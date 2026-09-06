@@ -99,7 +99,7 @@ import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
 import { AssignmentInteractionRouter } from "./assignment-operations-router.js";
-import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
+import { createAssignmentGlobalQueryPort } from "./assignment-global-state-ports.js";
 import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 import {
   EvidenceJournal,

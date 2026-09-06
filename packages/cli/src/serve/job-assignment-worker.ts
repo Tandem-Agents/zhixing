@@ -41,8 +41,7 @@ import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,
-  createAssignmentScheduleStager,
-} from "./assignment-schedule-stager.js";
+} from "./assignment-global-state-ports.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
 const JOB_RECOVERY_PAGE_SIZE = 32;
@@ -72,7 +71,6 @@ export interface JobRuntimeRunOptions {
   ) => Promise<void>;
   readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
-  readonly stageScheduleMutation: import("@zhixing/core/scheduler").ScheduleMutationStager;
   readonly assignmentMutations: import("@zhixing/core/contracts").AssignmentMutationPort;
   readonly globalQuery?: import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
   readonly assignmentIssuedAt: string;
@@ -483,17 +481,6 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
             envelope.permissionLease,
           ),
         toolSideEffectObserver: this.#interactions,
-        stageScheduleMutation: createAssignmentScheduleStager(
-          this.options.ledger,
-          assignmentId,
-          envelope.work.fence.anchorEpoch,
-          "job",
-          assignmentGlobalCapability({
-            assignmentId,
-            execution: "job",
-            capabilities: envelope.capabilities,
-          }),
-        ),
         assignmentMutations: createAssignmentMutationPort({
           ledger: this.options.ledger,
           assignmentId,

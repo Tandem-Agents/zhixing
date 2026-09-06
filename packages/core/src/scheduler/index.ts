@@ -39,6 +39,5 @@ export type {
   SchedulerFacadeEventHandler,
   SchedulerControlSource,
   ScheduleMutationContext,
-  ScheduleMutationStager,
 } from "./facade.js";
 export { InMemoryTaskStore } from "./in-memory-task-store.js";

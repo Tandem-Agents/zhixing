@@ -7,12 +7,22 @@
  * - 用户池(session/workspace/global)规则任一命中击败 builtin(用户最终决定权)
  */
 
-import { BoundaryRegistry, PermissionStore, SecurityPipeline, ToolArgumentExtractor, type IToolArgumentExtractor, type PermissionRule, type SessionType } from "@zhixing/core/security";
+import {
+  BoundaryRegistry,
+  PermissionStore,
+  SecurityPipeline,
+  ToolArgumentExtractor,
+  bindPermissionRuleExecutionSource,
+  type IToolArgumentExtractor,
+  type PermissionRule,
+  type SessionType,
+} from "@zhixing/core/security";
 import { describe, expect, it } from "vitest";
 import { createWebFetchTool, WEB_FETCH_DEFAULT_RULES } from "../index.js";
 
 const WORKSPACE = "/tmp/test-workspace";
 const CWD = "/tmp";
+const PERMISSION_CONTEXT = { kind: "main" as const };
 
 interface PipelineSetup {
   sessionType: SessionType;
@@ -32,13 +42,13 @@ function makePipeline(opts: PipelineSetup): SecurityPipeline {
   }
   if (opts.userRules) {
     for (const rule of opts.userRules) {
-      store.create(WORKSPACE, rule);
+      store.create(PERMISSION_CONTEXT, rule);
     }
   }
   return new SecurityPipeline({
     trustContext: { kind: "workspace", dir: WORKSPACE },
     sessionType: opts.sessionType,
-    permissionStore: store,
+    permissionRuleSource: bindPermissionRuleExecutionSource(store, PERMISSION_CONTEXT),
     toolBoundaryRegistry: BoundaryRegistry.fromTools(tools),
   });
 }

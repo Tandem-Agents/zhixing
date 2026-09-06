@@ -240,7 +240,6 @@ export function createOwnerRuntimeAdapter(
           correctness: {
             toolSideEffectObserver: options?.toolSideEffectObserver,
             authorizeToolExecution: options?.authorizeToolExecution,
-            stageScheduleMutation: options?.stageScheduleMutation,
             assignmentMutations: options?.assignmentMutations,
             globalQuery: options?.globalQuery,
             assignmentIssuedAt: options?.assignmentIssuedAt,
@@ -332,9 +331,6 @@ export function createOwnerRuntimeAdapter(
     },
 
     runOrchestrationV1(params) {
-      if (!agentRuntime.runOrchestrationV1) {
-        throw new Error("AgentRuntime does not support orchestration execution.");
-      }
       return agentRuntime.runOrchestrationV1(params);
     },
 

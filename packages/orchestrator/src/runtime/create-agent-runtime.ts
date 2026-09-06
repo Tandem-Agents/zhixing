@@ -79,17 +79,10 @@ import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { wrapStreamWithWatchdog } from "@zhixing/core/interrupt";
 import { setAgentIdentity } from "@zhixing/core/identity";
 import { withRetry } from "@zhixing/core/resilience";
-import { type SkillMode } from "@zhixing/core/skills/catalog";
-import type { ArtifactStore } from "@zhixing/core/authority";
-import {
-  SkillCatalogKernelProjectionApplicationService,
-  SkillCatalogLoadApplicationService,
-} from "@zhixing/core/skills/catalog";
-import {
-  TrustAdministrationExecutionApplicationService,
-  type TrustAdministrationRepositoryRule,
-} from "@zhixing/core/trust-administration";
-import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
+import type {
+  AssignmentGlobalQueryPort,
+  ModelCallResourceMeter,
+} from "@zhixing/core/contracts";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
@@ -138,10 +131,6 @@ import {
   OrchestrationRunnerV1,
 } from "../orchestration/index.js";
 import {
-  createAssignmentSkillPorts,
-  createAssignmentSkillProjectionApplication,
-} from "./assignment-skill-port.js";
-import {
   captureKernelRunEnvelope,
   type KernelRunEnvelope,
 } from "./kernel-run-envelope.js";
@@ -151,10 +140,6 @@ import {
   projectAgentResultToKernelTerminal,
   type KernelRunCompletion,
 } from "./kernel-terminal.js";
-import {
-  assertKernelRuntimeIdentityContribution,
-  type KernelRuntimeIdentityContribution,
-} from "./kernel-runtime-identity.js";
 import {
   assertKernelModelProviderBinding,
   type KernelModelProviderBinding,
@@ -168,10 +153,15 @@ import {
   type KernelToolImplementationPort,
 } from "./kernel-tool-implementation.js";
 import {
-  assembleKernelPermissionStorage,
-  bindKernelPermissionRuleSource,
-  type KernelPermissionStorageFactory,
-} from "./kernel-permission-storage.js";
+  assembleKernelSecurityExecution,
+  type KernelSecurityExecutionFactory,
+} from "./kernel-security-execution.js";
+import {
+  assertKernelWindowPromptProjection,
+  assertKernelWindowPromptProjectionPort,
+  type KernelWindowPromptProjection,
+  type KernelWindowPromptProjectionPort,
+} from "./kernel-window-prompt.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -258,38 +248,6 @@ function assembleMessagePrefix(
   return out;
 }
 
-function toPermissionRule(rule: TrustAdministrationRepositoryRule): PermissionRule {
-  return {
-    id: rule.id,
-    pattern: { ...rule.pattern },
-    decision: rule.decision,
-    scope: rule.scope,
-    createdAt: rule.createdAt,
-    lastMatchedAt: rule.lastMatchedAt,
-    matchCount: rule.matchCount,
-    ...(rule.contextId
-      ? { contextId: toSecurityPermissionContext(rule.contextId) }
-      : {}),
-    ...(rule.contextPath === undefined ? {} : { contextPath: rule.contextPath }),
-    ...(rule.contributors
-      ? { contributors: rule.contributors.map((entry) => ({ ...entry })) }
-      : {}),
-  };
-}
-
-function toSecurityPermissionContext(
-  context: import("@zhixing/core/trust-administration").TrustAdministrationContext,
-): PermissionContextId {
-  switch (context.kind) {
-    case "main":
-      return { kind: "main" };
-    case "workspace":
-      return { kind: "workspace", hash: context.hash };
-    case "scene":
-      return { kind: "scene", sceneId: context.sceneId };
-  }
-}
-
 function captureTurnContextProviders(
   providers: readonly TurnContextProvider[] | undefined,
 ): readonly TurnContextProvider[] {
@@ -312,6 +270,23 @@ function captureTurnContextProviders(
     captured.push(provider);
   }
   return Object.freeze(captured);
+}
+
+async function projectWindowPrompt(
+  port: KernelWindowPromptProjectionPort,
+  source?: AssignmentGlobalQueryPort,
+): Promise<KernelWindowPromptProjection> {
+  const projection = await port.project(source);
+  assertKernelWindowPromptProjection(projection);
+  return projection;
+}
+
+function applyWindowPromptProjection(
+  target: Partial<Record<SystemPromptSegment, string | null>>,
+  projection: KernelWindowPromptProjection,
+): Partial<Record<SystemPromptSegment, string | null>> {
+  target[projection.segment] = projection.content;
+  return target;
 }
 
 // ─── 类型 ───
@@ -380,7 +355,7 @@ export interface AgentRuntime {
    * 执行一份已校验的编排定义。运行体内部持有真实模型角色、安全管线、
    * confirmation broker 与工具池，因此编排节点执行也必须从这里出发。
    */
-  runOrchestrationV1?: (
+  runOrchestrationV1: (
     params: RunOrchestrationV1Params,
   ) => Promise<OrchestrationRunResultV1>;
   /** 当前消息列表里的 Task/sub-agent 用量拆分(/usage 的结构化数据面)。 */
@@ -504,6 +479,8 @@ export interface CreateAgentRuntimeOptions {
   readonly runtimeEnvironment: KernelRuntimeEnvironment;
   /** Host-selected implementation for the finite tool names declared by the profile. */
   readonly toolImplementation: KernelToolImplementationPort;
+  /** Product-owned immutable prompt projection refreshed at Kernel window boundaries. */
+  readonly windowPrompt: KernelWindowPromptProjectionPort;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
   /**
@@ -551,16 +528,6 @@ export interface CreateAgentRuntimeOptions {
    */
   profile?: AgentRoleProfile;
   /**
-   * 当前运行体的工作场景身份。只负责非记忆的 work 技能分区、scene 信任/
-   * 权限上下文和 lifecycle `sceneId`；main 运行体不传。
-   *
-   * 该身份由 workscene/conversation 组合根显式提供，不得从 profile 或 workspace
-   * 反推。
-   */
-  runtimeIdentity?: KernelRuntimeIdentityContribution;
-  /** Immutable skill content assets; catalog and writes remain assignment-owned. */
-  artifactStore?: ArtifactStore;
-  /**
    * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
@@ -571,8 +538,8 @@ export interface CreateAgentRuntimeOptions {
    * 工作模式装配 power runtime 时传 "power"。
    */
   primaryRole?: "main" | "power";
-  /** Host-owned finite permission persistence mechanism for this runtime. */
-  permissionStorage: KernelPermissionStorageFactory;
+  /** Product-bound finite Security execution for this runtime. */
+  securityExecution: KernelSecurityExecutionFactory;
   /** 产品组合根声明的本机秘密路径；所有工具调用都由安全管线旁路免疫地阻断。 */
   systemProtectedPaths?: readonly string[];
   /**
@@ -591,7 +558,7 @@ export interface CreateAgentRuntimeOptions {
   };
   /**
    * 运行体生命周期钩子订阅者集合 —— 装配期注入、实例内恒定（注册单位是实例，
-   * 触发单位是注意力窗口 / run）。skill 索引由持有 assignment query 的 runtime
+   * 触发单位是注意力窗口 / run）。产品提示由装配期 windowPrompt 贡献在通用
    * 窗口刷新路径维护，不进入本订阅者列表；
    * 此处传入的订阅者追加其后。第一版不做运行时 register（首窗语义需装配期注入）。
    */
@@ -611,9 +578,7 @@ export async function createAgentRuntime(
   const primaryRole = options.primaryRole ?? "main";
   assertKernelModelProviderBinding(options.modelProvider, primaryRole);
   assertKernelRuntimeEnvironment(options.runtimeEnvironment);
-  if (options.runtimeIdentity !== undefined) {
-    assertKernelRuntimeIdentityContribution(options.runtimeIdentity);
-  }
+  assertKernelWindowPromptProjectionPort(options.windowPrompt);
   // 在任何运行体资源装配前捕获并校验宿主贡献；失败时不发布半装配实例。
   const assembledTurnContextProviders = captureTurnContextProviders(
     options.turnContextProviders,
@@ -644,7 +609,6 @@ export async function createAgentRuntime(
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
   const profile = options.profile ?? mainProfile();
-  const sceneId = options.runtimeIdentity?.sceneId;
 
   // baseTools = profile.enabledTools 中的 builtin + options.extraTools，
   // **不含 Task** —— Task 装配依赖 securityPipeline / confirmationBroker
@@ -659,10 +623,6 @@ export async function createAgentRuntime(
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
   // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
   // 这些链路）。
-  // 技能分区跟随运行体的显式工作场景身份。执行侧只持 immutable artifact
-  // 与 assignment 读写接缝；目录、状态、usage 和物化的唯一写 owner 在 anchor。
-  const skillMode: SkillMode = sceneId === undefined ? "main" : "work";
-
   // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
   // 无需 per-run 重算）。三类用途严格分区：
   //   - roleThinking ：**真实 per-role 映射**（每个 role 按其自身 config 解析），
@@ -687,24 +647,15 @@ export async function createAgentRuntime(
     roles,
     roleThinking.light,
   );
-  const skillPorts = options.artifactStore
-    ? createAssignmentSkillPorts(options.artifactStore, {
-        admissionLlm: (prompt: string) => mainCallLLM([userMessage(prompt)]),
-      })
-    : unavailableAssignmentSkillPorts();
-
   const requestedToolNames = Object.freeze(
     profile.enabledTools.filter((name) => name !== "Task"),
   );
   const toolAssembly = assembleKernelToolImplementation(
     options.toolImplementation,
     Object.freeze({
-    requestedToolNames,
-    networkProxy: options.runtimeEnvironment.networkProxy,
-    skillCatalogLoad: skillPorts.loadApplication,
-    skillCatalogSave: skillPorts.saveApplication,
-    skillCatalogAdmission: skillPorts.admissionApplication,
-    skillMode,
+      requestedToolNames,
+      networkProxy: options.runtimeEnvironment.networkProxy,
+      callText: (prompt: string) => mainCallLLM([userMessage(prompt)]),
     }),
   );
   const baseTools: ToolDefinition[] = [...toolAssembly.tools];
@@ -727,38 +678,21 @@ export async function createAgentRuntime(
   // Concrete store selection, P04 path ownership and builtin registration stay
   // at the Host infrastructure edge. The Kernel captures only the finite
   // repository and context-bound readonly source before publication.
-  const permissionStorage = assembleKernelPermissionStorage(
-    options.permissionStorage,
+  const securityExecution = assembleKernelSecurityExecution(
+    options.securityExecution,
     Object.freeze({
       extractArgument: (request: SecurityRequest) =>
         toolArgumentExtractor.extract(request),
       builtinRuleSets: toolAssembly.permissionRuleSets,
+      workspacePath: workspace.path,
     }),
   );
-  const trustAdministration = new TrustAdministrationExecutionApplicationService({
-    repository: permissionStorage.trustAdministration,
-    ...(sceneId === undefined ? {} : { sceneId }),
-    workspacePath: workspace.path,
-  });
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
   const securityPipeline = new SecurityPipeline({
-    // 工作场景实例用显式运行体场景身份建立场景信任(会话锚:整会话生效、
-    // 跟场景身份而非 workdir 偶然
-    // 共享)——allow-context 沉淀进 scene 上下文,与 /trust 的场景语境视角同源。
-    // workdir 仍经 workspace 解析承载文件操作根,与信任锚正交。
-    // 非场景实例维持路径锚:有工作区即 workspace 信任,否则 global。
-    trustContext:
-      sceneId !== undefined
-        ? { kind: "scene", sceneId }
-        : workspace.path !== null
-          ? { kind: "workspace", dir: workspace.path }
-          : { kind: "global" },
+    trustContext: securityExecution.trustContext,
     sessionType,
-    permissionRuleSource: bindKernelPermissionRuleSource(
-      permissionStorage,
-      trustAdministration.context,
-    ),
+    permissionRuleSource: securityExecution.permissionRuleSource,
     toolBoundaryRegistry: boundaryRegistry,
     ...(options.systemProtectedPaths
       ? { systemProtectedPaths: options.systemProtectedPaths }
@@ -811,7 +745,7 @@ export async function createAgentRuntime(
       roleThinking,
       llmRoles: roles,
       securityPipeline,
-      trustAdministration,
+      securityApproval: securityExecution,
       workspace: workspace.path,
       workspaceSource: workspace.source,
       globalConfigPath: options.runtimeEnvironment.globalConfigPath,
@@ -872,14 +806,12 @@ export async function createAgentRuntime(
     buildSystemPrompt({ ...fixedPromptInputs, segmentOverrides: overrides });
 
   // 实例级 holder（所有 run 共享）—— authoritativePrompt 由首窗 onWindowOpen 建立。
-  const initialSkillProjection = await new SkillCatalogKernelProjectionApplicationService()
-    .project(skillMode);
+  // 产品投影负责 catalog/mode/render；Kernel 只捕获有限、不可变的段内容。
+  const initialWindowPrompt = await projectWindowPrompt(options.windowPrompt);
   let instanceSegmentOverrides: Partial<
     Record<SystemPromptSegment, string | null>
-  > = {
-    "skill-index": initialSkillProjection.content,
-  };
-  let skillCatalogRevision = initialSkillProjection.catalogRevision;
+  > = applyWindowPromptProjection({}, initialWindowPrompt);
+  let windowPromptRevision = initialWindowPrompt.revision;
   let instanceMessagePrefixContributions: PrefixContributionHolder = new Map();
   let authoritativePrompt = "";
   let authoritativeMessagePrefix: readonly Message[] = [];
@@ -914,8 +846,6 @@ export async function createAgentRuntime(
   }): LifecycleContextBase => ({
     runtimeId,
     runtimeKind,
-    mode: skillMode,
-    sceneId,
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
     async reportLifecycleWarning(event) {
@@ -1208,7 +1138,7 @@ export async function createAgentRuntime(
         roleThinking,
         llmRoles: roles,
         securityPipeline,
-        trustAdministration,
+        securityApproval: securityExecution,
         workspace: workspace.path,
         workspaceSource: workspace.source,
         globalConfigPath: options.runtimeEnvironment.globalConfigPath,
@@ -1246,22 +1176,22 @@ export async function createAgentRuntime(
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
-      const trust = trustAdministration.securitySnapshot();
+      const trust = securityExecution.securitySnapshot();
       return {
-        contextId: toSecurityPermissionContext(trust.context),
+        contextId: trust.contextId,
         workspacePath: trust.workspacePath,
-        permissionRules: trust.userRules.map(toPermissionRule),
+        permissionRules: trust.permissionRules,
         builtinRules: securityPipeline.getPolicyEngine().getActiveRules(),
         rateLimits: securityPipeline
           .getExecutionGuard()
           .getRateLimiter()
           .snapshot(),
-        confirmations: trust.observations.map((entry) => ({ ...entry })),
+        confirmations: trust.confirmations,
       };
     },
 
     executionPermissionRules(): readonly PermissionRule[] {
-      return trustAdministration.executionRules().map(toPermissionRule);
+      return securityExecution.executionPermissionRules();
     },
 
     executionProfile(): RuntimeExecutionProfile {
@@ -1465,18 +1395,19 @@ export async function createAgentRuntime(
       lastRunEntryWindowIndex = entryWindowIndex;
 
       if (isWindowFirstRun && envelope.correctness.globalQuery) {
-        const skillIndex = await createAssignmentSkillProjectionApplication(
+        const windowPrompt = await projectWindowPrompt(
+          options.windowPrompt,
           envelope.correctness.globalQuery,
-        ).project(skillMode);
+        );
         if (
           entryInstanceEpoch === instanceEpoch &&
-          skillIndex.catalogRevision > skillCatalogRevision
+          windowPrompt.revision > windowPromptRevision
         ) {
-          skillCatalogRevision = skillIndex.catalogRevision;
-          instanceSegmentOverrides = {
-            ...instanceSegmentOverrides,
-            "skill-index": skillIndex.content,
-          };
+          windowPromptRevision = windowPrompt.revision;
+          instanceSegmentOverrides = applyWindowPromptProjection(
+            { ...instanceSegmentOverrides },
+            windowPrompt,
+          );
           authoritativePrompt = buildPrompt(instanceSegmentOverrides);
         }
       }
@@ -1508,16 +1439,20 @@ export async function createAgentRuntime(
             new Map(localMessagePrefixContributions);
 
           if (envelope.correctness.globalQuery) {
-            const skillIndex = await createAssignmentSkillProjectionApplication(
+            const windowPrompt = await projectWindowPrompt(
+              options.windowPrompt,
               envelope.correctness.globalQuery,
-            ).project(skillMode);
-            localSegmentOverrides["skill-index"] = skillIndex.content;
+            );
+            applyWindowPromptProjection(localSegmentOverrides, windowPrompt);
             if (
               myEpoch > instanceEpoch &&
-              skillIndex.catalogRevision >= skillCatalogRevision
+              windowPrompt.revision >= windowPromptRevision
             ) {
-              skillCatalogRevision = skillIndex.catalogRevision;
-              nextInstanceSegmentOverrides["skill-index"] = skillIndex.content;
+              windowPromptRevision = windowPrompt.revision;
+              applyWindowPromptProjection(
+                nextInstanceSegmentOverrides,
+                windowPrompt,
+              );
             }
           }
 
@@ -1677,8 +1612,6 @@ export async function createAgentRuntime(
             turnOrigin: envelope.identity.turnContext?.turnOrigin,
             authorizeToolExecution:
               envelope.correctness.authorizeToolExecution,
-            stageScheduleMutation:
-              envelope.correctness.stageScheduleMutation,
             assignmentMutations: envelope.correctness.assignmentMutations,
             globalQuery: envelope.correctness.globalQuery,
             assignmentIssuedAt: envelope.correctness.assignmentIssuedAt,
@@ -1762,7 +1695,7 @@ export async function createAgentRuntime(
           : baseExecuteTool;
         const secureExecuteTool = createSecureExecuteTool({
           pipeline: securityPipeline,
-          trustAdministration,
+          securityApproval: securityExecution,
           originalExecute: executeToolWithCapacity,
           broker: confirmationBroker,
           sessionType,
@@ -1997,27 +1930,4 @@ function freezeExecutionProfile(
     mcpServers: Object.freeze(normalize(input.mcpServers, "Runtime MCP servers")),
     providerIds: Object.freeze(normalize(input.providerIds, "Runtime providers")),
   });
-}
-
-function unavailableAssignmentSkillPorts(): ReturnType<
-  typeof createAssignmentSkillPorts
-> {
-  const unavailable = async (): Promise<never> => {
-    throw new Error("User skills require an active artifact-backed assignment");
-  };
-  return {
-    loadApplication: new SkillCatalogLoadApplicationService({
-      async readScope() {
-        return { kind: "builtin-only" };
-      },
-      async readContent() {
-        return unavailable();
-      },
-      async stageUsage() {
-        return unavailable();
-      },
-    }),
-    saveApplication: { save: unavailable },
-    admissionApplication: { admit: unavailable },
-  };
 }

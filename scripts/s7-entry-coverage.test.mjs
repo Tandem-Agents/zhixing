@@ -4924,11 +4924,20 @@ test("Kernel run input has one finite Envelope owner and three production bindin
   const paths = [
     "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/run-context.ts",
     "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/subagent/factory.ts",
+    "packages/owner-kernel/src/types.ts",
     "packages/runtime-host/src/session-adapter.ts",
     "packages/runtime-host/src/runtime-host.ts",
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
+    "packages/cli/src/serve/conversation-assignment-worker.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-executor-dispatch.ts",
+    "packages/cli/src/serve/job-assignment-worker.ts",
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
+    "packages/cli/src/serve/assignment-global-state-ports.ts",
     "packages/cli/src/serve/workscene-runtime-projection.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -4940,6 +4949,28 @@ test("Kernel run input has one finite Envelope owner and three production bindin
   );
 
   assert.deepEqual(inspectKernelRunEnvelopeOwnership(records), []);
+  assert.deepEqual(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/cli/src/serve/execution-scheduler-facade.ts",
+      (text) => `${text}\n// catch (error) is not executable code`,
+    )),
+    [],
+  );
+  assert.deepEqual(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => replaceExactlyOnce(
+        text,
+        /async run\(input: KernelRunEnvelope\): Promise<KernelRunCompletion> \{/u,
+        "async run(\n      input: KernelRunEnvelope,\n    ): Promise<KernelRunCompletion> {",
+        "equivalent-kernel-run-signature-format",
+      ).replace(
+        "const envelope = captureKernelRunEnvelope(input);",
+        "const captured = captureKernelRunEnvelope(input);",
+      ).replaceAll(/\benvelope\./gu, "captured."),
+    )),
+    [],
+  );
   assert.match(
     inspectKernelRunEnvelopeOwnership(mutate(
       "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
@@ -4966,6 +4997,43 @@ test("Kernel run input has one finite Envelope owner and three production bindin
       ),
     )).join("\n"),
     /does not expose one captured Kernel Run Envelope entry/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
+      (text) => text.replace(
+        "readonly assignmentMutations?: AssignmentMutationPort;",
+        "readonly stageScheduleMutation?: AssignmentMutationPort;\n    readonly assignmentMutations?: AssignmentMutationPort;",
+      ),
+    )).join("\n"),
+    /Schedule-specific mutation channel/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/cli/src/serve/execution-scheduler-facade.ts",
+      (text) => text.replaceAll('domain: "global"', 'domain: "session"'),
+    )).join("\n"),
+    /generic fail-closed mutation port/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "allowGlobal: this.#authority.globalPublishing",
+        "allowGlobal: true",
+      ),
+    )).join("\n"),
+    /generic fail-closed mutation port/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/assignment-schedule-stager.ts",
+        text: "export function createAssignmentScheduleStager() {}",
+      },
+    ]).join("\n"),
+    /Schedule-specific mutation channel/,
   );
   for (const relative of [
     "packages/runtime-host/src/session-adapter.ts",
@@ -5008,6 +5076,18 @@ test("Kernel run events have one finite owner and explicit two-sided projections
   );
 
   assert.deepEqual(inspectKernelRunEventOwnership(records), []);
+  assert.deepEqual(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => replaceExactlyOnce(
+        text,
+        /projectAgentYieldToKernelRunEvent\(value\)/u,
+        "projectAgentYieldToKernelRunEvent(\n              /* equivalent formatting */ value,\n            )",
+        "equivalent-kernel-event-projector-format",
+      ),
+    )),
+    [],
+  );
   assert.match(
     inspectKernelRunEventOwnership(mutate(
       "packages/orchestrator/src/runtime/kernel-run-event.ts",
@@ -5024,6 +5104,30 @@ test("Kernel run events have one finite owner and explicit two-sided projections
       (text) => text.replace(
         "projectAgentYieldToKernelRunEvent(value)",
         "value",
+      ),
+    )).join("\n"),
+    /Loop to Kernel Event boundary is bypassed/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => replaceExactlyOnce(
+        text,
+        /projectAgentYieldToKernelRunEvent\(value\)/u,
+        "value /* projectAgentYieldToKernelRunEvent(value) */",
+        "comment-only-kernel-event-projector",
+      ),
+    )).join("\n"),
+    /Loop to Kernel Event boundary is bypassed/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => replaceExactlyOnce(
+        text,
+        /await envelope\.observation\.onEvent\?\.\(\n\s*projectAgentYieldToKernelRunEvent\(value\),\n\s*\);/u,
+        "void projectAgentYieldToKernelRunEvent(value);\n          await envelope.observation.onEvent?.(value);",
+        "unrelated-kernel-event-projector",
       ),
     )).join("\n"),
     /Loop to Kernel Event boundary is bypassed/,
@@ -5161,6 +5265,18 @@ test("Kernel Conformance covers four production bindings and freezes AgentRuntim
   );
 
   assert.deepEqual(inspectKernelConformanceAndAgentRuntimeBudget(records), []);
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => replaceExactlyOnce(
+        text,
+        /runOrchestrationV1: \(/u,
+        "runOrchestrationV1?: (",
+        "optional-agent-runtime-orchestration",
+      ),
+    )).join("\n"),
+    /public member exact-set drifted/,
+  );
   assert.match(
     inspectKernelConformanceAndAgentRuntimeBudget(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
@@ -5390,7 +5506,7 @@ test("TurnContext providers are fixed assembly input before every RuntimeHost is
     inspectTurnContextProviderAssembly(mutate(
       "packages/runtime-host/src/runtime-host.ts",
       (text) => text.replace(
-        "return this.assemble({ runtimeKind: \"ephemeral\", runtimeTools });",
+        "return this.assemble({ runtimeKind: \"ephemeral\", product: projection });",
         "return createAgentRuntime({} as never);",
       ),
     )).join("\n"),
@@ -5500,7 +5616,9 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/orchestrator/src/runtime/index.ts",
     "packages/orchestrator/package.json",
     "packages/runtime-host/src/runtime-host.ts",
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
     "packages/cli/src/runtime/kernel-tool-implementation.ts",
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/serve/command.ts",
@@ -5540,19 +5658,37 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     (text) => `import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";\n${text}`,
   )).join("\n"), /demand-owned Tool port|concrete Tool package/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/orchestrator/src/runtime/kernel-tool-implementation.ts",
+    (text) => text.replace(
+      "readonly callText: (prompt: string) => Promise<string>;",
+      "readonly skillMode: SkillMode;",
+    ),
+  )).join("\n"), /finite, exact and concrete-free/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/runtime-host/src/runtime-host.ts",
     (text) => text.replace(
-      "toolImplementation: this.opts.toolImplementation,",
+      "toolImplementation: runtimeTools.implementation,",
       "toolImplementation: fallbackToolImplementation,",
     ),
   )).join("\n"), /RuntimeHost/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/cli/src/serve/executor-role-runtime.ts",
     (text) => text.replace(
-      "toolImplementation: this.options.toolImplementation,",
-      "toolImplementation: createFallback(),",
+      "this.options.createToolImplementation(Object.freeze({",
+      "createFallback(Object.freeze({",
     ),
   )).join("\n"), /Executor runtime issuance/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    (text) => `${text}\nconst leakedSkillTools = createAssignmentSkillPorts(artifactStore);`,
+  )).join("\n"), /demand-owned Tool port/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+    (text) => text.replace(
+      '    const product = runtimeProduct(\n      "work",',
+      '    const product = runtimeProduct(\n      "main",',
+    ),
+  )).join("\n"), /Skill main\/work Tool selection/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/tools-builtin/src/task-list.ts",
     (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,
@@ -5622,7 +5758,6 @@ test("Advancement model providers are concrete only at the Host edge", async () 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
-
   assert.deepEqual(inspectAdvancementProviderDependencyInversion(records), []);
   assert.match(
     inspectAdvancementProviderDependencyInversion(mutate(
@@ -5863,7 +5998,6 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   const paths = [
     "packages/runtime-host/src/runtime-host.ts",
     "packages/runtime-host/src/conversation-runtime-projection.ts",
-    "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/cli/src/serve/builtin-extra-tools.ts",
     "packages/cli/src/serve/segment-deps.ts",
@@ -5899,6 +6033,23 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace("assertRuntimeProductProjection(projection);", ""),
+    )).join("\n"),
+    /can bypass Workscene product projection/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace(
+        "assertKernelWindowPromptProjectionPort(options.windowPrompt);",
+        "",
+      ),
+    )).join("\n"),
+    /can bypass Workscene product projection/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/runtime-host/src/conversation-runtime-projection.ts",
       (text) => `${text}\nconst sceneId = "host-owned";`,
     )).join("\n"),
@@ -5906,10 +6057,10 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
-      "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
-      (text) => text.replace("keys.length !== 1 ||", "false ||"),
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => `${text}\nconst sceneId = "kernel-owned";`,
     )).join("\n"),
-    /Kernel runtime identity contribution/,
+    /Kernel assembly still interprets Workscene product identity/,
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
@@ -6388,7 +6539,7 @@ test("Trust Administration management has one domain application and Product API
     "packages/cli/src/security/trust-rule-arg-provider.ts",
     "packages/orchestrator/src/security/secure-executor.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-    "packages/orchestrator/src/runtime/kernel-permission-storage.ts",
+    "packages/orchestrator/src/runtime/kernel-security-execution.ts",
     "packages/orchestrator/src/tools/task.ts",
     "packages/orchestrator/src/subagent/factory.ts",
     "packages/orchestrator/src/subagent/loop-runner.ts",
@@ -6454,10 +6605,7 @@ test("Trust Administration management has one domain application and Product API
   assert.match(
     inspectTrustAdministrationOwnership(mutate(
       "packages/runtime-host/src/runtime-host.ts",
-      (text) => text.replace(
-        "      permissionStorage: this.opts.permissionStorage,",
-        "",
-      ),
+      (text) => `${text}\nconst permissionStorage = {};`,
     )).join("\n"),
     /bypasses the one Host permission storage adapter/,
   );
@@ -6506,7 +6654,7 @@ test("Trust Administration management has one domain application and Product API
     inspectTrustAdministrationOwnership(mutate(
       "packages/orchestrator/src/subagent/loop-runner.ts",
       (text) => text.replace(
-        "trustAdministration: opts.trustAdministration,",
+        "securityApproval: opts.securityApproval,",
         "",
       ),
     )).join("\n"),
@@ -7446,9 +7594,14 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/scheduler-global-state.ts",
     "packages/owner-kernel/src/scheduler-authority.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
-    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
+    "packages/cli/src/runtime/skill-catalog-window-projection.ts",
+    "packages/orchestrator/src/runtime/kernel-window-prompt.ts",
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/runtime/kernel-tool-implementation.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
-    "packages/cli/src/serve/assignment-schedule-stager.ts",
+    "packages/cli/src/serve/assignment-global-state-ports.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/core/src/protocol/execution-asset-snapshot.ts",
     "packages/cli/src/serve/execution-asset-cache.ts",
@@ -7465,6 +7618,16 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+        text: "export function createAssignmentSkillPorts() {}",
+      },
+    ]).join("\n"),
+    /assignment adapter returned to the Kernel package/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -8547,11 +8710,21 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     /became a second Skill projection owner/,
   );
   assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/orchestrator/src/runtime/assignment-skill-projection.ts",
+        text: "export function createAssignmentSkillProjectionApplication() {}",
+      },
+    ]).join("\n"),
+    /window projection returned to the Kernel package/,
+  );
+  assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
-      (text) => `${text}\nexport function renderAssignmentSkillIndex() { return []; }`,
+      "packages/cli/src/runtime/skill-catalog-window-projection.ts",
+      (text) => text.replace('kind: "skill-catalog"', 'kind: "skill-get"'),
     )).join("\n"),
-    /projection adapter interprets Skill fields or omits the raw catalog query/,
+    /Product Skill window projection interprets catalog fields or omits the domain\/query boundary/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -8561,14 +8734,41 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
         "true",
       ),
     )).join("\n"),
-    /can regress the immutable projection/,
+    /can regress the immutable product prompt/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-      (text) => `${text}\nconst leakedProjection = renderSkillIndex(builtinIndexEntries("main", new Set()));`,
+      (text) => `${text}\nimport { SkillCatalogKernelProjectionApplicationService } from "@zhixing/core/skills/catalog";`,
     )).join("\n"),
-    /interprets Skill catalog fields|can regress the immutable projection/,
+    /reconstructs Skill projection/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-window-prompt.ts",
+      (text) => text.replace(
+        "readonly segment: DataDrivenSegment;",
+        "readonly contributions: readonly unknown[];",
+      ),
+    )).join("\n"),
+    /window prompt contract is product-aware or not finite\/fail-closed/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "target[projection.segment] = projection.content;",
+        "for (const contribution of projection.contributions) target[contribution.segment] = contribution.content;",
+      ),
+    )).join("\n"),
+    /window prompt contract is product-aware or not finite\/fail-closed/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace("windowPrompt: product.windowPrompt,", ""),
+    )).join("\n"),
+    /runtime issuance does not bind the one product-owned Skill window projection/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -8596,14 +8796,14 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      "packages/cli/src/runtime/assignment-skill-adapter.ts",
       (text) => `${text}\nexport interface SkillTextLoader { loadText(): void; }`,
     )).join("\n"),
     /retired parallel Skill load application owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      "packages/cli/src/runtime/assignment-skill-adapter.ts",
       (text) => text.replace(
         "new SkillCatalogLoadApplicationService(",
         "createLegacySkillLoader(",
@@ -8613,7 +8813,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      "packages/cli/src/runtime/assignment-skill-adapter.ts",
       (text) => text.replace(
         "const run = requireRunSkillContext();",
         'const run = optionalRunSkillContext();\n      if (!run) return { kind: "builtin-only" };',
@@ -8630,13 +8830,13 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      "packages/cli/src/runtime/kernel-tool-implementation.ts",
       (text) => text.replace(
         "skillCatalogLoad: skillPorts.loadApplication",
         "skillLoader: skillPorts.loader",
       ),
     )).join("\n"),
-    /unique Skill load application binding|retired parallel Skill load application owner/,
+    /Skill load application binding|retired parallel Skill load application owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9002,20 +9202,20 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      "packages/cli/src/runtime/assignment-skill-adapter.ts",
       (text) => `${text}\nconst bypass = scrubSecrets("draft");`,
     )).join("\n"),
     /retains Skill save business orchestration/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      "packages/cli/src/runtime/kernel-tool-implementation.ts",
       (text) => text.replace(
         "skillCatalogSave: skillPorts.saveApplication",
         "skillSaver: skillPorts.saver",
       ),
     )).join("\n"),
-    /does not install the unique Skill save application binding/,
+    /Skill save application binding/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9049,7 +9249,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/serve/assignment-schedule-stager.ts",
+      "packages/cli/src/serve/assignment-global-state-ports.ts",
       (text) => text.replace(
         "const requestId = assignmentMutationRequestId({",
         "const requestId = legacyAssignmentMutationRequestId({",
@@ -9076,7 +9276,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      "packages/cli/src/runtime/assignment-skill-adapter.ts",
       (text) => text.replace(
         "new SkillCatalogAdmissionApplicationService(",
         "createLegacyAdmissionApplication(",
@@ -9086,13 +9286,13 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      "packages/cli/src/runtime/kernel-tool-implementation.ts",
       (text) => text.replace(
         "skillCatalogAdmission: skillPorts.admissionApplication",
         "skillAdmission: skillPorts.admission",
       ),
     )).join("\n"),
-    /does not install the unique Skill admission application binding/,
+    /Skill admission application binding/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9663,7 +9863,7 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/providers/src/credentials-loader.ts",
     "packages/secrets/src/platform-secret-store.ts",
     "packages/secrets/src/vault-secret-store.ts",
-    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/advancement/application.ts",
     "packages/cli/src/serve/advancement-rubric-library.ts",

@@ -4,20 +4,20 @@ import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
 import {
   createAgentRuntime,
-  createKernelRuntimeIdentityContribution,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
   type KernelModelProviderFactory,
-  type KernelPermissionStorageFactory,
   type KernelRuntimeEnvironmentFactory,
-  type KernelToolImplementationPort,
 } from "@zhixing/orchestrator/runtime";
+import type { RuntimeSecurityExecutionInfrastructure } from "./permission-storage-infrastructure.js";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
+import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
+import { createSkillCatalogWindowPromptProjection } from "../runtime/skill-catalog-window-projection.js";
 import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
@@ -271,7 +271,7 @@ export async function runExecutorRole(
       modelConfiguration,
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
-      toolImplementation: bootstrap.toolImplementation,
+      createToolImplementation: bootstrap.createToolImplementation,
       permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -1041,8 +1041,8 @@ export class ExecutorRuntimeSubstrate {
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
-    readonly toolImplementation: KernelToolImplementationPort;
-    readonly permissionStorage: KernelPermissionStorageFactory;
+    readonly createToolImplementation: HostKernelToolImplementationFactory;
+    readonly permissionStorage: RuntimeSecurityExecutionInfrastructure;
     readonly mcpTools: McpRuntimeToolProjectionPort;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
@@ -1080,16 +1080,27 @@ export class ExecutorRuntimeSubstrate {
           }
         : undefined;
     const primaryRole = workscene ? "power" : "main";
+    const artifacts = this.options.artifactStore();
     return createAgentRuntime({
-      artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.interactive,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({ primaryRole }),
       runtimeEnvironment: this.#runtimeEnvironment.create({
         ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
       }),
-      toolImplementation: this.options.toolImplementation,
-      permissionStorage: this.options.permissionStorage,
+      toolImplementation: this.options.createToolImplementation(Object.freeze({
+        kind: "assignment",
+        mode: workscene ? "work" : "main",
+        artifacts,
+      })),
+      windowPrompt: createSkillCatalogWindowPromptProjection(
+        workscene ? "work" : "main",
+      ),
+      securityExecution: this.options.permissionStorage.bind(
+        workscene
+          ? Object.freeze({ kind: "scene", sceneId: workscene.sceneId })
+          : Object.freeze({ kind: "default" }),
+      ),
       profile:
         workscene?.profile ??
         mainProfile({ hasWorkspace: workspaceRoot !== null }),
@@ -1101,9 +1112,6 @@ export class ExecutorRuntimeSubstrate {
       ...(workscene
         ? {
             primaryRole,
-            runtimeIdentity: createKernelRuntimeIdentityContribution(
-              workscene.sceneId,
-            ),
           }
         : {}),
     });
@@ -1120,9 +1128,13 @@ export class ExecutorRuntimeSubstrate {
       baseProfile,
       extraTools: [...mcp.tools],
       executionMcpServers: mcp.serverIds,
+      implementation: this.options.createToolImplementation(Object.freeze({
+        kind: "assignment",
+        mode: "main",
+        artifacts: this.options.artifactStore(),
+      })),
     });
     return createAgentRuntime({
-      artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.scheduler,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({
@@ -1132,8 +1144,11 @@ export class ExecutorRuntimeSubstrate {
           : { mainModelOverride: selection.modelOverride }),
       }),
       runtimeEnvironment: this.#runtimeEnvironment.create({}),
-      toolImplementation: this.options.toolImplementation,
-      permissionStorage: this.options.permissionStorage,
+      toolImplementation: selection.runtimeTools.implementation,
+      windowPrompt: createSkillCatalogWindowPromptProjection("main"),
+      securityExecution: this.options.permissionStorage.bind(
+        Object.freeze({ kind: "default" }),
+      ),
       profile: selection.profile,
       extraTools: [...selection.runtimeTools.extraTools],
       executionMcpServers: selection.runtimeTools.executionMcpServers,

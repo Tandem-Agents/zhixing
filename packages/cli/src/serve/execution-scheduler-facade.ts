@@ -1,10 +1,12 @@
-import type { AgentTurnResult, ScheduleMutationContext, ScheduleMutationStager, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing/core/scheduler";
+import type { AssignmentMutationPort } from "@zhixing/core/contracts";
+import type { AgentTurnResult, ScheduleMutationContext, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing/core/scheduler";
 import {
   ScheduleManagementApplicationService,
   type ScheduleManagementRepository,
   type ScheduleTaskDraft,
 } from "@zhixing/core/scheduler/application";
 import type { ScheduleTaskSpecDto } from "@zhixing/core/contracts";
+import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 interface StagedViewState {
@@ -15,7 +17,7 @@ interface StagedViewState {
 
 /** Anchor product adapter that routes schedule writes through assignment staging. */
 export class ExecutionSchedulerFacade implements SchedulerFacade {
-  readonly #states = new WeakMap<ScheduleMutationStager, StagedViewState>();
+  readonly #states = new WeakMap<AssignmentMutationPort, StagedViewState>();
 
   constructor(private readonly base: SchedulerFacade) {}
 
@@ -88,17 +90,17 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
   }
 
   #stagedState(): {
-    readonly stage: ScheduleMutationStager;
+    readonly mutations: AssignmentMutationPort;
     readonly state: StagedViewState;
   } | undefined {
-    const stage = runContextStorage.getStore()?.stageScheduleMutation;
-    if (!stage) return undefined;
-    let state = this.#states.get(stage);
+    const mutations = runContextStorage.getStore()?.assignmentMutations;
+    if (!mutations) return undefined;
+    let state = this.#states.get(mutations);
     if (!state) {
       state = { nextOperation: 1, primed: false, tasks: new Map() };
-      this.#states.set(stage, state);
+      this.#states.set(mutations, state);
     }
-    return { stage, state };
+    return { mutations, state };
   }
 
   async #prime(state: StagedViewState): Promise<void> {
@@ -121,7 +123,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
   }
 
   #application(staged: {
-    readonly stage: ScheduleMutationStager;
+    readonly mutations: AssignmentMutationPort;
     readonly state: StagedViewState;
   }): ScheduleManagementApplicationService {
     const repository: ScheduleManagementRepository = {
@@ -135,16 +137,15 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
         return task ? structuredClone(task) : undefined;
       },
       commitCreate: async ({ spec, operation }) => {
-        const result = await staged.stage({
+        const result = await staged.mutations.stage({
+          domain: "global",
           mutation: { kind: "schedule-create", spec: taskSpecDto(spec) },
           operationId: operation.operationId,
         });
-        if (!result.taskId) {
-          throw new Error("Staged schedule creation did not return its stable task id");
-        }
+        const taskId = scheduleTaskIdForRequest(result.requestId);
         const now = new Date().toISOString();
         const view: TaskView = {
-          id: result.taskId,
+          id: taskId,
           taskRevision: 1,
           ...structuredClone(spec),
           state: { consecutiveErrors: 0, runCount: 0 },
@@ -157,7 +158,8 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
       commitUpdate: async ({ taskId, spec, operation }) => {
         const current = staged.state.tasks.get(taskId);
         if (!current) throw new Error(`Task not found: ${taskId}`);
-        await staged.stage({
+        await staged.mutations.stage({
+          domain: "global",
           mutation: {
             kind: "schedule-update",
             taskId,
@@ -176,7 +178,8 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
         return structuredClone(next);
       },
       commitDelete: async ({ taskId, operation }) => {
-        await staged.stage({
+        await staged.mutations.stage({
+          domain: "global",
           mutation: {
             kind: "schedule-delete",
             taskId,

@@ -6,7 +6,6 @@ import type {
   TurnContext,
 } from "@zhixing/core/types";
 import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing/core/transcript";
-import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type { WatchdogPolicy } from "@zhixing/core/interrupt";
 import type {
   AssignmentGlobalQueryPort,
@@ -45,7 +44,6 @@ export interface KernelRunEnvelope {
   readonly correctness: {
     readonly toolSideEffectObserver?: ToolSideEffectObserver;
     readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
-    readonly stageScheduleMutation?: ScheduleMutationStager;
     readonly assignmentMutations?: AssignmentMutationPort;
     readonly globalQuery?: AssignmentGlobalQueryPort;
     readonly assignmentIssuedAt?: string;
@@ -127,7 +125,6 @@ export function captureKernelRunEnvelope(
     correctness: Object.freeze({
       toolSideEffectObserver: input.correctness.toolSideEffectObserver,
       authorizeToolExecution: input.correctness.authorizeToolExecution,
-      stageScheduleMutation: input.correctness.stageScheduleMutation,
       assignmentMutations: input.correctness.assignmentMutations,
       globalQuery: input.correctness.globalQuery,
       assignmentIssuedAt: input.correctness.assignmentIssuedAt,

@@ -2,7 +2,7 @@
  * RuntimeHost —— 宿主侧 runtime 装配点:共享装配资产单一持有,按消费者发放实例。
  *
  * 两层结构:
- * - 资产层(构造注入):技能库 / 段切换依赖 / 渲染装饰与安全回调钩子——全部实例共享,
+ * - 资产层(构造注入):模型、环境、段切换依赖、渲染装饰与安全回调钩子——全部实例共享,
  *   是配置换代的单位。
  * - 实例层(按需发放):每个对话一个 runtime 实例——AgentRuntime 闭包持有窗口级
  *   状态,设计假定是服务单一对话的窗口序列,跨对话共享即互相践踏;定时任务路径
@@ -14,25 +14,25 @@
  */
 
 import {
+  assertKernelWindowPromptProjectionPort,
   createAgentRuntime,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
   type KernelModelProviderFactory,
-  type KernelPermissionStorageFactory,
   type KernelRuntimeEnvironmentFactory,
-  type KernelToolImplementationPort,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import type {
   IConfirmationBroker,
 } from "@zhixing/core/confirmation";
-import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   assertConversationRuntimeProjection,
+  assertRuntimeProductProjection,
   assertRuntimeToolProjection,
   type ConversationRuntimeProjection,
+  type RuntimeProductProjection,
   type RuntimeToolProjection,
 } from "./conversation-runtime-projection.js";
 
@@ -52,6 +52,8 @@ export interface JobAgentRuntimeOptions {
   readonly confirmationBroker: IConfirmationBroker;
   readonly profile: NonNullable<CreateAgentRuntimeOptions["profile"]>;
   readonly runtimeTools: RuntimeToolProjection;
+  readonly windowPrompt: RuntimeProductProjection["windowPrompt"];
+  readonly securityExecution: RuntimeProductProjection["securityExecution"];
   readonly modelOverride?: string;
 }
 
@@ -60,16 +62,10 @@ export interface RuntimeHostOptions {
   readonly modelProvider: KernelModelProviderFactory;
   /** Host-owned configuration/workspace projection; no source object enters the Kernel. */
   readonly runtimeEnvironment: KernelRuntimeEnvironmentFactory;
-  /** Host-selected concrete implementation of the finite profile tool requirements. */
-  readonly toolImplementation: KernelToolImplementationPort;
-  /** Host-owned P04 mechanism; RuntimeHost forwards it without selecting storage. */
-  readonly permissionStorage: KernelPermissionStorageFactory;
   /** Durable interaction observer shared by all conversation runtime trees. */
   confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
   systemProtectedPaths: readonly string[];
-  /** Executor-local immutable artifacts; skill authority remains on the anchor. */
-  artifactStore: () => ArtifactStore;
   /** 段切换外部依赖——注意力窗口的段保护对一切运行体生效 */
   segmentDeps: SegmentDepsOption;
   /** 设备唯一容量裁决器派生的可信 workload 准入；生产组合根必须提供。 */
@@ -111,10 +107,10 @@ export class RuntimeHost {
    * workmode 工具组。
    */
   async createEphemeralRuntime(
-    runtimeTools: RuntimeToolProjection,
+    projection: RuntimeProductProjection,
   ): Promise<AgentRuntime> {
-    assertRuntimeToolProjection(runtimeTools);
-    return this.assemble({ runtimeKind: "ephemeral", runtimeTools });
+    assertRuntimeProductProjection(projection);
+    return this.assemble({ runtimeKind: "ephemeral", product: projection });
   }
 
   /**
@@ -123,11 +119,12 @@ export class RuntimeHost {
    */
   async createJobRuntime(options: JobAgentRuntimeOptions): Promise<AgentRuntime> {
     assertRuntimeToolProjection(options.runtimeTools);
+    assertKernelWindowPromptProjectionPort(options.windowPrompt);
     assertRuntimeProfileProjection(options.profile);
     return this.assemble({
       runtimeKind: "ephemeral",
       job: options,
-      runtimeTools: options.runtimeTools,
+      product: options,
     });
   }
 
@@ -136,18 +133,18 @@ export class RuntimeHost {
       conversation?: ConversationRuntimeProjection;
       runtimeKind?: RuntimeKind;
       job?: JobAgentRuntimeOptions;
-      runtimeTools?: RuntimeToolProjection;
+      product?: RuntimeProductProjection;
     },
   ): Promise<AgentRuntime> {
     const conversation = opts?.conversation;
     const job = opts?.job;
-    const runtimeTools = conversation?.runtimeTools ?? opts?.runtimeTools;
-    if (!runtimeTools) {
+    const product = conversation ?? opts?.product;
+    if (!product) {
       throw new TypeError(
-        "Runtime tool projection is required before runtime issuance",
+        "Runtime product projection is required before runtime issuance",
       );
     }
-    assertRuntimeToolProjection(runtimeTools);
+    const runtimeTools = product.runtimeTools;
     const profile = job?.profile ?? conversation?.profile;
     const primaryRole = conversation?.primaryRole ?? "main";
     // 临时运行时按调度类计费,常驻会话按交互类:两者的公平份额不同,且容量
@@ -177,11 +174,11 @@ export class RuntimeHost {
         : {}),
       modelProvider,
       runtimeEnvironment,
-      toolImplementation: this.opts.toolImplementation,
-      permissionStorage: this.opts.permissionStorage,
+      toolImplementation: runtimeTools.implementation,
+      windowPrompt: product.windowPrompt,
+      securityExecution: product.securityExecution,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       primaryRole,
-      runtimeIdentity: conversation?.runtimeIdentity,
       profile,
       extraTools: [...runtimeTools.extraTools],
       ...(turnContextProviders ? { turnContextProviders } : {}),
@@ -189,13 +186,19 @@ export class RuntimeHost {
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,
-      artifactStore: this.opts.artifactStore(),
       runtimeKind: opts?.runtimeKind ?? "conversation",
       ...(job ? { confirmationBroker: job.confirmationBroker } : {}),
       ...(opts?.runtimeKind !== "ephemeral" && this.opts.confirmationLifecycleObserver
         ? { confirmationLifecycleObserver: this.opts.confirmationLifecycleObserver }
         : {}),
-      ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
+      ...(this.opts.lifecycle || conversation?.lifecycle
+        ? {
+            lifecycle: [
+              ...(this.opts.lifecycle ?? []),
+              ...(conversation?.lifecycle ?? []),
+            ],
+          }
+        : {}),
     });
   }
 }

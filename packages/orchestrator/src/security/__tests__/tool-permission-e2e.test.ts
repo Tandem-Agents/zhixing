@@ -22,6 +22,7 @@ import {
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
+  toPermissionContext,
 } from "@zhixing/core/security";
 import { TrustAdministrationExecutionApplicationService } from "@zhixing/core/trust-administration";
 import { createSecureExecuteTool } from "../secure-executor.js";
@@ -77,7 +78,16 @@ function createTrustRuntime(
       trustAdministration.context,
     ),
   });
-  return { pipeline, trustAdministration };
+  return {
+    pipeline,
+    trustAdministration,
+    securityApproval: Object.freeze({
+      contextId: Object.freeze(toPermissionContext(trustAdministration.context)),
+      recordApproval: (
+        approval: Parameters<typeof trustAdministration.recordApproval>[0],
+      ) => trustAdministration.recordApproval(approval),
+    }),
+  };
 }
 
 // ─── 测试 ───
@@ -88,7 +98,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // 真实 PermissionStore（in-memory）+ 真实 SecurityPipeline + 真实 broker。
     // Security 只读匹配，同一 Trust Administration 应用拥有贡献与规则写入。
     const store = new PermissionStore({ rootDir: null });
-    const { pipeline, trustAdministration } = createTrustRuntime(
+    const { pipeline, trustAdministration, securityApproval } = createTrustRuntime(
       store,
       "/tmp/ws-e2e",
     );
@@ -96,7 +106,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
-      trustAdministration,
+      securityApproval,
       originalExecute: exec.fn,
       broker,
     });
@@ -148,7 +158,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // - Trust 应用把 "curl https://a.com" 与 "curl https://b.com" 视为同一计数 key
     // - 但 allow-context 用精确 pattern 时，规则 argument 是用户选的具体 pattern
     const store = new PermissionStore({ rootDir: null });
-    const { pipeline, trustAdministration } = createTrustRuntime(
+    const { pipeline, trustAdministration, securityApproval } = createTrustRuntime(
       store,
       "/tmp/ws-e2e",
     );
@@ -156,7 +166,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
-      trustAdministration,
+      securityApproval,
       originalExecute: exec.fn,
       broker,
     });
@@ -205,7 +215,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // 验证 secure-executor.applyBrokerDecision 的分支独立性：
     // allow-context kind 走领域显式规则路径，**不**计入自动沉淀贡献。
     const store = new PermissionStore({ rootDir: null });
-    const { pipeline, trustAdministration } = createTrustRuntime(
+    const { pipeline, trustAdministration, securityApproval } = createTrustRuntime(
       store,
       "/tmp/ws-e2e",
     );
@@ -213,7 +223,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
-      trustAdministration,
+      securityApproval,
       originalExecute: exec.fn,
       broker,
     });
@@ -294,12 +304,15 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
   // 在此处失败。
   it("主模式自动沉淀 → scope=context + contextId={kind:'main'}，不创建 global 规则", async () => {
     const store = new PermissionStore({ rootDir: null });
-    const { pipeline, trustAdministration } = createTrustRuntime(store, null);
+    const { pipeline, trustAdministration, securityApproval } = createTrustRuntime(
+      store,
+      null,
+    );
     const broker = new ConfirmationBroker();
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
-      trustAdministration,
+      securityApproval,
       originalExecute: exec.fn,
       broker,
     });

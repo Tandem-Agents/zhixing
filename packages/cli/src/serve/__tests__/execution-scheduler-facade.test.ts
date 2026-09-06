@@ -1,7 +1,11 @@
 import { createEventBus } from "@zhixing/core";
+import type { AssignmentMutationPort } from "@zhixing/core/contracts";
 import { type SchedulerFacade, type SchedulerEventMap, type TaskSpec, type TaskView } from "@zhixing/core/scheduler";
+import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import type { ConversationAssignmentLedger } from "@zhixing/executor";
 import { describe, expect, it, vi } from "vitest";
+import { createAssignmentMutationPort } from "../assignment-global-state-ports.js";
 import { ExecutionSchedulerFacade } from "../execution-scheduler-facade.js";
 
 const SPEC: TaskSpec = {
@@ -34,6 +38,15 @@ function baseFacade(): SchedulerFacade {
   };
 }
 
+function mutationPort(stage: AssignmentMutationPort["stage"]): AssignmentMutationPort {
+  return {
+    assignmentId: "assignment-1",
+    execution: "conversation",
+    stage,
+    readOverlay: async () => [],
+  };
+}
+
 describe("ExecutionSchedulerFacade", () => {
   it("uses the direct facade outside a durable assignment", async () => {
     const base = baseFacade();
@@ -46,21 +59,27 @@ describe("ExecutionSchedulerFacade", () => {
     const base = baseFacade();
     const staged: unknown[] = [];
     const facade = new ExecutionSchedulerFacade(base);
-    const stage = vi.fn(async (input: unknown) => {
+    const stage = vi.fn(async (input) => {
       staged.push(input);
-      return { seq: staged.length, taskId: "task-created" };
+      return {
+        kind: "assignment-mutation-staged" as const,
+        requestId: `request-${staged.length}`,
+        recordSeq: staged.length,
+        mutationDigest: "a".repeat(64),
+      };
     });
+    const assignmentMutations = mutationPort(stage);
     const bus = createEventBus<SchedulerEventMap>();
 
     await runContextStorage.run(
-      { bus, lineage: "main", stageScheduleMutation: stage },
+      { bus, lineage: "main", assignmentMutations },
       async () => {
         const created = await facade.create(SPEC, { operationId: "tool-1" });
-        expect(created.id).toBe("task-created");
+        expect(created.id).toBe(scheduleTaskIdForRequest("request-1"));
         await facade.update("task-existing", { name: "renamed" }, {
           operationId: "tool-2",
         });
-        await facade.delete("task-created", { operationId: "tool-3" });
+        await facade.delete(created.id, { operationId: "tool-3" });
         expect((await facade.list()).map((item) => item.id)).toEqual([
           "task-existing",
         ]);
@@ -69,10 +88,12 @@ describe("ExecutionSchedulerFacade", () => {
 
     expect(staged).toMatchObject([
       {
+        domain: "global",
         operationId: "tool-1",
         mutation: { kind: "schedule-create" },
       },
       {
+        domain: "global",
         operationId: "tool-2",
         mutation: {
           kind: "schedule-update",
@@ -81,10 +102,11 @@ describe("ExecutionSchedulerFacade", () => {
         },
       },
       {
+        domain: "global",
         operationId: "tool-3",
         mutation: {
           kind: "schedule-delete",
-          taskId: "task-created",
+          taskId: scheduleTaskIdForRequest("request-1"),
           taskRevision: 1,
         },
       },
@@ -95,12 +117,18 @@ describe("ExecutionSchedulerFacade", () => {
   });
 
   it("uses domain defaults and rejects system-task mutation before assignment staging", async () => {
-    const stage = vi.fn(async () => ({ seq: 1, taskId: "task-created" }));
+    const stage = vi.fn(async () => ({
+      kind: "assignment-mutation-staged" as const,
+      requestId: "request-create",
+      recordSeq: 1,
+      mutationDigest: "a".repeat(64),
+    }));
+    const assignmentMutations = mutationPort(stage);
     const bus = createEventBus<SchedulerEventMap>();
     const direct = baseFacade();
     const facade = new ExecutionSchedulerFacade(direct);
     await runContextStorage.run(
-      { bus, lineage: "main", stageScheduleMutation: stage },
+      { bus, lineage: "main", assignmentMutations },
       async () => {
         const created = await facade.create({
           name: "defaulted",
@@ -125,7 +153,7 @@ describe("ExecutionSchedulerFacade", () => {
     const systemFacade = new ExecutionSchedulerFacade(systemBase);
     const systemStage = vi.fn();
     await runContextStorage.run(
-      { bus, lineage: "main", stageScheduleMutation: systemStage },
+      { bus, lineage: "main", assignmentMutations: mutationPort(systemStage) },
       async () => {
         await expect(systemFacade.update("system", { enabled: false }, {
           operationId: "update-system",
@@ -134,5 +162,35 @@ describe("ExecutionSchedulerFacade", () => {
       },
     );
     expect(systemStage).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to direct CRUD when an assignment forbids global writes", async () => {
+    const stageMutation = vi.fn();
+    const ledger = {
+      stageMutation,
+      readStagedMutationOverlay: async () => [],
+    } as unknown as ConversationAssignmentLedger;
+    const assignmentMutations = createAssignmentMutationPort({
+      ledger,
+      assignmentId: "local-assignment",
+      execution: "conversation",
+      anchorEpoch: 1,
+      allowGlobal: false,
+    });
+    const base = baseFacade();
+    const facade = new ExecutionSchedulerFacade(base);
+    const bus = createEventBus<SchedulerEventMap>();
+
+    await runContextStorage.run(
+      { bus, lineage: "main", assignmentMutations },
+      async () => {
+        await expect(
+          facade.create(SPEC, { operationId: "forbidden-create" }),
+        ).rejects.toThrow("Global mutations are unavailable");
+      },
+    );
+
+    expect(stageMutation).not.toHaveBeenCalled();
+    expect(base.create).not.toHaveBeenCalled();
   });
 });

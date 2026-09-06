@@ -286,7 +286,6 @@ const CASES: readonly ConformanceCase[] = [
                 onProtocolEvent: async () => undefined,
                 authorizeToolExecution: async () => [],
                 toolSideEffectObserver: {} as ToolSideEffectObserver,
-                stageScheduleMutation: {} as never,
                 assignmentMutations: {} as never,
                 assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
               },

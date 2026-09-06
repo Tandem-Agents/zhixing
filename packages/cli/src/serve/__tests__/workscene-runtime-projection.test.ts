@@ -41,6 +41,12 @@ function fixture(mcpTools = {
     mcpTools,
     scheduler: {} as never,
   });
+  const securityExecution = Object.freeze({
+    bind: vi.fn((context) => Object.freeze({ create: vi.fn(), context })),
+  });
+  const createGuidanceLifecycle = vi.fn((sceneId?: string) => Object.freeze({
+    id: sceneId === undefined ? "guidance-main" : `guidance-scene:${sceneId}`,
+  }));
   return createAnchorRuntimeProjectionAssembly({
     capabilities,
     workscenes,
@@ -48,11 +54,16 @@ function fixture(mcpTools = {
     extraTools,
     mcpTools,
     scheduler: {} as never,
+    skillArtifacts: {} as never,
+    createToolImplementation: vi.fn((binding) =>
+      Object.freeze({ create: vi.fn(), binding }) as never),
+    securityExecution: securityExecution as never,
+    createGuidanceLifecycle,
   });
 }
 
 describe("Workscene product runtime projection", () => {
-  it("forms frozen main and scene projections with the exact product tool split", () => {
+  it("forms frozen main and scene projections with the exact product tool split", async () => {
     const assembly = fixture();
     const main = assembly.main();
     const withWorkspace = assembly.scene({
@@ -67,6 +78,8 @@ describe("Workscene product runtime projection", () => {
     });
 
     expect(Object.isFrozen(main)).toBe(true);
+    expect((main.runtimeTools.implementation as never as { binding: unknown }).binding)
+      .toMatchObject({ kind: "assignment", mode: "main" });
     expect(Object.isFrozen(withWorkspace.profile)).toBe(true);
     expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
@@ -87,8 +100,66 @@ describe("Workscene product runtime projection", () => {
     ]);
     expect(withWorkspace.workspace).toBe("/workspace");
     expect(withWorkspace.primaryRole).toBe("power");
-    expect(withWorkspace.runtimeIdentity).toMatchObject({ sceneId: "scene-1" });
-    expect(Object.isFrozen(withWorkspace.runtimeIdentity)).toBe(true);
+    expect(withWorkspace).not.toHaveProperty("runtimeIdentity");
+    expect(withWorkspace.securityExecution).toMatchObject({
+      context: { kind: "scene", sceneId: "scene-1" },
+    });
+    expect(main.securityExecution).toMatchObject({ context: { kind: "default" } });
+    expect((withWorkspace.runtimeTools.implementation as never as { binding: unknown }).binding)
+      .toMatchObject({ kind: "assignment", mode: "work" });
+    const query = {
+      read: vi.fn(async () => ({
+        kind: "skill-catalog",
+        catalogRevision: 4,
+        entries: [
+          {
+            id: "main-skill",
+            name: "Main Skill",
+            description: "ZX_MAIN_PRODUCT_SKILL",
+            source: "own",
+            mode: "main",
+            pinned: false,
+            disabled: false,
+            createdAt: "2026-09-06T00:00:00.000Z",
+            usage: null,
+            contentRef: "a".repeat(64),
+            revision: 1,
+            digest: "b".repeat(64),
+          },
+          {
+            id: "work-skill",
+            name: "Work Skill",
+            description: "ZX_WORK_PRODUCT_SKILL",
+            source: "own",
+            mode: "work",
+            pinned: false,
+            disabled: false,
+            createdAt: "2026-09-06T00:00:00.000Z",
+            usage: null,
+            contentRef: "c".repeat(64),
+            revision: 1,
+            digest: "d".repeat(64),
+          },
+        ],
+      })),
+    } as never;
+    const mainPrompt = await main.windowPrompt.project(query);
+    const workPrompt = await withWorkspace.windowPrompt.project(query);
+    expect(mainPrompt.content).toContain(
+      "ZX_MAIN_PRODUCT_SKILL",
+    );
+    expect(mainPrompt.content).not.toContain(
+      "ZX_WORK_PRODUCT_SKILL",
+    );
+    expect(workPrompt.content).toContain(
+      "ZX_WORK_PRODUCT_SKILL",
+    );
+    expect(workPrompt.content).not.toContain(
+      "ZX_MAIN_PRODUCT_SKILL",
+    );
+    expect(withWorkspace.lifecycle?.map((entry) => entry.id)).toEqual([
+      "guidance-scene:scene-1",
+    ]);
     expect(withWorkspace.profile.instructions).toContain('work scene "写作场景"');
     expect(withWorkspace.profile.enabledTools).toContain("read");
     expect(withWorkspace.profile.enabledTools).toContain("admit_skill");
@@ -97,7 +168,7 @@ describe("Workscene product runtime projection", () => {
     expect(withoutWorkspace.profile.enabledTools).not.toContain("admit_skill");
   });
 
-  it("forms ephemeral and durable-job projections from the same exact tool facts", () => {
+  it("forms ephemeral and durable-job projections from the same exact product facts", async () => {
     const assembly = fixture();
     const ephemeral = assembly.ephemeral();
     const allJob = assembly.job({} as never);
@@ -106,14 +177,16 @@ describe("Workscene product runtime projection", () => {
       model: "job-model",
     } as never);
 
-    expect(ephemeral.extraTools.map((tool) => tool.name)).toEqual([
+    expect(ephemeral.runtimeTools.extraTools.map((tool) => tool.name)).toEqual([
       "schedule",
       "task_list",
       "mcp__alpha__tool",
     ]);
-    expect(ephemeral.executionMcpServers).toEqual(["alpha", "beta"]);
+    expect(ephemeral.runtimeTools.executionMcpServers).toEqual(["alpha", "beta"]);
+    expect((ephemeral.runtimeTools.implementation as never as { binding: unknown }).binding)
+      .toMatchObject({ kind: "assignment", mode: "main" });
     expect(allJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual(
-      ephemeral.extraTools.map((tool) => tool.name),
+      ephemeral.runtimeTools.extraTools.map((tool) => tool.name),
     );
     expect(restrictedJob.profile.enabledTools).toEqual(["read"]);
     expect(restrictedJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual([
@@ -122,6 +195,12 @@ describe("Workscene product runtime projection", () => {
     ]);
     expect(restrictedJob.runtimeTools.executionMcpServers).toEqual(["alpha", "beta"]);
     expect(restrictedJob.modelOverride).toBe("job-model");
+    const ephemeralPrompt = await ephemeral.windowPrompt.project();
+    const jobPrompt = await allJob.windowPrompt.project();
+    expect(ephemeralPrompt.content).toBe(
+      jobPrompt.content,
+    );
+    expect(ephemeralPrompt.content).toContain("提炼技能");
     expect(() => assembly.job({ tools: ["unknown-tool"] } as never)).toThrow(
       "Job requested unavailable tools: unknown-tool",
     );
@@ -163,10 +242,10 @@ describe("Workscene product runtime projection", () => {
     const assembly = fixture({ snapshot } as never);
 
     expect(assembly.ephemeral()).toMatchObject({
-      executionMcpServers: ["first"],
+      runtimeTools: { executionMcpServers: ["first"] },
     });
     expect(assembly.ephemeral()).toMatchObject({
-      executionMcpServers: ["second"],
+      runtimeTools: { executionMcpServers: ["second"] },
     });
     expect(snapshot).toHaveBeenCalledTimes(2);
   });

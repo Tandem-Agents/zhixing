@@ -4,7 +4,7 @@ import type { ConversationAssignmentLedger } from "@zhixing/executor";
 import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,
-} from "./assignment-schedule-stager.js";
+} from "./assignment-global-state-ports.js";
 
 describe("assignment mutation composition", () => {
   it("derives a stable request identity and delegates overlay to the one assignment ledger", async () => {

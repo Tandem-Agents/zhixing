@@ -1,4 +1,3 @@
-import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -12,7 +11,6 @@ import {
   validateGlobalQuery,
   validateGlobalQueryResult,
 } from "@zhixing/core/protocol";
-import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
 import type { ConversationAssignmentLedger } from "@zhixing/executor";
 
 export function createAssignmentGlobalQueryPort(input: {
@@ -126,37 +124,4 @@ function assertGlobalMutationCapability(
   ) {
     throw new Error("Assignment global mutation capability is misbound");
   }
-}
-
-/** One deterministic schedule overlay writer per durable assignment run. */
-export function createAssignmentScheduleStager(
-  ledger: ConversationAssignmentLedger,
-  assignmentId: string,
-  anchorEpoch: number,
-  execution: "conversation" | "job" = "conversation",
-  capability?: AuthorityCapability,
-): ScheduleMutationStager {
-  const mutations = createAssignmentMutationPort({
-    ledger,
-    assignmentId,
-    execution,
-    anchorEpoch,
-    capability,
-  });
-  return async ({ mutation, operationId }) => {
-    if (!operationId) {
-      throw new TypeError("Schedule mutation requires a durable operationId");
-    }
-    const staged = await mutations.stage({
-      domain: "global",
-      mutation,
-      operationId,
-    });
-    return {
-      seq: staged.recordSeq,
-      ...(mutation.kind === "schedule-create"
-        ? { taskId: scheduleTaskIdForRequest(staged.requestId) }
-        : {}),
-    };
-  };
 }

@@ -37,15 +37,56 @@ const {
 } = await import("../executor-role-runtime.js");
 
 const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
-const permissionStorage = Object.freeze({ create: vi.fn() }) as never;
+const createToolImplementation = vi.fn(() => toolImplementation);
+const permissionStorage = Object.freeze({
+  bind: vi.fn((context) => Object.freeze({ create: vi.fn(), context })),
+}) as never;
 const deviceRemovalLifecycle = Object.freeze({}) as never;
 const plannedDutyMigrationLifecycle = Object.freeze({}) as never;
 const postAdoptionReviewLifecycle = Object.freeze({}) as never;
+
+const skillProjectionQuery = {
+  read: vi.fn(async () => ({
+    kind: "skill-catalog",
+    catalogRevision: 6,
+    entries: [
+      {
+        id: "executor-main-skill",
+        name: "Executor Main Skill",
+        description: "ZX_EXECUTOR_MAIN_SKILL",
+        source: "own",
+        mode: "main",
+        pinned: false,
+        disabled: false,
+        createdAt: "2026-09-06T00:00:00.000Z",
+        usage: null,
+        contentRef: "a".repeat(64),
+        revision: 1,
+        digest: "b".repeat(64),
+      },
+      {
+        id: "executor-work-skill",
+        name: "Executor Work Skill",
+        description: "ZX_EXECUTOR_WORK_SKILL",
+        source: "own",
+        mode: "work",
+        pinned: false,
+        disabled: false,
+        createdAt: "2026-09-06T00:00:00.000Z",
+        usage: null,
+        contentRef: "c".repeat(64),
+        revision: 1,
+        digest: "d".repeat(64),
+      },
+    ],
+  })),
+} as never;
 
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
   runtimeMocks.modelProviderCreate.mockClear();
   runtimeMocks.runtimeEnvironmentCreate.mockClear();
+  createToolImplementation.mockClear();
 });
 
 describe("executor role conversation runtime production assembly", () => {
@@ -59,7 +100,7 @@ describe("executor role conversation runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
-      toolImplementation,
+      createToolImplementation,
       permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
@@ -88,10 +129,24 @@ describe("executor role conversation runtime production assembly", () => {
     expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenNthCalledWith(1, {
       workspace: "/scene-workspace",
     });
-    const worksceneIdentity = runtimeMocks.createAgentRuntime.mock.calls[0]![0]
-      .runtimeIdentity;
-    expect(worksceneIdentity).toMatchObject({ sceneId: "scene-a" });
-    expect(Object.isFrozen(worksceneIdentity)).toBe(true);
+    const worksceneSecurity = runtimeMocks.createAgentRuntime.mock.calls[0]![0]
+      .securityExecution;
+    expect(worksceneSecurity).toMatchObject({
+      context: { kind: "scene", sceneId: "scene-a" },
+    });
+    expect(Object.isFrozen(worksceneSecurity)).toBe(true);
+    expect(createToolImplementation).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ kind: "assignment", mode: "work" }),
+    );
+    const workPrompt = await runtimeMocks.createAgentRuntime.mock.calls[0]![0]
+      .windowPrompt.project(skillProjectionQuery);
+    expect(workPrompt.content).toContain(
+      "ZX_EXECUTOR_WORK_SKILL",
+    );
+    expect(workPrompt.content).not.toContain(
+      "ZX_EXECUTOR_MAIN_SKILL",
+    );
 
     await substrate.createConversationRuntime(
       "/ordinary-workspace",
@@ -104,8 +159,24 @@ describe("executor role conversation runtime production assembly", () => {
     expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenNthCalledWith(2, {
       workspace: "/ordinary-workspace",
     });
-    expect(mainParams.runtimeIdentity).toBeUndefined();
+    expect(mainParams).not.toHaveProperty("runtimeIdentity");
+    expect(mainParams.securityExecution).toMatchObject({
+      context: { kind: "default" },
+    });
     expect(mainParams.primaryRole).toBeUndefined();
+    expect(createToolImplementation).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ kind: "assignment", mode: "main" }),
+    );
+    const mainPrompt = await mainParams.windowPrompt.project(
+      skillProjectionQuery,
+    );
+    expect(mainPrompt.content).toContain(
+      "ZX_EXECUTOR_MAIN_SKILL",
+    );
+    expect(mainPrompt.content).not.toContain(
+      "ZX_EXECUTOR_WORK_SKILL",
+    );
   });
 });
 
@@ -118,7 +189,7 @@ describe("executor role job runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
-      toolImplementation,
+      createToolImplementation,
       permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
@@ -153,7 +224,7 @@ describe("executor role job runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
-      toolImplementation,
+      createToolImplementation,
       permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
@@ -175,7 +246,7 @@ describe("executor role job runtime production assembly", () => {
     expect(runtimeMocks.createAgentRuntime).toHaveBeenCalledWith(
       expect.objectContaining({
         confirmationBroker,
-        artifactStore,
+        toolImplementation,
         deviceCapacity: schedulerCapacity,
         orchestrationCapacity,
         runtimeKind: "ephemeral",
@@ -186,6 +257,21 @@ describe("executor role job runtime production assembly", () => {
       primaryRole: "main",
     });
     expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({});
+    expect(createToolImplementation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "assignment",
+        mode: "main",
+        artifacts: artifactStore,
+      }),
+    );
+    const jobPrompt = await runtimeMocks.createAgentRuntime.mock.calls[0]![0]
+      .windowPrompt.project(skillProjectionQuery);
+    expect(jobPrompt.content).toContain(
+      "ZX_EXECUTOR_MAIN_SKILL",
+    );
+    expect(jobPrompt.content).not.toContain(
+      "ZX_EXECUTOR_WORK_SKILL",
+    );
   });
 
   it("makes the owner ready before transport recovery and closes it before transport", async () => {

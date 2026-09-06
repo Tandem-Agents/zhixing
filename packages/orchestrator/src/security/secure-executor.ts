@@ -20,7 +20,6 @@ import {
   wrapWithConstraints,
   type DurableToolExecutionAuthorizer,
   type ExecutionConstraints,
-  type PermissionContextId,
   type SecurityMiddlewareResult,
   type SecurityPipeline,
   type SessionType,
@@ -40,10 +39,7 @@ import {
   type IConfirmationBroker,
 } from "@zhixing/core/confirmation";
 import { type IEventBus } from "@zhixing/core/events";
-import type {
-  TrustAdministrationContext,
-  TrustAdministrationExecutionApplication,
-} from "@zhixing/core/trust-administration";
+import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { AISecuritySteward } from "./ai-steward.js";
 import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
 
@@ -70,7 +66,6 @@ export class SecurityBlockError extends Error {
     this.name = "SecurityBlockError";
   }
 }
-
 // ─── Executor type ───
 
 type ExecuteToolFn = (
@@ -105,8 +100,8 @@ export type OnUserDeniedFn = (
 
 export interface SecureExecuteToolOptions {
   pipeline: SecurityPipeline;
-  /** Sole application owner for user trust approvals and sedimentation. */
-  trustAdministration: TrustAdministrationExecutionApplication;
+  /** Finite Security approval effect; product Trust remains outside the Kernel. */
+  securityApproval: KernelSecurityApprovalPort;
   /** 原始 executeTool 实现(通常是 (tool, input, ctx) => tool.call(input, ctx)) */
   originalExecute: ExecuteToolFn;
   /**
@@ -158,7 +153,7 @@ export function createSecureExecuteTool(
 ): ExecuteToolFn {
   const {
     pipeline,
-    trustAdministration,
+    securityApproval,
     originalExecute,
     broker,
     turnContext,
@@ -272,7 +267,7 @@ export function createSecureExecuteTool(
         // needs-confirm / 未触发管家 → broker（非交互由其 fail-to-deny 兜底）
         await handleBrokerPath({
           broker,
-          trustAdministration,
+          securityApproval,
           toolName: tool.name,
           input,
           context: augmentedContext,
@@ -289,7 +284,7 @@ export function createSecureExecuteTool(
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
         await recordTrustApproval({
-          trustAdministration,
+          securityApproval,
           operation: { tool: tool.name, arguments: input },
           riskLevel: result.decision?.riskLevel ?? "medium",
           origin: "steward",
@@ -357,7 +352,7 @@ async function consultSteward(params: {
 
 async function handleBrokerPath(params: {
   broker: IConfirmationBroker;
-  trustAdministration: TrustAdministrationExecutionApplication;
+  securityApproval: KernelSecurityApprovalPort;
   toolName: string;
   input: Record<string, unknown>;
   context: ToolExecutionContext;
@@ -376,7 +371,7 @@ async function handleBrokerPath(params: {
 }): Promise<void> {
   const {
     broker,
-    trustAdministration,
+    securityApproval,
     toolName,
     input,
     context,
@@ -395,7 +390,7 @@ async function handleBrokerPath(params: {
     input,
     workingDirectory: context.workingDirectory,
     result,
-    contextId: toPermissionContext(trustAdministration.context),
+    contextId: securityApproval.contextId,
     sessionType,
     // 远程确认回程地址透传：AgentRuntime → ToolExecutionContext.turnOrigin
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
@@ -465,7 +460,7 @@ async function handleBrokerPath(params: {
       }
       await applyBrokerDecision({
         decision,
-        trustAdministration,
+        securityApproval,
         toolName,
         input,
         riskLevel: result.decision?.riskLevel ?? "medium",
@@ -616,7 +611,7 @@ function formatBytes(bytes: number): string {
  * confirm 弹窗显式选 allow-global 时建立。
  */
 async function recordTrustApproval(params: {
-  trustAdministration: TrustAdministrationExecutionApplication;
+  securityApproval: KernelSecurityApprovalPort;
   operation: { readonly tool: string; readonly arguments: Readonly<Record<string, unknown>> };
   riskLevel: RiskLevel;
   origin: "user" | "steward";
@@ -626,7 +621,7 @@ async function recordTrustApproval(params: {
   auditor: SecurityAuditor | null;
 }): Promise<void> {
   const {
-    trustAdministration,
+    securityApproval,
     operation,
     riskLevel,
     origin,
@@ -635,7 +630,7 @@ async function recordTrustApproval(params: {
     toolInput,
     auditor,
   } = params;
-  const outcome = trustAdministration.recordApproval({
+  const outcome = securityApproval.recordApproval({
     kind: "allow-once",
     operation,
     riskLevel,
@@ -647,13 +642,12 @@ async function recordTrustApproval(params: {
     if (!context) {
       throw new TypeError("Sedimented Trust rule must be context-bound");
     }
-    const contextId = toPermissionContext(context);
     await auditor.auditRuleSedimented({
       toolName,
       toolInput,
       pattern: { ...outcome.rule.pattern },
       scope: "context",
-      contextId,
+      contextId: context,
       ruleId: outcome.rule.id,
       contributors: outcome.rule.contributors?.map((entry) => ({ ...entry })) ?? [],
     });
@@ -673,7 +667,7 @@ async function applyBrokerDecision(params: {
         | "allow-global";
     }
   >;
-  trustAdministration: TrustAdministrationExecutionApplication;
+  securityApproval: KernelSecurityApprovalPort;
   toolName: string;
   input: Record<string, unknown>;
   riskLevel: RiskLevel;
@@ -682,7 +676,7 @@ async function applyBrokerDecision(params: {
 }): Promise<void> {
   const {
     decision,
-    trustAdministration,
+    securityApproval,
     toolName,
     input,
     riskLevel,
@@ -693,7 +687,7 @@ async function applyBrokerDecision(params: {
   switch (decision.kind) {
     case "allow-once":
       await recordTrustApproval({
-        trustAdministration,
+        securityApproval,
         operation: { tool: toolName, arguments: input },
         riskLevel,
         origin: "user",
@@ -705,37 +699,24 @@ async function applyBrokerDecision(params: {
       return;
 
     case "allow-session":
-      trustAdministration.recordApproval({
+      securityApproval.recordApproval({
         kind: "allow-session",
         pattern: decision.pattern,
       });
       return;
 
     case "allow-context":
-      trustAdministration.recordApproval({
+      securityApproval.recordApproval({
         kind: "allow-context",
         pattern: decision.pattern,
       });
       return;
 
     case "allow-global":
-      trustAdministration.recordApproval({
+      securityApproval.recordApproval({
         kind: "allow-global",
         pattern: decision.pattern,
       });
       return;
-  }
-}
-
-function toPermissionContext(
-  context: TrustAdministrationContext,
-): PermissionContextId {
-  switch (context.kind) {
-    case "main":
-      return { kind: "main" };
-    case "workspace":
-      return { kind: "workspace", hash: context.hash };
-    case "scene":
-      return { kind: "scene", sceneId: context.sceneId };
   }
 }

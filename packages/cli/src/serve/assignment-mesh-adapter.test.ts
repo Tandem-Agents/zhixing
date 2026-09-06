@@ -101,9 +101,9 @@ import {
   createRunSubmissionMeshServiceHandler,
   registerRunExecutorMeshService,
 } from "./assignment-mesh-adapter.js";
-import { createAssignmentMutationPort } from "./assignment-schedule-stager.js";
-import { createAssignmentSkillPorts } from "../../../orchestrator/src/runtime/assignment-skill-port.js";
-import { runContextStorage } from "../../../orchestrator/src/runtime/run-context.js";
+import { createAssignmentMutationPort } from "./assignment-global-state-ports.js";
+import { createAssignmentSkillPorts } from "../runtime/assignment-skill-adapter.js";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 const EXPIRY = "2026-07-21T01:00:00.000Z";

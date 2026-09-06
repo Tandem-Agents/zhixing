@@ -8,7 +8,6 @@
  */
 
 import type { AgentTurnResult, ScheduledTask, TaskAction } from "./types.js";
-import type { ScheduleWriteMutation } from "../contracts/state.js";
 import type { IngressContext } from "../contracts/protocol.js";
 import type {
   ScheduleManagementApplication,
@@ -66,12 +65,6 @@ export interface ScheduleMutationContext {
   /** Revision observed by the caller from a prior authority read. */
   readonly taskRevision?: number;
 }
-
-/** Assignment-scoped append-only mutation port inherited by nested tool calls. */
-export type ScheduleMutationStager = (input: {
-  readonly mutation: ScheduleWriteMutation;
-  readonly operationId?: string;
-}) => Promise<{ readonly seq: number; readonly taskId?: string }>;
 
 export interface SchedulerFacade {
   /** 创建任务，返回创建后的任务视图（含内核算出的 nextRunAt）。 */

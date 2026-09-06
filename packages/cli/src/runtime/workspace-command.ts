@@ -286,7 +286,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
-      toolImplementation: createHostKernelToolImplementation(),
+      createToolImplementation: createHostKernelToolImplementation,
       permissionStorage:
         createPermissionStorageInfrastructure({ zhixingHome }).runtime,
       mcpTools: mcpRuntime.tools,

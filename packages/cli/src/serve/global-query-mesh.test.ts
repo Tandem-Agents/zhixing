@@ -16,7 +16,7 @@ import type {
   MeshServiceRegistry,
 } from "@zhixing/mesh/service-registry";
 import { describe, expect, it, vi } from "vitest";
-import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
+import { createAssignmentGlobalQueryPort } from "./assignment-global-state-ports.js";
 import {
   MeshAssignmentGlobalQueryPort,
   registerGlobalQueryMeshService,

@@ -717,6 +717,20 @@ async function runServerProcess(
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
     scheduler: schedulerFacade,
+    skillArtifacts: authorityRuntime.artifacts,
+    createToolImplementation: bootstrap.createToolImplementation,
+    securityExecution: permissionStorage.runtime,
+    createGuidanceLifecycle: (sceneId) =>
+      createZhixingGuidanceLifecycle({
+        getZhixingHome,
+        ...(sceneId === undefined
+          ? {}
+          : {
+              resolveWorkspaceRoot: () => resolveWorksceneRoot(sceneId),
+            }),
+        readGuidanceFile,
+        loadLayeredGuidance,
+      }),
   });
   // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
   //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
@@ -957,11 +971,8 @@ async function runServerProcess(
     runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
       configuration: kernelEnvironmentConfiguration,
     }),
-    toolImplementation: bootstrap.toolImplementation,
-    permissionStorage: permissionStorage.runtime,
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
-    artifactStore: () => authorityRuntime.artifacts,
     segmentDeps: serveSegmentDeps,
     deviceCapacity: {
       interactive: deviceCapacity.workload("workload-interactive"),
@@ -970,12 +981,6 @@ async function runServerProcess(
     },
     lifecycle: [
       createAdvancementAcceptanceLifecycle(advancementController),
-      createZhixingGuidanceLifecycle({
-        getZhixingHome,
-        resolveWorksceneRoot,
-        readGuidanceFile,
-        loadLayeredGuidance,
-      }),
     ],
     decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),

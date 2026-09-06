@@ -42,6 +42,7 @@ function runtimeRequest() {
         rules: Object.freeze([rule("builtin", "builtin", "pwd")]),
       }),
     ]),
+    workspacePath: null,
   });
 }
 
@@ -62,21 +63,28 @@ describe("Host permission storage infrastructure", () => {
     const home = await createTempDir("permission-storage-infrastructure");
     cleanup.push(home);
     const infrastructure = createPermissionStorageInfrastructure({ zhixingHome: home });
-    const runtime = infrastructure.runtime.create(runtimeRequest());
+    const runtime = infrastructure.runtime
+      .bind(Object.freeze({ kind: "default" }))
+      .create(runtimeRequest());
     const context = { kind: "main" } as const;
 
-    runtime.trustAdministration.createExecutionRule(
-      context,
-      rule("durable", "global", "npm *"),
-    );
+    runtime.recordApproval({
+      kind: "allow-global",
+      pattern: {
+        pattern: { tool: "bash", argument: "npm *" },
+        label: "npm commands",
+      },
+    });
 
     await expect(
       fs.readFile(path.join(home, "permissions", "global.json"), "utf8"),
-    ).resolves.toContain('"id": "durable"');
+    ).resolves.toContain('"argument": "npm *"');
     await expect(infrastructure.management.list(context)).resolves.toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "durable" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ scope: "global", pattern: { tool: "bash", argument: "npm *" } }),
+      ]),
     );
-    expect(runtime.rulesFor(context).match(securityRequest("pwd"))).toMatchObject({
+    expect(runtime.permissionRuleSource.match(securityRequest("pwd"))).toMatchObject({
       id: "builtin",
       scope: "builtin",
     });
@@ -87,20 +95,52 @@ describe("Host permission storage infrastructure", () => {
     cleanup.push(home);
     const infrastructure = createPermissionStorageInfrastructure({ zhixingHome: home });
     const context = { kind: "main" } as const;
-    const first = infrastructure.runtime.create(runtimeRequest());
-    first.trustAdministration.createExecutionRule(
-      context,
-      rule("session", "session", "git status"),
-    );
+    const factory = infrastructure.runtime.bind(Object.freeze({ kind: "default" }));
+    const first = factory.create(runtimeRequest());
+    first.recordApproval({
+      kind: "allow-session",
+      pattern: {
+        pattern: { tool: "bash", argument: "git status" },
+        label: "git status",
+      },
+    });
 
-    expect(first.rulesFor(context).match(securityRequest("git status"))).toMatchObject({
-      id: "session",
+    expect(first.permissionRuleSource.match(securityRequest("git status"))).toMatchObject({
       scope: "session",
     });
-    const restarted = infrastructure.runtime.create(runtimeRequest());
+    const restarted = factory.create(runtimeRequest());
     expect(
-      restarted.rulesFor(context).match(securityRequest("git status")),
+      restarted.permissionRuleSource.match(securityRequest("git status")),
     ).toBeNull();
     await expect(infrastructure.management.list(context)).resolves.toEqual([]);
+  });
+
+  it("binds scene identity independently from workspace and defaults to workspace/global", async () => {
+    const home = await createTempDir("permission-storage-context");
+    cleanup.push(home);
+    const infrastructure = createPermissionStorageInfrastructure({ zhixingHome: home });
+    const workspacePath = path.join(home, "workspace");
+    const requestWithWorkspace = Object.freeze({
+      ...runtimeRequest(),
+      workspacePath,
+    });
+
+    const scene = infrastructure.runtime
+      .bind(Object.freeze({ kind: "scene", sceneId: "scene-1" }))
+      .create(requestWithWorkspace);
+    const workspace = infrastructure.runtime
+      .bind(Object.freeze({ kind: "default" }))
+      .create(requestWithWorkspace);
+    const global = infrastructure.runtime
+      .bind(Object.freeze({ kind: "default" }))
+      .create(runtimeRequest());
+
+    expect(scene.contextId).toEqual({ kind: "scene", sceneId: "scene-1" });
+    expect(scene.trustContext).toEqual({ kind: "scene", sceneId: "scene-1" });
+    expect(scene.securitySnapshot().workspacePath).toBeNull();
+    expect(workspace.contextId.kind).toBe("workspace");
+    expect(workspace.trustContext).toEqual({ kind: "workspace", dir: workspacePath });
+    expect(global.contextId).toEqual({ kind: "main" });
+    expect(global.trustContext).toEqual({ kind: "global" });
   });
 });

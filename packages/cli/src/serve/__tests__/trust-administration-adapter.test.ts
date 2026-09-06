@@ -1,5 +1,10 @@
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { worksceneConversationId } from "@zhixing/core/conversation";
+import {
+  createPermissionStoreTrustAdministrationRepository,
+  PermissionStore,
+} from "@zhixing/core/security";
 import type { TrustAdministrationRepositoryRule } from "@zhixing/core/trust-administration";
 import { createTempDir } from "@zhixing/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
@@ -43,13 +48,11 @@ function permissionStorage() {
   });
 }
 
-function runtimeRepository() {
-  return permissionStorage().runtime.create(
-    Object.freeze({
-      extractArgument: () => "",
-      builtinRuleSets: Object.freeze([]),
-    }),
-  ).trustAdministration;
+function seedRepository() {
+  const rootDir = path.join(process.env.ZHIXING_HOME!, "permissions");
+  return createPermissionStoreTrustAdministrationRepository(
+    () => new PermissionStore({ rootDir }),
+  );
 }
 
 function workspaceConfiguration(
@@ -62,7 +65,7 @@ function workspaceConfiguration(
 
 describe("Trust Administration PermissionStore adapter", () => {
   it("projects scene/global rules and preserves same-context durable revoke", async () => {
-    const seed = runtimeRepository();
+    const seed = seedRepository();
     seed.createExecutionRule(
       { kind: "scene", sceneId: "s1" },
       makeRule("rule-scene", "context", { kind: "scene", sceneId: "s1" }),
@@ -101,7 +104,7 @@ describe("Trust Administration PermissionStore adapter", () => {
     const storage = permissionStorage();
     const configuredHash = storage.workspaceIdentity("/proj");
     const cwdHash = storage.workspaceIdentity(process.cwd());
-    const seed = runtimeRepository();
+    const seed = seedRepository();
     seed.createExecutionRule(
       { kind: "workspace", hash: configuredHash },
       makeRule("configured", "context", {

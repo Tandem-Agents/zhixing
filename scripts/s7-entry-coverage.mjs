@@ -1055,6 +1055,12 @@ async function collectProductionConstants() {
     extraTools: assembly,
     mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
     scheduler: () => inert,
+    skillArtifacts: inert,
+    createToolImplementation: () => Object.freeze({ create: inert }),
+    securityExecution: Object.freeze({
+      bind: () => Object.freeze({ create: inert }),
+    }),
+    createGuidanceLifecycle: () => Object.freeze({ id: "coverage-guidance" }),
   });
   const assembledNames = (kind) => {
     const projection = kind === "main"
@@ -1363,13 +1369,31 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   const runtimeSource = required(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
-  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
   const sessionAdapter = required("packages/runtime-host/src/session-adapter.ts");
   const ephemeral = required("packages/cli/src/serve/ephemeral-executor.ts");
   const durableJob = required("packages/cli/src/serve/agent-job-runtime.ts");
   const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
   const worksceneProjection = required(
     "packages/cli/src/serve/workscene-runtime-projection.ts",
+  );
+  const runContext = required("packages/orchestrator/src/runtime/run-context.ts");
+  const subagentFactory = required("packages/orchestrator/src/subagent/factory.ts");
+  const ownerTypes = required("packages/owner-kernel/src/types.ts");
+  const conversationWorker = required(
+    "packages/cli/src/serve/conversation-assignment-worker.ts",
+  );
+  const conversationProtocol = required(
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
+  const conversationDispatch = required(
+    "packages/cli/src/serve/conversation-executor-dispatch.ts",
+  );
+  const jobWorker = required("packages/cli/src/serve/job-assignment-worker.ts");
+  const schedulerAdapter = required(
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
+  );
+  const assignmentPorts = required(
+    "packages/cli/src/serve/assignment-global-state-ports.ts",
   );
 
   const sourceFile = ts.createSourceFile(
@@ -1398,7 +1422,6 @@ export function inspectKernelRunEnvelopeOwnership(records) {
     correctness: [
       "toolSideEffectObserver",
       "authorizeToolExecution",
-      "stageScheduleMutation",
       "assignmentMutations",
       "globalQuery",
       "assignmentIssuedAt",
@@ -1473,13 +1496,81 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   ) {
     failures.push("Kernel run input has a second owner or the retired RunParams contract remains");
   }
+
+  const retiredScheduleChannel =
+    /\b(?:ScheduleMutationStager|stageScheduleMutation|createAssignmentScheduleStager|scheduleMutations)\b/u;
   if (
-    !runtimeSource.includes("run: (envelope: KernelRunEnvelope) => Promise<KernelRunCompletion>") ||
-    !runtimeSource.includes("async run(input: KernelRunEnvelope): Promise<KernelRunCompletion>") ||
-    !runtimeSource.includes("const envelope = captureKernelRunEnvelope(input);") ||
-    runtimeSource.includes("runV2") ||
-    !runtimeIndex.includes('export type { KernelRunEnvelope } from "./kernel-run-envelope.js";')
+    records.some((record) => retiredScheduleChannel.test(record.text)) ||
+    byPath.has("packages/cli/src/serve/assignment-schedule-stager.ts")
   ) {
+    failures.push("Schedule-specific mutation channel crossed the Kernel or assignment boundary");
+  }
+  if (
+    !schedulerAdapter.includes("runContextStorage.getStore()?.assignmentMutations") ||
+    !schedulerAdapter.includes('domain: "global"') ||
+    !schedulerAdapter.includes("scheduleTaskIdForRequest(result.requestId)") ||
+    !assignmentPorts.includes('if (request.domain === "global" && !allowGlobal)') ||
+    !assignmentPorts.includes("return ledger.stageMutation(") ||
+    !conversationWorker.includes("assignmentMutations: createAssignmentMutationPort({") ||
+    !conversationProtocol.includes("assignmentMutations: effect.assignmentMutations({") ||
+    !conversationProtocol.includes("allowGlobal: this.#authority.globalPublishing") ||
+    !conversationDispatch.includes("assignmentMutations(mutationInput)") ||
+    !jobWorker.includes("assignmentMutations: createAssignmentMutationPort({") ||
+    !subagentFactory.includes("assignmentMutations: parentContext.assignmentMutations") ||
+    !runContext.includes("assignmentMutations?: AssignmentMutationPort") ||
+    !ownerTypes.includes("assignmentMutations?: AssignmentMutationPort")
+  ) {
+    failures.push("Schedule assignment effects do not use one generic fail-closed mutation port");
+  }
+
+  const runtimeFile = ts.createSourceFile(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const createFactory = runtimeFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "createAgentRuntime",
+  );
+  const captureDeclarations = [];
+  const collectRunCaptures = (node) => {
+    if (
+      ts.isMethodDeclaration(node) &&
+      node.name &&
+      propertyNameText(node.name) === "run" &&
+      ts.isObjectLiteralExpression(node.parent) &&
+      ts.isReturnStatement(node.parent.parent) &&
+      node.parent.parent.parent === createFactory?.body &&
+      node.body &&
+      node.parameters.length === 1 &&
+      ts.isIdentifier(node.parameters[0].name)
+    ) {
+      const runInput = node.parameters[0].name.text;
+      const collectCaptures = (child) => {
+        if (
+          ts.isVariableDeclaration(child) &&
+          ts.isIdentifier(child.name) &&
+          child.initializer &&
+          ts.isCallExpression(child.initializer) &&
+          ts.isIdentifier(child.initializer.expression) &&
+          child.initializer.expression.text === "captureKernelRunEnvelope" &&
+          child.initializer.arguments.length === 1 &&
+          ts.isIdentifier(child.initializer.arguments[0]) &&
+          child.initializer.arguments[0].text === runInput
+        ) {
+          captureDeclarations.push(child);
+        }
+        ts.forEachChild(child, collectCaptures);
+      };
+      collectCaptures(node.body);
+    }
+    ts.forEachChild(node, collectRunCaptures);
+  };
+  if (createFactory?.body) collectRunCaptures(createFactory.body);
+  if (captureDeclarations.length !== 1) {
     failures.push("AgentRuntime does not expose one captured Kernel Run Envelope entry");
   }
 
@@ -1671,6 +1762,46 @@ export function inspectKernelRunEventOwnership(records) {
   ) {
     failures.push("Kernel Run Event has a second owner or AgentYield alias");
   }
+
+  const runtimeFile = ts.createSourceFile(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const observationOnEventCalls = [];
+  const collectObservationOnEventCalls = (node) => {
+    if (ts.isCallExpression(node)) {
+      const target = unwrapExpression(node.expression);
+      const observation =
+        ts.isPropertyAccessExpression(target) && target.name.text === "onEvent"
+          ? unwrapExpression(target.expression)
+          : undefined;
+      if (
+        observation &&
+        ts.isPropertyAccessExpression(observation) &&
+        observation.name.text === "observation"
+      ) {
+        observationOnEventCalls.push(node);
+      }
+    }
+    ts.forEachChild(node, collectObservationOnEventCalls);
+  };
+  collectObservationOnEventCalls(runtimeFile);
+  const observedEvent = observationOnEventCalls.length === 1 &&
+      observationOnEventCalls[0].arguments.length === 1
+    ? unwrapExpression(observationOnEventCalls[0].arguments[0])
+    : undefined;
+  const projector = observedEvent && ts.isCallExpression(observedEvent)
+    ? unwrapExpression(observedEvent.expression)
+    : undefined;
+  const hasOneProjectedOnEventCall =
+    projector &&
+    ts.isIdentifier(projector) &&
+    projector.text === "projectAgentYieldToKernelRunEvent" &&
+    observedEvent.arguments.length === 1;
+
   if (
     !runtimeIndex.includes("assertKernelRunEvent,") ||
     !runtimeIndex.includes("type KernelRunEvent,") ||
@@ -1678,8 +1809,7 @@ export function inspectKernelRunEventOwnership(records) {
     envelopeSource.includes("AgentYield") ||
     envelopeSource.includes("onYield") ||
     !envelopeSource.includes("readonly onEvent?: (event: KernelRunEvent)") ||
-    !runtimeSource.includes("projectAgentYieldToKernelRunEvent(value)") ||
-    !runtimeSource.includes("envelope.observation.onEvent?.(") ||
+    !hasOneProjectedOnEventCall ||
     runtimeSource.includes("envelope.observation.onYield")
   ) {
     failures.push("Agent Loop to Kernel Event boundary is bypassed or leaked");
@@ -2072,6 +2202,7 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
     declarations.length !== 1 ||
     declaration?.relative !== runtimePath ||
     memberNames.some((name) => !name) ||
+    declaration?.statement.members.some((member) => member.questionToken) ||
     JSON.stringify([...memberNames].sort()) !==
       JSON.stringify([...expectedMembers].sort())
   ) {
@@ -2390,10 +2521,10 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
     runtimeSource.match(/new SecurityPipeline\s*\(/gu) ?? [];
   const storeConstructions =
     runtimeSource.match(/new PermissionStore\s*\(/gu) ?? [];
-  const permissionStorageAssemblies =
-    runtimeSource.match(/assembleKernelPermissionStorage\s*\(/gu) ?? [];
+  const securityExecutionAssemblies =
+    runtimeSource.match(/assembleKernelSecurityExecution\s*\(/gu) ?? [];
   const permissionRuleBindings =
-    runtimeSource.match(/bindKernelPermissionRuleSource\s*\(/gu) ?? [];
+    runtimeSource.match(/bindPermissionRuleExecutionSource\s*\(/gu) ?? [];
   const trustApplicationConstructions =
     runtimeSource.match(
       /new TrustAdministrationExecutionApplicationService\s*\(/gu,
@@ -2446,11 +2577,13 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
   if (
     pipelineConstructions.length !== 1 ||
     storeConstructions.length !== 0 ||
-    permissionStorageAssemblies.length !== 1 ||
-    permissionRuleBindings.length !== 1 ||
-    trustApplicationConstructions.length !== 1 ||
+    securityExecutionAssemblies.length !== 1 ||
+    permissionRuleBindings.length !== 0 ||
+    trustApplicationConstructions.length !== 0 ||
     !runtimeSource.includes("const securityPipeline = new SecurityPipeline({") ||
-    /createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
+    !runtimeSource.includes("permissionRuleSource: securityExecution.permissionRuleSource") ||
+    (runtimeSource.match(/securityApproval: securityExecution/gu) ?? []).length !== 3 ||
+    /createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b|@zhixing\/core\/trust-administration|TrustAdministration/u.test(
       runtimeSource,
     ) ||
     [...securityBindings].some(
@@ -2911,7 +3044,13 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
   const manifest = required("packages/orchestrator/package.json");
   const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+  const runtimeToolProjection = required(
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
+  );
   const edge = required("packages/cli/src/runtime/kernel-tool-implementation.ts");
+  const skillAdapter = required(
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
+  );
   const applicationHost = required("packages/cli/src/serve/application-host.ts");
   const topology = required("packages/cli/src/serve/role-topology.ts");
   const command = required("packages/cli/src/serve/command.ts");
@@ -2968,15 +3107,17 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     !contract.includes("export interface KernelToolImplementationPort") ||
     !contract.includes("export interface KernelToolImplementationRequest") ||
     !contract.includes("readonly requestedToolNames: readonly string[];") ||
+    !contract.includes("readonly callText: (prompt: string) => Promise<string>;") ||
     !contract.includes("assembleKernelToolImplementation(") ||
     !contract.includes("exact requested sequence") ||
-    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES/u.test(contract)
+    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|SkillCatalog|SkillMode|ArtifactStore/u.test(contract)
   ) failures.push("Kernel Tool demand contract is not finite, exact and concrete-free");
   if (
     !runtime.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
     !runtime.includes("assembleKernelToolImplementation(") ||
     !runtime.includes("profile.enabledTools.filter((name) => name !== \"Task\")") ||
-    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES/u.test(runtime)
+    !runtime.includes("callText: (prompt: string) => mainCallLLM([userMessage(prompt)])") ||
+    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES|createAssignmentSkillPorts|skillCatalogLoad|skillCatalogSave|skillCatalogAdmission|ArtifactStore/u.test(runtime)
   ) failures.push("AgentRuntime does not consume only the demand-owned Tool port");
   if (!runtimeIndex.includes('from "./kernel-tool-implementation.js";')) {
     failures.push("Kernel Tool contract escaped its runtime-only subpath");
@@ -2985,29 +3126,44 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     failures.push("Orchestrator still declares the concrete Tool implementation package");
   }
   if (
-    !runtimeHost.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
-    !runtimeHost.includes("toolImplementation: this.opts.toolImplementation,")
+    !runtimeToolProjection.includes("readonly implementation: KernelToolImplementationPort;") ||
+    !runtimeHost.includes("toolImplementation: runtimeTools.implementation,") ||
+    /readonly toolImplementation:|artifactStore/u.test(runtimeHost)
   ) failures.push("RuntimeHost can publish a runtime without the Host Tool binding");
   if (
-    !edge.includes("export function createHostKernelToolImplementation()") ||
+    !edge.includes("export function createHostKernelToolImplementation(") ||
+    !edge.includes("binding: HostSkillToolBinding") ||
+    !edge.includes("createAssignmentSkillPorts(binding.artifacts") ||
+    !edge.includes("admissionLlm: request.callText") ||
+    !skillAdapter.includes("export function createAssignmentSkillPorts(") ||
     !edge.includes("BUILTIN_TOOL_FACTORIES") ||
     !edge.includes("WEB_FETCH_DEFAULT_RULES") ||
     !edge.includes("Object.hasOwn(BUILTIN_TOOL_FACTORIES, name)") ||
     !edge.includes("tools: Object.freeze(tools)")
   ) failures.push("CLI Host edge does not uniquely select the concrete Tool implementation");
   if (
-    !applicationHost.includes("createToolImplementation: () => KernelToolImplementationPort;") ||
-    !applicationHost.includes("toolImplementation: this.#dependencies.createToolImplementation(),") ||
+    !applicationHost.includes("readonly createToolImplementation: HostKernelToolImplementationFactory;") ||
+    !applicationHost.includes("createToolImplementation: this.#dependencies.createToolImplementation,") ||
     !applicationHost.includes("createToolImplementation: createHostKernelToolImplementation,") ||
-    !topology.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
-    !command.includes("toolImplementation: bootstrap.toolImplementation,")
+    !topology.includes("readonly createToolImplementation: HostKernelToolImplementationFactory;") ||
+    !command.includes("createToolImplementation: bootstrap.createToolImplementation,") ||
+    !command.includes("skillArtifacts: authorityRuntime.artifacts,")
   ) failures.push("Persistent Host topology does not carry one explicit Tool binding");
   if (
-    !executor.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
-    (executor.match(/toolImplementation: this\.options\.toolImplementation,/gu) ?? []).length !== 2 ||
-    !executor.includes("toolImplementation: bootstrap.toolImplementation,")
+    !executor.includes("readonly createToolImplementation: HostKernelToolImplementationFactory;") ||
+    (executor.match(/this\.options\.createToolImplementation\(Object\.freeze\(\{/gu) ?? []).length !== 2 ||
+    !executor.includes("createToolImplementation: bootstrap.createToolImplementation,") ||
+    !executor.includes('mode: workscene ? "work" : "main"') ||
+    !executor.includes('mode: "main"')
   ) failures.push("Executor runtime issuance bypasses the explicit Tool binding");
-  if (!workspace.includes("toolImplementation: createHostKernelToolImplementation(),")) {
+  if (
+    !worksceneProjection.includes("readonly createToolImplementation: HostKernelToolImplementationFactory;") ||
+    !worksceneProjection.includes("implementation: input.createToolImplementation(Object.freeze({") ||
+    !/runtimeProduct\(\s*"main",/u.test(worksceneProjection) ||
+    !/runtimeProduct\(\s*"work",/u.test(worksceneProjection) ||
+    !worksceneProjection.includes('runtimeProduct("main")')
+  ) failures.push("Anchor product composition does not own Skill main/work Tool selection");
+  if (!workspace.includes("createToolImplementation: createHostKernelToolImplementation,")) {
     failures.push("Transient workspace runtime lacks the Host Tool binding");
   }
   if (
@@ -3735,9 +3891,9 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const projection = required(
     "packages/runtime-host/src/conversation-runtime-projection.ts",
   );
-  const kernelIdentity = required(
-    "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
-  );
+  if (byPath.has("packages/orchestrator/src/runtime/kernel-runtime-identity.ts")) {
+    failures.push("retired Kernel product identity contract remains reachable");
+  }
   const kernelAssembly = required(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
@@ -3751,6 +3907,21 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const product = required("packages/cli/src/serve/workscene-runtime-projection.ts");
   const command = required("packages/cli/src/serve/command.ts");
   const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const productCreate = projection.slice(
+    projection.indexOf("export function createRuntimeProductProjection("),
+    projection.indexOf("export function assertRuntimeProductProjection("),
+  );
+  const productAssert = projection.slice(
+    projection.indexOf("export function assertRuntimeProductProjection("),
+    projection.indexOf("export function createRuntimeToolProjection("),
+  );
+  const conversationCreate = projection.slice(
+    projection.indexOf("export function createConversationRuntimeProjection("),
+    projection.indexOf("export function assertConversationRuntimeProjection("),
+  );
+  const conversationAssert = projection.slice(
+    projection.indexOf("export function assertConversationRuntimeProjection("),
+  );
 
   if (
     /\b(?:WorksceneDto|WorksceneToolDirectory|powerProfile|createWorksceneRuntime|worksceneDirectory|capabilityCatalog)\b/iu.test(
@@ -3760,11 +3931,16 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     /\bsceneId\b/u.test(host) ||
     !host.includes("projection: ConversationRuntimeProjection") ||
     !host.includes("assertConversationRuntimeProjection(projection);") ||
+    !host.includes("assertRuntimeProductProjection(projection);") ||
+    !host.includes("assertRuntimeToolProjection(options.runtimeTools);") ||
+    !host.includes("assertKernelWindowPromptProjectionPort(options.windowPrompt);") ||
+    !host.includes("assertRuntimeProfileProjection(options.profile);") ||
     !host.includes("conversation: projection") ||
-    !host.includes("assertRuntimeToolProjection(runtimeTools);") ||
+    /private async assemble[\s\S]*assertRuntime(?:Product|Tool|Conversation)Projection/u.test(host) ||
     !host.includes("extraTools: [...runtimeTools.extraTools]") ||
     !host.includes("executionMcpServers: runtimeTools.executionMcpServers") ||
-    !host.includes("runtimeIdentity: conversation?.runtimeIdentity")
+    !host.includes("securityExecution: product.securityExecution") ||
+    /runtimeIdentity/u.test(host)
   ) {
     failures.push("RuntimeHost still owns or can bypass Workscene product projection");
   }
@@ -3774,32 +3950,27 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !projection.includes("export function createRuntimeToolProjection(") ||
     !projection.includes("export function assertRuntimeToolProjection(") ||
     !projection.includes("Runtime tool projection must be finite and immutable") ||
-    !projection.includes("assertRuntimeToolProjection(input.runtimeTools);") ||
+    !productCreate.includes("assertRuntimeToolProjection(input.runtimeTools);") ||
+    !productCreate.includes("assertKernelWindowPromptProjectionPort(input.windowPrompt);") ||
+    !productAssert.includes("assertRuntimeToolProjection(projection.runtimeTools);") ||
+    !productAssert.includes("assertKernelWindowPromptProjectionPort(projection.windowPrompt);") ||
     !projection.includes("export interface ConversationRuntimeProjection") ||
     !projection.includes("export function createConversationRuntimeProjection(") ||
     !projection.includes("export function assertConversationRuntimeProjection(") ||
+    !conversationCreate.includes("assertRuntimeToolProjection(input.runtimeTools);") ||
+    !conversationCreate.includes("assertKernelWindowPromptProjectionPort(input.windowPrompt);") ||
+    !conversationAssert.includes("assertRuntimeToolProjection(projection.runtimeTools);") ||
+    !conversationAssert.includes("assertKernelWindowPromptProjectionPort(projection.windowPrompt);") ||
     !projection.includes("return Object.freeze({") ||
-    !projection.includes("assertKernelRuntimeIdentityContribution(") ||
     !projection.includes("Conversation runtime projection must be immutable") ||
-    /\bsceneId\b|Record<string, unknown>|metadata/iu.test(projection)
+    !projection.includes("securityExecution: input.securityExecution") ||
+    /\bsceneId\b|runtimeIdentity|Record<string, unknown>|metadata/iu.test(projection)
   ) {
     failures.push("generic conversation projection is not finite, immutable and fail closed");
   }
 
-  if (
-    !kernelIdentity.includes("export interface KernelRuntimeIdentityContribution") ||
-    !kernelIdentity.includes("export function createKernelRuntimeIdentityContribution(") ||
-    !kernelIdentity.includes("export function assertKernelRuntimeIdentityContribution(") ||
-    !kernelIdentity.includes("kernelRuntimeIdentityProvenance") ||
-    !kernelIdentity.includes("keys.length !== 1") ||
-    !kernelIdentity.includes("Object.isFrozen(identity)") ||
-    /Record<string, unknown>|metadata/iu.test(kernelIdentity) ||
-    !kernelAssembly.includes(
-      "assertKernelRuntimeIdentityContribution(options.runtimeIdentity);",
-    ) ||
-    !kernelAssembly.includes("const sceneId = options.runtimeIdentity?.sceneId;")
-  ) {
-    failures.push("Kernel runtime identity contribution is not finite and fail closed");
+  if (/runtimeIdentity|\bsceneId\b/u.test(kernelAssembly)) {
+    failures.push("Kernel assembly still interprets Workscene product identity");
   }
 
   if (
@@ -3846,7 +4017,8 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
 
   if (
     !schedulerAdapter.includes("export class ExecutionSchedulerFacade") ||
-    !schedulerAdapter.includes("stageScheduleMutation") ||
+    !schedulerAdapter.includes("assignmentMutations") ||
+    !schedulerAdapter.includes('domain: "global"') ||
     schedulerAdapter.includes("@zhixing/runtime-host")
   ) {
     failures.push("Anchor staged scheduler adapter is not owned by product composition");
@@ -3865,13 +4037,17 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("export function createAnchorRuntimeProjectionAssembly(") ||
     !product.includes("export function createWorksceneConversationRuntimeFactory(") ||
     !product.includes("new ExecutionSchedulerFacade(input.scheduler)") ||
-    !product.includes("const runtimeTools = (") ||
+    !product.includes("const runtimeProduct = (") ||
+    !product.includes("createRuntimeProductProjection({") ||
     !product.includes("createRuntimeToolProjection({") ||
+    !product.includes("windowPrompt: createSkillCatalogWindowPromptProjection(mode)") ||
     !product.includes("createConversationRuntimeProjection({") ||
-    !product.includes("createKernelRuntimeIdentityContribution(options.scene.sceneId)") ||
+    !product.includes("securityExecution: input.securityExecution.bind(") ||
+    !product.includes('Object.freeze({ kind: "scene", sceneId })') ||
+    !product.includes("lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)]") ||
     !product.includes("profile: mainProfile(") ||
     !product.includes("profile: powerProfile(") ||
-    !product.includes("const ephemeral = (): RuntimeToolProjection => runtimeTools();") ||
+    !product.includes('const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");') ||
     !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
     !product.includes("selectJobRuntimeTools({") ||
     !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
@@ -4598,7 +4774,7 @@ export function inspectStorageRemainderBoundary(records) {
   const platformSecrets = required("packages/secrets/src/platform-secret-store.ts");
   const vault = required("packages/secrets/src/vault-secret-store.ts");
   const skillAdapter = required(
-    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
   );
   const skillApplication = required(
     "packages/core/src/skills/catalog-application.ts",
@@ -4673,7 +4849,7 @@ export function inspectStorageRemainderBoundary(records) {
   }
   requireMultiplicity(
     "new AssignmentSkillAdmissionCorrectnessPort(",
-    [["packages/orchestrator/src/runtime/assignment-skill-port.ts", 1]],
+    [["packages/cli/src/runtime/assignment-skill-adapter.ts", 1]],
     "P05 admission temp adapter",
   );
 
@@ -5627,7 +5803,7 @@ export function inspectTrustAdministrationOwnership(records) {
     "packages/cli/src/serve/permission-storage-infrastructure.ts",
   );
   const permissionContract = required(
-    "packages/orchestrator/src/runtime/kernel-permission-storage.ts",
+    "packages/orchestrator/src/runtime/kernel-security-execution.ts",
   );
   const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
   const executorRole = required(
@@ -5705,8 +5881,8 @@ export function inspectTrustAdministrationOwnership(records) {
   }
 
   if (
-    !secureExecutor.includes("trustAdministration.recordApproval({") ||
-    /PermissionStore|ConfirmationTracker|getPermissionStore|getConfirmationTracker|createExecutionRule/u.test(
+    !secureExecutor.includes("securityApproval.recordApproval({") ||
+    /TrustAdministration|PermissionStore|ConfirmationTracker|getPermissionStore|getConfirmationTracker|createExecutionRule/u.test(
       secureExecutor,
     )
   ) {
@@ -5716,12 +5892,11 @@ export function inspectTrustAdministrationOwnership(records) {
   }
 
   if (
-    !agentRuntime.includes("new TrustAdministrationExecutionApplicationService({") ||
-    !agentRuntime.includes("assembleKernelPermissionStorage(") ||
-    !agentRuntime.includes("bindKernelPermissionRuleSource(") ||
-    !agentRuntime.includes("trustAdministration.securitySnapshot()") ||
-    !agentRuntime.includes("trustAdministration.executionRules()") ||
-    /new PermissionStore|createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
+    !agentRuntime.includes("assembleKernelSecurityExecution(") ||
+    !agentRuntime.includes("securityExecution.securitySnapshot()") ||
+    !agentRuntime.includes("securityExecution.executionPermissionRules()") ||
+    !agentRuntime.includes("permissionRuleSource: securityExecution.permissionRuleSource") ||
+    /TrustAdministration|new PermissionStore|createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
       agentRuntime,
     )
   ) {
@@ -5734,26 +5909,27 @@ export function inspectTrustAdministrationOwnership(records) {
     [
       "packages/orchestrator/src/tools/task.ts",
       taskTool,
-      "trustAdministration: env.trustAdministration,",
+      "securityApproval: env.securityApproval,",
     ],
     [
       "packages/orchestrator/src/subagent/factory.ts",
       childFactory,
-      "trustAdministration: opts.trustAdministration,",
+      "securityApproval: opts.securityApproval,",
     ],
     [
       "packages/orchestrator/src/subagent/loop-runner.ts",
       childLoop,
-      "trustAdministration: opts.trustAdministration,",
+      "securityApproval: opts.securityApproval,",
     ],
     [
       "packages/orchestrator/src/orchestration/agent-node-executor.ts",
       agentNode,
-      "trustAdministration: this.options.trustAdministration,",
+      "securityApproval: this.options.securityApproval,",
     ],
   ]) {
     if (
-      !text.includes("TrustAdministrationExecutionApplication") ||
+      !text.includes("KernelSecurityApprovalPort") ||
+      /@zhixing\/core\/trust-administration|TrustAdministration/u.test(text) ||
       !text.includes(binding)
     ) {
       failures.push(`${relative}: child execution can bypass the one Trust application`);
@@ -5819,8 +5995,11 @@ export function inspectTrustAdministrationOwnership(records) {
     ) ||
     !permissionInfrastructure.includes("store.registerBuiltinRules(") ||
     !permissionInfrastructure.includes("bindPermissionRuleExecutionSource(") ||
-    !permissionInfrastructure.includes("toPermissionContext(context)") ||
-    /resolveWorkspace|parseConversationId|SUGGESTION_THRESHOLDS|recordApproval/u.test(
+    !permissionInfrastructure.includes("new TrustAdministrationExecutionApplicationService({") ||
+    !permissionInfrastructure.includes("createKernelSecurityExecution(") ||
+    !permissionInfrastructure.includes("application.recordApproval(approval)") ||
+    !permissionInfrastructure.includes("permissionRuleSource") ||
+    /resolveWorkspace|parseConversationId|SUGGESTION_THRESHOLDS/u.test(
       permissionInfrastructure,
     )
   ) {
@@ -5830,11 +6009,11 @@ export function inspectTrustAdministrationOwnership(records) {
   }
 
   if (
-    !permissionContract.includes("export interface KernelPermissionStorageFactory") ||
-    !permissionContract.includes("export interface KernelPermissionStorageBinding") ||
-    !permissionContract.includes("TrustAdministrationExecutionRepository") ||
+    !permissionContract.includes("export interface KernelSecurityExecutionFactory") ||
+    !permissionContract.includes("export interface KernelSecurityExecution") ||
+    !permissionContract.includes("export interface KernelSecurityApprovalPort") ||
     !permissionContract.includes("PermissionRuleExecutionSource") ||
-    /PermissionStore|rootDir|node:path|node:fs/u.test(permissionContract)
+    /TrustAdministration|PermissionStore|rootDir|node:path|node:fs/u.test(permissionContract)
   ) {
     failures.push(
       "Kernel permission storage contract exposes a concrete store or physical path",
@@ -5845,16 +6024,17 @@ export function inspectTrustAdministrationOwnership(records) {
     (composition.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
       .length !== 1 ||
     !composition.includes("repository: permissionStorage.management") ||
-    !composition.includes("permissionStorage: permissionStorage.runtime") ||
-    !runtimeHost.includes("permissionStorage: this.opts.permissionStorage") ||
+    !composition.includes("securityExecution: permissionStorage.runtime") ||
+    runtimeHost.includes("permissionStorage") ||
+    !runtimeHost.includes("securityExecution: product.securityExecution") ||
     (executorRole.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
       .length !== 1 ||
     !executorRole.includes("permissionStorage: permissionStorage.runtime") ||
-    !executorRole.includes("permissionStorage: this.options.permissionStorage") ||
+    !executorRole.includes("securityExecution: this.options.permissionStorage.bind(") ||
     (workspaceCommand.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
       .length !== 1 ||
     !workspaceCommand.includes(
-      "createPermissionStorageInfrastructure({ zhixingHome }).runtime",
+      "permissionStorage:",
     )
   ) {
     failures.push(
@@ -7048,14 +7228,33 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const cliDirectories = required(
     "packages/cli/src/serve/trust-administration-adapter.ts",
   );
-  const assignmentSkillPort = required(
-    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+  const assignmentSkillAdapter = required(
+    "packages/cli/src/runtime/assignment-skill-adapter.ts",
   );
+  const skillWindowProjection = required(
+    "packages/cli/src/runtime/skill-catalog-window-projection.ts",
+  );
+  const kernelWindowPrompt = required(
+    "packages/orchestrator/src/runtime/kernel-window-prompt.ts",
+  );
+  const runtimeProductProjection = required(
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
+  );
+  const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+  const kernelToolEdge = required(
+    "packages/cli/src/runtime/kernel-tool-implementation.ts",
+  );
+  if (byPath.has("packages/orchestrator/src/runtime/assignment-skill-port.ts")) {
+    failures.push("Skill assignment adapter returned to the Kernel package");
+  }
+  if (byPath.has("packages/orchestrator/src/runtime/assignment-skill-projection.ts")) {
+    failures.push("Skill window projection returned to the Kernel package");
+  }
   const assignmentMutationIdentity = required(
     "packages/core/src/protocol/assignment-mutation.ts",
   );
   const assignmentMutationPort = required(
-    "packages/cli/src/serve/assignment-schedule-stager.ts",
+    "packages/cli/src/serve/assignment-global-state-ports.ts",
   );
   const taskSurfaceStart = infoCommands.indexOf(
     'dispatcher.registerHandler("tasks:repl"',
@@ -8845,8 +9044,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Channel gained an unauthorized empty Skill Product API Surface");
   }
   for (const [relative, text] of [
-    ["packages/orchestrator/src/runtime/assignment-skill-port.ts", assignmentSkillPort],
-    ["packages/orchestrator/src/runtime/create-agent-runtime.ts", agentRuntime],
+    ["packages/cli/src/runtime/assignment-skill-adapter.ts", assignmentSkillAdapter],
+    ["packages/cli/src/runtime/skill-catalog-window-projection.ts", skillWindowProjection],
     ["packages/tools-builtin/src/skill.ts", builtinSkill],
     ["packages/tools-builtin/src/factories.ts", builtinFactories],
   ]) {
@@ -8862,74 +9061,120 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     }
   }
   if (
-    !assignmentSkillPort.includes(
-      "createAssignmentSkillProjectionApplication",
+    !skillWindowProjection.includes(
+      "createSkillCatalogWindowPromptProjection",
     ) ||
-    !assignmentSkillPort.includes(
-      "new SkillCatalogKernelProjectionApplicationService({",
+    !skillWindowProjection.includes(
+      "new SkillCatalogKernelProjectionApplicationService(",
     ) ||
-    !assignmentSkillPort.includes('kind: "skill-catalog"') ||
-    !assignmentSkillPort.includes("includeDisabled: true") ||
-    !assignmentSkillPort.includes('result.kind !== "skill-catalog"') ||
-    assignmentSkillPort.includes("renderAssignmentSkillIndex") ||
-    assignmentSkillPort.includes("renderSkillIndex") ||
-    assignmentSkillPort.includes("builtinIndexEntries") ||
-    assignmentSkillPort.includes("SKILL_INDEX_TOP_N") ||
-    assignmentSkillPort.includes("entry.mode === mode") ||
-    assignmentSkillPort.includes("entry.disabled")
+    !skillWindowProjection.includes("createKernelWindowPromptProjection({") ||
+    !skillWindowProjection.includes('kind: "skill-catalog"') ||
+    !skillWindowProjection.includes("includeDisabled: true") ||
+    !skillWindowProjection.includes('result.kind !== "skill-catalog"') ||
+    skillWindowProjection.includes("renderAssignmentSkillIndex") ||
+    skillWindowProjection.includes("renderSkillIndex") ||
+    skillWindowProjection.includes("builtinIndexEntries") ||
+    skillWindowProjection.includes("SKILL_INDEX_TOP_N") ||
+    skillWindowProjection.includes("entry.mode === mode") ||
+    skillWindowProjection.includes("entry.disabled")
   ) {
     failures.push(
-      "Orchestrator projection adapter interprets Skill fields or omits the raw catalog query",
+      "Product Skill window projection interprets catalog fields or omits the domain/query boundary",
     );
   }
   if (
-    !agentRuntime.includes(
-      "new SkillCatalogKernelProjectionApplicationService()",
+    /@zhixing\/core\/skills|SkillCatalog|skillMode|createAssignmentSkillProjectionApplication/u.test(
+      agentRuntime,
     ) ||
     !agentRuntime.includes(
-      "createAssignmentSkillProjectionApplication(",
+      "readonly windowPrompt: KernelWindowPromptProjectionPort",
     ) ||
+    !agentRuntime.includes(
+      "assertKernelWindowPromptProjectionPort(options.windowPrompt)",
+    ) ||
+    !agentRuntime.includes("projectWindowPrompt(options.windowPrompt)") ||
     !agentRuntime.includes("entryInstanceEpoch === instanceEpoch") ||
-    !agentRuntime.includes("skillIndex.catalogRevision > skillCatalogRevision") ||
+    !agentRuntime.includes("windowPrompt.revision > windowPromptRevision") ||
+    !agentRuntime.includes("windowPrompt.revision >= windowPromptRevision") ||
+    agentRuntime.includes('kind: "skill-catalog"') ||
+    agentRuntime.includes("includeDisabled: true") ||
     agentRuntime.includes("renderAssignmentSkillIndex") ||
     agentRuntime.includes("renderSkillIndex") ||
     agentRuntime.includes("builtinIndexEntries") ||
-    agentRuntime.includes("SKILL_INDEX_TOP_N") ||
-    agentRuntime.includes("entry.mode === skillMode") ||
-    agentRuntime.includes("entry.disabled")
+    agentRuntime.includes("SKILL_INDEX_TOP_N")
   ) {
     failures.push(
-      "Agent runtime interprets Skill catalog fields or can regress the immutable projection",
+      "Agent runtime reconstructs Skill projection or can regress the immutable product prompt",
     );
   }
   if (
-    assignmentSkillPort.includes("getBuiltinSkill") ||
-    assignmentSkillPort.includes("parseFrontmatter") ||
-    assignmentSkillPort.includes("skillNameToId") ||
-    !assignmentSkillPort.includes("new SkillCatalogLoadApplicationService(") ||
-    !assignmentSkillPort.includes("createSkillCatalogLoadCorrectnessPort(artifacts)") ||
-    !assignmentSkillPort.includes("async readScope(skillId)") ||
-    !assignmentSkillPort.includes("const run = requireRunSkillContext()") ||
-    assignmentSkillPort.includes("return { kind: \"builtin-only\" }") ||
-    !assignmentSkillPort.includes("async stageUsage(operationId, mutation)")
+    /@zhixing\/core\/skills|SkillCatalog|skillMode|catalogRevision/u.test(
+      kernelWindowPrompt,
+    ) ||
+    !kernelWindowPrompt.includes(
+      "interface KernelWindowPromptProjectionPort",
+    ) ||
+    !kernelWindowPrompt.includes("readonly revision: number") ||
+    !kernelWindowPrompt.includes("readonly segment: DataDrivenSegment") ||
+    !kernelWindowPrompt.includes("readonly content: string | null") ||
+    !kernelWindowPrompt.includes('projection.segment !== "skill-index"') ||
+    !kernelWindowPrompt.includes("keys.length !== 3") ||
+    /KernelWindowPromptContribution|readonly contributions:|for \(const contribution/u.test(
+      kernelWindowPrompt,
+    ) ||
+    !agentRuntime.includes("target[projection.segment] = projection.content;") ||
+    agentRuntime.includes("for (const contribution of projection.contributions)")
+  ) {
+    failures.push(
+      "Kernel window prompt contract is product-aware or not finite/fail-closed",
+    );
+  }
+  if (
+    !runtimeProductProjection.includes(
+      "readonly windowPrompt: KernelWindowPromptProjectionPort",
+    ) ||
+    !runtimeProductProjection.includes(
+      "assertKernelWindowPromptProjectionPort(input.windowPrompt)",
+    ) ||
+    (runtimeHost.match(/windowPrompt: product\.windowPrompt,/gu) ?? []).length !== 1 ||
+    !worksceneRuntimeProjection.includes(
+      "createSkillCatalogWindowPromptProjection(mode)",
+    ) ||
+    executorRoleRuntime.split("createSkillCatalogWindowPromptProjection(")
+      .length - 1 !== 2
+  ) {
+    failures.push(
+      "Anchor/Executor runtime issuance does not bind the one product-owned Skill window projection",
+    );
+  }
+  if (
+    assignmentSkillAdapter.includes("getBuiltinSkill") ||
+    assignmentSkillAdapter.includes("parseFrontmatter") ||
+    assignmentSkillAdapter.includes("skillNameToId") ||
+    !/loadApplication:\s*new SkillCatalogLoadApplicationService\(\s*createSkillCatalogLoadCorrectnessPort\(artifacts\)/u.test(
+      assignmentSkillAdapter,
+    ) ||
+    !assignmentSkillAdapter.includes("async readScope(skillId)") ||
+    !assignmentSkillAdapter.includes("const run = requireRunSkillContext()") ||
+    !assignmentSkillAdapter.includes("async stageUsage(operationId, mutation)")
   ) {
     failures.push("Orchestrator retains Skill load business orchestration or omits the domain adapter");
   }
   if (
-    assignmentSkillPort.includes("scrubSecrets") ||
-    assignmentSkillPort.includes("stringifyFrontmatter") ||
-    assignmentSkillPort.includes("SkillDraft") ||
-    !assignmentSkillPort.includes("new SkillCatalogSaveApplicationService(") ||
-    !assignmentSkillPort.includes("createSkillCatalogSaveCorrectnessPort(artifacts)")
+    assignmentSkillAdapter.includes("scrubSecrets") ||
+    assignmentSkillAdapter.includes("stringifyFrontmatter") ||
+    assignmentSkillAdapter.includes("SkillDraft") ||
+    !assignmentSkillAdapter.includes("new SkillCatalogSaveApplicationService(") ||
+    !assignmentSkillAdapter.includes("createSkillCatalogSaveCorrectnessPort(artifacts)")
   ) {
     failures.push("Orchestrator retains Skill save business orchestration or omits the domain service");
   }
   if (
-    !assignmentSkillPort.includes("new SkillCatalogAdmissionApplicationService(") ||
-    !assignmentSkillPort.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
-    !assignmentSkillPort.includes("acquireLocalCandidate(") ||
-    !assignmentSkillPort.includes("assertRegularCandidateTree(") ||
-    assignmentSkillPort.includes("class SkillAdmissionWorkspace")
+    !assignmentSkillAdapter.includes("new SkillCatalogAdmissionApplicationService(") ||
+    !assignmentSkillAdapter.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
+    !assignmentSkillAdapter.includes("acquireLocalCandidate(") ||
+    !assignmentSkillAdapter.includes("assertRegularCandidateTree(") ||
+    assignmentSkillAdapter.includes("class SkillAdmissionWorkspace")
   ) {
     failures.push("Orchestrator does not provide the path-free Skill admission adapter");
   }
@@ -8940,11 +9185,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !assignmentMutationPort.includes(
       "const requestId = assignmentMutationRequestId({",
     ) ||
-    !assignmentSkillPort.includes(
+    !assignmentSkillAdapter.includes(
       "return assignmentMutationRequestId({",
     ) ||
-    !assignmentSkillPort.includes("requestIdentity: record.requestId") ||
-    !assignmentSkillPort.includes("recordSeq: record.recordSeq")
+    !assignmentSkillAdapter.includes("requestIdentity: record.requestId") ||
+    !assignmentSkillAdapter.includes("recordSeq: record.recordSeq")
   ) {
     failures.push(
       "Skill save replay identity is not shared with the durable assignment mutation ledger",
@@ -8979,30 +9224,34 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     !builtinFactories.includes("skillCatalogLoad?: SkillCatalogLoadApplication") ||
-    !agentRuntime.includes("skillCatalogLoad: skillPorts.loadApplication") ||
-    !agentRuntime.includes('return { kind: "builtin-only" }') ||
-    agentRuntime.includes("skillLoader: skillPorts.loader")
+    !kernelToolEdge.includes("skillCatalogLoad: skillPorts.loadApplication") ||
+    !assignmentSkillAdapter.includes("createBuiltinOnlyAssignmentSkillPorts") ||
+    agentRuntime.includes("skillCatalogLoad") ||
+    agentRuntime.includes("createAssignmentSkillPorts") ||
+    agentRuntime.includes("skillLoader:")
   ) {
-    failures.push("Agent runtime does not install the unique Skill load application binding");
+    failures.push("Host edge does not uniquely install the Skill load application binding");
   }
   if (
     !builtinFactories.includes("skillCatalogSave?: SkillCatalogSaveApplication") ||
-    !agentRuntime.includes("skillCatalogSave: skillPorts.saveApplication") ||
-    agentRuntime.includes("skillSaver: skillPorts.saver")
+    !kernelToolEdge.includes("skillCatalogSave: skillPorts.saveApplication") ||
+    agentRuntime.includes("skillCatalogSave") ||
+    agentRuntime.includes("skillSaver:")
   ) {
-    failures.push("Agent runtime does not install the unique Skill save application binding");
+    failures.push("Host edge does not uniquely install the Skill save application binding");
   }
   if (
     !builtinFactories.includes(
       "skillCatalogAdmission?: SkillCatalogAdmissionApplication",
     ) ||
-    !agentRuntime.includes(
+    !kernelToolEdge.includes(
       "skillCatalogAdmission: skillPorts.admissionApplication",
     ) ||
+    agentRuntime.includes("skillCatalogAdmission") ||
     builtinFactories.includes("admissionLlm?: AdmissionLlm") ||
     builtinFactories.includes("skillAdmission?: SkillAdmissionPort")
   ) {
-    failures.push("Agent runtime does not install the unique Skill admission application binding");
+    failures.push("Host edge does not uniquely install the Skill admission application binding");
   }
   if (cliDirectories.includes("GlobalStatePort") || cliDirectories.includes("skill-set-state")) {
     failures.push("CLI management directories retain a direct Skill correctness adapter");

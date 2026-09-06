@@ -106,7 +106,7 @@ import { retryDurableObligation } from "./durable-obligation-retry.js";
 import {
   assignmentGlobalCapability,
   createAssignmentGlobalQueryPort,
-} from "./assignment-schedule-stager.js";
+} from "./assignment-global-state-ports.js";
 import type {
   ConversationChannelSessionInput,
   FirstPartySurfaceSession,
@@ -1367,18 +1367,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
           },
           toolSideEffectObserver: this.#interactions,
-          ...(this.#authority.globalPublishing
-            ? {
-              stageScheduleMutation: effect.scheduleMutations({
-                anchorEpoch: this.#authority.ownerEpoch,
-                capability: assignmentGlobalCapability({
-                  assignmentId,
-                  execution: "conversation",
-                  capabilities: dispatch.envelope.capabilities,
-                }),
-              }),
-            }
-            : {}),
           assignmentMutations: effect.assignmentMutations({
             execution: "conversation",
             anchorEpoch: this.#authority.ownerEpoch,

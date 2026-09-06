@@ -1,20 +1,12 @@
 import type { PermissionRule } from "@zhixing/core/security";
-import type { SkillMode } from "@zhixing/core/skills/catalog";
 import type { ToolDefinition } from "@zhixing/core/types";
-import type {
-  SkillCatalogAdmissionApplication,
-  SkillCatalogLoadApplication,
-  SkillCatalogSaveApplication,
-} from "@zhixing/core/skills/catalog";
 
 /** Host-provided finite implementation input for one Kernel runtime instance. */
 export interface KernelToolImplementationRequest {
   readonly requestedToolNames: readonly string[];
   readonly networkProxy?: string;
-  readonly skillCatalogLoad: SkillCatalogLoadApplication;
-  readonly skillCatalogSave: SkillCatalogSaveApplication;
-  readonly skillCatalogAdmission: SkillCatalogAdmissionApplication;
-  readonly skillMode: SkillMode;
+  /** Controlled generic text call used by concrete tools that need model judgment. */
+  readonly callText: (prompt: string) => Promise<string>;
 }
 
 export interface KernelToolPermissionRuleSet {
@@ -46,9 +38,12 @@ export function assembleKernelToolImplementation(
   }
   if (
     !Object.isFrozen(request.requestedToolNames) ||
-    new Set(request.requestedToolNames).size !== request.requestedToolNames.length
+    new Set(request.requestedToolNames).size !== request.requestedToolNames.length ||
+    typeof request.callText !== "function"
   ) {
-    throw new TypeError("Kernel Tool request names must be a frozen unique sequence");
+    throw new TypeError(
+      "Kernel Tool request names must be a frozen unique sequence and include a text call",
+    );
   }
   const assembly = implementation.create(Object.freeze({ ...request }));
   if (

@@ -2,7 +2,9 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mainProfile } from "@zhixing/orchestrator/profile";
-import { createKernelRuntimeIdentityContribution } from "@zhixing/orchestrator/runtime";
+import {
+  createKernelWindowPromptProjection,
+} from "@zhixing/orchestrator/runtime";
 
 const { createAgentRuntimeMock } = vi.hoisted(() => ({
   createAgentRuntimeMock: vi.fn(),
@@ -17,9 +19,20 @@ const { RuntimeHost } = await import("@zhixing/runtime-host/runtime-host");
 const { createConversationRuntimeProjection } = await import(
   "@zhixing/runtime-host/conversation-runtime-projection"
 );
-const { createRuntimeToolProjection } = await import(
+const { createRuntimeProductProjection, createRuntimeToolProjection } = await import(
   "@zhixing/runtime-host/conversation-runtime-projection"
 );
+const defaultToolImplementation = Object.freeze({ create: vi.fn() });
+const defaultSecurityExecution = Object.freeze({ create: vi.fn() });
+const defaultWindowPrompt = Object.freeze({
+  async project() {
+    return createKernelWindowPromptProjection({
+      revision: -1,
+      segment: "skill-index",
+      content: null,
+    });
+  },
+});
 
 function makeHostOptions() {
   const issuedProviderSets: Array<readonly unknown[]> = [];
@@ -33,7 +46,6 @@ function makeHostOptions() {
   });
   const segmentDeps = { marker: "segment-deps" };
   const decorateRunBus = () => () => {};
-  const artifactStore = { marker: "artifact-store" };
   const modelBinding = Object.freeze({ marker: "model-binding" });
   const runtimeEnvironment = Object.freeze({ marker: "runtime-environment" });
   const modelProvider = Object.freeze({
@@ -42,8 +54,6 @@ function makeHostOptions() {
   const runtimeEnvironmentFactory = Object.freeze({
     create: vi.fn(() => runtimeEnvironment),
   });
-  const toolImplementation = Object.freeze({ create: vi.fn() });
-  const permissionStorage = Object.freeze({ create: vi.fn() });
   const deviceCapacity = {
     interactive: { kind: "interactive" },
     scheduler: { kind: "scheduler" },
@@ -52,10 +62,7 @@ function makeHostOptions() {
   const options = {
     modelProvider,
     runtimeEnvironment: runtimeEnvironmentFactory,
-    toolImplementation,
-    permissionStorage,
     systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
-    artifactStore: () => artifactStore,
     segmentDeps,
     deviceCapacity,
     decorateRunBus,
@@ -68,13 +75,10 @@ function makeHostOptions() {
     turnContextProviders,
     segmentDeps,
     decorateRunBus,
-    artifactStore,
     modelBinding,
     modelProvider,
     runtimeEnvironment,
     runtimeEnvironmentFactory,
-    toolImplementation,
-    permissionStorage,
     deviceCapacity,
   };
 }
@@ -86,6 +90,18 @@ function runtimeTools(
   return createRuntimeToolProjection({
     extraTools: names.map((name) => ({ name }) as never),
     executionMcpServers: mcpServers,
+    implementation: defaultToolImplementation,
+  });
+}
+
+function runtimeProduct(
+  names: readonly string[] = ["schedule", "product-tool"],
+  mcpServers: readonly string[] = ["alpha"],
+) {
+  return createRuntimeProductProjection({
+    runtimeTools: runtimeTools(names, mcpServers),
+    windowPrompt: defaultWindowPrompt,
+    securityExecution: defaultSecurityExecution,
   });
 }
 
@@ -101,24 +117,16 @@ function runtimeProfile() {
   });
 }
 
-function projection(overrides: {
-  workspace?: string | null;
-  sceneId?: string;
-} = {}) {
+function projection(overrides: { workspace?: string | null } = {}) {
   return createConversationRuntimeProjection({
     ...(Object.hasOwn(overrides, "workspace")
       ? { workspace: overrides.workspace }
       : {}),
-    primaryRole: overrides.sceneId ? "power" : "main",
+    primaryRole: "main",
     profile: mainProfile({ hasWorkspace: overrides.workspace !== null }),
-    ...(overrides.sceneId
-      ? {
-          runtimeIdentity: createKernelRuntimeIdentityContribution(
-            overrides.sceneId,
-          ),
-        }
-      : {}),
     runtimeTools: runtimeTools(),
+    windowPrompt: defaultWindowPrompt,
+    securityExecution: defaultSecurityExecution,
   });
 }
 
@@ -133,35 +141,32 @@ describe("generic conversation projection", () => {
       options,
       segmentDeps,
       decorateRunBus,
-      artifactStore,
       modelBinding,
       modelProvider,
       runtimeEnvironment,
       runtimeEnvironmentFactory,
-      toolImplementation,
-      permissionStorage,
     } =
       makeHostOptions();
     const host = new RuntimeHost(options);
-    const input = projection({ workspace: "/project", sceneId: "scope-1" });
+    const input = projection({ workspace: "/project" });
 
     await host.createConversationRuntime(input);
 
     const params = createAgentRuntimeMock.mock.calls[0]![0];
     expect(params.segmentDeps).toBe(segmentDeps);
     expect(params.decorateRunBus).toBe(decorateRunBus);
-    expect(params.artifactStore).toBe(artifactStore);
-    expect(params.toolImplementation).toBe(toolImplementation);
-    expect(params.permissionStorage).toBe(permissionStorage);
-    expect(modelProvider.create).toHaveBeenCalledWith({ primaryRole: "power" });
+    expect(params).not.toHaveProperty("artifactStore");
+    expect(params.toolImplementation).toBe(input.runtimeTools.implementation);
+    expect(params.windowPrompt).toBe(input.windowPrompt);
+    expect(params.securityExecution).toBe(defaultSecurityExecution);
+    expect(modelProvider.create).toHaveBeenCalledWith({ primaryRole: "main" });
     expect(runtimeEnvironmentFactory.create).toHaveBeenCalledWith({
       workspace: "/project",
     });
     expect(params.modelProvider).toBe(modelBinding);
     expect(params.runtimeEnvironment).toBe(runtimeEnvironment);
-    expect(params.primaryRole).toBe("power");
-    expect(params.runtimeIdentity).toBe(input.runtimeIdentity);
-    expect(params.runtimeIdentity).toMatchObject({ sceneId: "scope-1" });
+    expect(params.primaryRole).toBe("main");
+    expect(params).not.toHaveProperty("runtimeIdentity");
     expect(params.profile).toBe(input.profile);
     expect(params.extraTools).toEqual(input.runtimeTools.extraTools);
     expect(params.executionMcpServers).toBe(
@@ -190,6 +195,8 @@ describe("generic conversation projection", () => {
       primaryRole: "main",
       profile: runtimeProfile(),
       runtimeTools: { extraTools: [], executionMcpServers: [] },
+      windowPrompt: defaultWindowPrompt,
+      securityExecution: defaultSecurityExecution,
     } as never;
 
     await expect(host.createConversationRuntime(mutable)).rejects.toThrow(
@@ -198,37 +205,59 @@ describe("generic conversation projection", () => {
     expect(createAgentRuntimeMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a structurally similar identity without Kernel provenance", async () => {
+  it("rejects a mutable Security execution factory before publishing a runtime", async () => {
     const { options } = makeHostOptions();
     const host = new RuntimeHost(options);
     const invalid = Object.freeze({
       ...projection(),
-      runtimeIdentity: Object.freeze({ sceneId: "scope-1" }),
+      securityExecution: { create: vi.fn() },
     }) as never;
 
     await expect(host.createConversationRuntime(invalid)).rejects.toThrow(
-      "Kernel runtime identity contribution is invalid",
+      "Conversation Security execution must be immutable",
     );
     expect(createAgentRuntimeMock).not.toHaveBeenCalled();
   });
 });
 
 describe("shared assembly inputs", () => {
-  it("rejects an extended or duplicate product tool projection before publication", async () => {
-    const { options } = makeHostOptions();
+  it("validates each complete public issuance input before model assembly", async () => {
+    const { options, modelProvider } = makeHostOptions();
     const host = new RuntimeHost(options);
     const extended = Object.freeze({
-      ...runtimeTools(["schedule"]),
+      ...runtimeProduct(["schedule"]),
       productMetadata: "forbidden",
     }) as never;
 
     await expect(host.createEphemeralRuntime(extended)).rejects.toThrow(
-      "Runtime tool projection must be finite and immutable",
+      "Runtime product projection must be finite and immutable",
     );
     expect(() => runtimeTools(["schedule", "schedule"])).toThrow(
       "Runtime tool projection contains an invalid or duplicate tool",
     );
+    await expect(host.createJobRuntime({
+      confirmationBroker: {} as never,
+      profile: runtimeProfile(),
+      runtimeTools: runtimeTools(["schedule"]),
+      windowPrompt: Object.freeze({
+        ...defaultWindowPrompt,
+        productMetadata: "forbidden",
+      }),
+    } as never)).rejects.toThrow(
+      "Kernel window prompt projection port must be finite and immutable",
+    );
+    await expect(host.createJobRuntime({
+      confirmationBroker: {} as never,
+      profile: {
+        ...runtimeProfile(),
+      },
+      runtimeTools: runtimeTools(["schedule"]),
+      windowPrompt: defaultWindowPrompt,
+    } as never)).rejects.toThrow(
+      "Runtime profile projection must be immutable",
+    );
     expect(createAgentRuntimeMock).not.toHaveBeenCalled();
+    expect(modelProvider.create).not.toHaveBeenCalled();
   });
 
   it("conversation / ephemeral / durable job obtain providers before publication", async () => {
@@ -242,11 +271,12 @@ describe("shared assembly inputs", () => {
     const host = new RuntimeHost(options);
 
     await host.createConversationRuntime(projection());
-    await host.createEphemeralRuntime(runtimeTools(["schedule"]));
+    await host.createEphemeralRuntime(runtimeProduct(["schedule"]));
     await host.createJobRuntime({
       confirmationBroker: {} as never,
       profile: runtimeProfile(),
       runtimeTools: runtimeTools(["task_list"]),
+      windowPrompt: defaultWindowPrompt,
     });
 
     expect(turnContextProviders).toHaveBeenCalledTimes(3);
@@ -288,6 +318,7 @@ describe("shared assembly inputs", () => {
       confirmationBroker: {} as never,
       profile,
       runtimeTools: runtimeTools(["schedule"]),
+      windowPrompt: defaultWindowPrompt,
       modelOverride: "job-model",
     });
 

@@ -8,10 +8,7 @@ import {
 
 const request = Object.freeze({
   requestedToolNames: Object.freeze(["read", "web_fetch"]),
-  skillCatalogLoad: {} as never,
-  skillCatalogSave: {} as never,
-  skillCatalogAdmission: {} as never,
-  skillMode: "main" as const,
+  callText: vi.fn(async () => "text"),
 }) satisfies KernelToolImplementationRequest;
 
 function tool(name: string): ToolDefinition {
@@ -46,7 +43,7 @@ describe("Kernel Tool implementation demand boundary", () => {
     expect(implementation.create).toHaveBeenCalledOnce();
     expect(implementation.create).toHaveBeenCalledWith(expect.objectContaining({
       requestedToolNames: request.requestedToolNames,
-      skillMode: "main",
+      callText: request.callText,
     }));
   });
 

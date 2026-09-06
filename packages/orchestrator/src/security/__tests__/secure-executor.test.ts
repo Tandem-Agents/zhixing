@@ -30,6 +30,7 @@ import {
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,
+  toPermissionContext,
 } from "@zhixing/core/security";
 import {
   TrustAdministrationExecutionApplicationService,
@@ -127,11 +128,17 @@ function makePipeline(): {
 }
 
 function createSecureExecuteTool(
-  options: Omit<SecureExecuteToolOptions, "trustAdministration">,
+  options: Omit<SecureExecuteToolOptions, "securityApproval">,
 ) {
   const trustAdministration = trustByPipeline.get(options.pipeline);
   if (!trustAdministration) throw new Error("test trust application missing");
-  return createProductionSecureExecuteTool({ ...options, trustAdministration });
+  return createProductionSecureExecuteTool({
+    ...options,
+    securityApproval: Object.freeze({
+      contextId: Object.freeze(toPermissionContext(trustAdministration.context)),
+      recordApproval: (approval) => trustAdministration.recordApproval(approval),
+    }),
+  });
 }
 
 function contextOf(pipeline: SecurityPipeline) {

@@ -790,10 +790,20 @@ if (
   failures.push("orchestrator-kernel-terminal:invalid-runtime-boundary");
 }
 if (
-  typeof orchestratorRuntime.createKernelRuntimeIdentityContribution !== "function" ||
-  typeof orchestratorRuntime.assertKernelRuntimeIdentityContribution !== "function"
+  typeof orchestratorRuntime.assembleKernelSecurityExecution !== "function" ||
+  "createKernelRuntimeIdentityContribution" in orchestratorRuntime ||
+  "assertKernelRuntimeIdentityContribution" in orchestratorRuntime
 ) {
-  failures.push("orchestrator-kernel-runtime-identity:invalid-runtime-boundary");
+  failures.push("orchestrator-kernel-security-execution:invalid-runtime-boundary");
+}
+for (const name of [
+  "createKernelWindowPromptProjection",
+  "assertKernelWindowPromptProjection",
+  "assertKernelWindowPromptProjectionPort",
+]) {
+  if (typeof orchestratorRuntime[name] !== "function") {
+    failures.push(`orchestrator-kernel-window-prompt:${name}:invalid-runtime-boundary`);
+  }
 }
 for (const name of [
   "createKernelModelProviderBinding",
@@ -819,6 +829,8 @@ for (const name of [
 for (const name of [
   "assertConversationRuntimeProjection",
   "createConversationRuntimeProjection",
+  "assertRuntimeProductProjection",
+  "createRuntimeProductProjection",
 ]) {
   if (
     typeof runtimeHostConversationProjection[name] !== "function" ||
@@ -1104,12 +1116,16 @@ if (
   !/readonly toolImplementation: KernelToolImplementationPort;/u.test(
     createAgentRuntimeOptionsDeclaration,
   ) ||
+  !/readonly windowPrompt: KernelWindowPromptProjectionPort;/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
   /providerConfiguration|ZhixingConfig|ProviderCredential/u.test(
     createAgentRuntimeOptionsDeclaration,
   ) ||
   !orchestratorRuntimeDeclarations.includes("KernelModelProviderFactory") ||
   !orchestratorRuntimeDeclarations.includes("KernelRuntimeEnvironmentFactory")
-  || !orchestratorRuntimeDeclarations.includes("KernelToolImplementationPort")
+  || !orchestratorRuntimeDeclarations.includes("KernelToolImplementationPort") ||
+  !orchestratorRuntimeDeclarations.includes("KernelWindowPromptProjectionPort")
 ) {
   failures.push("orchestrator-kernel-provider:invalid-declaration-boundary");
 }
@@ -1141,26 +1157,34 @@ if (
   !/createConversationRuntime\(projection: ConversationRuntimeProjection\)/u.test(
     runtimeHostDeclaration,
   ) ||
-  !/createEphemeralRuntime\(runtimeTools: RuntimeToolProjection\)/u.test(
+  !/createEphemeralRuntime\(projection: RuntimeProductProjection\)/u.test(
     runtimeHostDeclaration,
   ) ||
   !runtimeHostDeclaration.includes("readonly runtimeTools: RuntimeToolProjection") ||
+  !runtimeHostDeclaration.includes("readonly windowPrompt: RuntimeProductProjection") ||
+  !runtimeHostDeclaration.includes("readonly securityExecution: RuntimeProductProjection") ||
   !conversationProjectionDeclaration ||
   !conversationProjectionDeclaration.includes("createConversationRuntimeProjection") ||
   !conversationProjectionDeclaration.includes("interface RuntimeToolProjection") ||
+  !conversationProjectionDeclaration.includes("interface RuntimeProductProjection") ||
+  !conversationProjectionDeclaration.includes("createRuntimeProductProjection") ||
+  !conversationProjectionDeclaration.includes("assertRuntimeProductProjection") ||
   !conversationProjectionDeclaration.includes("createRuntimeToolProjection") ||
   !conversationProjectionDeclaration.includes("assertRuntimeToolProjection") ||
   !conversationProjectionDeclaration.includes("readonly runtimeTools: RuntimeToolProjection") ||
+  !conversationProjectionDeclaration.includes("readonly windowPrompt: KernelWindowPromptProjectionPort") ||
+  !conversationProjectionDeclaration.includes("readonly securityExecution: KernelSecurityExecutionFactory") ||
   conversationProjectionDeclaration.includes("readonly productTools") ||
   /\bsceneId\b/u.test(runtimeHostDeclaration) ||
   /\bsceneId\b/u.test(conversationProjectionDeclaration) ||
   runtimeHostRootDeclaration.includes("ConversationRuntimeProjection") ||
-  /\bworksceneIdentity\b/u.test(orchestratorRuntimeDeclarations) ||
-  !/runtimeIdentity\?: KernelRuntimeIdentityContribution;/u.test(
-    createAgentRuntimeOptionsDeclaration ?? "",
+  /\bworksceneIdentity\b|KernelRuntimeIdentityContribution|createKernelRuntimeIdentityContribution|assertKernelRuntimeIdentityContribution/u.test(
+    orchestratorRuntimeDeclarations,
   ) ||
-  !orchestratorRuntimeDeclarations.includes("createKernelRuntimeIdentityContribution") ||
-  !orchestratorRuntimeDeclarations.includes("assertKernelRuntimeIdentityContribution")
+  /runtimeIdentity|\bsceneId\b/u.test(createAgentRuntimeOptionsDeclaration ?? "") ||
+  !/securityExecution: KernelSecurityExecutionFactory;/u.test(
+    createAgentRuntimeOptionsDeclaration ?? "",
+  )
 ) {
   failures.push("runtime-host:workscene-product-projection-boundary");
 }

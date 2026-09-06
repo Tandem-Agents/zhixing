@@ -1,6 +1,5 @@
 import type { AgentYield, RunResult } from "@zhixing/core/loop";
 import type { IConfirmationBroker } from "@zhixing/core/confirmation";
-import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentMutationPort,
   AuthorityCallContext,
@@ -40,8 +39,7 @@ import {
 } from "./conversation-executor-ledger.js";
 import {
   createAssignmentMutationPort,
-  createAssignmentScheduleStager,
-} from "./assignment-schedule-stager.js";
+} from "./assignment-global-state-ports.js";
 import type {
   DurableConversationInteractionObserver,
   DurableInteractionBinding,
@@ -163,10 +161,6 @@ export interface ConversationExecutorExecutionEffect {
     readonly allowGlobal: boolean;
     readonly capability?: import("@zhixing/core/contracts").AuthorityCapability;
   }): AssignmentMutationPort;
-  scheduleMutations(input: {
-    readonly anchorEpoch: number;
-    readonly capability: import("@zhixing/core/contracts").AuthorityCapability;
-  }): ScheduleMutationStager;
   authorizeToolExecution(
     lease: Extract<
       DispatchEnvelope,
@@ -912,15 +906,6 @@ function createLocalConversationExecutorMechanism(
                     ? { capability: mutationInput.capability }
                     : {}),
                 });
-              },
-              scheduleMutations(scheduleInput) {
-                return createAssignmentScheduleStager(
-                  ledger,
-                  effectInput.assignmentId,
-                  scheduleInput.anchorEpoch,
-                  "conversation",
-                  scheduleInput.capability,
-                );
               },
               authorizeToolExecution: (lease) =>
                 ledger.authorizeToolExecution(effectInput.assignmentId, lease),

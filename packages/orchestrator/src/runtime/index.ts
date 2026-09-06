@@ -77,17 +77,22 @@ export {
   type KernelToolPermissionRuleSet,
 } from "./kernel-tool-implementation.js";
 export {
-  assembleKernelPermissionStorage,
-  bindKernelPermissionRuleSource,
-  type KernelPermissionStorageBinding,
-  type KernelPermissionStorageFactory,
-  type KernelPermissionStorageRequest,
-} from "./kernel-permission-storage.js";
+  assembleKernelSecurityExecution,
+  type KernelSecurityApproval,
+  type KernelSecurityApprovalPort,
+  type KernelSecurityApprovalResult,
+  type KernelSecurityExecution,
+  type KernelSecurityExecutionFactory,
+  type KernelSecurityExecutionRequest,
+  type KernelSecurityUserSnapshot,
+} from "./kernel-security-execution.js";
 export {
-  assertKernelRuntimeIdentityContribution,
-  createKernelRuntimeIdentityContribution,
-  type KernelRuntimeIdentityContribution,
-} from "./kernel-runtime-identity.js";
+  assertKernelWindowPromptProjection,
+  assertKernelWindowPromptProjectionPort,
+  createKernelWindowPromptProjection,
+  type KernelWindowPromptProjection,
+  type KernelWindowPromptProjectionPort,
+} from "./kernel-window-prompt.js";
 export type { KernelRunEnvelope } from "./kernel-run-envelope.js";
 export {
   assertKernelRunEvent,

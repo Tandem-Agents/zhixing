@@ -9,7 +9,7 @@ export interface ZhixingGuidanceLifecycleDeps {
    * Resolves the runtime-local workspace root. Raw paths never cross the
    * workscene registry or its wire DTO.
    */
-  readonly resolveWorksceneRoot: (sceneId: string) => Promise<string | null>;
+  readonly resolveWorkspaceRoot?: () => Promise<string | null>;
   readonly readGuidanceFile: ReadGuidanceFile;
   readonly loadLayeredGuidance?: typeof defaultLoadLayeredGuidance;
 }
@@ -37,8 +37,8 @@ export function createZhixingGuidanceLifecycle(
       };
       const homeDir = deps.getZhixingHome();
       let workdir: string | undefined;
-      if (ctx.mode === "work" && ctx.sceneId) {
-        workdir = await resolveWorkdir(ctx.sceneId, deps, reportWarning);
+      if (deps.resolveWorkspaceRoot) {
+        workdir = await resolveWorkdir(deps, reportWarning);
       }
       const roots: GuidanceResolvedRoots = workdir
         ? { homeDir, workdir }
@@ -66,13 +66,12 @@ export function createZhixingGuidanceLifecycle(
 }
 
 async function resolveWorkdir(
-  sceneId: string,
   deps: ZhixingGuidanceLifecycleDeps,
   reportWarning: (event: GuidanceWarningInput) => void,
 ): Promise<string | undefined> {
   let workdir: string | null;
   try {
-    workdir = await deps.resolveWorksceneRoot(sceneId);
+    workdir = await deps.resolveWorkspaceRoot?.() ?? null;
   } catch (error) {
     reportWarning({
       message: `工作场景约定查询失败，已降级为仅全局约定：${errorMessage(error)}`,

@@ -25,9 +25,9 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   createAssignmentSkillPorts,
-  createAssignmentSkillProjectionApplication,
-} from "./assignment-skill-port.js";
-import { runContextStorage } from "./run-context.js";
+} from "./assignment-skill-adapter.js";
+import { createSkillCatalogWindowPromptProjection } from "./skill-catalog-window-projection.js";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 const ISSUED_AT = "2026-08-04T00:00:00.000Z";
 
@@ -102,17 +102,59 @@ describe("assignment skill ports", () => {
     const own = entry({ description: "Owned description" });
     const disabled = entry({ id: "disabled", name: "Disabled", disabled: true });
     const read = vi.fn(skillQuery([own, disabled], 9).read);
-    const result = await createAssignmentSkillProjectionApplication({ read })
-      .project("main");
-    expect(result.catalogRevision).toBe(9);
-    expect(result.content).toContain("Owned description");
-    expect(result.content).not.toContain("加载本方法来起草");
-    expect(result.content).not.toContain("Disabled");
+    const result = await createSkillCatalogWindowPromptProjection("main")
+      .project({ read });
+    const content = result.content;
+    expect(result.revision).toBe(9);
+    expect(content).toContain("Owned description");
+    expect(content).not.toContain("加载本方法来起草");
+    expect(content).not.toContain("Disabled");
     expect(JSON.stringify([own, disabled])).not.toMatch(/[A-Z]:\\|\/tmp\//);
     expect(read).toHaveBeenCalledWith({
       kind: "skill-catalog",
       includeDisabled: true,
     });
+  });
+
+  it("binds builtin startup and main/work catalog selection before Kernel issuance", async () => {
+    const source = skillQuery([
+      entry({
+        id: "main-product-skill",
+        name: "Main Product Skill",
+        description: "ZX_MAIN_PRODUCT_SKILL",
+        mode: "main",
+      }),
+      entry({
+        id: "work-product-skill",
+        name: "Work Product Skill",
+        description: "ZX_WORK_PRODUCT_SKILL",
+        mode: "work",
+      }),
+    ], 12);
+    const main = createSkillCatalogWindowPromptProjection("main");
+    const work = createSkillCatalogWindowPromptProjection("work");
+
+    const initial = await main.project();
+    const mainProjection = await main.project(source);
+    const workProjection = await work.project(source);
+
+    expect(initial.revision).toBe(-1);
+    expect(initial.content).toContain("提炼技能");
+    expect(mainProjection.content).toContain(
+      "ZX_MAIN_PRODUCT_SKILL",
+    );
+    expect(mainProjection.content).not.toContain(
+      "ZX_WORK_PRODUCT_SKILL",
+    );
+    expect(workProjection.content).toContain(
+      "ZX_WORK_PRODUCT_SKILL",
+    );
+    expect(workProjection.content).not.toContain(
+      "ZX_MAIN_PRODUCT_SKILL",
+    );
+    expect(mainProjection.revision).toBe(12);
+    expect(Object.isFrozen(mainProjection)).toBe(true);
+    expect(mainProjection.segment).toBe("skill-index");
   });
 
   it("fails closed when the raw catalog query returns another result kind", async () => {
@@ -123,7 +165,7 @@ describe("assignment skill ports", () => {
     }));
 
     await expect(
-      createAssignmentSkillProjectionApplication({ read }).project("main"),
+      createSkillCatalogWindowPromptProjection("main").project({ read }),
     ).rejects.toThrow("Skill catalog query returned another result type");
   });
 

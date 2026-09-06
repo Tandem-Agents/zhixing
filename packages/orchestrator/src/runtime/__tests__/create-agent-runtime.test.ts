@@ -40,23 +40,26 @@ import {
 import { buildGuidanceMessagePair, type TurnContextProvider } from "@zhixing/core/context";
 import { MockLLMProvider, deriveToolCalls } from "@zhixing/core/loop";
 import { PermissionStore, type PermissionRule } from "@zhixing/core/security";
-import { skillNameToId } from "@zhixing/core/skills/id";
 import { type IEventBus } from "@zhixing/core/events";
-import { type SkillCatalogEntry } from "@zhixing/core/skills/catalog";
 import type {
   AssignmentGlobalQueryPort,
-  GlobalQuery,
-  GlobalReadResult,
   ModelCallResourceMeter,
 } from "@zhixing/core/contracts";
 import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
 import { createKernelModelProviderBinding } from "../kernel-model-provider.js";
 import { createKernelRuntimeEnvironment } from "../kernel-runtime-environment.js";
 import type { KernelToolImplementationPort } from "../kernel-tool-implementation.js";
-import type { KernelPermissionStorageFactory } from "../kernel-permission-storage.js";
+import type {
+  KernelSecurityExecution,
+  KernelSecurityExecutionFactory,
+} from "../kernel-security-execution.js";
+import {
+  createKernelWindowPromptProjection,
+  type KernelWindowPromptProjection,
+  type KernelWindowPromptProjectionPort,
+} from "../kernel-window-prompt.js";
 import {
   bindPermissionRuleExecutionSource,
-  createPermissionStoreTrustAdministrationRepository,
   toPermissionContext,
 } from "@zhixing/core/security";
 
@@ -86,58 +89,49 @@ const {
     ensureWorkspaceDirMock: vi.fn(() => "exists" as const),
 }));
 
-function makeSkillCatalogQuery(
-  entries: readonly SkillCatalogEntry[],
-  catalogRevision = 1,
-): { port: AssignmentGlobalQueryPort; read: ReturnType<typeof vi.fn> } {
-  const read = vi.fn(async (query: GlobalQuery): Promise<GlobalReadResult> => {
-    if (query.kind === "skill-catalog") {
-      return { kind: "skill-catalog", catalogRevision, entries: [...entries] };
-    }
-    if (query.kind === "skill-get") {
-      return {
-        kind: "skill-get",
-        catalogRevision,
-        entry: entries.find((entry) => entry.id === query.skillId) ?? null,
-      };
-    }
-    throw new Error(`Unexpected global query in skill fixture: ${query.kind}`);
+function windowPromptProjection(
+  revision: number,
+  content: string | null,
+): KernelWindowPromptProjection {
+  return createKernelWindowPromptProjection({
+    revision,
+    segment: "skill-index",
+    content,
   });
-  return { port: { read }, read };
 }
 
-function ownSkillEntry(
-  overrides: Partial<SkillCatalogEntry> = {},
-): SkillCatalogEntry {
-  return {
-    id: skillNameToId("提炼技能"),
-    name: "提炼技能",
-    description: "用户定制版描述",
-    source: "own",
-    mode: "main",
-    pinned: false,
-    disabled: false,
-    createdAt: "2026-08-04T00:00:00.000Z",
-    usage: null,
-    contentRef: "a".repeat(64),
-    revision: 1,
-    digest: "b".repeat(64),
-    ...overrides,
+function windowPromptPort(input: {
+  readonly initial?: KernelWindowPromptProjection;
+  readonly project?: (
+    source: AssignmentGlobalQueryPort,
+  ) => Promise<KernelWindowPromptProjection>;
+} = {}): KernelWindowPromptProjectionPort & {
+  readonly calls: AssignmentGlobalQueryPort[];
+} {
+  const calls: AssignmentGlobalQueryPort[] = [];
+  const port = {
+    async project(source?: AssignmentGlobalQueryPort) {
+      if (!source) return input.initial ?? windowPromptProjection(-1, null);
+      calls.push(source);
+      return input.project?.(source) ?? windowPromptProjection(1, null);
+    },
+  };
+  Object.defineProperty(port, "calls", { value: calls, enumerable: false });
+  return Object.freeze(port) as KernelWindowPromptProjectionPort & {
+    readonly calls: AssignmentGlobalQueryPort[];
   };
 }
 
 const {
   createAgentRuntime: createAgentRuntimeImpl,
 } = await import("../create-agent-runtime.js");
-const { createKernelRuntimeIdentityContribution } = await import(
-  "../kernel-runtime-identity.js"
-);
 type TestCreateAgentRuntimeOptions = Omit<
   Parameters<typeof createAgentRuntimeImpl>[0],
-  "modelProvider" | "runtimeEnvironment" | "permissionStorage"
+  "modelProvider" | "runtimeEnvironment" | "securityExecution" | "windowPrompt"
 > & {
   readonly workspace?: string | null;
-  readonly permissionStorage?: KernelPermissionStorageFactory;
+  readonly securityExecution?: KernelSecurityExecutionFactory;
+  readonly windowPrompt?: KernelWindowPromptProjectionPort;
 };
 
 function createTestModelProvider(primaryRole: "main" | "power") {
@@ -214,9 +208,16 @@ const testToolImplementation: KernelToolImplementationPort = Object.freeze({
   },
 });
 
-function createTestPermissionStorage(
+function createTestSecurityExecution(
   injectedStore?: PermissionStore,
-): KernelPermissionStorageFactory {
+  binding: Readonly<{
+    contextId: KernelSecurityExecution["contextId"];
+    trustContext: KernelSecurityExecution["trustContext"];
+  }> = Object.freeze({
+    contextId: Object.freeze({ kind: "main" as const }),
+    trustContext: Object.freeze({ kind: "global" as const }),
+  }),
+): KernelSecurityExecutionFactory {
   return Object.freeze({
     create(request) {
       const store =
@@ -231,18 +232,47 @@ function createTestPermissionStorage(
           [...contribution.rules],
         );
       }
+      const contextId = Object.freeze(toPermissionContext(binding.contextId));
       return Object.freeze({
-        trustAdministration:
-          createPermissionStoreTrustAdministrationRepository(() => store),
-        rulesFor: (context) =>
-          bindPermissionRuleExecutionSource(store, toPermissionContext(context)),
+        contextId,
+        trustContext: Object.freeze({ ...binding.trustContext }),
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, contextId),
+        recordApproval(approval) {
+          if (approval.kind === "allow-once") {
+            return Object.freeze({ kind: "recorded" as const });
+          }
+          const scope = approval.kind === "allow-session"
+            ? "session"
+            : approval.kind === "allow-context"
+              ? "context"
+              : "global";
+          const rule = PermissionStore.createRule({
+            pattern: approval.pattern.pattern,
+            decision: "allow",
+            scope,
+            ...(scope === "context" ? { contextId } : {}),
+          });
+          store.create(contextId, rule);
+          return Object.freeze({ kind: "rule-created" as const, rule });
+        },
+        securitySnapshot() {
+          return Object.freeze({
+            contextId,
+            workspacePath: request.workspacePath,
+            permissionRules: Object.freeze(store.list(contextId)),
+            confirmations: Object.freeze([]),
+          });
+        },
+        executionPermissionRules() {
+          return Object.freeze(store.snapshot(contextId));
+        },
       });
     },
   });
 }
 
 const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
-  const { workspace, permissionStorage, ...runtimeOptions } = options;
+  const { workspace, securityExecution, windowPrompt, ...runtimeOptions } = options;
   const primaryRole = runtimeOptions.primaryRole ?? "main";
   return createAgentRuntimeImpl({
     ...runtimeOptions,
@@ -250,8 +280,9 @@ const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
     modelProvider: createTestModelProvider(primaryRole),
     runtimeEnvironment: createTestRuntimeEnvironment(workspace),
     toolImplementation: testToolImplementation,
-    permissionStorage:
-      permissionStorage ?? createTestPermissionStorage(),
+    windowPrompt: windowPrompt ?? windowPromptPort(),
+    securityExecution:
+      securityExecution ?? createTestSecurityExecution(),
   });
 };
 const { mainProfile } = await import("../../profile/default-profiles.js");
@@ -2502,9 +2533,12 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     ).rejects.toThrow("protocol persistence failed");
   });
 
-  it("Skill 领域投影:无 global query 保留 builtin,own 同名时遮蔽", async () => {
+  it("只消费产品已裁决的初始与 durable-window 提示投影", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
-    const runtime = await createAgentRuntime();
+    const initial = windowPromptPort({
+      initial: windowPromptProjection(-1, "ZX_INITIAL_PRODUCT_PROMPT"),
+    });
+    const runtime = await createAgentRuntime({ windowPrompt: initial });
     await runKernel(runtime, {
       modelInput: {
         messages: [userMessage("hi")],
@@ -2516,10 +2550,16 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       correctness: {},
       observation: {},
     });
-    expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain(
+      "ZX_INITIAL_PRODUCT_PROMPT",
+    );
 
-    const own = makeSkillCatalogQuery([ownSkillEntry()]);
-    const runtime2 = await createAgentRuntime();
+    const source: AssignmentGlobalQueryPort = { read: vi.fn() as never };
+    const durable = windowPromptPort({
+      initial: windowPromptProjection(-1, "ZX_INITIAL_PRODUCT_PROMPT"),
+      project: async () => windowPromptProjection(9, "ZX_DURABLE_PRODUCT_PROMPT"),
+    });
+    const runtime2 = await createAgentRuntime({ windowPrompt: durable });
     await runKernel(runtime2, {
       modelInput: {
         messages: [userMessage("hi")],
@@ -2529,46 +2569,29 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: own.port,
+        globalQuery: source,
       },
       observation: {},
     });
     const prompt2 = providerRef.current.calls[1]!.systemPrompt!;
-    expect(prompt2).toContain("用户定制版描述");
-    expect(prompt2).not.toContain("加载本方法来起草");
+    expect(prompt2).toContain("ZX_DURABLE_PRODUCT_PROMPT");
+    expect(prompt2).not.toContain("ZX_INITIAL_PRODUCT_PROMPT");
+    expect(durable.calls).toEqual([source]);
   });
 
-  it("内置 skill 订阅者:own 同名 fork 被禁用 → builtin 不回落索引(遮蔽按含 disabled 全集,展示与加载一致)", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const query = makeSkillCatalogQuery([ownSkillEntry({ disabled: true })]);
-    const runtime = await createAgentRuntime();
-    await runKernel(runtime, {
-      modelInput: {
-        messages: [userMessage("hi")],
-      },
-      identity: {
-        turnIndex: 0,
-      },
-      control: {},
-      correctness: {
-        globalQuery: query.port,
-      },
-      observation: {},
-    });
-    const prompt = providerRef.current.calls[0]!.systemPrompt!;
-    // 禁用 = 该 id 从索引整体消失(用户版剔除、builtin 不得回落)。
-    expect(prompt).not.toContain("用户定制版描述");
-    expect(prompt).not.toContain("加载本方法来起草");
-  });
-
-  it("技能目录只在窗口边界读取，同一窗口多 run 的 prompt byte-equal", async () => {
+  it("产品提示只在窗口边界投影，同一窗口多 run 的 prompt byte-equal", async () => {
     providerRef.current = new MockLLMProvider([
       { text: "ok" },
       { text: "ok" },
       { text: "ok" },
+      { text: "ok" },
+      { text: "ok" },
     ]);
-    const query = makeSkillCatalogQuery([ownSkillEntry()], 7);
-    const runtime = await createAgentRuntime();
+    const source: AssignmentGlobalQueryPort = { read: vi.fn() as never };
+    const projection = windowPromptPort({
+      project: async () => windowPromptProjection(7, "ZX_STABLE_WINDOW_PROMPT"),
+    });
+    const runtime = await createAgentRuntime({ windowPrompt: projection });
 
     await runKernel(runtime, {
       modelInput: {
@@ -2579,7 +2602,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: query.port,
+        globalQuery: source,
       },
       observation: {},
     });
@@ -2592,44 +2615,48 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: query.port,
+        globalQuery: source,
       },
       observation: {},
     });
-    expect(query.read).toHaveBeenCalledTimes(1);
+    expect(projection.calls).toHaveLength(1);
     expect(providerRef.current.calls[1]!.systemPrompt).toBe(
       providerRef.current.calls[0]!.systemPrompt,
     );
 
-    await runtime.onAttentionWindowChange("clear");
-    await runKernel(runtime, {
-      modelInput: {
-        messages: [userMessage("three")],
-      },
-      identity: {
-        turnIndex: 0,
-      },
-      control: {},
-      correctness: {
-        globalQuery: query.port,
-      },
-      observation: {},
-    });
-    expect(query.read).toHaveBeenCalledTimes(2);
-    expect(providerRef.current.calls[2]!.systemPrompt).toBe(
-      providerRef.current.calls[0]!.systemPrompt,
-    );
+    for (const [index, reason] of ["clear", "resume", "compact"].entries()) {
+      await runtime.onAttentionWindowChange(reason as "clear" | "resume" | "compact");
+      await runKernel(runtime, {
+        modelInput: {
+          messages: [userMessage(`window-${reason}`)],
+        },
+        identity: {
+          turnIndex: 0,
+        },
+        control: {},
+        correctness: {
+          globalQuery: source,
+        },
+        observation: {},
+      });
+      expect(projection.calls).toHaveLength(index + 2);
+      expect(providerRef.current.calls[index + 2]!.systemPrompt).toBe(
+        providerRef.current.calls[0]!.systemPrompt,
+      );
+    }
   });
 
-  it("Skill 领域投影:旧 catalog revision 不能覆盖实例权威", async () => {
+  it("旧产品提示 revision 不能覆盖实例权威", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
-    const current = makeSkillCatalogQuery([
-      ownSkillEntry({ description: "ZX_SKILL_REVISION_7" }),
-    ], 7);
-    const stale = makeSkillCatalogQuery([
-      ownSkillEntry({ description: "ZX_SKILL_REVISION_6" }),
-    ], 6);
-    const runtime = await createAgentRuntime();
+    const current: AssignmentGlobalQueryPort = { read: vi.fn() as never };
+    const stale: AssignmentGlobalQueryPort = { read: vi.fn() as never };
+    const projection = windowPromptPort({
+      project: async (source) =>
+        source === current
+          ? windowPromptProjection(7, "ZX_WINDOW_REVISION_7")
+          : windowPromptProjection(6, "ZX_WINDOW_REVISION_6"),
+    });
+    const runtime = await createAgentRuntime({ windowPrompt: projection });
 
     await runKernel(runtime, {
       modelInput: {
@@ -2640,7 +2667,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: current.port,
+        globalQuery: current,
       },
       observation: {},
     });
@@ -2654,28 +2681,27 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: stale.port,
+        globalQuery: stale,
       },
       observation: {},
     });
 
     expect(providerRef.current.calls[1]!.systemPrompt).toContain(
-      "ZX_SKILL_REVISION_7",
+      "ZX_WINDOW_REVISION_7",
     );
     expect(providerRef.current.calls[1]!.systemPrompt).not.toContain(
-      "ZX_SKILL_REVISION_6",
+      "ZX_WINDOW_REVISION_6",
     );
   });
 
-  it("Skill 领域投影:前一窗口延迟读取不能覆盖后继窗口", async () => {
+  it("前一窗口延迟投影不能覆盖后继窗口", async () => {
     providerRef.current = new MockLLMProvider([
       { text: "ok" },
       { text: "ok" },
       { text: "ok" },
     ]);
-    const current = makeSkillCatalogQuery([
-      ownSkillEntry({ description: "ZX_SKILL_CURRENT_WINDOW" }),
-    ], 7);
+    const current: AssignmentGlobalQueryPort = { read: vi.fn() as never };
+    const delayed: AssignmentGlobalQueryPort = { read: vi.fn() as never };
     let queryEntered!: () => void;
     const entered = new Promise<void>((resolve) => {
       queryEntered = resolve;
@@ -2684,19 +2710,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     const gate = new Promise<void>((resolve) => {
       releaseQuery = resolve;
     });
-    const delayedRead = vi.fn(async (query: GlobalQuery): Promise<GlobalReadResult> => {
-      if (query.kind !== "skill-catalog") {
-        throw new Error(`Unexpected delayed Skill query: ${query.kind}`);
-      }
-      queryEntered();
-      await gate;
-      return {
-        kind: "skill-catalog",
-        catalogRevision: 8,
-        entries: [ownSkillEntry({ description: "ZX_SKILL_STALE_WINDOW" })],
-      };
+    const projection = windowPromptPort({
+      project: async (source) => {
+        if (source === current) {
+          return windowPromptProjection(7, "ZX_CURRENT_WINDOW");
+        }
+        queryEntered();
+        await gate;
+        return windowPromptProjection(8, "ZX_DELAYED_WINDOW");
+      },
     });
-    const runtime = await createAgentRuntime();
+    const runtime = await createAgentRuntime({ windowPrompt: projection });
     await runKernel(runtime, {
       modelInput: {
         messages: [userMessage("current")],
@@ -2706,7 +2730,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: current.port,
+        globalQuery: current,
       },
       observation: {},
     });
@@ -2721,7 +2745,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
       control: {},
       correctness: {
-        globalQuery: { read: delayedRead },
+        globalQuery: delayed,
       },
       observation: {},
     });
@@ -2742,16 +2766,16 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     });
 
     expect(providerRef.current.calls[1]!.systemPrompt).toContain(
-      "ZX_SKILL_CURRENT_WINDOW",
+      "ZX_CURRENT_WINDOW",
     );
     expect(providerRef.current.calls[1]!.systemPrompt).not.toContain(
-      "ZX_SKILL_STALE_WINDOW",
+      "ZX_DELAYED_WINDOW",
     );
     expect(providerRef.current.calls[2]!.systemPrompt).toContain(
-      "ZX_SKILL_CURRENT_WINDOW",
+      "ZX_CURRENT_WINDOW",
     );
     expect(providerRef.current.calls[2]!.systemPrompt).not.toContain(
-      "ZX_SKILL_STALE_WINDOW",
+      "ZX_DELAYED_WINDOW",
     );
   });
 
@@ -2770,73 +2794,31 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
 // ─── 信任上下文装配:场景实例用场景信任(会话锚),非场景维持路径锚 ───
 
-describe("trustContext 装配分叉", () => {
-  it("显式 workscene 身份独立决定 work 技能、scene 信任/权限与 lifecycle sceneId", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const query = makeSkillCatalogQuery([
-      ownSkillEntry({
-        id: "main-only",
-        name: "Main Only",
-        description: "ZX_MAIN_SKILL_MARKER",
-        mode: "main",
-      }),
-      ownSkillEntry({
-        id: "work-only",
-        name: "Work Only",
-        description: "ZX_WORK_SKILL_MARKER",
-        mode: "work",
-      }),
-    ]);
-    const opens: Array<{ mode: string; sceneId?: string }> = [];
+describe("Host-bound Security execution", () => {
+  it("Kernel 只消费外层已裁决的 scene 信任/权限，不向 lifecycle 泄漏产品身份", async () => {
+    const opens: string[] = [];
     const runtime = await createAgentRuntime({
       workspace: null,
-      runtimeIdentity: createKernelRuntimeIdentityContribution("s1"),
+      securityExecution: createTestSecurityExecution(undefined, Object.freeze({
+        contextId: Object.freeze({ kind: "scene", sceneId: "s1" }),
+        trustContext: Object.freeze({ kind: "scene", sceneId: "s1" }),
+      })),
       lifecycle: [
         {
           id: "identity-probe",
           onWindowOpen: (ctx) => {
-            opens.push({
-              mode: ctx.mode,
-              ...(ctx.sceneId === undefined ? {} : { sceneId: ctx.sceneId }),
-            });
+            opens.push(ctx.reason);
+            expect("sceneId" in ctx).toBe(false);
+            expect("mode" in ctx).toBe(false);
           },
         },
       ],
     });
-    expect(opens).toEqual([{ mode: "work", sceneId: "s1" }]);
+    expect(opens).toEqual(["instance-start"]);
     expect(runtime.securitySnapshot().contextId).toEqual({
       kind: "scene",
       sceneId: "s1",
     });
-
-    await runKernel(runtime, {
-      modelInput: {
-        messages: [userMessage("hi")],
-      },
-      identity: {
-        turnIndex: 0,
-      },
-      control: {},
-      correctness: {
-        globalQuery: query.port,
-      },
-      observation: {},
-    });
-    expect(providerRef.current.calls[0]!.systemPrompt).toContain(
-      "ZX_WORK_SKILL_MARKER",
-    );
-    expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
-      "ZX_MAIN_SKILL_MARKER",
-    );
-  });
-
-  it("缺少 Kernel provenance 的身份在任何 runtime 装配前 fail closed", async () => {
-    await expect(
-      createAgentRuntime({
-        workspace: null,
-        runtimeIdentity: Object.freeze({ sceneId: "s1" }) as never,
-      }),
-    ).rejects.toThrow("Kernel runtime identity contribution is invalid");
   });
 
   it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {
@@ -2880,7 +2862,7 @@ describe("trustContext 装配分叉", () => {
     store.create({ kind: "main" }, userRule);
     const runtime = await createAgentRuntime({
       workspace: null,
-      permissionStorage: createTestPermissionStorage(store),
+      securityExecution: createTestSecurityExecution(store),
     });
 
     expect(runtime.securitySnapshot().permissionRules).toMatchObject([

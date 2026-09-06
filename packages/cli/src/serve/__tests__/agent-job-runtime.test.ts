@@ -68,7 +68,6 @@ function runOptions(signal = new AbortController().signal) {
     onProtocolEvent: vi.fn(async () => undefined),
     authorizeToolExecution: vi.fn(async () => []),
     toolSideEffectObserver: {} as ToolSideEffectObserver,
-    stageScheduleMutation: {} as never,
     assignmentMutations: {} as never,
     globalQuery: {} as never,
     assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
@@ -117,7 +116,6 @@ describe("agent job runtime structured lifecycle", () => {
     expect(captured!.correctness).toMatchObject({
       authorizeToolExecution: options.authorizeToolExecution,
       toolSideEffectObserver: options.toolSideEffectObserver,
-      stageScheduleMutation: options.stageScheduleMutation,
       assignmentMutations: options.assignmentMutations,
       globalQuery: options.globalQuery,
       assignmentIssuedAt: options.assignmentIssuedAt,

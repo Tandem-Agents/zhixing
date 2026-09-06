@@ -52,7 +52,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           expect(harness.rolePlan).toBeUndefined();
         }
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
-        expect(harness.createToolImplementation).toHaveBeenCalledOnce();
+        expect(harness.createToolImplementation).not.toHaveBeenCalled();
         expect(harness.createPlannedAnchorTransferStaging).toHaveBeenCalledOnce();
         expect(harness.closePlannedAnchorTransferStaging).toHaveBeenCalledOnce();
         expect(harness.createDisasterRecoveryStaging).toHaveBeenCalledOnce();
@@ -63,8 +63,8 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           .toBe(harness.disasterRecoveryStaging);
         expect(harness.roleBootstrap?.mesh.plannedAnchorTransferStaging)
           .toBe(harness.plannedAnchorTransferStaging);
-        expect(harness.roleBootstrap?.toolImplementation)
-          .toBe(harness.toolImplementation);
+        expect(harness.roleBootstrap?.createToolImplementation)
+          .toBe(harness.createToolImplementation);
         expect(harness.roleBootstrap).not.toHaveProperty("startup");
         expect(harness.roleBootstrap).not.toHaveProperty("config");
         expect(harness.roleBootstrap).not.toHaveProperty("runtimeConfiguration");

@@ -66,7 +66,7 @@ import {
 import { type EventBus } from "@zhixing/core/events";
 import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import { type SecurityPipeline } from "@zhixing/core/security";
-import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
+import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { createSecureExecuteTool } from "../security/secure-executor.js";
 import type {
   DurableToolExecutionAuthorizer,
@@ -143,8 +143,8 @@ export interface RunSubAgentLoopOptions {
   llmRoles: LLMRoles;
   /** 共享父 SecurityPipeline 实例(权限规则 / boundary registry 跨 agent 共用) */
   securityPipeline: SecurityPipeline;
-  /** 领域拥有的信任规则写入与沉淀入口。 */
-  trustAdministration: TrustAdministrationExecutionApplication;
+  /** 从父运行树继承的有限安全批准端口。 */
+  securityApproval: KernelSecurityApprovalPort;
   /** 子 confirmation broker —— 与父 broker 隔离,默认 fail-deny resolver */
   confirmationBroker: IConfirmationBroker;
   /**
@@ -287,7 +287,7 @@ export async function runSubAgentLoop(
     // broker 默认 resolver 语义对齐;主路径仍按 stdin TTY 检测)
     const secureExecuteTool = createSecureExecuteTool({
       pipeline: opts.securityPipeline,
-      trustAdministration: opts.trustAdministration,
+      securityApproval: opts.securityApproval,
       originalExecute: (tool, input, ctx) => tool.call(input, ctx),
       broker: opts.confirmationBroker,
       sessionType: "ci",

@@ -20,7 +20,7 @@ describe("createZhixingGuidanceLifecycle", () => {
       readGuidanceFile: deps.readGuidanceFile,
       reportWarning: expect.any(Function),
     });
-    expect(deps.resolveWorksceneRoot).not.toHaveBeenCalled();
+    expect(deps.resolveWorkspaceRoot).toBeUndefined();
   });
 
   it("work runtime 使用绝对 workdir 加载场景层", async () => {
@@ -29,11 +29,11 @@ describe("createZhixingGuidanceLifecycle", () => {
       payload: "场景约定",
       scene: { workdir },
     });
-    const ctx = makeWindowOpenContext({ mode: "work", sceneId: "scene-1" });
+    const ctx = makeWindowOpenContext();
 
     await createZhixingGuidanceLifecycle(deps).onWindowOpen?.(ctx);
 
-    expect(deps.resolveWorksceneRoot).toHaveBeenCalledWith("scene-1");
+    expect(deps.resolveWorkspaceRoot).toHaveBeenCalledOnce();
     expect(deps.loadLayeredGuidance).toHaveBeenCalledWith({
       roots: { homeDir: "/home", workdir },
       readGuidanceFile: deps.readGuidanceFile,
@@ -47,7 +47,7 @@ describe("createZhixingGuidanceLifecycle", () => {
       payload: "全局约定",
       getWorksceneError: new Error("db down"),
     });
-    const ctx = makeWindowOpenContext({ mode: "work", sceneId: "scene-1" });
+    const ctx = makeWindowOpenContext();
 
     await createZhixingGuidanceLifecycle(deps).onWindowOpen?.(ctx);
 
@@ -68,7 +68,7 @@ describe("createZhixingGuidanceLifecycle", () => {
       payload: "全局约定",
       scene: { workdir: "relative/project" },
     });
-    const ctx = makeWindowOpenContext({ mode: "work", sceneId: "scene-1" });
+    const ctx = makeWindowOpenContext();
 
     await createZhixingGuidanceLifecycle(deps).onWindowOpen?.(ctx);
 
@@ -101,7 +101,6 @@ describe("createZhixingGuidanceLifecycle", () => {
     const guidancePath = path.join("/home", "ZHIXING.md");
     const deps = {
       getZhixingHome: () => "/home",
-      resolveWorksceneRoot: vi.fn(async () => null),
       readGuidanceFile: vi.fn(async ({ path: filePath, reportWarning }) => {
         reportWarning({
           message: `EACCES: permission denied, open '${filePath}'`,
@@ -132,8 +131,6 @@ describe("createZhixingGuidanceLifecycle", () => {
     });
     const reportLifecycleWarning = vi.fn(() => warning);
     const ctx = makeWindowOpenContext({
-      mode: "work",
-      sceneId: "scene-1",
       reportLifecycleWarning,
     });
 
@@ -160,7 +157,7 @@ describe("createZhixingGuidanceLifecycle", () => {
 
     expect(ctx.prefixes).toEqual([null]);
     expect(deps.loadLayeredGuidance).not.toHaveBeenCalled();
-    expect(deps.resolveWorksceneRoot).not.toHaveBeenCalled();
+    expect(deps.resolveWorkspaceRoot).toBeUndefined();
   });
 });
 
@@ -170,12 +167,15 @@ function makeDeps(opts: {
   getWorksceneError?: Error;
   loadError?: Error;
 }) {
+  const resolveWorkspaceRoot = vi.fn(async () => {
+    if (opts.getWorksceneError) throw opts.getWorksceneError;
+    return opts.scene?.workdir ?? null;
+  });
   return {
     getZhixingHome: () => "/home",
-    resolveWorksceneRoot: vi.fn(async () => {
-      if (opts.getWorksceneError) throw opts.getWorksceneError;
-      return opts.scene?.workdir ?? null;
-    }),
+    ...(opts.scene !== undefined || opts.getWorksceneError
+      ? { resolveWorkspaceRoot }
+      : {}),
     readGuidanceFile: vi.fn(async () => null),
     loadLayeredGuidance: vi.fn(async () => {
       if (opts.loadError) throw opts.loadError;
@@ -195,7 +195,6 @@ function makeWindowOpenContext(
   return {
     runtimeId: "runtime-1",
     runtimeKind: "conversation",
-    mode: "main",
     providerId: "mock",
     model: "mock-model",
     reason: "instance-start",

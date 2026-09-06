@@ -12,7 +12,7 @@ import type {
   OrchestrationNodeRunResultV1,
 } from "@zhixing/core/orchestration";
 import type { SecurityPipeline } from "@zhixing/core/security";
-import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
+import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import {
   runChildAgent,
   type ChildAgentResult,
@@ -36,7 +36,7 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly roleThinking?: ResolvedRoleThinking;
   readonly llmRoles: LLMRoles;
   readonly securityPipeline: SecurityPipeline;
-  readonly trustAdministration: TrustAdministrationExecutionApplication;
+  readonly securityApproval: KernelSecurityApprovalPort;
   readonly workspace: string | null;
   readonly workspaceSource?: string;
   readonly globalConfigPath?: string;
@@ -88,7 +88,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
       roleThinking: this.options.roleThinking,
       llmRoles: this.options.llmRoles,
       securityPipeline: this.options.securityPipeline,
-      trustAdministration: this.options.trustAdministration,
+      securityApproval: this.options.securityApproval,
       workspace: this.options.workspace,
       workspaceSource: this.options.workspaceSource,
       globalConfigPath: this.options.globalConfigPath,

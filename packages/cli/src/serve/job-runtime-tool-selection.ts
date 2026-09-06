@@ -21,6 +21,7 @@ export function selectJobRuntimeTools(input: Readonly<{
   baseProfile: AgentRoleProfile;
   extraTools: readonly ToolDefinition[];
   executionMcpServers: readonly string[];
+  implementation: RuntimeToolProjection["implementation"];
 }>): JobRuntimeToolSelection {
   const requested = input.instruction.tools
     ? new Set(input.instruction.tools)
@@ -56,6 +57,7 @@ export function selectJobRuntimeTools(input: Readonly<{
         ? input.extraTools.filter((tool) => requested.has(tool.name))
         : [...input.extraTools],
       executionMcpServers: input.executionMcpServers,
+      implementation: input.implementation,
     }),
     ...(input.instruction.model
       ? { modelOverride: input.instruction.model }

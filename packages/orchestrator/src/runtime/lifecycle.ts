@@ -90,9 +90,6 @@ export interface LifecycleContextBase {
   /** 运行体实例唯一 id（装配期生成，仅用于事件归属 / 日志，不持久化） */
   readonly runtimeId: string;
   readonly runtimeKind: RuntimeKind;
-  readonly mode: "main" | "work";
-  /** work 运行体的工作场景 id（main 运行体为 undefined） */
-  readonly sceneId?: string;
   readonly providerId: string;
   readonly model: string;
   /**

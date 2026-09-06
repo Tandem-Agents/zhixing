@@ -10,7 +10,6 @@ import {
 import {
   SkillCatalogAdmissionApplicationService,
   SkillCatalogLoadApplicationService,
-  SkillCatalogKernelProjectionApplicationService,
   SkillCatalogSaveApplicationService,
   type SkillCatalogAdmissionApplication,
   type SkillCatalogAdmissionCandidate,
@@ -18,16 +17,14 @@ import {
   type SkillCatalogAdmissionMutation,
   type SkillCatalogLoadApplication,
   type SkillCatalogLoadCorrectnessPort,
-  type SkillCatalogKernelProjectionApplication,
   type SkillCatalogSaveApplication,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
 } from "@zhixing/core/skills/catalog";
 import type { ArtifactStore } from "@zhixing/core/authority";
-import type { AssignmentGlobalQueryPort } from "@zhixing/core/contracts";
 import { assignmentMutationRequestId } from "@zhixing/core/protocol";
-import { runContextStorage } from "./run-context.js";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -165,27 +162,6 @@ function createSkillCatalogSaveCorrectnessPort(
     },
     assignmentIssuedAt: requireAssignmentTime,
   };
-}
-
-export function createAssignmentSkillProjectionApplication(
-  query: AssignmentGlobalQueryPort,
-): SkillCatalogKernelProjectionApplication {
-  if (!query) throw new Error("Skill index requires the assignment global query port");
-  return new SkillCatalogKernelProjectionApplicationService({
-    async readCatalog() {
-      const result = await query.read({
-        kind: "skill-catalog",
-        includeDisabled: true,
-      });
-      if (result.kind !== "skill-catalog") {
-        throw new Error("Skill catalog query returned another result type");
-      }
-      return {
-        catalogRevision: result.catalogRevision,
-        entries: result.entries,
-      };
-    },
-  });
 }
 
 function requireRunSkillContext() {
@@ -328,6 +304,28 @@ async function assertRegularCandidateTree(root: string): Promise<void> {
     }
   };
   await visit(root);
+}
+
+/** Explicit no-Authority product binding: builtin reads only, all user writes fail closed. */
+export function createBuiltinOnlyAssignmentSkillPorts(): AssignmentSkillPorts {
+  const unavailable = async (): Promise<never> => {
+    throw new Error("User skills require an active artifact-backed assignment");
+  };
+  return {
+    loadApplication: new SkillCatalogLoadApplicationService({
+      async readScope() {
+        return { kind: "builtin-only" };
+      },
+      async readContent() {
+        return unavailable();
+      },
+      async stageUsage() {
+        return unavailable();
+      },
+    }),
+    saveApplication: { save: unavailable },
+    admissionApplication: { admit: unavailable },
+  };
 }
 
 function bindCandidateDigest(document: string, treeDigest: string): string {

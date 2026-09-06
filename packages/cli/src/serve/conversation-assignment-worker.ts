@@ -38,8 +38,7 @@ import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,
-  createAssignmentScheduleStager,
-} from "./assignment-schedule-stager.js";
+} from "./assignment-global-state-ports.js";
 
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
@@ -346,17 +345,6 @@ export class ConversationAssignmentWorker {
             envelope.permissionLease,
           ),
         toolSideEffectObserver: this.options.interactions,
-        stageScheduleMutation: createAssignmentScheduleStager(
-          this.options.ledger,
-          assignmentId,
-          envelope.work.ownerEpoch,
-          "conversation",
-          assignmentGlobalCapability({
-            assignmentId,
-            execution: "conversation",
-            capabilities: envelope.capabilities,
-          }),
-        ),
         assignmentMutations: createAssignmentMutationPort({
           ledger: this.options.ledger,
           assignmentId,

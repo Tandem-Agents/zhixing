@@ -22,7 +22,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentEventMap, PostTurnControlIntent, TurnOrigin } from "@zhixing/core/types";
 import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
 import type { EventBus } from "@zhixing/core/events";
-import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -72,8 +71,6 @@ export interface RunContext {
     readonly meter: ModelCallResourceMeter;
     readonly nextCallIndex: () => number;
   };
-  /** Durable assignment-local scheduler mutation append port. */
-  stageScheduleMutation?: ScheduleMutationStager;
   /** Unified assignment-local staged write and read-own-writes overlay. */
   assignmentMutations?: AssignmentMutationPort;
   /** Read-only global authority view bound to this assignment. */

@@ -2,12 +2,15 @@ import type {
   ToolDefinition,
 } from "@zhixing/core/types";
 import {
-  assertKernelRuntimeIdentityContribution,
+  assertKernelWindowPromptProjectionPort,
+  type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
+  type KernelSecurityExecutionFactory,
+  type KernelWindowPromptProjectionPort,
+  type KernelToolImplementationPort,
 } from "@zhixing/orchestrator/runtime";
 
 type RuntimeProfile = NonNullable<CreateAgentRuntimeOptions["profile"]>;
-type RuntimeIdentity = NonNullable<CreateAgentRuntimeOptions["runtimeIdentity"]>;
 type RuntimePrimaryRole = NonNullable<CreateAgentRuntimeOptions["primaryRole"]>;
 
 /**
@@ -19,11 +22,57 @@ type RuntimePrimaryRole = NonNullable<CreateAgentRuntimeOptions["primaryRole"]>;
 export interface RuntimeToolProjection {
   readonly extraTools: readonly Readonly<ToolDefinition>[];
   readonly executionMcpServers: readonly string[];
+  readonly implementation: KernelToolImplementationPort;
+}
+
+/** Product-owned immutable inputs shared by every runtime issuance shape. */
+export interface RuntimeProductProjection {
+  readonly runtimeTools: RuntimeToolProjection;
+  readonly windowPrompt: KernelWindowPromptProjectionPort;
+  readonly securityExecution: KernelSecurityExecutionFactory;
+}
+
+export function createRuntimeProductProjection(input: {
+  readonly runtimeTools: RuntimeToolProjection;
+  readonly windowPrompt: KernelWindowPromptProjectionPort;
+  readonly securityExecution: KernelSecurityExecutionFactory;
+}): RuntimeProductProjection {
+  assertRuntimeToolProjection(input.runtimeTools);
+  assertKernelWindowPromptProjectionPort(input.windowPrompt);
+  return Object.freeze({
+    runtimeTools: input.runtimeTools,
+    windowPrompt: input.windowPrompt,
+    securityExecution: input.securityExecution,
+  });
+}
+
+export function assertRuntimeProductProjection(
+  projection: RuntimeProductProjection,
+): void {
+  const keys =
+    projection && typeof projection === "object"
+      ? Object.keys(projection).sort()
+      : [];
+  if (
+    !projection ||
+    !Object.isFrozen(projection) ||
+    keys.length !== 3 ||
+    keys[0] !== "runtimeTools" ||
+    keys[1] !== "securityExecution" ||
+    keys[2] !== "windowPrompt" ||
+    !Object.isFrozen(projection.securityExecution) ||
+    typeof projection.securityExecution.create !== "function"
+  ) {
+    throw new TypeError("Runtime product projection must be finite and immutable");
+  }
+  assertRuntimeToolProjection(projection.runtimeTools);
+  assertKernelWindowPromptProjectionPort(projection.windowPrompt);
 }
 
 export function createRuntimeToolProjection(input: {
   readonly extraTools: readonly ToolDefinition[];
   readonly executionMcpServers: readonly string[];
+  readonly implementation: KernelToolImplementationPort;
 }): RuntimeToolProjection {
   const toolNames = new Set<string>();
   for (const tool of input.extraTools) {
@@ -53,6 +102,7 @@ export function createRuntimeToolProjection(input: {
       input.extraTools.map((tool) => Object.freeze({ ...tool })),
     ),
     executionMcpServers: Object.freeze([...input.executionMcpServers]),
+    implementation: input.implementation,
   });
 }
 
@@ -70,9 +120,12 @@ export function assertRuntimeToolProjection(
     !Object.isFrozen(projection) ||
     !Object.isFrozen(projection.extraTools) ||
     !Object.isFrozen(projection.executionMcpServers) ||
-    keys.length !== 2 ||
+    keys.length !== 3 ||
     keys[0] !== "executionMcpServers" ||
     keys[1] !== "extraTools" ||
+    keys[2] !== "implementation" ||
+    !Object.isFrozen(projection.implementation) ||
+    typeof projection.implementation.create !== "function" ||
     projection.extraTools.some(
       (tool) =>
         !tool ||
@@ -98,20 +151,21 @@ export function assertRuntimeToolProjection(
  * RuntimeHost treats this as an already-decided projection: it does not select a
  * product profile, workspace, identity, or product-specific tools.
  */
-export interface ConversationRuntimeProjection {
+export interface ConversationRuntimeProjection extends RuntimeProductProjection {
   readonly workspace?: string | null;
   readonly primaryRole: RuntimePrimaryRole;
   readonly profile: Readonly<RuntimeProfile>;
-  readonly runtimeIdentity?: Readonly<RuntimeIdentity>;
-  readonly runtimeTools: RuntimeToolProjection;
+  readonly lifecycle?: readonly AgentRuntimeLifecycle[];
 }
 
 export function createConversationRuntimeProjection(input: {
   readonly workspace?: string | null;
   readonly primaryRole: RuntimePrimaryRole;
   readonly profile: RuntimeProfile;
-  readonly runtimeIdentity?: RuntimeIdentity;
+  readonly lifecycle?: readonly AgentRuntimeLifecycle[];
   readonly runtimeTools: RuntimeToolProjection;
+  readonly windowPrompt: KernelWindowPromptProjectionPort;
+  readonly securityExecution: KernelSecurityExecutionFactory;
 }): ConversationRuntimeProjection {
   const profile = Object.freeze({
     ...input.profile,
@@ -121,17 +175,19 @@ export function createConversationRuntimeProjection(input: {
       ? { capabilities: Object.freeze({ ...input.profile.capabilities }) }
       : {}),
   });
-  const runtimeIdentity = input.runtimeIdentity;
-  if (runtimeIdentity !== undefined) {
-    assertKernelRuntimeIdentityContribution(runtimeIdentity);
-  }
+  const lifecycle = input.lifecycle
+    ? Object.freeze([...input.lifecycle])
+    : undefined;
   assertRuntimeToolProjection(input.runtimeTools);
+  assertKernelWindowPromptProjectionPort(input.windowPrompt);
   return Object.freeze({
     ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
     primaryRole: input.primaryRole,
     profile,
-    ...(runtimeIdentity ? { runtimeIdentity } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
     runtimeTools: input.runtimeTools,
+    windowPrompt: input.windowPrompt,
+    securityExecution: input.securityExecution,
   });
 }
 
@@ -151,11 +207,21 @@ export function assertConversationRuntimeProjection(
     !Object.isFrozen(projection.profile) ||
     !Object.isFrozen(projection.profile.constraints) ||
     !Object.isFrozen(projection.profile.enabledTools)
+    || (projection.lifecycle !== undefined &&
+      (!Object.isFrozen(projection.lifecycle) ||
+        projection.lifecycle.some(
+          (entry) =>
+            !entry || typeof entry.id !== "string" || entry.id.length === 0,
+        )))
   ) {
     throw new TypeError("Conversation runtime projection must be immutable");
   }
   assertRuntimeToolProjection(projection.runtimeTools);
-  if (projection.runtimeIdentity !== undefined) {
-    assertKernelRuntimeIdentityContribution(projection.runtimeIdentity);
+  assertKernelWindowPromptProjectionPort(projection.windowPrompt);
+  if (
+    !Object.isFrozen(projection.securityExecution) ||
+    typeof projection.securityExecution.create !== "function"
+  ) {
+    throw new TypeError("Conversation Security execution must be immutable");
   }
 }

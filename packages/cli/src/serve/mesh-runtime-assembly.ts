@@ -50,7 +50,7 @@ import {
 } from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
 import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
-import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
+import { createAssignmentGlobalQueryPort } from "./assignment-global-state-ports.js";
 import {
   MeshRunExecutorPort,
   type AssignmentArtifactAuthority,

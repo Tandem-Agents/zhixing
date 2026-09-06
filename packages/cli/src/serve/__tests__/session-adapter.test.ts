@@ -66,6 +66,10 @@ interface MockBehavior {
   yieldDelayMs?: number;
   /** 捕获 run 收到的参数,供透传契约断言 */
   capture?: (envelope: KernelRunEnvelope) => void;
+  /** 捕获编排入口参数,证明 SessionRuntime 只做必需能力的单向转交。 */
+  captureOrchestration?: (
+    params: Parameters<AgentRuntime["runOrchestrationV1"]>[0],
+  ) => void;
 }
 
 function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
@@ -142,6 +146,12 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
 
       const reason = behavior.reason ?? "completed";
       return buildResultByReason(envelope, reason);
+    },
+    async runOrchestrationV1(
+      params: Parameters<AgentRuntime["runOrchestrationV1"]>[0],
+    ) {
+      behavior.captureOrchestration?.(params);
+      return { status: "completed" } as never;
     },
     async dispose() {},
   });
@@ -241,6 +251,28 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 describe("createOwnerRuntimeAdapter", () => {
+  it("forwards orchestration through the required AgentRuntime capability", async () => {
+    let captured:
+      | Parameters<AgentRuntime["runOrchestrationV1"]>[0]
+      | undefined;
+    const runtime = createOwnerRuntimeAdapter(
+      "orchestration-required",
+      createMockAgentRuntime({
+        captureOrchestration: (params) => {
+          captured = params;
+        },
+      }),
+    );
+    const params = {
+      executable: {},
+      eventBus: {},
+    } as unknown as Parameters<AgentRuntime["runOrchestrationV1"]>[0];
+
+    await runtime.runOrchestrationV1?.(params);
+
+    expect(captured).toBe(params);
+  });
+
   it("yields events from onYield callback then returns final result", async () => {
     const runtime = createOwnerRuntimeAdapter(
       "test-1",
@@ -415,7 +447,6 @@ describe("createOwnerRuntimeAdapter", () => {
     const toolSideEffectObserver = {} as never;
     const authorizeToolExecution = async () => [];
     const modelCallResourceMeter = {} as never;
-    const stageScheduleMutation = {} as never;
     const assignmentMutations = {} as never;
     const globalQuery = {} as never;
     const resourceReservation = {
@@ -432,7 +463,6 @@ describe("createOwnerRuntimeAdapter", () => {
       toolSideEffectObserver,
       authorizeToolExecution,
       modelCallResourceMeter,
-      stageScheduleMutation,
       assignmentMutations,
       globalQuery,
       assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
@@ -459,7 +489,6 @@ describe("createOwnerRuntimeAdapter", () => {
     expect(captured!.correctness).toMatchObject({
       toolSideEffectObserver,
       authorizeToolExecution,
-      stageScheduleMutation,
       assignmentMutations,
       globalQuery,
       assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
