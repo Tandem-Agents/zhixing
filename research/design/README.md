@@ -11,7 +11,7 @@
 | 文档 | 内容 | 状态 |
 |------|------|------|
 | [设计原则](./principles.md) | 原则域入口:核心设计哲学(待凝练)+ [架构决策规则](./principles/README.md)(已启动,2 条) | ✅ 规则层已启动 |
-| [架构概述](./architecture/overview.md) | 整体架构设计（演进式） | ✅ v0.1 已确立 |
+| [架构概述](./architecture/overview.md) | AE-001 当前生产架构、责任边界与包/模块索引 | 技术完成，待用户确认 |
 | [架构决策](./architecture/decisions/_index.md) | ADR 索引 | ✅ 已启动（1 条） |
 | [功能规格](./specifications/) | 具体功能的实现规格 | 🔲 待启动 |
 | [实现路线图](./implementation-roadmap.md) | Step 0-8 执行计划，连接规格与代码 | 🔄 进行中 |

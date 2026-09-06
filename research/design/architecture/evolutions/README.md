@@ -4,7 +4,7 @@
 
 ## 索引
 
-| 编号 | 主题 | 状态 | 文档 |
-|---|---|---|---|
-| AE-001 | 伴身智能架构演进 | 构想中 | [AE-001-companion-intelligence.md](./AE-001-companion-intelligence.md) |
+| 编号 | 主题 | 状态 | 设计 | 实施记录 |
+|---|---|---|---|---|
+| AE-001 | 伴身智能架构演进 | 技术完成，待用户确认 | [AE-001-companion-intelligence.md](./AE-001-companion-intelligence.md) | [迁移任务](../../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md) |
 
