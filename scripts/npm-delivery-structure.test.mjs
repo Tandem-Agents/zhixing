@@ -5,6 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
+const canonicalRepositoryUrl = "https://github.com/Tandem-Agents/zhixing.git";
+const canonicalHomepage = "https://github.com/Tandem-Agents/zhixing#readme";
+const canonicalIssues = "https://github.com/Tandem-Agents/zhixing/issues";
 const removed = [
   "packages/cli/src/generated/release-channel.ts",
   "packages/cli/src/runtime/rpc-program-update-facade.ts",
@@ -48,24 +51,69 @@ test("production graph has one npm delivery path and no retired update owner", a
 
 test("public package manifests expose only prebuilt assets and no lifecycle installer", async () => {
   const rootManifest = await json(path.join(root, "package.json"));
+  let publicPackageCount = 0;
   for (const packageRoot of await packageDirectories()) {
     const manifest = await json(path.join(packageRoot, "package.json"));
     if (manifest.private === true) continue;
+    publicPackageCount += 1;
     assert.equal(manifest.version, rootManifest.version, `${manifest.name} version`);
     assert.equal(manifest.engines?.node, ">=24.0.0", `${manifest.name} Node boundary`);
     assert.equal(manifest.license, "MIT", `${manifest.name} license`);
     assert.equal(manifest.publishConfig?.access, "public", `${manifest.name} publish access`);
+    assert.equal(typeof manifest.description, "string", `${manifest.name} description`);
+    assert.notEqual(manifest.description.trim(), "", `${manifest.name} description`);
+    assert.deepEqual(manifest.repository, {
+      type: "git",
+      url: canonicalRepositoryUrl,
+      directory: path.relative(root, packageRoot).split(path.sep).join("/"),
+    }, `${manifest.name} repository`);
+    assert.equal(manifest.homepage, canonicalHomepage, `${manifest.name} homepage`);
+    assert.deepEqual(manifest.bugs, { url: canonicalIssues }, `${manifest.name} bugs`);
+    const readme = await readFile(path.join(packageRoot, "README.md"), "utf8");
+    assertPackageReadme(readme, manifest.name);
     for (const name of ["preinstall", "install", "postinstall", "prepare"]) {
       assert.equal(typeof manifest.scripts?.[name], "undefined", `${manifest.name} ${name}`);
     }
     assert.ok(Array.isArray(manifest.files) && manifest.files.includes("dist"), `${manifest.name} files`);
   }
+  assert.equal(publicPackageCount, 16, "public package count");
+  const expressiveReadme = [
+    "# Runtime building blocks",
+    "",
+    "Install `@zhixing/cli` and follow the project documentation.",
+    `[Zhixing](${canonicalHomepage}) also requires [Node.js](https://nodejs.org/).`,
+    "Released under MIT.",
+  ].join("\n");
+  assert.doesNotThrow(() => assertPackageReadme(expressiveReadme, "README example"));
+  assert.throws(() => assertPackageReadme(" \n", "empty README"), /README content/u);
 });
 
 test("npm publish command defaults to a zero-write instruction", async () => {
   const result = await run(process.execPath, [path.join(root, "scripts", "publish-npm.mjs")]);
   assert.equal(result.code, 0);
   assert.match(result.stdout, /未写入 npm/u);
+});
+
+test("Glob and Grep use the patched external brace expansion chain", async () => {
+  const [globSource, grepCandidates, rootManifest, cliManifest, lockfile, publishSource] = await Promise.all([
+    readFile(path.join(root, "packages", "tools-builtin", "src", "glob.ts"), "utf8"),
+    readFile(path.join(root, "packages", "tools-builtin", "src", "grep", "candidate-files.ts"), "utf8"),
+    json(path.join(root, "package.json")),
+    json(path.join(root, "packages", "cli", "package.json")),
+    readFile(path.join(root, "pnpm-lock.yaml"), "utf8"),
+    readFile(path.join(root, "scripts", "publish-npm.mjs"), "utf8"),
+  ]);
+  for (const [label, source] of [["Glob", globSource], ["Grep", grepCandidates]]) {
+    assert.match(source, /from\s+["']glob\/raw["']/u, `${label} must use glob/raw`);
+    assert.doesNotMatch(source, /from\s+["']glob["']/u, `${label} must not use bundled glob`);
+  }
+  const selector = "brace-expansion@>=5.0.0 <5.0.9";
+  assert.equal(rootManifest.pnpm?.overrides?.[selector], "5.0.9", "workspace patched brace override");
+  assert.equal(cliManifest.overrides?.[selector], "5.0.9", "CLI shrinkwrap patched brace override");
+  assert.match(lockfile, /^  brace-expansion@5\.0\.9:$/mu, "workspace lock must contain patched brace");
+  assert.doesNotMatch(lockfile, /^  brace-expansion@5\.0\.[0-8]:$/mu, "workspace lock retains vulnerable brace");
+  assert.match(publishSource, /locked\?\.version !== "5\.0\.9"/u, "publish candidate must pin patched brace");
+  assert.match(publishSource, /typeof locked\.integrity !== "string"/u, "publish candidate must require brace integrity");
 });
 
 async function packageDirectories() {
@@ -120,4 +168,11 @@ function run(executable, args) {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal, stdout, stderr }));
   });
+}
+
+function assertPackageReadme(readme, packageName) {
+  assert.notEqual(readme.trim(), "", `${packageName} README content`);
+  assert.match(readme, /@zhixing\/cli/u, `${packageName} README user installation entry`);
+  assert.ok(readme.includes(canonicalHomepage), `${packageName} README canonical documentation`);
+  assert.match(readme, /MIT/u, `${packageName} README license`);
 }

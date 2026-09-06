@@ -6,6 +6,9 @@ import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
+const canonicalRepositoryUrl = "https://github.com/Tandem-Agents/zhixing.git";
+const canonicalHomepage = "https://github.com/Tandem-Agents/zhixing#readme";
+const canonicalIssues = "https://github.com/Tandem-Agents/zhixing/issues";
 const skipBuild = process.argv.includes("--skip-build");
 const command = process.platform === "win32" ? (name) => `${name}.cmd` : (name) => name;
 const temporary = await mkdtemp(path.join(root, ".zhixing-package-check-"));
@@ -54,6 +57,7 @@ try {
   await run(command("npm"), ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false"], installRoot, npmEnv);
   await verifyInstalledClosure(installRoot, packages, rootManifest.version);
   await verifyPublicEntrypoints(installRoot, packages);
+  await verifyInstalledBraceExpansionBoundary(installRoot);
   await verifyCli(installRoot, home, rootManifest.version);
   await verifyWindowsHelper(installRoot, home);
   await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "@zhixing/cli"], installRoot, npmEnv);
@@ -76,6 +80,8 @@ async function publicPackages(version) {
       assert(manifest.version === version, `${manifest.name} 版本未与发布版本全等`);
       assert(manifest.engines?.node === ">=24.0.0", `${manifest.name} Node 下界不一致`);
       assert(manifest.license === "MIT" && manifest.repository && manifest.publishConfig?.access === "public", `${manifest.name} 发布元数据不完整`);
+      assertPublicPackageMetadata(manifest, path.relative(root, directory).split(path.sep).join("/"));
+      assertPackageReadme(await readFile(path.join(directory, "README.md"), "utf8"), manifest.name);
       assertNoLifecycleScripts(manifest, manifest.name);
       directories.push({ name: manifest.name, directory, manifest });
     }
@@ -90,6 +96,7 @@ async function inspectTarball(item, tarball, version) {
   const packageRoot = path.join(extractRoot, "package");
   const manifest = await json(path.join(packageRoot, "package.json"));
   assert(manifest.version === version, `${item.name} packed version 漂移`);
+  assertPublicPackageMetadata(manifest, path.relative(root, item.directory).split(path.sep).join("/"));
   assertNoLifecycleScripts(manifest, item.name);
   for (const [name, value] of Object.entries(manifest.dependencies ?? {})) {
     assert(typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(value), `${item.name} 依赖 ${name} 不是 exact registry version`);
@@ -101,6 +108,15 @@ async function inspectTarball(item, tarball, version) {
       (item.name === "@zhixing/mesh" && /^build\/Release\/checkpoint_child_bridge\.(?:exe|descriptor\.json)$/u.test(file));
     assert(allowed, `${item.name} tarball 含未声明资产：${file}`);
   }
+  assert(files.includes("README.md"), `${item.name} tarball 缺少 README.md`);
+  assert(files.includes("LICENSE"), `${item.name} tarball 缺少 LICENSE`);
+  const [readme, packedLicense, rootLicense] = await Promise.all([
+    readFile(path.join(packageRoot, "README.md"), "utf8"),
+    readFile(path.join(packageRoot, "LICENSE"), "utf8"),
+    readFile(path.join(root, "LICENSE"), "utf8"),
+  ]);
+  assertPackageReadme(readme, item.name);
+  assert(packedLicense === rootLicense, `${item.name} tarball LICENSE 与仓库根许可不一致`);
   if (item.name === "@zhixing/mesh") await verifyHelperDescriptor(packageRoot, version);
 }
 
@@ -225,6 +241,61 @@ async function verifyHelperDescriptor(packageRoot, version) {
   assert(descriptor.bytes === binary.byteLength && descriptor.sha256 === createHash("sha256").update(binary).digest("hex"), "Windows helper descriptor 摘要不匹配");
 }
 
+async function verifyInstalledBraceExpansionBoundary(installRoot) {
+  const toolsEntry = path.join(
+    installRoot,
+    "node_modules",
+    "@zhixing",
+    "tools-builtin",
+    "dist",
+    "index.js",
+  );
+  const toolsSource = await readFile(toolsEntry, "utf8");
+  assert(/from\s+["']glob\/raw["']/u.test(toolsSource), "安装后的 tools-builtin 未使用 glob/raw");
+  assert(!/from\s+["']glob["']/u.test(toolsSource), "安装后的 tools-builtin 仍使用内嵌旧 brace 的 glob 默认入口");
+
+  const smoke = [
+    'const { createGlobTool, createGrepTool } = await import("@zhixing/tools-builtin");',
+    "const part = \"{\" + \"0\".repeat(50) + \"1..100000}\";",
+    "const bracePattern = \"{\" + Array(400).fill(part).join(\",\") + \"}\";",
+    "const context = { workingDirectory: process.cwd() };",
+    "const mode = process.argv[1];",
+    "const result = mode === \"glob\"",
+    "  ? await createGlobTool().call({ pattern: bracePattern }, context)",
+    "  : await createGrepTool().call({ pattern: \"release-p07-no-match\", glob: bracePattern }, context);",
+    "if (result.isError) throw new Error(result.content);",
+  ].join("\n");
+  for (const mode of ["glob", "grep"]) {
+    const result = await runOutcomeWithDeadline(
+      process.execPath,
+      ["--max-old-space-size=64", "--input-type=module", "--eval", smoke, "--", mode],
+      installRoot,
+      npmEnv,
+      15_000,
+    );
+    assert(
+      result.code === 0 && result.signal === null && !result.timedOut,
+      `安装后的 ${mode} brace 安全反例失败（${result.timedOut ? "timeout" : result.signal ?? result.code}）${result.stderr ? `：${result.stderr.trim()}` : ""}`,
+    );
+  }
+}
+
+function assertPublicPackageMetadata(manifest, directory) {
+  assert(typeof manifest.description === "string" && manifest.description.trim().length > 0, `${manifest.name} 缺少用途说明`);
+  assert(manifest.repository?.type === "git", `${manifest.name} repository type 不正确`);
+  assert(manifest.repository?.url === canonicalRepositoryUrl, `${manifest.name} repository url 不正确`);
+  assert(manifest.repository?.directory === directory, `${manifest.name} repository directory 不正确`);
+  assert(manifest.homepage === canonicalHomepage, `${manifest.name} homepage 不正确`);
+  assert(manifest.bugs?.url === canonicalIssues, `${manifest.name} bugs url 不正确`);
+}
+
+function assertPackageReadme(readme, packageName) {
+  assert(readme.trim().length > 0, `${packageName} README 内容为空`);
+  assert(readme.includes("@zhixing/cli"), `${packageName} README 缺少用户安装入口`);
+  assert(readme.includes(canonicalHomepage), `${packageName} README 缺少规范文档入口`);
+  assert(readme.includes("MIT"), `${packageName} README 缺少许可说明`);
+}
+
 function assertNoLifecycleScripts(manifest, label) {
   for (const name of ["preinstall", "install", "postinstall", "prepare"]) {
     assert(typeof manifest.scripts?.[name] !== "string", `${label} 禁止发布 ${name} 脚本`);
@@ -268,6 +339,33 @@ function runOutcome(executable, args, cwd, env = process.env, capture = false) {
     child.stderr?.on("data", (chunk) => { stderr += chunk; });
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ stdout, stderr, code, signal }));
+  });
+}
+
+function runOutcomeWithDeadline(executable, args, cwd, env, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawnCommand(executable, args, {
+      cwd,
+      env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ stdout, stderr, code, signal, timedOut });
+    });
   });
 }
 

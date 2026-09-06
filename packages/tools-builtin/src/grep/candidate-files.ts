@@ -1,4 +1,4 @@
-import { globIterate } from "glob";
+import { globIterate } from "glob/raw";
 import * as path from "node:path";
 import { GREP_DEFAULT_IGNORE_GLOBS } from "./constants.js";
 import { relativePathWithin, toPosixPath } from "./paths.js";

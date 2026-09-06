@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a user need or a scoped product improvement
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before proposing implementation details. Do not include credentials, private data, or confidential work material.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who is affected, what are they trying to accomplish, and what currently blocks them?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result rather than prescribing an internal architecture.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and boundaries
+      description: State what should be included, what should remain unchanged, and any compatibility or safety constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any existing workflow or smaller solution you tried, if applicable.

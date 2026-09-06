@@ -90,6 +90,14 @@ async function verifyShrinkwrap(directory, packages, version) {
       throw new Error(`CLI shrinkwrap 未锁定 ${item.name}@${version} 的 registry integrity`);
     }
   }
+  const braceEntries = Object.entries(shrinkwrap.packages ?? {})
+    .filter(([key]) => /(?:^|\/)node_modules\/brace-expansion$/u.test(key));
+  if (braceEntries.length === 0) throw new Error("CLI shrinkwrap 缺少 brace-expansion");
+  for (const [key, locked] of braceEntries) {
+    if (locked?.version !== "5.0.9" || typeof locked.integrity !== "string") {
+      throw new Error(`CLI shrinkwrap 未锁定修复后的 brace-expansion：${key}`);
+    }
+  }
 }
 
 async function verifyRegistryCandidate(packages, version) {

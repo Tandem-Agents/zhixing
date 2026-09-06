@@ -16,6 +16,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { scanSkillContent, type ContentThreat } from "./content-scan.js";
 
+export type { ContentThreat } from "./content-scan.js";
+
 const SKILL_DOCUMENT_FILE = "SKILL.md";
 
 /** AI 研判对 LLM 的最小依赖 —— 一个 prompt 进、文本出(同 steward 形态,绑 `callText("main")`)。 */

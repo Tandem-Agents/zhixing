@@ -237,8 +237,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/longxia/zhixing.git",
+    "url": "https://github.com/Tandem-Agents/zhixing.git",
     "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Tandem-Agents/zhixing#readme",
+  "bugs": {
+    "url": "https://github.com/Tandem-Agents/zhixing/issues"
   },
   "publishConfig": {
     "access": "public"

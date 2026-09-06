@@ -11,7 +11,7 @@
  * - isReadOnly + isParallelSafe：安全且可并行
  */
 
-import { glob } from "glob";
+import { glob } from "glob/raw";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ToolDefinition, ToolResult } from "@zhixing/core";

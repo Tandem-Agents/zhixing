@@ -48,11 +48,18 @@
   "engines": {
     "node": ">=24.0.0"
   },
+  "overrides": {
+    "brace-expansion@>=5.0.0 <5.0.9": "5.0.9"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/longxia/zhixing.git",
+    "url": "https://github.com/Tandem-Agents/zhixing.git",
     "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/Tandem-Agents/zhixing#readme",
+  "bugs": {
+    "url": "https://github.com/Tandem-Agents/zhixing/issues"
   },
   "publishConfig": {
     "access": "public"

@@ -2,6 +2,8 @@
 
 > 知行命令行入口 —— 交互对话、运行控制、诊断入口
 
+这是知行面向普通用户的安装包；其余 `@zhixing/*` 包是由 CLI 组合使用的内部实现与协议组件，不代表独立 SDK 稳定性承诺。项目总览与英文入口见[知行主文档](https://github.com/Tandem-Agents/zhixing#readme)。
+
 ## 概览
 
 `zz` 和 `zhixing` 指向同一 CLI 入口；下文用 `zz` 表示当前构建产物的真实命令面。
@@ -32,7 +34,7 @@
 **当前真实存在但隐藏 / 过渡中的入口**：
 
 - `zz serve`：内部宿主启动路径；默认 help 不展示，不纳入 0.1 用户 smoke 清单。
-- `zz serve logs`：当前仍可调用的后台宿主日志查看入口；默认顶层 help 不展示，后续应收口到更清晰的诊断入口。
+- `zz serve logs`：当前仍可调用的后台宿主日志查看入口；默认顶层 help 不展示。
 
 **当前真实存在的 `zz --...` / option 形态**：
 
@@ -65,11 +67,20 @@ npm install -g @zhixing/cli
 zz
 ```
 
-同版修复或前向升级：
+同版修复时先取得当前明确版本，再按该版本重装：
 
-```text
+```powershell
+$ZhixingVersion = zz --version
 zz stop --maintenance
-npm install -g @zhixing/cli@<当前明确版本或 latest>
+npm install -g "@zhixing/cli@$ZhixingVersion"
+zz
+```
+
+主动前向升级时，安全停止后安装已经选定的明确新版；安装最新版本可使用：
+
+```powershell
+zz stop --maintenance
+npm install -g @zhixing/cli@latest
 zz
 ```
 
@@ -106,7 +117,7 @@ node packages/cli/dist/index.js [...]
 
 | 文件 | 内容 | 性质 |
 |---|---|---|
-| `~/.zhixing/config.jsonc` | 决策层：`llm.main`（必填）/ `llm.light` / `llm.power` 角色选择、`messaging` 启用列表、`workspace`、`agent` / `intent` / `network` 等使用偏好。**支持 JSONC 注释**——VSCode 等编辑器原生识别 | AI 可读；写需用户确认 |
+| `$ZHIXING_CONFIG_PATH` 指定的文件；未设置时为 `<ZHIXING_HOME>/config.jsonc`，默认 `~/.zhixing/config.jsonc` | 决策层：`llm.main`（必填）/ `llm.light` / `llm.power` 角色选择、`messaging` 启用列表、`workspace`、`agent` / `intent` / `network` 等使用偏好。**支持 JSONC 注释**——VSCode 等编辑器原生识别 | AI 可读；写需用户确认 |
 | 设备本地 SecretStore | provider、channel、MCP 的秘密 binding；桌面使用系统凭据保护，无头设备使用机器绑定加密 vault | 不进入 AI、网格、备份或迁移流 |
 
 ### 字段对称性
@@ -127,7 +138,7 @@ config 是“启用什么 / 用哪个”的引用；SecretStore 是目标设备�
 
 旧版 `~/.zhixing/credentials.json` 只作为一次性迁移源：逐 binding 写入并回读验证，激活前失败回滚且保留源文件；激活后清退异常则失败关闭并在下次读取继续收敛，不反向覆盖已提交凭据。
 
-配置是用户级单一来源：知行只读取全局 `~/.zhixing/config.jsonc`（决策层），不读取启动目录下的项目级配置；秘密只从当前设备 SecretStore 解锁，避免随项目或设备迁移泄漏。
+配置是用户级单一来源：知行读取 `ZHIXING_CONFIG_PATH` 指定的完整文件路径；未设置时读取当前 `ZHIXING_HOME` 下的 `config.jsonc`（默认 `~/.zhixing/config.jsonc`）。知行不读取启动目录下的项目级配置；秘密只从当前设备 SecretStore 解锁，避免随项目或设备迁移泄漏。
 
 ---
 
@@ -137,7 +148,7 @@ config 是“启用什么 / 用哪个”的引用；SecretStore 是目标设备�
 zz
 ```
 
-进入交互式多轮对话。所有内置工具（read/write/edit/glob/grep/bash/schedule）开箱可用。
+完成主模型配置后进入交互式多轮对话。当前工具集包括 read/write/edit/glob/grep/bash/schedule；实际执行仍受信任、权限和确认策略约束。
 
 **斜杠命令**：
 
@@ -159,6 +170,7 @@ zz
 | `/compact` | 手动触发上下文压缩 |
 | `/tasks` | 查看定时任务 |
 | `/config` | 修改基础配置（服务商 / 模型 / API Key / 消息通道等） |
+| `/mcp` | 管理 MCP 服务（接入外部工具 / 启停 / 查看连接） |
 | `/trust` | 权限规则管理 |
 | `/security` | 安全状态概览 |
 
@@ -173,7 +185,7 @@ zz status
 zz stop
 ```
 
-`zz status` 用于查看本机知行运行状态；`zz stop` 用于停止知行后台宿主。
+`zz status` 用于查看本机知行运行状态；`zz stop` 读取本机发现记录和持久认证 token，请求耐久安全停机并等待同一进程退出。停机被拒绝、超时或无法安全受理时不会强制杀进程；处理提示的阻塞项后可重试同一命令。托管维护前使用 `zz stop --maintenance`。
 
 ---
 
@@ -204,25 +216,24 @@ zz serve
 **启动后会创建**：
 
 ```
-~/.zhixing/server.pid    # PID + port + 启动时间（JSON）
-~/.zhixing/server.port   # 端口号（明文，shell 友好）
-~/.zhixing/server.token  # 共享认证 token（首次启动自动生成）
+<ZHIXING_HOME>/server.pid    # PID + port + 启动时间（JSON）
+<ZHIXING_HOME>/server.port   # 端口号（明文，shell 友好）
+<ZHIXING_HOME>/server.token  # 持久本机认证 token（首次启动生成，宿主重启复用）
 ```
 
-**端点**：
+端口由当前 `ZHIXING_HOME` 派生（受控内部入口可显式覆盖），并在监听成功后写入 `server.pid` / `server.port` 供正式客户端发现；`18900` 不是固定端口合同。按发现记录访问时，端点形态为：
 
 ```
-HTTP REST:    http://127.0.0.1:18900/api/health
-              http://127.0.0.1:18900/api/status
-WebSocket:    ws://127.0.0.1:18900/ws  ← JSON-RPC 2.0
+HTTP REST:    http://127.0.0.1:<实际端口>/api/health
+              http://127.0.0.1:<实际端口>/api/status
+WebSocket:    ws://127.0.0.1:<实际端口>/ws  ← JSON-RPC 2.0
 ```
 
-**优雅停机**：
+**安全停机**：
 
-- `Ctrl+C` 一次：停 Scheduler → 等待活跃任务 → 关 WebSocket → 关 HTTP → 释放 PID 锁
-- `Ctrl+C` 两次：强制 exit
-- `SIGTERM`：同 SIGINT 一次
-- `SIGUSR1`（仅 Linux/macOS）：触发停机供 supervisor 重启
+- 后台宿主使用 `zz stop`；它先完成耐久停止准备，再关闭真实 Server，且没有强制结束兜底。
+- 前台宿主收到第一次 `Ctrl+C` / `SIGINT` 或 `SIGTERM` 时走同一安全准备与清理链。停机期间应等待其完成，不重复发送中断。
+- 非 Windows 平台的 `SIGUSR1` 也只触发同一安全停机；知行本身不承诺 supervisor 自动重启。
 
 **进程锁**：端口监听是**唯一**单例锁——同 `ZHIXING_HOME` 派生同端口，重复启动被 OS 以 `EADDRINUSE` 原子拒绝。PID / port 文件仅是发现辅助（供客户端找到 owner 的端口 / pid），**不是第二把锁**：宿主 listen 成功即 owner，覆盖任何崩溃残留的 PID 文件、不自杀。
 
@@ -230,7 +241,7 @@ WebSocket:    ws://127.0.0.1:18900/ws  ← JSON-RPC 2.0
 
 ### 查看后台宿主日志
 
-`zz serve logs` 是当前仍可调用的后台宿主日志查看入口，后续应收口到更清晰的诊断入口。
+`zz serve logs` 是当前仍可调用的后台宿主日志查看入口。
 
 ```bash
 zz serve logs
@@ -252,7 +263,7 @@ zz stop
 
 修复路径：
 
-- 按错误消息提示在 `~/.zhixing/config.jsonc` 中删除违反字段
+- 按错误消息提示，在配置编辑器显示的实际 `config.jsonc` 路径中删除违反字段
 - 在交互终端跑 `zz`，由向导写入设备本地 SecretStore
 - channel 接入字段（appId / appSecret 等）通过配置编辑器写入 SecretStore；config.jsonc 只保留启用项与功能选项
 - 非交互宿主须先在目标设备完成 SecretStore 解锁与凭据配置，不接受明文文件或 env 注入语法
@@ -263,19 +274,21 @@ zz stop
 - 在交互终端（cmd / PowerShell / bash）直接跑 `zz` —— 向导逐字段询问后自动写盘
 - 非交互场景（CI / pipe）会 fail-fast 退出码 2，必须先在 TTY 终端完成首次配置
 
-检查现有配置：
-
-```bash
-cat ~/.zhixing/config.jsonc
-# 秘密只能通过 `zz` / `/config` 的专用流程查看或更新，不提供明文读取入口
-```
+现有功能配置可通过交互 REPL 的 `/config` 检查和修改；秘密只能通过 `zz` / `/config` 的专用流程查看或更新，不提供明文读取入口。
 
 ---
 
 ## 相关文档
 
-- [架构总览](../../research/design/architecture/overview.md)
-- [常驻服务设计](../../research/design/specifications/persistent-service.md)
-- [Server Gateway 协议](../../research/design/specifications/server-gateway.md)
-- [安全系统](../../research/design/specifications/security-system.md)
-- [输入补全](../../research/design/specifications/input-typeahead.md)
+- [项目与用户指南](https://github.com/Tandem-Agents/zhixing#readme)
+- [安装、维护与发布（当前指南）](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/release-and-maintenance-guide.md)
+- [架构总览](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/architecture/overview.md)
+- [常驻服务设计（历史材料，不作为当前实现合同）](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/persistent-service.md)
+- [Server Gateway 协议](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/server-gateway.md)
+- [安全系统](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/security-system.md)
+- [输入补全](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/input-typeahead.md)
+- [问题反馈](https://github.com/Tandem-Agents/zhixing/issues)
+
+## 许可
+
+MIT License。许可正文随 npm 包分发。
