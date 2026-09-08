@@ -1,0 +1,45 @@
+# 逐轮上下文注入
+
+本文负责模型调用前的动态状态注入；总体边界见[上下文管理架构](architecture.md)。动态时间和任务状态不应冻结在启动时的 system prompt 中，也不应由各入口重复拼装。
+
+## 职责与数据流
+
+```text
+时间／调度状态／会话任务列表
+  → TurnContextProvider 按需提供段落
+  → TurnContextInjector 按注册顺序组成 <turn-context>
+  → 最新 user 消息的首个文本块前部
+  → 模型调用的发送视图
+```
+
+运行体创建时先注册 TimeProvider，再按宿主贡献的固定顺序注册 Provider；生产宿主统一贡献 SchedulerProvider 与 TaskListProvider。注入实际发生在模型循环每次构建发送视图时，不只是每个用户 run 入口执行一次。运行后不再通过旧 `registerTurnContextProvider` 入口随意变更装配。
+
+Provider 负责读取所属领域的状态并形成标题和正文；Injector 只负责组合、标签与消息位置，不拥有调度器或任务列表的写权。
+
+| 来源 | 当前行为 |
+|---|---|
+| 时间 | 读取当前时间，按装配时区格式化，不使用进程启动时的固定时间 |
+| 调度 | 消费宿主提供的只读状态摘要；无活跃、近期完成或失败记录时不注入。默认展示上限为 10／5／3，时间筛选与排序由状态源负责，不由 Injector 再建账本 |
+| 会话任务列表 | 按当前 run 的 conversationId 读取任务状态；无身份或空列表时省略。标记 pending／in_progress／completed，供模型继续维护同一计划 |
+
+调度状态注入只提供感知，不承担主动通知：提示明确要求模型仅在用户询问任务相关话题时提及，不主动播报。
+
+## 注入合同
+
+- 按注册顺序输出，只渲染 `shouldInject()` 成立的 Provider；没有段落时不生成空标签。
+- 对消息数组和目标消息作副本替换，不修改原始输入；其他消息、非文本内容不由本机制重写。
+- 有新注入块时先移除目标文本中原有完整 `<turn-context>` 块，避免重复叠加；不遍历清洗全部历史。
+- 没有 user 消息时不创建伪用户输入；无新段落或 `skipTurnContext` 时返回消息副本，不执行剥离。该参数不等于清除旧块。
+- 当前段摘要使用独立发送链，不再执行动态注入；不能把最新时间或任务段反复当作历史事实摘要。
+- Injector 当前没有逐 Provider 异常吞并机制，Provider 抛错会向调用方传播；不得将“单源故障自动跳过、其他源照常”写成现有保证。
+
+## 相邻边界
+
+`ZHIXING.md` 属于窗口级 guidance／发送前缀，非此处的动态状态；[会话任务列表](../conversation/task-list.md)负责计划的读写与展示，注入只是消费者；调度任务与会话计划不是同一类任务。动态注入是模型输入材料，不是长期记忆或历史存储。
+
+本机制保护 system prompt 的稳定性，但动态消息仍会变化，不能据此承诺整次请求缓存命中。新增来源应复用当前注入接口，并由其领域提供真实状态，不在注入器内增加新的业务状态机。
+
+## 实现与验证入口
+
+- [Provider 与 Injector](../../../packages/core/src/context/turn-context.ts)、[宿主贡献集合](../../../packages/cli/src/runtime/turn-context-providers.ts)、[模型循环消费](../../../packages/core/src/loop/agent-loop.ts)。
+- [直接测试](../../../packages/core/src/context/__tests__/turn-context.test.ts)保护按需输出、顺序、消息副本、重复替换、任务状态和跳过语义；宿主接线需同时核对会话、场景与瞬态运行入口，不能仅证明测试夹具会调用 Injector。

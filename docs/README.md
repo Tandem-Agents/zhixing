@@ -22,16 +22,16 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [首个公开版本交付计划](./delivery/first-public-release.md)
 - [验证手册](../research/design/workbench/verification-runbook.md)
 - [架构演进记录索引](../research/design/architecture/evolutions/README.md)
-- [设计资料索引](../research/design/README.md)
 
 疑似漏洞的当前支持与私密报告状态只以[安全政策 / Security policy](../SECURITY.md)为准；不要在公开渠道披露漏洞细节或敏感数据。
 
 ## 架构与研究 / Architecture and research
 
+- [上下文管理架构](modules/context/architecture.md)
+- [逐轮上下文注入](modules/context/turn-context-injection.md)
+- [会话任务列表](modules/conversation/task-list.md)
 - [架构概览 / Architecture overview](../research/design/architecture/overview.md)
 - [架构演进 / Architecture evolutions](../research/design/architecture/evolutions/README.md)
-- [研究资料索引 / Research index](../research/README.md)
-- [设计资料索引 / Design index](../research/design/README.md)
 
 研究和历史演进文档用于解释背景与决策，不替代当前 README、CLI 说明或维护指南中的可执行用户合同。
 

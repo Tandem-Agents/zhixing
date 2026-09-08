@@ -10,7 +10,7 @@
 >
 > **关联**:
 > - [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) — **生命周期概念的单一权威**：注意力窗口 ⊃ run ⊃ turn；§二四钩子需求。**本 spec 与之冲突一律以它为准。**
-> - [context-management-v3-redesign.md](./context-management-v3-redesign.md) — 注意力窗口、段切换 / 压缩只动 messages、段内 system prompt+tools byte-equal（本 spec 的 cache 边界与之协同）
+> - [上下文管理架构](../../../docs/modules/context/architecture.md) — 注意力窗口、段切换 / 压缩只动 messages、段内 system prompt+tools byte-equal（本 spec 的 cache 边界与之协同）
 > - [skill-system.md](./skill-system.md) — §3 索引进 system prompt 稳定区及 assignment-bound 窗口刷新，§3.1 死线本意（窗口内不变、跨窗口可重建）
 > - [runtime-session-hot-reload.md](./runtime-session-hot-reload.md) — runtime 不可变契约 + reload blue-green swap（实例换代的权威）
 > - [work-mode.md](./work-mode.md) — main↔work 切换、power runtime overlay、turn 边界原子事务
@@ -301,7 +301,7 @@ skill 索引段（`skill-index`）落在 system prompt **静态缓存区**（`sy
 
 - 注意力窗口跨多个 run（基准 §一）。挂 onBeforeRun（每个 run 前）会在同一窗口的第 2、3 个 run 前改 system prompt → 违反"窗口内 byte-equal 不动"（Inv-2）。
 - 窗口边界正是「cache 前缀本就要因上下文重构而失效」的时刻（[lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §一）。在此重建是搭车：skill 没变→byte-equal→不破；变了→本就该更新。
-- **与 v3 段切换 cache 优化协同**：v3 让段切换 system+tools byte-equal 跨段以保 cache（[context-management-v3-redesign.md](./context-management-v3-redesign.md)）。本 spec 的"检查→变了才换"在 skill 没变时（绝大多数段切换）结果 byte-equal、保住 v3 优化；只在 skill 真变那次让位于必要更新（那次 messages 已大改、cache 本就大面积失效）。"段切换 system 不变"是"窗口边界可重建"在 skill 没变分支的特例。
+- **与 v3 段切换 cache 优化协同**：v3 让段切换 system+tools byte-equal 跨段以保 cache（[上下文管理架构](../../../docs/modules/context/architecture.md)）。本 spec 的"检查→变了才换"在 skill 没变时（绝大多数段切换）结果 byte-equal、保住 v3 优化；只在 skill 真变那次让位于必要更新（那次 messages 已大改、cache 本就大面积失效）。"段切换 system 不变"是"窗口边界可重建"在 skill 没变分支的特例。
 
 ### 5.3 双层 holder：实例权威 + run 局部（core 改动）
 
@@ -395,7 +395,7 @@ onWindowOpen 的 ctx 暴露**公共方法** `updateSystemPromptSegment(segment, 
 sub-agent 排除理由（[subagent-execution.md](./subagent-execution.md)）：
 
 - sub-agent 生命周期完全在 Task 工具 `call()` 内（INV-S1：spawn→多轮→finalize 不写独立 Turn、不调 commitTurn），不是 `AgentRuntime` 实例的 `run()`，无 onBeforeRun/onAfterRun 对应物。
-- sub-agent **不启用段切换**（[context-management-v3-redesign.md](./context-management-v3-redesign.md) §8.4，保 byte-equal-across-spawns），**无注意力窗口换代**——其 system prompt 整个 sub-agent 生命周期 byte-equal（`subagent/factory.ts:260-262` 死线），无 onWindowOpen/onWindowClose 对应物。
+- sub-agent **不启用段切换**（[上下文管理架构](../../../docs/modules/context/architecture.md)，保 byte-equal-across-spawns），**无注意力窗口换代**——其 system prompt 整个 sub-agent 生命周期 byte-equal（`subagent/factory.ts:260-262` 死线），无 onWindowOpen/onWindowClose 对应物。
 - sub-agent profile `enabledTools` 不含 Task（防递归），上下文走隔离 per-spawn EventBus 冒泡（INV-S2），观测已覆盖。
 
 排除是 by-construction：sub-agent **不经 `createAgentRuntime`**（走 `runChildAgent`，经 `loop-runner.ts` 调 `drainAgentLoop`→`runAgentLoop`），自然不携带 `lifecycle`。**agent-loop 签名向后兼容**：`runAgentLoop` 的 `getSystemPrompt?` 与现有 `systemPrompt?: string` 二选一、内部归一 `const getSP = params.getSystemPrompt ?? (() => params.systemPrompt ?? "")`——sub-agent 调用点（`loop-runner.ts`）继续传固定 `systemPrompt: string`、不传 `getSystemPrompt` / `windowLifecycle`，**零改动**。**关键**：serve 的 main runtime 经 createAgentRuntime、属覆盖项，其末窗 onWindowClose 必须在 serve 销毁路径接上（§四④ / §十二 E），否则首窗 open 触发而末窗 close 永不触发。
@@ -420,7 +420,7 @@ runtime 以返回的 `catalogRevision` 单调更新实例级 `skill-index` 段�
 4. **首窗 open / 末窗 close 与实例配对**：任何 onWindowOpen(`instance-start`) 已完成的实例，无论以何路径退场，最终必有且仅有一次末窗 onWindowClose（销毁类 reason）。① reload 换代旧实例末窗 close **必须接在 agent 域 swap 处**（`:651/656`）、**不可依赖 `disposeOldInBackground`**；② 装配回滚（`buildNewResources` 兄弟步骤抛错，`:765`）须对已激活实例补 `dispose("assembly-rollback")`、不静默 GC。
 5. **system prompt 窗口边界重建由 runtime 统一拼装**：通用订阅者在 onWindowOpen 经 `updateSystemPromptSegment` 贡献自身数据段；assignment-bound skill catalog 由 runtime 在同一窗口边界写入 `skill-index`。两者都不暴露"提交整串"，agent-loop 经 `getSystemPrompt()` 现取本 run 局部 prompt。
 6. **cache 死线不破**：重建一律"检查→变了才换、没变 byte-equal 不动"；skill 没变时段切换 holder byte-equal、保住 v3 段切换 system+tools cache（§5.2）。
-7. **钩子不修改 tools[]**：tools[] 装配后冻结（reload 级，[context-management-v3-redesign.md](./context-management-v3-redesign.md) §九 INV-4），任何阶段不得增删改。
+7. **钩子不修改 tools[]**：tools[] 装配后冻结（reload 级，[上下文管理架构](../../../docs/modules/context/architecture.md)），任何阶段不得增删改。
 8. **段覆盖服务数据驱动段**：`updateSystemPromptSegment` 段参数为 `DataDrivenSegment` 子类型（第一版仅 `skill-index`），运行时窗口边界更新只服务数据驱动段；profile 驱动段（identity 等）变化单位是 reload，类型层即排除、不可经此接口覆盖。
 9. **失败不阻塞主对话**：onBeforeRun/onAfterRun/run 内窗口换代钩子抛错 → emit `lifecycle:hook_failed` 到 per-run bus + 继续；末窗 onWindowClose 抛错 → 销毁调用方 warn（用户可见）+ 不阻断；唯首窗 onWindowOpen(`instance-start`) 抛错让装配失败（实例未就绪、安全回滚）。**可观测分通道、不押 `logDiagnostic`（cli 交互模式 `index.ts:89` no-op）。**
 10. **装配期注入、不开放运行时 register**：订阅集合实例内恒定，保证首窗语义完整。sub-agent by-construction 不挂（不经 createAgentRuntime、无段切换）。

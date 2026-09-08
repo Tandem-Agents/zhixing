@@ -4,7 +4,7 @@
 > - **权威 spec（single source of truth）已更新,请以这些文档为准**：
 >   - [conversation-model.md §9.5 + ADR-CM-015 + ADR-CM-017](../specifications/conversation-model.md)——commitTurn 原子截断、接口契约
 >   - [session-persistence.md §2.3 + §4.5 + §5](../specifications/session-persistence.md)——文件不变量、TranscriptStore 接口、写入实现
->   - [context-architecture.md §8.5](../specifications/context-architecture.md)——compact_end 事务化事件、turnsCompacted 精确计算
+>   - context-architecture.md §8.5（历史文档，已退役）——compact_end 事务化事件、turnsCompacted 精确计算
 > - **保留本文档的价值**：详细的问题审计（§0.1 完整链条审计 / §0.2 25 个 P0 问题分级）、5 阶段执行顺序、ADR-TR-1 到 TR-9 的推导过程、§4 接口变更清单的历史记录。这些属于"工程过程知识",精简合并会丢失,保留作未来重访参考。
 > - **不要双写**：新的设计决策（如 Phase 6+ 演进）应该写入权威 spec,不要再编辑本文档；本文档作为**冻结归档**保留。
 >

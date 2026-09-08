@@ -41,5 +41,3 @@
 
 | 文档 | 主题 | 沉淀于 |
 |---|---|---|
-| [Capability Compiler](capability-compiler.md) | 工具能力的动态分层与按需暴露——重新审视"tools schema 每次满载"的设计 | 2026-05-08 |
-| [Tool Result Anchor](tool-result-anchor.md) | 工具结果的焦点完整 + 消化后归档——重新审视"tool_result 持久完整保留"的设计 | 2026-05-08 |

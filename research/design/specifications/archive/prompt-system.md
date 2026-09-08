@@ -1,6 +1,6 @@
 # 系统提示词与上下文组装 — 设计方案
 
-> **历史资料，不是当前规格**：本文保留 2026-04-09 的早期 prompt / `ZHIXING.md` 方案，仅供追溯。当前实现请以 `packages/orchestrator/src/runtime/system-prompt.ts`、[context-management-v3-redesign.md](../context-management-v3-redesign.md) 与 [ZHIXING.md 分层 guidance 架构](../../drafts/zhixing-md-layered-context-architecture.md) 为准。文中的 `# Project Instructions (ZHIXING.md)`、首条 `<context>` 注入、子目录级与预算截断均为已废弃设想，不可作为实现依据。
+> **历史资料，不是当前规格**：本文保留 2026-04-09 的早期 prompt / `ZHIXING.md` 方案，仅供追溯。当前实现请以 `packages/orchestrator/src/runtime/system-prompt.ts`、[上下文管理架构](../../../../docs/modules/context/architecture.md) 与 [ZHIXING.md 分层 guidance 架构](../../drafts/zhixing-md-layered-context-architecture.md) 为准。文中的 `# Project Instructions (ZHIXING.md)`、首条 `<context>` 注入、子目录级与预算截断均为已废弃设想，不可作为实现依据。
 
 > **状态**: 📐 方案设计（2026-04-09）
 > **依赖**: OpenClaw 源码分析 `prompt-system.md`、Claude Code 社区逆向分析 `prompt-system.md`

@@ -15,7 +15,7 @@
 | 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
-| 010 | 上下文架构（v1.2 已废弃；新单一来源见 context-management-v3-redesign.md） | [context-architecture.md](context-architecture.md) | ⚠️ 已废弃 |
+| 010 | 上下文管理架构 | [现行文档](../../../docs/modules/context/architecture.md) | 已迁移 |
 | 011 | 网络出口原语（@zhixing/network） | [network-egress.md](network-egress.md) | 已实施 |
 | 012 | 内置工具集（@zhixing/tools-builtin） | [tools-builtin.md](tools-builtin.md) | 已实施 |
 | 013 | 可中断 Agent Loop（中断协议 + idle 看门狗 + 协议清理） | [interruptible-agent-loop-execution.md](interruptible-agent-loop-execution.md) | 设计中 |
@@ -35,7 +35,7 @@
 | 主题 | 文档 | 说明 |
 |---|---|---|
 | 早期常驻服务 / 调度 / 投递 / Memory maintenance 方案 | [persistent-service.md](persistent-service.md) | `HISTORICAL`；现行生产合同以 distributed-runtime 执行规格及对应模块现行文档为准 |
-| 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) 与 [context-management-v3-redesign.md](context-management-v3-redesign.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
+| 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) 与 [上下文管理架构](../../../docs/modules/context/architecture.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
 
 ## 编写规范
 

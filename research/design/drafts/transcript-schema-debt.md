@@ -44,7 +44,7 @@ Conversation 数据持久保留在 ~/.zhixing/projects/<id>/conversations/<convI
 [session-persistence.md](../specifications/session-persistence.md) 顶部已有 3 段 deprecation 标注,但正文 §二 / §三 / §六 / §七 / §八 仍是过时设计内容(SHA-256 项目哈希 / `--continue/--resume/--name/--fork-session` / `SessionStore` 等)。
 
 外部审查建议升级处置: 删正文 + 留 stub 指向 conversation-model.md §九。
-当前处置: 保留正文 + 顶部 deprecation(与 [v2-redesign](../specifications/context-management-v2-redesign.md) / [phase2-complete-agent.md](../specifications/phase2-complete-agent.md) / [ADR-005](../architecture/decisions/005-cli-architecture.md) 同款"决策痕迹保留"模式)。
+当前处置: 保留正文 + 顶部 deprecation(与 v2-redesign（历史文档，已退役） / [phase2-complete-agent.md](../specifications/phase2-complete-agent.md) / [ADR-005](../architecture/decisions/005-cli-architecture.md) 同款"决策痕迹保留"模式)。
 
 ## 待决策点
 

@@ -39,7 +39,7 @@
 - **自适应精度**：追踪估算误差，动态调整比率
 - **百分比阈值**：自适应不同窗口大小
 
-> 2026-05-11 更新：上方"知行策略"的"3 层压缩（L1 截断 / L2 丢弃 / L3 摘要）+ Tier 压缩 + 动态驱逐"为早期方案，已整体砍除。当前实现范式为 cache 第一优先 + 优质注意力窗口 + 段式 SegmentManager + tools 满载稳定，新单一来源见 [context-management-v3-redesign.md](../../design/specifications/context-management-v3-redesign.md)（Phase 1 已实施）。本文以下竞品调研内容仍有效。
+> 上方知行策略为历史方案；当前窗口、段切换与摘要边界见[上下文管理架构](../../../docs/modules/context/architecture.md)，本文竞品内容仅作研究材料。
 
 ## 对应源码分析
 
@@ -49,7 +49,7 @@
 ## 设计产出
 
 - [知行上下文引擎设计方案](../../design/specifications/context-engine.md)
-- [L3 LLM 摘要压缩方案](../../design/specifications/llm-summarization.md) — 7 段模板 + 质量校验 + 续写机制
+- [上下文管理与摘要](../../../docs/modules/context/architecture.md)
 - [会话持久化方案](../../design/specifications/session-persistence.md) — JSONL + Turn 级粒度 + 无索引设计
 
 ## 建议研究顺序

@@ -513,7 +513,7 @@ REPL 的"channel"是终端。若要把 REPL 回复也纳入 Outbox，需要：
 | [ADR-004 工具系统架构](../architecture/decisions/004-tool-system-architecture.md) | ToolExecutionContext 新增 commitToUser/turnId；ToolResult 新增 committedToUser | 中 |
 | [server-gateway.md](./server-gateway.md) | ChannelAdapter 接口不变；InboundRouter 改 drain 目标 | 小 |
 | [confirmation-ux.md](./confirmation-ux.md) | 远程确认卡片回执走 Outbox；Step 20 规划受益 | 待补 |
-| [turn-context-injection.md](./turn-context-injection.md) | 无影响 | — |
+| [逐轮上下文注入](../../../docs/modules/context/turn-context-injection.md) | 无影响 | — |
 | CLI REPL | Outbox 注入但终端适配器延后；不改用户可见行为 | 小 |
 
 ---

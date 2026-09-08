@@ -744,7 +744,7 @@ Level 1 完整执行规格（概念、竞品调研、架构决策、里程碑拆
 
 > **S7 当前边界：** 新投递已由权威 Delivery 日志、outbox 和状态目录接管。旧 `DeliveryPipeline`、`DeliveryQueue`、磁盘 store 与一次性 drainer 已整体退役，不再有生产装配或公开导出。以下内容仅描述历史实现及其演进背景。
 
-> **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。详见 [implementation-roadmap.md Step 12](../implementation-roadmap.md)。
+> **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。
 >
 > **顺序性与 Outbox（2026-04-21 更新）：** DeliveryPipeline 只负责**持久性**——崩溃恢复、重试。**顺序性**（per-user FIFO、因果依赖）由 [Outbox](./message-outbox.md) 承担。Pipeline drain 的目标从 `adapter.send` 改为 `outboxRegistry.of(target).post`，Pipeline 自身的全局 FIFO + 优先级排序语义保持不变，但该顺序只影响"何时提交到 Outbox"，**不保证用户可见的出队顺序**——那是 Outbox 的职责。相关决策见 [ADR-007](../architecture/decisions/007-message-outbox.md)。
 >

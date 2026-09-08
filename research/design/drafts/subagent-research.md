@@ -7,7 +7,7 @@
 - **写什么**:长期愿景 / v1 范围(纳入 + 推迟) / 设计原则 / 待 spec 锁定的开放问题
 - **不写**:修订记录 / "已拍板"决策时间戳 / "v1 状态: ✅ 必做"进度标签 / "以下保留 N 点"等元注释 / 对历史讨论的回应或心智澄清
 - **更新方式**:原地改,不追加历史段;结论变了直接覆盖,不留旧版本注释
-- **与其他文档边界**:落地条目和里程碑 → [implementation-roadmap.md](../implementation-roadmap.md);最终架构决策 → `specifications/subagent-execution.md`(spec 阶段产出)
+- **与其他文档边界**:最终架构决策 → `specifications/subagent-execution.md`(spec 阶段产出)
 
 ---
 

@@ -8,7 +8,7 @@
 > 2. 基于三方对比设计出比它们更优的方案
 > 3. 拆解为独立可验证的渐进实现里程碑（M1-M9）
 >
-> **前置**：[persistent-service.md §7](./persistent-service.md)（顶层定位） · [implementation-roadmap.md P1](../implementation-roadmap.md)（进度）
+> **前置**：[persistent-service.md §7](./persistent-service.md)（顶层定位）
 > **已建基础**：[process-lock.ts](../../../packages/server/src/process-lock.ts) · [lifecycle.ts](../../../packages/server/src/lifecycle.ts) · [discovery.ts](../../../packages/server/src/client/discovery.ts)
 
 ---

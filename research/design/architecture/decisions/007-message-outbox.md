@@ -208,5 +208,4 @@ Outbox 为 adapter.send 加超时包装（默认 30s），防止 channel 卡死�
 
 - [消息 Outbox 详细规格](../../specifications/message-outbox.md)
 - [持久化服务设计方案 §4.7 Delivery Pipeline](../../specifications/persistent-service.md)
-- [implementation-roadmap.md Step 16.9](../../implementation-roadmap.md)
 - 对照行业方案：Slack per-channel timeline、Claude Code tool-authored UI、Temporal happens-after、Akka actor mailbox、Event Sourcing

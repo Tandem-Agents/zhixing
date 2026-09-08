@@ -918,9 +918,9 @@ Transcript 持久化层的完整规格(JSONL 行格式 / 文件路径 / 上下�
 
 **身份字段从 header 拆出 meta.json 的设计动机**:可变身份(name / archived / preferredModel 等)与不可变内容日志各自独立演进,身份改动不重写整条 JSONL;同时 `sessionId` 已迁移为 `conversationId`(语义对齐"对话身份"而非"会话实例")。
 
-### 9.3 上下文架构 → 见 [context-architecture.md](./context-architecture.md)
+### 9.3 上下文架构 → 见 [上下文管理架构](../../../docs/modules/context/architecture.md)
 
-上下文管理的完整设计见 [context-management-v3-redesign.md](./context-management-v3-redesign.md)（2026-05-11 更新：原指向的 context-architecture.md v1.2 已废弃——Tier 多级压缩 / 场景参数化 / 动态驱逐 / recall_history / Pinning 均已从 `packages/` 砍除；新范式为 cache 第一优先 + 段式 SegmentManager + tools 满载稳定，Phase 1 已实施）。
+上下文管理的当前设计见[上下文管理架构](../../../docs/modules/context/architecture.md)；本文件中的旧压缩与原文存储说明不构成当前上下文合同。
 
 核心要点（2026-05-11 更新后）：
 
@@ -930,7 +930,7 @@ Transcript 持久化层的完整规格(JSONL 行格式 / 文件路径 / 上下�
 - 段切换复用 `CompactMarker`（扩展 `segmentId` / `structuredSummary` 选填字段）；段历史走 `Conversation.segmentMetadata`
 - `recall_history` / `pinnedMessageIds` / Tier 压缩 / Turn 驱逐机制**已删除**，不再是当前路径
 
-> **历史留存**：本节曾包含"三段窗口压缩方案"（长期摘要 + 中期摘要 + 近期原文），于 2026-04-17 被 [context-architecture.md](./context-architecture.md) 取代。撤销理由见 ADR-CM-011。完整原文存于 git 历史 `conversation-model.md@v2.0`。
+> **历史留存**：本节曾包含"三段窗口压缩方案"（长期摘要 + 中期摘要 + 近期原文），于 2026-04-17 被 context-architecture.md（历史文档，已退役） 取代。撤销理由见 ADR-CM-011。完整原文存于 git 历史 `conversation-model.md@v2.0`。
 
 ### 9.4 作用域选择
 
@@ -987,7 +987,7 @@ retained       = turns.slice(-retained_count)
 new_content    = [header, compactBefore, ...retained, newTurn?]
 ```
 
-`turnsCompacted` 是 `compact_end` 事件的精确字段 —— 本次 compact 事务替代的文件 Turn 数(见 [context-architecture.md](./context-architecture.md))。
+`turnsCompacted` 是 `compact_end` 事件的精确字段 —— 本次 compact 事务替代的文件 Turn 数(见 context-architecture.md（历史文档，已退役）)。
 
 **原子重写** —— `writeAtomic` 三步：
 
@@ -1581,7 +1581,7 @@ packages/cli/src/migrate/
 
 **原决策（2026-04-17 早）：** SessionRuntime 给 LLM 的上下文由长期摘要 + 中期摘要 + 近期原文三段构成。
 
-**现决策（2026-04-17）：** 撤销。上下文管理完整设计见 [context-architecture.md](./context-architecture.md)。采用场景参数化 + 多级压缩 + LLM 兜底架构。
+**现决策（2026-04-17）：** 撤销。上下文管理完整设计见 context-architecture.md（历史文档，已退役）。采用场景参数化 + 多级压缩 + LLM 兜底架构。
 
 **撤销理由**：三段窗口基线占用 70K+ tokens，违反"最小化是核心竞争力"的设计理念；且中期摘要常驻本质上是"防御性装入"，违反"按需召回"原则。
 
@@ -1595,7 +1595,7 @@ packages/cli/src/migrate/
 - 用户对话是资产,磁盘数据保真不可靠压缩改写
 - append-only 文件易于备份、易于审计、并发安全(无锁追加)
 
-**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"原子事务日志 + compact 触发原子截断"。具体归档策略见 [context-architecture.md](./context-architecture.md) §十四。磁盘治理机制见 §9.5 + ADR-CM-017（commitTurn 原子截断,至多 1 个 compact 行,无归档段）。
+**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"原子事务日志 + compact 触发原子截断"。具体归档策略见 context-architecture.md（历史文档，已退役） §十四。磁盘治理机制见 §9.5 + ADR-CM-017（commitTurn 原子截断,至多 1 个 compact 行,无归档段）。
 
 ---
 

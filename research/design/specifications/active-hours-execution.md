@@ -8,7 +8,7 @@
 > 2. 基于三方对比设计出比它们更优的方案
 > 3. 拆解为独立可验证的渐进实现里程碑（M1-M7）
 >
-> **前置**：[persistent-service.md §4.6](./persistent-service.md)（顶层定位） · [implementation-roadmap.md P2](../implementation-roadmap.md)（进度） · [daemon-level-1-execution.md](./daemon-level-1-execution.md)（Step 17 基础）
+> **前置**：[persistent-service.md §4.6](./persistent-service.md)（顶层定位） · [daemon-level-1-execution.md](./daemon-level-1-execution.md)（Step 17 基础）
 > **已建基础**：[Scheduler](../../../packages/core/src/scheduler/scheduler.ts) · [TaskPriority](../../../packages/core/src/scheduler/types.ts)
 
 ---

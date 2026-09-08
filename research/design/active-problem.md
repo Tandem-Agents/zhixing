@@ -37,5 +37,5 @@
 >
 > 最近一次沉淀：
 >
-> - 上下文管理范式重设（v1.2 → v2 → v3）已完成 Phase 1 实施并归档到 [`problems/context-management-redesign.md`](problems/context-management-redesign.md)，v3 设计权威为 [`specifications/context-management-v3-redesign.md`](specifications/context-management-v3-redesign.md)。
+> - 上下文管理的旧版本与实施记录已整合，现行说明见[上下文管理架构](../../docs/modules/context/architecture.md)。
 > - conversation scope 去 cwd 隔离（user-level 默认化）的完整设计已写入 [`specifications/conversation-scope-flattening.md`](specifications/conversation-scope-flattening.md)，按 spec 实施完成后归档到 [`problems/conversation-scope-flattening.md`](problems/)。
