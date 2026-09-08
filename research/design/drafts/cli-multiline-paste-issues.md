@@ -74,7 +74,7 @@
 - `typeahead-input.ts` 的 `submit()` 先用 `expandPastes(rawDraft, registry)` 得到 `expanded`，这说明原文在提交时已经可得。
 - 同一个 `submit()` 随后调用 `echoSubmittedDraft(rawDraft)`，把 raw draft 写入 scrollback。
 - `buildHistoryEchoLines(rawDraft)` 对 raw draft 做 wrap 后写入历史区，因此占位符会按字面进入 scrollback。
-- `research/internals/screen-rendering/overview.md` 明确当前 main buffer 使用终端原生 scrollback，已绘历史不可接管 / 重绘。因此不能依赖“之后再展开 scrollback 中的 token”。
+- [CLI 屏幕渲染与能力边界](../../../docs/modules/cli/screen-rendering.md) 明确当前 main buffer 使用终端原生 scrollback，没有通用的已绘历史接管与重建能力。因此不能依赖“之后再展开 scrollback 中的 token”。
 
 **影响**：占位符这个 UI handle 泄漏成了用户可见历史消息。用户发送的是一段原文材料，但历史区记录的是内部缩略 token，既不忠实，也无法在已绘 scrollback 中补救。
 
@@ -761,7 +761,7 @@ pnpm cli:build
 - `prepareUserTurnInput()` / `resolveInputMaterials()` 可能返回错误，例如：源文件消失、图片过大、非文本普通文件暂不支持。
 - 当 `preparedInput.errors.length > 0` 时，REPL 打印警告并 `continue`，不会调用 `controller.sendTurn(preparedInput.input)`。
 - 因此 scrollback 中可能存在一条用户消息 chip，但这条消息实际没有进入 agent，也不会进入核心对话事实。
-- `research/internals/screen-rendering/overview.md` 明确当前 CLI 不维护已绘历史状态，滚进 terminal scrollback 的内容归终端管理，应用无法可靠读取、修改或搬回。
+- [CLI 屏幕渲染与能力边界](../../../docs/modules/cli/screen-rendering.md) 明确当前 CLI 不维护完整历史画面的可重建模型，滚进 terminal scrollback 的内容归终端管理，应用无法可靠读取、修改或搬回。
 - 现有 `typeahead-input.test.ts` 覆盖成功提交时 history echo 显示 canonical 原文 / material chip，但没有覆盖材料解析失败时不应写入 scrollback。
 
 **背后需求**：scrollback 是用户对“已经发送内容”的信任记录。只要某次输入没有成功被核心接收，就不能提前把它渲染成已发送历史消息；否则用户会误以为 agent 已经看到了材料。

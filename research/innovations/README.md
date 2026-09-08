@@ -4,8 +4,6 @@
 >
 > 这里**不是**：
 > - 模块级规范（看 `research/design/specifications/`）
-> - 工作台（看 `research/design/active-problem.md`）
-> - 新功能草稿（看 `research/design/drafts-roadmap.md`）
 > - 已沉淀的问题对齐（看 `research/design/problems/`）
 > - 对外认知研究（看 `research/insights/` —— 那是学他家的）
 >

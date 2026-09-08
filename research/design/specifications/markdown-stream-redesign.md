@@ -3,7 +3,7 @@
 > **状态**: 待审阅 | **日期**: 2026-05-15
 > **前置实证**: `packages/cli/scripts/replay-md-trace.test.ts` + `replay-md-nested.test.ts`（重放 trace 实证根因）
 > **前置调研**: Claude Code / Codex / Gemini CLI / Aider / simonw-llm 五款主流 LLM CLI 的 markdown 流式渲染策略
-> **关联文档**: [cli-ui-design-language](./cli-ui-design-language.md)、[screen-render-architecture](../problems/screen-render-architecture.md)
+> **关联文档**: [CLI 视觉设计语言](../../../docs/modules/cli/visual-language.md)、[screen-render-architecture](../problems/screen-render-architecture.md)
 > **替换对象**: `packages/cli/src/output/markdown/markdown-stream.ts`（整体重写，状态机简化为 buffer + segment 二元）
 
 ## 目标

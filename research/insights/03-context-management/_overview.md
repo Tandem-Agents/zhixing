@@ -50,7 +50,6 @@
 
 - [知行上下文引擎设计方案](../../design/specifications/context-engine.md)
 - [上下文管理与摘要](../../../docs/modules/context/architecture.md)
-- [会话持久化方案](../../design/specifications/session-persistence.md) — JSONL + Turn 级粒度 + 无索引设计
 
 ## 建议研究顺序
 

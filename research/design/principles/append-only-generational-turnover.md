@@ -20,8 +20,8 @@ append-only 不是免费存储:必须配套 GC/保留窗与投影重建语义,�
 
 ## 起源与验证案例
 
-- transcript 持久化:append-only 分片唯一真相源,/clear 是追加事件而非毁盘,压缩永不反噬归档(`research/design/drafts/transcript-persistence-and-attention-window-architecture.md`)。
-- transcript GC 零索引写:"消除共享可变写优于锁住它",GC 只删文件不写索引,跨进程锁整个不需要(同上 §二)。
+- transcript 持久化：原文与窗口分离，耐久路径由权威日志驱动 append-only 分片投影；clear 是读取边界，压缩不截短原文，见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。
+- transcript GC 零索引写：GC 只删符合保留规则的文件、不改索引，避免与写入者竞争重写同一索引；不意味着追加、提交与恢复不再需要各自的并发保护（同上“存储保留与快照”）。
 - AuthorityCommitLog:每权威域唯一追加日志,状态推进以追加新记录表达,一切投影可重建(`research/design/modules/distributed-runtime/specification.md` §4.1)。
 - 信任事件链:HomeTrustEvent 哈希链只追加,撤销/换代是新事件(同上 §2.1)。
 - 换代键族:ownerEpoch / anchorEpoch / attempt / generation——旧代凭栅栏永久拒写,epoch 永不回滚(同上 §1.1/§6)。

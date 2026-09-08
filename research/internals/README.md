@@ -38,7 +38,7 @@ internals/
 
 | 域 | 内容 | 状态 |
 |---|---|---|
-| [屏幕渲染](./screen-rendering/overview.md) | 渲染范式(命令式无状态 vs 声明式状态树)与两种屏、能力边界与无状态层局限、alt-screen 滚动约束、DECSTBM 跨 buffer 继承根因与解法 | ✅ |
+| [CLI 屏幕渲染与能力边界](../../docs/modules/cli/screen-rendering.md) | 已迁移：两种屏幕、当前状态与历史边界、终端约束及防错规则 | 已迁移 |
 
 ## 维护原则
 

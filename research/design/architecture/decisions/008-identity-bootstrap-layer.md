@@ -23,8 +23,6 @@
 - **`config.json`**（已有，扩展使用）：服务商列表的非密元数据、LLM 角色（`llm.main` / `llm.secondary`）、workspace、agent、channel 公开字段（如 `appId`）、UI 偏好等
 - **`credentials.json`**（新增）：所有敏感字段——provider apiKey、channel 各类 secret（appSecret 等），按 `<entity-type>.<id>.<field>` 索引，与 `config.json` 通过 id 关联
 
-这是"已对齐产品方向 #2"（[`research/design/active-problem.md`](../../active-problem.md) 历史归档）的物理落地。
-
 ### 决策 2：AI 隔离凭证文件——复用现有安全体系，不新增机制
 
 知行的安全体系（[ADR-006](006-security-system-architecture.md)）已有完整支撑：

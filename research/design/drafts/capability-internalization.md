@@ -2,7 +2,7 @@
 
 > **性质**：需求确认文档（**已定稿**）——碎片经多轮裁决收敛，回答"要什么、为什么"；架构细节见末节「落地归属」指向的 spec。
 > **上游**：[skill-module.md](./skill-module.md)（skill 需求定稿）、[skill-authoring.md](../specifications/skill-authoring.md)（创作 spec，随本文档定稿重写）。
-> **取代**：[skill-new-ux-redesign.md](./skill-new-ux-redesign.md) 的 alt-screen 编辑屏方向——触发背景见 [screen-rendering/overview.md](../../internals/screen-rendering/overview.md)（alt-screen 无原生滚动、无状态层，长草稿"反复看、改了再看"撞硬天花板）。
+> **取代**：[skill-new-ux-redesign.md](./skill-new-ux-redesign.md) 的 alt-screen 编辑屏方向——触发背景见 [screen-rendering/overview.md](../../../docs/modules/cli/screen-rendering.md)（旧编辑屏的长草稿浏览受限；当前能力边界以该文档为准）。
 
 ## 一、本质与方向
 

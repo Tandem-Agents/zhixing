@@ -1,7 +1,7 @@
 # 项目存量文档清理与归位
 
 > 类型：用户协作文档<br>
-> 当前进度：已处理 14 份；上下文管理文档组已整合为三份现行正文。
+> 当前进度：已处理 27 份；CLI 视觉规范组与屏幕渲染概览已迁移，Staging 其余记录待核对。
 
 README 只承担入口、简要概览与导航，核心需求、架构设计和实现说明必须由职责明确的正文文档承载，不得以 README 代替。
 
@@ -46,6 +46,22 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 | `research/design/implementation-v3-context-phase1.md` | 同组整合，保留有效设计而非旧计划 | 上下文思想并入总体架构，任务列表设计校准后归入 `docs/modules/conversation/task-list.md`；旧文件已删除 |
 | `research/design/specifications/llm-summarization.md` | 同组整合，摘要职责按当前实现校准 | 有效摘要目标并入上下文架构；旧七段模板、策略链与计划清退，旧文件已删除 |
 | `research/design/specifications/turn-context-injection.md` | 同组整合，保留独立动态注入职责 | 更新至 `docs/modules/context/turn-context-injection.md`；旧文件已删除，相关导航与链接同步更新 |
+| `research/design/drafts/lifecycle-concepts.md` | 用户批准独立迁至 `docs/architecture/lifecycle-concepts.md` | 已保留三项概念与四个介入边界，校准窗口与 Run 的交错关系，清理草稿模板并同步引用；相关实现文档尚未迁移 |
+| `research/design/specifications/agent-runtime-lifecycle.md` | 用户批准独立迁至 `docs/modules/conversation/runtime-lifecycle.md` | 已保留四钩子、窗口稳定与提交边界，按当前 Host／Kernel／产品投影校准实现，清理旧实施步骤并同步引用 |
+| `research/design/drafts/transcript-schema-debt.md` | 用户批准删除已失效的债务备忘，不迁移 | 已删除并清理草稿索引引用；会话持久化主体文档仍待单独处理 |
+| `research/design/specifications/session-persistence.md` | 用户批准删除已归并的旧索引，不迁移 | 已删除并清理导航链接；保留历史文字记录，持久化主体文档与功能未动 |
+| `research/design/drafts/transcript-retention.md` | 用户批准删除已被替代的旧治理过程，不迁移 | 已删除并清理来源引用；后续持久化架构与对话模型文档保留待处理 |
+| `research/design/drafts/transcript-persistence-and-attention-window-architecture.md` | 用户批准保留核心语义、校准后迁至 `docs/modules/conversation/persistence.md` | 已保留两层分离、连续性、接受、clear、快照与存储治理；更新权威日志／投影边界，登记装填与读取差异，同步《对话模型》持久化段落与引用；未修改功能 |
+| `research/design/drafts/onboarding-connection-test.md` | 用户确认无独立保留价值，直接删除，不迁移 | 已删除并移除草稿索引条目；现有配置与就绪功能未改动 |
+| `research/design/drafts-roadmap.md` | 用户确认删除旧流程与不完整索引，不迁移 | 已删除并清理两处导航文字；其他草稿与正文未删除 |
+| `research/design/active-problem.md` | 用户确认删除空工作台，不迁移 | 已删除并清理旧流程引用与失效历史出处；关联设计正文保留 |
+| `research/design/specifications/cli-ui-design-language.md`、`input-zone-visual.md`、`research/design/problems/cli-ui-visual-foundation.md` | 用户批准整合为 `docs/modules/cli/visual-language.md` 与 `input-visual.md` | 已保留有效视觉原则、输入形态与渲染边界，校准当前实现并清退旧稿；Staging 底部信息行的生命周期与刷新顺序已承接，其余记录未动 |
+| `research/internals/screen-rendering/overview.md` | 用户批准单独迁至 `docs/modules/cli/screen-rendering.md` | 已复核并校准局部状态、缩放清回卷与失效实现引用；保留两种屏幕的取舍、能力边界与防错规则，同步引用；关联架构稿和复盘未迁移 |
+
+### 待处理检查点
+
+- `research/design/staging.md` 暂缓删除，不作为现行设计权威，也不整体迁移。它混有 CLI 输入交互、对话、工作场景等历史设计；随对应模块迁移核对，只吸收仍有效、有价值且尚未承接的内容，直接写入新目录的模块正文，不先补旧文档再迁移。
+- CLI 视觉规范组已迁移，下一步分析输入补全文档与 Staging 的候选操作记录，先提出方案再执行；粘贴材料、差异展示、对话、工作场景等其余记录随后随所属职责核对。全部记录已承接或确认无需保留、引用已处理后，再提请用户确认删除 Staging；不能仅因当前 topic 为空就删除。
 
 ## 五、完成标准
 

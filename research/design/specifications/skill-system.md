@@ -8,7 +8,7 @@
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 
 > **需求依据**:[drafts/skill-module.md](../drafts/skill-module.md)（需求已定稿）。本文是其**架构实现规格**,不重述需求论证。
-> **相关规格**:[agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md)（窗口级 system prompt 重建）、[上下文管理架构](../../../docs/modules/context/architecture.md)（cache 边界）、[lightweight-tool-loop.md](./lightweight-tool-loop.md);[ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)。早期 prompt 方案见 [archive/prompt-system.md](./archive/prompt-system.md)，仅作历史背景。
+> **相关规格**:[运行体生命周期钩子](../../../docs/modules/conversation/runtime-lifecycle.md)（窗口级 system prompt 重建）、[上下文管理架构](../../../docs/modules/context/architecture.md)（cache 边界）、[lightweight-tool-loop.md](./lightweight-tool-loop.md);[ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)。早期 prompt 方案见 [archive/prompt-system.md](./archive/prompt-system.md)，仅作历史背景。
 > **事实依据**:对接点均对已落地代码核实,标注 `文件:行/符号`。
 
 ## 〇、定位与范围
@@ -229,7 +229,7 @@ Index 产生时按 `index.mode` 过滤:标 `main` 进 main runtime 索引、标 
 第二版(技能管家)完整架构见 [skill-evolution.md](./skill-evolution.md);本节只列 v1 侧预留点 —— 第二版往这些点插入、不推倒重来:
 - **度量信号** —— `usage/` 旁路,v1 已用于 top-N 排序;v2 加「淘汰判断」第二消费者。
 - **来源标记** —— v1 来源全由目录定(`own` 本地产生 / `linked` 外部接入)、不设字段;v2 在 `own/` 内加 `stewardCreated` 布尔标记激活来源边界(技能管家只动自产)。插座 = `index.json` 是 per-id 可扩展状态对象,v2 加字段即纯增量。
-- **`load_skill`(度量采集点)** —— v1 建好,v2 直接接。**`systemPrompt` 可重建插座** —— ✅ 已落地（[agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md)）:双层 holder 保持窗口内稳定，skill 目录由 assignment-bound runtime 刷新并以权威 catalog revision 单调提交（§3.2/§3.3）。
+- **`load_skill`(度量采集点)** —— v1 建好,v2 直接接。**`systemPrompt` 可重建插座** —— ✅ 已落地（[运行体生命周期钩子](../../../docs/modules/conversation/runtime-lifecycle.md)）:双层 holder 保持窗口内稳定，skill 目录由 assignment-bound runtime 刷新并以权威 catalog revision 单调提交（§3.2/§3.3）。
 - **写隔离** —— v1 `linked` 物理只读;v2 决断 `own` 是否再物理细分(§二)。
 
 ## 十、测试拓扑

@@ -1,33 +1,33 @@
 # Staging — 架构设计与审核平台
 
-> 介于 [`active-problem.md`](active-problem.md) 工作台与 [`specifications/`](specifications/) 设计权威之间的中转平台。承载**需求已明确、架构待设计与审核**的内容 —— 设计审核通过后进入实施。一次只承载一个 staging topic;实施完成后"当前 staging"区整段清空,等下次启用换 topic。
+> 承载**需求已明确、架构待设计与审核**的内容 —— 设计审核通过后进入实施。一次只承载一个 staging topic;实施完成后"当前 staging"区整段清空,等下次启用换 topic。
 
 ## 原则
 
 本文档的维护规则。**原则稳定**;下方"当前 staging"区随 topic 生灭整段重写。
 
-- **定位**:本文件承载"需求已明确、架构待设计与审核"的内容。与 [`active-problem.md`](active-problem.md) 区别 —— active-problem 是"产品方向对齐工作台"(要跟用户**对齐需求**,讨论"做什么、不做什么"),staging 是"架构设计与审核平台"(需求已明确,**设计与审核架构**,讨论"怎么做")。需求未明确不放本文件,回 active-problem 对齐
+- **定位**:本文件承载"需求已明确、架构待设计与审核"的内容，讨论"怎么做"；需求未明确时先与用户对齐。
 - **工作流是设计 → 审核 → 实施**:架构设计需要至少一轮顶级架构师视角审查通过后才进入实施。审查中发现的真问题在本文件迭代修复,**不是上来就执行**
-- **单 topic 承载**:一次只一个 staging topic,与 active-problem 的"一次只一个问题"纪律同构。多个 staging 并存 → 拆到 `drafts/` 或独立 spec,不堆本文
+- **单 topic 承载**:一次只一个 staging topic。多个 staging 并存 → 拆到 `drafts/` 或独立 spec,不堆本文
 - **顶部原则段**:本文档自身维护规则,永久稳定
 - **内容区结构**:每个 staging topic 必须按"明确需求 → 架构设计"两段式组织
-  - **明确需求**:**严格保留用户原话精确表达的产品决策**,不擅自扩展、不引入未确认的次要事实、不写"哪些不在范围"等推断内容。任何对此段的修改都必须经过产品方向重新对齐(走 active-problem 流程,而非直接改本段)
+  - **明确需求**:**严格保留用户原话精确表达的产品决策**,不擅自扩展、不引入未确认的次要事实、不写"哪些不在范围"等推断内容。任何对此段的修改都必须经过产品方向重新对齐，而非直接改本段。
   - **架构设计**:实施层面的具体方案(目标 / 层次 / trade-offs / 清单 / 验收)。**本段是审查与迭代的主战场**,所有 grep 验证、调用链梳理、边界判断、范围确认都在本段做,审查发现的真问题在此段精确修复,直到审查通过才动手实施
 - **重启规则**:上一个 staging 沉淀完毕,下一个启用前**整段重写**"当前 staging"——不要在旧内容上叠加
-- **绝不留模糊问题**:已明确才放本文件,有疑问回 active-problem 重新对齐
+- **绝不留模糊问题**:已明确才放本文件,有疑问先重新对齐
 - **绝不长期残留**:实施完成立即清理(整段清空回模板态),staging 不是"已完成内容博物馆",归档去 problems / specifications
 
 ---
 
 ## 当前 staging
 
-> 暂无活跃 topic —— 上一个(普通交互模式输入区底部信息行)已实施完成,详细设计已沉淀至下方「最近一次沉淀」+ [input-zone-visual.md 形态 F](specifications/input-zone-visual.md) + `bottom-info/` 各模块 docstring。下个 topic 启用时整段重写本区。
+> 暂无活跃 topic —— 上一个(普通交互模式输入区底部信息行)已实施完成,详细设计已沉淀至下方「最近一次沉淀」+ [输入区视觉·底部信息行](../../docs/modules/cli/input-visual.md#底部信息行) + `bottom-info/` 各模块 docstring。下个 topic 启用时整段重写本区。
 
 ---
 
 > 最近一次沉淀:
 >
-> - **普通交互模式输入区底部信息行**(2026-05-23 完成):普通模式输入框上抬一行,框正下方留一行始终占位的信息提示行(横向分左 / 右双区、各可多块、左对齐 / 右对齐)。架构 —— **来源无关内容容器**:新建 `packages/cli/src/bottom-info/`(`BottomInfoModel` 左 / 右 `Map<id,content>` + `set` / `snapshot`,按 `BOTTOM_INFO_IDS` 声明序输出;`renderBottomInfoLine` 双区布局纯函数,左对齐 + 右对齐 + 填充 + 超宽右优先左截断,CJK 安全)。**渲染只读 `snapshot()`、永不读 buffer —— 来源无关是容器存在的根本理由(即便当前仅一个来源)**。`InputController` 作为**第一个来源**:`syncBottomInfo()` 在 buffer 内容变化时把 `esc 清空`(buffer 非空、dim)推进容器,接入点在 `syncBroker()` 内 **`broker.updateInput` 之前**(updateInput 同步触发 repaint 读 model,晚于它写会落后一帧)+ `attachKeypressOnly()` 末尾(start / resume 重建 buffer 后防 stale);`stop()` 清自己的块(来源负责自身 block 全生命周期)。渲染落点在 `computeRender` 普通模式(`panelLines.length===0`)追加,面板 / inline 态让位 —— 与普通输入框同生命周期是渲染结构的自然结果,对 chrome 组装 / cursor 公式透明。**最小可扩展内核**:不预建 subscribe / TTL / 优先级(无外部异步来源,YAGNI);未来外部来源持容器引用 `set` + 加 subscribe,`renderBottomInfoLine` 接口不返工。沉淀去向:`bottom-info/` 各模块 docstring 为首位权威 + [input-zone-visual.md 形态 F](specifications/input-zone-visual.md);cli 全套 86 文件 1675 测试通过(bottom-info 10 + 接入 6,含 updateInput 顺序守护 / resume 一致 / render 边界)
+> - **普通交互模式输入区底部信息行**(2026-05-23 完成):普通模式输入框上抬一行,框正下方留一行始终占位的信息提示行(横向分左 / 右双区、各可多块、左对齐 / 右对齐)。架构 —— **来源无关内容容器**:新建 `packages/cli/src/bottom-info/`(`BottomInfoModel` 左 / 右 `Map<id,content>` + `set` / `snapshot`,按 `BOTTOM_INFO_IDS` 声明序输出;`renderBottomInfoLine` 双区布局纯函数,左对齐 + 右对齐 + 填充 + 超宽右优先左截断,CJK 安全)。**渲染只读 `snapshot()`、永不读 buffer —— 来源无关是容器存在的根本理由(即便当前仅一个来源)**。`InputController` 作为**第一个来源**:`syncBottomInfo()` 在 buffer 内容变化时把 `esc 清空`(buffer 非空、dim)推进容器,接入点在 `syncBroker()` 内 **`broker.updateInput` 之前**(updateInput 同步触发 repaint 读 model,晚于它写会落后一帧)+ `attachKeypressOnly()` 末尾(start / resume 重建 buffer 后防 stale);`stop()` 清自己的块(来源负责自身 block 全生命周期)。渲染落点在 `computeRender` 普通模式(`panelLines.length===0`)追加,面板 / inline 态让位 —— 与普通输入框同生命周期是渲染结构的自然结果,对 chrome 组装 / cursor 公式透明。**最小可扩展内核**:不预建 subscribe / TTL / 优先级(无外部异步来源,YAGNI);未来外部来源持容器引用 `set` + 加 subscribe,`renderBottomInfoLine` 接口不返工。沉淀去向:`bottom-info/` 各模块 docstring 为首位权威 + [输入区视觉·底部信息行](../../docs/modules/cli/input-visual.md#底部信息行);cli 全套 86 文件 1675 测试通过(bottom-info 10 + 接入 6,含 updateInput 顺序守护 / resume 一致 / render 边界)
 > - **`/work` 工作场景二级选择面板**(2026-05-23 完成):`/work` 回车进入交互式二级选择面板(复用 `/resume` 候选面板 + arg-provider fuzzy 过滤),↑↓ 选择 + Enter 进场景(`/enter` 逻辑并入 `/work`),Ctrl+D 删 / Ctrl+R 改名 / Ctrl+N 新建(新增 `InlineTextPromptRegion` inline 输入态);命令形式收敛(删 `/work` 6 sub-command + `/enter` + `add --workdir`,archive 概念彻底移除)。架构 —— **inline-actions 能力模型**:`deletable` 单标志重构为 `InlineActionSupport { delete?/rename?/create? }`(`computeInlineActions` hook + `state.inlineActions`),provider 静态声明能力、cli callback 直调底层执行(声明 / 执行分离,消除死方法体);inline 编辑走 InputRegion + suspend/resume,REPL 主循环消费 `inline-edit-request`(非 callback fire-and-forget,无死锁)。收尾审查修复:argument 面板空 token 渐进式 Esc(截断为 no-op 时退一步清整行)+ 面板底部两行 hint 视觉(动作词亮 / 按键 dim、nav 行按 ghostText 动态插 Tab)+ 删除未接入生产的平行渲染器死代码(`typeahead-renderer` + `createTypeaheadPanel` + `cursor-invariants` kernel,净删 1431 行)。沉淀去向:各模块 docstring 为首位权威(`inline-text-prompt.ts` / `typeahead-panel.ts` / `typeahead-input.ts` / `argument-provider.ts`);cli 全套 85 文件 1659 测试通过
 > - **`/resume` 对话删除功能 + switchToNewConversation helper**(2026-05-22 完成):argument hint 行(`[conversation: …]`)替换为 "delete ctrl+d" 功能区,二次按 Ctrl+D 确认删除(第一次选中行整行红背景填充 + hint 切 "再按一次 ctrl+d 确认删除",第二次物理删除,任意其他键取消准备态);删当前对话自动新建空对话无缝衔接;main + work 双 scope。**架构 —— 删除能力作为 typeahead 通用基础设施的可插拔扩展**:`ArgChoiceProvider.delete?(value, signal)` opt-in 方法(仅物理删除)+ `SuggestionProvider.computeDeletable?(match)` hook(broker 不跨层访问 provider 内部,provider 自决,与 computeGhostText/computeArgumentHint 同款扩展点)+ `TypeaheadSessionState` 加 `deletable` / `deletePending`(**deletePending 单源不变量**:`setSessionState` 入参 `Omit<…,"deletePending">` + 内部强制 null + `markDeletePending` 专属 setter,所有 mutate 路径自动 reset → "任何其他按键取消" 由 broker 自身保证)+ broker `refresh(sessionId)` API(删后强制重 query 刷新候选)+ Panel 红背景渲染(`dangerPending` theme + strip ANSI 补齐填充)+ InputController Ctrl+D 完全重写(**释放原 EOF + deleteForward 两语义**,仅 deletable 候选激活时生效)+ repl `onCandidateDelete` 业务编排。`ConversationRepository.delete` 改真物理删除(`fs.rm recursive force`,对齐 WorkSceneRegistry 已确立的"废弃 trash"纪律,清理死代码软删 + 释放永不触发的 `isDefault` 守卫)。审查阶段抽 [`switch-to-new-conversation.ts`](../../packages/cli/src/runtime/switch-to-new-conversation.ts) helper 消除 `/new` + `onCandidateDelete` 两处"新建对话切换" 31 行重复(最小接口注入,顺带补全 `/new` 缺失的视图层 reset)。沉淀去向:[`leading-slash-alias.ts`](../../packages/cli/src/runtime/leading-slash-alias.ts) 同款各模块 docstring 为首位权威;9 包 5212 tests 零回归(broker 13 + switch helper 6 + paste 边界 6 新单测),严格 tsc 全包 exit 0
 > - **REPL 输入与命令体验三项小改**(2026-05-21 完成):需求三条 R1 首位 `、`→`/` 别名规范化(中文输入法误打 `、` 直接当 `/` 解析;显示层保留 `、` / 解析层走 `/`)/ R2 `/clear` UI 重置回刚进入交互模式初始态(advisories + welcome chrome + 一行 cleared notice,warnings 经 extraLines 注入避免清屏丢失可观测性)/ R3 `/workscene` → `/work` 改名(16 处字面同步,实施时发现 staging 统计漏了 work-mode.md:64 一处并补改)。新增 [`packages/cli/src/runtime/leading-slash-alias.ts`](../../packages/cli/src/runtime/leading-slash-alias.ts) `SLASH_ALIASES` 单源数组 + 两公开 API:单字符串 `normalizeLeadingSlashAlias(input)` 给 syncBroker(直接 override `ctx.draft`)、双字符串 `normalizeLeadingSlashAliasInExpanded(target, guard)` 给 submit(基于 `rawDraft.trim()` 首位判断、在 `expanded.trim()` 上替换,避免 paste 长内容折叠为 token 后首位恰为 `、` 时被误识别为命令);typeahead-input.ts syncBroker 用 spread + override draft、submit 用 InExpanded 双参数;repl.ts 顶层 startRepl 闭包 `clearScreenToInitial(extraLines?: readonly string[])` 复用 `rebuildAfterResize` + `initialRegionLines` 单源原语,buildSlashCommands 加注入参数,/clear handler 收集 warnings push 到本地数组(去前后 `\n`)、末尾按是否 chrome 分流(chrome 整屏重建 [advisories,"",welcome,"",warnings...,clearedNotice] 单一来源 / legacy 逐行 cliWriter)。沉淀去向:[`leading-slash-alias.ts`](../../packages/cli/src/runtime/leading-slash-alias.ts) 顶部 docstring 为首位权威(单源数组 + 两 API 语义分叉 + 单字符约束 + paste 边界推演);9 包 5193 tests 零回归(基线 +14 单测含 paste 边界 6 case),严格 tsc 全包 exit 0

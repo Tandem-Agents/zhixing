@@ -22,11 +22,11 @@
 | 014 | 子 Agent 体系（Task 工具 + AgentRoleProfile + ChildBroker + hierarchical EventBus） | [subagent-execution.md](subagent-execution.md) | 设计中 |
 | 015 | 用户秘密存储与首次引导（SecretStore + 旧明文迁移 + ready 状态 + 程序级向导） | [credentials-and-onboarding.md](credentials-and-onboarding.md) | 已实施 |
 | 016 | RuntimeSession 与配置热重载（REPL 内 `/config` + blue-green swap + 协同生命周期聚合） | [runtime-session-hot-reload.md](runtime-session-hot-reload.md) | 设计中 |
-| 017 | CLI 视觉设计语言（七条核心原则 + 视觉元素规范，覆盖配置编辑器 + REPL + 未来 TUI） | [cli-ui-design-language.md](cli-ui-design-language.md) | 设计中 |
-| 018 | 输入区视觉规范（box chrome + 多行扩展 + typeahead 选中行点阵纹理同源） | [input-zone-visual.md](input-zone-visual.md) | 设计中 |
+| 017 | CLI 视觉设计语言 | [视觉语言](../../../docs/modules/cli/visual-language.md) | 已迁移 |
+| 018 | 输入区视觉规范 | [输入区视觉](../../../docs/modules/cli/input-visual.md) | 已迁移 |
 | 019 | 轻量工具循环（来源无关原语：代码发起 + 注入工具集 + 多轮 LLM 决策，事实焊死/判断信任） | [lightweight-tool-loop.md](lightweight-tool-loop.md) | 设计中 |
 | 020 | MCP Host（船坞）（连接层 + 映射层 + 事实驱动接入 + 搜索引导） | [mcp-host.md](mcp-host.md) | 部分实施 |
-| 021 | 主对话运行体生命周期钩子（实例建立/run 前/run 后/实例销毁 四阶段 + cache 安全 system prompt 重建 + skill 索引边界重建） | [agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) | 设计中 |
+| 021 | 运行体生命周期钩子 | [运行体生命周期钩子](../../../docs/modules/conversation/runtime-lifecycle.md) | 已迁移 |
 
 ## 历史资料
 
@@ -35,7 +35,7 @@
 | 主题 | 文档 | 说明 |
 |---|---|---|
 | 早期常驻服务 / 调度 / 投递 / Memory maintenance 方案 | [persistent-service.md](persistent-service.md) | `HISTORICAL`；现行生产合同以 distributed-runtime 执行规格及对应模块现行文档为准 |
-| 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) 与 [上下文管理架构](../../../docs/modules/context/architecture.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
+| 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[运行体生命周期钩子](../../../docs/modules/conversation/runtime-lifecycle.md) 与 [上下文管理架构](../../../docs/modules/context/architecture.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
 
 ## 编写规范
 

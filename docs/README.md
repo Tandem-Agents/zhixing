@@ -27,9 +27,15 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 ## 架构与研究 / Architecture and research
 
+- [生命周期概念定义与规范](architecture/lifecycle-concepts.md)
+- [运行体生命周期钩子](modules/conversation/runtime-lifecycle.md)
+- [对话持久化与注意力窗口架构](modules/conversation/persistence.md)
 - [上下文管理架构](modules/context/architecture.md)
 - [逐轮上下文注入](modules/context/turn-context-injection.md)
 - [会话任务列表](modules/conversation/task-list.md)
+- [CLI 视觉设计语言](modules/cli/visual-language.md)
+- [输入区视觉](modules/cli/input-visual.md)
+- [CLI 屏幕渲染与能力边界](modules/cli/screen-rendering.md)
 - [架构概览 / Architecture overview](../research/design/architecture/overview.md)
 - [架构演进 / Architecture evolutions](../research/design/architecture/evolutions/README.md)
 
