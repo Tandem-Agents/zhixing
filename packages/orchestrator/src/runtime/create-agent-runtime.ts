@@ -494,7 +494,7 @@ export interface CreateAgentRuntimeOptions {
   executionMcpServers?: readonly string[];
   /**
    * 确认超时降级策略，透传给 secure-executor。默认 "deny"。
-   * 参见 remote-confirmation-execution.md。
+   * 参见 docs/modules/confirmation/surfaces.md。
    */
   confirmationFallback?: ConfirmationFallbackStrategy;
   /** Durable request/outcome boundary inherited by every broker in this runtime tree. */

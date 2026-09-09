@@ -854,7 +854,7 @@ describe("InboundRouter", () => {
     await registry.dispose();
   });
 
-  // ─── PR-3 / remote-confirmation-execution.md §3.5：pending-aware 拦截 ───
+  // ─── PR-3 / docs/modules/confirmation/surfaces.md：pending-aware 拦截 ───
 
   describe("confirmationHub pending-aware 拦截", () => {
     /**

@@ -172,7 +172,7 @@ type ConversationScope =
   | { kind: "workscene"; sceneId: string };              // 工作场景级:绑定到显式 workscene 子树
 ```
 
-**产品哲学**:conversation 跟着用户走、不绑 cwd —— 知行核心定位是"任意目录运行效果一致"(对齐 [ADR-003](../architecture/decisions/003-config-system.md) workspace 是用户级偏好)。default 是用户级,跨 cwd 共享;workscene 是用户显式创建的工作语境实体,绑该场景子树。**不引入 cwd 自动隔离 scope**,因为 hash 目录冒充产品概念是与产品哲学逆向的设计。
+**产品哲学**:conversation 跟着用户走、不绑 cwd —— 知行核心定位是"任意目录运行效果一致"(对齐 [配置架构](../../../docs/modules/configuration/architecture.md) workspace 是用户级偏好)。default 是用户级,跨 cwd 共享;workscene 是用户显式创建的工作语境实体,绑该场景子树。**不引入 cwd 自动隔离 scope**,因为 hash 目录冒充产品概念是与产品哲学逆向的设计。
 
 **路径源单一 dispatcher**:`conversationsDir(scope: ConversationScope): string` 是 conversation 模块的对外路径源 API,所有消费者(cli/serve 入口、TranscriptStore 等)通过此函数取得磁盘根目录,不独立拼接 path 字符串。未来增加 scope 时入口零改动(单点扩展)。
 
@@ -1204,7 +1204,7 @@ packages/cli/src/migrate/
 
 **决策**:cli / serve 入口都构造 `{ kind: "user" }` scope。不按 cwd 自动隔离对话。
 
-**理由**:知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [ADR-003](../architecture/decisions/003-config-system.md) workspace 是用户级偏好)。"project" 在产品中不对应任何用户可感知抽象 —— 按 cwd 算 hash 自动隔离对话是 IDE 工具思路(VSCode workspace 那种),与个人助手定位逆向。workscene 是用户显式创建的工作语境,与 cwd 自动隔离机制独立;接入第三方通道的 server 同样在 user scope 下工作,无需"项目级"再分层。
+**理由**:知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [配置架构](../../../docs/modules/configuration/architecture.md) workspace 是用户级偏好)。"project" 在产品中不对应任何用户可感知抽象 —— 按 cwd 算 hash 自动隔离对话是 IDE 工具思路(VSCode workspace 那种),与个人助手定位逆向。workscene 是用户显式创建的工作语境,与 cwd 自动隔离机制独立;接入第三方通道的 server 同样在 user scope 下工作,无需"项目级"再分层。
 
 ---
 
@@ -1338,7 +1338,7 @@ packages/cli/src/migrate/
 **决策**:cli / serve 入口都构造 user 作用域,不引入 cwd 自动隔离机制(无"环境作用域" / 无 ambient 升级 / 无 project 概念分支)。
 
 **理由**:
-- 知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [ADR-003](../architecture/decisions/003-config-system.md))
+- 知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [配置架构](../../../docs/modules/configuration/architecture.md))
 - "project" 在产品中不对应任何用户可感知抽象 —— 按 cwd 算 hash 自动隔离是 IDE 工具思路,与个人助手定位逆向
 - workscene 是用户显式创建的工作语境实体,与 cwd 自动隔离机制独立。需要场景隔离请用 workscene,无需基于 cwd 的隐式分层
 

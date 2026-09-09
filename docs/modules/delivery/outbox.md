@@ -107,6 +107,6 @@ Registry 的 `reapIdle` 按空闲时间与 Outbox.isIdle 判断回收；`dispose
 - [Outbox](../../../packages/core/src/delivery/outbox.ts)、[类型及事件](../../../packages/core/src/delivery/outbox-types.ts)、[Registry](../../../packages/core/src/delivery/outbox-registry.ts)。
 - [渠道效果映射](../../../packages/core/src/delivery/channel-effect.ts)、[Delivery 应用](../../../packages/core/src/delivery/application.ts)、[权威投递驱动](../../../packages/core/src/delivery/authority-pipeline.ts)。
 - [Host 装配](../../../packages/cli/src/setup-delivery.ts)、[渠道输入与回复投影](../../../packages/server/src/channels/inbound-router.ts)。
-- [权威终态投递合同 §5.5](../../../research/design/modules/distributed-runtime/specification.md#55-终态与状态投递)、[远程确认控制流](../../../research/design/specifications/remote-confirmation-execution.md)。
+- [权威终态投递合同 §5.5](../../../research/design/modules/distributed-runtime/specification.md#55-终态与状态投递)、[远程确认控制流](../confirmation/surfaces.md)。
 
 本文只定义消息顺序层及其直接交界，不展开整个调度、渠道、权限或分布式架构；不新增全局排序、第二份持久化、内部重试框架或终端 Channel 化。

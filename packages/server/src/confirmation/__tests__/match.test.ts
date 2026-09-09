@@ -1,7 +1,7 @@
 /**
  * match.ts 单元测试
  *
- * 覆盖 remote-confirmation-execution.md §3.6 的全部语义：
+ * 覆盖 docs/modules/confirmation/surfaces.md 的全部语义：
  *   - APPROVE_SET / DENY_SET 全覆盖（中英文 + 数字 + 口语）
  *   - 大小写无关
  *   - 前后空白 trim

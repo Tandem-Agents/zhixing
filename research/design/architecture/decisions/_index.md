@@ -6,13 +6,13 @@
 
 | # | 标题 | 状态 | 日期 | 关键依据 |
 |---|------|------|------|---------|
-| 001 | [Monorepo 项目结构](001-monorepo-structure.md) | 接受 | 2026-04-06 | OpenClaw 实践 + 业界标准 |
+| 001 | [仓库组织与包边界](../../../../docs/engineering/repository-structure.md) | 已迁移 | 2026-04-06 | 单仓多包取舍与当前工程边界 |
 | 002 | [Provider 层架构](../../../../docs/modules/providers/architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 源码分析 |
-| 003 | [配置系统](003-config-system.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 配置系统对比分析 |
+| 003 | [公开配置架构](../../../../docs/modules/configuration/architecture.md) | 已归并 | 2026-04-07 | 单一来源、路径、读写与用途投影；有效选型理由已承接 |
 | 005 | [CLI 架构](005-cli-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code CLI 架构深度对比 |
-| 006 | [安全系统架构](006-security-system-architecture.md) | 接受 | 2026-04-12 | OpenClaw + Hermes + Claude Code 安全系统三方深度对比 |
+| 006 | [安全架构](../../../../docs/modules/security/architecture.md) | 已归并 | 2026-04-12 | 当前安全机制与信任正文已归位 |
 | 007 | [消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md) | 接受 | 2026-04-21 | Slack / Claude Code / Temporal / Akka 多生产者顺序治理对照 |
-| 008 | [用户凭证存储与首次引导](008-identity-bootstrap-layer.md) | 接受 | 2026-05-01 | 凭证与公开配置物理分离 + 复用 bypassImmune 与 builtin 规则隔离 + 必要字段判定的程序级引导 |
+| 008 | [秘密存储架构](../../../../docs/modules/secrets/architecture.md) · [首次引导](../../../../docs/modules/secrets/onboarding.md) | 已归并 | 2026-05-01 | 有效取舍已承接，旧存储方案已替换；现状与差异见正文 |
 | 009 | [命令系统统一](../../../../docs/modules/cli/command-system.md) | 已归并 | 2026-06-03 | 有效决策与取舍已并入当前命令系统正文 |
 
 ## 使用说明

@@ -58,7 +58,7 @@ runner 按依赖完成状态启动 ready 节点，受 maxParallel 约束；节�
 
 父 abort 向编排及节点级联；fail-fast 只中止本次编排，不反向终止父运行。失败时跳过未开始节点并中止在跑节点，不启动后继；运行超时与用户中止分别表达，不把部分产物当成功。
 
-节点身份使用 `definitionId:runId:nodeId:1` 作为 child operation identity。存在父资源预留上下文时，子执行派生 child lease；模型计量、工具授权沿父调用上下文进入，结果返回父产品链，不建立第二提交源。
+节点身份使用 `definitionId:runId:nodeId:1` 作为 child operation identity。存在父资源预留上下文时，子执行派生 child lease；模型计量、工具授权沿父调用上下文进入，结果返回父产品链，不建立第二提交源。共享执行机制见[子 Agent 架构](../subagents/architecture.md)，Task 的批次上限与文本 trailer 不作为编排节点协议。
 
 终态要求：所有终态都应先结算、释放子资源，再允许父节点终态推进。当前 `runChildAgent` 在子执行清理后结算、释放租约，并将结算或释放异常转为失败结果；但 runner 通过 `Promise.race` 可在中止或超时时提前返回，`drainRunning` 等待的也是该包装结果，而非底层执行清理完成。因此当前编排返回不能保证子资源已释放，也不能保证随后发生的清理失败进入编排结果；这是实现与终态要求的差异，不是放宽要求。
 

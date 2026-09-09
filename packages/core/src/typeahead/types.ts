@@ -862,7 +862,7 @@ export interface ITypeaheadBroker {
  * 渲染器能力声明 —— broker 在构造 SuggestionItem 时可据此裁剪字段，
  * 避免渲染器不支持的特性被计算出来后浪费。
  *
- * 类比 confirmation-ux.md 的 `RendererCapabilities` —— 同一份设计套路。
+ * 类比 docs/modules/confirmation/architecture.md 的 `RendererCapabilities` —— 同一份设计套路。
  */
 export interface TypeaheadRendererCapabilities {
   /** 支持 ghost text 显示（inline，不在 dropdown 里） */

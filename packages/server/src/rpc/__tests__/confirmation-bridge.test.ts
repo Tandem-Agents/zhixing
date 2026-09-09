@@ -1,7 +1,7 @@
 /**
  * ConfirmationBridge 单元测试
  *
- * 覆盖 remote-confirmation-execution.md §3.9：
+ * 覆盖 docs/modules/confirmation/surfaces.md：
  *   - request 事件按 conversation observer 过滤推送
  *   - resolved 事件按 conversation observer 过滤推送
  *   - admin-scoped 兜底（无 conversationId → 广播到所有 authenticated）

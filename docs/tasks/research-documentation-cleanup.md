@@ -1,7 +1,7 @@
 # 项目存量文档清理与归位
 
 > 类型：用户协作文档<br>
-> 当前进度：已处理 65 份；工具体系文档组已迁移，待用户审查。
+> 当前进度：已处理 84 份；仓库组织与包边界文档已迁移，待用户审查。
 
 README 只承担入口、简要概览与导航，核心需求、架构设计和实现说明必须由职责明确的正文文档承载，不得以 README 代替。
 
@@ -63,6 +63,22 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 | `research/design/specifications/input-typeahead.md`、`research/design/migrations/command-system-unification.md`、`research/design/architecture/decisions/009-command-system-unification.md` | 用户批准按文档组迁移至 `docs/modules/cli/input-completion.md` 与 `command-system.md` | 已承接有效设计与统一命令取舍，校准输入生命周期、候选动作与宿主调用链；明确常用计分未接入、通用参数校验及超时行为边界，未改功能。三份旧文件已删除，相关索引、链接与源码注释引用已同步；Staging 只处理相关输入记录，其他职责保留 |
 
 ### 待处理检查点
+
+仓库组织处理记录：用户批准将 `research/design/architecture/decisions/001-monorepo-structure.md` 校准后迁至新建 `docs/engineering/repository-structure.md`，旧稿已删除。保留核心独立复用、单体／多仓／单仓多包取舍，按当前 workspace、包布局、统一版本及 dist 构建事实替换旧目录蓝图与独立发版表述；同步决策索引和文档入口。不改功能、不执行 Git 写操作，待用户审查。
+
+路径解析与资源隔离处理记录：用户批准将 `research/design/problems/phantom-resource-elimination.md` 校准后迁至新建 `docs/engineering/path-and-resource-isolation.md`，旧稿已删除。保留共享原语／领域路径／防回归三层职责、测试隔离及双作用域清理；防回归已核实由 Biome 实现，未将缺少 ESLint 配置误判为没有约束。校准数据根、配置覆盖、秘密归属与清理失败边界，删除旧审计数量及实施步骤，同步配置正文和文档入口引用；不改功能，未执行 Git 写操作，待用户审查。
+
+公开配置与运行期生效处理记录：用户批准将 `research/design/architecture/decisions/003-config-system.md`、`research/design/problems/repl-config-and-hot-reload.md`、`research/design/specifications/runtime-session-hot-reload.md` 整合为 `docs/modules/configuration/architecture.md` 与 `runtime-application.md`，README 仅导航，三份旧稿已删除。承接单一配置来源、有效选型理由、系统自动应用与状态保持要求；校准配置 replace／merge、用途投影、drain 后宿主换代及独立收敛反馈。明确无变更仍换代、通道重建、旧资源回滚与会话授权保持等差异，不以迁移替代功能修复。相邻路径治理、统一宿主和历史验收记录不整体迁移，直接引用已同步；待用户审查。
+
+秘密存储与首次引导处理记录：用户批准将 `research/design/problems/identity-bootstrap-layer.md`、`research/design/architecture/decisions/008-identity-bootstrap-layer.md`、`research/design/specifications/credentials-and-onboarding.md` 整合为 `docs/modules/secrets/architecture.md` 与 `onboarding.md`，README 仅作导航，三份旧稿已删除。保留密非密分离、多入口共享、逐次确认、必要字段与无 AI 引导的有效需求；校准设备本地 SecretStore、凭据换代、暴露日志、main 检查与用途投影。明确公开配置和凭据未共同原子提交、编辑后重读不等于完整重验。相关导航和边界检查脚本仅更新文档路径，未改产品功能。相邻配置热更新、分布式运行时及事故记录未迁移；待用户审查。
+
+安全、权限与信任处理记录：用户批准将 `research/design/architecture/decisions/006-security-system-architecture.md`、`research/design/specifications/security-system.md`、`permission-trust-tiers.md` 与 `research/design/drafts/permission-architecture-evolution.md` 整合为 `docs/modules/security/architecture.md`、`trust.md`，四份旧稿已删除，README 仅导航。保留六项用户需求、资源边界、操作影响与信任分离、授权反馈及设计取舍；校准 Trust 应用／Kernel／Host 和冻结权限责任，明确 critical 显式放行、安全助理输入／超时及 OS 隔离等实现差异。配置、凭证、分布式正文及历史审查记录不整体迁移，只同步直接引用；未改功能、未执行 Git 写操作，待用户审查。
+
+确认交互处理记录：用户批准将 `research/design/specifications/confirmation-ux.md` 与 `remote-confirmation-execution.md` 整合为 `docs/modules/confirmation/architecture.md`、`surfaces.md`，两份旧稿已删除；权限演进稿的 Confirm 选项小节改为引用，其余内容保留。承接决定与展示分离、理由回流、控制流独立、保守匹配及作用域取舍；按当前 Broker 耐久提交、Host binding、CLI/RPC 身份及渠道 challenge/grant 校准，明确旧规划与当前能力边界。入口、直接引用与源码注释同步，不改功能、不执行 Git 写操作，待用户审查。
+
+中断与取消处理记录：用户批准将 `research/design/specifications/interruptible-agent-loop-execution.md`、`remote-interruption-execution.md` 和 `research/design/drafts/intent-classification.md` 整合为新建的 `docs/modules/interruption/architecture.md` 与 `control-and-feedback.md`，三份旧稿已删除。保留信号所有权、流闲置检测、部分输出、工具协议清理、控制与拒绝二分、保守精确匹配、反馈单源与设计取舍；按当前 Product API／owner／assignment 和 Host 校准耐久取消、断线及关停，明确性能目标与实际保证、controller 监听释放及 CLI 原因透传边界。同步入口、容错交叉引用与三处源码注释；外部研究、调度及关停主体不随本组迁移，不改功能、不执行 Git 写操作，待用户审查。
+
+子 Agent 处理记录：用户批准将 `research/design/drafts/subagent-research.md` 与 `research/design/specifications/subagent-execution.md` 收敛至新建 `docs/modules/subagents/architecture.md`、`docs/modules/cli/subagents.md`，两份旧稿已删除。保留上下文隔离、受限委派、消费者对照、失败与成本可见性；按 Task 与编排节点两条生产链校准，明确子对话不持久化不等于没有耐久资源事实，并登记结算异常的事件缺口及 RPC 展示限制。已有编排正文补共享机制引用；外部研究、Workflow 及历史验收记录未整体迁移。不改功能、不执行 Git 写操作，待用户审查。
 
 工具体系处理记录：用户批准将 `research/design/specifications/tools-builtin.md`、`tool-permission-execution.md` 与 `research/design/architecture/decisions/004-tool-system-architecture.md` 收敛为新建 `docs/modules/tools/architecture.md`、`permission-integration.md`、`web-fetch.md`，三份旧稿已删除。保留协议／实现分离、操作级安全、声明接入、用户规则优先和预置规则生命周期等取舍；按当前 Host／Kernel／Trust 校准装配、批准与换代，保留 WebFetch 模式对照并明确缓存、取消及异常边界。安全／信任／确认专题、外部研究和已有 grep／轻量循环正文未整体迁移；仅同步直接引用与索引，源码仅改文档引用。未改功能，未执行 Git 写操作，待用户审查。
 

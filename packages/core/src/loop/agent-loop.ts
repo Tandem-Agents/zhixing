@@ -10,7 +10,7 @@
  * - 子生成器拆分：streamLLMCall / executeToolCalls 各司其职
  * - EventBus 一等公民：所有关键节点发射事件，支持完全解耦的观测
  *
- * 中断架构（详见 research/design/specifications/interruptible-agent-loop-execution.md）：
+ * 中断架构（详见 docs/modules/interruption/architecture.md）：
  *
  * - **入口包装 createInterruptController**：把外部 abortSignal 当作"一个可能的 abort 源"
  *   汇入 controller，loop 内部一律走 controller.signal。后续里程碑的看门狗 / fork 子 agent

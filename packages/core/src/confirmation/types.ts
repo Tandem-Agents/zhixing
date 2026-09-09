@@ -186,7 +186,7 @@ export interface ConfirmationRequest {
   /** 过期时间戳（ms）。超时后 broker 以 expired 自动 resolve */
   expiresAt: number;
 
-  // ── 远程确认回程地址（ADR-010 / remote-confirmation-execution.md §3.3） ──
+  // ── 远程确认回程地址（ADR-010 / docs/modules/confirmation/surfaces.md） ──
   /**
    * Turn 发起入口的元信息。由 secure-executor 从 ToolExecutionContext.turnContext
    * 透传填入。远程渲染器（TextConfirmationRenderer）读 `target` 字段决定把确认
@@ -320,7 +320,7 @@ export interface ConfirmationRenderer {
  * - **auto-approve-safe**：检查 `operationClass`，observe / internal 放行；
  *   external / critical 仍然拒绝。适合"希望定时任务超时后也能执行低风险操作"的运维。
  *
- * 参见 remote-confirmation-execution.md §3.8。
+ * 参见 docs/modules/confirmation/surfaces.md。
  */
 export type ConfirmationFallbackStrategy = "deny" | "auto-approve-safe";
 

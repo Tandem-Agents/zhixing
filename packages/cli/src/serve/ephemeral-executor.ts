@@ -31,7 +31,7 @@ export interface EphemeralTurnOptions {
    * 可选 turn 级上下文。scheduler → ephemeralRuntime 路径由 serve/command.ts
    * 填入 `{ turnId, turnOrigin: { channel: "scheduler", target?, triggeredBy: taskId } }`——
    * 用于远程确认把请求路由回创建任务时的通道对话
-   * （remote-confirmation-execution.md §3.3）。
+   * （docs/modules/confirmation/surfaces.md）。
    */
   turnContext?: TurnContext;
   /**

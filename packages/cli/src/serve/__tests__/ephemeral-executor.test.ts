@@ -277,7 +277,7 @@ describe("runEphemeralTurn", () => {
     expect(result.error).toContain("Incomplete Kernel terminal");
   });
 
-  // ─── PR-2 / remote-confirmation-execution.md §3.3：turnContext 透传 ───
+  // ─── PR-2 / docs/modules/confirmation/surfaces.md：turnContext 透传 ───
 
   it("可选 turnContext 透传给 runtime.run（scheduler → ephemeral 路径）", async () => {
     const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<KernelRunCompletion> => ({

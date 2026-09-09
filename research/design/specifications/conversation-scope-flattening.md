@@ -2,7 +2,7 @@
 
 > 触发于 2026-05-20：审视 conversation 持久化布局发现产品/实现错位。本 spec 承载完整设计与实施契约。
 >
-> 产品定位锚定：知行的核心产品哲学是「任意目录运行效果一致、对话跟着人走不跟着目录走」（[ADR-003 §workspace 是用户级偏好](../architecture/decisions/003-config-system.md#L62) 焊死）。本 spec 在 conversation 持久化层兑现这条不变量。
+> 产品定位锚定：知行的核心产品哲学是「任意目录运行效果一致、对话跟着人走不跟着目录走」（[配置架构：工作区交界](../../../docs/modules/configuration/architecture.md#工作区交界) 焊死）。本 spec 在 conversation 持久化层兑现这条不变量。
 
 ## 一句话
 
@@ -139,7 +139,7 @@ const store = new TranscriptStore(convDir);
 - 删 `{ kind: "project"; projectId; projectPath }` variant 段落（line ~172）
 - 补 `{ kind: "workscene"; sceneId: string }` variant —— **同步既有事实**，承认 workscene 已是 ConversationScope 合法 variant；workscene 子系统设计权威在其专属 spec，本处只承载 variant 类型契约本身，不展开 workscene 设计
 - 删「用户在编程项目中需要项目隔离的对话」理由段（line ~1465）
-- 加段落明示「conversation 跟着用户走、不绑 cwd」与 [ADR-003](../architecture/decisions/003-config-system.md#L62) 对齐
+- 加段落明示「conversation 跟着用户走、不绑 cwd」与 [配置架构](../../../docs/modules/configuration/architecture.md#工作区交界) 对齐
 - 加 `conversationsDir` 作为对外路径源 API 的契约说明
 
 最终 conversation-model.md `ConversationScope` 与代码同步到 `user | workscene` 二态。

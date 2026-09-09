@@ -2474,7 +2474,7 @@ S6 job interaction 耐久收敛须有结构性回归闭包：新增记录进入 
 | message-outbox.md（顺序层） | S3 | delivery-origin OutboxEntry 必带 delivery 流既有 idempotencyKey（其他非耐久消息仍可选），只承接 per-target 顺序，不再承担权威去重 / 生命周期；同 item 重驱复用原键 |
 | persistent-service.md（delivery 模块） | S3/S7 | S3 新增 AuthorityCommitLog delivery 流的权威投影 / drain 组件（与既有 queue/pipeline 并存，conversation 域切换后承接渠道回复与状态通知），落实 keyBody/key/intentDigest、串行唯一索引与十五行状态机，同步事件、stats、server RuntimeControlAdapter、CLI setup-delivery 与测试；S7 随 scheduler 接入删除公开生产接口 `IDeliveryPipeline.enqueue(EnqueueParams)` 并退役旧 queue/pipeline——旧 JSON 队列至此退出事实源 |
 | agent-runtime-lifecycle.md | S3/S7 | 生命周期写类钩子生效时点对齐"权威提交后触发" |
-| 权限模块（permission-architecture-evolution.md） | S4 | TrustRule / TrustRuleSnapshot 类型落地（自现有 PermissionRule 演化）、资产化分发、PermissionSnapshotLease、fail-closed 语义 |
+| [权限与信任模块](../../../../docs/modules/security/trust.md) | S4 | TrustRule / TrustRuleSnapshot 类型落地（自现有 PermissionRule 演化）、资产化分发、PermissionSnapshotLease、fail-closed 语义 |
 | **本文** | S6 | 回填：用户内容资产的数据面消费协议（surface 下载授权、断点续传、生命周期治理）与 **surface 预上传授权**（control 写依赖闭包的上传半边，绑定 requestId——assignment 域传输已在 §4.2 随 S5 落定）及验收项（含嵌套引用、root / dependency 跨层重复、非规范顺序、少列 / 多列、断点续传、缺件拒绝） |
 | **本文** | S10 | 回填：三路径停机收束协议的字段级（新增章节）与验收项 |
 

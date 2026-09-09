@@ -76,7 +76,7 @@ if (/readFileSync|writeFileSync/u.test(credentialRepository)) {
 }
 
 const isolationContract = await readFile(
-  path.join(root, "research/design/specifications/credentials-and-onboarding.md"),
+  path.join(root, "docs/modules/secrets/architecture.md"),
   "utf8",
 );
 for (const requiredBoundary of [

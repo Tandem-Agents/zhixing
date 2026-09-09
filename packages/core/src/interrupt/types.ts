@@ -1,7 +1,7 @@
 /**
  * 可中断 Agent Loop 协议层类型。
  *
- * 设计与背景:research/design/specifications/interruptible-agent-loop-execution.md
+ * 设计与背景:docs/modules/interruption/architecture.md
  */
 
 // ─── AbortReason 判别联合 ───

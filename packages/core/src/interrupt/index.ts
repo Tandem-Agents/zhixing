@@ -2,7 +2,7 @@
  * 可中断 Agent Loop —— 公开 API。
  *
  * 端到端架构与决策记录:
- *   research/design/specifications/interruptible-agent-loop-execution.md
+ *   docs/modules/interruption/architecture.md
  *
  * 本模块导出协议层 + 基础能力 + stream 看门狗 + 跨平台子进程优雅停止:
  * - AbortReason 判别联合 + WatchdogPolicy 配置类型 + createWatchdogPolicy 工厂

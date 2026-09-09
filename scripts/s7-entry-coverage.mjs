@@ -35,7 +35,7 @@ const dueDocuments = [
   ["research/design/specifications/message-outbox.md", "已整体退役"],
   ["research/design/specifications/persistent-service.md", "已整体退役"],
   ["research/design/specifications/agent-runtime-lifecycle.md", "权威提交"],
-  ["research/design/drafts/permission-architecture-evolution.md", "PermissionSnapshotLease"],
+  ["docs/modules/security/trust.md", "PermissionSnapshotLease"],
   ["research/design/modules/distributed-runtime/specification.md", "surface 预上传"],
 ];
 

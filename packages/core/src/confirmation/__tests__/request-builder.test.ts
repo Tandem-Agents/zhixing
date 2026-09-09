@@ -457,7 +457,7 @@ describe("buildConfirmationRequest", () => {
     expect(req.display.commandFull).toBe("\x1b[31mrm -rf /\x1b[0m");
   });
 
-  // ─── turnOrigin 透传(remote-confirmation-execution.md 中描述的回程地址机制) ───
+  // ─── turnOrigin 透传(docs/modules/confirmation/surfaces.md 中描述的回程地址机制) ───
 
   it("turnOrigin 字段被透传到 ConfirmationRequest", () => {
     const req = buildConfirmationRequest({

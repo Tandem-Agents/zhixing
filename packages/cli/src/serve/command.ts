@@ -633,7 +633,7 @@ async function runServerProcess(
     },
   });
 
-  // 3a. ConfirmationHub —— 远程权限确认聚合层（见 remote-confirmation-execution.md）
+  // 3a. ConfirmationHub —— 远程权限确认聚合层（见 docs/modules/confirmation/surfaces.md）
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
   // Scheduler generation owner 在任何长期消费者之前构造稳定产品端口；

@@ -47,7 +47,7 @@
 
 “用户消息应得到回复，失败也应有交代”的要求保留，但 retry 事件本身不证明通道已完成失败通知。旧稿提出的消息至少一次交付、重连期间缓冲、长时间重试提示、最终降级回复与跨会话故障隔离，必须由相应消息、通道和服务责任链证明，不能从本模块推导为全部已实现；其中重试提示的 10/30 秒示例不是现行通知合同。
 
-当前模型重试链没有 Provider/model failover，也没有通过非流式回退恢复流请求。旧四层模型保留的是恢复职责要完整、层间不可互相代替的思想，不保留“所有层复用同一熔断器”的预建要求。独立的[常驻服务](../../../research/design/specifications/persistent-service.md)与[可中断执行](../../../research/design/specifications/interruptible-agent-loop-execution.md)文档各有职责，其旧排期也不构成本模块的实现证明。
+当前模型重试链没有 Provider/model failover，也没有通过非流式回退恢复流请求。旧四层模型保留的是恢复职责要完整、层间不可互相代替的思想，不保留“所有层复用同一熔断器”的预建要求。独立的[常驻服务](../../../research/design/specifications/persistent-service.md)与[中断执行](../interruption/architecture.md)文档各有职责，历史排期不构成本模块的实现证明。
 
 ## 实现定位
 

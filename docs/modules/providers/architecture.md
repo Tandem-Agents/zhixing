@@ -33,7 +33,7 @@
 
 旧演进路线中的 Anthropic、缓存标记、思考传输和预算解析已有实现；旧 Phase 顺序不再是待执行计划。自动跨模型 failover、非流式回退、远程模型发现及精细缓存策略不能因旧稿列过就视为现有能力或本次承诺。
 
-专题权威分别为[模型元信息](model-metadata.md)、[模型角色](model-roles.md)、[思考控制](thinking-control.md)和 [Anthropic 适配](anthropic-adapter.md)。[秘密存储与首次引导](../../../research/design/specifications/credentials-and-onboarding.md)、[容错与模型调用恢复](../resilience/architecture.md)是相邻职责，不由 Provider 协议层重复定义。
+专题权威分别为[模型元信息](model-metadata.md)、[模型角色](model-roles.md)、[思考控制](thinking-control.md)和 [Anthropic 适配](anthropic-adapter.md)。[秘密存储](../secrets/architecture.md)、[首次引导](../secrets/onboarding.md)、[容错与模型调用恢复](../resilience/architecture.md)是相邻职责，不由 Provider 协议层重复定义。
 
 ## 实现入口
 

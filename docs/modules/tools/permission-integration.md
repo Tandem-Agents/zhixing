@@ -1,6 +1,6 @@
 # 工具与权限体系集成
 
-本篇说明工具如何接入安全分类、规则匹配和批准反馈，不定义整套信任政策或确认界面。安全模块正文尚在[安全系统](../../../research/design/specifications/security-system.md)、[权限与信任需求](../../../research/design/drafts/permission-architecture-evolution.md)及[确认交互](../../../research/design/specifications/confirmation-ux.md)；其中旧实施接线须与当前源码区分。
+本篇说明工具如何接入安全分类、规则匹配和批准反馈，不定义整套信任政策或确认界面；分别见[安全架构](../security/architecture.md)、[信任、授权与管理](../security/trust.md)及[确认交互](../confirmation/architecture.md)。
 
 ## 一、为何需要声明式接入
 

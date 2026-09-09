@@ -1,7 +1,7 @@
 /**
  * ConfirmationHub 单元测试
  *
- * 覆盖 remote-confirmation-execution.md §3.2 的全部不变量：
+ * 覆盖 docs/modules/confirmation/surfaces.md 的全部不变量：
  *   - attach/detach 生命周期
  *   - INV-H1: 单 conversationId 唯一 broker
  *   - INV-H2: brokerId 全局唯一

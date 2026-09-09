@@ -285,7 +285,7 @@ zz stop
 - [架构总览](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/architecture/overview.md)
 - [常驻服务设计（历史材料，不作为当前实现合同）](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/persistent-service.md)
 - [Server Gateway 协议](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/server-gateway.md)
-- [安全系统](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/specifications/security-system.md)
+- [安全系统](../../docs/modules/security/architecture.md)
 - [输入补全](../../docs/modules/cli/input-completion.md)
 - [命令系统](../../docs/modules/cli/command-system.md)
 - [问题反馈](https://github.com/Tandem-Agents/zhixing/issues)

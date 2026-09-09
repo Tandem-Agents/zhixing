@@ -1,7 +1,7 @@
 /**
  * 文本 → ConfirmationDecision 匹配规则
  *
- * 远程确认（[remote-confirmation-execution.md §3.6]）的核心业务逻辑：
+ * 远程确认（[docs/modules/confirmation/surfaces.md]）的核心业务逻辑：
  * 用户在通道里回复任意文本后，这里把它翻译成 broker 可消费的 decision。
  *
  * 设计原则（详见 spec §3.6）：
