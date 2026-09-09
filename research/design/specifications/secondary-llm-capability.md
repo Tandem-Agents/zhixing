@@ -383,7 +383,7 @@ async call(input, ctx) {
 | MCP 大结果摘要 | light | 未来 | tool result > N tokens 时自动 distill |
 | 子 agent 返回压缩 | light | 未来 | sub-agent 完成后 summarize 给父 agent |
 | 通道入站分类 | light | 未来 | 入站消息选择 agent 时的轻量分类 |
-| **工作场景主对话**（work-mode） | power | **首个真实消费者** | 进入工作场景后，power 接管该场景的主对话循环；详见 [work-mode.md](work-mode.md) |
+| **工作场景主对话**（work-mode） | power | **首个真实消费者** | 进入工作场景后，power 接管该场景的主对话循环；详见 [工作场景架构](../../../docs/modules/workscene/architecture.md) |
 | **不在辅助角色范围** | - | - | 主对话循环 / complex reasoning / 用户面对的最终输出（一律 main） |
 
 ---

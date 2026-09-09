@@ -408,50 +408,9 @@ type NonInteractiveStrategy =
 
 ### 6.2 TTY 渲染器状态机
 
-```
-           broker.onRequest(req)
-                    │
-                    ▼
-          ┌──────────────────┐
-          │   enter raw mode │
-          │  (refcount +1)   │
-          └────────┬─────────┘
-                   │
-                   ▼
-          ┌──────────────────┐       ◀── up/down: move selected
-          │  renderPanel()   │       ◀── 0-9: hotkey select
-          │  (Ink-less       │       ◀── enter: confirm
-          │   manual ANSI)   │       ◀── ctrl+c: cancel → deny
-          └────────┬─────────┘       ◀── ctrl+d: cancel → cancelled
-                   │
-                   ▼
-          ┌──────────────────┐
-          │ selected option  │
-          │ .kind = ?        │
-          └───┬────────┬─────┘
-              │        │
-     inline   │        │ simple
-      input   ▼        ▼
-       ┌──────────┐  ┌──────────┐
-       │ switch   │  │ resolve  │
-       │ to input │  │ (broker) │
-       │ mode,    │  └──────────┘
-       │ buffer   │
-       │ text     │
-       └────┬─────┘
-            │ enter
-            ▼
-       ┌──────────┐
-       │ resolve  │
-       │ with note│
-       └──────────┘
-```
+通用选择的纯状态机、导航／快捷键、补充输入与 raw-mode 租约设计已承接至 [CLI 选择模块架构](../../../docs/modules/cli/selection.md)，这里仅保留权限职责：Broker 发起确认，权限渲染器将所选动作及补充文字映射回 `ConfirmationDecision`。
 
-**关键点**：
-- **raw mode 引用计数**（学习 Claude Code 的 `rawModeEnabledCount`）：多个模态并存时不互相关闭 TTY。
-- **Ctrl+C = deny**（学习 Hermes）：不抛异常，直接 resolve deny，干净。
-- **Ctrl+D = cancelled**：区分"我拒绝这个操作"和"我退出程序"——前者走 deny+rejection 逻辑，后者走 cancelled+session-end 逻辑。
-- **hotkey 与箭头导航并存**：初级用户箭头键，熟练用户按 `n` 直接拒绝。
+当前权限渲染器仍使用 `SelectOperationRegion`，尚未接入 `SelectionService`，不能把通用选择实现当作权限实现。原设计中 Ctrl+C 映射 deny、Ctrl+D 映射 cancelled 的区分属于权限侧的业务裁决，不是通用选择的默认行为；通用模块只返回取消原因。权限输入与拒绝理由的消费链仍由本文负责。
 
 ### 6.3 面板布局（示例：bash 命令）
 

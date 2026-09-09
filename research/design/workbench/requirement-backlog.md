@@ -45,7 +45,7 @@
 
 ## 最近完成的模块
 
-- [工作场景管理能力统一、目录管理与智能创建](./workscene-management-architecture.md)
+- [工作场景管理能力统一、目录管理与智能创建](../../../docs/modules/workscene/management.md)
 - [ZHIXING.md 分层上下文与约定注入](./zhixing-md-layered-context-architecture.md)
 
 ## 用户使用的提示词

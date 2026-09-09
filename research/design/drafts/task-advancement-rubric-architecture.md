@@ -870,22 +870,7 @@ C18 新增的验收项：
 
 #### C2：SelectionService 通用能力升级
 
-落地提交：
-
-- `e63ffe9` `feat(cli/selection): add reusable details disclosure`
-- `b9a441b` `fix(cli/selection): unify keypress translation`
-
-内容：
-
-- 若 Rubric 确认需要详情展开、编辑承接或多步短决策，先升级 `packages/cli/src/tui/selection/` 的通用协议与 presenter。
-- 不出现 Rubric 专属字段、分支或文案。
-- 保持 `/stop` 等既有调用不退化。
-
-审查重点：
-
-- 选择模块是否仍是领域无关短决策基础设施。
-- 交互能力是否可被其它场景复用。
-- 是否避免在 Rubric 侧临时拼 UI。
+详情展开、统一按键处理及领域无关边界已归入 [CLI 选择模块架构](../../../docs/modules/cli/selection.md)，此处不再重复定义通用协议。Rubric 侧只负责契约请求与选择结果的映射，不新增专用面板或状态机；C5 仍负责该业务适配。
 
 #### C3：推进基础类型、RunRecord 元数据与 AdvancementStore
 

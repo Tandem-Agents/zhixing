@@ -1,6 +1,6 @@
 # 模型思考控制 — 用户配置
 
-> Provider 层 + config 层既有需求(一直未做),与 [work-mode.md](work-mode.md) **正交**(work-mode 的 primaryRole 决定"用哪个角色的模型",本 spec 决定"那个模型思考多深";二者在 power/light 角色上协同,互不依赖)。本文档只写目标设计与实施计划。
+> Provider 层 + config 层既有需求(一直未做),与 [工作场景架构](../../../docs/modules/workscene/architecture.md) **正交**(work-mode 的 primaryRole 决定"用哪个角色的模型",本 spec 决定"那个模型思考多深";二者在 power/light 角色上协同,互不依赖)。本文档只写目标设计与实施计划。
 
 ## 总览与原则
 

@@ -57,18 +57,7 @@
 
 ### 2.3 Grep 工具
 
-| 维度 | OpenClaw | Claude Code | **知行策略** |
-|------|----------|-------------|-------------|
-| 实现 | 闭源 + 部分靠 exec grep | 基于 ripgrep 子进程 | **基于 ripgrep**（安装为可选依赖，降级为 Node.js 内置） |
-| 输出模式 | 未知 | 3 种（files_with_matches/content/count） | **3 种**（同 Claude Code，已验证好用） |
-| 默认输出 | 未知 | files_with_matches | **content**（直接展示匹配，更符合"搜索"直觉） |
-| 结果上限 | 未知 | 20,000 字符 / 250 条 | **30,000 字符 / 300 条**（与 bash 工具的 maxResultChars 对齐） |
-| 上下文行 | 未知 | -C/-B/-A | **支持 -C/-B/-A**，默认 -C 2 |
-
-**知行超越点：**
-- 默认展示内容而非文件名，减少一步操作
-- ripgrep 不可用时优雅降级为 Node.js 内置搜索
-- 上下文行默认 2（Claude Code 默认 0，经常需要手动指定）
+当前需求、搜索契约、默认参数和实现边界以 [grep 搜索架构](../../../docs/modules/tools/grep.md) 为准；保留默认返回内容、提供上下文和缺少 ripgrep 时仍可用的设计取舍，不再沿用旧参数表。
 
 ### 2.4 容错与重试
 

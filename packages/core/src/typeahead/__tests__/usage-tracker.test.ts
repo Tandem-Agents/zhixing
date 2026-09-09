@@ -1,7 +1,7 @@
 /**
  * UsageTracker 单元测试
  *
- * 覆盖面（input-typeahead.md §6.4 的所有数学性质 + 持久化边界）：
+ * 覆盖面（有界频度数学性质 + 可选文件存储边界，不代表 CLI 已启用持久化）：
  *   - 纯函数 decayAndIncrement / currentScoreOf 的正确性
  *   - 有界性：MAX_SCORE=32 的稳态不变量（§6.4.3）
  *   - 行为曲线：30/60/90 天不用的衰减（§6.4.4）

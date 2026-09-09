@@ -1,7 +1,7 @@
 # 项目存量文档清理与归位
 
 > 类型：用户协作文档<br>
-> 当前进度：已处理 27 份；CLI 视觉规范组与屏幕渲染概览已迁移，Staging 其余记录待核对。
+> 当前进度：已处理 47 份；工作场景文档组已迁移。
 
 README 只承担入口、简要概览与导航，核心需求、架构设计和实现说明必须由职责明确的正文文档承载，不得以 README 代替。
 
@@ -23,7 +23,7 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 
 ## 三、逐份审核与处理
 
-1. **确定审查单元。** 独立文档逐份分析；遇到同一模块的多版本、重设计或实施配套文档，先追溯该模块的文档谱系，列清相关文件的职责、先后与替代关系，作为一组整体分析。不因引用关系扩展到全局架构或其他模块。
+1. **确定审查单元。** 判定为独立文档或确定目标文档数量前，先核查正文引用、反向引用、同主题决策与迁移记录，必要时追查 Git 历史；没有 V2 文件不代表没有后续演进。独立文档逐份分析；同一模块的多版本、重设计或实施配套文档，列清各份职责、先后与替代关系，作为一组整体分析。区分本组正文、配套记录与相邻参考，不因引用关系扩展到全局架构或其他模块。
 2. **提出方案并等待审核。** 完整阅读本单元文档，核对必要的源码和引用，说明各份的时效性、保留价值、删改与合并建议，以及最终文档数量、职责和目录位置。迁移结果按当前有效职责组织，不按历史版本组织；保留有效需求与核心思想，过时设计和实现说明按最新有效设计及生产事实校准，不以改名搬迁代替更新。单份或整组方案均经用户批准后执行；出现目录缺口先按上节完善技能。
 3. **按批准执行。** 迁移、删除或更新，并同步相关链接、索引、附件及脚本中的路径引用。范围变化重新请求批准，不顺手修改产品功能。
 4. **反馈结果。** 检查内容没有误删、引用没有断开，简要报告实际处理结果，接着分析下一个审查单元，等待用户批准后再操作。
@@ -58,10 +58,31 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 | `research/design/specifications/cli-ui-design-language.md`、`input-zone-visual.md`、`research/design/problems/cli-ui-visual-foundation.md` | 用户批准整合为 `docs/modules/cli/visual-language.md` 与 `input-visual.md` | 已保留有效视觉原则、输入形态与渲染边界，校准当前实现并清退旧稿；Staging 底部信息行的生命周期与刷新顺序已承接，其余记录未动 |
 | `research/internals/screen-rendering/overview.md` | 用户批准单独迁至 `docs/modules/cli/screen-rendering.md` | 已复核并校准局部状态、缩放清回卷与失效实现引用；保留两种屏幕的取舍、能力边界与防错规则，同步引用；关联架构稿和复盘未迁移 |
 
+| `research/design/specifications/input-typeahead.md`、`research/design/migrations/command-system-unification.md`、`research/design/architecture/decisions/009-command-system-unification.md` | 用户批准按文档组迁移至 `docs/modules/cli/input-completion.md` 与 `command-system.md` | 已承接有效设计与统一命令取舍，校准输入生命周期、候选动作与宿主调用链；明确常用计分未接入、通用参数校验及超时行为边界，未改功能。三份旧文件已删除，相关索引、链接与源码注释引用已同步；Staging 只处理相关输入记录，其他职责保留 |
+
 ### 待处理检查点
 
+工作场景处理记录：用户批准将 `research/design/agent-vision.md`、`specifications/work-mode.md`、`drafts/workscene-management-architecture.md` 三份整合为 `docs/modules/workscene/architecture.md` 与 `management.md`，旧稿已删除。承接有效产品思想、统一管理和智能创建需求，按领域应用、assignment 提交、设备工作空间及 owner 会话恢复校准；Staging 中本模块记录归并，其他记录保留。未修改产品功能，迁移质量待用户审查。
+
+SSP 处理记录：用户批准将 `research/design/drafts/stepped-skill-protocol-adoption.md` 独立迁至 `docs/modules/skills/ssp-adoption.md`，旧稿已删除并更新导航。保留协议独立权威、采纳原则和分层集成方向；校准开发辅助技能与产品运行时的区别，以及正文入库不保留步骤附件、不能保证入口回退的现状。配套技能未改，未实现协议集成。
+
+技能处理记录：用户批准将 `drafts/skill-module.md`、`capability-internalization.md`、`skill-new-ux-redesign.md` 与 `specifications/skill-system.md`、`skill-authoring.md`（均原属 `research/design/`）整合为 `docs/modules/skills/architecture.md` 与 `authoring-and-admission.md`，五份旧稿已删除。保留渐进披露、能力内化、创作与管理分责、来源保护及独立接入审查；按 Skill Catalog、assignment 与制品提交校准实现，明确附件保留、模式更新、归档恢复、禁用补全及成功反馈的设计／实现差异。随后经用户批准将 `specifications/skill-evolution.md` 独立迁至 `docs/modules/skills/evolution.md` 并删除旧稿：保留自主沉淀、来源保护、用户接管、治理与反馈设计，删除过时接线，区分未实现要求、当前基础与候选机制。SSP 采纳记录已另行迁移，见上条；外部调研和历史审查记录未迁移。未改功能。
+
+编排与多视角处理记录：用户批准将 `file-based-orchestration-infrastructure.md` 与 `multi-perspective-divergence-convergence-architecture.md` 分别迁至 `docs/modules/orchestration/architecture.md`、`docs/modules/conversation/perspectives.md`，两份旧稿已删除。保留需求区与用户原话，校准通用模板能力、会话应用归属、耐久提交、资源和呈现；相邻子 Agent 规格及历史审查记录保留，不改功能。
+
+grep 处理记录：用户批准将 `research/design/drafts/core-grep-search-architecture.md` 迁至新建的 `docs/modules/tools/grep.md`，旧稿已删除；吸收 `release-0.1-readiness-issues.md` 的相关实现取舍，并将该文档与 `phase2-complete-agent.md` 的 grep 专节改为引用，其余内容保留。新文档区分搜索合同与 ripgrep 预筛选、编码、预算及展示传输现状；未改代码。
+
+编辑差异处理记录：用户批准将 `research/design/drafts/cli-edit-diff-rendering.md` 迁至新建的 `docs/modules/cli/edit-diff.md`，旧稿已删除。保留单次修改差异、展示隔离、静态 scrollback 与视觉取舍；回填现有生成器、统计和渲染上限，明确常规 REPL 的 RPC 剥离造成的展示接入缺口及极窄屏限制。相邻搜索、发布、任务推进文档保留，未修改代码。
+
+文本粘贴处理记录：`research/design/problems/multiline-paste-attachment.md` 已迁至 `docs/modules/cli/text-paste.md` 并删除旧稿；原粘贴追踪文档第 1～4、6、7 项的有效内容已承接，相关故障复盘保留。正文按当前检测、保活和提交链校准，未改功能。
+
+材料输入处理记录：用户批准将 `research/design/drafts/cli-multiline-paste-issues.md` 剩余第 5、8～15 项按共同输入与 CLI 采集两项职责迁移；已新建 `docs/modules/conversation/material-input.md` 和 `docs/modules/cli/material-input.md`，旧追踪文档删除。保留有效产品语义、路径意图与失败边界，校准当前 parts、能力检查及引用生命周期；明确统一材料存储未落地、字符串 handle 来源限制和提交回显与核心接受的差异。不改功能、不迁移故障复盘。
+
+选择模块处理记录：`research/design/drafts/selection-module-architecture.md` 已按用户批准迁至 `docs/modules/cli/selection.md`，旧文件删除；吸收 `confirmation-ux.md` 的通用状态机与租约思想、任务推进 C2 的详情与按键升级，相关章节改为引用。保留业务文档及故障复盘，明确权限接入、实例互斥与异常清理等设计／实现差异，未修改功能。
+
 - `research/design/staging.md` 暂缓删除，不作为现行设计权威，也不整体迁移。它混有 CLI 输入交互、对话、工作场景等历史设计；随对应模块迁移核对，只吸收仍有效、有价值且尚未承接的内容，直接写入新目录的模块正文，不先补旧文档再迁移。
-- CLI 视觉规范组已迁移，下一步分析输入补全文档与 Staging 的候选操作记录，先提出方案再执行；粘贴材料、差异展示、对话、工作场景等其余记录随后随所属职责核对。全部记录已承接或确认无需保留、引用已处理后，再提请用户确认删除 Staging；不能仅因当前 topic 为空就删除。
+- 输入补全、命令系统、选择模块、文本粘贴及材料输入已迁移；其余文档仍须核查谱系、提出方案并等待批准，不能将相邻材料默认视为单篇。
+- Staging 的粘贴材料、差异展示、对话、工作场景等其余记录随后随所属职责核对。全部记录已承接或确认无需保留、引用已处理后，再提请用户确认删除 Staging；不能仅因当前 topic 为空就删除。
 
 ## 五、完成标准
 

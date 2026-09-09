@@ -1,7 +1,7 @@
 /**
  * Typeahead 输入补全 — 类型定义
  *
- * 设计原则（见 research/design/specifications/input-typeahead.md §5）：
+ * 设计原则（见 docs/modules/cli/input-completion.md 与 command-system.md）：
  *   - Core 不认识 TTY / Ink / chalk / readline / prompt_toolkit
  *   - CommandDef 是命令的单一真相源，CLI / Web / gateway 各自 derive 视图
  *   - ArgSchema 是结构化的参数定义（判别式联合），不是 Hermes 的字符串 args_hint
@@ -411,7 +411,7 @@ export interface ICommandRegistry {
 
 /**
  * Usage tracker 持久化的单条记录。
- * 对应 input-typeahead.md §6.4.5 的数据格式 v2。
+ * UsageTracker 可选文件存储的数据格式 v2。
  */
 export interface UsageEntry {
   /** 已应用衰减后的 score，∈ [0, MAX_SCORE] */
@@ -423,7 +423,7 @@ export interface UsageEntry {
 /**
  * MRU 评分跟踪器。
  *
- * 实现 input-typeahead.md §6.4 的 bounded frecency 模型：
+ * 实现有界频度模型（见 docs/modules/cli/input-completion.md）：
  *   - score 本身有界（≤ MAX_SCORE=32）
  *   - 7 天半衰期
  *   - 30 天不用衰减到 ~5%

@@ -163,7 +163,7 @@ dispose 顺序与 reload 步骤 7 一致——共享同一序列。
 
 ### 4.1 注册（双轨制）
 
-REPL 当前 slash 命令走两套 [`input-typeahead.md`](input-typeahead.md) 描述的双轨制：
+本节以下是旧注册方案，不代表当前实现；双轨已清退，现行注册与宿主换代边界见[命令系统](../../../docs/modules/cli/command-system.md)。旧方案曾分为：
 
 - **legacy handler**（`buildSlashCommands` 内）：用户敲 `/config` 时实际执行的逻辑
 - **typeahead 元数据**（`REPL_COMMANDS` 数组）：自动派生 typeahead 候选 + 类目分组
@@ -684,6 +684,6 @@ rl.on("close", async () => {
 
 ## 十五、引用
 
-- 协同 spec：[`credentials-and-onboarding.md`](credentials-and-onboarding.md)（`runConfigEditor` 五级面板架构 + sections 注册 + writers 接口）· [`input-typeahead.md`](input-typeahead.md)（slash 命令双轨制注册）· [`security-system.md`](security-system.md)（`PermissionStore` / `ConfirmationBroker` 设施）· [`subagent-execution.md`](subagent-execution.md)（Task 工具的 closure capture 模式）
+- 协同 spec：[`credentials-and-onboarding.md`](credentials-and-onboarding.md)（`runConfigEditor` 五级面板架构 + sections 注册 + writers 接口）· [命令系统](../../../docs/modules/cli/command-system.md)（现行统一注册与执行）· [`security-system.md`](security-system.md)（`PermissionStore` / `ConfirmationBroker` 设施）· [`subagent-execution.md`](subagent-execution.md)（Task 工具的 closure capture 模式）
 - 协同 ADR：[ADR-005 CLI 架构](../architecture/decisions/005-cli-architecture.md) · [ADR-006 安全系统架构](../architecture/decisions/006-security-system-architecture.md) · [ADR-008 身份与引导层](../architecture/decisions/008-identity-bootstrap-layer.md)
 - 上下文：[`research/design/problems/repl-config-and-hot-reload.md`](../problems/repl-config-and-hot-reload.md)

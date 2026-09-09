@@ -12,7 +12,7 @@
 | 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
 | 005 | 安全系统 | [security-system.md](security-system.md) | 待审阅 |
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
-| 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
+| 007 | 输入补全与命令系统 | [输入补全](../../../docs/modules/cli/input-completion.md) · [命令系统](../../../docs/modules/cli/command-system.md) | 已迁移 |
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
 | 010 | 上下文管理架构 | [现行文档](../../../docs/modules/context/architecture.md) | 已迁移 |

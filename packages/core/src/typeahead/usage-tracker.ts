@@ -1,7 +1,7 @@
 /**
  * UsageTracker — bounded frecency MRU 评分器
  *
- * 实现 input-typeahead.md §6.4 的所有约束：
+ * 实现有界频度与可选文件存储；CLI 接入状态见 docs/modules/cli/input-completion.md：
  *   - score 有界 ≤ MAX_SCORE=32（稳态不超上限）
  *   - 7 天半衰期的 EMA 衰减
  *   - 30 天不用衰减到 ~5%，90 天衰减到 <GC_THRESHOLD 被自动 GC
@@ -108,7 +108,7 @@ interface UsageFileV1 {
 
 /**
  * 纯函数：根据前一条记录 + 当前时间，计算写入新一次使用后的 entry。
- * 完全符合 input-typeahead.md §6.4.2 的伪代码。
+ * 先衰减、再增量、最后封顶，保持评分有界。
  */
 export function decayAndIncrement(
   prev: UsageEntry | undefined,
