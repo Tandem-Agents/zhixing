@@ -91,7 +91,7 @@ PowerShell 出于安全不查当前目录，直接走 PATH → 命中全局 shim
      - `llm.secondary`（可选）：用于 I/O 边界净化任务——上下文压缩 / WebFetch distill / 工具结果摘要 / 子 agent 返回压缩 / 通道入站分类等。**没配 secondary 时自动落到 main 上**（仍保留隔离价值，仅放弃任务专门化和 cost 优化）
      - 每个角色绑定一个 `(provider, model)`，从 Layer 1 中选——main 和 secondary 可同 provider 也可不同
    - **未来方向**（仅记录、当前不做）：角色层可能扩到 3 级——例如"高级模型用于复杂任务"+"主模型用于日常便宜大量调用"+"低级模型用于 WebFetch 整理等更便宜场景"。当前两级是事实，方向已定
-   - 详见 spec [`secondary-llm-capability.md`](../specifications/secondary-llm-capability.md)
+   - 详见 spec [模型角色与推荐](../../../docs/modules/providers/model-roles.md)
 
 4. **位置：用户目录而非项目目录**
    - 用户身份相关的文件统一在 `~/.zhixing/`（Windows 下 `C:\Users\<user>\.zhixing\`）

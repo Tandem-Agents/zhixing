@@ -10,7 +10,7 @@
 > - **斜杠命令**：本文提及的 `/sessions` 命令已删除,统一为 `/resume`(列+切+resume 三合一)→ 见 [conversation-model.md §11.2](./conversation-model.md)
 > - **上下文管理**：本文为历史方案；现行窗口与段切换机制见[上下文管理架构](../../../docs/modules/context/architecture.md)。
 > - **LLM 摘要**：旧七段模板与 LLMSummarize strategy 已退役，当前摘要机制同见上述架构。
-> - **LLM 角色**：本文的二档(main/secondary)已演进为三档注册表(main/light/power)→ 见 [secondary-llm-capability.md](./secondary-llm-capability.md)
+> - **LLM 角色**：本文的二档(main/secondary)已演进为三档注册表(main/light/power)→ 见 [模型角色与推荐](../../../docs/modules/providers/model-roles.md)
 >
 > 阅读当前架构请以上述权威 spec 为准。本文保留用于追溯设计演进路径。
 
@@ -61,18 +61,7 @@
 
 ### 2.4 容错与重试
 
-| 维度 | OpenClaw | Claude Code | **知行策略** |
-|------|----------|-------------|-------------|
-| 429 处理 | 换 auth profile | 重试同模型 3 次 → 换模型 | **指数退避 + 可选 provider failover** |
-| 退避算法 | 有代码但主循环未使用 | 未明确 | **指数退避 × jitter**，基础 1s，最大 60s |
-| 超时处理 | LLM 超时 → compaction | 90s 空闲超时 → 非流式降级 | **60s 空闲超时 → 重试一次** |
-| 断路器 | overflow compact 最多 3 次 | auto-compact 失败 3 次停止 | **通用断路器：可配置失败次数和冷却期** |
-| Failover 层级 | 在 Agent Loop 外层 | 在 query() 内部 | **在 Agent Loop 外层**（Resilience 层职责） |
-
-**知行超越点：**
-- 真正使用指数退避（OpenClaw 有代码但没用，Claude Code 策略不公开）
-- 通用断路器模式，不只用于 compaction
-- Resilience 层独立于 Agent Loop，关注点清晰分离
+有效设计与当前实现已归入[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)。以该正文说明的重试、退避、熔断及输出安全边界为准；旧次数、超时重试和 Failover 设想不再作为当前能力说明。
 
 ### 2.5 会话持久化
 
@@ -152,13 +141,9 @@ L3: LLM 摘要压缩（昂贵，高质量）
 
 ### Phase 2B — 基础容错
 
-```
-2B-1: 指数退避重试
-  位置: packages/core/src/loop/ 新增 retry.ts
-  机制: Agent Loop 内拦截可恢复错误，指数退避重试
-  验证: mock 429 → 自动重试 → 成功
-  不修改 agent-loop.ts 主逻辑，通过 deps.callLLM 包装实现
+2B-1 的容错职责与实现位置见[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)，不再保留旧实施步骤。
 
+```
 2B-2: Token 估算
   位置: packages/core/src/context/ 新增 token-estimator.ts
   机制: 字符数 / 4 的经验公式（后续可接 tiktoken）

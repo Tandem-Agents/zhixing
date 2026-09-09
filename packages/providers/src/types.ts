@@ -147,10 +147,8 @@ export interface ProviderPreset {
   /**
    * 已知 model catalog（可选）。
    *
-   * 当前所有 preset 都不内嵌——budget 跟 PROTOCOL_BUDGET_DEFAULTS 一致时，内嵌
-   * 是负维护无价值（详见 research/design/drafts/model-budget-resolution.md）。
-   * 字段保留作扩展点：未来真有 model 的 budget 跟协议族默认显著不同
-   * （如 1M context 变体），届时按需补充。
+   * 仅收录有实际消费价值的元信息；不是服务商可接受模型的白名单。
+   * 目录、预算与能力的职责见 docs/modules/providers/model-metadata.md。
    */
   knownModels?: readonly ModelInfo[];
 }
@@ -440,7 +438,7 @@ export interface AdvancementConfig {
  * 网络出口配置——对应全局 `~/.zhixing/config.jsonc` 的 `network` 字段。
  *
  * 影响所有出站 HTTP（当前消费者：web_fetch；未来：webhook 投递 / MCP HTTP / 第二通道出站）。
- * 详见 [network-egress.md §十三](../../../research/design/specifications/network-egress.md)。
+ * 详见 [网络出口架构](../../../docs/modules/network/architecture.md)。
  */
 export interface NetworkConfig {
   /**

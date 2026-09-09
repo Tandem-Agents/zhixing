@@ -6,7 +6,7 @@
 >
 > - [server-gateway.md](./server-gateway.md) — RPC 协议层（含 Channel 接入）
 > - [persistent-service.md](./persistent-service.md) — Scheduler / Background Agent 集成点
-> - [message-outbox.md](./message-outbox.md) — TurnId 的消费者（因果依赖标签）
+> - [消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md) — TurnId 的消费者（因果依赖标签）
 
 ---
 
@@ -504,7 +504,7 @@ agent loop iteration 3: LLM 调用
 
 ### 5.3 TurnId（Outbox 因果标签载体，v2.3 新增）
 
-> 2026-04-21 引入。规格详见 [message-outbox.md](./message-outbox.md) §3.3 和 [ADR-007](../architecture/decisions/007-message-outbox.md)。
+> 渠道因果身份及当前 Slot 合同见[消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md#三身份队列与因果规则)。本节后续数据示例是早期模型，不定义当前运行记录结构。
 
 `turnIndex` 是 Turn 在 Conversation 内的**相对序号**，不足以做跨模块的引用（两个 Conversation 的 turnIndex=3 是同一个吗？当然不是）。为了让 Scheduler、DeliveryPipeline、Outbox 等组件能表达"这件事发生在某个 turn 内"的因果关系，引入**全局唯一的 TurnId**：
 
@@ -518,11 +518,11 @@ interface Turn {
 }
 ```
 
-**产生时机**：ConversationManager 在 turn 开始（`setBusy(true)` 之前）生成 turnId。该 turnId 贯穿：
+**当前生产接线**：渠道入口取得 turnIdentity，在执行开始回调中开启 Slot；该因果身份贯穿工具、调度来源及投递映射，不能继续按旧 `setBusy` 接线理解：
 
-1. **Agent Loop**：通过 `ToolExecutionContext.turnId` 透传给所有工具调用（参见 [ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)）
+1. **Agent Loop**：通过 `ToolExecutionContext.turnId` 透传给所有工具调用（参见 [工具体系架构](../../../docs/modules/tools/architecture.md)）
 2. **Scheduler**：工具创建的定时任务在 `task.createdInTurn` 记录该 turnId
-3. **Outbox**：turn 开始时 `outbox.openSlot({ slotId: turnId })`；turn 完成 `fillSlot` / 异常 `abandonSlot`
+3. **Outbox**：开始执行时 openSlot；权威非空回复经 Delivery 效果 fill，明确空完成才填空，authoritative 收尾不提前 abandon。默认 TTL 等原语行为与强因果合同的差异见 Outbox 正文，不能概括成“异常就放行”。
 4. **Transcript**：原始运行记录承接运行身份，用于事后审计跨组件因果链；当前 `runId` 与 `runIndex` 的区别见 §九。
 
 **为什么不复用 turnIndex**：

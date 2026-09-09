@@ -1,7 +1,7 @@
 /**
  * Outbox 类型定义
  *
- * 规格：[message-outbox.md](../../../../research/design/specifications/message-outbox.md) §3.3
+ * 规格：[消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md)
  *
  * Outbox 是叠加在有限发送效果之上的 per-target FIFO 串行化层。
  * 职责：顺序性（per-user 串行）+ 因果依赖（Phase 3 Turn Slot）。

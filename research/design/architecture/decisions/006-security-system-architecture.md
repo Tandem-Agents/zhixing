@@ -211,7 +211,7 @@ Windows: 无可用沙箱 → 不影响安全保证
 
 ## 相关决策
 
-- 依赖：[ADR-004 工具系统架构](004-tool-system-architecture.md)（工具执行管线是安全检查的宿主）
+- 依赖：[工具体系架构](../../../../docs/modules/tools/architecture.md)（工具执行管线是安全检查的宿主）
 - 被依赖：未来的 MCP 安全策略、插件安全审计
 
 ## 引用

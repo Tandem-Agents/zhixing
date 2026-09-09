@@ -1,8 +1,8 @@
 /**
  * Outbox — per-target 串行化出口
  *
- * 规格：[message-outbox.md](../../../../research/design/specifications/message-outbox.md) §3.4-3.5
- * 决策：[ADR-007](../../../../research/design/architecture/decisions/007-message-outbox.md)
+ * 规格：[消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md)
+ * 决策：[消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md)
  *
  * 不变量（必须保持）：
  * - INV-1 Per-Target FIFO：入队顺序 = 出队顺序

@@ -1,7 +1,7 @@
 /**
  * OutboxRegistry — 管理所有 per-target Outbox 实例
  *
- * 规格：[message-outbox.md](../../../../research/design/specifications/message-outbox.md) §3.4
+ * 规格：[消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md)
  *
  * 职责：
  * - 懒创建：首次访问某 target 时创建 Outbox

@@ -8,24 +8,22 @@
 
 | # | 功能模块 | 文档 | 状态 |
 |---|---------|------|------|
-| 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
-| 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
+| 001 | Anthropic Messages 适配器 | [当前正文](../../../docs/modules/providers/anthropic-adapter.md) | 已迁移 |
+| 002 | Provider 与模型调用架构 | [当前正文](../../../docs/modules/providers/architecture.md) | 已归并 |
 | 005 | 安全系统 | [security-system.md](security-system.md) | 待审阅 |
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
 | 007 | 输入补全与命令系统 | [输入补全](../../../docs/modules/cli/input-completion.md) · [命令系统](../../../docs/modules/cli/command-system.md) | 已迁移 |
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
 | 010 | 上下文管理架构 | [现行文档](../../../docs/modules/context/architecture.md) | 已迁移 |
-| 011 | 网络出口原语（@zhixing/network） | [network-egress.md](network-egress.md) | 已实施 |
-| 012 | 内置工具集（@zhixing/tools-builtin） | [tools-builtin.md](tools-builtin.md) | 已实施 |
+| 011 | 网络出口原语（@zhixing/network） | [网络出口架构](../../../docs/modules/network/architecture.md) | 已归位 |
 | 013 | 可中断 Agent Loop（中断协议 + idle 看门狗 + 协议清理） | [interruptible-agent-loop-execution.md](interruptible-agent-loop-execution.md) | 设计中 |
 | 014 | 子 Agent 体系（Task 工具 + AgentRoleProfile + ChildBroker + hierarchical EventBus） | [subagent-execution.md](subagent-execution.md) | 设计中 |
 | 015 | 用户秘密存储与首次引导（SecretStore + 旧明文迁移 + ready 状态 + 程序级向导） | [credentials-and-onboarding.md](credentials-and-onboarding.md) | 已实施 |
 | 016 | RuntimeSession 与配置热重载（REPL 内 `/config` + blue-green swap + 协同生命周期聚合） | [runtime-session-hot-reload.md](runtime-session-hot-reload.md) | 设计中 |
 | 017 | CLI 视觉设计语言 | [视觉语言](../../../docs/modules/cli/visual-language.md) | 已迁移 |
 | 018 | 输入区视觉规范 | [输入区视觉](../../../docs/modules/cli/input-visual.md) | 已迁移 |
-| 019 | 轻量工具循环（来源无关原语：代码发起 + 注入工具集 + 多轮 LLM 决策，事实焊死/判断信任） | [lightweight-tool-loop.md](lightweight-tool-loop.md) | 设计中 |
-| 020 | MCP Host（船坞）（连接层 + 映射层 + 事实驱动接入 + 搜索引导） | [mcp-host.md](mcp-host.md) | 部分实施 |
+| 019 | 轻量工具循环（程序发起、工具调度与场景校验） | [当前正文](../../../docs/modules/tools/lightweight-tool-loop.md) | 已迁移 |
 | 021 | 运行体生命周期钩子 | [运行体生命周期钩子](../../../docs/modules/conversation/runtime-lifecycle.md) | 已迁移 |
 
 ## 历史资料

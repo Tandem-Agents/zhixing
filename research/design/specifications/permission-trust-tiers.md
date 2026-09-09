@@ -1,6 +1,6 @@
 # 权限信任分级体系 — 架构设计（可执行级）
 
-> **定位**：把权限决策从"信任混入操作分类的静态规则"重构为「**操作影响 × 信任等级**正交 + **信任机制**为主、**AI 安全管家**研判灰色地带」的统一体系。需求与取舍依据见 [../drafts/permission-architecture-evolution.md](../drafts/permission-architecture-evolution.md)；现状见 [security-system.md](./security-system.md)、[tool-permission-execution.md](./tool-permission-execution.md)。
+> **定位**：把权限决策从"信任混入操作分类的静态规则"重构为「**操作影响 × 信任等级**正交 + **信任机制**为主、**AI 安全管家**研判灰色地带」的统一体系。需求与取舍依据见 [../drafts/permission-architecture-evolution.md](../drafts/permission-architecture-evolution.md)；现状见 [security-system.md](./security-system.md)、[工具与权限集成](../../../docs/modules/tools/permission-integration.md)。
 > **写作规约**：只写当前生效设计 + 决策依据 + 对接点（`文件:符号`）；不写版本号 / 修订史。
 
 ## 一、范围与分层纪律

@@ -8,7 +8,7 @@
 > 2. 基于三方对比设计出与已有架构契合且更优的统一抽象
 > 3. 拆解为按"用户可见性优先"排序的渐进实现里程碑(M1-M9)
 >
-> **前置**:[persistent-service.md §3.6](./persistent-service.md)(Orchestrator 层) · [conversation-model.md](./conversation-model.md)(Turn / SessionRuntime) · [tools-builtin.md](./tools-builtin.md)(工具协议)
+> **前置**:[persistent-service.md §3.6](./persistent-service.md)(Orchestrator 层) · [conversation-model.md](./conversation-model.md)(Turn / SessionRuntime) · [工具体系架构](../../../docs/modules/tools/architecture.md)(工具协议)
 > **已建基础**:
 > - [agent-loop.ts](../../../packages/core/src/loop/agent-loop.ts) · [llm-call.ts](../../../packages/core/src/loop/llm-call.ts) · [tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts)
 > - [run-agent.ts](../../../packages/cli/src/run-agent.ts) · [repl.ts](../../../packages/cli/src/repl.ts) · [run-agent.ts:680-703 `trackMessages`](../../../packages/cli/src/run-agent.ts#L680)(yield 流 → newMessages 重建)

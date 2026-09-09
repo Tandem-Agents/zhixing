@@ -27,7 +27,7 @@
 > **前置规格**：
 > - [confirmation-ux.md](./confirmation-ux.md) — Phase 1 已落地（Broker + TerminalRenderer + DisplayBody）
 > - [conversation-model.md §5.3](./conversation-model.md) — TurnId / Turn / SessionRuntime 生命周期
-> - [message-outbox.md](./message-outbox.md) — Outbox / EmissionSource / TurnSlot
+> - [消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md) — Outbox / EmissionSource / TurnSlot
 > - [persistent-service.md §7](./persistent-service.md) — daemon 定位
 >
 > **已建基础（必读）**：
@@ -421,7 +421,7 @@ export interface ConfirmationRequest {
 > 而非 `confirmation/types.ts`。原因：`TurnOrigin` 是 turn 层通用元信息，`ConfirmationRequest`
 > 是其使用者之一——让 confirmation 依赖 types 比反向更符合"依赖向下"原则。
 
-**与 EmissionSource 的关系**（[message-outbox.md §3.3](./message-outbox.md)）：`EmissionSource` 标"消息从哪里来"，`TurnOrigin` 标"确认请求要回哪里去"。两者正交，共用 `DeliveryTarget` 类型。
+**与 EmissionSource 的关系**（[消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md)）：`EmissionSource` 标"消息从哪里来"，`TurnOrigin` 标"确认请求要回哪里去"。两者正交，共用 `DeliveryTarget` 类型。
 
 **全链路注入清单**（3 个 turn 入口 + 2 个透传点）：
 
@@ -740,7 +740,7 @@ export function formatResolutionReceipt(
 
 ### 3.7 Outbox 协同：确认消息绕过 Outbox
 
-**问题**：Outbox（[message-outbox.md](./message-outbox.md)）为同一 `(channelId, to)` 提供 FIFO 串行化 + 因果依赖（`afterSlot`）。确认消息走 Outbox 会死锁：
+**问题**：Outbox（[消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md)）为同一 `(channelId, to)` 提供 FIFO 串行化 + 因果依赖（`afterSlot`）。确认消息走 Outbox 会死锁：
 
 ```
 turn 开始 → outbox.openSlot(turnId)        ← slot 打开

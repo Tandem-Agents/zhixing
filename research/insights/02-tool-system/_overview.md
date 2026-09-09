@@ -29,7 +29,7 @@
 - 5 阶段 15 步中间件管线，渐进实现
 - 协议/实现分离——工具定义与执行环境解耦
 - 结果分层预算（per-tool + session 级）
-- 详见 [ADR-004](../../design/architecture/decisions/004-tool-system-architecture.md)
+- 详见 [工具体系架构](../../../docs/modules/tools/architecture.md)
 
 ## 对应源码分析
 

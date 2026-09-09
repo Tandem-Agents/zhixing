@@ -1,7 +1,7 @@
 # 项目存量文档清理与归位
 
 > 类型：用户协作文档<br>
-> 当前进度：已处理 47 份；工作场景文档组已迁移。
+> 当前进度：已处理 65 份；工具体系文档组已迁移，待用户审查。
 
 README 只承担入口、简要概览与导航，核心需求、架构设计和实现说明必须由职责明确的正文文档承载，不得以 README 代替。
 
@@ -21,9 +21,11 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 
 历史与研究材料按其保留价值判断，不强行改成当前实现说明；目标位置已有同职责文档时，提出合并建议，保留独有内容，不制造重复权威。
 
+凝练不得损失有价值的比较关系、选型依据和设计理由；旧表格或图示若承担这些职责，应校准后保留或等效重构，不能仅因相关词句仍在就判定完整承接，迁移与复审均须核对。
+
 ## 三、逐份审核与处理
 
-1. **确定审查单元。** 判定为独立文档或确定目标文档数量前，先核查正文引用、反向引用、同主题决策与迁移记录，必要时追查 Git 历史；没有 V2 文件不代表没有后续演进。独立文档逐份分析；同一模块的多版本、重设计或实施配套文档，列清各份职责、先后与替代关系，作为一组整体分析。区分本组正文、配套记录与相邻参考，不因引用关系扩展到全局架构或其他模块。
+1. **确定审查单元。** 判定为独立文档或确定目标文档数量前，先核查正文引用、反向引用、同主题决策与迁移记录，必要时追查 Git 历史；没有 V2 文件不代表没有后续演进。不能只沿已知文件的链接找同组文档：须用模块中英文别名及核心子职责扫描全目录文件名与正文，纳入没有互链的专题；宣布该组处理完成前复扫剩余文件。独立文档逐份分析；同一模块的多版本、重设计或实施配套文档，列清各份职责、先后与替代关系，作为一组整体分析。区分本组正文、配套记录与相邻参考，不因引用关系扩展到全局架构或其他模块。
 2. **提出方案并等待审核。** 完整阅读本单元文档，核对必要的源码和引用，说明各份的时效性、保留价值、删改与合并建议，以及最终文档数量、职责和目录位置。迁移结果按当前有效职责组织，不按历史版本组织；保留有效需求与核心思想，过时设计和实现说明按最新有效设计及生产事实校准，不以改名搬迁代替更新。单份或整组方案均经用户批准后执行；出现目录缺口先按上节完善技能。
 3. **按批准执行。** 迁移、删除或更新，并同步相关链接、索引、附件及脚本中的路径引用。范围变化重新请求批准，不顺手修改产品功能。
 4. **反馈结果。** 检查内容没有误删、引用没有断开，简要报告实际处理结果，接着分析下一个审查单元，等待用户批准后再操作。
@@ -61,6 +63,26 @@ README 只承担入口、简要概览与导航，核心需求、架构设计和�
 | `research/design/specifications/input-typeahead.md`、`research/design/migrations/command-system-unification.md`、`research/design/architecture/decisions/009-command-system-unification.md` | 用户批准按文档组迁移至 `docs/modules/cli/input-completion.md` 与 `command-system.md` | 已承接有效设计与统一命令取舍，校准输入生命周期、候选动作与宿主调用链；明确常用计分未接入、通用参数校验及超时行为边界，未改功能。三份旧文件已删除，相关索引、链接与源码注释引用已同步；Staging 只处理相关输入记录，其他职责保留 |
 
 ### 待处理检查点
+
+工具体系处理记录：用户批准将 `research/design/specifications/tools-builtin.md`、`tool-permission-execution.md` 与 `research/design/architecture/decisions/004-tool-system-architecture.md` 收敛为新建 `docs/modules/tools/architecture.md`、`permission-integration.md`、`web-fetch.md`，三份旧稿已删除。保留协议／实现分离、操作级安全、声明接入、用户规则优先和预置规则生命周期等取舍；按当前 Host／Kernel／Trust 校准装配、批准与换代，保留 WebFetch 模式对照并明确缓存、取消及异常边界。安全／信任／确认专题、外部研究和已有 grep／轻量循环正文未整体迁移；仅同步直接引用与索引，源码仅改文档引用。未改功能，未执行 Git 写操作，待用户审查。
+
+Outbox 处理记录：用户批准将 `research/design/specifications/message-outbox.md` 与 `research/design/architecture/decisions/007-message-outbox.md` 合并至新建 `docs/modules/delivery/outbox.md`，两份旧稿已删除。保留因果需求、职责与方案对照、Slot 和 commitment 演进理由；按当前权威 Delivery／渠道效果／Host 校准。明确默认 TTL、发送失败及重启后内存 Slot 与强因果要求之间的差异，不把尝试排序写成送达保证。相邻文档仅同步直接引用与相关冲突说明，未迁移其主体，未改功能；待用户审查。
+
+网络出口处理记录：用户批准将 `research/design/specifications/network-egress.md` 校准后迁至新建的 `docs/modules/network/architecture.md`，旧稿已删除。保留共享防护、DNS 与代理取舍、两张代理对照表、结构化错误和资源所有权；补齐两种 fetch 的合同与 WebFetch／MCP／Host 消费链，明确代理 DNS、取消／连接池及诊断脱敏的实际边界，不把设计要求写成已实现保证。入口、规格索引、WebFetch 相邻说明与两处源码注释链接同步；相邻模块未整体迁移，无功能修改，待用户审查。
+
+MCP 处理记录：用户批准将 `research/design/specifications/mcp-host.md` 内的运行架构与后续接入演进整体收敛为 `docs/modules/mcp/architecture.md`、`onboarding-and-management.md`，旧稿已删除。保留连接／工具分离、统一安全、映射表、接入事实来源与两阶段搜索理由；按 Host 与执行设备生命周期、秘密投影和配置换代校准，明确工具筛选、命令解析、鉴权补录及来源校验的实际边界。同步入口、规格索引与轻量工具循环引用；外部 MCP 调研、通用轻量循环及相邻安全／配置文档各自保留，不改功能。迁移待用户审查。
+
+轻量工具循环补正：迁移时将四种 LLM 使用形态的对比表压成概述，丢失横向比较与选型价值，首次复审未识别。经用户指出并批准，已按当前实现补回对比表与选择依据；保留原语与单发调用、主对话、Task 子 Agent 的关系，不恢复过时接线。此项应重新核对，不能沿用此前“完整承接”的结论。
+
+轻量工具循环处理记录：用户批准将 `research/design/specifications/lightweight-tool-loop.md` 校准后迁至 `docs/modules/tools/lightweight-tool-loop.md`，旧稿已删除。保留程序发起的小任务、事实约束与模型判断分离、场景校验和副作用保护，校准当前输入校验、历史截断、异常与取消边界及 MCP／工作场景两条宿主接线；清退旧实施说明与未经证明的升级承诺。MCP 正文只同步原语引用，业务职责保留；文档入口与规格索引同步，历史检查表不改。不改功能，待用户审查。
+
+容错处理记录：用户批准将 `research/design/specifications/resilience-engine.md` 校准后迁至新建的 `docs/modules/resilience/architecture.md`，旧稿已删除。`phase2-complete-agent.md` 的容错专节与 2B-1 旧步骤改为引用，其他职责保留。承接自动恢复、失败可见、故障隔离和策略分离思想，回填当前包装器、内容输出安全边界、取消／watchdog、事件及熔断生命周期，明确分类次数表不驱动重试、等待取消与冷却探测等现状限制，不把跨层规划写成现行能力。Provider 引用与文档入口同步；外部调研、中断执行、常驻服务及调度器不随本次迁移。不改功能，待用户审查。
+
+Provider 处理记录：用户批准将 `research/design/architecture/decisions/002-provider-architecture.md`、`research/design/specifications/provider-layer-evolution.md`、`anthropic-adapter.md`、`secondary-llm-capability.md`、`role-recommendations.md`、`thinking-control.md` 与 `research/design/drafts/model-budget-resolution.md` 七份正文收敛为 `docs/modules/providers/architecture.md`、`model-metadata.md`、`model-roles.md`、`anthropic-adapter.md`、`thinking-control.md` 五份正文。旧稿已删除，相关引用同步；保留协议与角色分层、目录非白名单、预算优先级、调用隔离、原生思考参数和签名保真，按 Host binding、秘密投影及当前消费链校准。明确 SDK 重试与业务恢复区别、思考目录和方言接线限制、未知型号校验边界，不改功能。容错、秘密存储与首次引导、配置系统、轻量工具循环和外部调研各有独立职责，未随本组迁移；Staging 相关角色分流记录已归位，其他记录保留。下一候选为容错引擎，须先分析完整关联范围，再报用户批准。
+
+用量展示处理记录：用户批准将 `research/design/specifications/usage-display.md` 迁至 `docs/modules/cli/usage-display.md`，旧稿已删除，导航同步。保留安静默认、按需详情与成本透明的意图，校准状态条、容量估算／API 消耗／缓存、会话查询与子任务拆分、整理反馈；明确费用、构成分析及旧显示配置未落地，展示标尺不等于自动切段阈值。模型预算解析、子 Agent 正文及 Staging 历史记录不随本次迁移，不改功能。
+
+工作场景漏项补迁：用户批准将 `research/design/drafts/work-scene-workdir-binding.md` 的按需绑定与目录输入设计意图补入已有 `docs/modules/workscene/management.md`，旧稿已删除。明确自动引导及专用目录输入尚未形成完整实现，取消不等于默认目录授权，材料采集不等于绑定；清退旧接线、成本估算与未经当前验证的终端矩阵。整组四份旧正文收敛为两份现行正文，本次补迁待用户审查。`staging.md` 为共享配套记录；权限、对话作用域、ZHIXING.md 注入及全局架构材料各有独立职责，不随本组整篇迁移。漏查教训已补入上方审查单元规则。
 
 工作场景处理记录：用户批准将 `research/design/agent-vision.md`、`specifications/work-mode.md`、`drafts/workscene-management-architecture.md` 三份整合为 `docs/modules/workscene/architecture.md` 与 `management.md`，旧稿已删除。承接有效产品思想、统一管理和智能创建需求，按领域应用、assignment 提交、设备工作空间及 owner 会话恢复校准；Staging 中本模块记录归并，其他记录保留。未修改产品功能，迁移质量待用户审查。
 

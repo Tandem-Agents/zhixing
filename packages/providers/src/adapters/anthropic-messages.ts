@@ -3,7 +3,7 @@
  *
  * 通过 @anthropic-ai/sdk 直连 Anthropic Messages API。
  *
- * 设计决策（详见 research/design/specifications/anthropic-adapter.md）：
+ * 设计决策（详见 docs/modules/providers/anthropic-adapter.md）：
  * - 消费原始 SSE 事件流，不用 SDK 高级抽象（避免部分 JSON 解析的 O(n²)）
  * - 工具参数累积原始 JSON 字符串，完成时一次解析
  * - cache_control 放在 system prompt 和最后一条 user 消息上（低成本高收益）

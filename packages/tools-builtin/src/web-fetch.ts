@@ -55,7 +55,7 @@ export interface WebFetchToolOptions {
    *   - "http://host:port"：显式代理 URL
    *
    * 默认 undefined → safeFetch 默认 "auto" 行为。
-   * 详见 [network-egress.md §十三](../../../research/design/specifications/network-egress.md)。
+   * 详见 [网络出口架构](../../../docs/modules/network/architecture.md)。
    */
   proxy?: NetworkPolicy["proxy"];
 }

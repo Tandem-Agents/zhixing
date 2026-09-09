@@ -55,10 +55,10 @@ policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > a
 
 - **产品方向**：13 条 Phase 1+2 已对齐结果，详见 [`research/design/problems/identity-bootstrap-layer.md`](../../problems/identity-bootstrap-layer.md)
 - **现有架构对齐**：
-  - [ADR-002 Provider 架构](002-provider-architecture.md)：apiKey 解析的 `env:` / `helper:` / plaintext 三种凭证前缀**全部删除**——凭证唯一入口是 `~/.zhixing/credentials.json` plaintext。配置文件不暴露任何"存储后端"语法（贯彻 problems Phase 1 第 5 条"不留两条路并行的脏代码"）
+  - [Provider 当前架构](../../../../docs/modules/providers/architecture.md)：本 ADR 当时采用的明文 `credentials.json` 方案已被设备本地 SecretStore 替代；当前由宿主解锁并显式提供凭证投影，Provider 不自行读取持久化秘密，也不通过 `env:` / `helper:` 获取凭证。本 ADR 的旧存储描述不再代表现行合同，现行规则见[秘密存储与首次引导](../../specifications/credentials-and-onboarding.md)。
   - [ADR-003 配置系统](003-config-system.md)：3 层配置级联在公开配置维度沿用；私密配置**不参与级联**（用户级单一来源，避免项目级泄漏到 git）
   - [ADR-006 安全系统架构](006-security-system-architecture.md)：复用 `bypassImmune` 与 builtin 规则机制
-  - [`secondary-llm-capability.md`](../../specifications/secondary-llm-capability.md)：LLM 双层抽象（Layer 1 库 + Layer 2 角色）已实现，本 ADR 仅引用
+  - [模型角色与推荐](../../../../docs/modules/providers/model-roles.md)：LLM 双层抽象（Layer 1 库 + Layer 2 角色）已实现，本 ADR 仅引用
 
 ## 考虑过的替代方案
 
@@ -114,7 +114,7 @@ policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > a
 
 ## 相关决策
 
-- **依赖**：[ADR-002](002-provider-architecture.md) · [ADR-003](003-config-system.md) · [ADR-005](005-cli-architecture.md) · [ADR-006](006-security-system-architecture.md)
+- **依赖**：[Provider 当前架构](../../../../docs/modules/providers/architecture.md) · [ADR-003](003-config-system.md) · [ADR-005](005-cli-architecture.md) · [ADR-006](006-security-system-architecture.md)
 - **不在本 ADR 范围**：实现细节（schema 字段、loader API、wizard 步骤、规则 `message` 文案、迁移顺序等）下放到 [`specifications/credentials-and-onboarding.md`](../../specifications/credentials-and-onboarding.md)
 
 ## 引用

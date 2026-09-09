@@ -9,8 +9,8 @@
 > 产品定位：个人助手（需要 7×24 可达 + 主动关怀 + 跨通道投递 + 智能协调）
 >
 > **v2.1 变更摘要（2026-04-21）**：
-> - §4.7 Delivery Pipeline 与 [Outbox](./message-outbox.md) 的职责切分说明
-> - 决策见 [ADR-007](../architecture/decisions/007-message-outbox.md)——修复 Step 16 E2E 观察到的多生产者顺序倒转；Daemon（Step 17）的前置依赖
+> - §4.7 Delivery Pipeline 与 [Outbox](../../../docs/modules/delivery/outbox.md) 的职责切分说明
+> - 决策见 [消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md)——修复 Step 16 E2E 观察到的多生产者顺序倒转；Daemon（Step 17）的前置依赖
 >
 > **v2.0 变更摘要**：
 > - 文档标题从"常驻服务架构"升级为"智能体运行时架构"——反映 2026 行业范式从"定时任务+通道"到"Agent Harness+智能协调"的跃迁
@@ -746,7 +746,7 @@ Level 1 完整执行规格（概念、竞品调研、架构决策、里程碑拆
 
 > **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。
 >
-> **顺序性与 Outbox（2026-04-21 更新）：** DeliveryPipeline 只负责**持久性**——崩溃恢复、重试。**顺序性**（per-user FIFO、因果依赖）由 [Outbox](./message-outbox.md) 承担。Pipeline drain 的目标从 `adapter.send` 改为 `outboxRegistry.of(target).post`，Pipeline 自身的全局 FIFO + 优先级排序语义保持不变，但该顺序只影响"何时提交到 Outbox"，**不保证用户可见的出队顺序**——那是 Outbox 的职责。相关决策见 [ADR-007](../architecture/decisions/007-message-outbox.md)。
+> **顺序性与 Outbox：** 本节旧 DeliveryPipeline 已退役。当前耐久事实与重试裁决归权威 Delivery，Outbox 只承担进程内顺序与因果依赖；现行关系、失败及恢复限制见[消息 Outbox 与因果排序](../../../docs/modules/delivery/outbox.md)。
 >
 > **Faithful Delivery 契约（2026-04-21 更新）：** 曾经的 `DeliveryFilter[]` 链（含默认的 `DedupFilter`）已被移除。Pipeline 契约是"忠实送达"——enqueue 的每条消息都尝试送到 sender，不主动 drop。去重/限流/免打扰属业务策略，应在对应层处理（防 LLM 复读 → Agent Loop；防 Scheduler 重复 → Scheduler；防 channel 客户端合并 → Channel Adapter；防 pipeline 持久化重入 → Queue 层的 itemId correctness）。移除契机是发现 DedupFilter 按 content 去重会误杀合法的业务独立事件（两个 scheduler task 生成相同文本时第二条被静默吞）。
 

@@ -49,7 +49,7 @@
 
 加上 bypass-immune 声明式保护规则（借鉴 Claude Code 但更系统化）。
 
-详见 [ADR-004](../../design/architecture/decisions/004-tool-system-architecture.md) 和 [工具系统架构方案](../../_private/notes/tool-system-design.md)。
+详见 [工具体系架构](../../../docs/modules/tools/architecture.md) 和 [工具系统架构方案](../../_private/notes/tool-system-design.md)。
 
 ## 对应源码分析
 

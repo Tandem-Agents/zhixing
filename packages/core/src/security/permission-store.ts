@@ -183,7 +183,7 @@ export interface PermissionStoreOptions {
    *   读取每个工具自身的 `ToolDefinition.permissionArgumentKey` 显式声明，
    *   避免多 string 字段工具的字段顺序歧义
    *
-   * 见 [tool-permission-execution.md §4.2](../../../../research/design/specifications/tool-permission-execution.md)
+   * 见 [工具与权限集成](../../../../docs/modules/tools/permission-integration.md)
    * 与 ADR-TPE-007（依赖注入而非穿透 tools）。
    */
   extractArgument?: (request: SecurityRequest) => string;
@@ -570,7 +570,7 @@ export class PermissionStore implements IPermissionStore {
    * **生命周期**：builtin 规则不被 `resetAll` 清除——它们是 boot-time 系统配置，
    * 不属于用户 runtime 操作的"清理"语义范围。
    *
-   * 见 [tool-permission-execution.md §4.6](../../../../research/design/specifications/tool-permission-execution.md)
+   * 见 [工具与权限集成](../../../../docs/modules/tools/permission-integration.md)
    * 与 ADR-TPE-002。
    *
    * @example

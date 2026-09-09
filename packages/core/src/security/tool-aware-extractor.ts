@@ -18,7 +18,7 @@
  * 2. **装配期补注册**：`extractor.register(name, key)`。运行时动态增删工具
  *    （MCP 连接变更等）走 reload 整体重建后重新 fromTools，不走 in-place 增删
  *
- * 见 [tool-permission-execution.md §4.2](../../../../research/design/specifications/tool-permission-execution.md)
+ * 见 [工具与权限集成](../../../../docs/modules/tools/permission-integration.md)
  * 与 ADR-TPE-007（依赖注入而非穿透 tools）。
  */
 

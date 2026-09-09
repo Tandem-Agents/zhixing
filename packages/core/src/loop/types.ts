@@ -134,7 +134,7 @@ export interface AgentLoopParams {
    * 供工具在 I/O 边界使用 light 角色做信息净化（如 WebFetch distill）。
    *
    * 可选——单测 / 极简自动化路径可不传，consumer 必须显式分支处理 !ctx.llm。
-   * 见 research/design/specifications/secondary-llm-capability.md §三。
+   * 见 docs/modules/providers/model-roles.md 的消费与能力缺失。
    */
   llmRoles?: LLMRoles;
   /**

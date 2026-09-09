@@ -436,7 +436,7 @@ export interface LLMRole {
  *    某辅助角色（light / power）时，该角色自动用 main 实例 + main.model 兜底
  *    （隔离价值仍保留，仅放弃任务专门化/cost 优化）。这不是降级，是合理的
  *    未配置默认；工厂层不预设任何 vendor 默认（见 providers/create-provider.ts
- *    与 secondary-llm-capability.md ADR-SLLM-004）。
+ *    与 docs/modules/providers/model-roles.md 的解析与回退规则）。
  * 2. roles.main.{provider,model} 反映会话**实际使用的** effective state——含
  *    任何 CLI override（如 --provider / --model）。consumer 读到的就是
  *    runtime 实际跑的 provider+model。
