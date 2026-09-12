@@ -111,7 +111,7 @@
 
 ### 事件与体验
 
-复用本次 EventBus 的 orchestration 事件与 RPC 投影；CLI 已有 run_start/node_start/run_end 消费者及历史 perspectiveCount 来源投影，不再描述成全部尚待接入。用户应看到评议进度、最终答案或失败环节，不必理解 DAG；未来其他触发面复用同一应用行为，不复制流程。
+复用本次 EventBus 的 orchestration 事件与 RPC 投影；CLI 已有 run_start/node_start/run_end 消费者及历史 perspectiveCount 来源投影。用户应看到评议进度、最终答案或失败环节，不必理解 DAG；未来其他触发面复用同一应用行为，不复制流程。
 
 事件桥随执行清理，busy 在执行 finally 中释放。实时进度不是最终提交证据；用户最终看到的答案与历史应以同一已提交结果为准。帮助说明、触发边界、失败呈现和历史标记属于此能力的产品维护范围。
 

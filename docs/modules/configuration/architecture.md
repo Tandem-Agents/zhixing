@@ -46,6 +46,8 @@
 
 自动模板准备默认工作区，已配置的工作区丢失时有目录保障流程；无配置的 cwd 兜底不负责创建额外目录。目录治理见[路径解析与资源隔离](../../engineering/path-and-resource-isolation.md)，操作影响与信任关系见[信任与管理](../security/trust.md)。
 
+默认工作区是用户可见的工作文件目录，与 `.zhixing` 内部配置、权限及日志分开。模板在 Windows 上优先选择已有 D: 盘下的 `ZhixingWorkspace`，否则放在用户家目录；其他平台放在家目录。不默认选 Documents，以免智能体频繁读写触发 OneDrive／iCloud 等自动同步；这不是禁止用户主动选择其他目录。
+
 ## 当前装配与消费
 
 原始公开配置只在加载、编辑与组合边界处理。组合根通过[运行配置快照](../../../packages/cli/src/runtime/runtime-configuration-snapshot.ts)及[用途投影](../../../packages/cli/src/runtime/runtime-configuration-projections.ts)深拷贝、冻结，并向不同职责发放有限数据：

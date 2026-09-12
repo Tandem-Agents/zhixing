@@ -25,7 +25,7 @@
 
 [TerminalConfirmationRenderer](../../../packages/cli/src/security/terminal-renderer.ts)使用 `SelectOperationRegion`，由 ScreenController 管理内联操作区，让 scrollback 保持可见。上下键、快捷键和 Enter 完成选择，拒绝项可输入理由。选择层的 Esc 取消映射为 deny，Ctrl+C／Ctrl+D／外部 abort 映射 cancelled；输入模式下 Esc 的返回行为由选择状态机处理，不能统称“所有取消键都拒绝”。
 
-沿用轻量原生终端方案是为了支持内联输入与可控布局，不引入 React/Ink 依赖；早期独立屏原地擦行方案已退出。宿主用 beforeShow／afterShow 协调输入让位与恢复，避免两个输入消费者争用；通用机制见[选择模块](../cli/selection.md)与[屏幕渲染](../cli/screen-rendering.md)，权限面板尚不是 SelectionService 的业务调用。
+轻量原生终端方案支持内联输入与可控布局，不引入 React/Ink 依赖；只提供选择列表的组件不能直接完成“选择并补充文字”的一次交互，先接过渡库再替换也会重复适配。当前使用 Chrome 内联操作区，早期独立屏原地擦行方案已退出。宿主用 beforeShow／afterShow 协调输入让位与恢复，避免两个输入消费者争用；通用机制见[选择模块](../cli/selection.md)与[屏幕渲染](../cli/screen-rendering.md)，权限面板尚不是 SelectionService 的业务调用。
 
 CLI 通过 [RpcConfirmationBroker](../../../packages/cli/src/runtime/rpc-confirmation-broker.ts)接收完整请求并去重；`refresh` 可补查漏通知。同步 `resolve=true` 仅表示本地发起，异步失败上报并尝试刷新。当前回程等待 RPC Promise，但未判断返回体的 `ok:false`；不能将面板消失写成授权成功保证。该适配器也不自建全局审批队列，不能宣称已有“#N of M”视图或批量审批。
 
@@ -61,4 +61,4 @@ CLI 通过 [RpcConfirmationBroker](../../../packages/cli/src/runtime/rpc-confirm
 
 ## 反馈边界
 
-允许／拒绝回执必须与提交结果一致；拒绝理由进入工具错误，而非自动改写工具参数。通知丢失、断线、过期、取消和应答竞争都不能导致另一次授权。当前实现限制应与这些设计义务区分，不通过恢复旧直连、宽松兜底或追加另一套确认状态来解释。
+允许／拒绝回执必须与提交结果一致；拒绝理由进入工具错误，而非自动改写工具参数。通知丢失、断线、过期、取消和应答竞争都不能导致另一次授权。

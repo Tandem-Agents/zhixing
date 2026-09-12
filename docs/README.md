@@ -23,6 +23,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [验证手册](../research/design/workbench/verification-runbook.md)
 - [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
 - [仓库组织与包边界](engineering/repository-structure.md)
+- [状态、重放与合同一致性的工程经验](engineering/state-replay-contract-lessons.md)
 - [架构演进记录索引](../research/design/architecture/evolutions/README.md)
 
 疑似漏洞的当前支持与私密报告状态只以[安全政策 / Security policy](../SECURITY.md)为准；不要在公开渠道披露漏洞细节或敏感数据。
@@ -35,9 +36,11 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [上下文管理架构](modules/context/architecture.md)
 - [逐轮上下文注入](modules/context/turn-context-injection.md)
 - [会话任务列表](modules/conversation/task-list.md)
+- [CLI 总体架构](modules/cli/architecture.md)
 - [CLI 视觉设计语言](modules/cli/visual-language.md)
 - [输入区视觉](modules/cli/input-visual.md)
 - [CLI 屏幕渲染与能力边界](modules/cli/screen-rendering.md)
+- [CLI Markdown 流式渲染](modules/cli/markdown-rendering.md)
 - [输入补全架构](modules/cli/input-completion.md)
 - [CLI 命令系统](modules/cli/command-system.md)
 - [CLI 选择模块](modules/cli/selection.md)
@@ -81,6 +84,8 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [MCP 接入与管理](modules/mcp/onboarding-and-management.md)
 - [网络出口架构](modules/network/architecture.md)
 - [消息 Outbox 与因果排序](modules/delivery/outbox.md)
+- [飞书通道架构与能力边界](modules/feishu/architecture.md)
+- [IM 通道接入选型研究](research/channel-platforms.md)
 - [架构概览 / Architecture overview](../research/design/architecture/overview.md)
 - [架构演进 / Architecture evolutions](../research/design/architecture/evolutions/README.md)
 
@@ -88,6 +93,16 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 Research and historical evolution documents explain context and decisions; they do not replace the executable user contract in the current README, CLI guide, or maintenance guide.
 
+经验检索：[失败复盘与可复用教训](postmortems/README.md)，按问题信号查找诊断、决策与效率经验。
+
+事件调查：[提示注入诱导凭证外发](incidents/2026-06-30-prompt-injection-credential-exfil-incident.md)，记录经过、证据与未决来源。
+
 ## 许可 / License
 
 [MIT License](../LICENSE)
+
+## 文档迁移过渡状态
+
+当前文档体系由 `docs/` 与旧 `research/` 共同支撑：`docs/` 承载新建及已按现状校准归位的文档；`research/` 尚有有效设计，也混有过时内容，不能因目录位置一概采信或判废。同一职责已迁移的，以新正文为准；未迁移的仍须结合有效需求与当前实现判断。
+
+迁移正按单元经用户审核逐步进行，可随时暂停以处理其他工作，不作为其他事项的前置条件。恢复时先读取[迁移任务文档](tasks/research-documentation-cleanup.md)中的规则、处理记录与待处理检查点，再核对实际文件及最近审核结果，从未完成项继续；进度只在任务文档维护，本段仅说明临时状态。

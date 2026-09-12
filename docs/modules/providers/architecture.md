@@ -23,15 +23,15 @@
 
 `resolveProvider` 合并预设与显式凭证条目，`create-provider.ts` 按 protocol 选择适配器。单 Provider 工厂与角色工厂共用此路径；Provider 可被独立使用，不必知道 main/light/power。
 
-当前 CLI 宿主的 `createHostKernelModelProviderFactory` 为普通会话和工作场景投影生效模型信息，`createHostAdvancementModelProviderFactory` 为推进职责提供调用与评议 binding；两者消费同一 Provider 解析层，承担不同的产品用途。orchestrator 消费注入结果，不再以旧 `run-agent.ts` 接线或自行读取配置为架构依据。
+当前 CLI 宿主的 `createHostKernelModelProviderFactory` 为普通会话和工作场景投影生效模型信息，`createHostAdvancementModelProviderFactory` 为推进职责提供调用与评议 binding；两者消费同一 Provider 解析层，承担不同的产品用途。orchestrator 消费注入结果，不自行读取配置。
 
 主循环与段摘要的显式重试、流空闲保护在 orchestrator 调用链装配；不同调用点的保护不能仅因共享 Provider 就视为完全相同。适配器本身没有业务重试循环，但 SDK 的内部默认行为也不能据此推断为已关闭。会话提交、恢复与资源终态不是本模块的所有权。
 
 ## 取舍与范围
 
-按协议组织保留多服务商接入能力，避免每厂商复制实现；预设降低连接配置成本，用户仍可使用自定义连接与目录外模型。协议差异集中处理，不引入与个人部署无关的 OAuth 伪装、认证轮换或通用插件平台。
+按协议组织保留多服务商接入能力，避免每厂商复制实现；预设降低连接配置成本，用户仍可使用自定义连接与目录外模型。其代价是持续维护协议兼容差异，并分别验证各协议适配器，不能假定同协议服务商的行为完全一致。协议差异集中处理，不引入与个人部署无关的 OAuth 伪装、认证轮换或通用插件平台。
 
-旧演进路线中的 Anthropic、缓存标记、思考传输和预算解析已有实现；旧 Phase 顺序不再是待执行计划。自动跨模型 failover、非流式回退、远程模型发现及精细缓存策略不能因旧稿列过就视为现有能力或本次承诺。
+当前已实现 Anthropic 适配、缓存标记、思考传输和预算解析；尚未实现自动跨模型 failover、非流式回退、远程模型发现及自适应缓存断点。
 
 专题权威分别为[模型元信息](model-metadata.md)、[模型角色](model-roles.md)、[思考控制](thinking-control.md)和 [Anthropic 适配](anthropic-adapter.md)。[秘密存储](../secrets/architecture.md)、[首次引导](../secrets/onboarding.md)、[容错与模型调用恢复](../resilience/architecture.md)是相邻职责，不由 Provider 协议层重复定义。
 

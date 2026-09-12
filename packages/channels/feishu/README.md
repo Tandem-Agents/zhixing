@@ -4,6 +4,8 @@ Feishu channel adapter for Zhixing. It maintains the Feishu connection and proje
 
 This is an optional implementation package consumed by the Zhixing host. It is not a standalone bot product or an independently versioned SDK.
 
+Architecture and current capability boundaries: [飞书通道架构](../../../docs/modules/feishu/architecture.md).
+
 End users should install `@zhixing/cli` and follow the [Zhixing user guide](https://github.com/Tandem-Agents/zhixing#readme). Report package issues through [GitHub Issues](https://github.com/Tandem-Agents/zhixing/issues).
 
 Released under the MIT License. The license text is included in the package.

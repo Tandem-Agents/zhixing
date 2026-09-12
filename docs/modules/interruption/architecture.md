@@ -16,8 +16,6 @@
 | 保留部分 text／thinking，丢弃流阶段全部 tool_use | 用 JSON 外观猜测参数是否完整 | 不完整调用不能执行；不引入脆弱的完整性启发式，代价是看不到该次未完成的工具意图 |
 | 工具实现自己的取消／资源清理 | 给工具 Promise 做 race 就宣称效果停止 | 放弃等待不等于进程或外部效果已停止 |
 
-这些选择承接既有研究中的信号汇聚、协作中断、双阈值与协议补齐思想；不依赖某个外部项目当前实现，也不引入投机执行、自然语言自动中断或后台任务框架。
-
 ## 信号与终态
 
 `runAgentLoop` 用 `createInterruptController` 接收外部 signal，向模型、工具和上下文处理传递同一 signal。需要主动触发 watchdog 的 Loop 内部协作者可持有 controller；普通 Provider／工具只接收 signal。
@@ -33,6 +31,8 @@
 
 原因须保持 JSON 可序列化，不携带 Error、signal 或循环对象。`getAbortReason` 当前只检查对象的 kind 字符串，**不是完整运行时 schema 校验**；消费者不能把它当不可信输入验证器，须保留未知原因兜底。
 
+判别联合把原因及其元数据绑定在一起，便于类型收窄与穷尽处理，避免散落字符串判断造成拼写错误或漏掉新增原因；这不替代跨信任边界的运行时校验。
+
 `aborted` 与 `completed`、`max_turns`、`error` 分开；模型的 StopReason 也不承担执行取消语义。abort 与轮次上限同时满足时先处理 abort。上下文处理及结束钩子交界也必须保留原因，不能把取消转成普通成功或无关错误。启动前失败不伪造已经启动的 Loop 事件；消费者主动结束生成器由 Loop 的 finally 处理终止边界。
 
 ## 模型流与部分结果
@@ -46,7 +46,7 @@
 - 流阶段的 tool_use 全部不进入 partial，因此也不为这些被丢弃的调用制造孤立 tool_result。
 - 普通 Provider 错误的安全部分消息不加中断标记，不能误称用户主动取消。
 
-已获得的模型用量继续累计到轮次及最终结果，不能因中断置零；Provider 尚未报告的 usage 不能凭空精确恢复。Kernel 产出部分消息不等于所有接入面都展示，也不等于绕过 owner 已完成持久化提交；后者见[对话持久化](../conversation/persistence.md)。
+已获得的模型用量继续累计到轮次及最终结果，不能因中断置零：客户端停止等待不会免除服务端已经处理的 token 费用。Provider 尚未报告的 usage 不能凭空精确恢复。Kernel 产出部分消息不等于所有接入面都展示，也不等于绕过 owner 已完成持久化提交；后者见[对话持久化](../conversation/persistence.md)。
 
 ## 工具阶段与效果边界
 
@@ -62,13 +62,17 @@
 
 `interruptBehavior` 是自描述而非执行器的调度开关。POSIX `gracefulKill` 优先向进程组发 SIGTERM，默认等待 1000ms 后升 SIGKILL，失败退为直接 child；Windows 使用 `taskkill /T /F`，失败退为 `child.kill()`。helper 等待退出，发送 kill 失败不等于已停止；不可终止资源可能使等待超过 grace 时长，不能许诺所有工具都有固定硬上界。
 
+POSIX 的宽限阶段给进程保留部分输出和执行退出清理的机会；立即强杀可能跳过这些动作。宽限仍须有界，不能把等待进程自行结束当成可靠取消。
+
 ## 生命周期、事件与质量边界
 
 中断源只触发 signal。Loop 记录触发时间，在退出路径先发 `interrupt:fired` 再发 `agent:run_end`；预警由 watchdog 发出，用户取消不必先有预警。`interruptedTurnIndex` 是被中断轮次的零基序号，不是 `turn_complete.turnCount` 的完成数。
 
-保留的性能目标是 Loop 框架延迟 P95 ≤200ms，以 `exitDelayMs - toolGraceMs` 区别工具自身等待；基础 iterator race 的响应目标为 ≤10ms。它们不是网络、耐久提交、工具清理与消息送达的总时延承诺，也不是本次文档迁移取得的实测结论。
+abort listener 只同步记录时间，不以 fire-and-forget 发终态事件；统一退出路径顺序 await 发射，避免异步通知越过 run_end，或新增退出分支遗漏中断通知。
 
-timer、iterator race listener、键盘与进程监听必须随所属执行退出释放。**当前 controller helper 没有 dispose：parent／external 的 once listener 在上游始终不 abort 时不会因子运行结束自动摘除。** 长生命周期 signal 的重复复用仍有累积边界，不把“所有资源已无泄漏”写成现状。流包装的退出清理与底层外部操作停止也须分别验证。
+性能目标是 Loop 框架延迟 P95 ≤200ms，以 `exitDelayMs - toolGraceMs` 区别工具自身等待；基础 iterator race 的响应目标为 ≤10ms。它们不是网络、耐久提交、工具清理与消息送达的总时延承诺，也不代表当前已经实测达标。
+
+timer、iterator race listener、键盘与进程监听必须随所属执行退出释放。**当前 controller helper 没有 dispose：parent／external 的 once listener 在上游始终不 abort 时不会因子运行结束自动摘除。** 长生命周期 signal 的重复复用可能累积监听器并阻碍子 controller 回收。流包装的退出清理与底层外部操作停止也须分别验证。
 
 维护本模块时直接保护：已取消输入、流挂起、thinking-only、部分工具参数、工具成功与 abort 竞态、并发混合结果、父子隔离、上下文／退出钩子交界、用量及事件顺序。模型重试与 watchdog 的交界由[容错架构](../resilience/architecture.md)说明；不以 mock 通过代替真实 Provider、进程清理和产品终态证据。
 

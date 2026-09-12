@@ -35,4 +35,4 @@
 
 工作区包的公开 exports 指向 `dist` 产物，修改源码不代表消费者立即获得新实现。跨包开发需要构建受影响依赖；首次构建、后续验证及贡献流程见[贡献指南](../../CONTRIBUTING.md)。根 build 先检查版本一致性，再递归执行包构建。
 
-独立复用不等于当前独立版本发布。当前[版本检查](../../scripts/release-version.mjs)以根版本为源核对 packages 内各包版本，[发布脚本](../../scripts/publish-npm.mjs)协调公开包及 CLI 的发布；不能沿用旧稿“各包可独立发版”作为当前政策，也不能把存在发布配置写成已经发布。交付要求以[公开版本交付文档](../delivery/first-public-release.md)为准。
+独立复用不等于独立版本发布。当前[版本检查](../../scripts/release-version.mjs)以根版本为源核对 packages 内各包版本，[发布脚本](../../scripts/publish-npm.mjs)协调公开包及 CLI 的发布；存在发布配置不等于已经发布。交付要求以[公开版本交付文档](../delivery/first-public-release.md)为准。

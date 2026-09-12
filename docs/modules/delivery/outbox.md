@@ -14,7 +14,7 @@ Outbox 是消息投递的进程内顺序层：同一目标的多个生产者共�
 | Slot 与 `afterSlot` | 前置回复插到依赖消息之前，显式等待前置条件 | 内存状态不能代替崩溃恢复与耐久投递事实 |
 | 权威 Delivery | 记录 intent、尝试、结果与恢复，裁决重试和不确定结果 | 不应在传输适配器再复制一套业务状态机 |
 
-原设计将持久性与顺序性分开，这一取舍仍成立；旧 `DeliveryPipeline`／`DeliveryQueue`／`delivery-queue.json` 已退役，不能继续作为现行持久层。当前权威 Delivery 也不是旧队列改名：领域应用负责状态判断，日志与正确性接口负责耐久提交，效果适配器只返回发送证据。
+持久性与顺序性分责。旧 `DeliveryPipeline`／`DeliveryQueue`／`delivery-queue.json` 已退役；当前由权威 Delivery 的领域应用负责状态判断，日志与正确性接口负责耐久提交，效果适配器只返回发送证据。
 
 | 替代思路 | 取舍 |
 |---|---|
@@ -23,8 +23,6 @@ Outbox 是消息投递的进程内顺序层：同一目标的多个生产者共�
 | 全局消息排序 | 不同用户时间轴无此同步要求，会引入无关阻塞；按目标隔离即可 |
 | 在 Outbox 内加入持久化与重试 | 与权威 Delivery 重复所有权；退避与不确定结果需要领域裁决，不归通用队列 |
 | 为保序重写整个系统 | 单个顺序问题不要求全系统重写；当前已存在权威日志，应复用而非再造第二份 |
-
-这些比较保留原 ADR 的有效设计理由，不把未经独立证实的外部产品类比作为架构正确性的证据。
 
 ## 二、当前职责与调用链
 
@@ -78,15 +76,17 @@ CLI Host 的 `setup-delivery.ts` 装配共享效果与 Registry，渠道接入�
 | 孤儿 afterSlot | 原语记录断链并放行；可能来自实例回收或进程恢复，不能单凭“未知”证明前置已发送 |
 | 渠道权威回复 | InboundRouter 不在 authoritative 收尾分支 abandon；非空由 ChannelDeliveryEffect fill，completed 且无内容时填空 |
 
-生产 `onStarted` 调 `openSlot({ slotId })`，当前装配未覆盖默认 TTL，因此十分钟到期仍可能提前释放权威依赖。这与上述权威合同存在差异，不能保留旧稿“任何终态放行即可保证因果”的结论。
+生产 `onStarted` 调 `openSlot({ slotId })`，当前装配未覆盖默认 TTL，因此十分钟到期仍可能提前释放权威依赖。这与上述权威合同存在差异：Slot 进入终态并不必然意味着前置消息已送达。
 
-另一个边界是 fill 在发送完成前关闭 Slot：若前置发送失败，Outbox 清除 inflight 后继续 drain，而不是等待该前置消息的权威重试成功。因此当前原语证明的是尝试排序，不是失败／超时／重启情况下无条件的用户可见送达顺序。迁移文档保留更强的产品要求，并明确现状，不在本次文档任务中整改代码。
+另一个边界是 fill 在发送完成前关闭 Slot：若前置发送失败，Outbox 清除 inflight 后继续 drain，而不是等待该前置消息的权威重试成功。因此当前原语证明的是尝试排序，不是失败／超时／重启情况下无条件的用户可见送达顺序。
 
 ## 五、失败、恢复与生命周期
 
 `post` 的 Promise 可以 resolve 一个 `success:false` 的 DeliveryResult，也可能 reject；resolve 不等于成功到达用户。发送默认 30 秒超时，采用 Promise.race，不会取消底层发送，所以超时后仍可能发生外部效果，不能宣称“要么成功，要么完全未发送”的原子性。
 
 Outbox 不内部重试：成功产生 sent，失败产生 failed，最终清除 inflight，交回上游。权威 Pipeline 对明确失败提交结果；传输抛错保留未知结果交恢复策略裁决，不能直接认定未送达并盲目重发。重试仍复用原 Delivery 幂等身份，适配器是否支持去重与响应丢失证据是独立合同。
+
+失败项留在队首退避会阻塞该目标的后续消息，移到队尾则改变顺序；取舍依赖业务因果与投递语义，不能由通用队列自行决定。Outbox 只执行一次发送尝试，恢复决策属于权威 Delivery。
 
 Outbox 与 Slot 是内存结构。崩溃后的耐久投递从权威 Delivery 状态恢复，而非从旧 JSON 队列恢复；不能再把渠道最终回复丢失解释成“用户重发即可”。内存 Slot 不随日志自动重建，恢复后的因果连续性不能仅凭耐久消息仍在就宣告成立。
 
@@ -102,11 +102,9 @@ Registry 的 `reapIdle` 按空闲时间与 Outbox.isIdle 判断回收；`dispose
 
 ## 七、验证与实现入口
 
-必要验证应分别识别：每目标隔离、回复插入与因果等待、未知／过期／abandon 的断链、失败返回和抛错、超时后的未知效果、幂等键透传、权威恢复及确认控制流不死锁。只测成功路径 FIFO，不能证明用户最终看到的顺序；原有历史测试数量不作当前验收证据。
+必要验证应分别识别：每目标隔离、回复插入与因果等待、未知／过期／abandon 的断链、失败返回和抛错、超时后的未知效果、幂等键透传、权威恢复及确认控制流不死锁。只测成功路径 FIFO，不能证明用户最终看到的顺序。
 
 - [Outbox](../../../packages/core/src/delivery/outbox.ts)、[类型及事件](../../../packages/core/src/delivery/outbox-types.ts)、[Registry](../../../packages/core/src/delivery/outbox-registry.ts)。
 - [渠道效果映射](../../../packages/core/src/delivery/channel-effect.ts)、[Delivery 应用](../../../packages/core/src/delivery/application.ts)、[权威投递驱动](../../../packages/core/src/delivery/authority-pipeline.ts)。
 - [Host 装配](../../../packages/cli/src/setup-delivery.ts)、[渠道输入与回复投影](../../../packages/server/src/channels/inbound-router.ts)。
 - [权威终态投递合同 §5.5](../../../research/design/modules/distributed-runtime/specification.md#55-终态与状态投递)、[远程确认控制流](../confirmation/surfaces.md)。
-
-本文只定义消息顺序层及其直接交界，不展开整个调度、渠道、权限或分布式架构；不新增全局排序、第二份持久化、内部重试框架或终端 Channel 化。

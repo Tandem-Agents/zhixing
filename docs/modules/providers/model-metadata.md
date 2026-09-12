@@ -6,7 +6,7 @@
 
 `ProviderPreset.knownModels → ResolvedProvider.declaredModels → LLMProvider.models` 共用 `ModelInfo`，适配器直接复用目录。目录允许为空，只声明已知元信息，不穷举服务商支持的模型；请求始终使用实际选择的 model 字符串。
 
-目录最初用于预算解析，当前还被模型选择界面、输入能力与思考配置消费。因此应保留“元信息目录而非白名单”的边界，不能继续称其唯一用途为预算，也不能将能力字段一概视为无人消费的装饰。
+目录由预算解析、模型选择界面、输入能力与思考配置共同消费；它提供已知元信息，不限制可请求的模型范围。
 
 当前 DeepSeek、硅基流动预设已有目录，其他预设可以没有。只维护会影响真实使用的元信息，不为重复协议兜底或凑齐型号建设无价值目录。推荐不受目录是否收录约束，见[模型角色](model-roles.md)。
 
@@ -23,7 +23,7 @@
 
 core 只接收预算形状，不依赖 providers 或协议字符串。Host binding 按实际 `primaryRole` 的协议、目录与覆盖值注入；普通 main 与工作场景 power 不能混用预算。主链正常注入协议默认时不会进入最后的防御性分支。
 
-`modelOverrides` 属于 Provider 条目，由当前显式凭证投影携带；不再沿旧稿往公开 config 的旧 `providers` 字段写入。它与 `config.jsonc` 中的 `modelCapabilityOverrides` 不是同一个配置。
+`modelOverrides` 属于 Provider 条目，由当前显式凭证投影携带，不写入公开 config。它与 `config.jsonc` 中的 `modelCapabilityOverrides` 不是同一个配置。
 
 ## 不同能力不可混为一谈
 

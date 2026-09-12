@@ -827,7 +827,7 @@ T=3600s 钉钉来新消息
 
 ## 九、Transcript 持久化
 
-当前持久化、窗口协作、启动恢复、clear、分片保留与实现差异统一见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。本节不再定义旧单文件格式、CompactMarker、commitTurn 截断或 canonical 回灌协议。
+当前持久化、窗口协作、启动恢复、clear、分片保留与实现差异统一见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。
 
 对话跟随用户而非启动 cwd；工作场景由用户显式选择。会话身份与内容日志职责分离，名称等身份变化不改写历史正文。具体存储路由由 Host 适配，不由 CLI／server 各自复制实现。
 
@@ -969,7 +969,7 @@ Server 模式下 ConversationManager 是单例。所有客户端(多个 CLI、We
 - 会话 owner 负责运行接受、权威提交、恢复及窗口推进；Host 装配具体存储端口，CLI 不另建直接协调 Store 的写入主链。
 - 历史浏览与启动恢复共享原文事实，分别按分页和窗口预算消费；不能用全量历史加载代替工作窗口恢复。
 
-当前组件归属、生产调用和实现差异统一见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。本节保留职责划分，不再维护已退役的 Store API 或第二套装配合同。
+当前组件归属、生产调用和实现差异统一见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。
 
 ### 12.2 Server RPC
 
@@ -1327,7 +1327,7 @@ packages/cli/src/migrate/
 
 ### ADR-CM-015：身份、内容与会话接受职责分离
 
-仍有效的取舍是：可变身份与原始内容各自负责，改名不重写内容日志，内容存储不兼任身份 CRUD。会话 owner 负责接受与恢复，Host 装配具体存储。
+可变身份与原始内容各自负责，改名不重写内容日志，内容存储不兼任身份 CRUD。会话 owner 负责接受与恢复，Host 装配具体存储。
 
 旧版“server 持有 Manager、CLI 直接持有 Store、commitTurn 返回 canonical”的包归属与调用合同已被替代。当前权威提交、分片投影和窗口推进见[对话持久化与注意力窗口架构](../../../docs/modules/conversation/persistence.md)。
 

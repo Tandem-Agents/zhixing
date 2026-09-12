@@ -74,7 +74,7 @@
 
 **发现 3：中国平台是个人助手的刚需差异点**
 
-Hermes 是唯一覆盖中国社交平台的参考项目（钉钉/飞书/企微/微信）。OpenClaw 和 Claude Code 均未覆盖。知行作为中文个人助手，**首个通道应该是钉钉或飞书**，不是 Slack。
+面向目标用户选择可达的通讯入口，并比较主动投递与部署成本；不以旧竞品覆盖情况决定当前排期。平台研究见[IM 通道接入选型研究](../../../docs/research/channel-platforms.md)。
 
 ### 2.2 设计取舍
 
@@ -601,26 +601,9 @@ Agent 开始生成（runAgentLoop yield text_delta）
 
 ## 八、中国平台适配考量
 
-### 8.1 首选通道：钉钉
+### 8.1 平台选择与飞书适配
 
-**理由**：
-- 钉钉开放平台成熟度最高，SDK 完善（dingtalk-stream for Node.js）
-- Stream Mode 长连接——不需要公网 IP 或域名，**个人部署零门槛**
-- 支持 ActionCard（可做审批按钮）、Markdown 消息、群/单聊
-- Hermes 已验证可行性
-
-**关键技术点**：
-- 使用 `dingtalk-stream` SDK 建立长连接
-- 机器人接收消息 → InboundRouter
-- 回复走 Session Webhook（每条消息带 sessionWebhook URL，24h 有效）
-- ActionCard 可实现 ApprovableChannel trait
-
-### 8.2 次选通道：飞书
-
-**理由**：
-- lark-oapi SDK 支持 WebSocket 订阅
-- Interactive Card 可做富交互（审批、表单）
-- 企业场景覆盖
+平台能力比较与选择依据由[IM 通道接入选型研究](../../../docs/research/channel-platforms.md)维护，当前飞书设计与实现边界见[飞书通道架构](../../../docs/modules/feishu/architecture.md)。原先钉钉首选、飞书次选的排序不作为当前开发优先级；不在网关正文重复平台 SDK、配额与认证结论。
 
 ### 8.3 网络代理
 

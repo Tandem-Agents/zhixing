@@ -29,7 +29,7 @@
 
 `edit/write → tool_end → 宿主 projectSessionTurn → 剥离 presentation 的 session delta → ConversationController.onDelta → CLI 渲染`
 
-`ToolBatchCoordinator.recordSideEffect` 能消费 file-diff artifact；没有 artifact 时只显示原有摘要。当前 RPC 剥离发生在它之前，所以不能因工具和 renderer 单测存在，就宣称常规 REPL 已实现端到端 diff 展示。产品目标仍有效，这是真实接入缺口；本文只记录，不降低目标，也不借文档迁移实施修复。
+`ToolBatchCoordinator.recordSideEffect` 能消费 file-diff artifact；没有 artifact 时只显示原有摘要。当前 RPC 剥离发生在它之前，所以不能因工具和 renderer 单测存在，就宣称常规 REPL 已实现端到端 diff 展示。端到端展示仍是产品要求，当前存在接入缺口。
 
 ## 终端展示合同
 

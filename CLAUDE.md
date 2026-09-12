@@ -41,7 +41,7 @@
 
 研究与设计在 `research/`(`insights/`、`source-analysis/`、`landscape/`、`design/`)。其中:
 
-- `research/postmortems/` — AI 协作失败复盘:记录多轮失败后才定位的问题、提炼可迁移诊断原则;调试前先扫其 README 反模式清单。
+- `docs/postmortems/` — 失败复盘与可复用教训:按 README 的问题信号查找适用的诊断、决策与效率经验。
 
 多 agent 协作面板(根级):
 

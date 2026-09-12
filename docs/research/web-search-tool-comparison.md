@@ -1,8 +1,8 @@
 # Web 搜索工具：三方实现对比
 
-> 调研动机：知行已有 `web_fetch`（直接抓取一个已知 URL 的正文），但没有「网络查询」能力——给一个问题、由工具去搜索引擎找出相关 URL/摘要。本文对比 Claude Code、OpenClaw、Hermes 三个参考项目在**不依赖 MCP** 的前提下如何实现 web 搜索工具，为知行新增 `web_search` 提供事实依据。
+> 本文是搜索能力的跨产品研究，不是知行的需求、架构规范或实施计划。基于 2026-05-23 的研究材料，比较搜索执行位置、后端解耦和抓取分工；知行现状见末节。
 >
-> 事实基线：所有结论附源码文件:行号或真实 schema/官方文档来源。Claude Code 部分按可信度标注（无开源源码，依据逆向 schema + 官方文档 + 反混淆代码三方印证）。
+> 外部项目的接口、后端数量、限制和源码行号均属于原调研快照，不代表外部产品最新版；原稿未记录对应 commit，不能据这些行号保证精确复现旧版本。外部结论不作为当前服务可用性承诺，具体选型前须复核来源。
 
 ---
 
@@ -12,21 +12,21 @@
 
 | 范式 | 谁执行搜索 | 代表 | LLM provider 耦合 |
 |------|-----------|------|------------------|
-| **① 服务端 hosted tool** | LLM provider 服务端（同一次 API 调用内自动执行） | Claude Code（唯一纯粹形态） | **强绑** 该 provider |
+| **① 服务端 hosted tool** | LLM provider 服务端（同一次 API 调用内自动执行） | Claude Code（原稿归类，见下文证据边界） | **强绑** 该 provider |
 | **② 客户端直调第三方搜索 API** | 客户端自己发 HTTP 到搜索引擎 API | OpenClaw（brave/exa/tavily/ddg/…）、Hermes（parallel/exa/tavily/firecrawl） | **无关** |
 | **③ 客户端单发一个「带内置搜索的 LLM」请求** | 在一个独立 LLM 请求里开 server-side search 开关 | OpenClaw（gemini/grok/kimi） | 弱耦合（作为可选 provider） |
 
-**关键共识**：除 Claude Code 外，参考项目都把搜索做成「provider 可插拔」——对模型只暴露**一个工具名**（`web_search`），背后挂多个后端，运行时按配置/可用密钥选一个执行。范式 ② 和 ③ 在这些项目里用**同一套 provider 抽象**统一，对上层是同一个工具。
+**关键共识**：除 Claude Code 外，参考项目都把搜索做成「provider 可插拔」——对模型只暴露**一个工具名**（`web_search`），背后挂多个后端，运行时按配置/可用密钥选一个执行。原稿所述 OpenClaw 把范式 ② 和 ③ 接入同一 provider 抽象；Hermes 本文列出的后端仅属于范式 ②。
 
 ---
 
-## Claude Code：服务端 hosted tool（客户端零搜索实现）
+## Claude Code：原稿的 hosted tool 分析与证据边界
 
-**可信度**：高。依据三方印证——① 逆向得到的真实工具 schema（`claude-code-reverse/results/tools/WebSearch.tool.yaml`，即模型实际收到的文本）；② Anthropic 官方文档；③ 反混淆客户端源码（`claude-code-deobfuscation/`）中**完全不存在任何搜索后端代码**，全仓库 grep `web_search`/`brave`/`tavily` 等零命中。三者共同指向：客户端只声明 schema，不执行搜索。
+原稿依据逆向 schema（`claude-code-reverse/results/tools/WebSearch.tool.yaml`）、Anthropic API 文档及反混淆源码检索，将其归为服务端搜索。原记录称检索 `web_search`/`brave`/`tavily` 等无命中；但字符串未命中不能证明客户端不存在实现，API 的 hosted tool 机制也不能单独证明 Claude Code 客户端采用同一调用链。下述 hosted API 形态保留为研究参照，客户端映射属于待独立验证的推断。
 
 ### 机制
 
-WebSearch 是 **Anthropic API 的 hosted tool**，在 LLM 请求的 `tools` 数组里声明：
+原稿引用的 **Anthropic API hosted tool** 请求形态如下；不要与客户端 `WebSearch` schema 直接视为同一层接口：
 
 ```json
 { "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }
@@ -37,7 +37,7 @@ WebSearch 是 **Anthropic API 的 hosted tool**，在 LLM 请求的 `tools` 数�
 - 结果以 search result block 返回，字段含 `url` / `title` / `page_age` / `encrypted_content`；多轮对话需把 `encrypted_content` 原样传回，模型才能引用。
 - 工具入参（客户端声明的 schema）：`query`（必填，≥2 字符）、`allowed_domains` / `blocked_domains`（域名白/黑名单）。
 
-### 约束（对「能否照搬」至关重要）
+### 原稿记录的约束（不代表当前可用性）
 
 - **地域限制**：仅 US 可用（schema 原文："Web search is only available in the US"）。
 - **平台限制**：不支持 Bedrock / Vertex——Claude Code 在这些平台**直接隐藏该工具**。
@@ -52,9 +52,9 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 ## OpenClaw：provider 插件 + 单一 `web_search` 工具
 
-**可信度**：高，全部源码可查（仓库根 `E:\Dev\longxia\_refs\openclaw-main`，下列路径相对仓库根）。
+**原稿证据类型**：源码定位（仓库根 `E:\Dev\longxia\_refs\openclaw-main`，下列路径相对仓库根）。
 
-> 项目辨析：本地源码是 **OpenClaw**（`github.com/openclaw/openclaw`，多平台个人 AI 助手）。它与用户口中的 **OpenCode**（`opencode.ai`，终端编码助手，web search 用 Exa）是**两个不同项目**——二者有集成（OpenClaw 有 `opencode-controller` skill），但搜索实现各自独立。本节以本地 OpenClaw 源码为准。
+> 本节研究对象为 OpenClaw（`github.com/openclaw/openclaw`），不是 OpenCode；不将不同项目的实现混作同一证据。
 
 ### 架构：能力分布在插件，对模型只暴露一个工具
 
@@ -82,7 +82,7 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 | `kimi` | `extensions/moonshot` | Moonshot 内置 `$web_search` | ③ 模型服务端 search | `/chat/completions`，`tools:[{type:"builtin_function",function:{name:"$web_search"}}]`，最多 3 轮 tool-call 回填 |
 | `x_search`（独立工具） | `extensions/xai` | xAI Responses x_search | ③ | 同 grok，`tools:[{type:"x_search"}]` |
 
-类别 ② 的精髓：无论自己发 HTTP 调搜索 API（②），还是单发一个开了 server-side search 的 LLM 请求（③），**对上层都返回同一 payload 形状**，由统一的 `createTool/execute` 抽象屏蔽差异。
+这里统一的是 `createTool/execute` 调用接口，不是搜索结果的全部 payload 结构：范式 ②、③ 仍可能分别返回结构化结果或合成答案，区别见下表述。
 
 ### 凭证
 
@@ -98,10 +98,10 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 ### 安全设计（值得借鉴）
 
 - 统一出口 `withTrustedWebSearchEndpoint`（`src/agents/tools/web-search-provider-common.ts:77`）→ `withTrustedWebToolsEndpoint`（`web-guarded-fetch.ts:64`）套 **SSRF 网络守卫**（白名单允许私网，专为自建 SearXNG / 本地 Ollama）。
-- `wrapWebContent`（`src/security/external-content.ts:419`）给每段外部文本加**唯一随机边界标记防 prompt 注入**。
+- `wrapWebContent`（`src/security/external-content.ts:419`）给每段外部文本加**唯一随机边界标记以区分外部内容**，但标记不是权限隔离，也不能保证模型不受提示注入影响。
 - `count` 钳到 1–10（Exa 例外上限 100），结果默认缓存 15 分钟。
 
-### DuckDuckGo：唯一无 key 的特殊实现
+### DuckDuckGo：免 key 的 HTML 抓取实现
 
 标记 `requiresCredential:false`、`autoDetectOrder:100`（API provider 之后的首个 keyless fallback，`extensions/duckduckgo/src/ddg-search-provider.shared.ts:5`）。机制 = **抓 DDG 的非 JS HTML 搜索页 + 正则解析**，不是官方 API：
 
@@ -113,7 +113,7 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 ## Hermes：客户端多后端可插拔
 
-**可信度**：高，全部源码可查（仓库根 `E:\Dev\longxia\_refs\hermes-agent-main`，Python 3.11）。
+**原稿证据类型**：源码定位（仓库根 `E:\Dev\longxia\_refs\hermes-agent-main`，Python 3.11）。
 
 ### 工具与后端
 
@@ -138,51 +138,45 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 ---
 
-## 横向对比
+## 横向对比（原调研快照）
 
 | 维度 | Claude Code | OpenClaw | Hermes |
 |------|------------|----------|--------|
-| 实现范式 | ① 服务端 hosted | ② + ③（provider 插件） | ②（多后端可插拔） |
-| 搜索后端 | Brave（托管不可换） | 12 provider | Parallel/Exa/Tavily/Firecrawl |
-| LLM provider 耦合 | 强绑 Anthropic | 无关 | 无关 |
-| 客户端是否发搜索 HTTP | 否 | 是（②）/ 单发 LLM 请求（③） | 是 |
+| 实现范式 | 原稿推断为 ①；客户端调用链未证实 | ② + ③（provider 插件） | ②（多后端可插拔） |
+| 搜索后端 | 原稿记载 API hosted 后端为 Brave；不能据此确认客户端后端 | 12 provider | Parallel/Exa/Tavily/Firecrawl |
+| LLM provider 耦合 | API hosted 形态依赖 Anthropic；客户端映射未证实 | 无关 | 无关 |
+| 客户端是否发搜索 HTTP | 未证实；源码关键词未命中不足以断言“否” | 是（②）/ 单发 LLM 请求（③） | 是 |
 | 暴露给模型的工具数 | 1（WebSearch） | 1（web_search）+ 1（x_search） | 1（web_search）+ web_extract |
-| 凭证 | 无需（随 API key） | per-provider，SecretRef→env | per-backend，config/env |
-| 无 key 选项 | 无 | DDG（HTML 抓取）/ SearXNG（自托管） | 仅 optional skill |
-| 结果形态 | 加密 result block | results[] 或 content+citations | JSON 元数据（title/url/description） |
-| 正文获取 | 同 tool（服务端） | results 自带 或 配 web_fetch | 配 web_extract |
-| 外部内容防注入 | Anthropic 服务端 | `wrapWebContent` 随机边界标记 | 未特别强调 |
-| 地域/平台限制 | US-only，不支持 Bedrock/Vertex | 无 | 无 |
+| 凭证 | API hosted 形态使用 API 凭证，无须另配搜索 key；客户端凭证链未证实 | per-provider，SecretRef→env | per-backend，config/env |
+| 无 key 选项 | 本文未证实客户端是否存在免 key 选项 | DDG（HTML 抓取）/ SearXNG（自托管） | 仅 optional skill |
+| 结果形态 | API hosted 返回含 encrypted_content 的 result block；客户端映射未证实 | results[] 或 content+citations | JSON 元数据（title/url/description） |
+| 正文获取 | 搜索结果与引用不等同于完整正文；另有 WebFetch | results 的摘要或合成答案不等同于完整正文；另配 web_fetch | 配 web_extract |
+| 外部内容处理证据 | 本文不足以说明其完整防注入机制 | `wrapWebContent` 随机边界与 untrusted 标识，不保证防住注入 | 本文未充分分析，不表示没有防护 |
+| 地域/平台限制 | 原稿记载 US-only、Bedrock/Vertex 限制，当前适用性未复验 | 按具体后端核对，不能统一断言无限制 | 按具体后端核对，不能统一断言无限制 |
 
-**取舍**：范式 ① 对开发者零维护、结果新鲜带引用，但绑死单一 provider 且有地域/平台/计费/黑盒约束；范式 ② 完全 provider 无关、可控、可自托管/无 key，代价是自己管密钥、解析归一化、必要时二次摘要。OpenClaw 的 provider 插件抽象把 ②③ 统一到一个工具名，是「既要 provider 无关、又要在支持的模型上白嫖服务端 search」的折中范本。
+**取舍**：范式 ① 减少客户端维护搜索后端的工作，但仍需处理服务接口、结果与引用，并依赖承载请求的模型服务能力；范式 ② 可与主模型解耦，代价是后端接入、凭证、结果归一化与运维，自托管或免 key 取决于所选后端；范式 ③ 把模型服务端搜索作为独立后端，不必绑定主对话模型，但仍有模型服务依赖和费用。统一工具入口可以隔离调用方式，不能抹平结果形态、质量及可用性差异。
 
 ---
 
-## 对知行的启示
+## 知行现状与研究建议
 
-### 现状与缺口（基于知行源码）
+### 当前内置能力
 
-- 知行已有 `web_fetch`，是**编排型工具**：串联 `@zhixing/network` 的 `safeFetch`（含 SSRF/网络策略）+ `sanitizeUntrustedText`、`processContent`（charset + Turndown HTML→MD）、可选 `ctx.llm.light` 蒸馏（`packages/tools-builtin/src/web-fetch.ts:1`）。两模式：带 `prompt` 时 light LLM 只提取所需信息，否则返回 raw markdown。
-- `web_fetch` 的 system hint 已白纸黑字声明它**不搜索网络**：「this tool fetches a URL, it does not search the web」「If the user asks a question without a URL… ask for the URL or suggest a search engine」（`web-fetch.ts:45,49`）——功能缺口由工具自己点明。
-- 知行**已预留** WebSearch 接入：`distill.ts` 注释明确「collectStream 是通用的 light LLM consumer，可被其他 consumer 复用（如未来 WebSearch 的搜索结果摘要）」（`packages/tools-builtin/src/web-fetch/distill.ts:6`）。
+[内置工具工厂](../../packages/tools-builtin/src/factories.ts)注册了 `web_fetch`，未注册 `web_search`。这说明内置工具的边界，不等于断言通过 MCP 等外部工具也无法搜索。
 
-### 范式选择：知行应走范式 ②，而非 ①
+[WebFetch](../../packages/tools-builtin/src/web-fetch.ts)读取已知 URL，不负责搜索发现 URL。它复用安全网络出口、内容转换与不可信文本净化；有 prompt 且具备 light 能力时尝试提炼，无 light、提炼为空或失败时可返回原文。当前调用为 `context.llm.light.chat()`，具体缓存、取消和权限边界以 [WebFetch 模块文档](../modules/tools/web-fetch.md)为准，网络职责见 [网络架构](../modules/network/architecture.md)。
 
-知行是**多 provider 架构**（`@zhixing/providers`，`primaryRole=main/power` 可绑不同 provider/model）。范式 ①（服务端 hosted）会把搜索能力绑死在 Anthropic 且受 US-only / 不支持 Bedrock-Vertex 限制，与多 provider 设计冲突——不可作为基础能力。
+[collectStream](../../packages/tools-builtin/src/web-fetch/distill.ts)注释将未来 WebSearch 摘要列为潜在复用场景；注释不等于已存在搜索接入、已批准需求或已完成接口设计。
 
-**推荐：范式 ② 为主，OpenClaw 式「单工具名 + provider 后端」抽象**，理由是它与知行既有装配机制天然契合：
+### 选型理由与候选方向
 
-- 新增内置工具 `web_search` 走 `BUILTIN_TOOL_FACTORIES`（`packages/tools-builtin/src/factories.ts`），在 `AgentRoleProfile.enabledTools` 里启用——与现有 builtin 工具同一条装配路径，main / 有 workdir 的 workscene 默认带上。
-- 复用 `web_fetch` 已验证的编排骨架：`@zhixing/network` 的 `safeFetch` + `sanitizeUntrustedText`（对应 OpenClaw 的 `withTrustedWebSearchEndpoint` SSRF 守卫 + `wrapWebContent` 防注入），以及 `distill.ts` 的 `collectStream`（注释已点名给 WebSearch 复用）做可选的结果摘要。
-- provider 抽象参考 OpenClaw 的 `WebSearchProviderPlugin`：`id + autoDetectOrder + requiresCredential + execute`，运行时按密钥/配置选一个，失败回退。
+以下为研究建议，不是当前发布范围、默认配置或已批准工作：
 
-### 落地建议
-
-1. **工具分工对齐 Hermes/OpenClaw**：`web_search` 只返回元数据（`{title, url, snippet}` 列表，发现 URL），正文交给已有 `web_fetch`。两者配套，职责清晰。
-2. **起步后端**：先接 1 个无门槛默认 + 1 个高质量可选。DuckDuckGo（HTML 抓取、零配置、无 key）适合做开箱默认；Brave / Tavily / Exa 任一做 API key 可选项。（注意 DDG HTML 抓取有反爬风险，需处理 bot-challenge。）
-3. **范式 ③ 可作为后续可选 provider**：当 `primaryRole` 用 Gemini / Grok / Kimi 等自带 server-side search 的模型时，可加对应 provider（在一个独立 LLM 请求里开 `google_search` / `web_search` / `$web_search`），与范式 ② 共用同一 `web_search` 工具名。非首期必需。
-4. **安全**：搜索结果是外部不可信内容，必须经 `sanitizeUntrustedText` 并标注 untrusted（知行已有 `@zhixing/network` 与 security pipeline，沿用即可）；工具走自描述 `boundaries`（read 类）接入 `SecurityPipeline`，与 `web_fetch` 一致。
-5. **凭证**：per-provider key 走知行现有配置/凭证体系（与身份层凭证物理分离原则一致），auto-detect 时只解析选中 provider 的密钥。
+1. **执行位置与模型耦合。** 若目标是搜索独立于主模型，可考虑范式 ②，或将范式 ③ 包成独立后端。范式 ① 并非天然违反多 provider 架构，但不能在其他模型不支持时仍承诺同等能力；选择应依据明确需求，而非过时的地域限制推导。
+2. **统一入口与后端差异。** 可参考 OpenClaw 的统一工具入口及后端接口，也保留显式选择、可用性检测与失败回退的比较价值。是否需要多个后端、自动探测和回退必须由实际场景证明，不能照搬整套插件框架。工厂注册是现有接入线索，原稿的角色默认启用建议不是现行装配合同。
+3. **搜索与抓取分工。** 搜索发现 URL、标题和摘要，正文交给 `web_fetch`；合成答案需保留引用与来源边界，不把摘要、引用或答案当作已获取完整原文。结果摘要可评估复用 light consumer，而非默认再增加一次 LLM 调用。
+4. **候选后端。** 原稿提出 DDG HTML 免 key 默认入口，Brave／Tavily／Exa 作为 API 可选项，并将 Gemini／Grok／Kimi 服务端搜索列为扩展方向。后端数量按需求选择：HTML 抓取有页面变化、反爬与可用性风险，服务端搜索也不等于免费；具体选型前再核对服务条件。
+5. **安全与凭证。** 可以复用现有网络出口和不可信内容处理，但文本净化或随机标记不能保证防住提示注入。当前 WebFetch 的权限声明为 `network / egress / dynamic:false`，不是原稿所称 read 类；搜索的目的地址、输入和执行边界需按实际设计确认。后端凭证应走相应配置解析及授权边界，不混入用户身份凭证；若采用自动选择，只解析必要候选，不能为探测遍读秘密。
 
 ---
 
@@ -190,13 +184,13 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 调研时间 2026-05-23。
 
-**源码（本地，可逐行复核）**
+**原稿源码定位（历史本地路径，未附版本锁定）**
 - OpenClaw：`E:\Dev\longxia\_refs\openclaw-main`（`extensions/*/`、`src/agents/tools/`、`src/plugins/`、`src/web-search/`、`src/security/`）
 - Hermes：`E:\Dev\longxia\_refs\hermes-agent-main`（`tools/web_tools.py`、`tools/registry.py`、`model_tools.py`）
-- Claude Code 逆向 schema：`E:\Dev\longxia\_refs\claude-code-reverse\results\tools\WebSearch.tool.yaml`；反混淆源码 `E:\Dev\longxia\_refs\claude-code-deobfuscation`（用于反证客户端无搜索实现）
+- Claude Code 逆向 schema：`E:\Dev\longxia\_refs\claude-code-reverse\results\tools\WebSearch.tool.yaml`；反混淆源码 `E:\Dev\longxia\_refs\claude-code-deobfuscation`（原稿检索依据，不能单独证明客户端不存在搜索实现）
 - 知行现状：`packages/tools-builtin/src/web-fetch.ts`、`web-fetch/distill.ts`、`factories.ts`
 
-**网上（模糊点确认）**
+**原研究的网页来源（历史资料）**
 - [Introducing web search on the Anthropic API](https://www.anthropic.com/news/web-search-api)
 - [Web search tool — Claude API Docs](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool)
 - [Inside Claude Code's Web Tools: WebFetch vs WebSearch — Mikhail Shilkov](https://mikhail.io/2025/10/claude-code-web-tools/)

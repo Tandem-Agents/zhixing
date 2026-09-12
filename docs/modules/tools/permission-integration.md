@@ -25,13 +25,13 @@
 4. 批准记录由 Trust 应用处理。Host 的管理侧使用独立的读取入口；不能把旧 `pipeline.getPermissionStore().create()` 或 Renderer 落库描述成当前架构。
 5. 存在 assignment 执行权威时，执行器在策略前和实际效果前检查授权；冻结权限快照与设备执行不允许被本地当前规则或工具声明绕过。拓扑合同归分布式运行架构，本篇不另建授权协议。
 
-运行期变更工具集合通过 reload 重建以上装配快照。`register` 是装配能力；旧稿中的 `unregister` 热卸载与远程可替换注册框架不属于当前合同。
+运行期变更工具集合通过 reload 重建以上装配快照。`register` 是装配能力，不提供 `unregister` 热卸载或远程可替换注册合同。
 
 ## 三、声明与分类
 
 - 文件工具与 Bash 由 context classifier 优先处理；没有专项分类器的工具由 `boundaries` 表达资源类型、访问方式及动态性。多个 crossing 取最高影响，缺少声明不会默认放行。
 - `permissionArgumentKey` 对 write/edit 为 `path`，Bash 为 `command`，WebFetch 为 `url`。声明缺失或对应值不是字符串时，提取器仍退回 `path / file_path / target / destination` 优先列表，再取字符串候选；因此显式字段不是 schema 校验的替代物。
-- `needsPermission`、只读标识与影响分类不是同一层。安全包装器会评估实际操作；不能据旧稿推导 `needsPermission=false` 的工具完全不经过权限规则或安全检查。
+- `needsPermission`、只读标识与影响分类不是同一层。安全包装器会评估实际操作；`needsPermission=false` 不意味着工具绕过权限规则或安全检查。
 - BoundaryRegistry 对声明做拷贝隔离；参数提取器按小写工具名登记。非法空声明／空参数 key 不应通过注册悄悄清除状态。
 
 ## 四、规则与生命周期

@@ -22,15 +22,15 @@ CLI 与服务复用检查和编辑责任；秘密只在目标设备专用界面�
 
 ## 共享编辑器
 
-[配置编辑器](../../../packages/cli/src/config-editor/index.ts)以 stdin、stdout、writers、sections、标题及初始数据作为边界。必要字段检查是纯函数，由启动与编辑 section 复用；面板交互不承担后端装配。配置选择、列表、实体、输入和模型选择按面板状态组织，通过方向键、Enter、Esc、Ctrl+C 导航，不以历史“几级面板”限制功能。
+[配置编辑器](../../../packages/cli/src/config-editor/index.ts)以 stdin、stdout、writers、sections、标题及初始数据作为边界。必要字段检查是纯函数，由启动与编辑 section 复用；面板交互不承担后端装配。配置选择、列表、实体、输入和模型选择按面板状态组织，通过方向键、Enter、Esc、Ctrl+C 导航。
 
-初始配置、服务启动和 REPL `/config` 复用编辑器与秘密仓库；后续 MCP 专用接入见[MCP 接入与管理](../mcp/onboarding-and-management.md)。编辑后的运行配置采用与热更新不由秘密存储重复定义，见[运行配置与会话热更新](../configuration/runtime-application.md)。
+初始配置、服务启动和 REPL `/config` 复用编辑器与秘密仓库；后续 MCP 专用接入见[MCP 接入与管理](../mcp/onboarding-and-management.md)。编辑后的运行配置应用不由秘密存储重复定义，见[运行期配置应用](../configuration/runtime-application.md)。
 
 ## 保存、取消与失败
 
 编辑改动先存内存，只有“完成”才调用 writers。取消或 Ctrl+C 不提交编辑期改动；这不表示撤销进入编辑器以前的启动迁移等动作。写入失败必须传播，不能显示保存或启动成功。
 
-**原有“两份数据一同保存，不出现半成功状态”的要求尚未由跨存储事务实现。** 当前 `runConfigEditor` 顺序等待 `writeConfig`、`writeCredentials`，第二步失败可能留下已更新的公开配置。凭据内部 generation 的原子切换并不能证明公开配置与秘密共同原子提交。本次文档迁移只记录差异，不宣告该要求已满足，也不新增修复实现。
+**公开配置与秘密应一同保存，不出现半成功状态；当前尚未实现跨存储事务。** `runConfigEditor` 顺序等待 `writeConfig`、`writeCredentials`，第二步失败可能留下已更新的公开配置。凭据内部 generation 的原子切换并不能证明公开配置与秘密共同原子提交。
 
 编辑完成后启动器重读落盘数据，但不会再完整调用一次启动语义检查与 main 缺失检查；编辑器校验、重读成功不能表述为全部就绪门禁复验。当前结果包括 ready、cancelled、schema-error、semantic-error、secret-store-error、non-tty；写入阶段异常向调用方传播，不被包装成完成结果。
 

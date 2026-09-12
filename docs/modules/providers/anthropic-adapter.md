@@ -11,19 +11,19 @@
 ## 流事件与工具参数
 
 - 请求开始发出内部 `message_start`；文本 delta 直接透传。
-- 工具块开始发 `tool_call_start`，参数片段发 `tool_call_delta`，块结束发 `tool_call_end`。最终参数解析由下游完成，适配器不在每个 delta 反复解析 JSON，也不是旧稿描述的“块末才同时发 start/end”。
+- 工具块开始发 `tool_call_start`，参数片段发 `tool_call_delta`，块结束发 `tool_call_end`。最终参数解析由下游完成，适配器不在每个 delta 反复解析 JSON，避免对不断增长的参数做重复工作。
 - 思考块发 start/delta/end；signature 片段累积后随 end 交给消息组装。
 - 正常结束发 `message_end`，携带 stopReason 和 usage；异常发 error 后返回，不再伪造成功结束。未知内容块当前没有对应投影，不能当作已支持。
 
 ## 思考与签名
 
-请求侧已经接入 `ThinkingConfig`：当前仅 budget 形态生成 `{ type: enabled, budget_tokens }`，不是旧稿的 adaptive/budget 双路径。仅有 on 而无预算不臆造数值，其他不适用形态不发送。
+请求侧已经接入 `ThinkingConfig`：当前仅 budget 形态生成 `{ type: enabled, budget_tokens }`，adaptive 尚未接入。仅有 on 而无预算不臆造数值，其他不适用形态不发送。
 
 历史思考块带 signature 时，思考文字与签名原样回传，不能改写签名内容；缺 signature 的跨 Provider 思考块降为 text，保留信息而不伪造 Anthropic 原生块。接收思考事件、配置界面是否可选和请求是否启用是三个独立条件，参见[思考控制](thinking-control.md)。
 
 ## 缓存与用量
 
-当前在 system 文本块及最后一条 user 消息的最后内容块放置 ephemeral cache_control。它表达缓存意图，不保证命中；未实现的自适应断点、扩展 TTL、非流式回退不作为现状保留。
+当前在 system 文本块及最后一条 user 消息的最后内容块放置 ephemeral cache_control，使后续增量对话有机会复用稳定前缀。标记表达缓存意图，不保证命中；自适应断点、扩展 TTL 与非流式回退尚未实现。
 
 `extractUsage` 保留 `input_tokens` 为原始 `inputTokens`，并计算：
 

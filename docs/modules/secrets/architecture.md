@@ -6,6 +6,7 @@
 
 - CLI、服务与通道共享产品身份和配置责任；同一用户的不同设备分别持有本机所需秘密，不通过网格共享凭据。
 - 公开配置与秘密物理分离、通过稳定 id 关联：AI 读取公开配置无需用户确认，写入须逐次确认，不允许“永远同意”或跳过；秘密禁止 AI 读取或写入，只能由用户通过目标设备的专用流程管理。
+- 文件工具按文件读取，若公开配置与秘密混存，保护整个文件会阻断正常配置协助，允许读取又会暴露秘密；物理分离使这两类访问政策可以分别执行。
 - 凭据加载不依赖项目目录、shell shim、项目 `.env` 或 `env:` / `helper:` 前缀，开发与正式运行走同一产品路径。否则入口与 shell 的差异会改变用户能否启动。
 - 不引入额外多身份／profile 体系。服务商库与模型角色是不同职责，引用[模型角色](../providers/model-roles.md)，不在秘密仓库重复定义。
 - 复用现有安全规则及其 message、suggestion 提供阻断原因和安全操作指引，不为引导新增安全动作或专用 AI 配置工具。旧明文文件和“不使用系统密钥库”的方案已被设备本地加密存储替代，不再是现行约束。
@@ -59,7 +60,7 @@ SecretStore 必须真实解锁、旧明文为零；但凭据字段齐全不等�
 
 暴露记录只含非秘密的设备、binding、服务、经服务核验的 principal 指纹、tenant、scope、状态及轮换指引。输入须规范、身份唯一、深度不可变，状态时间不得倒退。撤销只将目标设备的 active 暴露标为 compromised，并提供受影响外部账号及操作指引，不自动轮换第三方账号。
 
-当前 [CredentialExposureAuthority](../../../packages/cli/src/serve/credential-exposure-authority.ts)已经通过 AuthorityCommitLog 的 exposure 流耐久提交、投影并执行路由检查，不能继续写成“以后实现耐久化”。凭据描述与执行能力匹配属于分布式执行合同，本模块不另立权威，也不再将其笼统列为未来功能。
+当前 [CredentialExposureAuthority](../../../packages/cli/src/serve/credential-exposure-authority.ts)通过 AuthorityCommitLog 的 exposure 流耐久提交、投影并执行路由检查。凭据描述与执行能力匹配属于分布式执行合同，本模块不另立权威。
 
 ## 错误与验证边界
 

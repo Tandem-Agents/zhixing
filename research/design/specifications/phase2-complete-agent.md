@@ -57,11 +57,11 @@
 
 ### 2.3 Grep 工具
 
-当前需求、搜索契约、默认参数和实现边界以 [grep 搜索架构](../../../docs/modules/tools/grep.md) 为准；保留默认返回内容、提供上下文和缺少 ripgrep 时仍可用的设计取舍，不再沿用旧参数表。
+grep 默认返回匹配内容并提供上下文，减少搜索后再次读取的步骤；缺少 ripgrep 时仍可通过 Node 执行器搜索。搜索契约、默认参数与实际支持边界见 [grep 搜索架构](../../../docs/modules/tools/grep.md)。
 
 ### 2.4 容错与重试
 
-有效设计与当前实现已归入[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)。以该正文说明的重试、退避、熔断及输出安全边界为准；旧次数、超时重试和 Failover 设想不再作为当前能力说明。
+协议适配与恢复策略分离，在调用装配处注入重试与退避，已输出内容后不自动重发。当前分类、次数、熔断及取消边界见[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)。
 
 ### 2.5 会话持久化
 
@@ -141,7 +141,7 @@ L3: LLM 摘要压缩（昂贵，高质量）
 
 ### Phase 2B — 基础容错
 
-2B-1 的容错职责与实现位置见[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)，不再保留旧实施步骤。
+2B-1：模型调用重试包装器。现行职责与实现位置见[容错与模型调用恢复](../../../docs/modules/resilience/architecture.md)。
 
 ```
 2B-2: Token 估算

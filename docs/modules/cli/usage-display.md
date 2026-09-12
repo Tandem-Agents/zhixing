@@ -6,7 +6,7 @@
 
 知行是助手，不是仪表盘。默认反馈工作是否在推进及何时结束，容量和消耗详情按需查看；信息用于理解状态和作出选择，不为展示而展示。自动上下文整理由系统负责，不能把正确运行的责任交给用户手动监控百分比。
 
-旧设计以“耗时 → 容量百分比 → 警示”的渐进摘要行减少噪音。保留的是默认少打扰、需要时提供参照与详情的取舍，不保留已经被状态条替代的四阶段摘要行作为现行实现。费用透明仍有价值，但 token 数、容量估算和实际费用不能互相冒充。
+反馈优先级是：是否仍在响应 → 上下文剩余容量 → 有可靠计价依据时的费用。默认少打扰，需要时提供参照与详情：同样的 token 数在不同容量窗口中意义不同，孤立数字不能表达容量压力。费用透明仍有价值，但 token 数、容量估算和实际费用不能互相冒充。
 
 ## 三类数据必须区分
 
@@ -41,13 +41,13 @@ ContextIndicator 在稳定尾部展示 `~ 14.0k` 或 `~ 14.0k (cache 9.0k)`，`~
 
 ## 设计与实现差异
 
-旧稿中仍有价值但未完整落地的目标是：按本轮与累计清晰归属输入／输出及缓存用量、按需解释上下文构成，以及在计价依据可靠时提供费用明细。当前 `/usage`、`/context` 不具备旧示例的全部字段，费用查询 `/cost` 未实现；不能把示例金额或“缓存节省”当作真实结果。
+用量查询需要按本轮与累计清晰归属输入／输出及缓存用量、按需解释上下文构成，并在计价依据可靠时提供费用明细。这些目标尚未完整落地：当前 `/usage` 主区不是累计账单，`/context` 没有构成分析，费用查询 `/cost` 未实现；不能把示例金额或“缓存节省”当作真实结果。
 
-原稿的 `display.turnSummary`、`contextShowThreshold`、`showCost` 不是当前配置合同。旧阈值渐进摘要、TUI 技术选型、可编程状态行及实施优先级不再作为执行计划保留；不因迁移文档引入新配置、插件框架或计费能力。
+当前没有 `display.turnSummary`、`contextShowThreshold`、`showCost` 配置项，也不提供可编程状态行接口。
 
 ## 实现与核对入口
 
 - [命令与错误反馈](../../../packages/cli/src/commands/info-commands.ts)、[会话控制](../../../packages/cli/src/runtime/conversation-controller.ts)、[RPC](../../../packages/server/src/rpc/methods/session.ts)、[宿主查询适配](../../../packages/cli/src/serve/conversation-usage-application.ts)。
 - [渲染与 run 装配](../../../packages/cli/src/render.ts)、[状态条](../../../packages/cli/src/status-bar/status-bar.ts)、[上下文指示器](../../../packages/cli/src/context-indicator/context-indicator.ts)、[预算口径](../../../packages/core/src/context/budget.ts)。
 
-直接核对估算与实耗分离、多请求累加与结算、主子 lineage 隔离、cache 缺值与更新、跨 run 显示生命周期、查询失败不伪造结果、子任务拆分及窄屏可读性、整理成功／失败／降级互不冒充。对应命令、渲染、状态条、ContextIndicator 和宿主查询测试提供局部证据，不为文档迁移新增计量框架或运行全量验证。
+直接核对估算与实耗分离、多请求累加与结算、主子 lineage 隔离、cache 缺值与更新、跨 run 显示生命周期、查询失败不伪造结果、子任务拆分及窄屏可读性、整理成功／失败／降级互不冒充。对应命令、渲染、状态条、ContextIndicator 和宿主查询测试提供局部证据。

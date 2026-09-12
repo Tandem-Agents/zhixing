@@ -6,11 +6,11 @@
 
 `config.llm.<role>.thinking → Host 校验与 roleThinking → 主循环／单发调用／摘要请求 → ChatRequest.thinking → adapter 方言参数`
 
-配置按 main/light/power 分别保存；`primaryRole` 选择当前主循环角色，不覆盖其他角色的思考设置。main 单发跟 main，默认单发与当前自动／手动段摘要使用 light thinking；旧独立 main 压缩链已退出，取舍差异见[模型角色](model-roles.md)。不能只接主循环漏掉其他请求构造点。
+配置按 main/light/power 分别保存：同一模型用于不同任务时也可能需要不同思考深度，选模型与选思考配置是两个独立维度。`primaryRole` 选择当前主循环角色，不覆盖其他角色的思考设置。main 单发跟 main，默认单发与当前自动／手动段摘要使用 light thinking；旧独立 main 压缩链已退出，取舍差异见[模型角色](model-roles.md)。不能只接主循环漏掉其他请求构造点。
 
 当前 `ThinkingControl` 由模型目录声明 none、toggle、effort（枚举原值）或 budget（可选范围），驱动配置编辑器和 `validateThinkingConfig`；`ThinkingConfig` 保存 off/on/effort/budget 的具体选择。共同结构只表达形态，不把一个厂商的档位解释成另一厂商的等价档位。
 
-adapter 不读取配置文件，也不直接读取界面能力描述，而按 `ProviderQuirks.thinkingDialect` 转换已经传入的请求参数。元数据声明与协议方言分责，不能将旧稿“adapter 也直接由模型元数据驱动”当成现有结构。
+adapter 不读取配置文件，也不直接读取界面能力描述，而按 `ProviderQuirks.thinkingDialect` 转换已经传入的请求参数。模型元数据负责可配置能力，协议方言负责发送形态。
 
 ## 当前发送形态
 
@@ -30,7 +30,7 @@ adapter 不读取配置文件，也不直接读取界面能力描述，而按 `P
 
 宿主对已收录模型按 `validateThinkingConfig` 校验：不相容配置被忽略，Kernel 装配会告警；未收录模型目前直接传递配置，交由方言映射。因而“任何非法模型参数都已被拦截”并不成立。辅助角色回退后按生效模型进行校验，但未知模型的逐型号约束仍不可验证。
 
-保留的设计要求是尊重原生形态、不发送已知无效参数、模型切换后不误用旧配置；当前元数据尚不完整，budget 与 max_tokens 的协议联动也没有统一校验。Anthropic 的 on 无预算与部分接口 budget 限制不能由共同形态校验自动证明正确。补齐这些要求需按具体型号与端点验证，不在文档迁移中新增能力或推定任意预算有效。
+配置必须尊重原生形态、不发送已知无效参数、模型切换后不误用旧配置；当前元数据尚不完整，budget 与 max_tokens 的协议联动也没有统一校验。Anthropic 的 on 无预算与部分接口 budget 限制不能由共同形态校验自动证明正确，仍需按具体型号与端点验证。
 
 `supportsThinking` 粗标只说明思考能力信号，不代表用户可调参数；接收 reasoning/thinking 事件也不以该粗标为开关。带签名历史的协议保真见 [Anthropic 适配](anthropic-adapter.md)。
 

@@ -41,7 +41,7 @@ Host 另持 lifecycle.connect/close；管理面只消费 status.snapshot。
 - 首次失败与被动断线均进入 `connecting`，保留最近失败原因，按 1 秒起步、上限 30 秒的指数退避重试。连接成功清除旧错误。空配置的 hub 返回空目录，调用未知 server 返回错误，关闭可空操作。
 - 主动关闭前解除断线回调，取消重连计时器；异步建链完成时复核当前规格，已删除或替换的孤儿连接必须释放。Host 关闭还清空期望规格，防止在途连接在退出后重新生效。
 - 已冻结的工具仍可能遇到 server 断线，调用返回明确的不可用错误。重连恢复连接不重写旧提示或旧 schema；新发现的工具需下一次运行体装配才进入快照。
-- 当前关闭委托 SDK Client/transport，并释放 HTTP 连接池；hub 使用 `allSettled` 收尾。旧设计要求退出不遗留子进程，但不能仅据此宣称已实现任意后代进程树的强制终止或关闭失败的完整报告。
+- 当前关闭委托 SDK Client/transport，并释放 HTTP 连接池；hub 使用 `allSettled` 收尾。退出不应遗留子进程，但该关闭路径不能证明任意后代进程树都已被强制终止，或关闭失败都已完整报告。
 - 库内 `hub.applyConfig` 能增量调整规格，但当前 Host 端口未暴露它。用户配置生效走 Host 换代，不能沿用旧的 `session.reload → computeDiff → hub.applyConfig` 接线说明。
 
 ## 工具映射合同

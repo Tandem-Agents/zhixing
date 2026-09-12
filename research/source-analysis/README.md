@@ -61,8 +61,8 @@ Nous Research 开发的自主进化型开源智能体，核心差异化在于 Sk
 
 | 文档 | 内容 | 状态 |
 |------|------|------|
-| [动态上下文注入](./dynamic-context-injection.md) | openclaw / hermes / claude-code 的 per-turn 动态注入对比 | ✅ 已完成 |
-| [Web 搜索工具](./web-search-tool.md) | 三方 web_search 实现对比（服务端 hosted / 客户端多 provider）+ 对知行启示 | ✅ 已完成 |
+| [动态上下文注入](../../docs/research/dynamic-context-injection-comparison.md) | 三方注入位置、更新时机与缓存取舍；原研究证据边界与知行现状分列 | 已迁移 |
+| [Web 搜索工具](../../docs/research/web-search-tool-comparison.md) | 三方实现研究快照、比较与证据边界；知行现状和未批准建议分列 | 已迁移 |
 | [Skill 系统横向对比](./skill-system-comparison.md) | openclaw vs hermes（含 claude-code 参照）：进上下文趋同（索引+渐进披露+缓存）vs 进化/信任/分发分歧 | ✅ 已完成 2026-05-25 |
 
 ## 分析规范

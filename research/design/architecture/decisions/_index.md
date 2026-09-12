@@ -9,7 +9,7 @@
 | 001 | [仓库组织与包边界](../../../../docs/engineering/repository-structure.md) | 已迁移 | 2026-04-06 | 单仓多包取舍与当前工程边界 |
 | 002 | [Provider 层架构](../../../../docs/modules/providers/architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 源码分析 |
 | 003 | [公开配置架构](../../../../docs/modules/configuration/architecture.md) | 已归并 | 2026-04-07 | 单一来源、路径、读写与用途投影；有效选型理由已承接 |
-| 005 | [CLI 架构](005-cli-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code CLI 架构深度对比 |
+| 005 | [CLI 总体架构](../../../../docs/modules/cli/architecture.md) | 已迁移 | 2026-04-07 | 有效取舍已承接；按宿主／RPC 与当前终端实现校准 |
 | 006 | [安全架构](../../../../docs/modules/security/architecture.md) | 已归并 | 2026-04-12 | 当前安全机制与信任正文已归位 |
 | 007 | [消息 Outbox 与因果排序](../../../../docs/modules/delivery/outbox.md) | 接受 | 2026-04-21 | Slack / Claude Code / Temporal / Akka 多生产者顺序治理对照 |
 | 008 | [秘密存储架构](../../../../docs/modules/secrets/architecture.md) · [首次引导](../../../../docs/modules/secrets/onboarding.md) | 已归并 | 2026-05-01 | 有效取舍已承接，旧存储方案已替换；现状与差异见正文 |

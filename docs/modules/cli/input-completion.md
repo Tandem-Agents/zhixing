@@ -49,6 +49,18 @@ Provider 查询、派生提示及订阅者异常由 Broker 隔离，错误可交
 
 Ghost text 只由无歧义的命令名称或别名前缀生成，不用模糊结果猜测尾文；参数提示由 `ArgSchema` 随当前位置派生，避免另维护一份字符串参数表。
 
+### 选型依据
+
+| 选择 | 相比另一方案的理由 |
+|---|---|
+| Fuse 多字段匹配，而非只做 prefix | 允许用户记不准名称时仍能发现命令；纯 JS 不引入 native 构建依赖 |
+| 名称、别名优先于描述 | 命令应自解释，描述中的偶然命中不能压过明确名称；当前权重为名称 4、别名 3、名称分词 2、描述 0.3 |
+| 模糊候选与前缀 ghost 分开 | 模糊匹配适合“找选项”，不适合把不确定文本显示成用户即将输入的后缀 |
+| 有界、衰减的使用分数，而非累计次数 | 曾经高频的命令不应永久霸榜，新习惯应能改变排序；生产接入缺口见上文 |
+| Provider/Broker 与终端分离，而非把补全交给整套 UI 框架 | 候选规则可独立测试和复用，终端仍统一管理输入、模态和屏幕；不要求重写成熟的检索算法 |
+
+原始交互调研见 [OpenClaw](../../../research/source-analysis/openclaw/slash-command-completion.md)、[Hermes](../../../research/source-analysis/hermes-agent/slash-command-completion.md)和 [Claude Code](../../../research/source-analysis/claude-code/slash-command-completion.md)，其中竞品能力描述对应各自调研版本，不代表当前版本评测。
+
 ## 接受、提交与候选操作
 
 “默认选中第一项”的目的，是不要求用户先按方向键激活列表，**不是所有 Enter 都执行**。
@@ -82,6 +94,6 @@ Ghost text 只由无歧义的命令名称或别名前缀生成，不用模糊结
 
 ## 范围与维护依据
 
-本模块保留 `/` 与 `@` 的输入范围以及默认开启、`ZHIXING_INPUT_TYPEAHEAD=legacy` 回退输入采集的约定；关闭补全不另建命令执行路径。旧稿的工具/MCP/Agent 专用补全、文件命令目录、Plugin SDK 和 Web 渲染交付计划没有在当前 REPL 接入，不列作已具备能力或本次迁移的开发任务。
+本模块提供 `/` 与 `@` 的输入范围以及默认开启、`ZHIXING_INPUT_TYPEAHEAD=legacy` 回退输入采集的约定；关闭补全不另建命令执行路径。工具/MCP/Agent 专用补全、文件命令目录、Plugin SDK 和 Web 渲染未在当前 REPL 接入。
 
 直接实现依据：[Broker](../../../packages/core/src/typeahead/broker.ts)、[Providers](../../../packages/core/src/typeahead/providers)、[输入控制器](../../../packages/cli/src/typeahead-input.ts)、[REPL 装配](../../../packages/cli/src/repl.ts)。维护时重点保护草稿/候选分离、迟到结果拒收、接受与提交区分、管理面板空态、候选操作终态、挂起恢复和鼠标租约；不以纯候选快照代替真实输入消费链。

@@ -10,7 +10,7 @@
 - timer、取消监听器与连接池分别有明确生命周期，不能把资源释放交给 GC。
 - 代理是基础设施配置，正常使用保持安静，失败提供可诊断且不泄露凭证的信息，不要求用户理解内部传输拓扑。
 
-传输使用同一独立 `undici` 包的 fetch 与 dispatcher，避免混用 Node 内建 fetch 与另一版本 dispatcher。原选型曾遇到内部接口不兼容；该原因支持依赖配对，不代表所有 Node 版本必然不兼容。
+传输使用同一独立 `undici` 包的 fetch 与 dispatcher，避免混用 Node 内建 fetch 与另一版本 dispatcher。早期选型实验在 Node 22 中遇到 `invalid onRequestStart method`，暴露了内嵌与独立 undici 的内部接口不兼容；这一故障支持依赖配对，不代表所有 Node 版本必然不兼容。
 
 ## 二、公共接口与责任
 
@@ -63,7 +63,7 @@ PinnedAgent 的 lookup hook 对解析出的地址检查后再交给连接使用�
 | `createSafeFetch` 重定向 | 拒绝 | 拒绝 |
 | 代理地址是否可为内网／回环 | 不适用 | 允许，不套目标网段限制 |
 
-因此代理路径不能声称与 PinnedAgent 具有相同的 SSRF 保证。攻击者不必控制代理服务器，就可能使其访问一个解析到内网的目标；目标访问边界还依赖代理自身的出口策略。EnvHttpProxyAgent 的 `NO_PROXY` 分流由 undici 执行，但本包未向该 dispatcher 注入安全 lookup，不能把其绕过代理的连接视作 PinnedAgent 防护已经成立。这里记录现状与边界，不降低安全目标，也不在文档迁移中改变实现。
+因此代理路径不能声称与 PinnedAgent 具有相同的 SSRF 保证。攻击者不必控制代理服务器，就可能使其访问一个解析到内网的目标；目标访问边界还依赖代理自身的出口策略。EnvHttpProxyAgent 的 `NO_PROXY` 分流由 undici 执行，但本包未向该 dispatcher 注入安全 lookup，不能把其绕过代理的连接视作 PinnedAgent 防护已经成立。
 
 ## 四、失败与资源生命周期
 
@@ -78,7 +78,7 @@ PinnedAgent 的 lookup hook 对解析出的地址检查后再交给连接使用�
 
 body reader 累积字节，超限取消；取消监听器在结束时移除。但当前实现存在需与设计义务区分的边界：取消后若 reader 以 done 正常结束，循环没有最终复查取消状态；`HopLifecycle.dispose()` 也只释放 timer／监听器，不等于关闭每跳 dispatcher。不能用“有 finally”证明所有资源与取消终态都已闭合。
 
-`SafeFetch.close()` 显式关闭连接池。MCP HTTP transport 将它作为 dispose 返回，连接所有者负责在断开时调用；MCP 查源／搜索的 `defaultHttpGetText` 则封装 fetch 并读取 `res.text()`，当前未暴露 close，也没有因此获得高层 GET 的 body 上限。保留明确所有权与受控资源的设计要求，不把这些缺口写成已解决。
+`SafeFetch.close()` 显式关闭连接池。MCP HTTP transport 将它作为 dispose 返回，连接所有者负责在断开时调用；MCP 查源／搜索的 `defaultHttpGetText` 则封装 fetch 并读取 `res.text()`，当前未暴露 close，也没有因此获得高层 GET 的 body 上限。该消费路径尚未满足连接池显式释放与读取规模受控的要求。
 
 ## 五、代理诊断与秘密边界
 
@@ -117,4 +117,4 @@ body reader 累积字节，超限取消；取消监听器在结束时移除。�
 - [WebFetch](../../../packages/tools-builtin/src/web-fetch.ts)、[MCP transport](../../../packages/mcp/src/transport.ts)、[MCP HTTP 文本请求](../../../packages/mcp/src/http.ts)；业务边界见 [MCP 架构](../mcp/architecture.md)。
 - [Kernel 配置接线](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)、[工具实现装配](../../../packages/cli/src/runtime/kernel-tool-implementation.ts)、[展示配置投影](../../../packages/cli/src/runtime/runtime-configuration-provider.ts)。
 
-验证重点是 URL／IP 表达、DNS 实际连接检查、两种重定向合同、body 与取消边界、代理分支、诊断脱敏及消费者释放路径。纯函数与可控 DNS／HTTP 替身用于确定性验证；单元测试绿灯不能代替生产消费链证据，也不把旧测试数量与耗时当架构合同。
+验证重点是 URL／IP 表达、DNS 实际连接检查、两种重定向合同、body 与取消边界、代理分支、诊断脱敏及消费者释放路径。纯函数与可控 DNS／HTTP 替身用于确定性验证；单元测试绿灯不能代替生产消费链证据。

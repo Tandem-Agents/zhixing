@@ -8,6 +8,8 @@
 
 `RuntimeHost` 接收已裁决的产品投影，统一装配 conversation 与 ephemeral 运行体；后者用于一次性任务等执行。订阅集合在装配时确定、实例存续期间不变，每个边界按注册顺序串行等待，不开放运行后的二次注册，也不假定订阅者之间存在逆序释放依赖。宿主贡献与会话专属贡献在同一装配点合并。
 
+装配期固定订阅集合，是为了让每个订阅者都能参与首窗准备；运行后才注册会错过这一边界，留下生命周期语义缺口。
+
 运行体持有窗口级提示与钩子状态，不能跨不同对话共享这些可变状态。实例的使用方负责结束与释放，`RuntimeHost` 不代替会话 owner 或执行器管理产品生命周期。Task 派生子 Agent 直接走子执行循环，不经 `createAgentRuntime`，不携带本钩子；不能据此把所有非交互运行体都排除在外。
 
 ## 二、四个边界
@@ -16,7 +18,7 @@
 |---|---|---|
 | `onWindowOpen` | 装配首窗；切段、有效压缩、clear、resume 后的新窗 | 贡献窗口级提示段和消息前缀，为新窗口准备稳定材料 |
 | `onBeforeRun` | 本次 Run 进入模型循环前 | 读取本次输入，异步准备，经 `injectUserContext` 贡献本次用户消息上下文 |
-| `onAfterRun` | Kernel 正常返回本次 completion 后、Run 资源清理前 | 观测执行结果与收尾；不代表 owner 已接受或提交 |
+| `onAfterRun` | Kernel 正常返回本次 completion 后、Run 资源清理前 | 观测执行结果、总结经验与收尾；这是接入能力，不代表内置自动学习或 owner 已接受、提交 |
 | `onWindowClose` | 换窗前关闭旧窗；实例退场关闭末窗 | 收束旧窗口及实例资源 |
 
 换窗先对全部订阅者执行 close，再执行 open；Run 入口本身不是换窗。循环内的段切换由 `runTurnBegin`／`runTurnEnd` 在重构边界调用 `windowLifecycle.onChange`，保证下次模型调用使用新窗口；Run 外的 clear、resume、手动 compact 经运行体适配层调用 `onAttentionWindowChange`。

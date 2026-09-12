@@ -1,27 +1,28 @@
 # 动态上下文注入：三方架构对比
 
-> 调研动机：知行的 system prompt 是静态的（session 级一次性构建），定时任务状态等 per-turn 动态信息无法注入。
-> 本文对比 openclaw / hermes / claude-code 三个参考项目的方案，为知行的 16d（任务状态注入）及后续 Layer 3 接入提供架构依据。
+> 本文比较动态上下文的注入位置、更新时机与缓存取舍，供架构选型参考；知行的现行实现见末节。
+>
+> 外部实现属于原研究材料，材料未锁定版本、commit 或完整来源链，不代表外部项目最新版。下文图示与行号保留为研究线索，不承诺精确复现或当前适用；尤其 Claude Code 不同材料的版本不能混作同一份源码。`per-turn` 沿用各材料术语，不直接等同于知行的一次用户 Run 或每次模型调用。
 
 ---
 
 ## 核心发现
 
-三个项目不约而同采用 **"静态 system prompt + 动态 per-turn 注入"** 的分层架构，但注入点不同：
+三种方案采用 **“静态 system prompt + 动态 per-turn 注入”** 的分层思路，区别在于动态内容的注入位置：既可以追加到 system 的动态区，也可以通过消息注入。
 
 | 项目 | System Prompt | Per-Turn 动态注入点 | Cache 策略 |
 |------|-------------|---------------------|-----------|
-| **OpenClaw** | 静态前缀 + 动态后缀（cache boundary 分隔） | system prompt 尾部 + plugin hook + context engine | 前缀全局缓存，后缀不缓存 |
-| **Hermes** | 完全静态（session 级缓存，不 per-turn 重建） | user message 注入（memory prefetch / plugin context） | system prompt 永不变，动态内容在 user message 里 |
-| **Claude Code** | 静态前缀 + 动态 section registry | `<system-reminder>` 标签注入 user message | global / org / ephemeral 三级缓存 |
+| **OpenClaw** | stable prefix + dynamic suffix（cache boundary 分隔） | system prompt 动态区 + plugin hook + context engine | 原研究描述显式缓存控制优先覆盖稳定区；不代表后缀绝不缓存或跨用户共享 |
+| **Hermes** | 原稿描述 session 级 `_cached_system_prompt` 复用 | user message 注入（memory prefetch / plugin context） | 应用侧复用 system 文本，动态内容另入消息；不等于服务端必然命中 |
+| **Claude Code** | 原稿描述静态前缀 + section registry，内部机制待来源复核 | 原稿描述 `<system-reminder>` 包装用户上下文与附件 | 原稿的 global / org / null 为材料中的范围标记，不能直接当作服务端共享或缓存保证 |
 
-**共识原则：per-turn 变化的内容不放 system prompt 前缀，避免打破 prompt cache。**
+**让高频变化内容避开稳定前缀，减少缓存失效。** 应用侧的提示文本／段落计算缓存与模型服务端的 prompt cache 是不同层次；动态 system 后缀仍是可选注入位置，缓存命中取决于具体协议与请求。
 
 ---
 
 ## OpenClaw：Cache Boundary + Plugin Hook
 
-### 架构
+### 架构（原研究示意）
 
 ```
 System Prompt:
@@ -39,15 +40,15 @@ Per-Turn 注入:
 
 ### 关键设计
 
-- **`SYSTEM_PROMPT_CACHE_BOUNDARY`** 标记将 system prompt 分为缓存区和非缓存区
+- **`SYSTEM_PROMPT_CACHE_BOUNDARY`** 标记将 system prompt 分为稳定区与动态区；标记本身不是模型服务端缓存开关，需由传输层解释
 - **Context Engine** 每轮 `assemble()` 返回 `systemPromptAddition`，注入到 system prompt 尾部
 - **Plugin Hook** 提供三个注入点：system prompt 前/后 + user prompt 前
-- **当前时间**在 `buildSystemPromptParams()` 中构建，嵌入 system prompt Runtime 段（session 级，非 per-turn）
+- **时间信息的粒度需复核**：原稿称当前时刻冻结于 Runtime 段，但相邻 OpenClaw 提示词研究描述的是稳定时区信息、具体时刻由工具取得。两稿口径冲突，不能据此把启动时刻写成确定实现；仍应区分时区、会话起始时间和实时钟
 
 ### 定时任务状态
 
-- 有 cron 工具但 **不注入活跃任务状态到 system prompt**
-- AI 知道 cron 工具的存在，但不知道当前有哪些定时任务
+- 原稿未记录活跃 cron 状态自动注入 system prompt 的链路。
+- 未记录自动注入，不等于模型无法通过工具查询或其他输入获知任务；本材料不足以断言产品不存在该能力。
 
 ### 关键文件
 
@@ -63,17 +64,17 @@ Per-Turn 注入:
 
 ## Hermes：静态 System Prompt + User Message 注入
 
-### 架构
+### 架构（原研究示意）
 
 ```
-System Prompt（完全静态，session 级构建一次，永不 per-turn 重建）:
+System Prompt（原稿所述 session 级文本缓存）:
   ┌─────────────────────────────┐
   │  身份 + 记忆 + 技能指南       │
   │  工具指南 + 上下文文件         │
   │  时间戳 + 平台提示            │  ← frozen at build time
   └─────────────────────────────┘
 
-Per-Turn 注入（全部在 user message 里）:
+原稿列出的 Per-Turn 注入（user message）:
   ┌─────────────────────────────┐
   │  [原始 user message]         │
   │  + <memory-context>          │  ← 外部记忆 prefetch
@@ -83,7 +84,7 @@ Per-Turn 注入（全部在 user message 里）:
 
 ### 关键设计
 
-- **System prompt 永不 per-turn 重建**：`_cached_system_prompt` 只在 session 首轮构建或从 SQLite 恢复
+- **System prompt 文本复用**：原稿所述 `_cached_system_prompt` 在 session 首轮构建或从 SQLite 恢复；这是所分析路径，不据此断言所有入口和版本永不重建
 - **动态内容注入到 user message**：memory prefetch + plugin context append 到当前轮 user message 末尾
 - **明确的设计原则**：
   > "per-turn changing information is NEVER in the system prompt"
@@ -94,9 +95,9 @@ Per-Turn 注入（全部在 user message 里）:
 
 ### 定时任务状态
 
-- Scheduler 独立运行，**agent 不知道当前有哪些定时任务**
+- 原稿描述 Scheduler 独立运行，但这不等于 agent 无法查询任务状态
 - 定时任务结果通过 gateway 投递到配置的通道
-- 无 per-turn 任务状态注入
+- 原稿未记录活跃调度任务的逐轮自动注入；应与前述压缩时注入 Todo 状态分开判断
 
 ### 关键文件
 
@@ -112,7 +113,9 @@ Per-Turn 注入（全部在 user message 里）:
 
 ## Claude Code：Section Registry + System-Reminder 标签
 
-### 架构
+原稿给出了符号和行号，但没有能将这些内部机制绑定到同一版本的来源链。[现存架构研究](../../research/source-analysis/claude-code/architecture-overview.md)也指出本地逆向、早期重写源码和后期索引不是同一版本。以下保留为原稿描述的设计参照，内部注册、刷新与缓存范围均待独立核实，不作为已证实的客户端合同。
+
+### 架构（原稿描述，内部机制待核实）
 
 ```
 System Prompt（section registry 管理）:
@@ -149,15 +152,15 @@ Per-Turn 注入（<system-reminder> 标签）:
 - **`<system-reminder>` 标签**：动态上下文注入到 user message 体内，不在 system prompt 里
   - `prependUserContext()` 在首条 user message 前注入 CLAUDE.md + currentDate
   - `wrapInSystemReminder()` 包装各种附件
-- **三级缓存**：`global`（跨 org）/ `org`（组织内）/ `null`（ephemeral，不缓存）
-- **当前日期**：通过 `<system-reminder>` 每轮注入（`Today's date is 2026-04-20.`）
+- **缓存范围标记**：原稿解释 `global` / `org` / `null` 为不同范围；这不能证明模型服务端跨组织共享缓存，`ephemeral` 也不能直接解释为“不缓存”
+- **当前日期**：原稿示例为 `Today's date is 2026-04-20.`；示例证明材料包含日期，不能单独证明每轮刷新，刷新时机需结合调用链核实
 - **Attachment 异步 prefetch**：memory / skill / file-change 在 turn 中异步加载注入
 
 ### Todo/任务状态
 
 - `TodoWrite` 工具管理待办列表
 - Todo 状态通过 `<system-reminder>` 注入：`"your todo list is currently empty"` 或当前任务列表
-- **这是三个项目中唯一将任务状态注入到 per-turn 上下文的**
+- 这里的 Todo 是会话待办，不是 cron 调度任务；不能与另两节的调度状态混比后推出“唯一支持任务状态注入”
 
 ### 关键文件
 
@@ -171,34 +174,28 @@ Per-Turn 注入（<system-reminder> 标签）:
 
 ---
 
-## 对知行的启示
+## 对知行的研究价值与当前实现
 
-### 1. 注入位置：user message 而非 system prompt
+### 1. 注入位置：保护稳定前缀，而非固定标签或唯一通道
 
-三个项目的共识：**per-turn 动态内容不放 system prompt 前缀**。
+把高频状态放在当前用户消息前部，可以保护稳定提示前缀；各入口共用注入逻辑，可以避免状态口径分裂。这两项取舍不依赖特定标签。
 
-- Hermes 最激进：system prompt 完全静态，动态内容全在 user message
-- Claude Code 折中：system prompt 有 section registry（部分段 per-turn 重算），但高频变化内容用 `<system-reminder>` 注入 user message
-- OpenClaw 最灵活：system prompt 有 cache boundary 分区，但也支持 user prompt 注入
+- Hermes 材料侧重 system 文本复用、动态信息入消息。
+- Claude Code 材料描述分段计算与 reminder／附件两条路径，内部实现仍受上文证据边界约束。
+- OpenClaw 材料提供 system 动态区与 user prompt 多种注入点，体现可选择的位置与缓存代价。
 
-### 2. 任务状态注入：只有 Claude Code 做了
+### 2. 状态种类与感知方式必须分别比较
 
-- OpenClaw 和 Hermes 的定时任务调度器都**不注入活跃任务状态**到 AI 上下文
-- 只有 Claude Code 通过 `<system-reminder>` 注入 todo 状态
-- 这意味着这是一个"高级特性"，不是标配——但对知行的定时任务场景是刚需
+- 调度任务、会话 Todo、任务完成通知是不同职责；自动注入、按需查询、压缩时回填也是不同机制。
+- 知行需要及时感知当前时间、活跃调度及近期结果，才能基于当前状态回答和行动；竞品是否提供这一能力不决定它对知行的价值。
 
 ### 3. Prompt Cache 友好
 
-所有项目都将 prompt cache 作为核心设计约束：
-- System prompt 的稳定前缀必须 cache-friendly
-- 动态内容放在 cache boundary 之后或 user message 里
-- 知行目前的静态 system prompt 天然 cache-friendly，动态注入应保持这一优势
+稳定文本复用、分区和消息注入都是减少无关前缀变化的手段。把动态内容放到边界之后或消息中，只保护其前面的稳定部分；实际命中仍取决于 provider 的缓存协议、请求前缀、模型、有效期等条件。应用侧 `_cached_system_prompt`、段落计算缓存和服务端 prompt cache 应分别说明。
 
-### 4. 推荐方案
+### 4. 原推荐示意与已实现的知行路径
 
-基于三方调研，知行 16d 的推荐注入方式：
-
-**采用 Claude Code 的 `<system-reminder>` 模式**：在当前轮 user message 前注入动态上下文，不修改 system prompt。
+以下保留旧 16d 的内容示意，展示时间与调度状态如何位于用户输入前；不是当前标签、格式或完整字段合同：
 
 ```
 <system-reminder>
@@ -213,9 +210,8 @@ Per-Turn 注入（<system-reminder> 标签）:
 {用户原始消息}
 ```
 
-优点：
-- 不打破 system prompt cache
-- Per-turn 动态，每次 run 都是最新状态
-- 与 Hermes/Claude Code 的成熟模式对齐
-- 不需要重构 system prompt 构建链路
-- REPL 和 serve 用同一个注入逻辑
+知行已通过 [TurnContextInjector](../../packages/core/src/context/turn-context.ts) 组合 `<turn-context>`，在[模型循环构建发送视图](../../packages/core/src/loop/agent-loop.ts)时注入最新 user 消息的首个文本块前部，而非仅在用户 Run 开始时拼接一次。它保留原始消息，动态状态不写进 system prompt。
+
+当前来源包括运行体装配的时间 Provider，以及[宿主统一贡献](../../packages/cli/src/runtime/turn-context-providers.ts)的调度和会话任务列表 Provider。状态读取与业务写权分离，各运行入口复用同一装配方式；这已承接旧稿“及时感知、前缀稳定、入口一致”的意图，不再是待实施方案。调度状态感知不等于主动通知，也不保证来源无延迟或全请求缓存命中。
+
+具体合同、跳过行为和实现边界由[逐轮上下文注入](../modules/context/turn-context-injection.md)统一说明，本研究不重复定义。
