@@ -31,6 +31,7 @@
 | 场景会话身份、observer 与活动记录 | `WorksceneSessionOwner` 和 ConversationManager；场景身份在会话创建时确定，入口反查归属 |
 | 串行操作与资源静止 | 宿主 `workscene-directory.ts`，协调权威机制与 session owner，不再充当全部产品规则的所有者 |
 | 运行配置 | `workscene-runtime-projection.ts` 组合 main/power profile、场景身份、工具与解析后的环境，交运行时生命周期管理 |
+| 模型行为指引 | 产品侧 `workscene-agent-guidance.ts` 生成场景 profile 与进入指引；Anchor/Executor 共用场景专注与隔离语义，仅已装配场景控制工具的 Anchor 场景获得管理/退出指引，Executor 不获得不存在能力的指引。进入指引由实际 entry 工具携带。Kernel 只按工具声明渲染，不识别场景工具名或生成场景策略 |
 | 接入面 | RPC 投影与 CLI facade/controller；切换自己的当前会话指针，不建立另一套场景权威 |
 
 一套底座、多入口不等于所有调用绕到一个万能 Directory：产品行为归领域，提交、恢复与资源机制归各自 owner，入口只做适配。

@@ -1,6 +1,8 @@
 import type { ArtifactStore } from "@zhixing/core/authority";
 import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
+import { buildSystemPrompt } from "@zhixing/orchestrator/runtime";
+import { mainProfile } from "@zhixing/orchestrator/profile";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
@@ -90,6 +92,69 @@ beforeEach(() => {
 });
 
 describe("executor role conversation runtime production assembly", () => {
+  it.each(["/scene-workspace", null])(
+    "projects scene focus without unavailable control instructions (workspace=%s)",
+    async (workspace) => {
+      runtimeMocks.createAgentRuntime.mockResolvedValue({} as AgentRuntime);
+      const agentIdentity = { displayName: "Executor instance" };
+      runtimeMocks.runtimeEnvironmentCreate.mockImplementationOnce((input) => ({
+        kind: "environment", input, agentIdentity,
+      }));
+      const configuration = projectRuntimeConfiguration(createRuntimeConfigurationSnapshot({}));
+      const mcpTool = {
+        name: "mcp__alpha__lookup",
+        description: "lookup",
+        inputSchema: { type: "object" as const },
+        call: async () => ({ content: "ok" }),
+      };
+      const substrate = new ExecutorRuntimeSubstrate({
+        zhixingHome: "/executor-home",
+        modelConfiguration: configuration.model,
+        kernelEnvironmentConfiguration: configuration.kernelEnvironment,
+        credentials: {}, createToolImplementation, permissionStorage,
+        mcpTools: { snapshot: () => ({ tools: [mcpTool], serverIds: ["alpha"] }) },
+        systemProtectedPaths: ["protected"],
+        interactions: {} as never,
+        artifactStore: () => ({} as ArtifactStore),
+        deviceCapacity: {
+          interactive: {} as AgentRuntimeCapacityBinding,
+          scheduler: {} as AgentRuntimeCapacityBinding,
+          orchestration: {} as AgentRuntimeCapacityBinding,
+        },
+      });
+
+      await substrate.createConversationRuntime(workspace, "ws:scene-a:primary");
+
+      const issued = runtimeMocks.createAgentRuntime.mock.calls[0]![0];
+      const base = mainProfile({ agentIdentity, hasWorkspace: workspace !== null });
+      expect(issued.profile).toEqual({
+        ...base,
+        instructions: `${base.instructions}\n\n` +
+          'You are now focused on the work scene "scene-a". ' +
+          "Work in this scene is isolated from personal scope and other scenes.",
+      });
+      expect(issued.extraTools).toEqual([mcpTool]);
+      expect(issued.executionMcpServers).toEqual(["alpha"]);
+      const availableNames = [...issued.profile.enabledTools, ...issued.extraTools.map((tool: { name: string }) => tool.name)];
+      for (const name of ["workmode_exit", "workscene_rename_current", "workscene_set_workdir_current", "workscene_clear_workdir_current"]) {
+        expect(availableNames).not.toContain(name);
+      }
+      const prompt = buildSystemPrompt({
+        profile: issued.profile, tools: issued.extraTools, cwd: workspace ?? "/unused",
+      });
+      expect(prompt).toContain(issued.profile.instructions);
+      expect(prompt).not.toMatch(/workmode_exit|rename this scene|change its device workspace|clear its workspace binding|Do not just narrate/);
+      expect(issued.primaryRole).toBe("power");
+      expect(runtimeMocks.modelProviderCreate).toHaveBeenCalledWith({ primaryRole: "power" });
+      expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({ workspace });
+      expect(issued.securityExecution).toMatchObject({ context: { kind: "scene", sceneId: "scene-a" } });
+      expect(createToolImplementation).toHaveBeenCalledWith(expect.objectContaining({ kind: "assignment", mode: "work" }));
+      const workPrompt = await issued.windowPrompt.project(skillProjectionQuery);
+      expect(workPrompt.content).toContain("ZX_EXECUTOR_WORK_SKILL");
+      expect(workPrompt.content).not.toContain("ZX_EXECUTOR_MAIN_SKILL");
+    },
+  );
+
   it("forwards explicit workscene identity and keeps ordinary workspace runtimes in main mode", async () => {
     const runtime = {} as AgentRuntime;
     runtimeMocks.createAgentRuntime.mockResolvedValue(runtime);
@@ -154,6 +219,7 @@ describe("executor role conversation runtime production assembly", () => {
       "ordinary-conversation",
     );
     const mainParams = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
+    expect(mainParams.profile).toEqual(mainProfile({ hasWorkspace: true }));
     expect(runtimeMocks.modelProviderCreate).toHaveBeenNthCalledWith(2, {
       primaryRole: "main",
     });
@@ -259,6 +325,7 @@ describe("executor role job runtime production assembly", () => {
     expect(runtimeMocks.modelProviderCreate).toHaveBeenCalledWith({
       primaryRole: "main",
     });
+    expect(runtimeMocks.createAgentRuntime.mock.calls[0]![0].profile).toEqual(mainProfile());
     expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({});
     expect(createToolImplementation).toHaveBeenCalledWith(
       expect.objectContaining({

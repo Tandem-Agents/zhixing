@@ -3,30 +3,18 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { WorkScene } from "@zhixing/core/workscene/types";
 import {
   MAIN_IDENTITY_INSTRUCTIONS,
   SUB_AGENT_ENABLED_TOOLS,
   mainProfile,
-  powerProfile,
   subAgentProfile,
 } from "../default-profiles.js";
 import { renderIdentity } from "../../runtime/system-prompt.js";
 
-function makeScene(overrides: Partial<WorkScene> = {}): WorkScene {
-  return {
-    id: "scene-x",
-    name: "知行 CLI 开发",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    lastActiveAt: "2026-01-01T00:00:00.000Z",
-    ...overrides,
-  };
-}
-
 describe("mainProfile()", () => {
-  it("isolates main and workscene names across independent runtime inputs", () => {
+  it("isolates names across independent runtime inputs", () => {
     const first = mainProfile({ agentIdentity: { displayName: "First" } });
-    const second = powerProfile(makeScene(), { agentIdentity: { displayName: "Second" } });
+    const second = mainProfile({ agentIdentity: { displayName: "Second" } });
     expect(first.name).toBe("First");
     expect(second.name).toBe("Second");
     expect(mainProfile().name).toBe("知行");
@@ -90,63 +78,5 @@ describe("subAgentProfile(opts)", () => {
   it("子工具集包含 web_fetch 且不包含 Task", () => {
     expect(SUB_AGENT_ENABLED_TOOLS).toContain("web_fetch");
     expect(SUB_AGENT_ENABLED_TOOLS).not.toContain("Task");
-  });
-});
-
-describe("powerProfile(scene)", () => {
-  it("有已解析 workspace → 主工具全集（含文件工具）", () => {
-    const p = powerProfile({ ...makeScene(), hasWorkspace: true });
-    expect(p.enabledTools).toEqual([
-      "read",
-      "write",
-      "edit",
-      "glob",
-      "grep",
-      "bash",
-      "web_fetch",
-      "load_skill",
-      "save_skill",
-      "admit_skill",
-      "Task",
-    ]);
-  });
-
-  it("无 workspace → 剔除全部本地文件类工具（by-construction 隔离）", () => {
-    const p = powerProfile({ ...makeScene(), hasWorkspace: false });
-    // load_skill / save_skill 读写 app-state(~/.zhixing/skills)、非 workdir
-    // 本地文件,故保留。
-    expect(p.enabledTools).toEqual([
-      "web_fetch",
-      "load_skill",
-      "save_skill",
-      "Task",
-    ]);
-    for (const fileTool of ["read", "write", "edit", "glob", "grep", "bash"]) {
-      expect(p.enabledTools).not.toContain(fileTool);
-    }
-  });
-
-  it("instructions 含基础身份、场景内属性管理与退出自判；capabilities 同 main", () => {
-    const p = powerProfile(makeScene({ name: "写作场景" }));
-    expect(p.instructions).toContain(MAIN_IDENTITY_INSTRUCTIONS);
-    expect(p.instructions).toContain("写作场景");
-    expect(p.instructions).toContain("rename this scene");
-    expect(p.instructions).toContain("change its device workspace");
-    expect(p.instructions).toContain("clear its workspace binding");
-    expect(p.instructions).not.toContain("memory");
-    // 退出自判：显式指向 workmode_exit 工具，而非仅"叙述完成"
-    expect(p.instructions).toContain("workmode_exit");
-    expect(p.capabilities).toEqual({
-      canSpawnSubAgents: true,
-      userFacing: true,
-    });
-    expect(p.role).toBe("main");
-  });
-
-  it("同一 scene 多次调用 instructions byte-equal（静态前缀缓存可复用）", () => {
-    const scene = { ...makeScene(), hasWorkspace: true };
-    expect(powerProfile(scene).instructions).toBe(
-      powerProfile(scene).instructions,
-    );
   });
 });

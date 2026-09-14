@@ -12,7 +12,8 @@ import {
   type WorksceneAssignmentToolApplication,
   type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
-import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile } from "@zhixing/orchestrator/profile";
+import { powerProfile } from "./workscene-agent-guidance.js";
 import {
   type AgentRuntimeLifecycle,
   type AgentRuntime,
@@ -96,6 +97,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
           id: "capability-catalog",
           name: "capability-catalog",
           hasWorkspace: false,
+          hasSceneControlTools: false,
         }).enabledTools,
         ...input.extraTools
           .assembleTools({ scheduler: () => executionScheduler })
@@ -214,6 +216,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
         id: options.scene.sceneId,
         name: options.scene.name,
         hasWorkspace: options.absolutePath !== null,
+        hasSceneControlTools: true,
       }, { agentIdentity: input.agentIdentity }),
       lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)],
       ...product,

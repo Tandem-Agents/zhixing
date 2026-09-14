@@ -32,7 +32,7 @@ owner 提交固化唯一 `WorksceneAppliedResult`，随后 publish 链幂等物�
 
 enter/exit 是切换控制，不是登记写入工具的替代通道。当前 CLI 仍有 `set_workdir` 控制消费分支及重进失败处理；它不构成 assignment 管理工具的生产写入路径，不能据此把当前工具说明写回“先 emit，后落盘”。配置生效与接入面的会话切换必须分开说明。
 
-提示词、工具声明与实际能力必须同步：主模式和场景 profile 对可用动作、确认及生效时机的说明，不得领先或滞后于生产路径；更新仍须遵守窗口内系统前缀稳定的边界。当前 [powerProfile](../../../packages/orchestrator/src/profile/default-profiles.ts)仍描述工作空间变更通过本轮后重新进入场景生效，而[当前场景工具](../../../packages/cli/src/serve/workmode-tools.ts)只暂存 assignment 变更，不发出重进意图。该提示词与工具路径的差异尚未消除，不能据提示词宣称自动重进已成立，也不能据旧消费分支恢复管理写入旁路。
+提示词、工具声明与实际能力必须同步：主模式和场景 profile 对可用动作、确认及生效时机的说明，不得领先或滞后于生产路径；更新仍须遵守窗口内系统前缀稳定的边界。当前产品侧 [powerProfile](../../../packages/cli/src/serve/workscene-agent-guidance.ts)仍描述工作空间变更通过本轮后重新进入场景生效，而[当前场景工具](../../../packages/cli/src/serve/workmode-tools.ts)只暂存 assignment 变更，不发出重进意图。该提示词与工具路径的差异尚未消除，不能据提示词宣称自动重进已成立，也不能据旧消费分支恢复管理写入旁路。
 
 ## 工作空间与数据安全
 

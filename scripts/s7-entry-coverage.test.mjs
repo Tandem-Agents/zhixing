@@ -6033,6 +6033,10 @@ test("validated configuration crosses composition roots as finite frozen project
 
 test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
   const paths = [
+    "packages/orchestrator/src/runtime/system-prompt.ts",
+    "packages/orchestrator/src/profile/default-profiles.ts",
+    "packages/orchestrator/src/profile/index.ts",
+    "packages/cli/src/serve/workscene-agent-guidance.ts",
     "packages/runtime-host/src/runtime-host.ts",
     "packages/runtime-host/src/conversation-runtime-projection.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
@@ -6054,6 +6058,15 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
 
   assert.deepEqual(inspectWorksceneRuntimeProjectionBoundary(records), []);
+  for (const [relative, transform] of [
+    ["packages/orchestrator/src/runtime/system-prompt.ts", (text) => `${text}\nfunction renamedPolicy(tools) { return tools.some(t => t.name === "workmode_enter") ? "scene policy" : null; }`],
+    ["packages/orchestrator/src/profile/default-profiles.ts", (text) => `${text}\nconst renamedProfile = { instructions: "Call workmode_exit when done" };`],
+    ["packages/orchestrator/src/profile/index.ts", (text) => `${text}\nexport { powerProfile as sceneProfile } from "./default-profiles.js";`],
+    ["packages/cli/src/serve/workmode-tools.ts", (text) => text.replace("systemPromptGuidance: WORKING_MODE_TEXT,", "")],
+    ["packages/cli/src/serve/executor-role-runtime.ts", (text) => text.replace('import { powerProfile } from "./workscene-agent-guidance.js"', 'import { powerProfile } from "@zhixing/orchestrator/profile"')],
+  ]) {
+    assert.match(inspectWorksceneRuntimeProjectionBoundary(mutate(relative, transform)).join("\n"), /guidance must be product-owned/u);
+  }
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/runtime-host/src/runtime-host.ts",

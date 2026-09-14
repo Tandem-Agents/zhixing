@@ -26,7 +26,7 @@
 | 3 | KERNEL-C01 | Kernel 中残留 Workscene 产品指引与 Profile 策略 |
 | 4 | NOTICE-C01 | 共享 Journal 与投递参与适配中残留产品通知、文案和结果语义 |
 
-单元 1 已完成开发、审查与最终验证，单元 2 已完成开发。2026-09-14 用户进一步授权双方协作完成单元 2 的审查与修复，原“开发后停止”检查点已解除；不启动单元 3/4，不操作 Git。单元 1 暂留的构造期容器由单元 2 退出，运行期边界不得回退。审查依据[AE-001 权威设计](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)、任务范围、源码及真实调用链，不以测试数量、文件大小或执行者自述代替结论。
+单元 1、2 已完成开发、独立审查与最终验证，已提交到 `16051748`。单元 3 已完成开发；2026-09-14 用户授权双方协作完成其审查与修复，原“开发后停止”检查点已解除。当前不启动单元 4，不操作 Git，已有暂存内容保持不变。前两单元已成立的运行期显式依赖、身份/数据根隔离和静态装配图不得回退。审查依据[AE-001 权威设计](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)、任务范围、源码及真实调用链，不以测试数量、文件大小或执行者自述代替结论。
 
 ## 协作顺序与结束条件
 
@@ -40,7 +40,64 @@
 
 验证纪律参考[开发工作台](../../research/design/workbench/unit-development-workbench.md)、[审查工作台](../../research/design/workbench/unit-review-workbench.md)、[验证手册](../../research/design/workbench/verification-runbook.md)和[验证耗时复盘](../postmortems/2026-08-06-final-validation-overrun.md)。本次双方分工与最终验证失败处置按以上用户约定执行，不套用额外角色或重复审批流程。
 
-## 当前工作：HOST-C02
+## 当前工作：KERNEL-C01
+
+- 基线：`16051748ca1a5ca4bc333444ba734783a0b277bd`。本轮开始时第三单元 18 个变更文件已在暂存区，无未跟踪文件；双方只读暂存区，修复与记录更新留在工作区。
+- 状态：2026-09-14 KERNEL-C01 已完成。R2 独立复核和必要最终验证全部通过，R1 唯一 P2 已关闭，无范围内未解决问题；四单元完成 3/4（75%），停止，等待下一单元授权。修复留在工作区，原暂存区、HEAD 未动。
+- 审查输入：`git -c core.safecrlf=false diff HEAD -- packages scripts`，同时包含暂存与未暂存代码。输出 CRLF 规范化为 LF 后按 UTF-8 计算 SHA-256：`deb4c6e18edceba375b8aa65c64be69a83a3fe747e1bb442c5405f3140b2d507`。暂存区完整 `git diff --cached --binary` 同算法指纹为 `ea8ea6d0bacb8a7ea18256600ffa965bd96a9ce6f738b6338249daf66e6a42fb`；记录更新不改变代码审查输入。
+- 实现交接：产品侧 `workscene-agent-guidance.ts` 接管场景 `powerProfile` 与进入指引原文，Anchor、Executor 和能力目录消费同一来源；实际进入工具携带 `systemPromptGuidance`。Kernel 的中性 `tool-guidance` 段在原位置逐字渲染工具声明，删除旧 Workscene 判断、模板和 Profile 出口。RuntimeHost、Skill 窗口投影、模型选择、工具调用与权限实现未改动。
+
+### 单元 3 的任务、目标与验收要求
+
+1. **任务与目标**：沿全部 Profile/提示词生成、传递及消费链核实 Workscene 产品策略归属；产品责任者决定行为，Kernel 只消费已决定的输入。不能仅搬文件或把产品判断移到 RuntimeHost，也不得新增万能模板、插件或提示词框架。通用角色、工具循环和环境投影保留其合法责任。
+2. **完整范围**：覆盖 Anchor main/scene/job/ephemeral、Executor 场景 Runtime、能力目录、工具裁剪及子 Agent 段子集；闭合旧 `WORKING_MODE_TEXT`、`buildWorkingMode`、`powerProfile/WorksceneProfileInput`、默认段与旧出口。反查同根生产者、消费者和别名/遗留路径，不局限改动行；NOTICE-C01 的通知职责不混入本单元。
+3. **功能保护**：模型可见原文、提示词顺序与缓存分界、窗口内稳定性/换代、工具及 main/power 模型选择、无工作区隔离、权限确认、显式身份和子 Agent 专注约束不回退。指引随实际能力贡献，缺少工具不得产生虚假指引。新有限字段必须有真实消费必要性，不能以架构整理新增功能或默改既有体验。
+4. **审查与证据**：以基线源码和真实调用链核实行为等价，不能以指纹或测试自证全部正确。核查元数据穿过真实工具装配/筛选和窗口边界后的行为、产品 Profile 全部调用者及公开出口；发现问题一次按根因报全，给出依据、影响和验收条件。执行者修复后只复核受影响范围，未失效结论复用；无问题直接通过。
+5. **验证与结束**：审查方先读代码，只执行用于核实疑点的必要轻量检查；执行方暂停代码修改和构建。独立通过后执行有新增证据价值的最终验证，复用同输入已通过的 90 项直接测试、构建、类型与边界检查，不跑整包或完整 S7/A7。双方确认无范围内遗留且必要验证通过后，才标记单元 3 完成并停止；不得自动提交或开始单元 4。
+
+### KERNEL-C01 协作记录
+
+| 轮次 | 请求/结论 | 处置与下一步 |
+|---|---|---|
+| 背景交接 | 审查方已确认权威设计、全部生产入口与保护边界，主动回送背景理解；本阶段未审查源码或运行测试 | 交接完成，立即派发 R1 |
+| R1 | 审查输入代码指纹 `deb4c6e18edceba375b8aa65c64be69a83a3fe747e1bb442c5405f3140b2d507`，进行完整独立审查 | 执行方冻结代码与构建，等待一次性根因清单或明确通过 |
+| R1 结论 | 不通过，唯一 P2：Executor 的 `ws:*` 场景 Profile 包含未装配的退出/改名/工作区管理指引。基线已有，但属于本单元明确的“缺少工具不注入虚假指引”义务；本机与 Mesh assignment 正式入口均可达。其余完整范围无确认问题；审查方独立比较 9 组 Profile、45 组提示词等价，真实 Executor 类的有/无工作区探针确认缺口 | 产品输入增加必需的 `hasSceneControlTools`，按现有装配事实投影：Anchor scene 为 true，Executor scene 和只读能力目录为 false。共享基础身份/专注/隔离不变，只有具备场景控制工具的入口追加原控制原文；未新增工具或改路由、模型、安全、窗口机制 |
+| R2 交接 | 代码指纹 `9b9ca0be9a46cbd6996233069386425971927e7654570d2185e7f4aac81de505`；真实 Executor 装配两分支、普通 main/job 不变、Anchor 原文与完整前缀、工具/投影共 3 文件 27 项通过（19.67 秒） | 复核修复及其直接交界；R1 未失效结论复用。暂存区完整指纹保持不变；尚未重建 CLI 或执行最终验证 |
+| R2 结论 | 独立复核通过，R1-01 关闭；6 个代码/测试修复文件及直接交界已核对，首尾代码与暂存区指纹一致。确认三个生产调用、两个实际控制能力分支、Anchor 原文和 Executor 有效语义均正确，无新增问题或范围内遗留 | 未重复运行测试，R1 未失效结论复用；执行方按下列计划完成必要最终验证，不追加审查或启动下一单元 |
+
+### KERNEL-C01 开发证据与最终验证安排
+
+| 已有证据 | 结果与复用边界 |
+|---|---|
+| orchestrator 的 `default-profiles.test.ts`、`system-prompt.test.ts` | 2 文件 72 项通过；角色、身份、段顺序、指引声明及子 Agent 子集 |
+| CLI 的 `workscene-agent-guidance.test.ts`、`workscene-runtime-projection.test.ts` | 2 文件 18 项通过；真实产品工具/投影、工作区限制、作业筛选及基线提示词逐字等价 |
+| S7 `Anchor tool and MCP projection` 定向组 | 通过；生产边界及新增反例，无完整 S7 运行 |
+| `pnpm build`、CLI `tsc -p tsconfig.json --noEmit`、diff 空白检查 | 通过；构建已完成，未因用户中断重复执行 |
+
+审查前不启动最终验证。R1/后续复核通过后，按实际修复及未覆盖的直接交界列出精确命令、失效输入、复用证据、耗时与截止，再串行执行；生产代码未变时不重建、不重复已通过测试。最终阶段发现问题由执行者自行修复并复验受影响闭包，按双方约定不追加形式化审查轮次。
+
+R2 通过后按以下计划执行增量，结果见下表。复用 Kernel 的 72 项直接测试、修复后的 CLI 27 项和未变边界对应的 S7 证据，不运行这些集合的重复版本。
+
+| 顺序 | 精确命令/范围 | 必要性、预算与截止 |
+|---|---|---|
+| 1 | 根目录 `pnpm cli:build`，随后 `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` | R1 修复仅改 CLI，需要更新产物并核对新增必需投影字段的全部调用者；上游构建有效。预计合计 40 秒，截止 3 分钟，串行 |
+| 2 | CLI `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/workmode-tools.test.ts src/runtime/__tests__/runtime-host.test.ts --maxWorkers=1 --reporter=verbose` | 补工具真实调用/确认/overlay 与 Host 发放透传交界；不重复产品投影纯构建测试。预计 15 秒，截止 1 分钟 |
+| 3 | orchestrator `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/create-agent-runtime.test.ts src/subagent/__tests__/factory.test.ts -t 'primaryRole 槽位\|只消费产品已裁决\|产品提示只在窗口边界投影\|sub-agent profile.enabledTools\|backgroundMessages' --maxWorkers=1 --reporter=verbose` | 仅补真实 Kernel 运行中的模型选择、窗口投影/稳定性与子运行过滤/专注交界；不跑两个整文件。预计 30 秒，截止 2 分钟 |
+| 4 | `git -c core.safecrlf=false diff --check`，核对 HEAD/代码及暂存区指纹 | 确认最终输入及既有暂存内容未被修改；预计 2 秒，截止 10 秒 |
+
+### KERNEL-C01 最终验证结果（2026-09-14）
+
+| 验证 | 结果 |
+|---|---|
+| 根目录 `pnpm cli:build` | 通过，7.36 秒；更新 R1 修复后的 CLI 产物，上游构建复用 |
+| CLI `tsc -p tsconfig.json --noEmit` | 通过；新增必需输入的全部生产调用者类型闭合 |
+| CLI 工具调用与 RuntimeHost 两文件 | 15/15 通过，Vitest 6.12 秒；确认/overlay、场景读取及 Host 发放透传保持 |
+| Kernel/子 Agent 两文件定向用例 | 9/9 通过，86 项无关用例跳过，Vitest 6.27 秒；main/power/fallback、窗口 clear/resume/compact 与多 run 稳定性、子工具过滤和背景/任务隔离保持 |
+| diff 空白与输入核对 | 通过；代码指纹仍为 R2 的 `9b9ca0be9a46cbd6996233069386425971927e7654570d2185e7f4aac81de505`，完整暂存区指纹仍为 `ea8ea6d0bacb8a7ea18256600ffa965bd96a9ce6f738b6338249daf66e6a42fb`，HEAD 仍为 `16051748`，无未跟踪文件 |
+
+最终阶段没有新增代码修复，未运行整包、完整 S7/A7、组合门禁或重复上游构建。所有本轮测试/构建命令均已退出；单元 3 的独立审查与最终验证闭合，不代表四单元总验收已完成，不启动 NOTICE-C01、不操作 Git。
+
+## 已完成交接：HOST-C02
 
 - 基线：`139a3baf3bb5b9b33a44d8ac1b2a360641b6324d`，开始时工作区干净。
 - 状态：2026-09-14 HOST-C02 已完成。R2 独立复核及必要最终验证通过，R1 唯一 P1 根因及 Channel/Advancement 两组生产失败路径均已关闭；无范围内未解决问题。暂存区、HEAD 未动，停止在单元 2 验收点。

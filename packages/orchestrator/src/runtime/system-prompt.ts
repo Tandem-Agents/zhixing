@@ -49,8 +49,7 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
  * 各段适配策略(条件性 vs 始终):
  *   identity / principles / meta-protocol / tool-usage / style / safety  始终输出
  *   sub-agent-delegation   条件:tools 含 Task 才渲染(避免让 LLM 看到不存在的 Task 工具说明)
- *   working-mode           条件:tools 含 workmode_enter 才渲染(仅 main runtime 装配此工具;
- *                          power / 子 agent / 无 workmode 装配点 → 段缺省,历史输出 byte-equal)
+ *   tool-guidance         条件:已装配工具提供完整指引段时逐字渲染
  *
  * meta-protocol 段说明:LLM 在 messages 历史中可能遇到 `<system-meta kind="...">`
  * 标签(由 compact / drop 等机制层插入),本段告知 LLM 如何识别并不当作用户原话回应。
@@ -61,7 +60,7 @@ export type SystemPromptSegment =
   | "meta-protocol"
   | "tool-usage"
   | "sub-agent-delegation"
-  | "working-mode"
+  | "tool-guidance"
   | "skill-index"
   | "style"
   | "safety";
@@ -73,9 +72,8 @@ export type SystemPromptSegment =
  * 延伸说明,放工具段后是自然语义流;条件性渲染保证 tools 不含 Task 时
  * 输出仍 byte-equal 历史(段返 null 被 buildSystemPrompt 跳过,不留空白)。
  *
- * skill-index 紧随 working-mode:都是模式相关的条件段(working-mode 看是否工作
- * 场景,skill-index 看当前模式有无可注入技能),作为参考资料置于行为段(style /
- * safety)之前;无技能时段返 null 被跳过,无技能用户的输出仍 byte-equal 历史。
+ * skill-index 紧随 tool-guidance：已投影的参考资料置于行为段(style / safety)
+ * 之前；未贡献的段返 null 被跳过，不产生空段。
  */
 export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
@@ -83,7 +81,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "meta-protocol",
   "tool-usage",
   "sub-agent-delegation",
-  "working-mode",
+  "tool-guidance",
   "skill-index",
   "style",
   "safety",
@@ -166,7 +164,7 @@ export interface PromptBuildContext {
  * 默认主 agent 段顺序(MAIN_AGENT_SEGMENTS):
  *   Identity → Principles → Tool Usage
  *     → Sub-Agent Delegation (条件:tools 含 Task)
- *     → Working Mode        (条件:tools 含 workmode_enter)
+ *     → Tool Guidance       (条件:已装配工具提供完整指引段)
  *     → Skill Index         (条件:当前模式有可注入技能,ctx.skillIndex 非空)
  *     → Style → Safety
  *   + 缓存分界 + Environment(动态段,始终)
@@ -184,14 +182,11 @@ export interface PromptBuildContext {
  * 让此后所有消息都得重新计费。cache 周期的范围因调用方而异:
  *   - 主 agent(main / power,走 create-agent-runtime):cache 周期 = 单个**注意力
  *     窗口**;窗口内 byte-equal 不动,跨窗口边界(段切换 / compact / clear / resume)
- *     才允许重建,重建是「检查→变了才换、没变 byte-equal 不动」(本意见
- *     skill-system.md §3.1 / lifecycle-concepts.md)。运行时跨窗口重建尚未落地
- *     (规划见 agent-runtime-lifecycle.md),故现状是装配期构造一次。
+ *     才允许按已投影的窗口内容重建；未变化的段逐字保留。
  *   - 子 agent(走 subagent/factory):不启用段切换、无窗口换代,整个子 agent 生命
  *     周期 byte-equal(byte-equal-across-spawns,见 context-management-v3-redesign.md §8.4)。
- * 两类都在装配阶段构造一次、把字符串绑定到对应生命周期上下文,后续每轮 run() /
- * LLM call 一律透传,**不得在 run() / loop / LLM call 路径里重建**(那在窗口/生命
- * 周期内),不得在末尾追加 per-turn 信息。
+ * 主 agent 由窗口生命周期维护实例与 run 局部前缀，子 agent 只在装配时构造。
+ * 普通 run / LLM call 透传所属窗口前缀，不按每轮调用重建或追加 per-turn 信息。
  *
  * Per-turn 动态信息(当前时间 / 任务状态 / 工作目录变更等)通过 turn-context
  * 注入到末尾 user message,**不**进入 systemPrompt(参见 TimeProvider /
@@ -246,8 +241,8 @@ function renderSegment(
       return buildToolUsage(ctx.tools);
     case "sub-agent-delegation":
       return buildSubAgentDelegation(ctx.tools);
-    case "working-mode":
-      return buildWorkingMode(ctx.tools);
+    case "tool-guidance":
+      return buildToolGuidance(ctx.tools);
     case "skill-index":
       // 装配期预渲染好的索引文本;无技能(null/省略)→ 跳过,byte-equal 历史。
       return ctx.skillIndex ?? null;
@@ -382,48 +377,14 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
   return SUB_AGENT_DELEGATION_TEXT;
 }
 
-// ─── Segment: Working Mode ───
+// ─── Segment: Tool Guidance ───
 
-/**
- * Working Mode 指引 —— 教主对话何时进入工作场景、模糊时先探后问。
- *
- * 仅当 tools 含 `workmode_enter`（main runtime 装配的 main-only 工具）才渲染：
- * power runtime 只有 workmode_exit（其退出自判走 powerProfile 身份段，不靠本段）；
- * 子 agent / serve / 无 workmode 装配点无此工具，段缺省、历史输出 byte-equal。
- *
- * 段文本显式引用工具名字面值（workmode_enter / workscene_list /
- * workscene_change_approve）—— 与 sub-agent-delegation
- * 同款"prompt-text 显式契约"：宁可工具改名时同步本文本，也不动态拼接让段
- * 不可静态审查。
- */
-export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
-
-A work scene is an isolated context for a bounded line of work, with an optional device workspace and model. Entering one switches the conversation into that scene; leaving returns here.
-
-Tools:
-- \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
-- \`workscene_list\`: list scenes and their ids, names, optional device workspace names, and recent activity.
-- \`workscene_change_approve\`: create, rename, remove, bind/change a device workspace, or clear the workspace binding with confirmation.
-
-How to decide:
-- Need scene ids or current workspace bindings: call \`workscene_list\`.
-- Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
-- Ambiguous fit: ask the user before switching.
-- Workspace management: use \`workscene_change_approve\` action \`set_workdir\` with a device and workspace name already authorized on that device, and action \`clear_workdir\` only for an explicit unbind request. Never request or transmit a remote filesystem path.
-- Casual or one-off questions: stay in the main conversation.
-
-After \`workmode_enter\`, finish the current turn normally; do not assume you are already inside the scene.`;
-
-/**
- * Working Mode 段渲染。返回 `string | null`：
- *   - `null`：tools 不含 workmode_enter（power / 子 agent / serve / 无 workmode
- *     装配点）→ buildSystemPrompt 跳过，历史输出 byte-equal 无回归。
- *   - `string`：含 workmode_enter（main runtime）→ 完整段。
- */
-function buildWorkingMode(tools: ToolDefinition[]): string | null {
-  const hasEnter = tools.some((t) => t.name === "workmode_enter");
-  if (!hasEnter) return null;
-  return WORKING_MODE_TEXT;
+/** Tool-owned sections, in the frozen tool order; no tool names or product decisions. */
+function buildToolGuidance(tools: ToolDefinition[]): string | null {
+  const sections = tools.flatMap((tool) =>
+    tool.systemPromptGuidance === undefined ? [] : [tool.systemPromptGuidance],
+  );
+  return sections.length > 0 ? sections.join("\n\n") : null;
 }
 
 // ─── Segment 5: Style ───

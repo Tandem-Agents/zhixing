@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { buildSystemPrompt, CACHE_BOUNDARY } from "@zhixing/orchestrator/runtime";
+import { WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
 import {
   WorksceneApplicationError,
   type WorksceneConversationRuntimeProjection,
@@ -82,6 +85,10 @@ describe("Workscene product runtime projection", () => {
     expect((main.runtimeTools.implementation as never as { binding: unknown }).binding)
       .toMatchObject({ kind: "assignment", mode: "main" });
     expect(Object.isFrozen(withWorkspace.profile)).toBe(true);
+    // Actual Anchor assembly keeps the complete scene instructions from 16051748.
+    expect(createHash("sha256").update(withWorkspace.profile.instructions).digest("hex"))
+      .toBe("8935c7cde83a6146af927a0e999d47627bd5c5f71c5896cecfc08a90de288995");
+    expect(withoutWorkspace.profile.instructions).toContain("call the workmode_exit tool");
     expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
       "schedule",
@@ -90,6 +97,15 @@ describe("Workscene product runtime projection", () => {
       "workscene_change_approve",
       "workscene_list",
     ]);
+    const mainSystemPrompt = buildSystemPrompt({
+      profile: main.profile, tools: [...main.runtimeTools.extraTools], cwd: "/workspace",
+    });
+    expect(mainSystemPrompt).toContain(WORKING_MODE_TEXT);
+    expect(mainSystemPrompt.indexOf(WORKING_MODE_TEXT)).toBeLessThan(mainSystemPrompt.indexOf(CACHE_BOUNDARY));
+    expect(main.runtimeTools.extraTools.filter((tool) => tool.systemPromptGuidance !== undefined))
+      .toHaveLength(1);
+    expect(withWorkspace.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
+    expect(withoutWorkspace.runtimeTools.extraTools.every((tool) => tool.systemPromptGuidance === undefined)).toBe(true);
     expect(withWorkspace.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
       "schedule",
@@ -184,6 +200,10 @@ describe("Workscene product runtime projection", () => {
       "mcp__alpha__tool",
     ]);
     expect(ephemeral.runtimeTools.executionMcpServers).toEqual(["alpha", "beta"]);
+    for (const projection of [ephemeral, allJob, restrictedJob]) {
+      expect(buildSystemPrompt({ tools: [...projection.runtimeTools.extraTools], cwd: "/workspace" }))
+        .not.toContain(WORKING_MODE_TEXT);
+    }
     expect((ephemeral.runtimeTools.implementation as never as { binding: unknown }).binding)
       .toMatchObject({ kind: "assignment", mode: "main" });
     expect(allJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual(

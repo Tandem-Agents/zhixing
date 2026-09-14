@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
-> 状态：执行中（HOST-C01、HOST-C02 已完成；停在单元 2 验收点）<br>
-> 当前检查点：2026-09-14 HOST-C02 独立审查 R2 通过，Channel/Advancement 就绪时序问题闭合；最终 CLI 类型检查、启动装配 10 项、5 组受影响结构/反例检查及 CLI 构建通过，无范围内未解决问题。暂存区和 HEAD 未改，所有修复保留在工作区。[双人协作记录](../workbench/ae-001-boundary-corrections-collaboration.md)记录审查与最终验证证据。KERNEL-C01、NOTICE-C01 未开始，等待用户授权下一单元；相关退出门与四单元总验收仍未关闭<br>
-> 完成度：本次追加纠偏 2/4 个执行单元完成（50%）；此前 8/8 追加审查为历史验收，不再表示当前任务整体完成<br>
+> 状态：执行中（HOST-C01、HOST-C02、KERNEL-C01 已完成；NOTICE-C01 待授权）<br>
+> 当前检查点：2026-09-14 第三单元 KERNEL-C01 已完成协作审查、修复与必要最终验证，按约定停止。R2 独立复核通过，Executor 未装配工具却获得控制指引的唯一 P2 已关闭；CLI 构建、类型及 24 项最终定向验证通过，未失效开发证据复用。修复留在工作区，原 18 个暂存变更及 HEAD `16051748` 未动；未启动 NOTICE-C01。完整交接和证据见[双人协作记录](../workbench/ae-001-boundary-corrections-collaboration.md)；四单元总验收及相关整体退出门仍未关闭<br>
+> 完成度：本次追加纠偏 3/4 个执行单元完成（75%）；此前 8/8 追加审查为历史验收，不再表示当前任务整体完成<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -219,11 +219,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 当前取证基线 | `139a3baf3bb5b9b33a44d8ac1b2a360641b6324d`；HOST-C02 从干净工作区开始，仅审视本基线之后的装配实现、直接测试与必要文档差异 |
+| 当前取证基线 | `16051748ca1a5ca4bc333444ba734783a0b277bd`；KERNEL-C01 从干净工作区开始，HOST-C02 的独立通过与最终验证已随该提交固化 |
 | 当前 A 项 | A1、A4、A5 的 Conversation/Schedule 行及 A7 重开；其余领域和已成立的独立责任不因本次发现重做。此前 REVIEW-A7-C02-FINAL 仅保留为历史证据 |
-| 活跃工作包 | 无；HOST-C02 已取得 R2 独立通过及最终验证，停在单元 2 验收点。目标、输入、轮次和验证结果见[协作文档](../workbench/ae-001-boundary-corrections-collaboration.md)；未操作 Git，等待用户授权 KERNEL-C01 |
-| 下一责任链 | 获准实施后，顺序完成 HOST-C01 运行期依赖与输入隔离 → HOST-C02 装配图收束 → KERNEL-C01 产品策略投影 → NOTICE-C01 产品通知归位；四单元闭合后统一完成 A7 终验 |
-| 待退出结构 | Kernel 内 Workscene 策略、Journal 自定产品通知/文案尚待后续单元处理。HOST-C01 的运行期取服务、身份单例与数据根旁路，以及 HOST-C02 的共享 `AssemblyContext`、统一 setup、名称切片和业务期等待构造依赖均已验收退出 |
+| 活跃工作包 | 无运行中的工作包；KERNEL-C01 已完成，R2 与必要最终验证通过，唯一 P2 关闭，修复留在工作区。已有暂存变更原样保留 |
+| 下一责任链 | 等待 NOTICE-C01 授权；完成第四单元后统一完成 A7 终验。本轮停止，不自动提交或进入下一单元 |
+| 待退出结构 | Journal 自定产品通知/文案留待 NOTICE-C01；Kernel 内 Workscene 策略及旧 Profile 出口已验收退出。HOST-C01 的运行期取服务、身份单例与数据根旁路，以及 HOST-C02 的共享 `AssemblyContext`、统一 setup、名称切片和业务期等待构造依赖均已验收退出 |
 | 已失效结论 | A1 的显式依赖/配置投影、A4 的产品策略隔离、A5 的相关通知与结果投影归属、A7 的残留清零与最终完成结论；相关退出门已撤勾。历史测试通过不等于能识别本次反证，纠偏后按影响重取证据并完成终验 |
 | 边界与授权 | 只做保持功能不变的架构纠偏，不重启全项目迁移，不改首版范围；实施及 Git 操作分别遵守用户授权 |
 
@@ -293,14 +293,23 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 - 生命周期：保持唯一 ApplicationHost、唯一 RuntimeHost、既有资源 owner、启动补偿与正常关闭的交接，以及拒新、排空、关闭顺序和幂等性。既有一次性绑定必须有真实生命周期必要性、固定窄合同、开放前完成且不可重绑；不能用它把普通构造依赖推迟到业务运行时解决。
 - 完成与交接：从生产入口重新追踪依赖图和运行消费链，确认 C01 无回退、构造期同类残留清零、旧路径和临时接缝全部按上述标准处置；完成直接验证及必要文档校准，随后进入 KERNEL-C01。只减少行数、搬文件、让旧容器改名或增加转发层均不通过；A7 统一在四单元完成后执行。
 
-**KERNEL-C01　产品行为指引与 Profile 投影归位（对应 A4，待授权实施）。**
+**KERNEL-C01　产品行为指引与 Profile 投影归位（对应 A4，已完成）。**
+
+2026-09-14 验收：Workscene Profile 与进入指引归产品责任者，Kernel 只在原位置渲染工具声明，旧场景判断、模板与 Profile 出口退出；Anchor/Executor、能力目录、工具筛选、子 Agent 及窗口消费链经独立审查。R1 唯一 P2 为 Executor 沿用未装配控制工具的指引，已通过必需的实际能力投影修正：保留基础身份、场景专注和隔离，仅 Anchor 的完整控制工具组获得原管理/退出指引，不增加 Executor 能力；真实装配两分支与 Anchor 原文等直接验证 27 项通过。R2 独立复核通过，未失效 Kernel 72 项和 S7 边界证据复用；最终 CLI 构建、类型检查、工具/Host 15 项、Kernel/子 Agent 定向 9 项均通过，无新增修复或范围内遗留。修复未暂存，原暂存区及 HEAD 不变，停止，未进入 NOTICE-C01；四单元统一退出门不提前关闭。
 
 - 结果：工作场景的进入/退出、改名、工作区变更指引及产品 Profile 由 Workscene/产品组合责任者生成，Kernel 只消费已决定的输入，不按产品工具名称生成产品策略。
 - 实施与消费者：闭合 `WORKING_MODE_TEXT`、`buildWorkingMode`、`powerProfile/WorksceneProfileInput`、默认段选择及全部实际调用；覆盖 Anchor 的 main/scene/job/ephemeral 投影、Executor 的场景 Runtime、能力目录及子 Agent 的段子集。复用已有 Profile、工具提示和窗口投影边界，按真实静态/窗口输入职责取最直接方案，不将原来的产品 switch 搬到 RuntimeHost，也不创建任意插件、万能模板或另一套提示词框架。现有 Skill 投影保留，只在确有消费需要时调整有限合同。
 - 保护：当前模型可见指引、工具集合、main/power 模型选择、无工作区限制、权限确认、提示词顺序/缓存分界、窗口换代和子 Agent 专注约束不变；缺少工具时不注入虚假指引。结构优化不得删去产品行为规则以求“薄内核”。
 - 完成与交接：生产 Kernel 中不再有 Workscene 行为判断或对应工具名字驱动的业务模板；同类产品策略沿 Profile/提示词的所有生成与消费入口核对完毕。修改产品指引只需修改其责任者/投影，Kernel 不随之改变；直接回归证明原有提示词和工具行为等价，HOST-C01 的身份隔离不回退。
 
-**NOTICE-C01　产品通知与发布结果投影归位（对应 A5 的 Conversation/Schedule，待 KERNEL-C01 验收）。**
+开发记录（2026-09-14，基线 `16051748`，非独立验收）：
+
+- `cli/src/serve/workscene-agent-guidance.ts` 接管 `powerProfile` 与进入指引原文，Anchor、Executor 和能力目录消费同一来源；实际进入工具携带 `systemPromptGuidance`。Kernel 仅在原段位置逐字渲染工具声明，删除旧场景判断及 Profile 出口；RuntimeHost、Skill 窗口投影、模型选择、工具调用与权限实现未改动。
+- 定向验证：orchestrator 的 `default-profiles.test.ts`、`system-prompt.test.ts` 共 72 项通过；CLI 的 `workscene-agent-guidance.test.ts`、`workscene-runtime-projection.test.ts` 共 18 项通过；S7 的 `Anchor tool and MCP projection` 定向组通过。CLI 投影测试首次发现局部变量重名，修复后仅重跑受影响文件并通过。
+- 等价证据：以基线实际构建函数输出取得指纹，验证进入指引、场景身份指引及 main/scene/子 Agent 静态前缀逐字一致；直接用例覆盖工具筛选后指引移除、无工作区工具限制、身份隔离、提示段顺序、缓存分界和既有窗口投影。
+- `pnpm build` 与 `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 均通过；中断后读取原构建完成结果，未重复构建。未执行完整 S7、全量测试或最终重型门禁，未启动独立审查或下一单元，未操作 Git 暂存区、历史或远程。
+
+**NOTICE-C01　产品通知与发布结果投影归位（对应 A5 的 Conversation/Schedule，待授权）。**
 
 - 结果：通知何时生成/更新/关闭、如何形成产品结果和操作建议，由对应领域拥有；产品决定不再内嵌于共享 Journal 或投递参与适配，其提交、身份、去重、重放和交付机制保留。共用的发布结果文案有唯一产品投影来源，不继续成为共享正确性层的业务目录。
 - 实施与消费者：闭合 Job 能力缺口、发布结果、离线错过摘要及其通知生命周期，Conversation 的 `publishConflicts/projectPublishResults`，以及 `publish-result-product-language` 的 CLI presenter、状态/历史与 Channel 消费者。将仍内嵌的产品决定/文案交给领域拥有的纯决策或有限事务参与合同；已在 Schedule 领域内的失败策略等直接复用，不复制、不重写。反查其他 Journal 及投递生产者适配中的同根产品通知决定，按同一责任处理；技术错误消息、协议合法性校验、领域权威适配及必要事务协调不因名称含产品对象就被删除。

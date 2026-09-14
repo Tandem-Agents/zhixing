@@ -5,7 +5,6 @@ import {
   MAIN_AGENT_SEGMENTS,
   SUB_AGENT_DELEGATION_TEXT,
   SUB_AGENT_SEGMENTS,
-  WORKING_MODE_TEXT,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
 import type { ToolDefinition } from "@zhixing/core/types";
@@ -543,62 +542,54 @@ describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
   });
 });
 
-// ─── Segment: Working Mode 条件性渲染契约 ───
+// ─── Segment: Tool-owned guidance ───
 
-describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
+describe("buildSystemPrompt · tool-guidance", () => {
   const ctx = { tools: defaultTools, cwd: "/test/project" };
+  const guidance = "## Product guidance\nUse the available action only when appropriate.";
+  const guidedTool = () => stubTool("custom-action", { systemPromptGuidance: guidance });
 
-  it("MAIN_AGENT_SEGMENTS 含 'working-mode'(主 agent 启用此段)", () => {
-    expect(MAIN_AGENT_SEGMENTS).toContain("working-mode");
+  it("keeps the main slot and excludes it from the child subset", () => {
+    expect(MAIN_AGENT_SEGMENTS).toContain("tool-guidance");
+    expect(SUB_AGENT_SEGMENTS).not.toContain("tool-guidance");
+    expect(buildSystemPrompt({ ...ctx, tools: [guidedTool()], segments: SUB_AGENT_SEGMENTS }))
+      .not.toContain(guidance);
   });
 
-  it("SUB_AGENT_SEGMENTS 不含 'working-mode'(子 agent 无 workmode 工具)", () => {
-    expect(SUB_AGENT_SEGMENTS).not.toContain("working-mode");
+  it("does not infer product guidance from a tool name", () => {
+    const plain = buildSystemPrompt({ ...ctx, tools: [stubTool("custom-action")] });
+    const renamed = buildSystemPrompt({ ...ctx, tools: [stubTool("another-action")] });
+    expect(plain).toBe(renamed);
+    expect(plain).not.toContain(guidance);
   });
 
-  it("tools 不含 workmode_enter 时不渲染(byte-equal 历史输出,无回归)", () => {
-    const prompt = buildSystemPrompt(ctx);
-    expect(prompt).not.toContain("## Working Mode");
-  });
-
-  it("含 workmode_enter(power 只有 exit)时也不渲染 —— 仅 main runtime 启用", () => {
-    const prompt = buildSystemPrompt({
-      ...ctx,
-      tools: [...defaultTools, stubTool("workmode_exit")],
+  it("renders declared content verbatim regardless of the tool name", () => {
+    const original = buildSystemPrompt({ ...ctx, tools: [guidedTool()] });
+    const renamed = buildSystemPrompt({
+      ...ctx, tools: [{ ...guidedTool(), name: "renamed-action" }],
     });
-    expect(prompt).not.toContain("## Working Mode");
+    expect(original).toBe(renamed);
+    expect(original).toContain(guidance);
   });
 
-  it("tools 含 workmode_enter 时渲染,内容 byte-equal WORKING_MODE_TEXT", () => {
-    const tools = [...defaultTools, stubTool("workmode_enter")];
-    const prompt = buildSystemPrompt({ ...ctx, tools });
-    expect(prompt).toContain(WORKING_MODE_TEXT);
-    expect(prompt).toContain("## Working Mode (work scenes)");
-  });
-
-  it("段含关键决策语义:列出、歧义先问 / turn 边界生效", () => {
-    const tools = [...defaultTools, stubTool("workmode_enter")];
-    const prompt = buildSystemPrompt({ ...ctx, tools });
-    expect(prompt).toContain("workscene_list");
-    expect(prompt).not.toContain("workscene_memory_query");
-    expect(prompt).toContain("set_workdir");
-    expect(prompt).toContain("clear_workdir");
-    expect(prompt).toContain("optional device workspace");
-    expect(prompt).toContain("ask the user before switching");
-    expect(prompt).toContain("finish the current turn normally");
-  });
-
-  it("working-mode 段紧跟 sub-agent-delegation(段顺序不变)", () => {
+  it("follows tool order without empty sections and disappears with the tool", () => {
     const tools = [
-      ...defaultTools,
-      stubTool("Task"),
-      stubTool("workmode_enter"),
+      stubTool("plain"),
+      guidedTool(),
+      stubTool("other", { systemPromptGuidance: "## Other guidance" }),
     ];
-    const prompt = buildSystemPrompt({ ...ctx, tools });
-    const delegationIdx = prompt.indexOf("## Sub-Agent Delegation");
-    const workingModeIdx = prompt.indexOf("## Working Mode");
-    expect(delegationIdx).toBeGreaterThan(0);
-    expect(workingModeIdx).toBeGreaterThan(delegationIdx);
+    expect(buildSystemPrompt({ ...ctx, tools })).toContain(guidance + "\n\n## Other guidance");
+    expect(buildSystemPrompt({ ...ctx, tools: [stubTool("plain")] }))
+      .toBe(buildSystemPrompt({ ...ctx, tools: [] }));
+  });
+
+  it("keeps guidance after delegation and before references/cache boundary", () => {
+    const prompt = buildSystemPrompt({
+      ...ctx, tools: [stubTool("Task"), guidedTool()], skillIndex: "## Reference",
+    });
+    expect(prompt.indexOf("## Sub-Agent Delegation")).toBeLessThan(prompt.indexOf(guidance));
+    expect(prompt.indexOf(guidance)).toBeLessThan(prompt.indexOf("## Reference"));
+    expect(prompt.indexOf("## Reference")).toBeLessThan(prompt.indexOf(CACHE_BOUNDARY));
   });
 });
 
@@ -634,13 +625,13 @@ describe("buildSystemPrompt · skill-index 段条件性渲染", () => {
     expect(prompt).toContain(SKILL_INDEX_SAMPLE);
   });
 
-  it("skill-index 段紧随 working-mode(置于 working-mode 之后)", () => {
+  it("skill-index 段紧随工具贡献的指引", () => {
     const prompt = buildSystemPrompt({
       ...ctx,
-      tools: [...defaultTools, stubTool("workmode_enter")],
+      tools: [...defaultTools, stubTool("guided-tool", { systemPromptGuidance: "## Tool guidance" })],
       skillIndex: SKILL_INDEX_SAMPLE,
     });
-    const workingModeIdx = prompt.indexOf("## Working Mode");
+    const workingModeIdx = prompt.indexOf("## Tool guidance");
     const skillIdx = prompt.indexOf("## Available Skills");
     expect(workingModeIdx).toBeGreaterThan(0);
     expect(skillIdx).toBeGreaterThan(workingModeIdx);

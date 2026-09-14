@@ -3924,7 +3924,11 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   );
   const baseTools = required("packages/cli/src/serve/builtin-extra-tools.ts");
   required("packages/cli/src/serve/segment-deps.ts");
-  required("packages/cli/src/serve/workmode-tools.ts");
+  const workmodeTools = required("packages/cli/src/serve/workmode-tools.ts");
+  const guidance = required("packages/cli/src/serve/workscene-agent-guidance.ts");
+  const promptBuilder = required("packages/orchestrator/src/runtime/system-prompt.ts");
+  required("packages/orchestrator/src/profile/default-profiles.ts");
+  required("packages/orchestrator/src/profile/index.ts");
   required("packages/cli/src/serve/workscene-port.ts");
   const schedulerAdapter = required(
     "packages/cli/src/serve/execution-scheduler-facade.ts",
@@ -3932,6 +3936,24 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const product = required("packages/cli/src/serve/workscene-runtime-projection.ts");
   const command = required("packages/cli/src/serve/command.ts");
   const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const kernelPolicySources = records.filter((record) =>
+    record.relative.startsWith("packages/orchestrator/src/") &&
+    !record.relative.includes("/__tests__/") && !record.relative.endsWith(".test.ts") &&
+    (record.relative.includes("/profile/") || record.relative.includes("/runtime/")),
+  );
+  if (
+    kernelPolicySources.some((record) =>
+      /\b(?:WorksceneProfileInput|powerProfile|WORKING_MODE_TEXT|buildWorkingMode|workmode_\w+|workscene_\w+)\b|working-mode|work scene/iu.test(record.text),
+    ) ||
+    !promptBuilder.includes("tool.systemPromptGuidance") ||
+    !workmodeTools.includes("systemPromptGuidance: WORKING_MODE_TEXT") ||
+    !guidance.includes("export function powerProfile(") ||
+    !guidance.includes("export const WORKING_MODE_TEXT") ||
+    !product.includes('import { powerProfile } from "./workscene-agent-guidance.js"') ||
+    !executor.includes('import { powerProfile } from "./workscene-agent-guidance.js"')
+  ) {
+    failures.push("Workscene Profile and tool guidance must be product-owned; Kernel only renders declared content");
+  }
   const productCreate = projection.slice(
     projection.indexOf("export function createRuntimeProductProjection("),
     projection.indexOf("export function assertRuntimeProductProjection("),

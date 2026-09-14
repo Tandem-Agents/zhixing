@@ -1730,7 +1730,7 @@ export async function createAgentRuntime(
           // 消除"LLM 知道 workspace 是 D:\，但 Bash dir 在 E:\ 执行"的语义错位。
           // source:"none"（显式无工作区，无 workdir 工作场景）→ 不兜底 cwd，
           // 不让文件路径落进程 cwd / 主工作区（纵深防御；主防线是该场景
-          // 装配期无文件工具，见 powerProfile 二分）。其余路径维持原语义。
+          // 装配期已按授权工作区投影移除文件工具）。其余路径维持原语义。
           workingDirectory:
             workspace.source === "none"
               ? undefined

@@ -12,13 +12,6 @@ import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "@zhixing/core/id
 import { WORKSPACE_DEPENDENT_TOOL_IDS } from "@zhixing/core/environment";
 import type { AgentRoleProfile } from "./agent-role-profile.js";
 
-export interface WorksceneProfileInput {
-  readonly id: string;
-  readonly name: string;
-  /** Runtime-local resolution result; no raw path is required by the profile. */
-  readonly hasWorkspace?: boolean;
-}
-
 /**
  * 主 agent 身份段文本 —— 与历史 buildIdentity 输出 byte-equal,
  * 单独导出供 byte-equal 回归测试比对。
@@ -87,23 +80,8 @@ export interface SubAgentProfileOptions {
 }
 
 /**
- * 子 agent profile —— 任务专注,自我隔离,不可再派生。
- *
- * 子 agent 的输出仅给主 agent 看,所以 instructions 中明确"输出自包含、不引用上下文"
- * 等约束,避免子 agent 模仿主 agent 与用户对话的语气。
- */
-/**
- * 无授权 workspace 工作场景的工具集 —— 从主工具集剔除全部本地文件类工具
- * （bash/read/write/edit/glob/grep）。**by-construction 文件作用域隔离**：
- * 无 workspace = 该场景不涉本地文件，装配期即无文件工具，根本不存在"文件
- * 工具无根"问题；与"无 workspace 的 workingDirectory 不落 cwd"互为
- * 主防线（无文件操作面）与纵深防御。
- *
- * 保留 load_skill / save_skill：技能库读写的是 ~/.zhixing/skills（app-state，
- * 非 workspace 本地文件），不属被剔除的本地文件类；无 workspace 场景仍可加载
- * work 区技能、也可把对话里的做法沉淀成技能。
- * **不保留 admit_skill**：接入要读用户给的本地路径（filesystem/read）——
- * 无 workspace 场景按构造无本地文件操作面,接入回主对话做。
+ * 无授权 workspace 时剔除依赖本地文件作用域的工具；应用状态工具仍可用。
+ * 只消费环境投影，不决定产品场景或工作区配置。
  */
 const WORKSPACE_DEPENDENT_TOOLS = new Set<string>(
   WORKSPACE_DEPENDENT_TOOL_IDS,
@@ -112,42 +90,7 @@ const NON_FILE_TOOLS = MAIN_ENABLED_TOOLS.filter(
   (tool) => !WORKSPACE_DEPENDENT_TOOLS.has(tool),
 );
 
-/**
- * 工作场景 power agent profile —— 用户面对的主对话循环，专注单一工作场景。
- *
- * 复用 subAgentProfile 把动态文本编进 instructions 的现成手法：同一 scene
- * 输出固定 → 静态前缀 byte-equal，多次进入缓存可复用。
- *
- * 工具集按本地 runtime 是否已解析出授权 workspace 二分（by-construction）：
- *   - 有 workspace：主工具全集（文件工具在授权工作根内操作）
- *   - 无 workspace：剔除本地文件类，仅留非文件工具（web_fetch/load_skill/Task）
- *
- * capabilities 同 mainProfile（用户面对、可派 Task）。
- */
-export function powerProfile(
-  scene: WorksceneProfileInput,
-  options: MainProfileOptions = {},
-): AgentRoleProfile {
-  const hasWorkspace = scene.hasWorkspace === true;
-  return {
-    name: options.agentIdentity?.displayName ?? DEFAULT_AGENT_DISPLAY_NAME,
-    role: "main",
-    instructions:
-      `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +
-      `You are now focused on the work scene "${scene.name}". ` +
-      `Work in this scene is isolated from personal scope and other scenes. ` +
-      `Inside this scene, you may use confirmed tools to rename this scene, change its device workspace, or clear its workspace binding; rename applies to registry metadata without restarting this window, while workspace changes take effect after this turn by re-entering the scene with the updated configuration. ` +
-      `When the work in this scene is done — or the user signals they want to step back to the broader conversation — ` +
-      `judge for yourself that the scene is complete and call the workmode_exit tool to return to the main conversation. ` +
-      `Do not just narrate that you are done; leaving the scene only happens when you call workmode_exit.`,
-    constraints: [],
-    enabledTools: hasWorkspace
-      ? MAIN_ENABLED_TOOLS
-      : NON_FILE_TOOLS,
-    capabilities: { canSpawnSubAgents: true, userFacing: true },
-  };
-}
-
+/** 子 agent 输出只回写主 agent，指令保持任务专注与自包含。 */
 export function subAgentProfile(opts: SubAgentProfileOptions): AgentRoleProfile {
   const shortId = opts.subAgentId.slice(0, 6);
   return {

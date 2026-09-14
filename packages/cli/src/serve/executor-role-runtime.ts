@@ -11,7 +11,8 @@ import {
   type KernelRuntimeEnvironmentFactory,
 } from "@zhixing/orchestrator/runtime";
 import type { RuntimeSecurityExecutionInfrastructure } from "./permission-storage-infrastructure.js";
-import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile } from "@zhixing/orchestrator/profile";
+import { powerProfile } from "./workscene-agent-guidance.js";
 import { parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
@@ -1095,6 +1096,7 @@ export class ExecutorRuntimeSubstrate {
               id: scope.sceneId,
               name: scope.sceneId,
               hasWorkspace: workspaceRoot !== null,
+              hasSceneControlTools: false,
             }, { agentIdentity: runtimeEnvironment.agentIdentity }),
           }
         : undefined;

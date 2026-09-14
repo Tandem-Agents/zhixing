@@ -493,6 +493,14 @@ export interface ToolDefinition {
   systemPromptHints?: readonly string[];
 
   /**
+   * Pre-rendered tool guidance, owned by the tool's product/implementation.
+   * Rendered verbatim after delegation and before reference material, in tool
+   * order. Captured with the tool set for the runtime lifetime; absent tools
+   * contribute no section. Unlike hints, this is a complete Markdown section.
+   */
+  systemPromptGuidance?: string;
+
+  /**
    * 本工具是否可能在成功执行后自行向用户发送可见确认消息，并在 ToolResult 中
    * 设置 `committedToUser: true`。
    *

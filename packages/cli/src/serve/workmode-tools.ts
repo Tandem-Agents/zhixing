@@ -40,6 +40,7 @@ import {
   hasPostTurnControlCapability,
 } from "@zhixing/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
+import { WORKING_MODE_TEXT } from "./workscene-agent-guidance.js";
 export type { WorksceneToolDirectory } from "./workscene-port.js";
 
 /** Canonical product tool identities shared by runtime assembly and readiness. */
@@ -158,6 +159,7 @@ export function createWorkmodeEnterTool(
   };
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.enter,
+    systemPromptGuidance: WORKING_MODE_TEXT,
     description:
       "进入一个工作场景：后续对话切到该场景的独立运行态（场景目录 + power 模型）。" +
       "切换在用户确认后、于本 turn 结束的 turn 边界发生——调用本工具后请正常把本轮回复收尾，不要假设已经切换。",
