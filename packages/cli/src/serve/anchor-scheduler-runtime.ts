@@ -109,7 +109,7 @@ export interface AnchorSchedulerRuntimeOptions {
     readonly surfacePrincipal: string;
   }) => Promise<ManualJobSurfaceSession>;
   readonly localJobOwner?: ExecutorJobOwner;
-  readonly mesh: () => MeshRuntimeAssembly | undefined;
+  readonly mesh: MeshRuntimeAssembly | undefined;
   readonly capabilities: {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
@@ -1072,13 +1072,13 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
   }
 
   #requiredMesh(): MeshRuntimeAssembly {
-    const mesh = this.#options.mesh();
+    const mesh = this.#options.mesh;
     if (!mesh) throw new Error("Selected remote executor transport is unavailable");
     return mesh;
   }
 
   async #remoteTargets() {
-    const mesh = this.#options.mesh();
+    const mesh = this.#options.mesh;
     if (!mesh) return {};
     return { targets: await mesh.jobExecutionTargets() };
   }

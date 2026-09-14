@@ -15,7 +15,7 @@
  *     preview 已经剥掉 ANSI 控制字符,防显示欺骗(学 OpenClaw)
  *   - 选项是按 "从精确到宽泛" 的 SuggestedPattern 多级生成 —— 用户可以选不同
  *     的泛化级别
- *   - placeholder 使用 `getAgentIdentity().displayName` —— 默认 "知行",可配
+ *   - placeholder 使用请求所属实例的身份投影，缺省显示名为“知行”
  */
 
 import { generateRequestId } from "./broker.js";
@@ -24,7 +24,7 @@ import type {
   ConfirmationRequest,
   DisplayBody,
 } from "./types.js";
-import { getAgentIdentity } from "../identity/index.js";
+import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "../identity/index.js";
 import {
   suggestTrustAdministrationPatterns,
   type TrustAdministrationSuggestedPattern as SuggestedPattern,
@@ -226,10 +226,11 @@ export function buildConfirmationOptions(
   flags?: {
     bypassImmune?: boolean;
     requiresExplicitConfirmation?: boolean;
+    agentIdentity?: AgentIdentity;
   },
 ): ConfirmationOption[] {
   void sessionType;
-  const { displayName } = getAgentIdentity();
+  const displayName = flags?.agentIdentity?.displayName ?? DEFAULT_AGENT_DISPLAY_NAME;
 
   const patterns = suggestTrustAdministrationPatterns({
     tool: toolName,
@@ -294,6 +295,7 @@ function formatContextScopeLabel(contextId: PermissionContextId): string {
 // ─── 主构造器 ───
 
 export interface BuildConfirmationRequestParams {
+  agentIdentity?: AgentIdentity;
   toolName: string;
   input: Record<string, unknown>;
   workingDirectory: string;
@@ -357,6 +359,7 @@ export function buildConfirmationRequest(
     contextId,
     sessionType,
     {
+      agentIdentity: params.agentIdentity,
       bypassImmune: hasBypassImmune,
       requiresExplicitConfirmation: params.requiresExplicitConfirmation,
     },

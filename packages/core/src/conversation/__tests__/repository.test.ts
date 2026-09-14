@@ -34,7 +34,7 @@ afterEach(async () => {
 const USER_SCOPE: ConversationScope = { kind: "user" };
 
 function createRepo(scope: ConversationScope = USER_SCOPE) {
-  return new ConversationRepository(scope);
+  return new ConversationRepository(scope, tmpDir);
 }
 
 // ─── ensureDefault ───

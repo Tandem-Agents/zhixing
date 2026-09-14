@@ -19,6 +19,9 @@
 
 import {
   discoverServer,
+  getDefaultPidPath,
+  getDefaultPortPath,
+  getDefaultTokenPath,
   createRpcClient,
   isProtocolVersionCompatible,
   PROTOCOL_VERSION,
@@ -140,14 +143,19 @@ export interface CoreHostConnectionDeps {
 }
 
 /** 默认依赖：发现走 discoverServer、拉起走静默 spawnDaemon、client 走 createRpcClient。 */
-export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
+export function defaultCoreHostConnectionDeps(zhixingHome: string): CoreHostConnectionDeps {
+  const discoveryPaths = {
+    pidPath: getDefaultPidPath(zhixingHome),
+    portPath: getDefaultPortPath(zhixingHome),
+    tokenPath: getDefaultTokenPath(zhixingHome),
+  };
   return {
-    discover: () => discoverServer(),
+    discover: () => discoverServer(discoveryPaths),
     spawn: async () => {
       const { reconcileCurrentManagedService } = await import(
         "../serve/managed-service-runtime.js"
       );
-      const reconciled = await reconcileCurrentManagedService("host-missing").catch(
+      const reconciled = await reconcileCurrentManagedService("host-missing", undefined, zhixingHome).catch(
         (error: unknown) => ({
           error: error instanceof Error ? error.message : "本机自动启动配置不可用",
         }),
@@ -165,6 +173,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
       // 按需拉起、不是用户显式 serve，结果应由本层统一封装成友好错误。
       const silent = { log: () => {}, error: () => {} };
       const result = await spawnDaemon({
+        zhixingHome,
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
         // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP
@@ -182,6 +191,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
     stopUnresponsiveHost: async (endpoint) => {
       const silent = { log: () => {}, warn: () => {}, error: () => {} };
       const result = await runStopCommand({
+        zhixingHome,
         verbose: false,
         timeoutMs: 10_000,
         expectedLock: endpoint.pid,
@@ -201,7 +211,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
       const { createCurrentAnchorSurfaceRpcClient } = await import(
         "./surface-core-host-link.js"
       );
-      return createCurrentAnchorSurfaceRpcClient();
+      return createCurrentAnchorSurfaceRpcClient({ zhixingHome });
     },
     clientVersion: ZHIXING_CLI_VERSION,
   };

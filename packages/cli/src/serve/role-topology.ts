@@ -73,6 +73,7 @@ export interface ExecutorRoleModule {
 }
 
 export interface ServeBootstrapContext {
+  readonly zhixingHome: string;
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;

@@ -57,7 +57,7 @@ describe("executor job owner production surface", () => {
 
   it("keeps fresh job recovery closed until the durable lifecycle artifact exists", async () => {
     const ctx = ownerContext(
-      ["executor"],
+      ["anchor", "executor"],
       recoveryLedger(),
       new StartupRollback(),
     );
@@ -86,15 +86,15 @@ describe("executor job owner production surface", () => {
     await ctx.startupRollback.rollback();
   });
 
-  it("creates the same owner contract for executor-only and stays inert without executor", async () => {
+  it("creates the Anchor local-executor owner and stays inert without executor", async () => {
     const executorOnly = ownerContext(
-      ["executor"],
+      ["anchor", "executor"],
       recoveryLedger(),
       new StartupRollback(),
     );
     await unit.setup(executorOnly);
     expect(executorOnly.executorJobOwner).toBeDefined();
-    expect(executorOnly.jobRelayObligations).toBeUndefined();
+    expect(executorOnly.jobRelayObligations).toBeDefined();
     await startUnit.setup(executorOnly);
     await executorOnly.startupRollback.rollback();
 
@@ -127,7 +127,7 @@ describe("executor job owner production surface", () => {
         }],
       });
     const ctx = ownerContext(
-      ["executor"],
+      ["anchor", "executor"],
       { recoverableJobObligations } as ReturnType<typeof recoveryLedger>,
       new StartupRollback(),
     );

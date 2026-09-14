@@ -235,6 +235,7 @@ export class PersistentApplicationHost<Options> {
       lease,
     );
     const bootstrap = Object.freeze({
+      zhixingHome: this.#input.zhixingHome,
       mesh,
       deviceCapacity,
       secretStore: this.#input.secretStore,

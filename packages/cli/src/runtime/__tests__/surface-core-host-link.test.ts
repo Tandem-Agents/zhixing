@@ -12,13 +12,14 @@ describe("current anchor surface core-host link", () => {
 
     await expect(
       createCurrentAnchorSurfaceRpcClient({
+        zhixingHome: "C:/bound-data-root",
         configuration: { readTopology },
       }),
     ).rejects.toThrow("这台设备尚未完成家庭配置");
 
     expect(readTopology).toHaveBeenCalledOnce();
     expect(readTopology.mock.calls[0]?.[0]).toEqual({
-      homeDir: expect.any(String),
+      homeDir: "C:/bound-data-root",
     });
   });
 

@@ -33,8 +33,8 @@ beforeEach(async () => {
   const tmp = await createTempDir("conv-dir");
   originalHome = process.env.ZHIXING_HOME;
   process.env.ZHIXING_HOME = tmp;
-  repo = new ConversationRepository({ kind: "user" });
-  transcript = new ShardedTranscriptStore(conversationsDir({ kind: "user" }));
+  repo = new ConversationRepository({ kind: "user" }, process.env.ZHIXING_HOME!);
+  transcript = new ShardedTranscriptStore(conversationsDir({ kind: "user" }, process.env.ZHIXING_HOME!));
   directory = createConversationDirectory({
     user: { repo, transcript },
     routeConversation: (conversationId) => ({
@@ -128,9 +128,9 @@ describe("conversation directory(持久层实现)", () => {
       kind: "workscene",
       sceneId: "scene-lifecycle",
     };
-    const sceneRepo = new ConversationRepository(sceneScope);
+    const sceneRepo = new ConversationRepository(sceneScope, process.env.ZHIXING_HOME!);
     const sceneTranscript = new ShardedTranscriptStore(
-      conversationsDir(sceneScope),
+      conversationsDir(sceneScope, process.env.ZHIXING_HOME!),
     );
     const routedDirectory = createConversationDirectory({
       user: { repo, transcript },
@@ -388,8 +388,8 @@ describe("conversation directory(持久层实现)", () => {
 
   it("clear:workscene 全域 id 走共享 routed repo,清理 local meta 的 task_list", async () => {
     const sceneScope: ConversationScope = { kind: "workscene", sceneId: "scene-a" };
-    const sceneRepo = new ConversationRepository(sceneScope);
-    const sceneTranscript = new ShardedTranscriptStore(conversationsDir(sceneScope));
+    const sceneRepo = new ConversationRepository(sceneScope, process.env.ZHIXING_HOME!);
+    const sceneTranscript = new ShardedTranscriptStore(conversationsDir(sceneScope, process.env.ZHIXING_HOME!));
     const created = await sceneRepo.create({ name: "场景对话" });
     const globalId = worksceneConversationId(sceneScope.sceneId, created.id);
     await sceneTranscript.init(created.id);

@@ -314,6 +314,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #executeRecoveredPerspective:
     | ConversationProtocolRuntimeOptions["executeRecoveredPerspective"]
     | undefined;
+  readonly #statusListeners = new Set<
+    NonNullable<ConversationProtocolRuntimeOptions["onStatus"]>
+  >();
   readonly #onStatus: ((notice: ConversationStatusNotice) => void | Promise<void>) | undefined;
   readonly #onFinal: ((frame: FinalFrame) => void | Promise<void>) | undefined;
   readonly #onPublishResult:
@@ -322,7 +325,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #onFirstPartyFrame:
     | ((frame: StreamFrame) => void | Promise<void>)
     | undefined;
-  readonly #createFirstPartyFinality:
+  #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
   readonly #projectLifecycle:
@@ -542,6 +545,25 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           identity: AssignmentSubmissionIdentity,
         ) => journalFor(context).preflightSubmission(context, identity),
       },
+    };
+  }
+
+  /** Joined once after the status sources exist, before public consumers open. */
+  bindFirstPartyFinality(
+    factory: NonNullable<ConversationProtocolRuntimeOptions["createFirstPartyFinality"]>,
+  ): void {
+    if (this.#createFirstPartyFinality) {
+      throw new Error("First-party finality is already bound");
+    }
+    this.#createFirstPartyFinality = factory;
+  }
+
+  onStatus(
+    listener: NonNullable<ConversationProtocolRuntimeOptions["onStatus"]>,
+  ): () => void {
+    this.#statusListeners.add(listener);
+    return () => {
+      this.#statusListeners.delete(listener);
     };
   }
 
@@ -2453,9 +2475,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         executorId: this.#authority.executorId,
       },
     });
-    if (this.#onStatus) {
-      journal.onStatus(this.#onStatus);
-    }
+    journal.onStatus(async (notice) => {
+      await this.#onStatus?.(notice);
+      for (const listener of this.#statusListeners) await listener(notice);
+    });
     return journal;
   }
 

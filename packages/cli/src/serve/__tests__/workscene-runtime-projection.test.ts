@@ -48,6 +48,7 @@ function fixture(mcpTools = {
     id: sceneId === undefined ? "guidance-main" : `guidance-scene:${sceneId}`,
   }));
   return createAnchorRuntimeProjectionAssembly({
+    agentIdentity: { displayName: "知行" },
     capabilities,
     workscenes,
     worksceneAssignmentTools: {} as never,

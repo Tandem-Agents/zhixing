@@ -11,17 +11,17 @@ import type {
 import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 
 export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
-  manager: () => ConversationManager;
+  manager: ConversationManager;
 }>): ConversationPerspectivesCorrectnessPort {
   const port: ConversationPerspectivesCorrectnessPort = {
-    usesDurableTurnProtocol: () => input.manager().usesDurableTurnProtocol(),
+    usesDurableTurnProtocol: () => input.manager.usesDurableTurnProtocol(),
     session: (conversationId) => {
-      const managed = input.manager().getSession(conversationId);
+      const managed = input.manager.getSession(conversationId);
       return managed ? projectConversationPerspectivesRuntime(managed) : undefined;
     },
-    runDurable: (request) => runDurablePerspective(input.manager(), request),
+    runDurable: (request) => runDurablePerspective(input.manager, request),
     recordLegacyTurn: async (conversationId, record, turnId) => {
-      await input.manager().recordTurn(
+      await input.manager.recordTurn(
         conversationId,
         record,
         undefined,
@@ -29,9 +29,9 @@ export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
       );
     },
     publishPendingFinals: (conversationId) =>
-      input.manager().publishPendingFinals(conversationId),
+      input.manager.publishPendingFinals(conversationId),
     releaseBusy: (conversationId) =>
-      input.manager().setBusy(conversationId, false),
+      input.manager.setBusy(conversationId, false),
   };
   return Object.freeze(port);
 }

@@ -50,6 +50,7 @@ describe("conversation storage maintenance", () => {
 
 function createAliveCheck(): (directoryName: string) => Promise<boolean> {
   return createConversationStorageInfrastructure({
+      zhixingHome: home,
     optimalMaxTokens: 20_000,
     worksceneConversationStorageRemoval:
       createWorksceneStorageCleanupInfrastructure({ zhixingHome: home })

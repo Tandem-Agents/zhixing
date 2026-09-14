@@ -36,7 +36,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: new Error("host down"),
-      storage: createReadOnlyConversationStorage(),
+      storage: createReadOnlyConversationStorage(home),
       maxConversations: 1,
       width: 100,
     });
@@ -60,7 +60,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
-      storage: createReadOnlyConversationStorage(),
+      storage: createReadOnlyConversationStorage(home),
       maxConversations: 1,
       width: 100,
     });
@@ -82,7 +82,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
-      storage: createReadOnlyConversationStorage(),
+      storage: createReadOnlyConversationStorage(home),
       maxConversations: 1,
       width: 100,
     });
@@ -105,7 +105,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
-      storage: createReadOnlyConversationStorage(),
+      storage: createReadOnlyConversationStorage(home),
       maxConversations: 1,
       width: 100,
     });
@@ -132,7 +132,7 @@ describe("read-only conversation browser", () => {
       renderReadOnlyConversationBrowser({
         writer,
         error: "offline",
-        storage: createReadOnlyConversationStorage(),
+        storage: createReadOnlyConversationStorage(home),
         maxConversations: 1,
         width: 100,
       }),

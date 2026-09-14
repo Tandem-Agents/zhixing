@@ -16,6 +16,8 @@
 
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
+import { loadConfig } from "@zhixing/providers";
+import { createRuntimeConfigurationProvider } from "./runtime/runtime-configuration-provider.js";
 import {
   CommandProvider,
   FileProvider,
@@ -456,7 +458,7 @@ function setupBracketedPasteMode(): void {
 
 // ─── 启动 REPL ───
 
-export async function startRepl(): Promise<void> {
+export async function startRepl(zhixingHome: string, configPath: string): Promise<void> {
   // 在 ScreenController 接管 stdout 之前预热 chunk-dump singleton——若 --log 启用，
   // dump 创建时会经 stderr 写一行启用提示（"[zhixing] LLM raw chunk dump enabled →
   // <path>"）。chrome 接管后 stderr 写入会破坏 frame；提前到 chrome 启动前让提示落在
@@ -540,7 +542,7 @@ export async function startRepl(): Promise<void> {
   // 核心宿主连接 —— cli 进程级唯一(连接即接入面身份单位):调度 / 会话 / 确认 /
   // 管理域经各自 facade 共用这一条已认证连接;释放在退出链(本入口持有)。
   const coreHost = new CoreHostConnection({
-    ...defaultCoreHostConnectionDeps(),
+    ...defaultCoreHostConnectionDeps(zhixingHome),
     onLifecycleNotice: (notice) =>
       renderCoreHostLifecycleNotice({
         writer: cliWriter,
@@ -563,7 +565,7 @@ export async function startRepl(): Promise<void> {
   const startupFallbackWriter = renderScreen ? createStdoutWriter() : cliWriter;
   if (
     !(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter, {
-      storage: createReadOnlyConversationStorage(),
+      storage: createReadOnlyConversationStorage(zhixingHome),
       onAttemptFailed: () => startupProgress?.stop(),
     }))
   ) {
@@ -572,7 +574,10 @@ export async function startRepl(): Promise<void> {
   }
 
   // 本地派生视图——配置显示 / 代理诊断 / workspace root 随宿主换代刷新。
-  const localView = new ReplLocalView({ management: managementFacade });
+  const localView = new ReplLocalView({
+    management: managementFacade,
+    configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath })),
+  });
   await localView.refresh();
 
   // ── 带外监听器先于 auto-resume 建立 ──
@@ -1249,6 +1254,8 @@ export async function startRepl(): Promise<void> {
   // config 域命令（config/mcp/trust/security）—— 编辑器留本地 TTY,落盘后经
   // 宿主换代生效;/trust 经管理面 RPC。
   registerConfigCommands({
+    zhixingHome,
+    configPath,
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
     writer: cliWriter,
@@ -1268,7 +1275,7 @@ export async function startRepl(): Promise<void> {
           strategy: "drain",
         }),
         reconnect: (reloadOptions) => coreHost.reconnect(reloadOptions),
-        prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover,
+        prepareManagedServiceTurnover: () => prepareCurrentManagedServiceConfigTurnover(undefined, zhixingHome),
         refresh: async () => {
           const reloadStatus = await waitForReloadStatus(managementFacade);
           await localView.refresh();
@@ -1633,6 +1640,7 @@ export async function startRepl(): Promise<void> {
                               );
                             },
                           },
+                          zhixingHome,
                         ),
                       create: (sceneName, workspace) =>
                         worksceneFacade.create(sceneName, workspace),

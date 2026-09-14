@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createReadOnlyConversationStorage } from "../conversation-storage-infrastructure.js";
 import { extractFirstText } from "@zhixing/core";
 import { toSafePathSegment } from "@zhixing/core/paths";
 import { worksceneConversationId } from "@zhixing/core/conversation";
@@ -19,8 +22,46 @@ afterEach(() => {
 });
 
 describe("conversation storage infrastructure", () => {
+  it("keeps metadata, content, lazy scenes, naming and maintenance on the explicit home", async () => {
+    const root = await createTempDir("storage-owner-root");
+    const other = await createTempDir("storage-other-root");
+    process.env.ZHIXING_HOME = other;
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 20_000,
+      worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+    });
+    process.env.ZHIXING_HOME = await createTempDir("storage-later-root");
+    const user = await storage.directory.create();
+    const scene = worksceneConversationId("late-scene", "late-conversation");
+    const tasks = { items: [{ id: "one", content: "retained", status: "pending" as const }] };
+    for (const id of [user.conversationId, scene]) {
+      await storage.directory.ensure(id);
+      await storage.runtime.appendCommittedRun(id, run(id, 0));
+      await storage.committedViews.persistTaskList(id, tasks);
+      expect(await storage.taskLists.load(id)).toEqual(tasks);
+      expect((await storage.runtime.loadHistory(id))?.turnCount).toBe(1);
+      expect(await storage.maintenance.isConversationDataAlive(toSafePathSegment(id))).toBe(true);
+    }
+    await storage.runtime.writeSnapshot(user.conversationId, {
+      coveredThroughRunIndex: 0, structuredSummary: { facts: "facts", state: "state", active: "active" },
+      tokensBefore: 20, tokensAfter: 5,
+    });
+    expect(await fs.readdir(path.join(root, "conversations", toSafePathSegment(user.conversationId), "snapshots"))).toHaveLength(1);
+    await storage.naming.rename(user.conversationId, "Owner root");
+    expect((await storage.naming.get(user.conversationId))?.name).toBe("Owner root");
+    await storage.maintenance.runRetentionSweep();
+    const reader = createReadOnlyConversationStorage(root);
+    expect((await reader.list()).some((entry) => entry.conversationId === user.conversationId)).toBe(true);
+    expect((await reader.readHistory(user.conversationId, { limit: 1 })).runs).toHaveLength(1);
+    await expect(fs.stat(path.join(other, "conversations"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(process.env.ZHIXING_HOME!, "workscenes"))).rejects.toMatchObject({ code: "ENOENT" });
+    await storage.directory.deleteStoredConversation(scene);
+    expect(await storage.maintenance.isConversationDataAlive(toSafePathSegment(scene))).toBe(false);
+  });
+
   it("routes user and Workscene through one finite runtime/directory contract", async () => {
     const storage = createConversationStorageInfrastructure({
+      zhixingHome: process.env.ZHIXING_HOME!,
       optimalMaxTokens: 20_000,
       worksceneConversationStorageRemoval:
         createWorksceneStorageCleanupInfrastructure({
@@ -50,6 +91,7 @@ describe("conversation storage infrastructure", () => {
 
   it("shares committed views, clear/delete, and maintenance routing without exposing stores", async () => {
     const storage = createConversationStorageInfrastructure({
+      zhixingHome: process.env.ZHIXING_HOME!,
       optimalMaxTokens: 20_000,
       worksceneConversationStorageRemoval:
         createWorksceneStorageCleanupInfrastructure({

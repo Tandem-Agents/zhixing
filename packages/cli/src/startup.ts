@@ -18,6 +18,7 @@
  */
 
 import path from "node:path";
+import { getZhixingHome } from "@zhixing/core/paths";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import {
@@ -26,7 +27,7 @@ import {
   getGlobalConfigPath,
   loadConfig,
   loadCredentialSnapshot,
-  resolveHomeDir,
+
   validateConfigSemantics,
   writeConfig,
   writeCredentials,
@@ -82,8 +83,9 @@ export type StartupCheckResult =
   | { kind: "non-tty"; missingLabels: string[] };
 
 export interface RunStartupCheckOptions {
-  /** ~/.zhixing/ 目录覆盖（仅测试用） */
+  /** 入口固定的数据根；配置文件可单独指定。 */
   homeDir?: string;
+  configPath?: string;
   env?: Record<string, string | undefined>;
   isTTY?: boolean;
   /** 入口模式——决定是否检查 messaging */
@@ -103,16 +105,16 @@ export async function runStartupCheck(
   const stdout = options.stdout ?? process.stdout;
 
   const explicitHomeDir = options.homeDir;
-  const credentialsHomeDir = explicitHomeDir ?? resolveHomeDir(env);
-  const configPath = explicitHomeDir
+  const credentialsHomeDir = explicitHomeDir ?? getZhixingHome();
+  const configPath = options.configPath ?? (explicitHomeDir
     ? path.join(explicitHomeDir, "config.jsonc")
-    : getGlobalConfigPath(env);
+    : getGlobalConfigPath(env, credentialsHomeDir));
   // 1. load
   let config: ZhixingConfig;
   let credentials: ZhixingCredentials;
   let credentialGeneration: string | null;
   try {
-    config = loadConfig({ homeDir: explicitHomeDir, env });
+    config = loadConfig({ configPath, env });
   } catch (err) {
     return {
       kind: "schema-error",
@@ -197,7 +199,7 @@ export async function runStartupCheck(
     initialConfig: config,
     initialCredentials: credentials,
     writers: {
-      writeConfig: (next) => writeConfig(next, { homeDir: explicitHomeDir, env }),
+      writeConfig: (next) => writeConfig(next, { configPath, env }),
       writeCredentials: (next) =>
         writeCredentials(next, { store: secretStore }),
     },
@@ -217,7 +219,7 @@ export async function runStartupCheck(
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
     const updatedConfig = loadConfig({
-      homeDir: explicitHomeDir,
+      configPath,
       env,
     });
     const updatedCredentialReadGuard = await createCredentialReadGuard(

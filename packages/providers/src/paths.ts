@@ -55,12 +55,13 @@ export function getGlobalConfigDir(
  */
 export function getGlobalConfigPath(
   env: Record<string, string | undefined> = process.env,
+  zhixingHome: string = getZhixingHome(),
 ): string {
   const override = env["ZHIXING_CONFIG_PATH"]?.trim();
   if (override) {
     return expandUserHome(override);
   }
-  return path.join(getZhixingHome(), GLOBAL_CONFIG_FILENAME);
+  return path.join(zhixingHome, GLOBAL_CONFIG_FILENAME);
 }
 
 /**
@@ -71,4 +72,3 @@ export function resolveHomeDir(
 ): string {
   return resolveDir(env);
 }
-

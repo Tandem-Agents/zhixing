@@ -19,10 +19,10 @@ import * as readline from "node:readline/promises";
 import chalk from "chalk";
 import type { ChannelStatus } from "@zhixing/core/channels";
 import {
-  getGlobalConfigPath,
+
   loadConfig,
   loadCredentialSnapshot,
-  resolveHomeDir,
+
   writeConfig,
   writeCredentials,
 } from "@zhixing/providers";
@@ -46,6 +46,8 @@ import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
 
 export interface ConfigCommandDeps {
+  readonly zhixingHome: string;
+  readonly configPath: string;
   rl: readline.Interface;
   /**
    * 仅访问 activeTurnPromise——结构子类型避免对 ReplState 的硬依赖（防 cli/repl 与
@@ -208,12 +210,11 @@ async function runEditorCommand(
   rl.pause();
 
   try {
-    const homeDir = resolveHomeDir();
-    const configPath = getGlobalConfigPath();
+    const { zhixingHome: homeDir, configPath } = deps;
     const secretStore = createPlatformSecretStore({ homeDir });
 
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
-    const config = loadConfig();
+    const config = loadConfig({ configPath });
     const { credentials } = await loadCredentialSnapshot({ store: secretStore });
 
     const editorResult = await runConfigEditor({
@@ -230,7 +231,7 @@ async function runEditorCommand(
       writers: {
         // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
         // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
-        writeConfig: (next) => writeConfig(next, { homeDir }),
+        writeConfig: (next) => writeConfig(next, { configPath }),
         writeCredentials: (next) => writeCredentials(next, { store: secretStore }),
       },
       stdin: process.stdin,
@@ -256,7 +257,7 @@ async function runEditorCommand(
         const effects = await settleConfigPostCommitEffects({
           launchSelectionChanged,
           reload: deps.requestHostReload,
-          reconcile: () => reconcileCurrentManagedService("local-role-config-committed"),
+          reconcile: () => reconcileCurrentManagedService("local-role-config-committed", undefined, homeDir),
         });
         if (
           effects.reload.status === "succeeded" &&
@@ -339,7 +340,7 @@ export async function handleMcpCommand(
     ) => Promise<string>;
   },
 ): Promise<void> {
-  const proxy = loadConfig().network?.proxy;
+  const proxy = loadConfig({ configPath: deps.configPath }).network?.proxy;
   const management = createMcpManagementAdapter({
     proxy,
     readStatusWire: deps.readMcpStatusWire,

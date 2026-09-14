@@ -4,7 +4,7 @@ import { buildGuidanceMessagePair, loadLayeredGuidance as defaultLoadLayeredGuid
 import type { AgentRuntimeLifecycle } from "@zhixing/orchestrator/runtime";
 
 export interface ZhixingGuidanceLifecycleDeps {
-  readonly getZhixingHome: () => string;
+  readonly zhixingHome: string;
   /**
    * Resolves the runtime-local workspace root. Raw paths never cross the
    * workscene registry or its wire DTO.
@@ -17,6 +17,7 @@ export interface ZhixingGuidanceLifecycleDeps {
 export function createZhixingGuidanceLifecycle(
   deps: ZhixingGuidanceLifecycleDeps,
 ): AgentRuntimeLifecycle {
+  const homeDir = deps.zhixingHome;
   const loadLayeredGuidance =
     deps.loadLayeredGuidance ?? defaultLoadLayeredGuidance;
 
@@ -35,7 +36,6 @@ export function createZhixingGuidanceLifecycle(
             warningFailure ??= error;
           });
       };
-      const homeDir = deps.getZhixingHome();
       let workdir: string | undefined;
       if (deps.resolveWorkspaceRoot) {
         workdir = await resolveWorkdir(deps, reportWarning);

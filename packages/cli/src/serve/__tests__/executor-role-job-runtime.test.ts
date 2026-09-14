@@ -97,6 +97,7 @@ describe("executor role conversation runtime production assembly", () => {
       createRuntimeConfigurationSnapshot({}),
     );
     const substrate = new ExecutorRuntimeSubstrate({
+      zhixingHome: "/executor-home",
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
@@ -186,6 +187,7 @@ describe("executor role job runtime production assembly", () => {
       createRuntimeConfigurationSnapshot({}),
     );
     const substrate = new ExecutorRuntimeSubstrate({
+      zhixingHome: "/executor-home",
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
@@ -221,6 +223,7 @@ describe("executor role job runtime production assembly", () => {
       createRuntimeConfigurationSnapshot({}),
     );
     const substrate = new ExecutorRuntimeSubstrate({
+      zhixingHome: "/executor-home",
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},

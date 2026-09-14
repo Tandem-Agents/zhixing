@@ -168,8 +168,8 @@ function currentManagedServiceIdentity(homeDir: string) {
 export async function reconcileCurrentManagedService(
   trigger: ManagedServiceReconcileTrigger,
   signal: AbortSignal = new AbortController().signal,
+  homeDir: string = getZhixingHome(),
 ): Promise<ManagedServiceReconcileResult> {
-  const homeDir = getZhixingHome();
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
@@ -184,8 +184,8 @@ export async function reconcileCurrentManagedService(
 
 export async function prepareCurrentManagedServiceConfigTurnover(
   signal: AbortSignal = new AbortController().signal,
+  homeDir: string = getZhixingHome(),
 ): Promise<void> {
-  const homeDir = getZhixingHome();
   const current = await loadCurrentManagedServiceState("activate", homeDir);
   if (resolveHostLaunchPlan(current).mode === "managed" || !current.spec) return;
   const capacity = createDeviceCapacityRuntime(

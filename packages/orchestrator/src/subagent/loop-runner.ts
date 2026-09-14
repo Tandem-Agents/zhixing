@@ -145,6 +145,7 @@ export interface RunSubAgentLoopOptions {
   securityPipeline: SecurityPipeline;
   /** 从父运行树继承的有限安全批准端口。 */
   securityApproval: KernelSecurityApprovalPort;
+  readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
   /** 子 confirmation broker —— 与父 broker 隔离,默认 fail-deny resolver */
   confirmationBroker: IConfirmationBroker;
   /**
@@ -288,6 +289,7 @@ export async function runSubAgentLoop(
     const secureExecuteTool = createSecureExecuteTool({
       pipeline: opts.securityPipeline,
       securityApproval: opts.securityApproval,
+      agentIdentity: opts.agentIdentity,
       originalExecute: (tool, input, ctx) => tool.call(input, ctx),
       broker: opts.confirmationBroker,
       sessionType: "ci",

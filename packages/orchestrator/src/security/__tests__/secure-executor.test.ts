@@ -166,6 +166,31 @@ function autoResolveBroker(
 // ─── 测试 ───
 
 describe("createSecureExecuteTool", () => {
+  it("keeps concurrent confirmation brokers on their own runtime identity", async () => {
+    const requests: ConfirmationRequest[] = [];
+    const create = (displayName: string) => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, (request) => {
+        requests.push(request);
+        return { kind: "allow-once" };
+      });
+      return createSecureExecuteTool({
+        pipeline: makePipeline().pipeline, originalExecute: mockExecute().fn,
+        broker, agentIdentity: Object.freeze({ displayName }),
+      });
+    };
+    const first = create("First");
+    const second = create("Second");
+    await Promise.all([
+      first(makeTool("write"), { path: ".zhixing/config.json" }, makeContext()),
+      second(makeTool("write"), { path: ".zhixing/config.json" }, makeContext()),
+    ]);
+    expect(requests).toHaveLength(2);
+    const labels = requests.map((r) => JSON.stringify(r.options));
+    expect(labels.filter((s) => s.includes("告诉First哪里错了"))).toHaveLength(1);
+    expect(labels.filter((s) => s.includes("告诉Second哪里错了"))).toHaveLength(1);
+  });
+
   describe("放行路径", () => {
     it("read 工具默认放行,直接调用 originalExecute", async () => {
       const broker = new ConfirmationBroker();

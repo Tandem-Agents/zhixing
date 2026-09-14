@@ -46,7 +46,7 @@ const state = (id: string, content = id) => ({
 
 describe("ConversationRepoTaskListStore", () => {
   it("load 已存在 conversation 的 taskListState", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const conv = await repo.create({ name: "test" });
     await repo.updateTaskListState(conv.id, {
       items: [{ id: "t1", content: "x", status: "pending" }],
@@ -60,7 +60,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("load 不存在的 conversation 返回 undefined", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const store = new ConversationRepoTaskListStore(repo);
 
     const loaded = await store.load("never-existed");
@@ -68,7 +68,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("load conversation 存在但无 taskListState → 返回 undefined", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const conv = await repo.create({ name: "no-state" });
 
     const store = new ConversationRepoTaskListStore(repo);
@@ -77,7 +77,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("save 写入后 load 拉到（round-trip）", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const conv = await repo.create({ name: "rw" });
     const store = new ConversationRepoTaskListStore(repo);
 
@@ -91,7 +91,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("save 到不存在 conversation → throw TaskListPersistenceError（不静默 no-op）", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const store = new ConversationRepoTaskListStore(repo);
 
     await expect(
@@ -102,7 +102,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("delete 写入 undefined 字段（meta 字段被移除）", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const conv = await repo.create({ name: "del" });
     const store = new ConversationRepoTaskListStore(repo);
 
@@ -116,7 +116,7 @@ describe("ConversationRepoTaskListStore", () => {
   });
 
   it("delete 对不存在的 conversation 幂等 no-op", async () => {
-    const repo = new ConversationRepository(USER_SCOPE);
+    const repo = new ConversationRepository(USER_SCOPE, tmpDir);
     const store = new ConversationRepoTaskListStore(repo);
 
     await expect(store.delete("never-existed")).resolves.toBeUndefined();
@@ -135,7 +135,7 @@ describe("RoutedConversationRepoTaskListStore", () => {
       if (scope.kind === "workscene") {
         let repo = sceneRepos.get(scope.sceneId);
         if (!repo) {
-          repo = new ConversationRepository(scope);
+          repo = new ConversationRepository(scope, tmpDir);
           sceneRepos.set(scope.sceneId, repo);
         }
         return { repo, localId };
@@ -145,7 +145,7 @@ describe("RoutedConversationRepoTaskListStore", () => {
   }
 
   it("user 全域 id 按原 id 持久化到 user repo", async () => {
-    const userRepo = new ConversationRepository(USER_SCOPE);
+    const userRepo = new ConversationRepository(USER_SCOPE, tmpDir);
     const conv = await userRepo.create({ name: "user-task" });
     const store = new RoutedConversationRepoTaskListStore(createRoute(userRepo));
 
@@ -157,9 +157,9 @@ describe("RoutedConversationRepoTaskListStore", () => {
   });
 
   it("workscene 全域 id 路由到场景 scope repo 的 localId,并可跨 store 实例读回", async () => {
-    const userRepo = new ConversationRepository(USER_SCOPE);
+    const userRepo = new ConversationRepository(USER_SCOPE, tmpDir);
     const sceneScope: ConversationScope = { kind: "workscene", sceneId: "scene-a" };
-    const sceneRepo = new ConversationRepository(sceneScope);
+    const sceneRepo = new ConversationRepository(sceneScope, tmpDir);
     const conv = await sceneRepo.create({ name: "scene-task" });
     const globalId = worksceneConversationId(sceneScope.sceneId, conv.id);
     const firstSceneRepos = new Map([[sceneScope.sceneId, sceneRepo]]);
@@ -172,14 +172,14 @@ describe("RoutedConversationRepoTaskListStore", () => {
     expect((await sceneRepo.get(conv.id))?.taskListState?.items[0]?.id).toBe("s1");
 
     const freshStore = new RoutedConversationRepoTaskListStore(
-      createRoute(new ConversationRepository(USER_SCOPE)),
+      createRoute(new ConversationRepository(USER_SCOPE, tmpDir)),
     );
     const reloaded = await freshStore.load(globalId);
     expect(reloaded?.items[0]?.content).toBe("scene task");
   });
 
   it("save 到缺失的 routed conversation → throw 且保留全域 id", async () => {
-    const userRepo = new ConversationRepository(USER_SCOPE);
+    const userRepo = new ConversationRepository(USER_SCOPE, tmpDir);
     const store = new RoutedConversationRepoTaskListStore(createRoute(userRepo));
     const globalId = worksceneConversationId("scene-missing", "never-existed");
 
@@ -190,7 +190,7 @@ describe("RoutedConversationRepoTaskListStore", () => {
   });
 
   it("delete 对缺失的 routed conversation 幂等 no-op", async () => {
-    const userRepo = new ConversationRepository(USER_SCOPE);
+    const userRepo = new ConversationRepository(USER_SCOPE, tmpDir);
     const store = new RoutedConversationRepoTaskListStore(createRoute(userRepo));
 
     await expect(

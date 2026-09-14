@@ -95,6 +95,7 @@ async function setupCtx() {
     zhixingHome: tmp,
   });
   const conversationStorage = createConversationStorageInfrastructure({
+      zhixingHome: tmp,
     optimalMaxTokens: 20_000,
     worksceneConversationStorageRemoval: worksceneStorage.conversations,
   });
@@ -134,7 +135,7 @@ async function setupCtx() {
     secretStore,
     authorityRuntime,
     durableInteractions: new DurableConversationInteractionObserver(),
-    conversationPerspectives: { executePerspectiveWork: vi.fn() },
+    createConversationPerspectives: () => ({ executePerspectiveWork: vi.fn() }),
     sessionBroadcast: vi.fn(),
     sessionActivityBroadcast: vi.fn(),
     advancementDirectory: {
@@ -235,6 +236,22 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
     expect(session.turnCount).toBe(2);
 
     await ctx.conversations!.disposeAll();
+  });
+
+  it("keeps runtime storage dependencies after the construction container changes", async () => {
+    const { ctx, conversationStorage } = await setupCtx();
+    const manager = ctx.conversations!;
+    Object.assign(ctx, {
+      conversationIdentityLifecycle: {},
+      conversationCommittedViewStorage: {},
+      sessionBroadcast: () => { throw new Error("must not locate through ctx"); },
+    });
+    try {
+      await manager.getOrCreate("bound-conversation");
+      expect(await conversationStorage.directory.exists("bound-conversation")).toBe(true);
+    } finally {
+      await manager.disposeAll();
+    }
   });
 
   it("真·新对话 → 窗口为空、turnCount 0，目录 ensure 建索引", async () => {

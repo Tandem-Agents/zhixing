@@ -8,6 +8,8 @@
  */
 
 import chalk from "chalk";
+import { getZhixingHome } from "@zhixing/core/paths";
+import { getGlobalConfigPath } from "@zhixing/providers";
 import { Command, Help, InvalidArgumentError, Option } from "commander";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
@@ -40,7 +42,7 @@ async function renderActionError(error: unknown): Promise<void> {
 
 async function pruneRuntimeLogs(): Promise<void> {
   const { pruneAllLogs } = await import("./output/llm-chunk-dump.js");
-  pruneAllLogs();
+  pruneAllLogs(getZhixingHome());
 }
 
 /**
@@ -222,6 +224,8 @@ program
     log?: boolean;
   }) => {
     try {
+      const zhixingHome = getZhixingHome();
+      const configPath = getGlobalConfigPath(process.env, zhixingHome);
       const [
         { setDiagnosticLogger },
         { configureLlmChunkDump, pruneAllLogs },
@@ -236,7 +240,7 @@ program
         import("./repl.js"),
       ]);
 
-      pruneAllLogs();
+      pruneAllLogs(zhixingHome);
       // cli 交互模式（REPL）静默 core 诊断 log（[llm] 请求 / 工具调用等），
       // 避免污染对话 UI；serve 及其子命令各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
@@ -249,15 +253,17 @@ program
       // 两个 dump 写到不同文件，互不干扰；--log 单一开关统一启用，避免多 flag
       // 心智负担与 PowerShell env var 持久化陷阱。
       const dumpEnabled = options.log === true;
-      configureLlmChunkDump(dumpEnabled);
-      configureKeypressDump(dumpEnabled);
+      configureLlmChunkDump(dumpEnabled, zhixingHome);
+      configureKeypressDump(dumpEnabled, zhixingHome);
       // 启动期检查——先确保必要字段就绪
       const startupResult = await runStartupCheck({
+        homeDir: zhixingHome,
+        configPath,
         mode: "repl",
       });
       handleStartupResult(startupResult);
 
-      await startRepl();
+      await startRepl(zhixingHome, configPath);
     } catch (err) {
       await renderActionError(err);
       process.exit(1);

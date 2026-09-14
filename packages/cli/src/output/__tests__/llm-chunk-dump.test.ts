@@ -43,7 +43,7 @@ describe("LLM chunk dump · 默认禁用（未 configure / configure false）", 
   });
 
   it("configure(false) 显式禁用同样走 noop 路径", () => {
-    configureLlmChunkDump(false);
+    configureLlmChunkDump(false, getZhixingHome());
     const dump = getLlmChunkDump();
     expect(() => {
       dump.recordStreamEvent({ type: "text_delta", text: "x" });
@@ -75,7 +75,8 @@ describe("LLM chunk dump · 启用（configure(true)）", () => {
     __resetForTesting();
     originalHome = process.env.ZHIXING_HOME;
     process.env.ZHIXING_HOME = tempHome.getDir();
-    configureLlmChunkDump(true);
+    configureLlmChunkDump(false, tempHome.getDir());
+    configureLlmChunkDump(true, getZhixingHome());
     try {
       logsBefore = fs.existsSync(logDir()) ? fs.readdirSync(logDir()) : [];
     } catch {
@@ -356,6 +357,7 @@ describe("LLM chunk dump · 守门 (启动巡检 + 写盘失败 fail-safe)", () 
     __resetForTesting();
     originalHome = process.env.ZHIXING_HOME;
     process.env.ZHIXING_HOME = tempHome.getDir();
+    configureLlmChunkDump(false, tempHome.getDir());
     // describe-scope tempHome 跨 it 共享,每个 it 前清空 logs/ 子目录,
     // 避免前一个 test 的 seed 文件污染当前 test 断言
     const logsDir = path.join(tempHome.getDir(), "logs");
@@ -386,7 +388,7 @@ describe("LLM chunk dump · 守门 (启动巡检 + 写盘失败 fail-safe)", () 
     seedDir(rawDir, 10);
     seedDir(errDir, 12);
 
-    pruneAllLogs();
+    pruneAllLogs(getZhixingHome());
 
     expect(fs.readdirSync(rawDir)).toHaveLength(7);
     expect(fs.readdirSync(errDir)).toHaveLength(7);
@@ -394,7 +396,34 @@ describe("LLM chunk dump · 守门 (启动巡检 + 写盘失败 fail-safe)", () 
 
   it("pruneAllLogs 在目录不存在时 swallow,不抛错", () => {
     // tempHome 下当前没有 logs/ 子目录,pruneAllLogs 应 swallow 不抛错
-    expect(() => pruneAllLogs()).not.toThrow();
+    expect(() => pruneAllLogs(getZhixingHome())).not.toThrow();
+  });
+
+  it("pins raw/error output and rotation to the supplied root after environment changes", async () => {
+    const root = await createTempDir("explicit-log-root");
+    __resetForTesting();
+    configureLlmChunkDump(true, root);
+    process.env.ZHIXING_HOME = tempHome.getDir();
+    const dump = getLlmChunkDump();
+    dump.recordStreamEvent({ type: "text_delta", text: "isolated" });
+    dump.dispose();
+    const bus = createEventBus<AgentEventMap>();
+    const detach = attachChunkDumpToBus(bus);
+    await bus.emit("agent:run_end", {
+      reason: "error", error: "isolated", errorType: "provider_error",
+      duration: 0, turnCount: 0, usage: { inputTokens: 0, outputTokens: 0 },
+    });
+    detach();
+    const rawDir = path.join(root, "logs", "llm-raw");
+    const errorDir = path.join(root, "logs", "llm-error");
+    expect(fs.readdirSync(rawDir)).toHaveLength(1);
+    expect(fs.readdirSync(errorDir)).toHaveLength(1);
+    seedDir(rawDir, 8);
+    seedDir(errorDir, 8);
+    pruneAllLogs(root);
+    expect(fs.readdirSync(rawDir)).toHaveLength(7);
+    expect(fs.readdirSync(errorDir)).toHaveLength(7);
+    expect(fs.existsSync(path.join(tempHome.getDir(), "logs"))).toBe(false);
   });
 
   it("forensic 写盘失败时 prune 仍然跑(写盘失败不绕过守门)", async () => {

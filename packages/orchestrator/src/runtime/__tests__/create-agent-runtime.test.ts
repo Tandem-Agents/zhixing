@@ -130,6 +130,7 @@ type TestCreateAgentRuntimeOptions = Omit<
   "modelProvider" | "runtimeEnvironment" | "securityExecution" | "windowPrompt"
 > & {
   readonly workspace?: string | null;
+  readonly agentIdentity?: { readonly displayName: string };
   readonly securityExecution?: KernelSecurityExecutionFactory;
   readonly windowPrompt?: KernelWindowPromptProjectionPort;
 };
@@ -164,13 +165,16 @@ function createTestModelProvider(primaryRole: "main" | "power") {
   });
 }
 
-function createTestRuntimeEnvironment(workspace?: string | null) {
+function createTestRuntimeEnvironment(
+  workspace?: string | null,
+  agentIdentity = { displayName: "知行" },
+) {
   const resolved = workspace === null
     ? { path: null, source: "none" as const }
     : resolveWorkspaceMock();
   ensureWorkspaceDirMock(resolved);
   return createKernelRuntimeEnvironment({
-    agentIdentity: { displayName: "知行" },
+    agentIdentity,
     sessionType: "interactive",
     workspace: resolved,
     globalConfigPath: "/test/config.jsonc",
@@ -272,13 +276,13 @@ function createTestSecurityExecution(
 }
 
 const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
-  const { workspace, securityExecution, windowPrompt, ...runtimeOptions } = options;
+  const { workspace, agentIdentity, securityExecution, windowPrompt, ...runtimeOptions } = options;
   const primaryRole = runtimeOptions.primaryRole ?? "main";
   return createAgentRuntimeImpl({
     ...runtimeOptions,
     primaryRole,
     modelProvider: createTestModelProvider(primaryRole),
-    runtimeEnvironment: createTestRuntimeEnvironment(workspace),
+    runtimeEnvironment: createTestRuntimeEnvironment(workspace, agentIdentity),
     toolImplementation: testToolImplementation,
     windowPrompt: windowPrompt ?? windowPromptPort(),
     securityExecution:
@@ -342,6 +346,58 @@ describe("createAgentRuntime · run() lineage 契约", () => {
 
     expect(decorateCalls).toHaveLength(1);
     expect(decorateCalls[0]?.lineage).toBe("main");
+  });
+});
+
+describe("createAgentRuntime · identity isolation", () => {
+  it("keeps each runtime identity through interleaved creation, execution and replacement", async () => {
+    const makeProvider = () => new MockLLMProvider([
+      { toolCalls: [{ id: "identity-write", name: "write", input: { path: ".zhixing/config.json", content: "{}" } }] },
+      { text: "done" },
+    ]);
+    const firstProvider = makeProvider();
+    providerRef.current = firstProvider;
+    const first = await createAgentRuntime({ agentIdentity: { displayName: "FirstAgent" } });
+    const secondProvider = makeProvider();
+    providerRef.current = secondProvider;
+    const second = await createAgentRuntime({ agentIdentity: { displayName: "SecondAgent" } });
+    const observed: string[] = [];
+    const captureConfirmation = (runtime: Awaited<ReturnType<typeof createAgentRuntime>>) =>
+      vi.spyOn(runtime.confirmationBroker, "requestConfirmation").mockImplementation(async (request) => {
+        observed.push(JSON.stringify(request.options));
+        return { kind: "allow-once" };
+      });
+    captureConfirmation(first);
+    captureConfirmation(second);
+    const envelope: KernelRunEnvelope = {
+      modelInput: { messages: [userMessage("hi")] },
+      identity: { turnIndex: 0 },
+      control: {}, correctness: {}, observation: {},
+    };
+    try {
+      await runKernel(first, envelope);
+      await runKernel(second, envelope);
+      expect(observed).toHaveLength(2);
+      expect(observed[0]).toContain("告诉FirstAgent哪里错了");
+      expect(observed[0]).not.toContain("SecondAgent");
+      expect(observed[1]).toContain("告诉SecondAgent哪里错了");
+      expect(observed[1]).not.toContain("FirstAgent");
+    } finally {
+      await first.dispose();
+      await second.dispose();
+    }
+    const defaultProvider = makeProvider();
+    providerRef.current = defaultProvider;
+    const replacement = await createAgentRuntime();
+    captureConfirmation(replacement);
+    try {
+      await runKernel(replacement, envelope);
+      expect(observed).toHaveLength(3);
+      expect(observed[2]).toContain("告诉知行哪里错了");
+      expect(observed[2]).not.toContain("SecondAgent");
+    } finally {
+      await replacement.dispose();
+    }
   });
 });
 

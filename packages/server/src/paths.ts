@@ -14,46 +14,46 @@ import {
 } from "@zhixing/core/paths";
 
 /** ~/.zhixing/server.pid —— 进程锁 + 连接发现 */
-export function getDefaultPidPath(): string {
-  return join(getZhixingHome(), "server.pid");
+export function getDefaultPidPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.pid");
 }
 
 /** ~/.zhixing/server.port —— 端口文件（shell 脚本友好读取） */
-export function getDefaultPortPath(): string {
-  return join(getZhixingHome(), "server.port");
+export function getDefaultPortPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.port");
 }
 
 /** ~/.zhixing/server.state —— 阶段状态 + heartbeat（仅 daemon child 启用） */
-export function getDefaultStatePath(): string {
-  return join(getZhixingHome(), "server.state");
+export function getDefaultStatePath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.state");
 }
 
 /** ~/.zhixing/server.ready —— ready marker（仅 daemon child 启用） */
-export function getDefaultReadyMarkerPath(): string {
-  return join(getZhixingHome(), "server.ready");
+export function getDefaultReadyMarkerPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.ready");
 }
 
 /** ~/.zhixing/logs/server —— 受生命周期治理的后台宿主日志目录 */
-export function getDefaultServerLogDirPath(): string {
-  return join(getZhixingHome(), "logs", "server");
+export function getDefaultServerLogDirPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "logs", "server");
 }
 
 /** ~/.zhixing/logs/server/server.log —— 受生命周期治理的后台宿主活跃日志 */
-export function getDefaultServerActiveLogPath(): string {
-  return join(getDefaultServerLogDirPath(), "server.log");
+export function getDefaultServerActiveLogPath(zhixingHome: string = getZhixingHome()): string {
+  return join(getDefaultServerLogDirPath(zhixingHome), "server.log");
 }
 
 /** ~/.zhixing/server.log —— 旧版 daemon 日志；只作为迁移 / 兼容来源 */
-export function getLegacyServerLogPath(): string {
-  return join(getZhixingHome(), "server.log");
+export function getLegacyServerLogPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.log");
 }
 
 /** ~/.zhixing/logs/server/server.log —— daemon child stdout/stderr 重定向目标 */
-export function getDefaultLogPath(): string {
-  return getDefaultServerActiveLogPath();
+export function getDefaultLogPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "logs", "server", "server.log");
 }
 
 /** ~/.zhixing/server.token —— RPC 客户端认证用共享 token */
-export function getDefaultTokenPath(): string {
-  return join(getZhixingHome(), "server.token");
+export function getDefaultTokenPath(zhixingHome: string = getZhixingHome()): string {
+  return join(zhixingHome, "server.token");
 }

@@ -1,3 +1,4 @@
+import { getZhixingHome } from "@zhixing/core/paths";
 import {
   getDefaultServerActiveLogPath,
   getDefaultServerLogDirPath,
@@ -32,11 +33,11 @@ export interface ServerLogPaths {
   legacyLogPath: string;
 }
 
-export function getDefaultServerLogPaths(): ServerLogPaths {
+export function getDefaultServerLogPaths(zhixingHome: string = getZhixingHome()): ServerLogPaths {
   return {
-    dirPath: getDefaultServerLogDirPath(),
-    activeLogPath: getDefaultServerActiveLogPath(),
-    legacyLogPath: getLegacyServerLogPath(),
+    dirPath: getDefaultServerLogDirPath(zhixingHome),
+    activeLogPath: getDefaultServerActiveLogPath(zhixingHome),
+    legacyLogPath: getLegacyServerLogPath(zhixingHome),
   };
 }
 

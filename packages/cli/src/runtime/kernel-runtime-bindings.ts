@@ -123,8 +123,11 @@ export function createHostKernelModelProviderFactory(input: {
 
 export function createHostKernelRuntimeEnvironmentFactory(input: {
   readonly configuration: RuntimeKernelEnvironmentConfigurationProjection;
+  readonly zhixingHome: string;
 }): KernelRuntimeEnvironmentFactory {
   const configuration = input.configuration;
+  const globalConfigPath = getGlobalConfigPath(process.env, input.zhixingHome);
+  const agentIdentity = resolveAgentIdentity(configuration.agent);
   return Object.freeze({
     create(request: Parameters<KernelRuntimeEnvironmentFactory["create"]>[0]) {
       const sessionType = resolveWorkspaceSessionType();
@@ -136,10 +139,10 @@ export function createHostKernelRuntimeEnvironmentFactory(input: {
           });
       ensureWorkspaceDir(workspace);
       return createKernelRuntimeEnvironment({
-        agentIdentity: resolveAgentIdentity(configuration.agent),
+        agentIdentity,
         sessionType,
         workspace,
-        globalConfigPath: getGlobalConfigPath(),
+        globalConfigPath,
         ...(configuration.network?.proxy === undefined
           ? {}
           : { networkProxy: configuration.network.proxy }),

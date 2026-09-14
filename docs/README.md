@@ -20,6 +20,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [安全政策 / Security policy](../SECURITY.md)
 - [缺陷与需求反馈 / Bug and feature requests](https://github.com/Tandem-Agents/zhixing/issues)
 - [首个公开版本交付计划](./delivery/first-public-release.md)
+- [首次公开发布当前工作安排](./tasks/first-public-release-execution.md)
 - [验证手册](../research/design/workbench/verification-runbook.md)
 - [路径解析与资源隔离](engineering/path-and-resource-isolation.md)
 - [仓库组织与包边界](engineering/repository-structure.md)

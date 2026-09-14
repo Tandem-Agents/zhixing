@@ -1,15 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   DEFAULT_AGENT_DISPLAY_NAME,
-  getAgentIdentity,
-  resetAgentIdentityForTests,
   resolveAgentIdentity,
-  setAgentIdentity,
 } from "../index.js";
-
-afterEach(() => {
-  resetAgentIdentityForTests();
-});
 
 describe("resolveAgentIdentity", () => {
   it("未传配置 → 默认显示名 '知行'", () => {
@@ -47,31 +40,13 @@ describe("resolveAgentIdentity", () => {
   });
 });
 
-describe("setAgentIdentity / getAgentIdentity", () => {
-  it("默认身份是 '知行'", () => {
-    expect(getAgentIdentity()).toEqual({ displayName: "知行" });
-  });
-
-  it("set 后 get 返回新身份", () => {
-    setAgentIdentity({ displayName: "小助" });
-    expect(getAgentIdentity()).toEqual({ displayName: "小助" });
-  });
-
-  it("set 空字符串 → 回退到默认", () => {
-    setAgentIdentity({ displayName: "" });
-    expect(getAgentIdentity()).toEqual({ displayName: "知行" });
-  });
-
-  it("resetAgentIdentityForTests 恢复默认", () => {
-    setAgentIdentity({ displayName: "改过的名字" });
-    expect(getAgentIdentity().displayName).toBe("改过的名字");
-    resetAgentIdentityForTests();
-    expect(getAgentIdentity()).toEqual({ displayName: "知行" });
-  });
-
-  it("多次 set 覆盖前值", () => {
-    setAgentIdentity({ displayName: "a" });
-    setAgentIdentity({ displayName: "b" });
-    expect(getAgentIdentity().displayName).toBe("b");
-  });
+it("captures independent immutable values rather than sharing current identity", () => {
+  const source = { displayName: "first" };
+  const first = resolveAgentIdentity(source);
+  source.displayName = "second";
+  const second = resolveAgentIdentity(source);
+  expect(first.displayName).toBe("first");
+  expect(second.displayName).toBe("second");
+  expect(resolveAgentIdentity().displayName).toBe("知行");
+  expect(Object.isFrozen(first)).toBe(true);
 });

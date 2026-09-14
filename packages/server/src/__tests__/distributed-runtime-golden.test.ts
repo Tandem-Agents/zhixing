@@ -634,7 +634,7 @@ async function capturePersistence() {
   const previousHome = process.env.ZHIXING_HOME;
   process.env.ZHIXING_HOME = home;
   try {
-    const repository = new ConversationRepository({ kind: "user" });
+    const repository = new ConversationRepository({ kind: "user" }, process.env.ZHIXING_HOME!);
     const conversation = await repository.ensure("golden-conversation", {
       name: "Golden conversation",
     });

@@ -8,7 +8,7 @@
 
 import type { ServerInfoResult } from "./rpc-management-facade.js";
 import {
-  createRuntimeConfigurationProvider,
+
   type ReplRuntimeConfigurationProjection,
   type RuntimeConfigurationProvider,
   type RuntimeNetworkProxyDisplayProjection,
@@ -21,7 +21,7 @@ export interface ReplLocalViewManagement {
 
 export interface ReplLocalViewOptions {
   readonly management: ReplLocalViewManagement;
-  readonly configuration?: Pick<RuntimeConfigurationProvider, "readReplSurface">;
+  readonly configuration: Pick<RuntimeConfigurationProvider, "readReplSurface">;
 }
 
 export interface ReplLocalViewSnapshot {
@@ -39,8 +39,7 @@ export class ReplLocalView {
   private snapshot: ReplLocalViewSnapshot;
 
   constructor(private readonly opts: ReplLocalViewOptions) {
-    this.configuration =
-      opts.configuration ?? createRuntimeConfigurationProvider();
+    this.configuration = opts.configuration;
     this.snapshot = this.buildSnapshot(
       this.configuration.readReplSurface(),
       null,

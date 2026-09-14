@@ -100,7 +100,7 @@ describe("createZhixingGuidanceLifecycle", () => {
     const ctx = makeWindowOpenContext();
     const guidancePath = path.join("/home", "ZHIXING.md");
     const deps = {
-      getZhixingHome: () => "/home",
+      zhixingHome: "/home",
       readGuidanceFile: vi.fn(async ({ path: filePath, reportWarning }) => {
         reportWarning({
           message: `EACCES: permission denied, open '${filePath}'`,
@@ -149,6 +149,19 @@ describe("createZhixingGuidanceLifecycle", () => {
     expect(completed).toBe(true);
   });
 
+  it("keeps the explicit home while refreshing workspace and content each window", async () => {
+    const deps = makeDeps({ payload: "initial", scene: { workdir: "/first" } });
+    const lifecycle = createZhixingGuidanceLifecycle(deps);
+    await lifecycle.onWindowOpen?.(makeWindowOpenContext());
+    deps.resolveWorkspaceRoot?.mockResolvedValue("/second");
+    deps.loadLayeredGuidance.mockResolvedValue("updated");
+    const next = makeWindowOpenContext({ windowIndex: 1 });
+    await lifecycle.onWindowOpen?.(next);
+    expect(deps.loadLayeredGuidance.mock.calls[0]?.[0]).toMatchObject({ roots: { homeDir: "/home", workdir: "/first" } });
+    expect(deps.loadLayeredGuidance.mock.calls[1]?.[0]).toMatchObject({ roots: { homeDir: "/home", workdir: "/second" } });
+    expect(JSON.stringify(next.prefixes)).toContain("updated");
+  });
+
   it("ephemeral runtime 只清空本窗贡献并跳过 guidance", async () => {
     const deps = makeDeps({ payload: "不应读取" });
     const ctx = makeWindowOpenContext({ runtimeKind: "ephemeral" });
@@ -172,7 +185,7 @@ function makeDeps(opts: {
     return opts.scene?.workdir ?? null;
   });
   return {
-    getZhixingHome: () => "/home",
+    zhixingHome: "/home",
     ...(opts.scene !== undefined || opts.getWorksceneError
       ? { resolveWorkspaceRoot }
       : {}),

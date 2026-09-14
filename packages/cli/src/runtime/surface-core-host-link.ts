@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getZhixingHome } from "@zhixing/core/paths";
+
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
@@ -32,9 +32,10 @@ type WildcardNotificationHandler = (method: string, params: unknown) => void;
 let nextSurfaceConnectionId = 1;
 
 export async function createCurrentAnchorSurfaceRpcClient(options: {
+  readonly zhixingHome: string;
   readonly configuration?: Pick<RuntimeConfigurationProvider, "readTopology">;
-} = {}): Promise<CurrentAnchorSurfaceRpcClient> {
-  const homeDir = getZhixingHome();
+}): Promise<CurrentAnchorSurfaceRpcClient> {
+  const homeDir = options.zhixingHome;
   const configuration = (
     options.configuration ?? createRuntimeConfigurationProvider()
   ).readTopology({ homeDir }).mesh;

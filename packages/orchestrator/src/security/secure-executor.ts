@@ -25,6 +25,7 @@ import {
   type SessionType,
   type RiskLevel,
 } from "@zhixing/core/security";
+import type { AgentIdentity } from "@zhixing/core/identity";
 import { buildConfirmationRequest } from "@zhixing/core/confirmation";
 import {
   type AgentEventMap,
@@ -99,6 +100,7 @@ export type OnUserDeniedFn = (
 // ─── 构造器 ───
 
 export interface SecureExecuteToolOptions {
+  readonly agentIdentity?: AgentIdentity;
   pipeline: SecurityPipeline;
   /** Finite Security approval effect; product Trust remains outside the Kernel. */
   securityApproval: KernelSecurityApprovalPort;
@@ -266,6 +268,7 @@ export function createSecureExecuteTool(
       if (verdict?.decision !== "safe") {
         // needs-confirm / 未触发管家 → broker（非交互由其 fail-to-deny 兜底）
         await handleBrokerPath({
+          agentIdentity: opts.agentIdentity,
           broker,
           securityApproval,
           toolName: tool.name,
@@ -351,6 +354,7 @@ async function consultSteward(params: {
 // ─── Broker 路径 ───
 
 async function handleBrokerPath(params: {
+  readonly agentIdentity?: AgentIdentity;
   broker: IConfirmationBroker;
   securityApproval: KernelSecurityApprovalPort;
   toolName: string;
@@ -386,6 +390,7 @@ async function handleBrokerPath(params: {
   } = params;
 
   const request = buildConfirmationRequest({
+    agentIdentity: params.agentIdentity,
     toolName,
     input,
     workingDirectory: context.workingDirectory,

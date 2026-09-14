@@ -99,7 +99,7 @@ describe("Conversation perspective Host Correctness adapter", () => {
       durableTurnExecutor: () => ({ run: durableRun }),
     } as unknown as ConversationManager;
     const port = createConversationPerspectivesCorrectnessPort({
-      manager: () => manager,
+      manager,
     });
     const execute = vi.fn(async (
       runtime: ConversationPerspectivesRuntimePort,

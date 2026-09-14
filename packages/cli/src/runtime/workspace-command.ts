@@ -88,6 +88,7 @@ interface LocalWorkspaceDelivery<T, R> {
 export async function runWorkspaceCommand(
   operation: (workspace: LocalWorkspaceClient) => Promise<unknown>,
 ): Promise<void> {
+  const zhixingHome = getZhixingHome();
   const writer = createStdoutWriter();
   await withLocalWorkspaceClient(operation, {
     result: async (result) => {
@@ -102,7 +103,7 @@ export async function runWorkspaceCommand(
       writer.line(JSON.stringify({ recoveredOperations: operations }, null, 2));
     },
     failure: (error) => renderLocalWorkspaceFailure(error, writer),
-  });
+  }, zhixingHome);
 }
 
 /**
@@ -114,7 +115,8 @@ export async function runWorkspaceSceneCreateCommand(
   absolutePath: string,
 ): Promise<void> {
   const writer = createStdoutWriter();
-  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps());
+  const zhixingHome = getZhixingHome();
+  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome));
   try {
     await coreHost.ensure();
     const workscenes = new RpcWorksceneFacade(coreHost);
@@ -152,6 +154,7 @@ export async function runWorkspaceSceneCreateCommand(
         },
         failure: (error) => renderLocalWorkspaceFailure(error, writer),
       },
+      zhixingHome,
     );
     writer.line(
       JSON.stringify({
@@ -209,8 +212,8 @@ export async function createWorksceneAndReadWorkspaceView(
 export async function withLocalWorkspaceClient<T, R = T>(
   operation: (workspace: LocalWorkspaceClient) => Promise<T>,
   delivery: LocalWorkspaceDelivery<T, R>,
+  zhixingHome: string,
 ): Promise<R> {
-  const zhixingHome = getZhixingHome();
   const existing = createLocalWorkspaceClient(zhixingHome);
   if (await localWorkspaceHostIsReachable(zhixingHome)) {
     return useLocalWorkspaceClient(existing, operation, delivery);
@@ -283,6 +286,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
     );
     await mcpRuntime.lifecycle.connect();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
+      zhixingHome,
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
@@ -290,7 +294,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       permissionStorage:
         createPermissionStorageInfrastructure({ zhixingHome }).runtime,
       mcpTools: mcpRuntime.tools,
-      systemProtectedPaths: resolveSystemProtectedSecretPaths(),
+      systemProtectedPaths: resolveSystemProtectedSecretPaths(zhixingHome),
       interactions: new DurableConversationInteractionObserver(),
       artifactStore: () => {
         if (!runtime) throw new Error("Executor artifact store is not ready");

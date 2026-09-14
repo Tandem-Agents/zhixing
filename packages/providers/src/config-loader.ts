@@ -67,6 +67,8 @@ export class ConfigSchemaError extends Error {
  * 环境变量中的 API Key 由 resolveProvider 在更下游处理，这里不涉及。
  */
 export function loadConfig(options: {
+  /** 已在入口解析的文件位置；不改变设备数据根。 */
+  configPath?: string;
   /** ~/.zhixing/ 目录覆盖；优先于 env.ZHIXING_CONFIG_PATH 与默认路径 */
   homeDir?: string;
   env?: Record<string, string | undefined>;
@@ -76,9 +78,9 @@ export function loadConfig(options: {
   const env = options.env ?? process.env;
 
   // 全局配置路径：homeDir 显式 → env.ZHIXING_CONFIG_PATH → 默认 ~/.zhixing/config.jsonc
-  const globalPath = options.homeDir
+  const globalPath = options.configPath ?? (options.homeDir
     ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
-    : getGlobalConfigPath(env);
+    : getGlobalConfigPath(env));
   let globalConfig = readJsonSafe(globalPath);
 
   // 全局配置不存在且允许自动创建 → 生成模板
@@ -110,13 +112,14 @@ export function loadConfig(options: {
 export async function writeConfig(
   config: ZhixingConfig,
   options: {
+    configPath?: string;
     homeDir?: string;
     env?: Record<string, string | undefined>;
   } = {},
 ): Promise<void> {
-  const filePath = options.homeDir
+  const filePath = options.configPath ?? (options.homeDir
     ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
-    : getGlobalConfigPath(options.env ?? process.env);
+    : getGlobalConfigPath(options.env ?? process.env));
 
   let current: Partial<ZhixingConfig> = {};
   if (fs.existsSync(filePath)) {

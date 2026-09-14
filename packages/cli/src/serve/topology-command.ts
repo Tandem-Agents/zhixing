@@ -15,6 +15,9 @@ import { resolveHostProcessMode } from "./self-exec.js";
 import { reconcileCurrentManagedService } from "./managed-service-runtime.js";
 import {
   discoverServer,
+  getDefaultPidPath,
+  getDefaultPortPath,
+  getDefaultTokenPath,
   ServerNotRunningError,
 } from "@zhixing/server";
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
@@ -35,14 +38,14 @@ export async function runServeCommand(
   const processMode = resolveHostProcessMode(options.managed);
   const output = processMode === "managed" ? SILENT_WRITER : writer;
   if (processMode === "managed") {
-    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate"));
+    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate", zhixingHome));
     if (plan.mode !== "managed") {
-      await reconcileCurrentManagedService("managed-preflight");
+      await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
       return;
     }
-    const retained = await waitForManagedHostTurn();
+    const retained = await waitForManagedHostTurn({ zhixingHome });
     if (!retained) return;
-    const reconciled = await reconcileCurrentManagedService("managed-preflight");
+    const reconciled = await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
     if (reconciled.plan.mode !== "managed") return;
   }
   const secretStore = createPlatformSecretStore({
@@ -73,14 +76,20 @@ export async function runServeCommand(
 }
 
 export async function waitForManagedHostTurn(input: {
+  readonly zhixingHome?: string;
   readonly existingHostAlive?: () => Promise<boolean>;
   readonly shouldRemainManaged?: () => Promise<boolean>;
   readonly wait?: () => Promise<void>;
   readonly reconcileChangedPlan?: () => Promise<void>;
 } = {}): Promise<boolean> {
+  const zhixingHome = input.zhixingHome ?? getZhixingHome();
   const existingHostAlive = input.existingHostAlive ?? (async () => {
     try {
-      await discoverServer();
+      await discoverServer({
+        pidPath: getDefaultPidPath(zhixingHome),
+        portPath: getDefaultPortPath(zhixingHome),
+        tokenPath: getDefaultTokenPath(zhixingHome),
+      });
       return true;
     } catch (error) {
       if (error instanceof ServerNotRunningError) return false;
@@ -88,12 +97,12 @@ export async function waitForManagedHostTurn(input: {
     }
   });
   const shouldRemainManaged = input.shouldRemainManaged ?? (async () =>
-    resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate")).mode === "managed");
+    resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate", zhixingHome)).mode === "managed");
   const wait = input.wait ?? (() => new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000);
   }));
   const reconcileChangedPlan = input.reconcileChangedPlan ?? (() =>
-    reconcileCurrentManagedService("current-trust-applied").then(() => undefined));
+    reconcileCurrentManagedService("current-trust-applied", undefined, zhixingHome).then(() => undefined));
   while (await existingHostAlive()) {
     if (!await shouldRemainManaged()) {
       await reconcileChangedPlan();

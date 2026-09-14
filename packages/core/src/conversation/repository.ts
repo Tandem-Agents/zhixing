@@ -14,7 +14,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getZhixingHome, toSafePathSegment } from "../paths.js";
+import { toSafePathSegment } from "../paths.js";
 import { getWorkSceneConversationsRoot } from "../workscene/paths.js";
 import { writeAtomic } from "../transcript/serializer.js";
 import type {
@@ -39,31 +39,31 @@ import {
  * conversation 根目录，与 ConversationRepository / TranscriptStore 共用同源结果，
  * 杜绝跨模块独立拼接 path 字符串。
  */
-export function conversationsDir(scope: ConversationScope): string {
-  if (scope.kind === "workscene") return getWorkSceneConversationsRoot(scope.sceneId);
-  return path.join(getZhixingHome(), "conversations");
+export function conversationsDir(scope: ConversationScope, zhixingHome: string): string {
+  if (scope.kind === "workscene") return getWorkSceneConversationsRoot(scope.sceneId, zhixingHome);
+  return path.join(zhixingHome, "conversations");
 }
 
-function conversationDir(scope: ConversationScope, id: string): string {
-  return conversationDirForSegment(scope, toSafePathSegment(id));
+function conversationDir(root: string, id: string): string {
+  return conversationDirForSegment(root, toSafePathSegment(id));
 }
 
 function conversationDirForSegment(
-  scope: ConversationScope,
+  root: string,
   pathSegment: string,
 ): string {
-  return path.join(conversationsDir(scope), pathSegment);
+  return path.join(root, pathSegment);
 }
 
-function metaPath(scope: ConversationScope, id: string): string {
-  return path.join(conversationDir(scope, id), "meta.json");
+function metaPath(root: string, id: string): string {
+  return path.join(conversationDir(root, id), "meta.json");
 }
 
 function metaPathForSegment(
-  scope: ConversationScope,
+  root: string,
   pathSegment: string,
 ): string {
-  return path.join(conversationDirForSegment(scope, pathSegment), "meta.json");
+  return path.join(conversationDirForSegment(root, pathSegment), "meta.json");
 }
 
 // ─── ID 生成 ───
@@ -92,7 +92,7 @@ function isReservedId(id: string): boolean {
 // ─── ConversationRepository 实现 ───
 
 export class ConversationRepository implements IConversationRepository {
-  private readonly scope: ConversationScope;
+  private readonly root: string;
   /**
    * Per-id meta 写入锁。同 id 的所有 writeMeta FIFO 串行；跨 id 不互斥。
    *
@@ -101,14 +101,14 @@ export class ConversationRepository implements IConversationRepository {
    */
   private readonly metaLocks = new Map<string, Promise<unknown>>();
 
-  constructor(scope: ConversationScope) {
-    this.scope = scope;
+  constructor(private readonly scope: ConversationScope, zhixingHome: string) {
+    this.root = conversationsDir(scope, zhixingHome);
   }
 
   async list(
     opts?: { includeArchived?: boolean },
   ): Promise<Conversation[]> {
-    const dir = conversationsDir(this.scope);
+    const dir = this.root;
     let entries: string[];
     try {
       entries = await fs.readdir(dir);
@@ -178,7 +178,7 @@ export class ConversationRepository implements IConversationRepository {
       };
 
       await writeAtomic(
-        metaPath(this.scope, id),
+        metaPath(this.root, id),
         JSON.stringify(conversation, null, 2),
       );
       return conversation;
@@ -203,7 +203,7 @@ export class ConversationRepository implements IConversationRepository {
   }
 
   async delete(id: string): Promise<void> {
-    await fs.rm(conversationDir(this.scope, id), {
+    await fs.rm(conversationDir(this.root, id), {
       recursive: true,
       force: true,
     });
@@ -259,7 +259,7 @@ export class ConversationRepository implements IConversationRepository {
   ): Promise<void> {
     return this.withMetaLock(id, async () => {
       const content = await fs
-        .readFile(metaPath(this.scope, id), "utf-8")
+        .readFile(metaPath(this.root, id), "utf-8")
         .catch(() => null);
       if (content === null) return;
       const parsed = JSON.parse(content) as Record<string, unknown>;
@@ -269,7 +269,7 @@ export class ConversationRepository implements IConversationRepository {
         parsed.taskListState = state;
       }
       await writeAtomic(
-        metaPath(this.scope, id),
+        metaPath(this.root, id),
         JSON.stringify(parsed, null, 2),
       );
     });
@@ -284,7 +284,7 @@ export class ConversationRepository implements IConversationRepository {
   async appendSegmentMeta(id: string, meta: SegmentMeta): Promise<void> {
     return this.withMetaLock(id, async () => {
       const content = await fs
-        .readFile(metaPath(this.scope, id), "utf-8")
+        .readFile(metaPath(this.root, id), "utf-8")
         .catch(() => null);
       if (content === null) return;
       const parsed = JSON.parse(content) as Record<string, unknown>;
@@ -303,7 +303,7 @@ export class ConversationRepository implements IConversationRepository {
       };
       parsed.segmentMetadata = next;
       await writeAtomic(
-        metaPath(this.scope, id),
+        metaPath(this.root, id),
         JSON.stringify(parsed, null, 2),
       );
     });
@@ -318,7 +318,7 @@ export class ConversationRepository implements IConversationRepository {
   async clearViewLayerState(id: string): Promise<void> {
     return this.withMetaLock(id, async () => {
       const content = await fs
-        .readFile(metaPath(this.scope, id), "utf-8")
+        .readFile(metaPath(this.root, id), "utf-8")
         .catch(() => null);
       if (content === null) return;
       const parsed = JSON.parse(content) as Record<string, unknown>;
@@ -327,7 +327,7 @@ export class ConversationRepository implements IConversationRepository {
       // 顺手清理历史已弃用字段（与 readMeta 内的清理同源）
       delete parsed.capabilityState;
       await writeAtomic(
-        metaPath(this.scope, id),
+        metaPath(this.root, id),
         JSON.stringify(parsed, null, 2),
       );
     });
@@ -352,7 +352,7 @@ export class ConversationRepository implements IConversationRepository {
 
   private async readMetaInLock(id: string): Promise<Conversation | null> {
     try {
-      const content = await fs.readFile(metaPath(this.scope, id), "utf-8");
+      const content = await fs.readFile(metaPath(this.root, id), "utf-8");
       const parsed = JSON.parse(content) as Conversation &
         Record<string, unknown>;
       // 清理历史已弃用字段 —— writeMeta 会把整个对象 stringify 写回，
@@ -369,7 +369,7 @@ export class ConversationRepository implements IConversationRepository {
   ): Promise<Conversation | null> {
     try {
       const content = await fs.readFile(
-        metaPathForSegment(this.scope, pathSegment),
+        metaPathForSegment(this.root, pathSegment),
         "utf-8",
       );
       const parsed = JSON.parse(content) as Conversation &
@@ -395,7 +395,7 @@ export class ConversationRepository implements IConversationRepository {
   private async writeMeta(conversation: Conversation): Promise<void> {
     return this.withMetaLock(conversation.id, async () => {
       await writeAtomic(
-        metaPath(this.scope, conversation.id),
+        metaPath(this.root, conversation.id),
         JSON.stringify(conversation, null, 2),
       );
     });

@@ -1,7 +1,8 @@
-import { getZhixingHome } from "@zhixing/core/paths";
+
 import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
+import { configureLlmChunkDump } from "../output/llm-chunk-dump.js";
 import {
   createAgentRuntime,
   type AgentRuntime,
@@ -80,6 +81,11 @@ import {
   bindServer,
   DEFAULT_SERVER_CONFIG,
   getDefaultLogPath,
+  getDefaultPidPath,
+  getDefaultPortPath,
+  getDefaultStatePath,
+  getDefaultReadyMarkerPath,
+  getDefaultTokenPath,
   isProcessAlive,
   resolveProcessStartTime,
   runServer,
@@ -98,6 +104,7 @@ import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
   loadCurrentManagedServiceState,
+  reconcileCurrentManagedService,
 } from "./managed-service-runtime.js";
 import {
   createManagedServiceAdapter,
@@ -146,7 +153,8 @@ export async function runExecutorRole(
   ) {
     throw new Error("Executor-only host received an incompatible role projection");
   }
-  const zhixingHome = getZhixingHome();
+  const zhixingHome = bootstrap.zhixingHome;
+  configureLlmChunkDump(false, zhixingHome);
   const deviceCapacity = bootstrap.deviceCapacity;
   const modelConfiguration = bootstrap.modelConfiguration;
   const kernelEnvironmentConfiguration =
@@ -242,6 +250,8 @@ export async function runExecutorRole(
       startedAt: processStartedAt,
     } as const;
     const localServerState = new ServerStateFile({
+      statePath: getDefaultStatePath(zhixingHome),
+      readyMarkerPath: getDefaultReadyMarkerPath(zhixingHome),
       publishReadyMarker: processMode !== "foreground",
     });
     executorServerLifecycle.acquireStateFile(localServerState);
@@ -268,13 +278,14 @@ export async function runExecutorRole(
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
+      zhixingHome,
       modelConfiguration,
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
       createToolImplementation: bootstrap.createToolImplementation,
       permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
-      systemProtectedPaths: resolveSystemProtectedSecretPaths(),
+      systemProtectedPaths: resolveSystemProtectedSecretPaths(zhixingHome),
       interactions,
       artifactStore: () => {
         if (!authority) throw new Error("Executor artifact store is not ready");
@@ -507,6 +518,8 @@ export async function runExecutorRole(
       const result = await coordinateManagedHostTrustTransition({
         processMode,
         expectedAdmission: initialManagedHostAdmission,
+        loadCurrent: (purpose) => loadCurrentManagedServiceState(purpose, zhixingHome),
+        reconcile: (trigger, signal) => reconcileCurrentManagedService(trigger, signal, zhixingHome),
         refuseNewMessages: () => jobOwnerAssembly.pauseAccepting(),
         requestShutdown: () => executorInternalStop.requestStop({
           reason: "managed-role-changed",
@@ -888,7 +901,7 @@ export async function runExecutorRole(
       mesh.resumeAcceptingAfterLifecycle();
       localConversationOwner.resumeRecoveryAfterLifecycle();
     }
-    const token = await loadOrCreateToken();
+    const token = await loadOrCreateToken(getDefaultTokenPath(zhixingHome));
     const localConversationRpc = new LocalConversationRpcRouter({
       deviceId: authority.deviceId,
       owner: localConversationOwner.port(),
@@ -922,9 +935,10 @@ export async function runExecutorRole(
           conversationId,
           afterCommitRevision,
         ),
-      hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
+      hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath(zhixingHome) : undefined },
     });
     const localConversationServer = await runServer({
+      lockPaths: { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) },
       context: serverContext,
       boundServer: localServerBinding,
       config: {
@@ -936,7 +950,7 @@ export async function runExecutorRole(
       processInfo: {
         version: ZHIXING_CLI_VERSION,
         kind: "zhixing-local-conversation-host",
-        ...(isDaemonChild() ? { logPath: getDefaultLogPath() } : {}),
+        ...(isDaemonChild() ? { logPath: getDefaultLogPath(zhixingHome) } : {}),
         startTime: processStartTime,
         startedAt: processStartedAt,
       },
@@ -1038,6 +1052,7 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
+    readonly zhixingHome: string;
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
@@ -1058,6 +1073,7 @@ export class ExecutorRuntimeSubstrate {
       credentials: options.credentials,
     });
     this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory({
+      zhixingHome: options.zhixingHome,
       configuration: options.kernelEnvironmentConfiguration,
     });
   }
@@ -1068,6 +1084,9 @@ export class ExecutorRuntimeSubstrate {
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
+    const runtimeEnvironment = this.#runtimeEnvironment.create({
+      ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
+    });
     const workscene =
       scope?.kind === "workscene"
         ? {
@@ -1076,7 +1095,7 @@ export class ExecutorRuntimeSubstrate {
               id: scope.sceneId,
               name: scope.sceneId,
               hasWorkspace: workspaceRoot !== null,
-            }),
+            }, { agentIdentity: runtimeEnvironment.agentIdentity }),
           }
         : undefined;
     const primaryRole = workscene ? "power" : "main";
@@ -1085,9 +1104,7 @@ export class ExecutorRuntimeSubstrate {
       deviceCapacity: this.options.deviceCapacity.interactive,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({ primaryRole }),
-      runtimeEnvironment: this.#runtimeEnvironment.create({
-        ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
-      }),
+      runtimeEnvironment,
       toolImplementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",
         mode: workscene ? "work" : "main",
@@ -1103,7 +1120,7 @@ export class ExecutorRuntimeSubstrate {
       ),
       profile:
         workscene?.profile ??
-        mainProfile({ hasWorkspace: workspaceRoot !== null }),
+        mainProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null }),
       extraTools: [...mcp.tools],
       executionMcpServers: mcp.serverIds,
       confirmationLifecycleObserver: this.options.interactions,
@@ -1122,7 +1139,8 @@ export class ExecutorRuntimeSubstrate {
     confirmationBroker: import("@zhixing/core/confirmation").IConfirmationBroker,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
-    const baseProfile = mainProfile();
+    const runtimeEnvironment = this.#runtimeEnvironment.create({});
+    const baseProfile = mainProfile({ agentIdentity: runtimeEnvironment.agentIdentity });
     const selection = selectJobRuntimeTools({
       instruction,
       baseProfile,
@@ -1143,7 +1161,7 @@ export class ExecutorRuntimeSubstrate {
           ? {}
           : { mainModelOverride: selection.modelOverride }),
       }),
-      runtimeEnvironment: this.#runtimeEnvironment.create({}),
+      runtimeEnvironment,
       toolImplementation: selection.runtimeTools.implementation,
       windowPrompt: createSkillCatalogWindowPromptProjection("main"),
       securityExecution: this.options.permissionStorage.bind(

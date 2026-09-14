@@ -23,6 +23,8 @@ import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
 import { chromeOnlyVisibility } from "./command-visibility.js";
 
 export interface ConfigCommandsDeps {
+  readonly zhixingHome: string;
+  readonly configPath: string;
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
@@ -47,6 +49,8 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   // config/mcp handler 需要的 ConfigCommandDeps —— state.activeTurnPromise 以 getter-属性
   // 注入，handleConfigCommand 在编辑屏退出后读取当时最新值。
   const editorDeps = () => ({
+    zhixingHome: deps.zhixingHome,
+    configPath: deps.configPath,
     rl: deps.rl,
     state: {
       get activeTurnPromise(): Promise<unknown> | null {

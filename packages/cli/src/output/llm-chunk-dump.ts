@@ -40,18 +40,17 @@
  *   - **接入点单一**: 在 createRenderSubscribers (per-run-bus 订阅装载点) attach，
  *     不在 output-renderer 重复接入避免双轨道
  *   - **caller 决定 enabled**: caller 在首次调 `getLlmChunkDump()` 之前调
- *     `configureLlmChunkDump(enabled)` 显式传入；缺省 = 禁用，与 setStatusBar /
+ *     `configureLlmChunkDump(enabled, zhixingHome)` 显式传入；缺省 = 禁用，与 setStatusBar /
  *     ContextIndicator 等"由 caller 显式注入开关"的模式一致
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
 import { type AgentEventMap, type ContentBlock, type IEventBus, type Message, type StreamEvent, type ToolSpec } from "@zhixing/core";
 
 // ─── 日志目录布局与轮转 ───────────────────────────────────────────────
 //
-// 物理结构(全部基于 getZhixingHome,从不直拼 os.homedir):
+// 物理结构(全部基于入口传入的数据根):
 //
 //   <ZHIXING_HOME>/logs/
 //     llm-raw/         —— --log 启用时的全 stream 详尽 dump (process-singleton)
@@ -69,12 +68,19 @@ import { type AgentEventMap, type ContentBlock, type IEventBus, type Message, ty
 
 const MAX_LOG_FILES_PER_DIR = 7;
 
+let logHome: string | undefined;
+
+function configuredHome(): string {
+  if (!logHome) throw new Error("LLM diagnostics home is not configured");
+  return logHome;
+}
+
 function rawDumpDir(): string {
-  return path.join(getZhixingHome(), "logs", "llm-raw");
+  return path.join(configuredHome(), "logs", "llm-raw");
 }
 
 function forensicDir(): string {
-  return path.join(getZhixingHome(), "logs", "llm-error");
+  return path.join(configuredHome(), "logs", "llm-error");
 }
 
 /**
@@ -160,14 +166,14 @@ export interface LlmChunkDump {
  *
  * ─── 协议 ───
  *
- *   caller 启动时调一次 `configureLlmChunkDump(enabled)` 显式设置启用状态，
+ *   caller 启动时调一次 `configureLlmChunkDump(enabled, zhixingHome)` 显式设置启用状态，
  *   之后任何 module 通过 `getLlmChunkDump()` 复用单例。
  *
  *   未 configure 直接调 `getLlmChunkDump()` → 默认禁用（零运行成本 noop）。
  *
  *   typical usage（cli REPL 入口）：
  *   ```
- *   configureLlmChunkDump(options.log === true);
+ *   configureLlmChunkDump(options.log === true, zhixingHome);
  *   getLlmChunkDump();  // 预热 singleton（详见 attachChunkDumpToBus docstring）
  *   ```
  *
@@ -187,7 +193,8 @@ let pendingEnabled = false;
  * 重复调用 / cached 之后调用 = 不生效（singleton 一旦创建状态固定，再 configure
  * 不会替换 handle）。caller 应在启动入口一次性传 final 决定，不要中途切换。
  */
-export function configureLlmChunkDump(enabled: boolean): void {
+export function configureLlmChunkDump(enabled: boolean, zhixingHome: string): void {
+  logHome ??= zhixingHome;
   pendingEnabled = enabled;
 }
 
@@ -284,7 +291,8 @@ function writeLlmErrorForensic(error: {
   type: string;
   message: string | null;
 }): void {
-  // logDir 是纯字符串拼接,不抛错;放在 try 外让后续 prune 在写盘失败路径也能读到
+  if (!logHome) return;
+  // 入口已固定目录；写盘失败后仍轮转同一目录。
   const logDir = forensicDir();
   try {
     fs.mkdirSync(logDir, { recursive: true });
@@ -762,6 +770,7 @@ export function __resetForTesting(): void {
   cachedHandle?.dispose();
   cachedHandle = null;
   pendingEnabled = false;
+  logHome = undefined;
 }
 
 /**
@@ -784,9 +793,9 @@ export function __resetForTesting(): void {
  *
  * 错误模型:pruneLogDir 内部 swallow 所有 IO 失败;本函数不抛错不打印。
  */
-export function pruneAllLogs(): void {
-  pruneLogDir(rawDumpDir(), MAX_LOG_FILES_PER_DIR);
-  pruneLogDir(forensicDir(), MAX_LOG_FILES_PER_DIR);
+export function pruneAllLogs(zhixingHome: string): void {
+  pruneLogDir(path.join(zhixingHome, "logs", "llm-raw"), MAX_LOG_FILES_PER_DIR);
+  pruneLogDir(path.join(zhixingHome, "logs", "llm-error"), MAX_LOG_FILES_PER_DIR);
 }
 
 /**

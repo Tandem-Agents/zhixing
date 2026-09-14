@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
+  MeshExecutorTopologyTrustState,
   DeviceAdministrationDutyMigrationAdmissionAdapter,
   DeviceRemovalTargetEffectAdapter,
   finalizeCommittedPairingBootstrapContinuation,
@@ -11,6 +12,24 @@ import {
   resolveDeviceRemovalStatus,
 } from "./mesh-runtime-assembly.js";
 import type { PairingContinuation } from "./mesh-pairing-continuation-repository.js";
+
+describe("Host current owner projection", () => {
+  it("tracks reconciled trust and source-committed transfer through one stable owner", () => {
+    const trust = (deviceId: string) => ({ issuer: { deviceId } }) as import("@zhixing/core/contracts").HomeTrustRecord;
+    const state = new MeshExecutorTopologyTrustState(trust("first"));
+    const owner = () => state.currentAnchorDeviceId();
+    expect(owner()).toBe("first");
+    state.accept(trust("second"));
+    expect(owner()).toBe("second");
+    state.acceptPlannedTarget("third");
+    expect(owner()).toBe("third");
+    expect(state.current().issuer.deviceId).toBe("second");
+    state.accept(trust("third"));
+    expect(owner()).toBe("third");
+    expect(new MeshExecutorTopologyTrustState(trust("other")).currentAnchorDeviceId()).toBe("other");
+    expect(owner()).toBe("third");
+  });
+});
 
 describe("planned anchor post-install consumer closure", () => {
   it("partitions every durable pending kind into exactly one fixed consumer", () => {

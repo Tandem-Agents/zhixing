@@ -379,6 +379,21 @@ describe("buildConfirmationRequest", () => {
     };
   }
 
+  it("keeps each request identity explicit regardless of construction order", () => {
+    const build = (displayName?: string) => buildConfirmationRequest({
+      toolName: "bash", input: { command: "npm install express" },
+      workingDirectory: "/tmp/ws", result: minimalResult(),
+      contextId: { kind: "main" }, sessionType: "interactive",
+      ...(displayName ? { agentIdentity: { displayName } } : {}),
+    });
+    const first = build("First");
+    const second = build("Second");
+    expect(JSON.stringify(first.options)).toContain("告诉First哪里错了");
+    expect(JSON.stringify(second.options)).toContain("告诉Second哪里错了");
+    expect(JSON.stringify(build().options)).toContain("告诉知行哪里错了");
+    expect(JSON.stringify(first.options)).not.toContain("Second");
+  });
+
   it("生成完整的 ConfirmationRequest 结构", () => {
     const req = buildConfirmationRequest({
       toolName: "bash",

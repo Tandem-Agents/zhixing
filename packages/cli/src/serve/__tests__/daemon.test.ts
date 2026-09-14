@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import path from "node:path";
 import { SERVER_LOG_ACTIVE_OPEN_FLAGS } from "@zhixing/server";
 import { spawnDaemon } from "../daemon.js";
 
@@ -64,6 +65,37 @@ function mkFakeClock() {
 // 前提：测试进程的 process.argv[1] 是有效的 .js（vitest 跑的话确实是）。
 
 describe("spawnDaemon", () => {
+  it("binds logs, child environment and handshake to one home before asynchronous preparation", async () => {
+    const home = path.resolve("daemon-home-a");
+    const other = path.resolve("daemon-home-b");
+    const deps = makeDeps({
+      prepareServerLogForWriteFn: vi.fn(async (options) => {
+        vi.stubEnv("ZHIXING_HOME", other);
+        return { logPath: options!.paths!.activeLogPath } as never;
+      }),
+      readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
+      isProcessAliveFn: vi.fn(() => true),
+      httpGetFn: vi.fn(async () => 200),
+    });
+    try {
+      const result = await spawnDaemon({ zhixingHome: home, forwardedArgs: ["serve"], deps });
+      expect(result.ok).toBe(true);
+      expect(deps.prepareServerLogForWriteFn).toHaveBeenCalledWith({ paths: {
+        dirPath: path.join(home, "logs", "server"),
+        activeLogPath: path.join(home, "logs", "server", "server.log"),
+        legacyLogPath: path.join(home, "server.log"),
+      } });
+      expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.any(Array),
+        expect.objectContaining({ env: expect.objectContaining({ ZHIXING_HOME: home }) }));
+      expect(deps.readLockFn).toHaveBeenCalledWith({
+        pidPath: path.join(home, "server.pid"),
+        portPath: path.join(home, "server.port"),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("happy path: PID appears + health 200 → ok:true", async () => {
     const clock = mkFakeClock();
     const deps = makeDeps({

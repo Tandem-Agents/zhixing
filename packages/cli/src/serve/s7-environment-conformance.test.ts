@@ -427,6 +427,7 @@ async function runChain(topology: "in-process" | "mesh") {
       storageMaintenance: anchorCapacity.storage,
     });
     const conversationDirectory = createConversationStorageInfrastructure({
+      zhixingHome: anchorHome,
       optimalMaxTokens: 20_000,
       worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
     }).directory;

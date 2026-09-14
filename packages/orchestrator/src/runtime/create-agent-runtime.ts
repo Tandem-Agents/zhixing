@@ -77,7 +77,6 @@ import {
 } from "@zhixing/core/loop";
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { wrapStreamWithWatchdog } from "@zhixing/core/interrupt";
-import { setAgentIdentity } from "@zhixing/core/identity";
 import { withRetry } from "@zhixing/core/resilience";
 import type {
   AssignmentGlobalQueryPort,
@@ -598,17 +597,15 @@ export async function createAgentRuntime(
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens);
 
-  // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
-  // 应用级身份单例：Host 已裁决配置来源并只投影生效名称。
-  setAgentIdentity(options.runtimeEnvironment.agentIdentity);
-
   const cwd = process.cwd();
 
   const workspace = options.runtimeEnvironment.workspace;
   const sessionType = options.runtimeEnvironment.sessionType;
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
-  const profile = options.profile ?? mainProfile();
+  const profile = options.profile ?? mainProfile({
+    agentIdentity: options.runtimeEnvironment.agentIdentity,
+  });
 
   // baseTools = profile.enabledTools 中的 builtin + options.extraTools，
   // **不含 Task** —— Task 装配依赖 securityPipeline / confirmationBroker
@@ -745,6 +742,7 @@ export async function createAgentRuntime(
       roleThinking,
       llmRoles: roles,
       securityPipeline,
+      agentIdentity: options.runtimeEnvironment.agentIdentity,
       securityApproval: securityExecution,
       workspace: workspace.path,
       workspaceSource: workspace.source,
@@ -1138,6 +1136,7 @@ export async function createAgentRuntime(
         roleThinking,
         llmRoles: roles,
         securityPipeline,
+        agentIdentity: options.runtimeEnvironment.agentIdentity,
         securityApproval: securityExecution,
         workspace: workspace.path,
         workspaceSource: workspace.source,
@@ -1695,7 +1694,8 @@ export async function createAgentRuntime(
           : baseExecuteTool;
         const secureExecuteTool = createSecureExecuteTool({
           pipeline: securityPipeline,
-          securityApproval: securityExecution,
+          agentIdentity: options.runtimeEnvironment.agentIdentity,
+        securityApproval: securityExecution,
           originalExecute: executeToolWithCapacity,
           broker: confirmationBroker,
           sessionType,

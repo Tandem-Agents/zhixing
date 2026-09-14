@@ -117,6 +117,7 @@ export interface RunChildAgentOptions {
   /** 共享父 SecurityPipeline 实例 —— 权限规则 / boundary registry 跨 agent 共用 */
   securityPipeline: SecurityPipeline;
   /** 共享父级有限安全批准端口，子执行不取得产品领域应用。 */
+  agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
   securityApproval: KernelSecurityApprovalPort;
   /** 工作区路径(透传 buildSystemPrompt;null 表示无工作区) */
   workspace: string | null;
@@ -412,6 +413,7 @@ async function runChildAgentInner(
           roleThinking: opts.roleThinking,
           llmRoles: opts.llmRoles,
           securityPipeline: opts.securityPipeline,
+          agentIdentity: opts.agentIdentity,
           securityApproval: opts.securityApproval,
           confirmationBroker: childBroker,
           eventBus: childBus,

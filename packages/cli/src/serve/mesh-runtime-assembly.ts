@@ -290,6 +290,7 @@ function routedSubmissionMeshRole(
 }
 
 export interface MeshRuntimeAssemblyOptions {
+  readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
   readonly zhixingHome: string;
   readonly trust: HomeTrustRecord;
   readonly configuration: MeshRoleBootConfig;
@@ -327,12 +328,12 @@ export interface MeshRuntimeAssemblyOptions {
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
   readonly onError?: (error: Error) => void;
-  readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
 }
 
 /** Stable Host topology projection; trust updates change data, never construction wiring. */
 export class MeshExecutorTopologyTrustState {
   #current: HomeTrustRecord;
+  #plannedCommittedTargetDeviceId: string | undefined;
 
   constructor(initial: HomeTrustRecord) {
     this.#current = initial;
@@ -340,6 +341,14 @@ export class MeshExecutorTopologyTrustState {
 
   current(): HomeTrustRecord {
     return this.#current;
+  }
+
+  currentAnchorDeviceId(): string {
+    return this.#plannedCommittedTargetDeviceId ?? this.#current.issuer.deviceId;
+  }
+
+  acceptPlannedTarget(deviceId: string): void {
+    this.#plannedCommittedTargetDeviceId = deviceId;
   }
 
   accept(record: HomeTrustRecord): void {
@@ -531,7 +540,6 @@ export class MeshRuntimeAssembly
   #plannedDutyMigrationLifecycle!: PlannedDutyMigrationLifecycleContribution;
   #plannedAnchorIssuerKey: DeviceKey | undefined;
   #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
-  #plannedCommittedTargetDeviceId: string | undefined;
   #postAdoptionReviewLifecycle!: PostAdoptionReviewLifecycleContribution;
   #started = false;
   #controlStarted = false;
@@ -1758,7 +1766,7 @@ export class MeshRuntimeAssembly
           this.#ensureRecoveryCheckpoint(transferId),
         lifecycle: lifecycle.transfer,
         onSourceCommitted: (targetDeviceId) => {
-          this.#plannedCommittedTargetDeviceId = targetDeviceId;
+          this.options.executorTopologyTrust.acceptPlannedTarget(targetDeviceId);
         },
         onCommitted: (record) => this.#control.reconcileTrust(record),
       });
@@ -2226,8 +2234,7 @@ export class MeshRuntimeAssembly
   }
 
   #currentAnchorDeviceId(): string {
-    return this.#plannedCommittedTargetDeviceId ??
-      this.#control.currentTrust().issuer.deviceId;
+    return this.options.executorTopologyTrust.currentAnchorDeviceId();
   }
 
   #requireNoDeviceRemoval(): void {

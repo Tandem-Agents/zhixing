@@ -46,10 +46,6 @@ import {
 } from "./channels.js";
 import { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import {
-  ExecutionStatusHub,
-  FirstPartyFinalitySession,
-} from "./first-party-finality-session.js";
-import {
   setupDelivery,
 } from "../setup-delivery.js";
 import {
@@ -127,6 +123,7 @@ const authorityRuntimeSurface: AccessSurface = {
   name: "authority-runtime",
   phase: "pre-server",
   async setup(ctx) {
+    const { meshBootstrap: inputMeshBootstrap, meshExecutorTopologyTrust: inputMeshExecutorTopologyTrust } = ctx;
     const authorityRuntime = ctx.authorityRuntime;
     if (!authorityRuntime) {
       throw new Error("Authority integration requires the prepared Authority runtime");
@@ -177,9 +174,8 @@ const authorityRuntimeSurface: AccessSurface = {
         verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
           authority: authorityRuntime,
           currentAnchorDeviceId: () =>
-            ctx.meshBootstrap.mode === "trusted-home"
-              ? ctx.meshRuntime?.currentAnchorDeviceId() ??
-                ctx.meshBootstrap.trust.issuer.deviceId
+            inputMeshBootstrap.mode === "trusted-home"
+              ? inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()
               : authorityRuntime.deviceId,
         }),
         capacity: ctx.advancementCapacity,
@@ -191,34 +187,9 @@ const authorityRuntimeSurface: AccessSurface = {
       ctx.evidenceHandler = evidenceHandler;
     }
     const jobStatus = new JobStatusDirectory();
-    jobStatus.onStatus((notice) => {
-      ctx.runner?.server.context.broadcastAll?.("job.status", notice);
-    });
-    jobStatus.onSchedulerNotice((notice) => {
-      ctx.runner?.server.context.broadcastAll?.("scheduler.notice", notice);
-    });
-    // 三域权威 live/history 的聚合面:history 惰性路由到各域权威(装配序
-    // 无关),live 由各域装配点 tee 入;第一方会话工厂按调用方 last-seen
-    // 游标建立合并投影,渠道投递不经过它。
-    const statusHub = new ExecutionStatusHub({
-      conversationHistory: (requests) =>
-        ctx.conversationProtocol
-          ? ctx.conversationProtocol.statusHistory(requests)
-          : Promise.resolve({ notices: [], next: requests }),
-      jobHistory: async (cursors) => {
-        const page = await jobStatus.statusHistory(cursors);
-        return {
-          notices: page.notices,
-          next: page.next,
-        };
-      },
-      deliveryHistory: async (afterByItem) =>
-        (await ctx.deliveryStack?.statusHistory(afterByItem)) ?? [],
-    });
-    jobStatus.onStatus((notice) => statusHub.publish(notice));
-    ctx.executionStatusHub = statusHub;
-    ctx.firstPartyFinality = (input) =>
-      new FirstPartyFinalitySession({ sources: statusHub, ...input });
+
+
+
     ctx.lifecycleContributions.acquire("jobStatus.dispose", () =>
       jobStatus.dispose()
     );
@@ -340,6 +311,7 @@ const createMeshSurface = (): AccessSurface => ({
       ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
     });
     const preparation = Object.freeze({
+      runtime: mesh,
       connections: mesh.connections,
       advancementEvidence: mesh,
       assignmentDataPlane: mesh,
@@ -444,7 +416,7 @@ const createLosslessDataPlaneSurface = (
         ? { jobRelayObligations: ctx.jobRelayObligations }
         : {}),
       channelChallenges,
-      isCurrentOwner: () => isCurrentChannelOwner(ctx),
+      isCurrentOwner: channelOwnership(ctx.meshBootstrap, ctx.meshRuntimePreparation),
       jobStatus: ctx.jobStatus,
       onDataPlaneError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
@@ -469,7 +441,19 @@ const createConversationSurface = (
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
-    if (!ctx.authorityRuntime) {
+    const { zhixingHome: inputZhixingHome, storageMaintenance: inputStorageMaintenance, lifecycleContributions: inputLifecycleContributions } = ctx;
+    const {
+      authorityRuntime: inputAuthorityRuntime,
+      executorRoleModule: inputExecutorRoleModule,
+      assignmentRuntimeFactory: inputAssignmentRuntimeFactory,
+      sessionBroadcast: inputSessionBroadcast,
+      conversationIdentityLifecycle: inputConversationIdentityLifecycle,
+      conversationClearProjection: inputConversationClearProjection,
+      conversationDeleteProjection: inputConversationDeleteProjection,
+      conversationCommittedViewStorage: inputConversationCommittedViewStorage,
+      taskListService: inputTaskListService,
+    } = ctx;
+    if (!inputAuthorityRuntime) {
       throw new Error("Conversation surface requires the durable authority runtime");
     }
 
@@ -480,14 +464,14 @@ const createConversationSurface = (
       governCallText: (call) =>
         governControlTextCall(
           {
-            governor: ctx.authorityRuntime!.resourceGovernor,
+            governor: inputAuthorityRuntime!.resourceGovernor,
             origin: { admissionClass: "scheduler", entry: "schedule-trigger" },
             workPrefix: "turn-maintenance",
           },
           call,
         ),
       onRenamed: (conversationId, name) => {
-        ctx.sessionBroadcast(
+        inputSessionBroadcast(
           conversationId,
           SESSION_NOTIFICATIONS.changed,
           {
@@ -511,32 +495,32 @@ const createConversationSurface = (
         throw new Error("Conversation executor requires the Host mesh topology ports");
       }
       const receiver = createAssignmentArtifactReceiverInfrastructure({
-        zhixingHome: ctx.zhixingHome,
-        artifacts: ctx.authorityRuntime.artifacts,
+        zhixingHome: inputZhixingHome,
+        artifacts: inputAuthorityRuntime.artifacts,
       });
       topologyDirectory = new MeshConversationExecutorTopologyDirectory({
         trust: ctx.meshExecutorTopologyTrust,
         connections: ctx.meshConnections,
-        localDeviceId: ctx.authorityRuntime.deviceId,
-        artifacts: ctx.authorityRuntime.artifacts,
+        localDeviceId: inputAuthorityRuntime.deviceId,
+        artifacts: inputAuthorityRuntime.artifacts,
         receiver,
-        signer: ctx.authorityRuntime.signer,
-        verifier: ctx.authorityRuntime.verifier,
+        signer: inputAuthorityRuntime.signer,
+        verifier: inputAuthorityRuntime.verifier,
         assignmentArtifacts,
       });
       ctx.assignmentArtifactReceiver = receiver;
     }
-    const conversationAuthority = anchorConversationOwnerRuntime(ctx.authorityRuntime);
+    const conversationAuthority = anchorConversationOwnerRuntime(inputAuthorityRuntime);
     let dataPlane: ExecutorDataPlaneRuntime | undefined;
-    const executorBoundary = ctx.executorRoleModule
+    const executorBoundary = inputExecutorRoleModule
       ? (() => {
           const pair = createExecutorDataPlaneAssignmentPair(
             {
-              zhixingHome: ctx.zhixingHome,
-              authority: ctx.authorityRuntime!,
-              module: ctx.executorRoleModule!,
-              ...(ctx.storageMaintenance
-                ? { storageMaintenance: ctx.storageMaintenance }
+              zhixingHome: inputZhixingHome,
+              authority: inputAuthorityRuntime!,
+              module: inputExecutorRoleModule!,
+              ...(inputStorageMaintenance
+                ? { storageMaintenance: inputStorageMaintenance }
                 : {}),
               onError: (error) =>
                 console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
@@ -548,11 +532,11 @@ const createConversationSurface = (
                 clock: () => new Date().toISOString(),
                 local: {
                   ConversationAssignmentLedger:
-                    ctx.executorRoleModule!.ConversationAssignmentLedger,
+                    inputExecutorRoleModule!.ConversationAssignmentLedger,
                   InProcessAssignmentSubmission:
-                    ctx.executorRoleModule!.InProcessAssignmentSubmission,
+                    inputExecutorRoleModule!.InProcessAssignmentSubmission,
                   dataPlaneTickets: dataPlaneAssembly.assignmentTickets,
-                  runtimeFactory: ctx.assignmentRuntimeFactory,
+                  runtimeFactory: inputAssignmentRuntimeFactory,
                   createStream: dataPlaneAssembly.createStream,
                 },
               });
@@ -568,7 +552,7 @@ const createConversationSurface = (
             },
           );
           dataPlane = pair.dataPlane;
-          ctx.lifecycleContributions.acquire("executorDataPlane.close", () =>
+          inputLifecycleContributions.acquire("executorDataPlane.close", () =>
             pair.dataPlane.close()
           );
           return pair.assignment;
@@ -579,7 +563,7 @@ const createConversationSurface = (
           clock: () => new Date().toISOString(),
         });
     const protocol = new ConversationProtocolRuntime({
-      authority: ctx.authorityRuntime,
+      authority: inputAuthorityRuntime,
       manager: managerAssembly.resolve,
       recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
       losslessDataPlane: Object.freeze({
@@ -593,7 +577,7 @@ const createConversationSurface = (
         : {}),
       interactions: ctx.durableInteractions,
       executeRecoveredPerspective: async (input) => {
-        const execution = await ctx.conversationPerspectives.executePerspectiveWork({
+        const execution = await conversationPerspectives.executePerspectiveWork({
           runtime: projectConversationPerspectivesRuntime(
             input.managed,
             input.managed.runtime,
@@ -613,22 +597,21 @@ const createConversationSurface = (
         return execution.runResult;
       },
       onStatus: (notice) => {
-        ctx.sessionBroadcast(
+        inputSessionBroadcast(
           notice.ref.conversationId,
           SESSION_NOTIFICATIONS.status,
           notice,
         );
-        ctx.executionStatusHub?.publish(notice);
       },
       onFinal: (frame) => {
-        ctx.sessionBroadcast(
+        inputSessionBroadcast(
           frame.conversationId,
           SESSION_NOTIFICATIONS.final,
           frame,
         );
       },
       onPublishResult: (notice) => {
-        ctx.sessionBroadcast(
+        inputSessionBroadcast(
           notice.conversationId,
           SESSION_NOTIFICATIONS.event,
           createControlSessionEventEnvelope({
@@ -642,19 +625,13 @@ const createConversationSurface = (
       },
       onFirstPartyFrame: (frame) => {
         if (frame.ref.execution !== "conversation") return;
-        ctx.sessionBroadcast(
+        inputSessionBroadcast(
           frame.ref.conversationId,
           SESSION_NOTIFICATIONS.assignmentStream,
           frame,
         );
       },
-      createFirstPartyFinality: (input) => {
-        const factory = ctx.firstPartyFinality;
-        if (!factory) {
-          throw new Error("First-party finality projection is not assembled");
-        }
-        return factory(input);
-      },
+
       projectLifecycle: async (input) => {
         if (input.mutation === "clear") {
           await projectConversationClear({
@@ -662,10 +639,10 @@ const createConversationSurface = (
             operationId: input.requestId,
             projection: {
               clearStoredView: async (conversationId) => {
-                await ctx.conversationIdentityLifecycle.ensureShell(
+                await inputConversationIdentityLifecycle.ensureShell(
                   conversationId,
                 );
-                return ctx.conversationClearProjection.clearStoredView(
+                return inputConversationClearProjection.clearStoredView(
                   conversationId,
                 );
               },
@@ -673,7 +650,7 @@ const createConversationSurface = (
                 manager.clear(conversationId, persist),
             },
             publishFact: (fact) => {
-              ctx.sessionBroadcast(
+              inputSessionBroadcast(
                 fact.conversationId,
                 SESSION_NOTIFICATIONS.changed,
                 { conversationId: fact.conversationId, change: "cleared" },
@@ -691,11 +668,11 @@ const createConversationSurface = (
             conversations: manager,
             storage: {
               exists: (conversationId) =>
-                ctx.conversationIdentityLifecycle.identityExists(
+                inputConversationIdentityLifecycle.identityExists(
                   conversationId,
                 ),
               deleteStoredConversation: (conversationId) =>
-                ctx.conversationDeleteProjection.deleteStoredConversation(
+                inputConversationDeleteProjection.deleteStoredConversation(
                   conversationId,
                 ),
             },
@@ -711,7 +688,7 @@ const createConversationSurface = (
             },
           }),
           publishFact: (fact) => {
-            ctx.sessionBroadcast(
+            inputSessionBroadcast(
               fact.conversationId,
               SESSION_NOTIFICATIONS.changed,
               { conversationId: fact.conversationId, change: "deleted" },
@@ -725,18 +702,18 @@ const createConversationSurface = (
       ...ctx.conversationRuntimeStorage,
       ensureConversation: async (conversationId) => {
         await protocol.ensureSession(conversationId);
-        await ctx.conversationIdentityLifecycle.initializeRuntimeStorage(
+        await inputConversationIdentityLifecycle.initializeRuntimeStorage(
           conversationId,
         );
       },
       applyCommittedSessionMutations: async (conversationId, mutations) => {
         for (const record of [...mutations].sort((a, b) => a.seq - b.seq)) {
           if (record.mutation.kind === "task-list-op") {
-            await ctx.conversationCommittedViewStorage.persistTaskList(
+            await inputConversationCommittedViewStorage.persistTaskList(
               conversationId,
               record.mutation.op.state,
             );
-            ctx.taskListService.acceptCommitted(
+            inputTaskListService.acceptCommitted(
               conversationId,
               record.mutation.op.state,
             );
@@ -744,7 +721,7 @@ const createConversationSurface = (
               conversationId,
               record.mutation.op.state,
             );
-            ctx.sessionBroadcast(
+            inputSessionBroadcast(
               conversationId,
               SESSION_NOTIFICATIONS.changed,
               {
@@ -755,7 +732,7 @@ const createConversationSurface = (
             );
             continue;
           }
-          await ctx.conversationCommittedViewStorage.appendSegment(
+          await inputConversationCommittedViewStorage.appendSegment(
             conversationId,
             record.mutation.segment,
           );
@@ -766,6 +743,8 @@ const createConversationSurface = (
       onTurnCommitted: committedTurnListenerAssembly.notify,
     });
     managerAssembly.complete(manager);
+    const conversationPerspectives = ctx.createConversationPerspectives(manager);
+    ctx.conversationPerspectives = conversationPerspectives;
     const advancementComposition =
       await ctx.advancementConversationComposition.create({
         sessionState: protocol.sessionState,
@@ -780,14 +759,14 @@ const createConversationSurface = (
     const advancementReviews = advancementComposition.reviews;
     const advancementConversationLifecycle = advancementComposition.lifecycle;
     const conversationExists = (conversationId: string) =>
-      ctx.conversationIdentityLifecycle.identityExists(conversationId);
+      inputConversationIdentityLifecycle.identityExists(conversationId);
     const proxyTurns = createAdvancementProxyTurnPort({
       manager,
-      sessionBroadcast: ctx.sessionBroadcast,
+      sessionBroadcast: inputSessionBroadcast,
       conversationExists,
     });
     const reviewResults = new AdvancementReviewResultProjectionApplicationService({
-      events: createAdvancementEventSink(ctx.sessionBroadcast),
+      events: createAdvancementEventSink(inputSessionBroadcast),
       proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
     });
     const advancementRecovery = createAdvancementRecoveryMaintenance({
@@ -799,7 +778,7 @@ const createConversationSurface = (
         manager,
         { conversationExists },
       ),
-      events: createAdvancementEventSink(ctx.sessionBroadcast),
+      events: createAdvancementEventSink(inputSessionBroadcast),
       reviewResults,
       logger: console,
     });
@@ -862,7 +841,7 @@ const createConversationSurface = (
     ctx.advancement = advancementController;
     ctx.advancementReviews = advancementReviews;
     ctx.advancementConversationLifecycle = advancementConversationLifecycle;
-    ctx.lifecycleContributions.acquire(
+    inputLifecycleContributions.acquire(
       "execution.abortAllAndWait",
       () => manager.abortAllAndWait(
         { kind: "external", origin: "scheduler-shutdown" },
@@ -889,11 +868,17 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
   phase: "pre-server",
   kind: "core",
   async setup(ctx) {
+    const {
+      executorDataPlane: inputExecutorDataPlane,
+      meshBootstrap: inputMeshBootstrap,
+      meshExecutorTopologyTrust: inputMeshExecutorTopologyTrust,
+      authorityRuntime: inputAuthorityRuntime,
+    } = ctx;
     if (!ctx.enabledRoles.includes("executor")) return;
     if (
-      !ctx.authorityRuntime ||
+      !inputAuthorityRuntime ||
       !ctx.executorRoleModule ||
-      !ctx.executorDataPlane ||
+      !inputExecutorDataPlane ||
       !ctx.evidenceHandler
     ) {
       throw new Error(
@@ -903,13 +888,13 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
     if (ctx.localConversationOwner) {
       throw new Error("Local conversation owner is already assembled");
     }
-    const executorResources = ctx.authorityRuntime.executorResourceGovernor;
+    const executorResources = inputAuthorityRuntime.executorResourceGovernor;
     const localOwner = localConversationOwnerRuntime({
-      artifacts: ctx.authorityRuntime.artifacts,
-      deviceId: ctx.authorityRuntime.deviceId,
-      executorCapabilities: ctx.authorityRuntime.executorCapabilities,
-      executorId: ctx.authorityRuntime.executorId,
-      executorLog: ctx.authorityRuntime.executorLog,
+      artifacts: inputAuthorityRuntime.artifacts,
+      deviceId: inputAuthorityRuntime.deviceId,
+      executorCapabilities: inputAuthorityRuntime.executorCapabilities,
+      executorId: inputAuthorityRuntime.executorId,
+      executorLog: inputAuthorityRuntime.executorLog,
       resources: executorResources,
       executionResources: executorResources,
       assignmentResources: executorResources,
@@ -919,25 +904,25 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       }),
       finalizeUsage: (assignmentId) =>
         executorResources.finalizeLocalAssignment(assignmentId),
-      executionAssetCatalog: ctx.authorityRuntime.executionAssetCatalog,
-      localControlAdmission: ctx.authorityRuntime.localControlAdmission,
-      localDomainId: ctx.authorityRuntime.localDomainId,
-      localGovernorEpoch: ctx.authorityRuntime.localGovernorEpoch,
-      localOwnerEpoch: ctx.authorityRuntime.localOwnerEpoch,
-      permissionSnapshotFor: ctx.authorityRuntime.permissionSnapshotFor,
+      executionAssetCatalog: inputAuthorityRuntime.executionAssetCatalog,
+      localControlAdmission: inputAuthorityRuntime.localControlAdmission,
+      localDomainId: inputAuthorityRuntime.localDomainId,
+      localGovernorEpoch: inputAuthorityRuntime.localGovernorEpoch,
+      localOwnerEpoch: inputAuthorityRuntime.localOwnerEpoch,
+      permissionSnapshotFor: inputAuthorityRuntime.permissionSnapshotFor,
       preflightLocalConversationEnvironment:
-        ctx.authorityRuntime.preflightLocalConversationEnvironment,
+        inputAuthorityRuntime.preflightLocalConversationEnvironment,
       prepareLocalConversationAssignment:
-        ctx.authorityRuntime.prepareLocalConversationAssignment,
+        inputAuthorityRuntime.prepareLocalConversationAssignment,
       releaseLocalConversationEnvironmentPreflight:
-        ctx.authorityRuntime.releaseLocalConversationEnvironmentPreflight,
-      signer: ctx.authorityRuntime.signer,
-      storageMaintenance: ctx.authorityRuntime.storageMaintenance,
+        inputAuthorityRuntime.releaseLocalConversationEnvironmentPreflight,
+      signer: inputAuthorityRuntime.signer,
+      storageMaintenance: inputAuthorityRuntime.storageMaintenance,
       validateConversationRuntimeBinding:
-        ctx.authorityRuntime.validateConversationRuntimeBinding,
+        inputAuthorityRuntime.validateConversationRuntimeBinding,
       validateLocalConversationManifest:
-        ctx.authorityRuntime.validateLocalConversationManifest,
-      verifier: ctx.authorityRuntime.verifier,
+        inputAuthorityRuntime.validateLocalConversationManifest,
+      verifier: inputAuthorityRuntime.verifier,
     });
     const localExecutorBoundary = createConversationExecutorHostBoundary({
       authority: localOwner,
@@ -949,8 +934,8 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
         InProcessAssignmentSubmission:
           ctx.executorRoleModule.InProcessAssignmentSubmission,
         runtimeFactory: ctx.assignmentRuntimeFactory,
-        dataPlaneTickets: ctx.executorDataPlane.assignmentTickets,
-        createStream: (input) => ctx.executorDataPlane!.createStream(input),
+        dataPlaneTickets: inputExecutorDataPlane.assignmentTickets,
+        createStream: (input) => inputExecutorDataPlane!.createStream(input),
       },
     });
     if (!localExecutorBoundary.staging) {
@@ -968,10 +953,9 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       }),
       evidence: ctx.evidenceHandler,
       currentAnchorDeviceId: () =>
-        ctx.meshBootstrap.mode === "trusted-home"
-          ? ctx.meshRuntime?.currentAnchorDeviceId() ??
-            ctx.meshBootstrap.trust.issuer.deviceId
-          : ctx.authorityRuntime!.deviceId,
+        inputMeshBootstrap.mode === "trusted-home"
+          ? inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()
+          : inputAuthorityRuntime!.deviceId,
     });
     ctx.lifecycleContributions.acquire("localConversationOwner.close", () =>
       assembly.close()
@@ -1001,10 +985,11 @@ const executorJobOwnerUnit: CoreAssemblyUnit = {
   phase: "pre-server",
   kind: "core",
   async setup(ctx) {
+    const { executorDataPlane: inputExecutorDataPlane } = ctx;
     if (!ctx.enabledRoles.includes("executor")) return;
     if (
       !ctx.authorityRuntime ||
-      !ctx.executorDataPlane ||
+      !inputExecutorDataPlane ||
       !ctx.executorRoleModule ||
       !ctx.conversationProtocol ||
       !ctx.jobRuntime
@@ -1016,71 +1001,36 @@ const executorJobOwnerUnit: CoreAssemblyUnit = {
     if (ctx.executorJobOwner) {
       throw new Error("Executor job owner is already assembled");
     }
-    if (ctx.enabledRoles.includes("anchor")) {
-      ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
+    if (!ctx.enabledRoles.includes("anchor")) {
+      throw new Error("Anchor assembly requires the Anchor role; executor-only uses ExecutorRoleRuntime");
     }
+    ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
+    const jobRelays = ctx.jobRelayObligations;
+    const authority = ctx.authorityRuntime;
     const assembly = new ExecutorJobOwnerAssembly({
       ledger: ctx.conversationExecutorLedger!,
       runtime: ctx.jobRuntime,
       submissionFor: (envelope, signal) => {
-        const local =
-          ctx.jobRelayObligations?.submissionFor(envelope.assignmentId);
-        if (local) return local;
-        if (ctx.enabledRoles.includes("anchor")) {
-          return ctx.jobRelayObligations!.waitForSubmission(
-            envelope.assignmentId,
-            signal,
-          );
-        }
-        const mesh = ctx.meshRuntime;
-        if (mesh) return mesh.submissionForAnchor();
-        throw new JobInteractionRuntimeUnavailableError(
-          "Job assignment owner submission is not registered",
-        );
+        return jobRelays.submissionFor(envelope.assignmentId) ??
+          jobRelays.waitForSubmission(envelope.assignmentId, signal);
       },
       finalizeUsage: ({ assignmentId }) => {
-        const authority = ctx.authorityRuntime!;
-        if (ctx.enabledRoles.includes("anchor")) {
-          return authority.executorResourceGovernor.flushAssignment(
-            assignmentId,
-            authority.resourceGovernor,
-            (report) =>
-              usageReporterContext(report.reporterId, report.digest),
-          );
-        }
-        const mesh = ctx.meshRuntime;
-        if (!mesh) {
-          throw new JobInteractionRuntimeUnavailableError(
-            "Executor usage transport is not ready",
-          );
-        }
-        return mesh.finalizeExecutorUsage(assignmentId);
+        return authority.executorResourceGovernor.flushAssignment(
+          assignmentId,
+          authority.resourceGovernor,
+          (report) => usageReporterContext(report.reporterId, report.digest),
+        );
       },
       globalQueryFor: (capability, anchorEpoch) => {
-        const authority = ctx.authorityRuntime!;
-        if (ctx.enabledRoles.includes("anchor")) {
-          if (!authority.globalState) {
-            throw new JobInteractionRuntimeUnavailableError(
-              "Anchor global authority state is unavailable",
-            );
-          }
-          return createAssignmentGlobalQueryPort({
-            state: authority.globalState,
-            capability,
-            anchorEpoch,
-          });
+        if (!authority.globalState) {
+          throw new JobInteractionRuntimeUnavailableError("Anchor global authority state is unavailable");
         }
-        if (!ctx.meshRuntime) {
-          throw new JobInteractionRuntimeUnavailableError(
-            "Job assignment global query transport is not registered",
-          );
-        }
-        return ctx.meshRuntime.globalQueryForAnchor(capability, anchorEpoch);
+        return createAssignmentGlobalQueryPort({ state: authority.globalState, capability, anchorEpoch });
       },
       InProcessAssignmentSubmission:
         ctx.executorRoleModule.InProcessAssignmentSubmission,
       resources: ctx.authorityRuntime.executorResourceGovernor,
-      createStream: (input) => ctx.executorDataPlane!.createStream(input),
+      createStream: (input) => inputExecutorDataPlane!.createStream(input),
       onError: (_assignmentId, error) =>
         console.warn(chalk.yellow(`[job-worker] ${error.message}`)),
     });
@@ -1122,14 +1072,18 @@ const channelLogger = Object.freeze({
     console.error(chalk.red(`[channel] ${msg}`), ...args),
 });
 
-function isCurrentChannelOwner(ctx: AssemblyContext): boolean {
-  if (ctx.meshBootstrap.mode === "single-machine") return true;
-  const currentDeviceId = ctx.meshRuntime?.currentAnchorDeviceId() ??
-    ctx.meshBootstrap.trust.issuer.deviceId;
-  const ready = ctx.meshRuntime?.plannedCurrentOwnerReady() ??
-    ctx.meshBootstrap.plannedAnchorPostInstall === undefined;
-  return currentDeviceId === ctx.meshBootstrap.deviceKey.deviceId && ready;
+function channelOwnership(
+  bootstrap: AssemblyContext["meshBootstrap"],
+  mesh: AssemblyContext["meshRuntimePreparation"],
+): () => boolean {
+  return () => {
+    if (bootstrap.mode === "single-machine") return true;
+    const currentDeviceId = mesh?.currentAnchorDeviceId() ?? bootstrap.trust.issuer.deviceId;
+    const ready = mesh?.plannedCurrentOwnerReady() ?? bootstrap.plannedAnchorPostInstall === undefined;
+    return currentDeviceId === bootstrap.deviceKey.deviceId && ready;
+  };
 }
+
 
 /** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 function createChannelSurface(credentials: ChannelCredentialProjection): AccessSurface {
@@ -1137,6 +1091,7 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
     name: "channel",
     phase: "pre-server",
     async setup(ctx) {
+    const { channelHttpRoutes: inputChannelHttpRoutes } = ctx;
       const {
         conversations,
         channelConfiguration,
@@ -1163,10 +1118,10 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           credentials,
           logger: channelLogger,
           registerHttpRoute: (path, handler) => {
-            if (ctx.channelHttpRoutes.has(path)) {
+            if (inputChannelHttpRoutes.has(path)) {
               throw new Error(`Channel HTTP route already registered: ${path}`);
             }
-            ctx.channelHttpRoutes.set(path, handler);
+            inputChannelHttpRoutes.set(path, handler);
           },
         });
         ctx.lifecycleContributions.acquire("channels.dispose", async () => {
@@ -1269,9 +1224,6 @@ const deliverySurface: AccessSurface = {
       await deliveryStack.lifecycle.restore(ctx.startupLifecycle.delivery);
     }
     deliveryStack.lifecycle.close();
-    deliveryStack.onStatus((notice) => {
-      ctx.executionStatusHub?.publish(notice);
-    });
     ctx.conversationProtocol?.bindDeliveryDrain(() =>
       deliveryStack.flush(),
     );
@@ -1284,7 +1236,7 @@ const deliverySurface: AccessSurface = {
       cancelKeywords: channelConfiguration.intent?.cancelKeywords,
       sessionBroadcast: ctx.sessionBroadcast,
       sessionActivityBroadcast: ctx.sessionActivityBroadcast,
-      isCurrentOwner: () => isCurrentChannelOwner(ctx),
+      isCurrentOwner: channelOwnership(ctx.meshBootstrap, ctx.meshRuntimePreparation),
     });
     ctx.lifecycleContributions.acquire(
       "inboundRouter.refuseNew",

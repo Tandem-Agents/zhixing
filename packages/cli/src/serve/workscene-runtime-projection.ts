@@ -138,6 +138,7 @@ function sceneProductTools(
 
 /** Anchor product composition; RuntimeHost only sees the frozen output. */
 export function createAnchorRuntimeProjectionAssembly(input: {
+  readonly agentIdentity: import("@zhixing/core/identity").AgentIdentity;
   readonly capabilities: AnchorRuntimeCapabilityCatalog;
   readonly workscenes: WorksceneToolDirectory;
   readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
@@ -188,7 +189,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     return createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),
       primaryRole: "main",
-      profile: mainProfile({ hasWorkspace: workspace !== null }),
+      profile: mainProfile({ agentIdentity: input.agentIdentity, hasWorkspace: workspace !== null }),
       lifecycle: [input.createGuidanceLifecycle()],
       ...product,
     });
@@ -213,14 +214,14 @@ export function createAnchorRuntimeProjectionAssembly(input: {
         id: options.scene.sceneId,
         name: options.scene.name,
         hasWorkspace: options.absolutePath !== null,
-      }),
+      }, { agentIdentity: input.agentIdentity }),
       lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)],
       ...product,
     });
   };
   const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");
   const job = (instruction: JobExecutionInstruction) => {
-    const baseProfile = mainProfile();
+    const baseProfile = mainProfile({ agentIdentity: input.agentIdentity });
     const available = runtimeProduct("main");
     const selection = selectJobRuntimeTools({
       instruction,

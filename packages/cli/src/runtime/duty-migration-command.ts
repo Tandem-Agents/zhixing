@@ -1,3 +1,4 @@
+import { getZhixingHome } from "@zhixing/core/paths";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import {
@@ -147,7 +148,7 @@ async function completeDutyMigration(
 async function withManagement<T>(
   operation: (management: RpcManagementFacade) => Promise<T>,
 ): Promise<T> {
-  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps());
+  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps(getZhixingHome()));
   try {
     await coreHost.ensure();
     return await operation(new RpcManagementFacade(coreHost));

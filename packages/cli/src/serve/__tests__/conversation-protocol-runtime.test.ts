@@ -1942,6 +1942,15 @@ describe("ConversationProtocolRuntime", () => {
       },
       surfacePrincipal: "rpc:owner",
     });
+    // The journal already exists; subscriptions bound by Host composition must
+    // still observe its subsequent terminal publication.
+    const receivedStatuses: ConversationStatusNotice[] = [];
+    const unsubscribe = protocol.onStatus((notice) => { receivedStatuses.push(notice); });
+    const removedListener = vi.fn();
+    protocol.onStatus(removedListener)();
+    const finalityFactory = vi.fn();
+    protocol.bindFirstPartyFinality(finalityFactory);
+    expect(() => protocol.bindFirstPartyFinality(vi.fn())).toThrow("already bound");
     const control = {
       conversationId: "conversation-cancel",
       runId: admitted.runId,
@@ -1982,6 +1991,9 @@ describe("ConversationProtocolRuntime", () => {
       responseLoss.mockRestore();
     }
     expect(deliveryKicked).toBe(true);
+    expect(receivedStatuses.some((notice) => notice.state === "cancelled")).toBe(true);
+    expect(removedListener).not.toHaveBeenCalled();
+    unsubscribe();
     await protocol.recover();
     expect(recoverAuxiliary).toHaveBeenCalledWith("conversation-cancel");
     await expect(

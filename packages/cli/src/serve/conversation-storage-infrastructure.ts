@@ -75,11 +75,13 @@ interface ScopeStorage {
  * repository, transcript store, snapshot store, or path resolver.
  */
 export function createConversationStorageInfrastructure(input: Readonly<{
+  zhixingHome: string;
   optimalMaxTokens: number;
   worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort;
   clearTaskListCache?: (conversationId: string) => void;
 }>): ConversationStorageInfrastructure {
-  const user = createScopeStorage({ kind: "user" });
+  const zhixingHome = input.zhixingHome;
+  const user = createScopeStorage({ kind: "user" }, zhixingHome);
   const workscenes = new Map<string, ScopeStorage>();
 
   const routeConversation = (conversationId: string) => {
@@ -87,7 +89,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
     if (scope.kind === "user") return { ...user, localId };
     let storage = workscenes.get(scope.sceneId);
     if (!storage) {
-      storage = createScopeStorage(scope);
+      storage = createScopeStorage(scope, zhixingHome);
       workscenes.set(scope.sceneId, storage);
     }
     return { ...storage, localId };
@@ -157,14 +159,14 @@ export function createConversationStorageInfrastructure(input: Readonly<{
 
   const maintenance = Object.freeze({
     async runRetentionSweep() {
-      return runRetentionSweep({ roots: await collectConversationRoots() });
+      return runRetentionSweep({ roots: await collectConversationRoots(zhixingHome) });
     },
     async isConversationDataAlive(directoryName: string) {
       const conversationId = fromSafePathSegment(directoryName);
       const { scope, localId } = parseConversationId(conversationId);
       try {
         const info = await fs.stat(
-          path.join(conversationsDir(scope), toSafePathSegment(localId)),
+          path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(localId)),
         );
         return info.isDirectory();
       } catch {
@@ -191,11 +193,11 @@ export function createConversationStorageInfrastructure(input: Readonly<{
  * Conversation history projection consumed by the Surface and never creates a
  * writable repository or transcript store.
  */
-export function createReadOnlyConversationStorage(): Pick<
+export function createReadOnlyConversationStorage(zhixingHome: string): Pick<
   ConversationDirectoryStorage,
   "list" | "readHistory"
 > {
-  const root = conversationsDir({ kind: "user" });
+  const root = conversationsDir({ kind: "user" }, zhixingHome);
   const transcript = createReadOnlyTranscriptSource(root);
   return Object.freeze({
     async list() {
@@ -251,24 +253,24 @@ export function createReadOnlyConversationStorage(): Pick<
   });
 }
 
-function createScopeStorage(scope: ConversationScope): ScopeStorage {
-  const root = conversationsDir(scope);
+function createScopeStorage(scope: ConversationScope, zhixingHome: string): ScopeStorage {
+  const root = conversationsDir(scope, zhixingHome);
   return Object.freeze({
-    repo: new ConversationRepository(scope),
+    repo: new ConversationRepository(scope, zhixingHome),
     transcript: new ShardedTranscriptStore(root),
     snapshots: new SnapshotStore(root),
   });
 }
 
-async function collectConversationRoots(): Promise<string[]> {
-  const roots = [conversationsDir({ kind: "user" })];
+async function collectConversationRoots(zhixingHome: string): Promise<string[]> {
+  const roots = [conversationsDir({ kind: "user" }, zhixingHome)];
   try {
-    const entries = await fs.readdir(getWorkScenesRoot(), {
+    const entries = await fs.readdir(getWorkScenesRoot(zhixingHome), {
       withFileTypes: true,
     });
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        roots.push(getWorkSceneConversationsRoot(entry.name));
+        roots.push(getWorkSceneConversationsRoot(entry.name, zhixingHome));
       }
     }
   } catch {

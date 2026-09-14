@@ -29,14 +29,14 @@
  *   - **完全旁路**：dump 失败 swallow，不影响 keypress / chrome / 状态机
  *   - **process-level singleton**：一个 cli 进程一个日志文件，跨多次 confirmation
  *   - **caller 决定 enabled**：caller 在首次 record 之前调
- *     `configureKeypressDump(enabled)` 显式传入；缺省 = 禁用
+ *     `configureKeypressDump(enabled, zhixingHome)` 显式传入；缺省 = 禁用
  */
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { getZhixingHome } from "@zhixing/core/paths";
 
 let pendingEnabled = false;
+let logHome: string | undefined;
 let logPath: string | null = null;
 let initStarted = false;
 let pollIntervalStarted = false;
@@ -48,7 +48,8 @@ let startTime = 0;
  *
  * 反复调用：first call wins —— 后续调用静默忽略避免 race（与 LLM dump 同语义）。
  */
-export function configureKeypressDump(enabled: boolean): void {
+export function configureKeypressDump(enabled: boolean, zhixingHome: string): void {
+  logHome ??= zhixingHome;
   if (initStarted) return; // first call wins
   pendingEnabled = enabled;
   // dump 启用 → 同时启周期性 stdin 状态轮询。这是 2026-05-20 postmortem(confirm
@@ -94,9 +95,8 @@ function ensurePath(): string | null {
 
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    // 走 getZhixingHome（含 ZHIXING_HOME 解析）而非直拼 homedir——否则 ZHIXING_HOME
-    // 覆盖时其余数据进自定义目录、唯独这份调试日志漏到真实家目录，位置不一致。
-    const dir = join(getZhixingHome(), "logs");
+    if (!logHome) return null;
+    const dir = join(logHome, "logs");
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `keypress-${process.pid}-${ts}.log`);
 

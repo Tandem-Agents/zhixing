@@ -37,6 +37,18 @@ describe("getGlobalConfigPath", () => {
 });
 
 describe("loadConfig", () => {
+  it("keeps an explicit config file across environment changes and rereads current content", async () => {
+    const home = await createTempDir("fixed-config-file");
+    const configPath = path.join(home, "custom.jsonc");
+    const unrelated = path.join(home, "unrelated.jsonc");
+    await writeConfig({ llm: { main: { provider: "openai", model: "first" } } }, { configPath });
+    const options = { configPath, env: { ZHIXING_CONFIG_PATH: unrelated }, noAutoCreate: true };
+    expect(loadConfig(options).llm?.main.model).toBe("first");
+    await writeConfig({ llm: { main: { provider: "openai", model: "second" } } }, options);
+    expect(loadConfig(options).llm?.main.model).toBe("second");
+    expect(fs.existsSync(unrelated)).toBe(false);
+  });
+
   let tempHome: string;
 
   beforeEach(async () => {

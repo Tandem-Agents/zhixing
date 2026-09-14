@@ -9,7 +9,7 @@
  *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
  *   3. 恒定核心后置（ephemeralRuntime / runAgentTurn / systemHandlers）—— ephemeralRuntime 消费
  *      Host 前置阶段 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
- *   4. 构造核心 Scheduler（读 ctx.deliveryStack）+ start + seed 系统任务
+ *   4. 构造核心 Scheduler（绑定投递依赖）+ start + seed 系统任务
  *   5. createServerContext + runServer
  *   6. `setupAssemblyUnits(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
  *   7. 类型化 lifecycle contribution 在 activation gate 内接管 teardown（LIFO）
@@ -20,7 +20,7 @@
  */
 
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
-import { getZhixingHome } from "@zhixing/core/paths";
+import { resolveAgentIdentity } from "@zhixing/core/identity";
 import { loadLayeredGuidance } from "@zhixing/core/context";
 import { type SchedulerEventMap } from "@zhixing/core/scheduler";
 import { worksceneConversationId } from "@zhixing/core/conversation";
@@ -105,6 +105,12 @@ import {
   ServerLogLifecycle,
   CleanupRegistry,
   getDefaultLogPath,
+  getDefaultPidPath,
+  getDefaultPortPath,
+  getDefaultStatePath,
+  getDefaultReadyMarkerPath,
+  getDefaultTokenPath,
+  getDefaultServerLogPaths,
   resolveProcessStartTime,
   type RunningServer,
   type ServerContext,
@@ -118,6 +124,8 @@ import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-m
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
 import { loadCredentials, resolveModelCapability } from "@zhixing/providers";
 import chalk from "chalk";
+import { configureLlmChunkDump } from "../output/llm-chunk-dump.js";
+import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
 import { isProcessAlive } from "@zhixing/server";
 import { RuntimeHost } from "@zhixing/runtime-host";
 import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
@@ -272,7 +280,7 @@ import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
 /** Explicit finite contributions for profiles where the corresponding surface is absent. */
-const EMPTY_REMOVAL_INBOUND = Object.freeze({
+const EMPTY_INBOUND_LIFECYCLE = Object.freeze({
   refuseNewMessages: () => undefined,
   drainAcceptedMessages: async () => undefined,
   resumeNewMessages: () => undefined,
@@ -353,7 +361,8 @@ async function runServerProcess(
   let runner: RunningServer | undefined;
   try {
   const profile: ServerProfile = DEFAULT_PROFILE;
-  const zhixingHome = getZhixingHome();
+  const zhixingHome = bootstrap.zhixingHome;
+  configureLlmChunkDump(false, zhixingHome);
   const deviceCapacity = bootstrap.deviceCapacity;
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
@@ -368,8 +377,9 @@ async function runServerProcess(
     async () => initialManagedServiceState,
   );
   const isBackground = processMode !== "foreground";
-  const daemonLogPath = isBackground ? getDefaultLogPath() : undefined;
+  const daemonLogPath = isBackground ? getDefaultLogPath(zhixingHome) : undefined;
   const hostShellLifecycle = new AnchorHostShellLifecycle({
+    lockPaths: { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) },
     startupRollback,
     processInfo: {
       version: SERVER_VERSION,
@@ -381,6 +391,7 @@ async function runServerProcess(
   });
   const serverLogLifecycle = isBackground
     ? new ServerLogLifecycle({
+        paths: getDefaultServerLogPaths(zhixingHome),
         logger: {
           info: (msg) => console.log(chalk.dim(`[server-log] ${msg}`)),
           error: (msg, err) =>
@@ -413,7 +424,7 @@ async function runServerProcess(
   const credentialRotationCredentials =
     bootstrap.credentialRotationCredentials;
   const credentialGeneration = bootstrap.credentialGeneration;
-  const systemProtectedPaths = resolveSystemProtectedSecretPaths();
+  const systemProtectedPaths = resolveSystemProtectedSecretPaths(zhixingHome);
   const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(
     workspaceConfiguration,
   );
@@ -424,7 +435,7 @@ async function runServerProcess(
   // ============================================================================
 
   // 1. token
-  const tokenInfo = await loadOrCreateToken();
+  const tokenInfo = await loadOrCreateToken(getDefaultTokenPath(zhixingHome));
   if (tokenInfo.generated && processMode !== "managed") {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
@@ -524,7 +535,11 @@ async function runServerProcess(
     startTime: processStartTime,
     startedAt: processStartedAt,
   } as const;
-  const stateFile = new ServerStateFile({ publishReadyMarker: isBackground });
+  const stateFile = new ServerStateFile({
+    statePath: getDefaultStatePath(zhixingHome),
+    readyMarkerPath: getDefaultReadyMarkerPath(zhixingHome),
+    publishReadyMarker: isBackground,
+  });
   hostShellLifecycle.acquireStateFile(stateFile);
   const meshConnectionProjection = createMeshCompatibilityStateProjection(stateFile, {
     ...stopEndpointLock,
@@ -553,6 +568,7 @@ async function runServerProcess(
     storageMaintenance: deviceCapacity.storage,
   });
   const conversationStorage = createConversationStorageInfrastructure({
+    zhixingHome,
     optimalMaxTokens: resolveModelCapability(
       modelConfiguration.llm?.main?.model ?? "",
     ).optimalMaxTokens,
@@ -612,17 +628,9 @@ async function runServerProcess(
       disposeForward();
     };
   };
-  let assemblyContext: AssemblyContext | undefined;
-  const conversationPerspectives = new ConversationPerspectivesApplicationService({
-    correctness: createConversationPerspectivesCorrectnessPort({
-      manager: () => {
-        const manager = assemblyContext?.conversations;
-        if (!manager) {
-          throw new Error("Conversation perspective correctness is not assembled");
-        }
-        return manager;
-      },
-    }),
+  const createConversationPerspectives: AssemblyContext["createConversationPerspectives"] = (manager) =>
+    new ConversationPerspectivesApplicationService({
+    correctness: createConversationPerspectivesCorrectnessPort({ manager }),
     createRunEventBus: () => createEventBus<AgentEventMap>(),
     decorateRunBus: serveDecorateRunBus,
     onDurableFinalPublicationDeferred: (error) => {
@@ -711,6 +719,7 @@ async function runServerProcess(
     remoteWorkspaceProbe,
   });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
+    agentIdentity: resolveAgentIdentity(kernelEnvironmentConfiguration.agent),
     capabilities: anchorRuntimeCapabilities,
     workscenes: worksceneAuthority.tools,
     worksceneAssignmentTools,
@@ -722,7 +731,7 @@ async function runServerProcess(
     securityExecution: permissionStorage.runtime,
     createGuidanceLifecycle: (sceneId) =>
       createZhixingGuidanceLifecycle({
-        getZhixingHome,
+        zhixingHome,
         ...(sceneId === undefined
           ? {}
           : {
@@ -868,7 +877,9 @@ async function runServerProcess(
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
     processMode,
     expectedAdmission: initialManagedHostAdmission,
-    refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
+    loadCurrent: (purpose) => loadCurrentManagedServiceState(purpose, zhixingHome),
+    reconcile: (trigger, signal) => reconcileCurrentManagedService(trigger, signal, zhixingHome),
+    refuseNewMessages: () => inboundRouter?.refuseNewMessages(),
     requestShutdown: () => anchorInternalStop.requestStop({
       reason: "managed-role-changed",
       strategy: "immediate",
@@ -885,7 +896,8 @@ async function runServerProcess(
     zhixingHome,
     secretStore: bootstrap.secretStore,
     durableInteractions,
-    conversationPerspectives,
+    createConversationPerspectives,
+    onTrustApplied,
     deviceCapacity: deviceCapacity.arbiter,
     advancementCapacity: deviceCapacity.workload("workload-advancement"),
     storageMaintenance: deviceCapacity.storage,
@@ -926,10 +938,8 @@ async function runServerProcess(
     meshConnectionProjection,
     ...(meshConnections ? { meshConnections } : {}),
     ...(meshExecutorTopologyTrust ? { meshExecutorTopologyTrust } : {}),
-    onTrustApplied,
     ...(startupLifecycle ? { startupLifecycle } : {}),
   };
-  assemblyContext = ctx;
   let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
   let removalAdmissionOperationId: string | undefined;
   let removalBootstrapAdmissionClosed = true;
@@ -969,6 +979,7 @@ async function runServerProcess(
       credentials: providerCredentials,
     }),
     runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
+      zhixingHome,
       configuration: kernelEnvironmentConfiguration,
     }),
     confirmationLifecycleObserver: durableInteractions,
@@ -998,33 +1009,80 @@ async function runServerProcess(
     ctx,
     "pre-server",
   );
-  ctx.authorityCheckpointOwner = await createConfiguredCheckpointOwner({
+  const {
+    storageMaintenance: boundStorageMaintenance,
+    meshBootstrap: boundMeshBootstrap,
+    authorityRuntime: boundAuthorityRuntime,
+    worksceneDirectory: boundWorksceneDirectory,
+    worksceneApplication: boundWorksceneApplication,
+    secretStore: boundSecretStore,
+    mcpStatus: boundMcpStatus,
+    channelStatuses: boundChannelStatuses,
+    channelConnections: boundChannelConnections,
+    localConversationOwner: boundLocalConversationOwner,
+    executorJobOwner: boundExecutorJobOwner,
+    channelCoordinator: boundChannelCoordinator,
+    enabledRoles: boundEnabledRoles,
+    conversationProtocol: boundConversationProtocol,
+    jobStatus: boundJobStatus,
+    jobRelayObligations: boundJobRelayObligations,
+    conversationExecutorLedger: boundConversationExecutorLedger,
+    conversations: boundConversations,
+    inboundRouter: boundInboundRouter,
+    deliveryStack: boundDeliveryStack,
+    advancementRecovery: boundAdvancementRecovery,
+    sessionBroadcast: boundSessionBroadcast,
+    channelConversationProduct: boundChannelConversationProduct,
+    evidenceHandler: boundEvidenceHandler,
+  } = ctx;
+  const inboundRouter = boundInboundRouter;
+  const conversationPerspectives = ctx.conversationPerspectives!;
+  const preparedMeshRuntime = ctx.meshRuntimePreparation;
+  const meshRuntime = preparedMeshRuntime?.runtime;
+  const executionStatusHub = new ExecutionStatusHub({
+    conversationHistory: (requests) => boundConversationProtocol
+      ? boundConversationProtocol.statusHistory(requests)
+      : Promise.resolve({ notices: [], next: requests }),
+    jobHistory: async (requests) => boundJobStatus
+      ? boundJobStatus.statusHistory(requests)
+      : { notices: [], next: requests },
+    deliveryHistory: async (requests) => (await boundDeliveryStack?.statusHistory(requests)) ?? [],
+  });
+  const firstPartyFinality: NonNullable<AssemblyContext["firstPartyFinality"]> =
+    (input) => new FirstPartyFinalitySession({ sources: executionStatusHub, ...input });
+  boundConversationProtocol?.bindFirstPartyFinality(firstPartyFinality);
+  boundConversationProtocol?.onStatus((notice) => executionStatusHub.publish(notice));
+  boundJobStatus?.onStatus((notice) => executionStatusHub.publish(notice));
+  boundDeliveryStack?.onStatus((notice) => executionStatusHub.publish(notice));
+  ctx.executionStatusHub = executionStatusHub;
+  ctx.firstPartyFinality = firstPartyFinality;
+  const authorityCheckpointOwner = await createConfiguredCheckpointOwner({
     backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
     publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
       zhixingHome,
-      storageMaintenance: ctx.storageMaintenance,
+      storageMaintenance: boundStorageMaintenance,
     }).directory,
-    mesh: ctx.meshBootstrap,
+    mesh: boundMeshBootstrap,
     pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions(
-      ctx.meshRuntimePreparation
+      preparedMeshRuntime
         ? {
             kind: "available",
-            connections: ctx.meshRuntimePreparation.connections,
-            storageMaintenance: ctx.storageMaintenance,
+            connections: preparedMeshRuntime.connections,
+            storageMaintenance: boundStorageMaintenance,
           }
         : {
             kind: "runtime-unavailable",
-            storageMaintenance: ctx.storageMaintenance,
+            storageMaintenance: boundStorageMaintenance,
           },
     ),
-    storageMaintenance: ctx.storageMaintenance,
-    ...(ctx.authorityRuntime
+    storageMaintenance: boundStorageMaintenance,
+    ...(boundAuthorityRuntime
       ? {
           checkpointRetention: {
             checkpointRetentionSnapshot: () =>
-              ctx.authorityRuntime!.checkpointRetention.checkpointRetentionSnapshot(),
+              boundAuthorityRuntime!.checkpointRetention.checkpointRetentionSnapshot(),
             retainedAtCheckpoint: (snapshot, candidates) =>
-              ctx.authorityRuntime!.checkpointRetention.retainedAtCheckpoint(
+              boundAuthorityRuntime!.checkpointRetention.retainedAtCheckpoint(
                 snapshot,
                 candidates,
               ),
@@ -1036,12 +1094,13 @@ async function runServerProcess(
       error instanceof Error ? error.message : String(error),
     ),
   });
-  if (ctx.authorityCheckpointOwner) {
-    hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner);
+  ctx.authorityCheckpointOwner = authorityCheckpointOwner;
+  if (authorityCheckpointOwner) {
+    hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner);
   }
-  await ctx.authorityCheckpointOwner?.start();
-  const worksceneDirectory = ctx.worksceneDirectory;
-  const worksceneApplication = ctx.worksceneApplication;
+  await authorityCheckpointOwner?.start();
+  const worksceneDirectory = boundWorksceneDirectory;
+  const worksceneApplication = boundWorksceneApplication;
   if (!worksceneDirectory || !worksceneApplication) {
     throw new Error("Workscene product composition is incomplete");
   }
@@ -1079,14 +1138,14 @@ async function runServerProcess(
     ephemeralRuntime.dispose("session-dispose"),
   );
 
-  if (ctx.authorityRuntime) {
+  if (boundAuthorityRuntime) {
     await publishRequiredCredentialRotations({
       authority: new CredentialExposureAuthority({
-        deviceId: ctx.authorityRuntime.deviceId,
-        log: ctx.authorityRuntime.authorityLog,
-        secretStore: ctx.secretStore,
+        deviceId: boundAuthorityRuntime.deviceId,
+        log: boundAuthorityRuntime.authorityLog,
+        secretStore: boundSecretStore,
       }),
-      deviceId: ctx.authorityRuntime.deviceId,
+      deviceId: boundAuthorityRuntime.deviceId,
       configuration: credentialRotationConfiguration,
       credentials: credentialRotationCredentials,
       credentialGeneration,
@@ -1097,7 +1156,7 @@ async function runServerProcess(
       governProvider: (provider) =>
         governControlProvider(
           {
-            governor: ctx.authorityRuntime!.resourceGovernor,
+            governor: boundAuthorityRuntime!.resourceGovernor,
             origin: { admissionClass: "interactive", entry: "environment-control" },
             workPrefix: "credential-rotation-provider",
             defaultMaxOutputTokens: 1,
@@ -1105,10 +1164,10 @@ async function runServerProcess(
           },
           provider,
         ),
-      mcpStatuses: () => ctx.mcpStatus.snapshot(),
-      channelStatuses: () => ctx.channelStatuses?.() ?? [],
-      ...(ctx.channelConnections
-        ? { waitForChannels: () => ctx.channelConnections!.ready }
+      mcpStatuses: () => boundMcpStatus.snapshot(),
+      channelStatuses: () => boundChannelStatuses?.() ?? [],
+      ...(boundChannelConnections
+        ? { waitForChannels: () => boundChannelConnections!.ready }
         : {}),
     });
   }
@@ -1141,10 +1200,10 @@ async function runServerProcess(
     if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
     startupLifecycleFrozenRecoveryStarted = true;
     try {
-      await ctx.localConversationOwner?.recoverAcceptedWorkForLifecycle();
-      await ctx.executorJobOwner?.recoverAcceptedWorkForLifecycle();
-      await ctx.meshRuntime?.recoverAcceptedWorkForLifecycle();
-      await ctx.channelCoordinator?.recover();
+      await boundLocalConversationOwner?.recoverAcceptedWorkForLifecycle();
+      await boundExecutorJobOwner?.recoverAcceptedWorkForLifecycle();
+      await meshRuntime?.recoverAcceptedWorkForLifecycle();
+      await boundChannelCoordinator?.recover();
       await schedulerApplication.recoverAcceptedWork(
         sources
           .filter((source) => source.owner === "scheduler")
@@ -1155,28 +1214,28 @@ async function runServerProcess(
       throw error;
     }
   }
-  if (ctx.enabledRoles.includes("anchor")) {
+  if (boundEnabledRoles.includes("anchor")) {
     if (
-      !ctx.authorityRuntime ||
-      !ctx.conversationProtocol ||
-      !ctx.jobStatus ||
-      !ctx.jobRelayObligations
+      !boundAuthorityRuntime ||
+      !boundConversationProtocol ||
+      !boundJobStatus ||
+      !boundJobRelayObligations
     ) {
       throw new Error(
         "Anchor scheduler requires authority, protocol, job status, and relay owners",
       );
     }
     const createSchedulerRuntime = () => AnchorSchedulerRuntime.create({
-      authority: ctx.authorityRuntime!,
-      protocol: ctx.conversationProtocol!,
-      ...(ctx.enabledRoles.includes("executor") && ctx.conversationExecutorLedger
-        ? { localExecutor: ctx.conversationExecutorLedger }
+      authority: boundAuthorityRuntime!,
+      protocol: boundConversationProtocol!,
+      ...(boundEnabledRoles.includes("executor") && boundConversationExecutorLedger
+        ? { localExecutor: boundConversationExecutorLedger }
         : {}),
       eventBus: schedulerEventBus,
-      jobStatus: ctx.jobStatus!,
-      jobRelays: ctx.jobRelayObligations!,
+      jobStatus: boundJobStatus!,
+      jobRelays: boundJobRelayObligations!,
       openManualJobSurface: async (input) => {
-        const coordinator = ctx.channelCoordinator;
+        const coordinator = boundChannelCoordinator;
         if (!coordinator) {
           throw new Error("Manual job data plane is unavailable");
         }
@@ -1187,7 +1246,7 @@ async function runServerProcess(
           ticket: input.ticket,
           surfacePrincipal: input.surfacePrincipal,
           adoptFrame: async (frame) => {
-            const binding = runner?.server.context.rpcSurfaces?.current(
+            const binding = serverCtx.rpcSurfaces?.current(
               input.surfacePrincipal,
             );
             if (
@@ -1207,8 +1266,8 @@ async function runServerProcess(
         session.start();
         return session;
       },
-      ...(ctx.executorJobOwner ? { localJobOwner: ctx.executorJobOwner } : {}),
-      mesh: () => ctx.meshRuntime,
+      ...(boundExecutorJobOwner ? { localJobOwner: boundExecutorJobOwner } : {}),
+      mesh: meshRuntime,
       capabilities: anchorRuntimeProjections.capabilityCatalog(),
       systemHandlers,
       systemTasks: new Map([
@@ -1252,7 +1311,7 @@ async function runServerProcess(
       globalState: ReturnType<AnchorSchedulerRuntime["createProductBoundary"]>["globalState"],
     ) => {
       const releaseGlobalState =
-        ctx.authorityRuntime!.installSchedulerGlobalState(globalState);
+        boundAuthorityRuntime!.installSchedulerGlobalState(globalState);
       return releaseGlobalState;
     };
     const bindSchedulerGeneration = (runtime: AnchorSchedulerRuntime) => {
@@ -1289,63 +1348,62 @@ async function runServerProcess(
       resume: (runtime) => resumeSchedulerGeneration(runtime, false),
     });
 
-    const preparedMesh = ctx.meshRuntimePreparation;
+    const preparedMesh = preparedMeshRuntime;
     if (preparedMesh) {
-      const authority = ctx.authorityRuntime;
-      const channelCoordinator = ctx.channelCoordinator;
-      const jobRelays = ctx.jobRelayObligations;
-      const conversations = ctx.conversations;
-      const conversationProtocol = ctx.conversationProtocol;
-      const plannedInbound = ctx.inboundRouter;
+      const authority = boundAuthorityRuntime;
+      const channelCoordinator = boundChannelCoordinator;
+      const jobRelays = boundJobRelayObligations;
+      const conversations = boundConversations;
+      const conversationProtocol = boundConversationProtocol;
+
       if (
         !authority ||
         !channelCoordinator ||
         !jobRelays ||
         !conversations ||
-        !conversationProtocol ||
-        !plannedInbound
+        !conversationProtocol
       ) {
         throw new Error(
           "Mesh lifecycle recovery requires authority, conversation, data-plane, and relay owners",
         );
       }
-      const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null
-        ? EMPTY_REMOVAL_INBOUND
-        : ctx.inboundRouter;
-      const jobOwner = ctx.executorJobOwner === undefined
+      const inbound = boundInboundRouter === undefined || boundInboundRouter === null
+        ? EMPTY_INBOUND_LIFECYCLE
+        : boundInboundRouter;
+      const jobOwner = boundExecutorJobOwner === undefined
         ? EMPTY_REMOVAL_JOB_OWNER
-        : ctx.executorJobOwner;
-      const localOwner = ctx.localConversationOwner === undefined
+        : boundExecutorJobOwner;
+      const localOwner = boundLocalConversationOwner === undefined
         ? EMPTY_REMOVAL_LOCAL_OWNER
-        : ctx.localConversationOwner;
-      const delivery = ctx.deliveryStack === undefined
+        : boundLocalConversationOwner;
+      const delivery = boundDeliveryStack === undefined
         ? EMPTY_REMOVAL_DELIVERY
-        : ctx.deliveryStack.lifecycle;
-      const channel = ctx.channelConnections && ctx.channelStatuses
+        : boundDeliveryStack.lifecycle;
+      const channel = boundChannelConnections && boundChannelStatuses
         ? Object.freeze({
-            statuses: ctx.channelStatuses,
-            suspendConfigured: ctx.channelConnections.suspendConfigured,
-            disconnectConfigured: ctx.channelConnections.disconnectConfigured,
-            resumeConfigured: ctx.channelConnections.resumeConfigured,
-            connectConfigured: ctx.channelConnections.connectConfigured,
+            statuses: boundChannelStatuses,
+            suspendConfigured: boundChannelConnections.suspendConfigured,
+            disconnectConfigured: boundChannelConnections.disconnectConfigured,
+            resumeConfigured: boundChannelConnections.resumeConfigured,
+            connectConfigured: boundChannelConnections.connectConfigured,
           })
         : EMPTY_REMOVAL_CHANNEL;
-      const plannedChannel = ctx.channelConnections
+      const plannedChannel = boundChannelConnections
         ? Object.freeze({
             kind: "available" as const,
-            connections: ctx.channelConnections,
+            connections: boundChannelConnections,
           })
         : ABSENT_PLANNED_DUTY_CHANNEL;
-      const plannedDelivery = ctx.deliveryStack
+      const plannedDelivery = boundDeliveryStack
         ? Object.freeze({
             kind: "available" as const,
-            stack: ctx.deliveryStack,
+            stack: boundDeliveryStack,
           })
         : ABSENT_PLANNED_DUTY_DELIVERY;
-      const plannedJobOwner = ctx.executorJobOwner
+      const plannedJobOwner = boundExecutorJobOwner
         ? Object.freeze({
             kind: "available" as const,
-            owner: ctx.executorJobOwner,
+            owner: boundExecutorJobOwner,
           })
         : ABSENT_PLANNED_DUTY_JOB_OWNER;
       const captureExternal = async (
@@ -1401,10 +1459,10 @@ async function runServerProcess(
       const plannedDutyMigrationLifecycle =
         definePlannedDutyMigrationLifecycleContribution({
           kind: "anchor",
-          checkpoint: ctx.authorityCheckpointOwner
+          checkpoint: authorityCheckpointOwner
             ? {
                 kind: "available",
-                owner: ctx.authorityCheckpointOwner,
+                owner: authorityCheckpointOwner,
               }
             : {
                 kind: "unavailable",
@@ -1412,8 +1470,8 @@ async function runServerProcess(
               },
           transfer: {
             stopAccepting: async () => {
-              plannedInbound.refuseNewMessages();
-              await plannedInbound.drainAcceptedMessages();
+              inbound.refuseNewMessages();
+              await inbound.drainAcceptedMessages();
               if (plannedChannel.kind === "available") {
                 await plannedChannel.connections.disconnectConfigured();
               }
@@ -1446,7 +1504,7 @@ async function runServerProcess(
               }
               conversationProtocol.startRecoveryLoop();
               schedulerApplication.resumeAdmission();
-              plannedInbound.resumeNewMessages();
+              inbound.resumeNewMessages();
               if (plannedChannel.kind === "available") {
                 await plannedChannel.connections.connectConfigured();
               }
@@ -1652,17 +1710,17 @@ async function runServerProcess(
       }
     }
     if (!preparedMesh && !startupLifecycle) {
-      await ctx.deliveryStack?.lifecycle.resume();
+      await boundDeliveryStack?.lifecycle.resume();
       schedulerApplication.resumeAdmission();
-      ctx.executorJobOwner?.resumeAccepting();
-      ctx.inboundRouter?.resumeNewMessages();
-      await ctx.channelConnections?.connectConfigured();
+      boundExecutorJobOwner?.resumeAccepting();
+      boundInboundRouter?.resumeNewMessages();
+      await boundChannelConnections?.connectConfigured();
     }
   }
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
-  const advancementRecovery = ctx.advancementRecovery;
+  const advancementRecovery = boundAdvancementRecovery;
 
   const recoverAdvancementAcceptedWork = async (): Promise<void> => {
     if (!advancementRecovery) return;
@@ -1727,13 +1785,13 @@ async function runServerProcess(
     operationId: string,
   ) {
     const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
-    if (localOwners.has(owner) && ctx.localConversationOwner) {
-      return ctx.localConversationOwner.hostStopAcceptedWorkItems(
+    if (localOwners.has(owner) && boundLocalConversationOwner) {
+      return boundLocalConversationOwner.hostStopAcceptedWorkItems(
         operationId,
         owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
       );
     }
-    const conversations = (ctx.conversations?.list() ?? [])
+    const conversations = (boundConversations?.list() ?? [])
       .map((item) => ({
         id: item.conversationId,
         revision: protocolDigest("HostStopConversation", 1, {
@@ -1743,11 +1801,11 @@ async function runServerProcess(
       }));
     if (owner === "conversation") return conversations;
     if (owner === "remote") {
-      const relay = (await ctx.jobRelayObligations?.listOpen() ?? []).map((opening) => ({
+      const relay = (await boundJobRelayObligations?.listOpen() ?? []).map((opening) => ({
         id: `relay:${opening.assignmentId}`,
         revision: opening.sourceRevision,
       }));
-      const local = (await ctx.executorJobOwner?.acceptedWorkItems() ?? []).map((item) => ({
+      const local = (await boundExecutorJobOwner?.acceptedWorkItems() ?? []).map((item) => ({
         id: `local:${item.id}`,
         revision: item.revision,
       }));
@@ -1755,7 +1813,7 @@ async function runServerProcess(
         left.id.localeCompare(right.id, "en-US"));
     }
     if (owner === "channel") {
-      return (ctx.channelStatuses?.() ?? [])
+      return (boundChannelStatuses?.() ?? [])
         .filter((status) => status.state !== "disconnected")
         .map((status) => ({
           id: status.channelId,
@@ -1766,7 +1824,7 @@ async function runServerProcess(
       return await schedulerApplication.captureAcceptedWork();
     }
     if (owner === "delivery") {
-      return ctx.deliveryStack?.lifecycle.capture() ?? [];
+      return boundDeliveryStack?.lifecycle.capture() ?? [];
     }
     return [];
   }
@@ -1778,9 +1836,9 @@ async function runServerProcess(
   ) => {
     if (
       ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
-      ctx.localConversationOwner
+      boundLocalConversationOwner
     ) {
-      await ctx.localConversationOwner.assertHostStopAcceptedWorkSettled(
+      await boundLocalConversationOwner.assertHostStopAcceptedWorkSettled(
         operationId,
         owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
         strategy,
@@ -1793,17 +1851,17 @@ async function runServerProcess(
       return;
     }
     const current = owner === "delivery"
-      ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
+      ? await boundDeliveryStack?.lifecycle.read(operationId) ?? []
       : await captureStopAcceptedWork(owner, operationId);
     assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
-      if ((ctx.conversations?.list() ?? []).some((item) => item.busy)) {
+      if ((boundConversations?.list() ?? []).some((item) => item.busy)) {
         throw new Error("Conversation accepted work is still active");
       }
       return;
     }
     if (["intent", "final", "assignment", "lease", "permit"].includes(owner)) {
-      const closure = await ctx.conversationProtocol?.pendingClosureWork();
+      const closure = await boundConversationProtocol?.pendingClosureWork();
       const remaining = owner === "final"
         ? closure?.pendingFinals ?? 0
         : owner === "assignment"
@@ -1824,7 +1882,7 @@ async function runServerProcess(
       return;
     }
     if (owner === "channel") {
-      if ((ctx.channelStatuses?.() ?? []).some((status) => status.state !== "disconnected")) {
+      if ((boundChannelStatuses?.() ?? []).some((status) => status.state !== "disconnected")) {
         throw new Error("Channel accepted work is not settled");
       }
       return;
@@ -1853,16 +1911,16 @@ async function runServerProcess(
       readonly frozen: readonly HostStopAcceptedWorkItem[];
     }) => {
       const current = owner === "delivery"
-        ? await ctx.deliveryStack?.lifecycle.read(input.operationId) ?? []
+        ? await boundDeliveryStack?.lifecycle.read(input.operationId) ?? []
         : await captureStopAcceptedWork(owner, input.operationId);
       if (owner !== "delivery") {
         assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
       }
       if (
         ["conversation", "intent", "final", "assignment", "lease", "permit"].includes(owner) &&
-        ctx.localConversationOwner
+        boundLocalConversationOwner
       ) {
-        await ctx.localConversationOwner.settleHostStopAcceptedWork(
+        await boundLocalConversationOwner.settleHostStopAcceptedWork(
           input.operationId,
           input.strategy,
           input.timeoutMs,
@@ -1885,42 +1943,42 @@ async function runServerProcess(
   const acceptedWork: HostStopAcceptedWorkPorts = {
     conversation: stopPort("conversation", async ({ strategy, timeoutMs }) => {
       if (strategy === "cancel") {
-        await ctx.conversations?.abortAllAndWait(
+        await boundConversations?.abortAllAndWait(
           { kind: "external", origin: "server-shutdown" },
           timeoutMs,
         );
       }
-      await ctx.inboundRouter?.drainAcceptedMessages();
+      await boundInboundRouter?.drainAcceptedMessages();
     }),
     intent: stopPort("intent", async () => {
-      await ctx.executorJobOwner?.drain();
+      await boundExecutorJobOwner?.drain();
     }),
     final: stopPort("final", async () => {
-      await ctx.executorJobOwner?.drain();
+      await boundExecutorJobOwner?.drain();
     }),
     assignment: stopPort("assignment", async () => {
-      await ctx.executorJobOwner?.drain();
+      await boundExecutorJobOwner?.drain();
     }),
     remote: stopPort("remote", async () => {
-      await ctx.inboundRouter?.drainAcceptedMessages();
-      await ctx.executorJobOwner?.drain();
+      await boundInboundRouter?.drainAcceptedMessages();
+      await boundExecutorJobOwner?.drain();
     }),
     channel: stopPort("channel", async () => {
-      await ctx.channelConnections?.disconnectConfigured();
+      await boundChannelConnections?.disconnectConfigured();
     }),
     scheduler: stopPort("scheduler", async () => {
       await settleScheduleForTransfer();
-      await ctx.executorJobOwner?.drain();
+      await boundExecutorJobOwner?.drain();
     }),
     delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) => {
-      await ctx.deliveryStack?.lifecycle.seal(operationId);
-      await ctx.deliveryStack?.lifecycle.settle({ operationId, strategy, timeoutMs });
+      await boundDeliveryStack?.lifecycle.seal(operationId);
+      await boundDeliveryStack?.lifecycle.settle({ operationId, strategy, timeoutMs });
     }),
     lease: stopPort("lease", async () => {
-      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+      await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     }),
     permit: stopPort("permit", async () => {
-      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+      await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     }),
   };
   const isLifecycleHostStopped = async (candidateHost: StopHostGeneration): Promise<boolean> => {
@@ -1969,7 +2027,7 @@ async function runServerProcess(
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     onAcceptedWorkFrozen: async (snapshot) => {
       const sources = hostStopDeliveryLifecycleSources(snapshot);
-      ctx.localConversationOwner?.restoreHostStopAcceptedWork(
+      boundLocalConversationOwner?.restoreHostStopAcceptedWork(
         snapshot.operationId,
         Object.entries(snapshot.owners).flatMap(([owner, items]) =>
           items.map((item) => ({
@@ -1977,7 +2035,7 @@ async function runServerProcess(
             ...item,
           }))),
       );
-      await ctx.deliveryStack?.lifecycle.install({
+      await boundDeliveryStack?.lifecycle.install({
         operationId: snapshot.operationId,
         sources,
         deliveries: snapshot.owners.delivery,
@@ -1987,25 +2045,25 @@ async function runServerProcess(
     runtime: {
       closeAdmission: async (operationId) => {
         managedHostStopping = true;
-        ctx.inboundRouter?.refuseNewMessages();
-        ctx.executorJobOwner?.pauseAccepting();
+        boundInboundRouter?.refuseNewMessages();
+        boundExecutorJobOwner?.pauseAccepting();
         schedulerApplication.closeAdmission();
-        ctx.deliveryStack?.lifecycle.close();
+        boundDeliveryStack?.lifecycle.close();
         await Promise.all([
-          ctx.localConversationOwner?.closeHostStopAdmission(operationId),
-          ctx.channelConnections?.suspendConfigured(),
+          boundLocalConversationOwner?.closeHostStopAdmission(operationId),
+          boundChannelConnections?.suspendConfigured(),
         ]);
       },
       settleImmediate: async () => {
-        await ctx.inboundRouter?.drainAcceptedMessages();
-        await ctx.executorJobOwner?.drain();
+        await boundInboundRouter?.drainAcceptedMessages();
+        await boundExecutorJobOwner?.drain();
       },
       drainAcceptedWork: async () => {
-        await ctx.inboundRouter?.drainAcceptedMessages();
-        await ctx.executorJobOwner?.drain();
+        await boundInboundRouter?.drainAcceptedMessages();
+        await boundExecutorJobOwner?.drain();
       },
       cancelAcceptedWork: async (timeoutMs) => {
-        await ctx.conversations?.abortAllAndWait(
+        await boundConversations?.abortAllAndWait(
           { kind: "external", origin: "server-shutdown" },
           timeoutMs,
         );
@@ -2013,7 +2071,7 @@ async function runServerProcess(
       flushDurableState: async () => {
         const [checkpoint, localOwnerDigest] = await Promise.all([
           lifecycleAuthorityLog.checkpoint(),
-          ctx.localConversationOwner?.checkpointAcceptedWork(),
+          boundLocalConversationOwner?.checkpointAcceptedWork(),
         ]);
         return [{
           kind: "accepted-work",
@@ -2024,7 +2082,7 @@ async function runServerProcess(
         }];
       },
       settlePhysicalSteps: async () => {
-        await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+        await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
       },
     },
     isHostStopped: isLifecycleHostStopped,
@@ -2037,9 +2095,9 @@ async function runServerProcess(
     if (!terminal) {
       throw new Error("Durable host-stop recovery did not prove the old host terminal");
     }
-    await ctx.localConversationOwner?.releaseHostStopAdmission(operationId);
-    await ctx.deliveryStack?.lifecycle.release(operationId);
-    await ctx.deliveryStack?.lifecycle.resume();
+    await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
+    await boundDeliveryStack?.lifecycle.release(operationId);
+    await boundDeliveryStack?.lifecycle.resume();
     if (!startupLifecycleFrozenRecoveryStarted) {
       await recoverStartupLifecycleAcceptedWork(
         startupLifecycle?.delivery.sources ?? [],
@@ -2047,13 +2105,12 @@ async function runServerProcess(
     }
     await recoverAdvancementAcceptedWork();
     schedulerApplication.resumeAdmission();
-    ctx.executorJobOwner?.resumeAccepting();
-    ctx.meshRuntime?.resumeAcceptingAfterLifecycle();
-    ctx.inboundRouter?.resumeNewMessages();
-    await ctx.channelConnections?.resumeConfigured();
-    ctx.localConversationOwner?.resumeRecoveryAfterLifecycle();
+    boundExecutorJobOwner?.resumeAccepting();
+    meshRuntime?.resumeAcceptingAfterLifecycle();
+    boundInboundRouter?.resumeNewMessages();
+    await boundChannelConnections?.resumeConfigured();
+    boundLocalConversationOwner?.resumeRecoveryAfterLifecycle();
     startupLifecycle = undefined;
-    delete ctx.startupLifecycle;
     managedHostStopping = false;
   }
   async function cleanupLocalDevice() {
@@ -2092,10 +2149,10 @@ async function runServerProcess(
     ? bootstrap.mesh.anchorIssuerKey ?? bootstrap.mesh.deviceKey
     : undefined;
   const closeAnchorUninstallAdmission = async () => {
-    ctx.inboundRouter?.refuseNewMessages();
-    await ctx.inboundRouter?.drainAcceptedMessages();
-    await ctx.channelConnections?.disconnectConfigured();
-    await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+    boundInboundRouter?.refuseNewMessages();
+    await boundInboundRouter?.drainAcceptedMessages();
+    await boundChannelConnections?.disconnectConfigured();
+    await boundDeliveryStack?.quiesceForAuthorityTransfer();
     await settleScheduleForTransfer();
   };
   const currentRemovalAcceptedWork = {
@@ -2103,18 +2160,18 @@ async function runServerProcess(
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     closeAdmission: async (operationId: string) => {
       managedHostStopping = true;
-      ctx.inboundRouter?.refuseNewMessages();
-      ctx.executorJobOwner?.pauseAccepting();
+      boundInboundRouter?.refuseNewMessages();
+      boundExecutorJobOwner?.pauseAccepting();
       schedulerApplication.closeAdmission();
-      ctx.deliveryStack?.lifecycle.close();
+      boundDeliveryStack?.lifecycle.close();
       await Promise.all([
-        ctx.localConversationOwner?.closeHostStopAdmission(operationId),
-        ctx.channelConnections?.suspendConfigured(),
+        boundLocalConversationOwner?.closeHostStopAdmission(operationId),
+        boundChannelConnections?.suspendConfigured(),
       ]);
     },
     onFrozen: async (snapshot: HostStopAcceptedWorkSnapshot) => {
       const sources = hostStopDeliveryLifecycleSources(snapshot);
-      await ctx.deliveryStack?.lifecycle.install({
+      await boundDeliveryStack?.lifecycle.install({
         operationId: snapshot.operationId,
         sources,
         deliveries: snapshot.owners.delivery,
@@ -2124,7 +2181,7 @@ async function runServerProcess(
     flushDurableState: async (): Promise<readonly DeviceLifecycleEvidenceRef[]> => {
       const [checkpoint, localOwnerDigest] = await Promise.all([
         lifecycleAuthorityLog.checkpoint(),
-        ctx.localConversationOwner?.checkpointAcceptedWork(),
+        boundLocalConversationOwner?.checkpointAcceptedWork(),
       ]);
       return [{
         kind: "accepted-work",
@@ -2135,11 +2192,11 @@ async function runServerProcess(
       }];
     },
     settlePhysicalSteps: async () => {
-      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+      await boundAuthorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     },
   };
-  const currentRemovalJournal = ctx.meshRuntime && uninstallIssuerKey
-    ? new DeviceLifecycleJournal(lifecycleAuthorityLog, ctx.authorityRuntime!.verifier)
+  const currentRemovalJournal = meshRuntime && uninstallIssuerKey
+    ? new DeviceLifecycleJournal(lifecycleAuthorityLog, boundAuthorityRuntime!.verifier)
     : undefined;
   const readCurrentRemovalAuthority = currentRemovalJournal && uninstallIssuerKey
     ? async () => {
@@ -2153,7 +2210,7 @@ async function runServerProcess(
           currentDeviceName: trust.members.find((member) =>
             member.device.deviceId === bootstrap.mesh.deviceKey.deviceId)
             ?.device.displayName,
-          anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+          anchorEpoch: boundAuthorityRuntime!.anchorEpoch,
           trustHeadDigest: trust.chainHead.eventDigest,
           executorRemovalInProgress: (await currentRemovalJournal.active())
             .some((operation) => operation.identity.kind === "executor-removal"),
@@ -2183,7 +2240,7 @@ async function runServerProcess(
         commitRetirement: ({ identity, acceptedWork }) =>
           commitCurrentDeviceRetirementTransaction({
             log: lifecycleAuthorityLog,
-            verifier: ctx.authorityRuntime!.verifier,
+            verifier: boundAuthorityRuntime!.verifier,
             identity,
             acceptedWork,
           }),
@@ -2200,12 +2257,12 @@ async function runServerProcess(
         journal: currentRemovalJournal,
         signAbort: (input) => createSignedDeviceLifecycleAbort(input, uninstallIssuerKey),
         releaseAdmission: async (operationId) => {
-          await ctx.deliveryStack?.lifecycle.release(operationId);
-          await ctx.deliveryStack?.lifecycle.resume();
-          ctx.conversationProtocol?.startRecoveryLoop();
+          await boundDeliveryStack?.lifecycle.release(operationId);
+          await boundDeliveryStack?.lifecycle.resume();
+          boundConversationProtocol?.startRecoveryLoop();
           schedulerApplication.resumeAdmission();
-          ctx.inboundRouter?.resumeNewMessages();
-          await ctx.channelConnections?.connectConfigured();
+          boundInboundRouter?.resumeNewMessages();
+          await boundChannelConnections?.connectConfigured();
         },
       })
     : undefined;
@@ -2222,7 +2279,7 @@ async function runServerProcess(
         return Object.freeze({
           authority: Object.freeze({
             homeId: trust.homeId,
-            anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+            anchorEpoch: boundAuthorityRuntime!.anchorEpoch,
             trustHeadDigest: trust.chainHead.eventDigest,
           }),
           context: Object.freeze({
@@ -2238,9 +2295,9 @@ async function runServerProcess(
         DeviceLifecycleEvidenceRef
       >({
         backup: new BackupRecoveryCurrentRemovalApplicationService({
-          hasCheckpointOwner: () => ctx.authorityCheckpointOwner !== undefined,
-          readStatus: () => ctx.authorityCheckpointOwner
-            ? ctx.authorityCheckpointOwner.status()
+          hasCheckpointOwner: () => authorityCheckpointOwner !== undefined,
+          readStatus: () => authorityCheckpointOwner
+            ? authorityCheckpointOwner.status()
             : Promise.resolve({
                 state: "not-configured" as const,
                 fullBackupReady: false,
@@ -2275,7 +2332,7 @@ async function runServerProcess(
             return current.context;
           },
           forceCheckpoint: async (requestId: string) => {
-            const checkpoint = await ctx.authorityCheckpointOwner!.force(requestId);
+            const checkpoint = await authorityCheckpointOwner!.force(requestId);
             return Object.freeze({
               checkpoint,
               checkpointId: checkpoint.envelope.checkpointId,
@@ -2284,7 +2341,7 @@ async function runServerProcess(
             });
           },
           verifyCheckpoint: async ({ checkpoint, recoveryPackage }) => {
-            const verification = await ctx.authorityCheckpointOwner!.verify(
+            const verification = await authorityCheckpointOwner!.verify(
               checkpoint.envelope.checkpointId,
               recoveryPackage,
             );
@@ -2379,7 +2436,7 @@ async function runServerProcess(
         },
       })
     : undefined;
-  const currentRemovalMigrationApplication = currentRemovalMigrationLifecycle && ctx.meshRuntime
+  const currentRemovalMigrationApplication = currentRemovalMigrationLifecycle && meshRuntime
     ? new DeviceAdministrationCurrentRemovalMigrationApplicationService<
         DeviceLifecycleEvidenceRef
       >({
@@ -2418,15 +2475,15 @@ async function runServerProcess(
           flushDurableState: currentRemovalAcceptedWork.flushDurableState,
           settlePhysicalSteps: currentRemovalAcceptedWork.settlePhysicalSteps,
           commitTransfer: async (input) => {
-            await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
-            await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+            await meshRuntime!.preparePlannedAnchorTransfer(input);
+            await meshRuntime!.commitPlannedAnchorTransfer(input);
           },
           verifyTransfer: async ({ transferId, targetDeviceId }) => {
             const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
             if (
               !trust ||
               trust.issuer.deviceId !== targetDeviceId ||
-              ctx.meshRuntime!.currentAnchorDeviceId() !== targetDeviceId
+              meshRuntime!.currentAnchorDeviceId() !== targetDeviceId
             ) {
               throw new Error("The new duty device installation is not current");
             }
@@ -2440,7 +2497,7 @@ async function runServerProcess(
             };
           },
           retireLocalDevice: async ({ operationId, targetDeviceId }) => {
-            await ctx.meshRuntime!.retireLocalDeviceAfterMigration({ operationId });
+            await meshRuntime!.retireLocalDeviceAfterMigration({ operationId });
             return {
               kind: "cleanup",
               digest: protocolDigest("MigratedAnchorCleanup", 1, {
@@ -2455,32 +2512,32 @@ async function runServerProcess(
   await currentRemovalMigrationApplication?.resumeActive();
   await currentRemovalRecoveryApplication?.resumeActive();
   anchorInternalStopLifecycle.assertServerStartAllowed();
-  const deliveryProductApi = ctx.deliveryStack
+  const deliveryProductApi = boundDeliveryStack
     ? createDeliveryResolutionProductApiContribution(
-        ctx.deliveryStack.resolutionApplication,
+        boundDeliveryStack.resolutionApplication,
       )
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
     compact: createAnchorConversationCompactPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
     }),
     usage: createAnchorConversationUsageProjectionPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
     }),
     security: createAnchorConversationSecurityProjectionPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
     }),
     taskLists: createAnchorConversationTaskListPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
       taskLists: builtinExtraTools.taskListService,
     }),
     agentTurns: createConversationAgentTurnAdmissionPort({
-      manager: ctx.conversations!,
+      manager: boundConversations!,
     }),
     agentTurnIdentity: {
       exists: (conversationId) =>
@@ -2495,10 +2552,10 @@ async function runServerProcess(
       adoptionReview: schedulerGenerationOwner.postAdoptionReview,
     }),
     clear: createAnchorConversationClearCommitPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       directory: conversationDirectory,
       publishFact: (fact) => {
-        ctx.sessionBroadcast(
+        boundSessionBroadcast(
           fact.conversationId,
           SESSION_NOTIFICATIONS.changed,
           { conversationId: fact.conversationId, change: "cleared" },
@@ -2506,7 +2563,7 @@ async function runServerProcess(
       },
     }),
     delete: createAnchorConversationDeleteCommitPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       storage: {
         exists: (conversationId) =>
           conversationDirectory.exists(conversationId),
@@ -2524,7 +2581,7 @@ async function runServerProcess(
           ),
       },
       publishFact: (fact) => {
-        ctx.sessionBroadcast(
+        boundSessionBroadcast(
           fact.conversationId,
           SESSION_NOTIFICATIONS.changed,
           { conversationId: fact.conversationId, change: "deleted" },
@@ -2532,7 +2589,7 @@ async function runServerProcess(
       },
     }),
     runControl: createAnchorConversationRunControlPort({
-      conversations: ctx.conversations!,
+      conversations: boundConversations!,
       advancement: {
         settle: ({ conversationId, ingressId }) =>
           advancementReviews
@@ -2545,14 +2602,14 @@ async function runServerProcess(
     }),
     runtime: {
       read: (conversationId) => {
-        const active = ctx.conversations?.getSession(conversationId);
-        if (!ctx.conversations) return undefined;
+        const active = boundConversations?.getSession(conversationId);
+        if (!boundConversations) return undefined;
         return {
           ...(active ? { lastActiveAt: active.lastActiveAt } : {}),
           active: active !== undefined,
           busy: active?.busy ?? false,
-          observerCount: ctx.conversations.getObserverCount(conversationId),
-          pendingCount: ctx.conversations.pendingCount(conversationId),
+          observerCount: boundConversations.getObserverCount(conversationId),
+          pendingCount: boundConversations.pendingCount(conversationId),
         };
       },
     },
@@ -2571,9 +2628,9 @@ async function runServerProcess(
           },
           maintenance: {
             runNew: (conversationId, operation) =>
-              ctx.conversations!.runMaintenance(conversationId, operation),
+              boundConversations!.runMaintenance(conversationId, operation),
             runExisting: (conversationId, operation) =>
-              ctx.conversations!.runMaintenanceExisting(
+              boundConversations!.runMaintenanceExisting(
                 conversationId,
                 () => conversationDirectory.exists(conversationId),
                 operation,
@@ -2592,14 +2649,14 @@ async function runServerProcess(
               conversationId,
               outstandingProxyMessageId,
             }) => {
-              const cancelledPending = await ctx.conversations!.cancelPendingBySource(
+              const cancelledPending = await boundConversations!.cancelPendingBySource(
                 conversationId,
                 "advancement",
               );
               const abortedInFlight =
-                ctx.conversations!.getBusySource(conversationId) ===
+                boundConversations!.getBusySource(conversationId) ===
                   "advancement" &&
-                ctx.conversations!.abortInFlight(conversationId, {
+                boundConversations!.abortInFlight(conversationId, {
                   kind: "user-cancel",
                   source: "rpc",
                   pressedAt: Date.now(),
@@ -2643,36 +2700,36 @@ async function runServerProcess(
         });
   const advancementProductApi =
     createAdvancementProductApiContribution(advancementApplication);
-  const deviceAdministrationProductApi = ctx.meshRuntime
+  const deviceAdministrationProductApi = meshRuntime
     ? createDeviceAdministrationProductApiContribution(
         new DeviceAdministrationApplicationService({
           relationships: {
-            list: () => ctx.meshRuntime!.removableDevices(),
+            list: () => meshRuntime!.removableDevices(),
           },
           removalState: {
             read: (targetName) =>
-              ctx.meshRuntime!.deviceRemovalStatus({ targetName }),
+              meshRuntime!.deviceRemovalStatus({ targetName }),
           },
           dutyMigrationTargets: {
-            list: () => ctx.meshRuntime!.plannedAnchorTargets(),
+            list: () => meshRuntime!.plannedAnchorTargets(),
           },
-          dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission,
+          dutyMigrationAdmission: meshRuntime!.dutyMigrationAdmission,
           dutyMigration: {
             prepare: async (input) => {
-              await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
+              await meshRuntime!.preparePlannedAnchorTransfer(input);
             },
             commit: async (input) => {
-              await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+              await meshRuntime!.commitPlannedAnchorTransfer(input);
             },
             cancel: async (input) => {
-              await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
+              await meshRuntime!.abortPlannedAnchorTransfer(input);
             },
           },
           ...(currentDeviceRemoval && currentRemovalAdmission
             ? {
                 currentRemovalAdmission,
                 currentRemovalMigrationTargets: {
-                  list: () => ctx.meshRuntime!.plannedAnchorTargets(),
+                  list: () => meshRuntime!.plannedAnchorTargets(),
                 },
                 ...(currentRemovalMigrationApplication
                   ? { currentRemovalMigration: currentRemovalMigrationApplication }
@@ -2684,21 +2741,21 @@ async function runServerProcess(
               }
             : {}),
           removalContext: {
-            read: () => ctx.meshRuntime!.deviceRemovalCommandContext(),
+            read: () => meshRuntime!.deviceRemovalCommandContext(),
           },
           removalAuthority: {
             acceptForTarget: (input) =>
-              ctx.meshRuntime!.acceptDeviceRemovalForTarget(input),
+              meshRuntime!.acceptDeviceRemovalForTarget(input),
             operation: (operationId) =>
-              ctx.meshRuntime!.deviceRemovalOperation(operationId),
+              meshRuntime!.deviceRemovalOperation(operationId),
             operationForTarget: (targetDeviceId) =>
-              ctx.meshRuntime!.deviceRemovalOperationForTarget(targetDeviceId),
+              meshRuntime!.deviceRemovalOperationForTarget(targetDeviceId),
             abort: (operationId) =>
-              ctx.meshRuntime!.abortDeviceRemoval(operationId),
+              meshRuntime!.abortDeviceRemoval(operationId),
             commitLost: (operationId) =>
-              ctx.meshRuntime!.commitLostDeviceRemoval(operationId),
+              meshRuntime!.commitLostDeviceRemoval(operationId),
           },
-          removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects,
+          removalEffects: meshRuntime!.deviceRemovalTargetEffects,
         }),
       )
     : undefined;
@@ -2762,23 +2819,23 @@ async function runServerProcess(
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
     ],
   );
-  ctx.channelConversationProduct?.bind(productApi);
+  boundChannelConversationProduct?.bind(productApi);
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
-    ...(ctx.meshRuntime && ctx.authorityRuntime
+    ...(meshRuntime && boundAuthorityRuntime
       ? {
           conversationRpc: new CurrentAnchorFirstPartyRpcRouter({
-            deviceId: ctx.authorityRuntime.deviceId,
-            currentAnchorDeviceId: () => ctx.meshRuntime!.currentAnchorDeviceId(),
-            currentOwnerReady: () => ctx.meshRuntime!.plannedCurrentOwnerReady(),
-            remoteFor: (deviceId) => ctx.meshRuntime!.firstPartyConversationFor(deviceId),
+            deviceId: boundAuthorityRuntime.deviceId,
+            currentAnchorDeviceId: () => meshRuntime!.currentAnchorDeviceId(),
+            currentOwnerReady: () => meshRuntime!.plannedCurrentOwnerReady(),
+            remoteFor: (deviceId) => meshRuntime!.firstPartyConversationFor(deviceId),
           }),
         }
       : {}),
-    conversation: createServerConversationBinding(ctx.conversations!),
+    conversation: createServerConversationBinding(boundConversations!),
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
@@ -2789,8 +2846,8 @@ async function runServerProcess(
       { status: "running", phase: managedHostStopping ? "stopping" : "running" },
       { readiness: managedHostStopping ? "stopping" : "ready" },
     ),
-    recoveryBackupStatus: async () => projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner
-      ? await ctx.authorityCheckpointOwner.status()
+    recoveryBackupStatus: async () => projectBackupRecoveryPublicStatus(authorityCheckpointOwner
+      ? await authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => [...mcpRuntime.status.snapshot()],
@@ -2798,28 +2855,29 @@ async function runServerProcess(
     // 经 control 治理边界准入计量(用户同步操作,interactive 类)。
     // 生产装配恒有 authorityRuntime(pre-server surface 已断言)——缺失即 fail-closed,不静默绕过治理
     llmComplete: (() => {
-      const governor = ctx.authorityRuntime?.resourceGovernor;
-      if (!governor) {
+      const authority = boundAuthorityRuntime;
+      if (!authority) {
         throw new Error("llm.complete requires the durable authority runtime");
       }
       const raw: GovernedTextCall = (prompt, role, opts) =>
         ephemeralRuntime.callText(prompt, role, opts);
-      return governControlTextCall(
+      const call: GovernedTextCall = (prompt, role, opts) => governControlTextCall(
         {
-          governor,
+          governor: authority.resourceGovernor,
           origin: { admissionClass: "interactive", entry: "conversation-input" },
           workPrefix: "llm-complete",
         },
         raw,
-      );
+      )(prompt, role, opts);
+      return call;
     })(),
-    channelStatuses: ctx.channelStatuses,
+    channelStatuses: boundChannelStatuses,
     channelHttpRoutes,
     confirmation: createServerConfirmationBinding(confirmationHub),
     serverInfoRuntime: {
       openFirstPartyFinality: async (input) => {
-        const factory = ctx.firstPartyFinality;
-        const authority = ctx.authorityRuntime;
+        const factory = firstPartyFinality;
+        const authority = boundAuthorityRuntime;
         if (!factory || !authority) {
           throw new Error("First-party finality is unavailable");
         }
@@ -2867,7 +2925,7 @@ async function runServerProcess(
         };
       },
       deliveryStats: () => {
-        if (!ctx.deliveryStack) {
+        if (!boundDeliveryStack) {
           return {
             pending: 0,
             queued: 0,
@@ -2878,30 +2936,30 @@ async function runServerProcess(
             uncertain: 0,
           };
         }
-        return ctx.deliveryStack.stats();
+        return boundDeliveryStack.stats();
       },
       deliveryStatus: (afterByItem) =>
-        ctx.deliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
+        boundDeliveryStack?.statusHistory(afterByItem) ?? Promise.resolve([]),
       conversationStatus: (after) =>
-        ctx.conversationProtocol?.statusHistory(after) ??
+        boundConversationProtocol?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
       jobStatus: (after) =>
-        ctx.jobStatus?.statusHistory(after) ??
+        boundJobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
       schedulerNotices: (afterRevision) =>
-        ctx.jobStatus?.schedulerHistory(afterRevision) ??
+        boundJobStatus?.schedulerHistory(afterRevision) ??
         Promise.resolve({ notices: [], nextRevision: afterRevision }),
     },
     conversationFinalHistory: async (conversationId, afterCommitRevision) =>
-      (await ctx.conversationProtocol?.finalHistory(
+      (await boundConversationProtocol?.finalHistory(
         conversationId,
         afterCommitRevision,
       ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
     lifecycleShutdown: stopCoordinator,
   });
-  if (ctx.meshRuntime) {
+  if (meshRuntime) {
     const firstPartyConversationMeshSurface =
-      ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({
+      meshRuntime.createFirstPartyConversationSurfaceLifecycle({
         dispatch: ({ method, params, connection }) =>
           serverRegistry.dispatchCanonical(method, params, {
             connection,
@@ -2914,7 +2972,7 @@ async function runServerProcess(
     );
   }
 
-  ctx.deliveryStack?.onStatus((notice) => {
+  boundDeliveryStack?.onStatus((notice) => {
     serverCtx.broadcastAll?.("delivery.status", notice);
   });
 
@@ -2925,8 +2983,8 @@ async function runServerProcess(
     processMode,
     zhixingHome,
   )) {
-    ctx.inboundRouter?.refuseNewMessages();
-    await reconcileCurrentManagedService("managed-preflight");
+    boundInboundRouter?.refuseNewMessages();
+    await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
     throw new Error("Managed host admission changed during startup");
   }
   runner = await runServer({
@@ -2945,7 +3003,7 @@ async function runServerProcess(
     beforeActivate: async (openingRunner) => {
       hostShellLifecycle.assertActivationOwnership({
         serverLog: !!serverLogLifecycle,
-        checkpointOwner: !!ctx.authorityCheckpointOwner,
+        checkpointOwner: !!authorityCheckpointOwner,
       });
       lifecycleContributions.acquire(
         "anchorInternalStop.close",
@@ -2978,11 +3036,13 @@ async function runServerProcess(
       sessionBroadcastLifecycle.install(sessionTransport);
 
       // Delivery/Scheduler 的既有 activation 是公开入口开放的必要前置。
-      ctx.deliveryStack?.activate();
+      boundDeliveryStack?.activate();
       if (!startupLifecycle) schedulerApplication.activate();
 
       // prepared runner 只提供内部 connection/cleanup 设施；activation gate 尚未释放。
       ctx.runner = openingRunner;
+      boundJobStatus?.onStatus((notice) => openingRunner.server.context.broadcastAll?.("job.status", notice));
+      boundJobStatus?.onSchedulerNotice((notice) => openingRunner.server.context.broadcastAll?.("scheduler.notice", notice));
       if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
         await schedulerApplication.resumeManualSurfaces();
       }
@@ -2994,12 +3054,13 @@ async function runServerProcess(
 
       // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
       // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
+      if (!startupLifecycle) delete ctx.startupLifecycle;
       await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
 
       lifecycleContributions.transferExactTo(
         registry,
         "post-server",
-        ctx.conversations ? ["confirmationBridge.dispose"] : [],
+        boundConversations ? ["confirmationBridge.dispose"] : [],
       );
 
       // pre-server units transfer their typed contributions in the established
@@ -3010,20 +3071,20 @@ async function runServerProcess(
       lifecycleContributions.transferExactTo(registry, "activation", [
         "anchorInternalStop.close",
         "sessionBroadcast.close",
-        ...(ctx.conversations ? ["execution.abortAllAndWait" as const] : []),
+        ...(boundConversations ? ["execution.abortAllAndWait" as const] : []),
         ...(
-          ctx.conversationProtocol && !startupLifecycle
+          boundConversationProtocol && !startupLifecycle
             ? ["conversationProtocol.stopRecovery" as const]
             : []
         ),
         ...(schedulerCleanup ? ["scheduler.stop" as const] : []),
-        ...(ctx.inboundRouter ? ["inboundRouter.refuseNew" as const] : []),
+        ...(boundInboundRouter ? ["inboundRouter.refuseNew" as const] : []),
         ...(
-          ctx.evidenceHandler
+          boundEvidenceHandler
             ? ["evidenceHandler.stopAccepting" as const]
             : []
         ),
-        ...(ctx.meshRuntime
+        ...(meshRuntime
           ? ["firstPartyConversationMeshSurface.close" as const]
           : []),
       ]);
@@ -3054,8 +3115,8 @@ async function runServerProcess(
         console.log(chalk.dim(`  HTTP:      http://${openingRunner.server.host}:${openingRunner.server.port}`));
         console.log(chalk.dim(`  WebSocket: ws://${openingRunner.server.host}:${openingRunner.server.port}/ws`));
         console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-        if (ctx.channelStatuses) {
-          const statuses = ctx.channelStatuses();
+        if (boundChannelStatuses) {
+          const statuses = boundChannelStatuses();
           const connected = statuses.filter((s) => s.state === "connected");
           console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
           for (const s of statuses) {
@@ -3088,7 +3149,7 @@ async function runServerProcess(
       const exit = shouldIdleExit({
         connectionCount: runner!.server.connections.size,
         channelStates:
-          ctx.channelStatuses?.().map((s) => s.state) ?? [],
+          boundChannelStatuses?.().map((s) => s.state) ?? [],
         hasUserPendingWork:
           schedulerApplication.readStatus().enabledUserTaskCount > 0,
       });

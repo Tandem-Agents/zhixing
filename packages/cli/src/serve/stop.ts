@@ -3,11 +3,14 @@
 import chalk from "chalk";
 import { readFile, stat, unlink } from "node:fs/promises";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { getZhixingHome } from "@zhixing/core/paths";
 import {
   createRpcClient,
   getDefaultReadyMarkerPath,
   getDefaultStatePath,
   getDefaultTokenPath,
+  getDefaultPidPath,
+  getDefaultPortPath,
   isProcessAlive,
   readLock,
   releaseLock,
@@ -20,6 +23,7 @@ import {
 } from "./managed-service.js";
 
 export interface StopOptions {
+  zhixingHome?: string;
   timeoutMs?: number;
   pollMs?: number;
   rpcTimeoutMs?: number;
@@ -76,10 +80,15 @@ interface RpcShutdownOptions {
 
 export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult> {
   const deps = opts.deps ?? {};
+  const zhixingHome = opts.zhixingHome ?? getZhixingHome();
+  const lockPaths = { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) };
+  const statePath = deps.statePath ?? getDefaultStatePath(zhixingHome);
+  const readyMarkerPath = deps.readyMarkerPath ?? getDefaultReadyMarkerPath(zhixingHome);
+  const tokenPath = getDefaultTokenPath(zhixingHome);
   const con = deps.console ?? console;
-  const readLockFn = deps.readLockFn ?? readLock;
+  const readLockFn = () => (deps.readLockFn ?? readLock)(lockPaths);
   const isAlive = deps.isProcessAliveFn ?? isProcessAlive;
-  const releaseLockFn = deps.releaseLockFn ?? releaseLock;
+  const releaseLockFn = () => (deps.releaseLockFn ?? releaseLock)(lockPaths);
   const verbose = opts.verbose ?? true;
   const lock = await readLockFn().catch(() => null);
   if (!lock) {
@@ -95,8 +104,8 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     await cleanupExitedInstance({
       releaseLockFn,
       readLockFn,
-      statePath: deps.statePath ?? getDefaultStatePath(),
-      readyMarkerPath: deps.readyMarkerPath ?? getDefaultReadyMarkerPath(),
+      statePath,
+      readyMarkerPath,
       expectedLock: lock,
     });
     return { status: "nothing-to-stop" };
@@ -107,7 +116,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     try {
       stopManagedExact = await (
         deps.prepareManagedExactStopFn ??
-        ((expectedLock) => prepareManagedExactStop(expectedLock, readLockFn))
+        ((expectedLock) => prepareManagedExactStop(expectedLock, readLockFn, zhixingHome))
       )(lock);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -121,7 +130,8 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
   const start = clock();
   if (verbose) con.log(chalk.dim("正在安全停止知行..."));
   try {
-    await (deps.rpcShutdownFn ?? defaultRpcShutdown)(
+    await (deps.rpcShutdownFn ?? ((lock, timeoutMs, options) =>
+      defaultRpcShutdown(lock, timeoutMs, tokenPath, options)))(
       lock,
       opts.rpcTimeoutMs ?? 15_000,
       { respectBlockers: opts.respectBlockers ?? false },
@@ -165,8 +175,8 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
   await cleanupExitedInstance({
     releaseLockFn,
     readLockFn,
-    statePath: deps.statePath ?? getDefaultStatePath(),
-    readyMarkerPath: deps.readyMarkerPath ?? getDefaultReadyMarkerPath(),
+    statePath,
+    readyMarkerPath,
     expectedLock: lock,
   });
   if (verbose) con.log(chalk.green(`知行已停止，用时 ${(tookMs / 1000).toFixed(1)}s`));
@@ -176,10 +186,11 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
 async function defaultRpcShutdown(
   lock: PidFileContents,
   timeoutMs: number,
+  tokenPath: string,
   opts: RpcShutdownOptions = { respectBlockers: false },
 ): Promise<void> {
   const host = lock.host ?? "127.0.0.1";
-  const token = (await readFile(getDefaultTokenPath(), "utf8")).trim();
+  const token = (await readFile(tokenPath, "utf8")).trim();
   if (!token) throw new Error("token file missing or empty");
   const client = createRpcClient({ url: `ws://${host}:${lock.port}/ws`, timeout: timeoutMs });
   await client.connect();
@@ -235,8 +246,9 @@ async function exactHostExited(input: WaitForExitArgs): Promise<boolean> {
 async function prepareManagedExactStop(
   expectedLock: PidFileContents,
   readLockFn: typeof readLock,
+  zhixingHome: string,
 ): Promise<() => Promise<void>> {
-  const current = await loadCurrentManagedServiceState("inspect");
+  const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
   if (!current.spec) throw new Error("托管服务定义不可用");
   const spec = current.spec;
   const adapter = createManagedServiceAdapter();
@@ -248,7 +260,7 @@ async function prepareManagedExactStop(
   const expectedDefinition = managedServiceDefinitionDigest(spec);
 
   return async () => {
-    const latest = await loadCurrentManagedServiceState("inspect");
+    const latest = await loadCurrentManagedServiceState("inspect", zhixingHome);
     if (
       !latest.spec ||
       latest.spec.serviceId !== spec.serviceId ||

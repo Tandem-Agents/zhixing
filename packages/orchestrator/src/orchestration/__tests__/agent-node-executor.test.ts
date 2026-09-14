@@ -31,9 +31,11 @@ describe("ChildAgentNodeExecutorV1", () => {
       return childResult({ status: "completed", finalAssistantText: "{\"ok\":true}" });
     };
     const authorizeToolExecution = () => [];
+    const agentIdentity = Object.freeze({ displayName: "ParentAgent" });
     const executor = createAgentNodeExecutorV1({
       ...createExecutorOptions(),
       authorizeToolExecution,
+      agentIdentity,
       runChildAgent,
     });
 
@@ -63,6 +65,7 @@ describe("ChildAgentNodeExecutorV1", () => {
         content: "{\"ok\":true}",
       },
     });
+    expect(captured?.agentIdentity).toBe(agentIdentity);
     expect(captured?.parentBus).toBe(context.bus);
     expect(captured?.parentLineage).toBe(context.lineage);
     expect(captured?.parentSignal).toBe(context.abortSignal);

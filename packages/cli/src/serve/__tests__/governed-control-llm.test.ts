@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import type {
   AuthorityCallContext,
   ImmediateRootResourceLease,
@@ -60,6 +63,39 @@ const origin = {
 } as const;
 
 describe("governControlTextCall", () => {
+  it("the production llm.complete binding selects the current governor for every call", async () => {
+    const source = ts.createSourceFile("command.ts",
+      await readFile(new URL("../command.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.Latest, true);
+    let initializer: ts.Expression | undefined;
+    const visit = (node: ts.Node): void => {
+      if (ts.isPropertyAssignment(node) && node.name.getText(source) === "llmComplete") {
+        initializer = node.initializer;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(initializer).toBeDefined();
+    const first = createGovernorProbe();
+    const second = createGovernorProbe();
+    const authority = { resourceGovernor: first.governor };
+    const emitted = ts.transpileModule(
+      "const call = " + initializer!.getText(source) + "; call;",
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText;
+    const call = runInNewContext(emitted, {
+      boundAuthorityRuntime: authority,
+      ephemeralRuntime: { callText: async (prompt: string) => prompt },
+      governControlTextCall,
+    });
+    await expect(call("first")).resolves.toBe("first");
+    authority.resourceGovernor = second.governor;
+    await expect(call("second", "light")).resolves.toBe("second");
+    for (const probe of [first, second]) {
+      expect(probe.events.map((event) => event.op)).toEqual(["acquireRoot", "settle", "release"]);
+    }
+  });
+
   it("admits, meters and settles one governed control call in order", async () => {
     const probe = createGovernorProbe();
     const governed = governControlTextCall(

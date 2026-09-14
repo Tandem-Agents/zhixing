@@ -3,6 +3,23 @@ import { describe, expect, it } from "vitest";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 
 describe("production startup server ownership", () => {
+  it("uses the same finite inbound lifecycle for no-channel removal and planned migration", async () => {
+    const source = await readSource("command.ts");
+    const mesh = source.slice(source.indexOf("if (preparedMesh) {"), source.indexOf("if (preparedMesh) {") + 18000);
+    const guard = mesh.slice(0, mesh.indexOf("const inbound ="));
+    expect(guard).not.toMatch(/!boundInboundRouter|!plannedInbound/u);
+    expect(guard).toContain("!conversationProtocol");
+    expect(mesh).toContain("? EMPTY_INBOUND_LIFECYCLE");
+    expect(mesh).toContain("inbound.refuseNewMessages()");
+    expect(mesh).toContain("await inbound.drainAcceptedMessages()");
+    expect(mesh).toContain("inbound.resumeNewMessages()");
+    expect(mesh).not.toContain("plannedInbound.");
+    const empty = source.slice(source.indexOf("const EMPTY_INBOUND_LIFECYCLE"), source.indexOf("const EMPTY_REMOVAL_JOB_OWNER"));
+    expect(empty).toContain("refuseNewMessages: () => undefined");
+    expect(empty).toContain("drainAcceptedMessages: async () => undefined");
+    expect(empty).toContain("resumeNewMessages: () => undefined");
+  });
+
   it("requires PID, old port, current port and the live handle to agree", () => {
     const owner = { ownsEndpoint: (port: number) => port === 3210 };
     const current = endpoint(41, 3210);
@@ -122,8 +139,8 @@ describe("production startup server ownership", () => {
     expect(source).toContain(
       "createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(\n              conversationApplication",
     );
-    expect(source).toContain("ctx.conversations!.runMaintenanceExisting(");
-    expect(source).toContain("ctx.conversations!.runMaintenance(conversationId, operation)");
+    expect(source).toContain("boundConversations!.runMaintenanceExisting(");
+    expect(source).toContain("boundConversations!.runMaintenance(conversationId, operation)");
     expect(source).toContain(
       '.ensureShell({ kind: "ensure-shell", conversationId })',
     );
@@ -170,7 +187,7 @@ describe("production startup server ownership", () => {
       source,
       "const assemblyUnits = createAssemblyUnits(channelCredentials)",
     );
-    expect(assemblyUnits).toBeGreaterThan(location(source, "assemblyContext = ctx;"));
+    expect(assemblyUnits).toBeGreaterThan(location(source, "const ctx: AssemblyContext = {"));
     expect(assemblyUnits).toBeLessThan(
       location(source, "assemblyUnits.slice(0, conversationAssemblyIndex + 1)"),
     );
@@ -209,10 +226,10 @@ describe("production startup server ownership", () => {
     expect(losslessComposition).toBeLessThan(jobOwnerRecovery);
     expect(jobOwnerRecovery).toBeLessThan(interactionRecovery);
     for (const finiteAbsence of [
-      "ctx.inboundRouter === undefined || ctx.inboundRouter === null",
-      "ctx.executorJobOwner === undefined",
-      "ctx.localConversationOwner === undefined",
-      "ctx.deliveryStack === undefined",
+      "boundInboundRouter === undefined || boundInboundRouter === null",
+      "boundExecutorJobOwner === undefined",
+      "boundLocalConversationOwner === undefined",
+      "boundDeliveryStack === undefined",
       ": EMPTY_REMOVAL_CHANNEL",
     ]) {
       expect(source).toContain(finiteAbsence);
@@ -247,7 +264,7 @@ describe("production startup server ownership", () => {
     const serverContext = location(source, "serverCtx = createServerContext({");
     const firstPartySurfaceOwner = location(
       source,
-      "ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
+      "meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
     );
     const firstPartySurfaceCleanup = location(
       source,
@@ -299,7 +316,7 @@ describe("production startup server ownership", () => {
       activation,
       "sessionBroadcastLifecycle.install(sessionTransport)",
     );
-    const delivery = location(activation, "ctx.deliveryStack?.activate()");
+    const delivery = location(activation, "boundDeliveryStack?.activate()");
     const scheduler = location(activation, "schedulerApplication.activate()");
     const foundationTransfer = location(
       activation,

@@ -15,12 +15,16 @@
 import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process";
 import { open, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
+import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
 import chalk from "chalk";
 import {
   readLock,
   isProcessAlive,
   getDefaultLogPath,
+  getDefaultPidPath,
+  getDefaultPortPath,
+  getDefaultServerLogPaths,
   getDefaultReadyMarkerPath,
   prepareServerLogForWrite,
   SERVER_LOG_ACTIVE_OPEN_FLAGS,
@@ -33,6 +37,8 @@ import {
 } from "./self-exec.js";
 
 export interface SpawnDaemonOptions {
+  /** 本次启动与其发现、日志和 child 共用的数据根。 */
+  zhixingHome?: string;
   /** 传给后台 child 的 CLI 参数；应含 "serve" 及其子选项。 */
   forwardedArgs: string[];
   /** 日志文件路径覆盖 */
@@ -88,7 +94,10 @@ export interface SpawnDaemonResult {
  */
 export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemonResult> {
   const deps = opts.deps ?? {};
-  let logPath = opts.logPath ?? getDefaultLogPath();
+  const zhixingHome = opts.zhixingHome ?? getZhixingHome();
+  const lockPaths = { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) };
+  const readyMarkerPath = deps.readyMarkerPath ?? getDefaultReadyMarkerPath(zhixingHome);
+  let logPath = opts.logPath ?? getDefaultLogPath(zhixingHome);
   const handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const con = deps.console ?? console;
@@ -96,7 +105,9 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   // 1. resolveSelfExec
   let execArgs;
   try {
-    execArgs = resolveSelfExec(opts.forwardedArgs);
+    execArgs = resolveSelfExec(opts.forwardedArgs, {
+      env: { ...process.env, ZHIXING_HOME: zhixingHome },
+    });
   } catch (err) {
     if (err instanceof UnsupportedSelfExecError) {
       con.error(chalk.red(err.message));
@@ -113,7 +124,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   });
   if (!opts.logPath) {
     const prepareLogPath = deps.prepareServerLogForWriteFn ?? prepareServerLogForWrite;
-    logPath = (await prepareLogPath()).logPath;
+    logPath = (await prepareLogPath({ paths: getDefaultServerLogPaths(zhixingHome) })).logPath;
   }
   await mkdirFn(dirname(logPath), { recursive: true });
   const logHandle = await openFn(logPath, SERVER_LOG_ACTIVE_OPEN_FLAGS);
@@ -142,7 +153,11 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const handshake = await startupHandshake({
     timeoutMs: handshakeTimeoutMs,
     pollIntervalMs,
-    deps,
+    deps: {
+      ...deps,
+      readyMarkerPath,
+      readLockFn: () => (deps.readLockFn ?? readLock)(lockPaths),
+    },
     spawnedPid: child.pid,
     getChildExit: () => childExit,
   });

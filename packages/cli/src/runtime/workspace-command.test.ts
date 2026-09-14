@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import {
   CompletedWorkspaceAdministrationOperationError,
   type WorkspaceAdministrationConsumptionCredential,
@@ -10,6 +13,58 @@ import {
   createWorksceneAndReadWorkspaceView,
   useLocalWorkspaceClient,
 } from "./workspace-command.js";
+
+it("REPL workspace creation binds authorization and recovered receipts to its entry home", async () => {
+  // Execute the actual REPL composition callback without booting the terminal or a Host.
+  const source = ts.createSourceFile("repl.ts",
+    await readFile(new URL("../repl.ts", import.meta.url), "utf8"),
+    ts.ScriptTarget.Latest, true);
+  let callback: ts.Expression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(source) === "createWithLocalWorkspace") {
+      callback = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  expect(callback).toBeDefined();
+  const home = "bound-repl-home-a";
+  const authorization = { deviceId: "device-a", bindingRef: "binding-a" };
+  const create = vi.fn(async () => ({ sceneId: "created-scene" }));
+  const facade = {};
+  const withWorkspace = vi.fn(async (operation, delivery, actualHome) => {
+    expect(actualHome).toBe(home);
+    await delivery.recovered([{
+      operation: "authorize", target: "recovered-scene", outcome: "succeeded",
+      controlWorkspace: authorization, credential,
+    }]);
+    return delivery.result(await operation({
+      authorizeForControl: async () => authorization,
+    }), credential);
+  });
+  const emitted = ts.transpileModule(
+    "const callback = " + callback!.getText(source) + "; callback;",
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const invoke = runInNewContext(emitted, {
+    zhixingHome: home,
+    withLocalWorkspaceClient: withWorkspace,
+    createWorksceneFromLocalWorkspaceAuthorization: create,
+    worksceneFacade: facade,
+    cliWriter: { line: () => undefined },
+    chalk: { yellow: (text: string) => text, dim: (text: string) => text },
+    layout: { contentPrefix: "" },
+  });
+  vi.stubEnv("ZHIXING_HOME", "unrelated-home-b");
+  try {
+    await invoke("new-scene", "/workspace");
+    expect(withWorkspace).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenNthCalledWith(1, facade, "recovered-scene", authorization, credential);
+    expect(create).toHaveBeenNthCalledWith(2, facade, "new-scene", authorization, credential);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 const credential: WorkspaceAdministrationConsumptionCredential = {
   outboxId: "outbox-a",

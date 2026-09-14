@@ -156,8 +156,9 @@ export interface AdvancementConversationComposition {
   }>>;
 }
 
-/** Closed assembly-only Mesh projection. It cannot expose runtime services before start succeeds. */
+/** Construction handle: bind stable dependencies before start activates the Mesh. */
 export interface MeshRuntimePreparation {
+  readonly runtime: MeshRuntimeAssembly;
   readonly connections: MeshConnectionRegistry;
   readonly advancementEvidence: AdvancementEvidenceRemoteDirectory;
   readonly assignmentDataPlane: AssignmentDataPlaneRemoteDirectory;
@@ -204,14 +205,14 @@ export interface AssemblyContext {
   readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly zhixingHome: string;
+  readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
   readonly secretStore: SecretStorePort;
   readonly durableInteractions: DurableConversationInteractionObserver;
-  readonly conversationPerspectives: ConversationPerspectivesApplication;
+  readonly createConversationPerspectives: (manager: ConversationManager) => ConversationPerspectivesApplication;
   readonly deviceCapacity: DeviceCapacityArbiterPort;
   readonly advancementCapacity: AgentRuntimeCapacityBinding;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
-  readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
   readonly meshConnectionProjection?: MeshConnectionProjectionPort;
   /** Durable lifecycle projection loaded before any producer recovery or ingress. */
   startupLifecycle?: {
@@ -265,6 +266,7 @@ export interface AssemblyContext {
 
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
+  conversationPerspectives?: ConversationPerspectivesApplication;
   advancementRecovery?: AdvancementRecoveryMaintenance;
   advancement?: AdvancementController;
   advancementReviews?: AdvancementReviewAttemptApplication;

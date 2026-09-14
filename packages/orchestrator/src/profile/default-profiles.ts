@@ -8,7 +8,7 @@
  *     user message 注入，避免动态任务文本污染 system prompt 前缀
  */
 
-import { getAgentIdentity } from "@zhixing/core/identity";
+import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "@zhixing/core/identity";
 import { WORKSPACE_DEPENDENT_TOOL_IDS } from "@zhixing/core/environment";
 import type { AgentRoleProfile } from "./agent-role-profile.js";
 
@@ -61,17 +61,17 @@ const MAIN_ENABLED_TOOLS = [
 export const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep", "web_fetch"] as const;
 
 /**
- * 主 agent profile。name 来自全局 setAgentIdentity 单例,可由 zhixing.config.json
- * 的 agent.displayName 覆盖。
+ * 主 agent profile。name 来自本实例的已解析身份投影。
  */
 export interface MainProfileOptions {
+  readonly agentIdentity?: AgentIdentity;
   /** False means this runtime has no authorized workspace root. */
   readonly hasWorkspace?: boolean;
 }
 
 export function mainProfile(options: MainProfileOptions = {}): AgentRoleProfile {
   return {
-    name: getAgentIdentity().displayName,
+    name: options.agentIdentity?.displayName ?? DEFAULT_AGENT_DISPLAY_NAME,
     role: "main",
     instructions: MAIN_IDENTITY_INSTRUCTIONS,
     constraints: [],
@@ -124,10 +124,13 @@ const NON_FILE_TOOLS = MAIN_ENABLED_TOOLS.filter(
  *
  * capabilities 同 mainProfile（用户面对、可派 Task）。
  */
-export function powerProfile(scene: WorksceneProfileInput): AgentRoleProfile {
+export function powerProfile(
+  scene: WorksceneProfileInput,
+  options: MainProfileOptions = {},
+): AgentRoleProfile {
   const hasWorkspace = scene.hasWorkspace === true;
   return {
-    name: getAgentIdentity().displayName,
+    name: options.agentIdentity?.displayName ?? DEFAULT_AGENT_DISPLAY_NAME,
     role: "main",
     instructions:
       `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import path from "node:path";
+import { writeFile, access } from "node:fs/promises";
+import { createTempDir } from "@zhixing/test-utils";
 import { StopRefusedError, runStopCommand, type StopDeps } from "../stop.js";
 
 const LOCK = {
@@ -30,6 +33,37 @@ function deps(overrides: Partial<StopDeps> = {}): StopDeps {
 }
 
 describe("runStopCommand durable safety boundary", () => {
+  it("keeps endpoint reads and cleanup on the selected home after an environment change", async () => {
+    const home = await createTempDir("stop-home-a");
+    const other = await createTempDir("stop-home-b");
+    for (const root of [home, other]) {
+      await writeFile(path.join(root, "server.state"), "{}");
+      await writeFile(path.join(root, "server.ready"), "");
+    }
+    let alive = true;
+    const input = deps({
+      statePath: undefined,
+      readyMarkerPath: undefined,
+      isProcessAliveFn: vi.fn(() => alive),
+      rpcShutdownFn: vi.fn(async () => {
+        vi.stubEnv("ZHIXING_HOME", other);
+        alive = false;
+      }),
+    });
+    try {
+      expect(await runStopCommand({ zhixingHome: home, deps: input }))
+        .toMatchObject({ status: "stopped" });
+      const paths = { pidPath: path.join(home, "server.pid"), portPath: path.join(home, "server.port") };
+      expect(input.readLockFn).toHaveBeenCalledWith(paths);
+      expect(input.releaseLockFn).toHaveBeenCalledWith(paths);
+      await expect(access(path.join(home, "server.ready"))).rejects.toThrow();
+      await expect(access(path.join(other, "server.ready"))).resolves.toBeUndefined();
+      await expect(access(path.join(other, "server.state"))).resolves.toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("returns nothing-to-stop without creating lifecycle effects", async () => {
     const input = deps({ readLockFn: vi.fn(async () => null) });
     await expect(runStopCommand({ deps: input })).resolves.toEqual({ status: "nothing-to-stop" });

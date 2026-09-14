@@ -342,6 +342,7 @@ async function createFixture(
     zhixingHome: home,
   });
   const conversationDirectory = createConversationStorageInfrastructure({
+      zhixingHome: home,
     optimalMaxTokens: 20_000,
     worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
   }).directory;

@@ -84,12 +84,40 @@ describe("Host Kernel runtime bindings", () => {
     }
   });
 
+  it("pins identity and config root before lazy runtime creation", () => {
+    const previousHome = process.env.ZHIXING_HOME;
+    const previousConfig = process.env.ZHIXING_CONFIG_PATH;
+    try {
+      delete process.env.ZHIXING_CONFIG_PATH;
+      const configuration = projections(config({ agent: { displayName: "First" } }));
+      const first = createHostKernelRuntimeEnvironmentFactory({
+        zhixingHome: "/first", configuration: configuration.kernelEnvironment,
+      });
+      process.env.ZHIXING_HOME = "/later";
+      process.env.ZHIXING_CONFIG_PATH = "/later/custom.jsonc";
+      const second = createHostKernelRuntimeEnvironmentFactory({
+        zhixingHome: "/second",
+        configuration: projections(config({ agent: { displayName: "Second" } })).kernelEnvironment,
+      });
+      expect(first.create({ workspace: null }).globalConfigPath.replaceAll("\\", "/")).toBe("/first/config.jsonc");
+      expect(first.create({ workspace: null }).agentIdentity.displayName).toBe("First");
+      expect(second.create({ workspace: null }).agentIdentity.displayName).toBe("Second");
+      expect(first.create({ workspace: null }).agentIdentity.displayName).toBe("First");
+    } finally {
+      if (previousHome === undefined) delete process.env.ZHIXING_HOME;
+      else process.env.ZHIXING_HOME = previousHome;
+      if (previousConfig === undefined) delete process.env.ZHIXING_CONFIG_PATH;
+      else process.env.ZHIXING_CONFIG_PATH = previousConfig;
+    }
+  });
+
   it("projects identity/proxy and preserves explicit no-workspace without config leakage", () => {
     const configuration = projections(config({
       agent: { displayName: "测试知行" },
       network: { proxy: "http://127.0.0.1:8080" },
     }));
     const factory = createHostKernelRuntimeEnvironmentFactory({
+      zhixingHome: "/configured-home",
       configuration: configuration.kernelEnvironment,
     });
 

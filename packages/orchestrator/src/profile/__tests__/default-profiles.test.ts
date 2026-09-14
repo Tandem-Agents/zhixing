@@ -24,6 +24,14 @@ function makeScene(overrides: Partial<WorkScene> = {}): WorkScene {
 }
 
 describe("mainProfile()", () => {
+  it("isolates main and workscene names across independent runtime inputs", () => {
+    const first = mainProfile({ agentIdentity: { displayName: "First" } });
+    const second = powerProfile(makeScene(), { agentIdentity: { displayName: "Second" } });
+    expect(first.name).toBe("First");
+    expect(second.name).toBe("Second");
+    expect(mainProfile().name).toBe("知行");
+    expect(first.name).toBe("First");
+  });
   it("instructions 持历史身份段 verbatim 文本(byte-equal 锚点)", () => {
     expect(MAIN_IDENTITY_INSTRUCTIONS).toBe(
       [
