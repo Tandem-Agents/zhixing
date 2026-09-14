@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAssemblyUnits } from "./access-surfaces.js";
-import type { AssemblyContext } from "./access-surface.js";
+import { recoverChannelInteractions } from "./access-surfaces.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import {
   createConversationLosslessDataPlaneAssemblyHandle,
@@ -8,24 +7,26 @@ import {
 } from "./lossless-data-plane-composition.js";
 
 describe("lossless data-plane static Channel composition", () => {
-  it("fails the Anchor pre-server boundary when its required edge was not completed", async () => {
-    const units = createAssemblyUnits({});
-    expect(units.filter((unit) => unit.name === "lossless-data-plane")).toHaveLength(1);
-    const recovery = units.find(
-      (unit) => unit.name === "channel-interaction-recovery",
-    );
-    if (!recovery) throw new Error("Missing Channel interaction recovery unit");
-
-    await expect(recovery.setup({
-      enabledRoles: ["anchor"],
-      channelMechanism: Object.freeze({
-        kind: "absent",
-        reason: "not-configured",
-      }),
-    } as unknown as AssemblyContext)).rejects.toThrow(/not assembled/u);
-    await expect(recovery.setup({
-      enabledRoles: ["executor"],
-    } as unknown as AssemblyContext)).resolves.toBeUndefined();
+  it("recovers only a configured Channel after the coordinator has been supplied", async () => {
+    const recover = vi.fn(async () => {});
+    const channelCoordinator = { recover } as never;
+    await expect(recoverChannelInteractions({} as never)).rejects.toThrow("complete S6 graph");
+    await recoverChannelInteractions({
+      channelMechanism: { kind: "absent", reason: "not-configured" },
+      channelCoordinator,
+    });
+    expect(recover).not.toHaveBeenCalled();
+    await recoverChannelInteractions({
+      channelMechanism: { kind: "available", channels: {}, conversationProduct: {} } as never,
+      channelCoordinator,
+      startupLifecycle: { recoverAcceptedWork: false } as never,
+    });
+    expect(recover).not.toHaveBeenCalled();
+    await recoverChannelInteractions({
+      channelMechanism: { kind: "available", channels: {}, conversationProduct: {} } as never,
+      channelCoordinator,
+    });
+    expect(recover).toHaveBeenCalledOnce();
   });
 
   it("requires the private assembly handle to be completed exactly once", async () => {

@@ -5,11 +5,14 @@ import {
   createInboundChannelRouter,
   setupChannels,
 } from "../channels.js";
-import { createAssemblyUnits } from "../access-surfaces.js";
-import type { AssemblyContext } from "../access-surface.js";
+import { prepareChannel, type PrepareChannelInput } from "../access-surfaces.js";
+import { ChannelConversationProductBinding } from "../channel-conversation-product-binding.js";
+import { AnchorSessionBroadcastLifecycle } from "../anchor-session-broadcast-lifecycle.js";
+import { createSessionBroadcastTransport } from "@zhixing/rpc/session-broadcast";
 
 const mockFeishu = vi.hoisted(() => ({
   constructorError: undefined as Error | undefined,
+  ids: [] as string[],
   connect: vi.fn<(_: ChannelContext) => Promise<void>>(),
   disconnect: vi.fn<() => Promise<void>>(),
   send: vi.fn<(
@@ -23,7 +26,7 @@ const mockFeishu = vi.hoisted(() => ({
 
 vi.mock("@zhixing/channel-feishu", () => ({
   FeishuAdapter: class {
-    readonly id = "feishu";
+    readonly id = mockFeishu.ids.shift() ?? "feishu";
     readonly capabilities = {
       chatTypes: ["dm"],
       media: false,
@@ -83,6 +86,7 @@ describe("setupChannels", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFeishu.constructorError = undefined;
+    mockFeishu.ids.length = 0;
     mockFeishu.disconnect.mockResolvedValue(undefined);
     mockFeishu.send.mockResolvedValue({ success: true, retryable: false });
     mockFeishu.sendChallenge.mockResolvedValue({ success: true, retryable: false });
@@ -103,6 +107,7 @@ describe("setupChannels", () => {
       { channelId: "feishu", state: "disconnected" },
     ]);
 
+    await result.activate();
     const connectionTask = result.connectConfigured(OUTBOUND_ONLY);
     await Promise.resolve();
     expect(result.delivery.status("feishu")).toBe("connecting");
@@ -128,6 +133,7 @@ describe("setupChannels", () => {
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
     });
+    await result.activate();
     await result.connectConfigured(OUTBOUND_ONLY);
 
     expect(result.statusSnapshot()[0]).toMatchObject({
@@ -152,6 +158,7 @@ describe("setupChannels", () => {
 
     expect(mockFeishu.connect).not.toHaveBeenCalled();
 
+    await result.activate();
     await result.connectConfigured(OUTBOUND_ONLY);
     expect(mockFeishu.connect).toHaveBeenCalledOnce();
     expect(result.delivery.status("feishu")).toBe("connected");
@@ -191,6 +198,7 @@ describe("setupChannels", () => {
       sessionActivityBroadcast: vi.fn(),
       isCurrentOwner: () => true,
     });
+    await result.activate();
     await result.connectConfigured(Object.freeze({
       inbound: Object.freeze({
         kind: "router",
@@ -257,6 +265,7 @@ describe("setupChannels", () => {
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
     });
+    await result.activate();
     await result.connectConfigured(Object.freeze({
       inbound: OUTBOUND_ONLY.inbound,
       onChallengeAction: async (action) => {
@@ -277,16 +286,15 @@ describe("setupChannels", () => {
   });
 
   it("把未配置和 adapter 创建失败冻结为显式机制结果", async () => {
-    const surface = createAssemblyUnits({}).find((unit) => unit.name === "channel")!;
     const absent = {
       channelConfiguration: {},
-    } as unknown as AssemblyContext;
-    await surface.setup(absent);
-    expect(absent.channelMechanism).toEqual({
+    } as unknown as PrepareChannelInput;
+    const absentMechanism = await prepareChannel(Object.freeze(absent), {});
+    expect(absentMechanism).toEqual({
       kind: "absent",
       reason: "not-configured",
     });
-    expect(Object.isFrozen(absent.channelMechanism)).toBe(true);
+    expect(Object.isFrozen(absentMechanism)).toBe(true);
 
     mockFeishu.constructorError = new Error("adapter unavailable");
     const configured = {
@@ -298,13 +306,127 @@ describe("setupChannels", () => {
       },
       channelHttpRoutes: new Map(),
       lifecycleContributions: { acquire: vi.fn() },
-    } as unknown as AssemblyContext;
-    await surface.setup(configured);
-    expect(configured.channelMechanism?.kind).toBe("available");
-    if (configured.channelMechanism?.kind !== "available") {
+    } as unknown as PrepareChannelInput;
+    const configuredMechanism = await prepareChannel(Object.freeze(configured), {});
+    expect(configuredMechanism?.kind).toBe("available");
+    if (configuredMechanism?.kind !== "available") {
       throw new Error("configured Channel mechanism was not published");
     }
-    expect(configured.channelMechanism.channels.challenges.supports("feishu")).toBe(false);
-    expect(configured.channelMechanism.channels.statusSnapshot()).toEqual([]);
+    expect(configuredMechanism.channels.challenges.supports("feishu")).toBe(false);
+    expect(configuredMechanism.channels.statusSnapshot()).toEqual([]);
+  });
+
+  it.each(["connectConfigured", "resumeConfigured"] as const)(
+    "%s cannot open physical ingress before Host activation",
+    async (operation) => {
+      const result = await setupChannels({
+        entries: { feishu: { type: "feishu" } },
+        credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
+        logger,
+      });
+      mockFeishu.connect.mockResolvedValue(undefined);
+      if (operation === "resumeConfigured") {
+        await result.suspendConfigured();
+      }
+      await result[operation](OUTBOUND_ONLY);
+      expect(mockFeishu.connect).not.toHaveBeenCalled();
+      await result.activate();
+      expect(mockFeishu.connect).toHaveBeenCalledOnce();
+      await expect(result.activate()).rejects.toThrow("already active");
+
+      // Current-owner withdrawal during operation remains reversible.
+      await result.disconnectConfigured();
+      await result.resumeConfigured(OUTBOUND_ONLY);
+      expect(mockFeishu.connect).toHaveBeenCalledTimes(2);
+      await result.dispose();
+      await expect(result.resumeConfigured(OUTBOUND_ONLY)).rejects.toThrow("closed");
+      expect(mockFeishu.connect).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("withdraws startup connection intent and never reopens after failed startup cleanup", async () => {
+    const result = await setupChannels({
+      entries: { feishu: { type: "feishu" } },
+      credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
+      logger,
+    });
+    await result.connectConfigured(OUTBOUND_ONLY);
+    await result.disconnectConfigured();
+    await result.activate();
+    expect(mockFeishu.connect).not.toHaveBeenCalled();
+    await result.dispose();
+    await expect(result.connectConfigured(OUTBOUND_ONLY)).rejects.toThrow("closed");
+  });
+
+  it("delivers an immediate first message through prepared consumers while another adapter is still connecting", async () => {
+    mockFeishu.ids.push("first", "slow");
+    const slow = deferred<void>();
+    const firstMessage = deferred<void>();
+    const result = await setupChannels({
+      entries: { first: { type: "feishu" }, slow: { type: "feishu" } },
+      credentials: { channels: {} }, logger,
+    });
+    const binding = new ChannelConversationProductBinding({ usesDurableTurnProtocol: () => false } as never);
+    const broadcast = new AnchorSessionBroadcastLifecycle();
+    const command = vi.fn(async () => ({ result: { turnId: "first-turn" } }));
+    const notify = vi.fn();
+    let confirmationReady = false;
+    const consumers = {
+      inbound: {
+        kind: "router" as const,
+        handleMessage: async () => {
+          try {
+            expect(confirmationReady).toBe(true);
+            await binding.prepareAgentTurn({ channelId: "first", platformSubject: "user" });
+            broadcast.port.session("conversation", "session.event", {});
+            firstMessage.resolve();
+          } catch (error) { firstMessage.reject(error); }
+        },
+      },
+      onChallengeAction: async () => {},
+    };
+    mockFeishu.connect.mockImplementationOnce(async (context) => {
+      context.onMessage({ channelId: "first", from: "user", text: "hello", chatType: "dm" });
+    }).mockImplementationOnce(() => slow.promise);
+    await result.connectConfigured(consumers);
+    expect(mockFeishu.connect).not.toHaveBeenCalled();
+    binding.bind({ supports: () => true, command } as never);
+    broadcast.install(createSessionBroadcastTransport({
+      connections: new Set([{ id: "observer", authenticated: true, closed: false, notify }]),
+      observerConnectionIds: () => new Set(["observer"]),
+    }));
+    confirmationReady = true;
+    const activating = result.activate();
+    try {
+      await firstMessage.promise;
+      expect(command).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledOnce();
+      expect(result.statusSnapshot().find((status) => status.channelId === "slow")?.state)
+        .toBe("connecting");
+    } finally {
+      slow.resolve();
+      await activating;
+      binding.close();
+      broadcast.close();
+      await result.dispose();
+    }
+  });
+
+  it("aborts an in-flight activation before waiting for an adapter to finish connecting", async () => {
+    mockFeishu.connect.mockImplementation((context) => new Promise((resolve) => {
+      context.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+    }));
+    const result = await setupChannels({
+      entries: { feishu: { type: "feishu" } },
+      credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
+      logger,
+    });
+    await result.connectConfigured(OUTBOUND_ONLY);
+    const activating = result.activate();
+    await vi.waitFor(() => expect(mockFeishu.connect).toHaveBeenCalledOnce());
+    await result.dispose();
+    await activating;
+    expect(mockFeishu.connect.mock.calls[0]![0].abortSignal.aborted).toBe(true);
+    await expect(result.resumeConfigured(OUTBOUND_ONLY)).rejects.toThrow("closed");
   });
 });

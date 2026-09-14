@@ -116,6 +116,9 @@ export interface SetupChannelsResult {
   readonly delivery: ChannelDeliveryEffectSource;
   readonly inbound: InboundChannelPort;
   readonly challenges: ChannelChallengeDeliveryPort;
+  /** Release the Host gate after dependencies and startup recovery are ready. */
+  activate(): Promise<void>;
+  /** Before activation these record owner intent without opening a transport. */
   connectConfigured(consumers: ConfiguredChannelConsumers): Promise<void>;
   disconnectConfigured(): Promise<void>;
   suspendConfigured(): Promise<void>;
@@ -275,37 +278,51 @@ export async function setupChannels(
   }
 
   let transition: Promise<void> = Promise.resolve();
+  let phase: "prepared" | "active" | "closed" = "prepared";
+  let disposal: Promise<void> | undefined;
+  let requestedConsumers: ConfiguredChannelConsumers | undefined;
   let suspended = false;
   const serialize = (operation: () => Promise<void>): Promise<void> => {
-    const current = transition.then(operation, operation);
+    const current = transition.then(() => {
+      if (phase === "closed") throw new Error("Channel Host lifecycle is closed");
+      return operation();
+    });
     transition = current.catch(() => undefined);
     return current;
   };
-  const connectConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
-    if (suspended) return;
+  const connectIfRequested = async () => {
+    if (phase !== "active" || suspended || !requestedConsumers) return;
     await connectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
-      consumers,
+      consumers: requestedConsumers,
     });
+  };
+  const activate = () => serialize(async () => {
+    if (phase !== "prepared") throw new Error("Channel Host lifecycle is already active");
+    phase = "active";
+    await connectIfRequested();
   });
-  const disconnectConfigured = () => serialize(() => disconnectConfiguredChannels({
+  const connectConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
+    requestedConsumers = consumers;
+    await connectIfRequested();
+  });
+  const disconnectConfigured = () => serialize(async () => {
+    requestedConsumers = undefined;
+    await disconnectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
-    }));
+    });
+  });
   const suspendConfigured = () => serialize(async () => {
     suspended = true;
   });
   const resumeConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
     suspended = false;
-    await connectConfiguredChannels({
-      registry,
-      jobs: connectionJobs,
-      logger,
-      consumers,
-    });
+    requestedConsumers = consumers;
+    await connectIfRequested();
   });
 
   return {
@@ -313,11 +330,20 @@ export async function setupChannels(
     delivery,
     inbound,
     challenges,
+    activate,
     connectConfigured,
     disconnectConfigured,
     suspendConfigured,
     resumeConfigured,
-    dispose: () => registry.dispose(),
+    dispose: () => {
+      if (disposal) return disposal;
+      phase = "closed";
+      requestedConsumers = undefined;
+      // Abort an in-flight connect immediately; waiting for it first can prevent
+      // the adapter from ever receiving the cancellation that releases it.
+      disposal = registry.dispose();
+      return disposal;
+    },
   };
 }
 

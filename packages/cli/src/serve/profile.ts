@@ -23,22 +23,17 @@ export const DEFAULT_PROFILE: ServerProfile = "full";
 
 /** profile 行为画像描述符。 */
 export interface ProfileSpec {
-  /** 启用的接入面 name 集合（装配顺序由接入面工厂固定，见 access-surfaces.ts）。 */
-  readonly surfaces: readonly string[];
+  /** 可选适配器集合；核心能力与恢复义务不由 profile 裁剪。 */
+  readonly surfaces: readonly ("mesh-control" | "channel" | "delivery" | "confirmation-bridge")[];
 }
 
 export const PROFILES: Record<ServerProfile, ProfileSpec> = {
   full: {
     surfaces: [
-      "authority-runtime",
-      "conversation",
       "mesh-control",
-      "asset-maintenance",
-      "lossless-data-plane",
       "channel",
       "delivery",
       "confirmation-bridge",
-      "conversation-recovery",
     ],
   },
 };

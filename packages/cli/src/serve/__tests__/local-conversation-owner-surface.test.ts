@@ -1,34 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAssemblyUnits } from "../access-surfaces.js";
-import type { AssemblyContext } from "../access-surface.js";
+import { startLocalConversationOwner, type StartLocalConversationOwnerInput } from "../access-surfaces.js";
 import {
   LocalConversationOwnerAssembly,
   verifyLocalConversationFinal,
 } from "../local-conversation-owner.js";
-import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
 import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
 
-const unit = createAssemblyUnits({}).find(
-  (candidate) => candidate.name === "local-conversation-owner",
-)!;
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("local conversation owner production surface", () => {
-  it("is an internal core unit immediately after the anchor conversation owner", () => {
-    const names = createAssemblyUnits({}).map(
-      (candidate) => candidate.name,
-    );
-    expect(PROFILES.full.surfaces).not.toContain("local-conversation-owner");
-    expect(unit.kind).toBe("core");
-    expect(unit.phase).toBe("pre-server");
-    expect(names.indexOf("local-conversation-owner")).toBe(
-      names.indexOf("conversation") + 1,
-    );
-  });
 
   it("creates exactly one owner for executor topologies and closes it through rollback", async () => {
     const events: string[] = [];
@@ -46,21 +30,19 @@ describe("local conversation owner production surface", () => {
     const rollback = new StartupRollback();
     const ctx = context(["anchor", "executor"], rollback);
 
-    await unit.setup(ctx);
+    const owner = await startLocalConversationOwner(Object.freeze(ctx));
     expect(create).toHaveBeenCalledTimes(1);
-    expect(ctx.localConversationOwner).toBe(assembly);
+    expect(owner).toBe(assembly);
+    expect(ctx).not.toHaveProperty("localConversationOwner");
     expect(events).toEqual(["start"]);
-    await expect(unit.setup(ctx)).rejects.toThrow("already assembled");
     await rollback.rollback();
     expect(events).toEqual(["start", "close"]);
   });
 
-  it("does not construct an owner when the executor role is absent", async () => {
+  it("rejects missing execution dependencies before creating a local owner", async () => {
     const create = vi.spyOn(LocalConversationOwnerAssembly, "create");
-    const ctx = context(["anchor"], new StartupRollback());
-    await unit.setup(ctx);
+    await expect(startLocalConversationOwner({} as never)).rejects.toThrow("requires authority");
     expect(create).not.toHaveBeenCalled();
-    expect(ctx.localConversationOwner).toBeUndefined();
   });
 
   it("starts with the durable lifecycle gate before conversation recovery", async () => {
@@ -70,8 +52,8 @@ describe("local conversation owner production surface", () => {
     } as unknown as LocalConversationOwnerAssembly;
     vi.spyOn(LocalConversationOwnerAssembly, "create").mockResolvedValue(assembly);
     const ctx = context(["executor"], new StartupRollback());
-    ctx.startupLifecycle = {
-      kind: "removal",
+    const startupLifecycle = {
+      kind: "executor-removal",
       artifactReady: true,
       recoverAcceptedWork: true,
       alreadySettled: false,
@@ -81,19 +63,19 @@ describe("local conversation owner production surface", () => {
         deliveries: [],
         sealed: false,
       },
-    };
+    } as const;
 
-    await unit.setup(ctx);
+    await startLocalConversationOwner({ ...ctx, startupLifecycle });
 
     expect(assembly.start).toHaveBeenCalledWith({
       lifecycle: {
         operationId: "removal-startup",
-        kind: "removal",
+        kind: "executor-removal",
         recoverAcceptedWork: true,
         alreadySettled: false,
       },
     });
-    await ctx.startupRollback.rollback();
+    await ctx.lifecycleContributionsRollback.rollback();
   });
 
   it("accepts only a final frame that is already present in authoritative history", async () => {
@@ -120,7 +102,7 @@ describe("local conversation owner production surface", () => {
 function context(
   enabledRoles: readonly ("anchor" | "executor")[],
   startupRollback: StartupRollback,
-): AssemblyContext {
+): StartLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback } {
   const executorResources = {
     finalizeLocalAssignment: async () => ({ reportDigest: "sha256:" + "a".repeat(64), upToUsageSeq: 0 }),
     reclaimExpired: vi.fn(async () => 0),
@@ -157,7 +139,9 @@ function context(
     executorDataPlane: {},
     evidenceHandler: {},
     config: {},
-    startupRollback,
+    lifecycleContributionsRollback: startupRollback,
+    meshBootstrap: { mode: "single-machine" },
+    advancementConfiguration: {},
     lifecycleContributions: new AssemblyLifecycleContributions(startupRollback),
-  } as unknown as AssemblyContext;
+  } as unknown as StartLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback };
 }

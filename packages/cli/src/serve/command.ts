@@ -1,22 +1,11 @@
 /**
  * `zhixing serve` 命令 — 启动常驻服务（核心宿主）
  *
- * 核心宿主 = 恒定核心（runtime + 会话态 owner 位 + Scheduler + RPC server）+ 一组**可挂载的
- * 接入面**（access surface）。装配主干：
- *   1. 备齐恒定核心前置（token / transcript / confirmationHub / MCP runtime ports / builtinExtraTools /
- *      runtimeFactory / CleanupRegistry）—— 接入面 setup 从这里读依赖
- *   2. 建 AssemblyContext，`setupAssemblyUnits(pre-server)` 数据驱动装入稳定核心单元与 profile 接入面
- *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
- *   3. 恒定核心后置（ephemeralRuntime / runAgentTurn / systemHandlers）—— ephemeralRuntime 消费
- *      Host 前置阶段 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
- *   4. 构造核心 Scheduler（绑定投递依赖）+ start + seed 系统任务
- *   5. createServerContext + runServer
- *   6. `setupAssemblyUnits(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
- *   7. 类型化 lifecycle contribution 在 activation gate 内接管 teardown（LIFO）
- *   8. banner / idle reaper / waitForShutdown
- *
- * profile 不"砍主干"，只声明启用哪组接入面（见 PROFILES 描述符）；新增接入面 = 写一个
- * AccessSurface 单元 + 在集合加名字，装配主干一行不改。接入面体系详见 access-surface.ts。
+ * 组合根直接连接各工厂的明确输入与返回产物：Authority → Conversation / Advancement
+ * → 唯一 RuntimeHost → 本地执行器 / Mesh → Channel / 数据面 → Delivery / Scheduler。
+ * core 恒启用，profile 只选择可选适配器。恢复与入口开放排在所需消费者完成之后；
+ * confirmation bridge 使用 prepared Server，在 activation gate 内装入。
+ * 类型化生命周期贡献继续以同一幂等 handle 连接启动补偿与正常逆序关闭。
  */
 
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
@@ -193,9 +182,29 @@ import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
 import { shouldIdleExit } from "./idle-policy.js";
-import { setupAssemblyUnits, type AssemblyContext } from "./access-surface.js";
-import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
-import { createAssemblyUnits } from "./access-surfaces.js";
+import type {
+  AdvancementConversationComposition,
+  PreparedChannelMechanism,
+  StartupLifecycleRestoration,
+} from "./access-surface.js";
+import { createConversationLosslessDataPlaneAssemblyHandle } from "./lossless-data-plane-composition.js";
+import { DEFAULT_PROFILE, PROFILES, type ServerProfile } from "./profile.js";
+import {
+  prepareAuthorityServices,
+  startAssetMaintenance,
+  prepareMeshRuntime,
+  bindAdvancementEvidenceTopology,
+  createHostLosslessDataPlane,
+  createConversationServices,
+  startLocalConversationOwner,
+  createExecutorJobOwner,
+  startExecutorJobOwner,
+  prepareChannel,
+  recoverChannelInteractions,
+  prepareDelivery,
+  installConfirmationBridge,
+  startConversationRecovery,
+} from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
@@ -457,7 +466,7 @@ async function runServerProcess(
     throw new Error("More than one local device lifecycle operation owns startup admission");
   }
   const startupLifecycleOperation = localLifecycleOperations[0];
-  let startupLifecycle: AssemblyContext["startupLifecycle"];
+  let startupLifecycle: StartupLifecycleRestoration | undefined;
   if (startupLifecycleOperation) {
     let sources: readonly DeliveryLifecycleSourcePermit[] = [];
     let deliveries: readonly { readonly id: string; readonly revision: string }[] = [];
@@ -628,7 +637,7 @@ async function runServerProcess(
       disposeForward();
     };
   };
-  const createConversationPerspectives: AssemblyContext["createConversationPerspectives"] = (manager) =>
+  const createConversationPerspectives: (manager: import("@zhixing/owner-kernel/conversation-manager").ConversationManager) => import("@zhixing/core/conversation/application").ConversationPerspectivesApplication = (manager) =>
     new ConversationPerspectivesApplicationService({
     correctness: createConversationPerspectivesCorrectnessPort({ manager }),
     createRunEventBus: () => createEventBus<AgentEventMap>(),
@@ -751,11 +760,11 @@ async function runServerProcess(
 
   const durableInteractions = new DurableConversationInteractionObserver();
   const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
-  const advancementConversationComposition: AssemblyContext["advancementConversationComposition"] =
+  const advancementConversationComposition: AdvancementConversationComposition =
     Object.freeze({
       async create(
         input: Parameters<
-          AssemblyContext["advancementConversationComposition"]["create"]
+          AdvancementConversationComposition["create"]
         >[0],
       ) {
         const { controller, reviews } = await createServeAdvancementApplications({
@@ -868,10 +877,9 @@ async function runServerProcess(
       })
     : undefined;
   // ============================================================================
-  // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
-  // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
+  // Static Host graph: core factories are unconditional; profile selects only adapters.
   // ============================================================================
-  const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
+  const channelHttpRoutes: Map<string, import("@zhixing/core/channels").HttpHandler> = new Map();
   const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();
   const anchorInternalStop = anchorInternalStopLifecycle.port;
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
@@ -886,93 +894,66 @@ async function runServerProcess(
     }),
   }).then(() => undefined);
 
-  const ctx: AssemblyContext = {
-    profile,
-    modelConfiguration,
-    advancementConfiguration,
-    channelConfiguration,
-    authorityConfiguration,
-    providerCredentials,
-    zhixingHome,
-    secretStore: bootstrap.secretStore,
-    durableInteractions,
-    createConversationPerspectives,
-    onTrustApplied,
-    deviceCapacity: deviceCapacity.arbiter,
-    advancementCapacity: deviceCapacity.workload("workload-advancement"),
-    storageMaintenance: deviceCapacity.storage,
-    localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
-    confirmationHub,
-    mcpStatus: mcpRuntime.status,
-    conversationRuntimeStorage: conversationStorage.runtime,
-    conversationCommittedViewStorage: conversationStorage.committedViews,
-    conversationNamingStorage: conversationStorage.naming,
-    runtimeFactory,
-    assignmentRuntimeFactory,
-    ...(jobRuntime ? { jobRuntime } : {}),
-    executorReadiness,
-    ...(executor ? { executorRoleModule: executor } : {}),
-    conversationIdentityLifecycle,
-    conversationClearProjection: conversationDirectory,
-    conversationDeleteProjection: conversationDirectory,
-    taskListService: builtinExtraTools.taskListService,
+  const enabledSurfaces = new Set(PROFILES[profile].surfaces);
+  const authorityServices = await prepareAuthorityServices({
     authorityRuntime,
-    worksceneAuthority,
-    worksceneConversationStorageProjectionCleanup,
-    worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes,
-    sessionBroadcast,
-    sessionActivityBroadcast,
+    enabledRoles: bootstrap.mesh.roles,
+    localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
+    zhixingHome,
+    storageMaintenance: deviceCapacity.storage,
+    lifecycleContributions,
+    advancementCapacity: deviceCapacity.workload("workload-advancement"),
+    meshBootstrap: bootstrap.mesh,
+    meshExecutorTopologyTrust,
+  });
+  // The protocol needs the coordinator before it can recover work; the
+  // coordinator in turn needs the completed executor and Channel mechanisms.
+  // This one-shot port remains closed until that finite construction cycle ends.
+  const conversationLosslessDataPlane =
+    createConversationLosslessDataPlaneAssemblyHandle();
+  const conversationServices = await createConversationServices({
+    conversationNamingStorage: conversationStorage.naming,
+    meshBootstrap: bootstrap.mesh,
+    meshConnections,
+    meshExecutorTopologyTrust,
+    durableInteractions,
+    runtimeFactory,
+    conversationRuntimeStorage: conversationStorage.runtime,
+    confirmationHub,
+    createConversationPerspectives,
+    advancementConversationComposition,
     advancementDirectory: {
       list: () => conversationDirectory.listForAdvancement(),
       exists: (conversationId) => conversationDirectory.exists(conversationId),
       readRunsReverse: (conversationId, options) =>
         conversationDirectory.readRunsReverse(conversationId, options),
     },
-    advancementEvidenceRuntime,
-    advancementConversationComposition,
-    startupRollback,
+    worksceneAuthority,
+    worksceneConversationStorageProjectionCleanup,
+    worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes,
+    zhixingHome,
+    storageMaintenance: deviceCapacity.storage,
     lifecycleContributions,
-    channelHttpRoutes,
-    enabledRoles: bootstrap.mesh.roles,
-    meshBootstrap: bootstrap.mesh,
-    meshConnectionProjection,
-    ...(meshConnections ? { meshConnections } : {}),
-    ...(meshExecutorTopologyTrust ? { meshExecutorTopologyTrust } : {}),
-    ...(startupLifecycle ? { startupLifecycle } : {}),
-  };
+    authorityRuntime,
+    executorRoleModule: executor,
+    assignmentRuntimeFactory,
+    sessionBroadcast,
+    conversationIdentityLifecycle,
+    conversationClearProjection: conversationDirectory,
+    conversationDeleteProjection: conversationDirectory,
+    conversationCommittedViewStorage: conversationStorage.committedViews,
+    taskListService: builtinExtraTools.taskListService,
+  }, conversationLosslessDataPlane);
+  const advancementController = conversationServices.advancement;
+  const advancementReviews = conversationServices.advancementReviews;
+  const advancementConversationLifecycle =
+    conversationServices.advancementConversationLifecycle;
   let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
   let removalAdmissionOperationId: string | undefined;
   let removalBootstrapAdmissionClosed = true;
-  const assemblyUnits = createAssemblyUnits(channelCredentials);
 
-  // Conversation owner is the construction boundary for Advancement. Assemble
-  // through that unit first, then create the one RuntimeHost from the completed
-  // direct ports before any recovery, ingress, or Product API consumer can run.
-  const conversationAssemblyIndex = assemblyUnits.findIndex(
-    (unit) => unit.name === "conversation",
-  );
-  if (conversationAssemblyIndex < 0) {
-    throw new Error("Conversation assembly unit is required");
-  }
-  await setupAssemblyUnits(
-    assemblyUnits.slice(0, conversationAssemblyIndex + 1),
-    ctx,
-    "pre-server",
-  );
-  const advancementController = ctx.advancement;
-  const advancementReviews = ctx.advancementReviews;
-  const advancementConversationLifecycle =
-    ctx.advancementConversationLifecycle;
-  if (
-    !advancementController ||
-    !advancementReviews ||
-    !advancementConversationLifecycle
-  ) {
-    throw new Error(
-      "Conversation assembly did not publish the Advancement application",
-    );
-  }
-
+  // Runtime factories are dormant during Conversation construction. Close the
+  // one RuntimeHost/Advancement cycle before any owner starts executing work.
   const runtimeHost = new RuntimeHost({
     modelProvider: createHostKernelModelProviderFactory({
       configuration: modelConfiguration,
@@ -1002,42 +983,163 @@ async function runServerProcess(
       }),
   });
 
-  // Finish the pre-server graph only after the immutable Advancement/RuntimeHost
-  // knot is closed. Later units may now publish recovery and ingress consumers.
-  await setupAssemblyUnits(
-    assemblyUnits.slice(conversationAssemblyIndex + 1),
-    ctx,
-    "pre-server",
-  );
-  const {
-    storageMaintenance: boundStorageMaintenance,
-    meshBootstrap: boundMeshBootstrap,
-    authorityRuntime: boundAuthorityRuntime,
-    worksceneDirectory: boundWorksceneDirectory,
-    worksceneApplication: boundWorksceneApplication,
-    secretStore: boundSecretStore,
-    mcpStatus: boundMcpStatus,
-    channelStatuses: boundChannelStatuses,
-    channelConnections: boundChannelConnections,
-    localConversationOwner: boundLocalConversationOwner,
-    executorJobOwner: boundExecutorJobOwner,
-    channelCoordinator: boundChannelCoordinator,
-    enabledRoles: boundEnabledRoles,
-    conversationProtocol: boundConversationProtocol,
-    jobStatus: boundJobStatus,
-    jobRelayObligations: boundJobRelayObligations,
-    conversationExecutorLedger: boundConversationExecutorLedger,
-    conversations: boundConversations,
-    inboundRouter: boundInboundRouter,
-    deliveryStack: boundDeliveryStack,
-    advancementRecovery: boundAdvancementRecovery,
-    sessionBroadcast: boundSessionBroadcast,
-    channelConversationProduct: boundChannelConversationProduct,
-    evidenceHandler: boundEvidenceHandler,
-  } = ctx;
+  const localExecutor = executor ? await (async () => {
+    const dataPlane = conversationServices.executorDataPlane;
+    const ledger = conversationServices.conversationExecutorLedger;
+    const evidence = authorityServices.evidenceHandler;
+    if (!dataPlane || !ledger || !evidence || !jobRuntime) {
+      throw new Error("Local executor requires the completed Conversation execution graph");
+    }
+    const owner = await startLocalConversationOwner({
+      executorRoleModule: executor,
+      evidenceHandler: evidence,
+      assignmentRuntimeFactory,
+      durableInteractions,
+      advancementConfiguration,
+      providerCredentials,
+      lifecycleContributions,
+      startupLifecycle,
+      executorDataPlane: dataPlane,
+      meshBootstrap: bootstrap.mesh,
+      meshExecutorTopologyTrust,
+      authorityRuntime,
+    });
+    const jobs = await createExecutorJobOwner({
+      authorityRuntime,
+      executorRoleModule: executor,
+      jobRuntime,
+      jobRelayObligations: authorityServices.jobRelayObligations,
+      conversationExecutorLedger: ledger,
+      executorDataPlane: dataPlane,
+    });
+    return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
+  })() : undefined;
+  await startAssetMaintenance({ authorityRuntime, lifecycleContributions });
+  const meshBootstrap = bootstrap.mesh;
+  const preparedMeshRuntime =
+    enabledSurfaces.has("mesh-control") && meshBootstrap.mode === "trusted-home"
+      ? await (async () => {
+          if (!meshConnections || !meshExecutorTopologyTrust ||
+              !conversationServices.assignmentArtifactReceiver) {
+            throw new Error("Mesh requires the completed Conversation topology");
+          }
+          return prepareMeshRuntime({
+            meshBootstrap,
+            authorityRuntime,
+            conversationProtocol: conversationServices.conversationProtocol,
+            meshConnections,
+            meshExecutorTopologyTrust,
+            conversationExecutorTopologyDirectory: conversationServices.conversationExecutorTopologyDirectory,
+            assignmentArtifactReceiver: conversationServices.assignmentArtifactReceiver,
+            zhixingHome,
+            localConversationOwner: localExecutor?.owner,
+            jobRelayObligations: authorityServices.jobRelayObligations,
+            executor: localExecutor && executor ? {
+              ledger: localExecutor.ledger,
+              runtimeFactory: assignmentRuntimeFactory,
+              interactions: durableInteractions,
+              dataPlane: localExecutor.dataPlane,
+              InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+              evidence: localExecutor.evidence,
+              job: { owner: localExecutor.jobs.owner },
+            } : undefined,
+            secretStore: bootstrap.secretStore,
+            onTrustApplied,
+            lifecycleContributions,
+          });
+        })()
+      : undefined;
+  await bindAdvancementEvidenceTopology({
+    authorityRuntime,
+    conversationProtocol: conversationServices.conversationProtocol,
+    advancementEvidenceRuntime,
+    evidenceHandler: authorityServices.evidenceHandler,
+    meshRuntimePreparation: preparedMeshRuntime,
+  });
+  const channelMechanism: PreparedChannelMechanism = enabledSurfaces.has("channel")
+    ? await prepareChannel({
+        lifecycleContributions,
+        channelHttpRoutes,
+        conversations: conversationServices.conversations,
+        channelConfiguration,
+      }, channelCredentials)
+    : Object.freeze({ kind: "absent", reason: "not-configured" });
+  const losslessDataPlane = await createHostLosslessDataPlane({
+    authorityRuntime,
+    jobStatus: authorityServices.jobStatus,
+    channelMechanism,
+    localExecutor: localExecutor ? {
+      dataPlane: localExecutor.dataPlane,
+      ledger: localExecutor.ledger,
+      jobOwner: localExecutor.jobs.owner,
+    } : undefined,
+    durableInteractions,
+    meshRuntimePreparation: preparedMeshRuntime,
+    jobRelayObligations: authorityServices.jobRelayObligations,
+    meshBootstrap: bootstrap.mesh,
+    lifecycleContributions,
+  }, conversationLosslessDataPlane);
+  conversationLosslessDataPlane.assertComplete();
+  if (localExecutor) {
+    await startExecutorJobOwner({
+      executorJobOwnerAssembly: localExecutor.jobs,
+      lifecycleContributions,
+      startupLifecycle,
+    });
+  }
+  await recoverChannelInteractions({
+    channelMechanism,
+    channelCoordinator: losslessDataPlane.coordinator,
+    startupLifecycle,
+  });
+  const delivery = enabledSurfaces.has("delivery") ? await prepareDelivery({
+    authorityRuntime,
+    startupRollback,
+    lifecycleContributions,
+    startupLifecycle,
+    confirmationHub,
+    sessionBroadcast,
+    sessionActivityBroadcast,
+    meshBootstrap: bootstrap.mesh,
+    meshRuntimePreparation: preparedMeshRuntime,
+    channelConfiguration,
+    channelChallengeAction: losslessDataPlane.onChallengeAction,
+    channelMechanism,
+    zhixingHome,
+  }) : undefined;
+  if (delivery) {
+    conversationServices.conversationProtocol.bindDeliveryDrain(() =>
+      delivery.deliveryStack.flush(),
+    );
+  }
+  const boundStorageMaintenance = deviceCapacity.storage;
+  const boundMeshBootstrap = bootstrap.mesh;
+  const boundAuthorityRuntime = authorityRuntime;
+  const boundWorksceneDirectory = conversationServices.worksceneDirectory;
+  const boundWorksceneApplication = conversationServices.worksceneApplication;
+  const boundSecretStore = bootstrap.secretStore;
+  const boundMcpStatus = mcpRuntime.status;
+  const boundChannelStatuses = channelMechanism.kind === "available"
+    ? channelMechanism.channels.statusSnapshot : undefined;
+  const boundChannelConnections = delivery?.channelConnections;
+  const boundLocalConversationOwner = localExecutor?.owner;
+  const boundExecutorJobOwner = localExecutor?.jobs.owner;
+  const boundChannelCoordinator = losslessDataPlane.coordinator;
+  const boundEnabledRoles = bootstrap.mesh.roles;
+  const boundConversationProtocol = conversationServices.conversationProtocol;
+  const boundJobStatus = authorityServices.jobStatus;
+  const boundJobRelayObligations = losslessDataPlane.jobRelayObligations;
+  const boundConversationExecutorLedger = conversationServices.conversationExecutorLedger;
+  const boundConversations = conversationServices.conversations;
+  const boundInboundRouter = delivery?.inboundRouter;
+  const boundDeliveryStack = delivery?.deliveryStack;
+  const boundAdvancementRecovery = conversationServices.advancementRecovery;
+  const boundSessionBroadcast = sessionBroadcast;
+  const boundChannelConversationProduct = channelMechanism.kind === "available"
+    ? channelMechanism.conversationProduct : undefined;
+  const boundEvidenceHandler = authorityServices.evidenceHandler;
   const inboundRouter = boundInboundRouter;
-  const conversationPerspectives = ctx.conversationPerspectives!;
-  const preparedMeshRuntime = ctx.meshRuntimePreparation;
+  const conversationPerspectives = conversationServices.conversationPerspectives;
   const meshRuntime = preparedMeshRuntime?.runtime;
   const executionStatusHub = new ExecutionStatusHub({
     conversationHistory: (requests) => boundConversationProtocol
@@ -1048,14 +1150,12 @@ async function runServerProcess(
       : { notices: [], next: requests },
     deliveryHistory: async (requests) => (await boundDeliveryStack?.statusHistory(requests)) ?? [],
   });
-  const firstPartyFinality: NonNullable<AssemblyContext["firstPartyFinality"]> =
+  const firstPartyFinality: (input: Omit<ConstructorParameters<typeof FirstPartyFinalitySession>[0], "sources">) => FirstPartyFinalitySession =
     (input) => new FirstPartyFinalitySession({ sources: executionStatusHub, ...input });
   boundConversationProtocol?.bindFirstPartyFinality(firstPartyFinality);
   boundConversationProtocol?.onStatus((notice) => executionStatusHub.publish(notice));
   boundJobStatus?.onStatus((notice) => executionStatusHub.publish(notice));
   boundDeliveryStack?.onStatus((notice) => executionStatusHub.publish(notice));
-  ctx.executionStatusHub = executionStatusHub;
-  ctx.firstPartyFinality = firstPartyFinality;
   const authorityCheckpointOwner = await createConfiguredCheckpointOwner({
     backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
     publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
@@ -1094,7 +1194,6 @@ async function runServerProcess(
       error instanceof Error ? error.message : String(error),
     ),
   });
-  ctx.authorityCheckpointOwner = authorityCheckpointOwner;
   if (authorityCheckpointOwner) {
     hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner);
   }
@@ -1214,7 +1313,8 @@ async function runServerProcess(
       throw error;
     }
   }
-  if (boundEnabledRoles.includes("anchor")) {
+  const startAnchorRuntime = await (async () => {
+    if (!boundEnabledRoles.includes("anchor")) return async () => {};
     if (
       !boundAuthorityRuntime ||
       !boundConversationProtocol ||
@@ -1348,375 +1448,377 @@ async function runServerProcess(
       resume: (runtime) => resumeSchedulerGeneration(runtime, false),
     });
 
-    const preparedMesh = preparedMeshRuntime;
-    if (preparedMesh) {
-      const authority = boundAuthorityRuntime;
-      const channelCoordinator = boundChannelCoordinator;
-      const jobRelays = boundJobRelayObligations;
-      const conversations = boundConversations;
-      const conversationProtocol = boundConversationProtocol;
+    // The graph is wired here; recovery runs only after the prepared Server
+    // has installed the broadcast and confirmation consumers.
+    return async () => {
+      const preparedMesh = preparedMeshRuntime;
+      if (preparedMesh) {
+        const authority = boundAuthorityRuntime;
+        const channelCoordinator = boundChannelCoordinator;
+        const jobRelays = boundJobRelayObligations;
+        const conversations = boundConversations;
+        const conversationProtocol = boundConversationProtocol;
 
-      if (
-        !authority ||
-        !channelCoordinator ||
-        !jobRelays ||
-        !conversations ||
-        !conversationProtocol
-      ) {
-        throw new Error(
-          "Mesh lifecycle recovery requires authority, conversation, data-plane, and relay owners",
-        );
-      }
-      const inbound = boundInboundRouter === undefined || boundInboundRouter === null
-        ? EMPTY_INBOUND_LIFECYCLE
-        : boundInboundRouter;
-      const jobOwner = boundExecutorJobOwner === undefined
-        ? EMPTY_REMOVAL_JOB_OWNER
-        : boundExecutorJobOwner;
-      const localOwner = boundLocalConversationOwner === undefined
-        ? EMPTY_REMOVAL_LOCAL_OWNER
-        : boundLocalConversationOwner;
-      const delivery = boundDeliveryStack === undefined
-        ? EMPTY_REMOVAL_DELIVERY
-        : boundDeliveryStack.lifecycle;
-      const channel = boundChannelConnections && boundChannelStatuses
-        ? Object.freeze({
-            statuses: boundChannelStatuses,
-            suspendConfigured: boundChannelConnections.suspendConfigured,
-            disconnectConfigured: boundChannelConnections.disconnectConfigured,
-            resumeConfigured: boundChannelConnections.resumeConfigured,
-            connectConfigured: boundChannelConnections.connectConfigured,
-          })
-        : EMPTY_REMOVAL_CHANNEL;
-      const plannedChannel = boundChannelConnections
-        ? Object.freeze({
-            kind: "available" as const,
-            connections: boundChannelConnections,
-          })
-        : ABSENT_PLANNED_DUTY_CHANNEL;
-      const plannedDelivery = boundDeliveryStack
-        ? Object.freeze({
-            kind: "available" as const,
-            stack: boundDeliveryStack,
-          })
-        : ABSENT_PLANNED_DUTY_DELIVERY;
-      const plannedJobOwner = boundExecutorJobOwner
-        ? Object.freeze({
-            kind: "available" as const,
-            owner: boundExecutorJobOwner,
-          })
-        : ABSENT_PLANNED_DUTY_JOB_OWNER;
-      const captureExternal = async (
-        owner: "remote" | "channel" | "scheduler" | "delivery",
-        _operationId: string,
-      ): Promise<readonly HostStopAcceptedWorkItem[]> => {
-        if (owner === "remote") {
-          const relay = (await jobRelays.listOpen()).map((opening) => ({
-            id: `relay:${opening.assignmentId}`,
-            revision: opening.sourceRevision,
-          }));
-          const local = (await jobOwner.acceptedWorkItems()).map((item) => ({
-            id: `local:${item.id}`,
-            revision: item.revision,
-          }));
-          return [...relay, ...local].sort((left, right) =>
-            left.id.localeCompare(right.id, "en-US"));
-        }
-        if (owner === "channel") {
-          return channel.statuses()
-            .filter((status) => status.state !== "disconnected")
-            .map((status) => ({
-              id: status.channelId,
-              revision: protocolDigest("HostStopChannel", 1, {
-                channelId: status.channelId,
-              }),
-            }));
-        }
-        if (owner === "scheduler") {
-          return schedulerApplication.captureAcceptedWork();
-        }
-        return delivery.capture();
-      };
-      const recoverFrozenOwners = async (
-        sources: readonly DeliveryLifecycleSourcePermit[],
-      ): Promise<void> => {
-        if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
-        startupLifecycleFrozenRecoveryStarted = true;
-        try {
-          await localOwner.recoverAcceptedWorkForLifecycle();
-          await jobOwner.recoverAcceptedWorkForLifecycle();
-          await channelCoordinator.recover();
-          await schedulerApplication.recoverAcceptedWork(
-            sources
-              .filter((source) => source.owner === "scheduler")
-              .map(({ id, revision }) => ({ id, revision })),
+        if (
+          !authority ||
+          !channelCoordinator ||
+          !jobRelays ||
+          !conversations ||
+          !conversationProtocol
+        ) {
+          throw new Error(
+            "Mesh lifecycle recovery requires authority, conversation, data-plane, and relay owners",
           );
-        } catch (error) {
-          startupLifecycleFrozenRecoveryStarted = false;
-          throw error;
         }
-      };
-      const plannedDutyMigrationLifecycle =
-        definePlannedDutyMigrationLifecycleContribution({
-          kind: "anchor",
-          checkpoint: authorityCheckpointOwner
-            ? {
-                kind: "available",
-                owner: authorityCheckpointOwner,
-              }
-            : {
-                kind: "unavailable",
-                reason: "recovery-backup-unavailable",
+        const inbound = boundInboundRouter === undefined || boundInboundRouter === null
+          ? EMPTY_INBOUND_LIFECYCLE
+          : boundInboundRouter;
+        const jobOwner = boundExecutorJobOwner === undefined
+          ? EMPTY_REMOVAL_JOB_OWNER
+          : boundExecutorJobOwner;
+        const localOwner = boundLocalConversationOwner === undefined
+          ? EMPTY_REMOVAL_LOCAL_OWNER
+          : boundLocalConversationOwner;
+        const delivery = boundDeliveryStack === undefined
+          ? EMPTY_REMOVAL_DELIVERY
+          : boundDeliveryStack.lifecycle;
+        const channel = boundChannelConnections && boundChannelStatuses
+          ? Object.freeze({
+              statuses: boundChannelStatuses,
+              suspendConfigured: boundChannelConnections.suspendConfigured,
+              disconnectConfigured: boundChannelConnections.disconnectConfigured,
+              resumeConfigured: boundChannelConnections.resumeConfigured,
+              connectConfigured: boundChannelConnections.connectConfigured,
+            })
+          : EMPTY_REMOVAL_CHANNEL;
+        const plannedChannel = boundChannelConnections
+          ? Object.freeze({
+              kind: "available" as const,
+              connections: boundChannelConnections,
+            })
+          : ABSENT_PLANNED_DUTY_CHANNEL;
+        const plannedDelivery = boundDeliveryStack
+          ? Object.freeze({
+              kind: "available" as const,
+              stack: boundDeliveryStack,
+            })
+          : ABSENT_PLANNED_DUTY_DELIVERY;
+        const plannedJobOwner = boundExecutorJobOwner
+          ? Object.freeze({
+              kind: "available" as const,
+              owner: boundExecutorJobOwner,
+            })
+          : ABSENT_PLANNED_DUTY_JOB_OWNER;
+        const captureExternal = async (
+          owner: "remote" | "channel" | "scheduler" | "delivery",
+          _operationId: string,
+        ): Promise<readonly HostStopAcceptedWorkItem[]> => {
+          if (owner === "remote") {
+            const relay = (await jobRelays.listOpen()).map((opening) => ({
+              id: `relay:${opening.assignmentId}`,
+              revision: opening.sourceRevision,
+            }));
+            const local = (await jobOwner.acceptedWorkItems()).map((item) => ({
+              id: `local:${item.id}`,
+              revision: item.revision,
+            }));
+            return [...relay, ...local].sort((left, right) =>
+              left.id.localeCompare(right.id, "en-US"));
+          }
+          if (owner === "channel") {
+            return channel.statuses()
+              .filter((status) => status.state !== "disconnected")
+              .map((status) => ({
+                id: status.channelId,
+                revision: protocolDigest("HostStopChannel", 1, {
+                  channelId: status.channelId,
+                }),
+              }));
+          }
+          if (owner === "scheduler") {
+            return schedulerApplication.captureAcceptedWork();
+          }
+          return delivery.capture();
+        };
+        const recoverFrozenOwners = async (
+          sources: readonly DeliveryLifecycleSourcePermit[],
+        ): Promise<void> => {
+          if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
+          startupLifecycleFrozenRecoveryStarted = true;
+          try {
+            await localOwner.recoverAcceptedWorkForLifecycle();
+            await jobOwner.recoverAcceptedWorkForLifecycle();
+            await channelCoordinator.recover();
+            await schedulerApplication.recoverAcceptedWork(
+              sources
+                .filter((source) => source.owner === "scheduler")
+                .map(({ id, revision }) => ({ id, revision })),
+            );
+          } catch (error) {
+            startupLifecycleFrozenRecoveryStarted = false;
+            throw error;
+          }
+        };
+        const plannedDutyMigrationLifecycle =
+          definePlannedDutyMigrationLifecycleContribution({
+            kind: "anchor",
+            checkpoint: authorityCheckpointOwner
+              ? {
+                  kind: "available",
+                  owner: authorityCheckpointOwner,
+                }
+              : {
+                  kind: "unavailable",
+                  reason: "recovery-backup-unavailable",
+                },
+            transfer: {
+              stopAccepting: async () => {
+                inbound.refuseNewMessages();
+                await inbound.drainAcceptedMessages();
+                if (plannedChannel.kind === "available") {
+                  await plannedChannel.connections.disconnectConfigured();
+                }
+                if (plannedDelivery.kind === "available") {
+                  await plannedDelivery.stack.quiesceForAuthorityTransfer();
+                }
+                await schedulerApplication.settleAcceptedWork({
+                  strategy: "drain",
+                  frozen: await schedulerApplication.captureAcceptedWork(),
+                });
               },
-          transfer: {
-            stopAccepting: async () => {
-              inbound.refuseNewMessages();
-              await inbound.drainAcceptedMessages();
-              if (plannedChannel.kind === "available") {
-                await plannedChannel.connections.disconnectConfigured();
-              }
-              if (plannedDelivery.kind === "available") {
-                await plannedDelivery.stack.quiesceForAuthorityTransfer();
-              }
-              await schedulerApplication.settleAcceptedWork({
-                strategy: "drain",
-                frozen: await schedulerApplication.captureAcceptedWork(),
-              });
+              drainAccepted: async () => {
+                await conversations.abortAllAndWait(
+                  { kind: "external", origin: "planned-duty-migration" },
+                  30_000,
+                );
+                if (conversations.hasActiveWork()) {
+                  throw new Error(
+                    "Duty-device migration could not drain accepted conversation work",
+                  );
+                }
+                if (plannedJobOwner.kind === "available") {
+                  await plannedJobOwner.owner.drain();
+                }
+                await conversationProtocol.stopRecoveryLoop();
+              },
+              resumeAfterAbort: async () => {
+                if (plannedDelivery.kind === "available") {
+                  await plannedDelivery.stack.resumeAfterAuthorityTransfer();
+                }
+                conversationProtocol.startRecoveryLoop();
+                schedulerApplication.resumeAdmission();
+                inbound.resumeNewMessages();
+                if (plannedChannel.kind === "available") {
+                  await plannedChannel.connections.connectConfigured();
+                }
+              },
             },
-            drainAccepted: async () => {
-              await conversations.abortAllAndWait(
-                { kind: "external", origin: "planned-duty-migration" },
-                30_000,
-              );
-              if (conversations.hasActiveWork()) {
-                throw new Error(
-                  "Duty-device migration could not drain accepted conversation work",
+            postInstall: {
+              rebindAuthorityGeneration: async (generation) => {
+                const receipt = await authority.rebindInstalledAuthority(generation);
+                return receipt;
+              },
+              recoverScheduler: async (obligations) => {
+                await schedulerGenerationOwner.recoverInstalledAuthority({
+                  currentAnchorEpoch: authority.anchorEpoch,
+                  create: createSchedulerRuntime,
+                  prepare: prepareSchedulerGeneration,
+                  bind: bindSchedulerGeneration,
+                  publish: publishSchedulerGeneration,
+                  activate: (replacement) =>
+                    activateSchedulerGeneration(replacement, runner !== undefined),
+                  resume: (replacement) =>
+                    resumeSchedulerGeneration(replacement, runner !== undefined),
+                });
+                return obligations;
+              },
+              recoverConversation: async (obligations) => {
+                await conversationProtocol.recoverInstalledAuthority();
+                return obligations;
+              },
+              recoverDelivery: async (obligations) => {
+                if (plannedDelivery.kind === "available") {
+                  await plannedDelivery.stack.recoverInstalledAuthority();
+                }
+                return obligations;
+              },
+              openCurrentOwnerSurfaces: async () => {
+                if (plannedChannel.kind === "available") {
+                  await plannedChannel.connections.connectConfigured();
+                }
+              },
+            },
+          });
+        const postAdoptionReviewLifecycle =
+          definePostAdoptionReviewLifecycleContribution({
+            kind: "anchor",
+            review: schedulerGenerationOwner.postAdoptionReview,
+          });
+        const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
+          closeAdmission: async (operationId) => {
+            if (
+              removalAdmissionOperationId !== undefined &&
+              removalAdmissionOperationId !== operationId
+            ) {
+              throw new Error("Another device-removal operation owns external admission");
+            }
+            removalAdmissionOperationId = operationId;
+            inbound.refuseNewMessages();
+            jobOwner.pauseAccepting();
+            await channel.suspendConfigured();
+            schedulerApplication.closeAdmission();
+            delivery.close();
+          },
+          captureAcceptedWork: async (operationId) => {
+            const items = [] as Array<{
+              owner: "remote" | "channel" | "scheduler" | "delivery";
+              id: string;
+              revision: string;
+            }>;
+            for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+              for (const item of await captureExternal(owner, operationId)) {
+                items.push({ owner, ...item });
+              }
+            }
+            return Object.freeze(items.sort((left, right) =>
+              `${left.owner}:${left.id}`.localeCompare(
+                `${right.owner}:${right.id}`,
+                "en-US",
+              )));
+          },
+          settleAcceptedWork: async ({ operationId, ownerItems }) => {
+            if (removalAdmissionOperationId !== operationId) {
+              throw new Error("Device-removal settlement does not own external admission");
+            }
+            const sources = deliveryLifecycleSourcesFromOwnerItems(ownerItems);
+            await delivery.install({
+              operationId,
+              sources,
+              deliveries: ownerItems
+                .filter((item) => item.owner === "delivery")
+                .map(({ id, revision }) => ({ id, revision })),
+            });
+            await recoverFrozenOwners(sources);
+            for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+              const frozen = ownerItems
+                .filter((item) => item.owner === owner)
+                .map(({ id, revision }) => ({ id, revision }));
+              const current = owner === "delivery"
+                ? await delivery.read(operationId)
+                : await captureExternal(owner, operationId);
+              if (owner !== "delivery") {
+                assertAcceptedWorkSubset(
+                  current,
+                  frozen,
+                  `device-removal ${owner} settlement`,
                 );
               }
-              if (plannedJobOwner.kind === "available") {
-                await plannedJobOwner.owner.drain();
+              if (owner === "remote") {
+                await inbound.drainAcceptedMessages();
+                await jobOwner.drain();
+              } else if (owner === "channel") {
+                await channel.disconnectConfigured();
+              } else if (owner === "scheduler") {
+                await settleScheduleForTransfer();
+              } else {
+                await delivery.seal(operationId);
+                await delivery.settle({
+                  operationId,
+                  strategy: "drain",
+                  timeoutMs: 30_000,
+                });
               }
-              await conversationProtocol.stopRecoveryLoop();
-            },
-            resumeAfterAbort: async () => {
-              if (plannedDelivery.kind === "available") {
-                await plannedDelivery.stack.resumeAfterAuthorityTransfer();
+              const after = owner === "delivery"
+                ? await delivery.read(operationId)
+                : await captureExternal(owner, operationId);
+              if (owner !== "delivery") {
+                assertAcceptedWorkSubset(
+                  after,
+                  frozen,
+                  `device-removal ${owner} read-back`,
+                );
               }
-              conversationProtocol.startRecoveryLoop();
+              if (after.length !== 0) {
+                throw new Error(`Device-removal ${owner} accepted work is not settled`);
+              }
+            }
+            await authority.resourceGovernor.coordinate(async () => undefined);
+          },
+          releaseAdmission: async (operationId) => {
+            if (removalAdmissionOperationId === undefined) return;
+            if (removalAdmissionOperationId !== operationId) {
+              throw new Error("Device-removal release does not own external admission");
+            }
+            await delivery.release(operationId);
+            if (!removalBootstrapAdmissionClosed) {
+              await delivery.resume();
               schedulerApplication.resumeAdmission();
+              jobOwner.resumeAccepting();
               inbound.resumeNewMessages();
-              if (plannedChannel.kind === "available") {
-                await plannedChannel.connections.connectConfigured();
-              }
-            },
-          },
-          postInstall: {
-            rebindAuthorityGeneration: async (generation) => {
-              const receipt = await authority.rebindInstalledAuthority(generation);
-              return receipt;
-            },
-            recoverScheduler: async (obligations) => {
-              await schedulerGenerationOwner.recoverInstalledAuthority({
-                currentAnchorEpoch: authority.anchorEpoch,
-                create: createSchedulerRuntime,
-                prepare: prepareSchedulerGeneration,
-                bind: bindSchedulerGeneration,
-                publish: publishSchedulerGeneration,
-                activate: (replacement) =>
-                  activateSchedulerGeneration(replacement, runner !== undefined),
-                resume: (replacement) =>
-                  resumeSchedulerGeneration(replacement, runner !== undefined),
-              });
-              return obligations;
-            },
-            recoverConversation: async (obligations) => {
-              await conversationProtocol.recoverInstalledAuthority();
-              return obligations;
-            },
-            recoverDelivery: async (obligations) => {
-              if (plannedDelivery.kind === "available") {
-                await plannedDelivery.stack.recoverInstalledAuthority();
-              }
-              return obligations;
-            },
-            openCurrentOwnerSurfaces: async () => {
-              if (plannedChannel.kind === "available") {
-                await plannedChannel.connections.connectConfigured();
-              }
-            },
-          },
-        });
-      const postAdoptionReviewLifecycle =
-        definePostAdoptionReviewLifecycleContribution({
-          kind: "anchor",
-          review: schedulerGenerationOwner.postAdoptionReview,
-        });
-      const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
-        closeAdmission: async (operationId) => {
-          if (
-            removalAdmissionOperationId !== undefined &&
-            removalAdmissionOperationId !== operationId
-          ) {
-            throw new Error("Another device-removal operation owns external admission");
-          }
-          removalAdmissionOperationId = operationId;
-          inbound.refuseNewMessages();
-          jobOwner.pauseAccepting();
-          await channel.suspendConfigured();
-          schedulerApplication.closeAdmission();
-          delivery.close();
-        },
-        captureAcceptedWork: async (operationId) => {
-          const items = [] as Array<{
-            owner: "remote" | "channel" | "scheduler" | "delivery";
-            id: string;
-            revision: string;
-          }>;
-          for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
-            for (const item of await captureExternal(owner, operationId)) {
-              items.push({ owner, ...item });
+              await channel.resumeConfigured();
             }
-          }
-          return Object.freeze(items.sort((left, right) =>
-            `${left.owner}:${left.id}`.localeCompare(
-              `${right.owner}:${right.id}`,
-              "en-US",
-            )));
-        },
-        settleAcceptedWork: async ({ operationId, ownerItems }) => {
-          if (removalAdmissionOperationId !== operationId) {
-            throw new Error("Device-removal settlement does not own external admission");
-          }
-          const sources = deliveryLifecycleSourcesFromOwnerItems(ownerItems);
-          await delivery.install({
-            operationId,
-            sources,
-            deliveries: ownerItems
-              .filter((item) => item.owner === "delivery")
-              .map(({ id, revision }) => ({ id, revision })),
-          });
-          await recoverFrozenOwners(sources);
-          for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
-            const frozen = ownerItems
-              .filter((item) => item.owner === owner)
-              .map(({ id, revision }) => ({ id, revision }));
-            const current = owner === "delivery"
-              ? await delivery.read(operationId)
-              : await captureExternal(owner, operationId);
-            if (owner !== "delivery") {
-              assertAcceptedWorkSubset(
-                current,
-                frozen,
-                `device-removal ${owner} settlement`,
+            removalAdmissionOperationId = undefined;
+          },
+          cleanup: cleanupLocalDevice,
+          finalizeDeviceKey: async (operationId, identity) => {
+            const expectedGeneration = protocolDigest("DeviceKeyGeneration", 1, {
+              deviceId: bootstrap.mesh.deviceKey.deviceId,
+              publicKey: bootstrap.mesh.deviceKey.publicKey,
+            });
+            if (
+              identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId ||
+              identity.targetDeviceKeyGeneration !== expectedGeneration
+            ) {
+              throw new Error(
+                "Device removal key finalizer does not own the frozen key generation",
               );
             }
-            if (owner === "remote") {
-              await inbound.drainAcceptedMessages();
-              await jobOwner.drain();
-            } else if (owner === "channel") {
-              await channel.disconnectConfigured();
-            } else if (owner === "scheduler") {
-              await settleScheduleForTransfer();
-            } else {
-              await delivery.seal(operationId);
-              await delivery.settle({
+            await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
+            return [{
+              kind: "cleanup" as const,
+              digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
                 operationId,
-                strategy: "drain",
-                timeoutMs: 30_000,
-              });
-            }
-            const after = owner === "delivery"
-              ? await delivery.read(operationId)
-              : await captureExternal(owner, operationId);
-            if (owner !== "delivery") {
-              assertAcceptedWorkSubset(
-                after,
-                frozen,
-                `device-removal ${owner} read-back`,
-              );
-            }
-            if (after.length !== 0) {
-              throw new Error(`Device-removal ${owner} accepted work is not settled`);
-            }
-          }
-          await authority.resourceGovernor.coordinate(async () => undefined);
-        },
-        releaseAdmission: async (operationId) => {
-          if (removalAdmissionOperationId === undefined) return;
-          if (removalAdmissionOperationId !== operationId) {
-            throw new Error("Device-removal release does not own external admission");
-          }
-          await delivery.release(operationId);
-          if (!removalBootstrapAdmissionClosed) {
-            await delivery.resume();
-            schedulerApplication.resumeAdmission();
-            jobOwner.resumeAccepting();
-            inbound.resumeNewMessages();
-            await channel.resumeConfigured();
-          }
-          removalAdmissionOperationId = undefined;
-        },
-        cleanup: cleanupLocalDevice,
-        finalizeDeviceKey: async (operationId, identity) => {
-          const expectedGeneration = protocolDigest("DeviceKeyGeneration", 1, {
-            deviceId: bootstrap.mesh.deviceKey.deviceId,
-            publicKey: bootstrap.mesh.deviceKey.publicKey,
-          });
+                targetDeviceId: identity.targetDeviceId,
+                targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
+              }),
+            }];
+          },
+          onRemoved: () => anchorInternalStop.requestStop({
+            reason: "device-removed",
+            strategy: "immediate",
+          }),
+        });
+        const activeMesh = await preparedMesh.start({
+          deviceRemovalLifecycle,
+          plannedDutyMigrationLifecycle,
+          postAdoptionReviewLifecycle,
+          lifecycleAdmissionClosed: true,
+          recoverAcceptedWork: startupLifecycle?.recoverAcceptedWork ?? true,
+        });
+        removalBootstrapAdmissionClosed = false;
+        if (!startupLifecycle) {
+          await delivery.resume();
+          schedulerApplication.resumeAdmission();
+          jobOwner.resumeAccepting();
+          activeMesh.resumeAcceptingAfterLifecycle();
+          inbound.resumeNewMessages();
           if (
-            identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId ||
-            identity.targetDeviceKeyGeneration !== expectedGeneration
+            activeMesh.currentAnchorDeviceId() === bootstrap.mesh.deviceKey.deviceId &&
+            activeMesh.plannedCurrentOwnerReady()
           ) {
-            throw new Error(
-              "Device removal key finalizer does not own the frozen key generation",
-            );
+            await channel.connectConfigured();
           }
-          await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
-          return [{
-            kind: "cleanup" as const,
-            digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
-              operationId,
-              targetDeviceId: identity.targetDeviceId,
-              targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
-            }),
-          }];
-        },
-        onRemoved: () => anchorInternalStop.requestStop({
-          reason: "device-removed",
-          strategy: "immediate",
-        }),
-      });
-      const activeMesh = await preparedMesh.start({
-        deviceRemovalLifecycle,
-        plannedDutyMigrationLifecycle,
-        postAdoptionReviewLifecycle,
-        lifecycleAdmissionClosed: true,
-        recoverAcceptedWork: startupLifecycle?.recoverAcceptedWork ?? true,
-      });
-      ctx.meshRuntime = activeMesh;
-      delete ctx.meshRuntimePreparation;
-      removalBootstrapAdmissionClosed = false;
-      if (!startupLifecycle) {
-        await delivery.resume();
-        schedulerApplication.resumeAdmission();
-        jobOwner.resumeAccepting();
-        activeMesh.resumeAcceptingAfterLifecycle();
-        inbound.resumeNewMessages();
-        if (
-          activeMesh.currentAnchorDeviceId() === bootstrap.mesh.deviceKey.deviceId &&
-          activeMesh.plannedCurrentOwnerReady()
-        ) {
-          await channel.connectConfigured();
         }
       }
-    }
-    if (!preparedMesh && !startupLifecycle) {
-      await boundDeliveryStack?.lifecycle.resume();
-      schedulerApplication.resumeAdmission();
-      boundExecutorJobOwner?.resumeAccepting();
-      boundInboundRouter?.resumeNewMessages();
-      await boundChannelConnections?.connectConfigured();
-    }
-  }
+      if (!preparedMesh && !startupLifecycle) {
+        await boundDeliveryStack?.lifecycle.resume();
+        schedulerApplication.resumeAdmission();
+        boundExecutorJobOwner?.resumeAccepting();
+        boundInboundRouter?.resumeNewMessages();
+        await boundChannelConnections?.connectConfigured();
+      }
+    };
+  })();
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
@@ -1746,13 +1848,6 @@ async function runServerProcess(
       );
     }
   };
-
-  // Reconcile accepted-but-unreviewed runs and their durable evidence requests
-  // before any control ingress starts listening. Recovery may schedule local
-  // proxy work, but it never requires a connected surface.
-  if (advancementRecovery && !startupLifecycleOperation) {
-    await recoverAdvancementAcceptedWork();
-  }
 
   if (!authorityRuntime.globalState) {
     throw new Error("Skill management requires the anchor global-state authority");
@@ -2087,32 +2182,34 @@ async function runServerProcess(
     },
     isHostStopped: isLifecycleHostStopped,
   });
-  const stopResume = await stopCoordinator.resumeActive();
-  if (startupLifecycleOperation?.identity.kind === "stop") {
-    const operationId = startupLifecycleOperation.identity.operationId;
-    const terminal = stopResume.find((operation) =>
-      operation.identity.operationId === operationId && operation.phase === "terminal");
-    if (!terminal) {
-      throw new Error("Durable host-stop recovery did not prove the old host terminal");
+  const recoverHostStop = async (): Promise<void> => {
+    const stopResume = await stopCoordinator.resumeActive();
+    if (startupLifecycleOperation?.identity.kind === "stop") {
+      const operationId = startupLifecycleOperation.identity.operationId;
+      const terminal = stopResume.find((operation) =>
+        operation.identity.operationId === operationId && operation.phase === "terminal");
+      if (!terminal) {
+        throw new Error("Durable host-stop recovery did not prove the old host terminal");
+      }
+      await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
+      await boundDeliveryStack?.lifecycle.release(operationId);
+      await boundDeliveryStack?.lifecycle.resume();
+      if (!startupLifecycleFrozenRecoveryStarted) {
+        await recoverStartupLifecycleAcceptedWork(
+          startupLifecycle?.delivery.sources ?? [],
+        );
+      }
+      await recoverAdvancementAcceptedWork();
+      schedulerApplication.resumeAdmission();
+      boundExecutorJobOwner?.resumeAccepting();
+      meshRuntime?.resumeAcceptingAfterLifecycle();
+      boundInboundRouter?.resumeNewMessages();
+      await boundChannelConnections?.resumeConfigured();
+      boundLocalConversationOwner?.resumeRecoveryAfterLifecycle();
+      startupLifecycle = undefined;
+      managedHostStopping = false;
     }
-    await boundLocalConversationOwner?.releaseHostStopAdmission(operationId);
-    await boundDeliveryStack?.lifecycle.release(operationId);
-    await boundDeliveryStack?.lifecycle.resume();
-    if (!startupLifecycleFrozenRecoveryStarted) {
-      await recoverStartupLifecycleAcceptedWork(
-        startupLifecycle?.delivery.sources ?? [],
-      );
-    }
-    await recoverAdvancementAcceptedWork();
-    schedulerApplication.resumeAdmission();
-    boundExecutorJobOwner?.resumeAccepting();
-    meshRuntime?.resumeAcceptingAfterLifecycle();
-    boundInboundRouter?.resumeNewMessages();
-    await boundChannelConnections?.resumeConfigured();
-    boundLocalConversationOwner?.resumeRecoveryAfterLifecycle();
-    startupLifecycle = undefined;
-    managedHostStopping = false;
-  }
+  };
   async function cleanupLocalDevice() {
     const current = await loadCurrentManagedServiceState("activate", zhixingHome);
     const adapter = current.spec
@@ -2509,9 +2606,6 @@ async function runServerProcess(
         },
       })
     : undefined;
-  await currentRemovalMigrationApplication?.resumeActive();
-  await currentRemovalRecoveryApplication?.resumeActive();
-  anchorInternalStopLifecycle.assertServerStartAllowed();
   const deliveryProductApi = boundDeliveryStack
     ? createDeliveryResolutionProductApiContribution(
         boundDeliveryStack.resolutionApplication,
@@ -2957,21 +3051,6 @@ async function runServerProcess(
       ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
     lifecycleShutdown: stopCoordinator,
   });
-  if (meshRuntime) {
-    const firstPartyConversationMeshSurface =
-      meshRuntime.createFirstPartyConversationSurfaceLifecycle({
-        dispatch: ({ method, params, connection }) =>
-          serverRegistry.dispatchCanonical(method, params, {
-            connection,
-            server: serverCtx,
-          }),
-      });
-    lifecycleContributions.acquire(
-      "firstPartyConversationMeshSurface.close",
-      () => firstPartyConversationMeshSurface.close(),
-    );
-  }
-
   boundDeliveryStack?.onStatus((notice) => {
     serverCtx.broadcastAll?.("delivery.status", notice);
   });
@@ -3005,6 +3084,40 @@ async function runServerProcess(
         serverLog: !!serverLogLifecycle,
         checkpointOwner: !!authorityCheckpointOwner,
       });
+      // Server 内部设施已准备、公开入口仍为 inactive 503；同一 provenance
+      // transport 在任何恢复/调度/Channel consumer 可达前原子装入稳定 Host port。
+      lifecycleContributions.acquire(
+        "sessionBroadcast.close",
+        () => sessionBroadcastLifecycle.close(),
+      );
+      const sessionTransport = openingRunner.server.sessionBroadcastTransport;
+      if (!sessionTransport) {
+        throw new Error("Anchor Server did not provide a session broadcast transport");
+      }
+      sessionBroadcastLifecycle.install(sessionTransport);
+
+      // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
+      // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
+      if (enabledSurfaces.has("confirmation-bridge")) {
+        await installConfirmationBridge({
+          conversations: boundConversations,
+          confirmationHub,
+          runner: openingRunner,
+          lifecycleContributions,
+        });
+      }
+      // Recovery may emit events, run accepted work, or request Channel reopen.
+      // Physical Channel connections remain behind their Host activation gate.
+      boundChannelConversationProduct?.assertBound();
+      await startAnchorRuntime();
+      await recoverHostStop();
+      await currentRemovalMigrationApplication?.resumeActive();
+      await currentRemovalRecoveryApplication?.resumeActive();
+      anchorInternalStopLifecycle.assertServerStartAllowed();
+      if (advancementRecovery && !startupLifecycleOperation) {
+        await recoverAdvancementAcceptedWork();
+      }
+
       lifecycleContributions.acquire(
         "anchorInternalStop.close",
         () => anchorInternalStopLifecycle.close(),
@@ -3023,24 +3136,26 @@ async function runServerProcess(
         },
       });
 
-      // Server 内部设施已准备、公开入口仍为 inactive 503；同一 provenance
-      // transport 在任何恢复/调度/Channel consumer 可达前原子装入稳定 Host port。
-      lifecycleContributions.acquire(
-        "sessionBroadcast.close",
-        () => sessionBroadcastLifecycle.close(),
-      );
-      const sessionTransport = openingRunner.server.sessionBroadcastTransport;
-      if (!sessionTransport) {
-        throw new Error("Anchor Server did not provide a session broadcast transport");
+      if (meshRuntime) {
+        const firstPartyConversationMeshSurface =
+          meshRuntime.createFirstPartyConversationSurfaceLifecycle({
+            dispatch: ({ method, params, connection }) =>
+              serverRegistry.dispatchCanonical(method, params, {
+                connection,
+                server: serverCtx,
+              }),
+          });
+        lifecycleContributions.acquire(
+          "firstPartyConversationMeshSurface.close",
+          () => firstPartyConversationMeshSurface.close(),
+        );
       }
-      sessionBroadcastLifecycle.install(sessionTransport);
 
       // Delivery/Scheduler 的既有 activation 是公开入口开放的必要前置。
       boundDeliveryStack?.activate();
       if (!startupLifecycle) schedulerApplication.activate();
 
       // prepared runner 只提供内部 connection/cleanup 设施；activation gate 尚未释放。
-      ctx.runner = openingRunner;
       boundJobStatus?.onStatus((notice) => openingRunner.server.context.broadcastAll?.("job.status", notice));
       boundJobStatus?.onSchedulerNotice((notice) => openingRunner.server.context.broadcastAll?.("scheduler.notice", notice));
       if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
@@ -3052,15 +3167,16 @@ async function runServerProcess(
       lifecycleContributions.transferTo(registry, "foundation");
       lifecycleContributions.transferTo(registry, "surface");
 
-      // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
-      // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
-      if (!startupLifecycle) delete ctx.startupLifecycle;
-      await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
+      await startConversationRecovery({
+        conversationProtocol: boundConversationProtocol,
+        startupLifecycle,
+        lifecycleContributions,
+      });
 
       lifecycleContributions.transferExactTo(
         registry,
         "post-server",
-        boundConversations ? ["confirmationBridge.dispose"] : [],
+        enabledSurfaces.has("confirmation-bridge") ? ["confirmationBridge.dispose"] : [],
       );
 
       // pre-server units transfer their typed contributions in the established
@@ -3088,6 +3204,10 @@ async function runServerProcess(
           ? ["firstPartyConversationMeshSurface.close" as const]
           : []),
       ]);
+
+      // All recovery and required consumers are ready before a Channel can
+      // deliver its first callback, including reconnects requested by recovery.
+      await boundChannelConnections?.activate();
 
       // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
       lifecycleContributions.assertTransferred();

@@ -4,7 +4,7 @@
  * 恢复时丢历史上下文。
  *
  * 用真实 ShardedTranscriptStore + SnapshotStore（临时目录）驱动
- * conversationSurface 装配出的 ConversationManager，断言装填进会话窗口的
+ * createConversationServices 返回的 ConversationManager，断言装填进会话窗口的
  * 启动装填产物(窗口归 ManagedSession,工厂只发纯执行体、不感知装填)。
  */
 
@@ -16,8 +16,8 @@ import { extractFirstText } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
-import { createAssemblyUnits } from "../access-surfaces.js";
-import type { AssemblyContext } from "../access-surface.js";
+import { createConversationServices, type CreateConversationServicesInput } from "../access-surfaces.js";
+import { createConversationLosslessDataPlaneAssemblyHandle } from "../lossless-data-plane-composition.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import {
   ConversationProtocolRuntime,
@@ -37,9 +37,6 @@ const TEST_EXECUTOR_READINESS = {
   credentialGeneration: null,
 };
 
-const conversationSurface = createAssemblyUnits({}).find(
-  (s) => s.name === "conversation",
-)!;
 
 class MemorySecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -130,7 +127,7 @@ async function setupCtx() {
       },
     }) as never),
   };
-  const ctx = {
+  const input = {
     zhixingHome: tmp,
     secretStore,
     authorityRuntime,
@@ -163,12 +160,13 @@ async function setupCtx() {
     confirmationHub: undefined,
     conversationIdentityLifecycle,
     lifecycleContributions: { acquire: vi.fn() },
-  } as unknown as AssemblyContext;
-  await conversationSurface.setup(ctx);
+  } as unknown as CreateConversationServicesInput;
+  const ctx = await createConversationServices(input, createConversationLosslessDataPlaneAssemblyHandle());
   return {
     conversationStorage,
     created,
     ctx,
+    input,
     convDir,
     conversationIdentityLifecycle,
     advancementConversationComposition,
@@ -238,13 +236,14 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
     await ctx.conversations!.disposeAll();
   });
 
-  it("keeps runtime storage dependencies after the construction container changes", async () => {
-    const { ctx, conversationStorage } = await setupCtx();
+  it("returns frozen products and retains bound storage when the caller reuses its input object", async () => {
+    const { ctx, input, conversationStorage } = await setupCtx();
     const manager = ctx.conversations!;
-    Object.assign(ctx, {
+    expect(Object.isFrozen(ctx)).toBe(true);
+    Object.assign(input, {
       conversationIdentityLifecycle: {},
       conversationCommittedViewStorage: {},
-      sessionBroadcast: () => { throw new Error("must not locate through ctx"); },
+      sessionBroadcast: () => { throw new Error("must not locate through construction input"); },
     });
     try {
       await manager.getOrCreate("bound-conversation");

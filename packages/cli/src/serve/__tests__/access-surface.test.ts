@@ -1,95 +1,70 @@
-import { describe, it, expect } from "vitest";
-import {
-  setupAssemblyUnits,
-  type AssemblyUnit,
-  type AssemblyContext,
-  type SurfacePhase,
-} from "../access-surface.js";
-import { PROFILES, type ServerProfile } from "../profile.js";
+import { readFile } from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+import { PROFILES } from "../profile.js";
 
-function mockUnit(
-  name: string,
-  phase: SurfacePhase,
-  calls: string[],
-  core = false,
-): AssemblyUnit {
-  return {
-    name,
-    phase,
-    ...(core ? { kind: "core" as const } : {}),
-    setup: async () => {
-      calls.push(name);
-    },
-  };
-}
+const read = (file: string) => readFile(new URL("../" + file, import.meta.url), "utf8");
 
-// mock 装配集合 —— profile 接入面与声明对账，core 单元独立于 profile，
-// 数组序仍是统一依赖拓扑序。
-function allUnits(calls: string[]): AssemblyUnit[] {
-  return [
-    mockUnit("authority-runtime", "pre-server", calls),
-    mockUnit("conversation", "pre-server", calls),
-    mockUnit("executor-job-owner", "pre-server", calls, true),
-    mockUnit("asset-maintenance", "pre-server", calls),
-    mockUnit("mesh-control", "pre-server", calls),
-    mockUnit("lossless-data-plane", "pre-server", calls),
-    mockUnit("executor-job-owner-start", "pre-server", calls, true),
-    mockUnit("channel", "pre-server", calls),
-    mockUnit("delivery", "pre-server", calls),
-    mockUnit("confirmation-bridge", "post-server", calls),
-    mockUnit("conversation-recovery", "post-server", calls),
-  ];
-}
-
-// 遍历引擎只读 ctx.profile；surface.setup 的 mock 不碰 ctx 其余字段。
-function ctx(profile: ServerProfile): AssemblyContext {
-  return { profile } as unknown as AssemblyContext;
-}
-
-describe("access-surface 数据驱动装配", () => {
-  it("full 档 pre-server 按数组序装、post-server 单独装 bridge", async () => {
-    const calls: string[] = [];
-    const units = allUnits(calls);
-    await setupAssemblyUnits(units, ctx("full"), "pre-server");
-    expect(calls).toEqual([
-      "authority-runtime",
-      "conversation",
-      "executor-job-owner",
-      "asset-maintenance",
-      "mesh-control",
-      "lossless-data-plane",
-      "executor-job-owner-start",
-      "channel",
-      "delivery",
-    ]);
-
-    await setupAssemblyUnits(units, ctx("full"), "post-server");
-    expect(calls).toEqual([
-      "authority-runtime",
-      "conversation",
-      "executor-job-owner",
-      "asset-maintenance",
-      "mesh-control",
-      "lossless-data-plane",
-      "executor-job-owner-start",
-      "channel",
-      "delivery",
-      "confirmation-bridge",
-      "conversation-recovery",
-    ]);
+describe("Host static construction graph", () => {
+  it("connects all fourteen factories directly, before their consumers become reachable", async () => {
+    const command = await read("command.ts");
+    const calls = [
+      "await prepareAuthorityServices({",
+      "await createConversationServices({",
+      "new RuntimeHost({",
+      "await startLocalConversationOwner({",
+      "await createExecutorJobOwner({",
+      "await startAssetMaintenance({",
+      "return prepareMeshRuntime({",
+      "await bindAdvancementEvidenceTopology({",
+      "await prepareChannel({",
+      "await createHostLosslessDataPlane({",
+      "conversationLosslessDataPlane.assertComplete()",
+      "await startExecutorJobOwner({",
+      "await recoverChannelInteractions({",
+      "await prepareDelivery({",
+      "await installConfirmationBridge({",
+      "await startConversationRecovery({",
+    ];
+    let previous = -1;
+    for (const call of calls) {
+      expect(command.split(call), call).toHaveLength(2);
+      const position = command.indexOf(call);
+      expect(position, call).toBeGreaterThan(previous);
+      previous = position;
+    }
+    expect(command).toContain("const localExecutor = executor ?");
+    expect(command).toContain("executorJobOwnerAssembly: localExecutor.jobs");
+    expect(command).toContain("conversationProtocol: conversationServices.conversationProtocol");
+    expect(command).toContain("channelCoordinator: losslessDataPlane.coordinator");
+    expect(command).toContain("meshRuntimePreparation: preparedMeshRuntime");
+    expect(command).toContain("channelChallengeAction: losslessDataPlane.onChallengeAction");
+    expect(command.indexOf("beforeActivate: async (openingRunner) =>"))
+      .toBeLessThan(command.indexOf("await installConfirmationBridge({"));
+    expect(command.indexOf("await startConversationRecovery({"))
+      .toBeLessThan(command.indexOf("startupRollback.commit()"));
   });
 
-  it("phase 过滤：pre-server 装配不触发 post-server 接入面", async () => {
-    const calls: string[] = [];
-    await setupAssemblyUnits(allUnits(calls), ctx("full"), "pre-server");
-    expect(calls).not.toContain("confirmation-bridge");
+  it("uses finite readonly inputs and returns products rather than a writable service bus", async () => {
+    const sources = await Promise.all(["command.ts", "access-surface.ts", "access-surfaces.ts"].map(read));
+    for (const source of sources) {
+      expect(source).not.toMatch(/\b(?:AssemblyContext|setupAssemblyUnits|createAssemblyUnits|OrderedAssemblyUnit)\b/u);
+    }
+    const factories = sources[2]!;
+    expect(factories).not.toMatch(/\bctx\b/u);
+    const inputs = [...factories.matchAll(/export interface \w+Input \{([\s\S]*?)\n\}/gu)];
+    expect(inputs).toHaveLength(14);
+    for (const [, body] of inputs) {
+      for (const line of body!.split("\n").filter((line) => /^  \w/u.test(line))) {
+        expect(line).toMatch(/^  readonly /u);
+      }
+    }
+    expect(factories).toContain("return Object.freeze({");
+    expect(factories).not.toMatch(/\binput\.\w+\s*(?:=(?!=)|\?\?=)/u);
   });
 
-  it("PROFILES.full.surfaces 与接入面单元集合一致（防集合 / 单元漂移）", () => {
-    const names = allUnits([])
-      .filter((unit) => unit.kind !== "core")
-      .map((unit) => unit.name)
-      .sort();
-    expect([...PROFILES.full.surfaces].sort()).toEqual(names);
+  it("lets the profile select adapters, never the core or recovery obligations", () => {
+    expect(PROFILES.full.surfaces).toEqual([
+      "mesh-control", "channel", "delivery", "confirmation-bridge",
+    ]);
   });
 });

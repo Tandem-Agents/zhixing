@@ -19,23 +19,22 @@ import { ChannelConversationProductBinding } from "./channel-conversation-produc
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
 
 describe("ChannelConversationProductBinding", () => {
-  it("waits for and then uses the one sealed Product API dispatcher", async () => {
+  it("requires binding before consumption and uses the one sealed Product API dispatcher", async () => {
     const manager = managerWithResult("channel answer");
     const admitTurn = vi.spyOn(manager, "admitTurn");
     const binding = new ChannelConversationProductBinding(manager);
-    const pending = binding.prepareAgentTurn({
+    expect(() => binding.assertBound()).toThrow("not bound");
+    await expect(binding.prepareAgentTurn({
+      channelId: "feishu",
+      platformSubject: "user-1",
+    })).rejects.toThrow("not bound");
+    binding.bind(conversationProductApi(manager));
+    binding.assertBound();
+    expect(() => binding.bind(conversationProductApi(manager))).toThrow("already bound");
+    const turnIdentity = await binding.prepareAgentTurn({
       channelId: "feishu",
       platformSubject: "user-1",
     });
-    let settled = false;
-    void pending.then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
-    binding.bind(conversationProductApi(manager));
-    const turnIdentity = await pending;
     const outcomes: unknown[] = [];
     const started = vi.fn();
     const released = vi.fn();
@@ -115,18 +114,12 @@ describe("ChannelConversationProductBinding", () => {
     ))).toThrow("Conversation Product API contribution is missing");
   });
 
-  it("fails pending and future calls closed when the Channel lifecycle closes before binding", async () => {
+  it("rejects consumption and rebinding after the Channel lifecycle closes", async () => {
     const binding = new ChannelConversationProductBinding(managerWithResult("unused"));
-    const pending = binding.prepareAgentTurn({
-      channelId: "feishu",
-      platformSubject: "user-1",
-    });
-
     binding.close();
-
-    await expect(pending).rejects.toThrow(
-      "Channel Conversation Product API binding is closed",
-    );
+    expect(() => binding.assertBound()).toThrow("closed");
+    await expect(binding.admitAgentTurn({} as never)).rejects.toThrow("closed");
+    await expect(binding.abort({} as never)).rejects.toThrow("closed");
     await expect(binding.prepareAgentTurn({
       channelId: "feishu",
       platformSubject: "user-1",

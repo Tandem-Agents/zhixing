@@ -534,8 +534,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      executorDispatch: localExecutorBoundary.application,",
-        "      globalState: ctx.authorityRuntime.globalState,\n      executorDispatch: localExecutorBoundary.application,",
+        "    executorDispatch: localExecutorBoundary.application,",
+        "    globalState: inputAuthorityRuntime.globalState,\n    executorDispatch: localExecutorBoundary.application,",
       ),
     )).join("\n"),
     /forbidden or duplicate capability globalState/,
@@ -581,8 +581,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      verifier: ctx.authorityRuntime.verifier,\n    });",
-        "      verifier: ctx.authorityRuntime.verifier,\n      globalState: ctx.authorityRuntime.globalState,\n    });",
+        "    verifier: inputAuthorityRuntime.verifier,\n  });",
+        "    verifier: inputAuthorityRuntime.verifier,\n    globalState: inputAuthorityRuntime.globalState,\n  });",
       ),
     )).join("\n"),
     /forbidden or duplicate dependency globalState/,
@@ -591,8 +591,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      validateLocalConversationManifest:\n        ctx.authorityRuntime.validateLocalConversationManifest,\n      verifier: ctx.authorityRuntime.verifier,\n    });\n    const localExecutorBoundary",
-        "      validateLocalConversationManifest:\n        ctx.authorityRuntime.validateLocalConversationManifest,\n    });\n    const localExecutorBoundary",
+        "    validateLocalConversationManifest:\n      inputAuthorityRuntime.validateLocalConversationManifest,\n    verifier: inputAuthorityRuntime.verifier,\n  });\n  const localExecutorBoundary",
+        "    validateLocalConversationManifest:\n      inputAuthorityRuntime.validateLocalConversationManifest,\n  });\n  const localExecutorBoundary",
       ),
     )).join("\n"),
     /missing dependency verifier/,
@@ -601,11 +601,11 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      deviceId: ctx.authorityRuntime.deviceId,",
-        "      deviceId: ctx.authorityRuntime.executorId,",
+        "    deviceId: inputAuthorityRuntime.deviceId,",
+        "    deviceId: inputAuthorityRuntime.executorId,",
       ),
     )).join("\n"),
-    /dependency deviceId must bind ctx\.authorityRuntime\.deviceId/,
+    /dependency deviceId must bind inputAuthorityRuntime\.deviceId/,
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
@@ -621,8 +621,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "    const localOwner = localConversationOwnerRuntime({\n",
-        "    const localOwner = localConversationOwnerRuntime({\n      ...ctx.authorityRuntime,\n",
+        "  const localOwner = localConversationOwnerRuntime({\n",
+        "  const localOwner = localConversationOwnerRuntime({\n    ...inputAuthorityRuntime,\n",
       ),
     )).join("\n"),
     /spread or shorthand/,
@@ -632,12 +632,12 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text
         .replace(
-          "    const localOwner = localConversationOwnerRuntime({\n",
-          "    const localOwner = localConversationOwnerRuntime(Object.assign(ctx.authorityRuntime, {\n",
+          "  const localOwner = localConversationOwnerRuntime({\n",
+          "  const localOwner = localConversationOwnerRuntime(Object.assign(inputAuthorityRuntime, {\n",
         )
         .replace(
-          "      verifier: ctx.authorityRuntime.verifier,\n    });",
-          "      verifier: ctx.authorityRuntime.verifier,\n    }));",
+          "    verifier: inputAuthorityRuntime.verifier,\n  });",
+          "    verifier: inputAuthorityRuntime.verifier,\n  }));",
         ),
     )).join("\n"),
     /must receive one explicit dependency object literal/,
@@ -665,7 +665,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace("    await assembly.start(", "    await Promise.resolve("),
+      (text) => text.replace("  await assembly.start(input.startupLifecycle", "  await Promise.resolve(input.startupLifecycle"),
     )).join("\n"),
     /assembly must start exactly once, got 0/,
   );
@@ -895,7 +895,7 @@ test("Workscene remote workspace probing uses one statically assembled topology 
     inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "...(meshConnections ? { meshConnections } : {}),",
+        "        connections: meshConnections,",
         "",
       ),
     )).join("\n"),
@@ -983,7 +983,7 @@ test("Workscene product dependencies are statically complete before publication"
   );
   assert.match(
     inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
-      "packages/cli/src/serve/access-surface.ts",
+      "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
         "readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;",
         "readonly worksceneAuthority?: AnchorWorksceneAuthorityProjection;",
@@ -995,8 +995,8 @@ test("Workscene product dependencies are statically complete before publication"
     inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        /authority: ctx\.worksceneAuthority,\n(\s*)conversations: manager,/u,
-        "authority: ctx.worksceneAuthority,\n$1conversations: () => manager,",
+        /authority: input\.worksceneAuthority,\n(\s*)conversations: manager,/u,
+        "authority: input.worksceneAuthority,\n$1conversations: () => manager,",
       ),
     )).join("\n"),
     /publishes a partial or late-bound Workscene product/,
@@ -1128,7 +1128,7 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
         "if (dataPlane) await dataPlane.start();",
-        "ctx.executorDataPlane = dataPlane;\n    if (dataPlane) await dataPlane.start();",
+        "return Object.freeze({ executorDataPlane: dataPlane });",
       ),
     )).join("\n"),
     /Host assignment\/data-plane pair composition/u,
@@ -1137,8 +1137,8 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
     inspectAssignmentDataPlaneBoundary(mutate(
       "packages/cli/src/serve/profile.ts",
       (text) => text.replace(
-        '"conversation",',
-        '"executor-data-plane",\n      "conversation",',
+        '"mesh-control",',
+        '"executor-data-plane",\n      "mesh-control",',
       ),
     )).join("\n"),
     /Host assignment\/data-plane pair composition/u,
@@ -1294,8 +1294,8 @@ test("Assignment resources cross Conversation and Job through finite Correctness
     inspectAssignmentResourcePortBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "resources: ctx.authorityRuntime.executorResourceGovernor,",
-        "resourceGovernor: ctx.authorityRuntime.executorResourceGovernor,",
+        "resources: input.authorityRuntime.executorResourceGovernor,",
+        "resourceGovernor: input.authorityRuntime.executorResourceGovernor,",
       ),
     )).join("\n"),
     /Host Assignment resource role projection exact-set drifted/u,
@@ -2153,7 +2153,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
   for (const [relative, before, after, expected] of [
     ["packages/server/src/context.ts", "  conversation?: ServerConversationBinding;", "  conversations?: ConversationManager;", /demand must stay finite/],
     ["packages/server/src/context.ts", "  readonly serverInfoRuntime?: ServerInfoRuntimeBinding;", "  runtimeControl?: RuntimeControlAdapter;", /runtime status and history demand must stay handler-scoped/],
-    ["packages/cli/src/serve/command.ts", "conversation: createServerConversationBinding(ctx.conversations!),", "conversation: ctx.conversations,", /escaped the finite Host bindings/],
+    ["packages/cli/src/serve/command.ts", "conversation: createServerConversationBinding(boundConversations!),", "conversation: ctx.conversations,", /escaped the finite Host bindings/],
     ["packages/cli/src/serve/executor-role-runtime.ts", "      conversationRpc,", "      conversation: leakedConversationOwner,\n      conversationRpc,", /escaped the finite Host bindings/],
     ["packages/server/src/rpc/methods/confirmation.ts", "server.confirmation", "server.confirmationHub", /escaped the finite Host bindings/],
   ]) {
@@ -2402,8 +2402,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner",
-        "projectRecoveryBackupStatus(ctx.authorityCheckpointOwner",
+        "projectBackupRecoveryPublicStatus(authorityCheckpointOwner",
+        "projectRecoveryBackupStatus(authorityCheckpointOwner",
       ),
     )).join("\n"),
     /one Backup & Recovery application owner/,
@@ -2487,7 +2487,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => text.replace("ctx.authorityCheckpointOwner?.start()", "void 0"),
+      (text) => text.replace("authorityCheckpointOwner?.start()", "void 0"),
     )).join("\n"),
     /one create\/start\/stop lifecycle/,
   );
@@ -3017,7 +3017,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "plannedInbound.refuseNewMessages()",
+        "inbound.refuseNewMessages()",
         "ctx.inboundRouter?.refuseNewMessages()",
       ),
     )).join("\n"),
@@ -3102,8 +3102,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "ctx.meshRuntime?.currentAnchorDeviceId()",
-        "ctx.meshBootstrap.trust.issuer.deviceId",
+        "mesh?.currentAnchorDeviceId()",
+        "bootstrap.trust.issuer.deviceId",
       ),
     )).join("\n"),
     /current-owner resolver exact-set drifted/,
@@ -3299,8 +3299,28 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "isCurrentOwner: () => isCurrentChannelOwner(ctx),",
+        "isCurrentOwner: channelOwnership(input.meshBootstrap, input.meshRuntimePreparation),",
         "isCurrentOwner: () => true,",
+      ),
+    )).join("\n"),
+    /channel current-owner connection or final guard drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "const isCurrentOwner = channelOwnership(input.meshBootstrap, input.meshRuntimePreparation);",
+        "const isCurrentOwner = () => true;",
+      ),
+    )).join("\n"),
+    /channel current-owner connection or final guard drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "if (!isCurrentOwner()) await preparedChannels.disconnectConfigured();",
+        "// Regression: preserve connection intent after owner changes.",
       ),
     )).join("\n"),
     /channel current-owner connection or final guard drifted/,
@@ -3502,8 +3522,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        'ctx.lifecycleContributions.acquire("meshRuntime.stop"',
-        'ctx.startupRollback.register("meshRuntime.stop"',
+        'input.lifecycleContributions.acquire("meshRuntime.stop"',
+        'input.startupRollback.register("meshRuntime.stop"',
       ),
     )).join("\n"),
     /pre-server lifecycle contribution ownership drifted/,
@@ -3512,8 +3532,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        'ctx.lifecycleContributions.acquire(\n      "confirmationBridge.dispose",',
-        'registerCleanup(ctx.cleanup,\n      "confirmationBridge.dispose",',
+        'input.lifecycleContributions.acquire(\n    "confirmationBridge.dispose",',
+        'registerCleanup(ctx.cleanup,\n    "confirmationBridge.dispose",',
       ),
     )).join("\n"),
     /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
@@ -3522,8 +3542,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        'ctx.lifecycleContributions.acquire(\n      "conversationProtocol.stopRecovery",\n      () => protocol.stopRecoveryLoop(),\n    );\n    protocol.startRecoveryLoop();',
-        'protocol.startRecoveryLoop();\n    ctx.lifecycleContributions.acquire(\n      "conversationProtocol.stopRecovery",\n      () => protocol.stopRecoveryLoop(),\n    );',
+        'input.lifecycleContributions.acquire(\n    "conversationProtocol.stopRecovery",\n    () => protocol.stopRecoveryLoop(),\n  );\n  protocol.startRecoveryLoop();',
+        'protocol.startRecoveryLoop();\n  input.lifecycleContributions.acquire(\n    "conversationProtocol.stopRecovery",\n    () => protocol.stopRecoveryLoop(),\n  );',
       ),
     )).join("\n"),
     /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
@@ -3560,7 +3580,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/serve/access-surface.ts",
+      "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
         "readonly sessionBroadcast: SessionBroadcast;",
         "readonly sessionBroadcastRef: { current: SessionBroadcast | null };",
@@ -3589,8 +3609,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "      sessionBroadcastLifecycle.install(sessionTransport);\n\n      // Delivery",
-        "      // Delivery",
+        "      sessionBroadcastLifecycle.install(sessionTransport);",
+        "      // Regression: recovery starts without an installed broadcast.",
       ),
     )).join("\n"),
     /Anchor session broadcast static activation ownership drifted/,
@@ -3797,7 +3817,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/runtime/core-host-connection.ts",
-      (text) => text.replace('reconcileCurrentManagedService("host-missing")', 'spawnDaemon({})'),
+      (text) => text.replace('reconcileCurrentManagedService("host-missing", undefined, zhixingHome)', 'spawnDaemon({})'),
     )).join("\n"),
     /production trigger exact-set drifted/,
   );
@@ -3869,10 +3889,10 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text
-        .replace("ctx.deliveryStack?.activate()", "void openingRunner.server.port")
+        .replace("boundDeliveryStack?.activate()", "void openingRunner.server.port")
         .replace(
           "publishReady: async (openingRunner) => {",
-          "publishReady: async (openingRunner) => {\n      ctx.deliveryStack?.activate();",
+          "publishReady: async (openingRunner) => {\n      boundDeliveryStack?.activate();",
         ),
     )).join("\n"),
     /entry-last activation or publication order drifted/,
@@ -4094,7 +4114,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/server/src/routes.ts",
-      (text) => text.replace("ctx.managedHostPublicStatus?.()", "undefined"),
+      (text) => text.replace("managedHostPublicStatus?.()", "undefined"),
     )).join("\n"),
     /public status or executor queue wake drifted/,
   );
@@ -4175,8 +4195,8 @@ test("device lifecycle stays on one journal, two production roots and local-only
     inspectDeviceLifecycleAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "    ctx.meshRuntimePreparation = preparation;",
-        "    ctx.meshRuntime = mesh;",
+        "  return preparation;",
+        "  return mesh;",
       ),
     )).join("\n"),
     /static lifecycle contribution ownership drifted/,
@@ -4185,8 +4205,8 @@ test("device lifecycle stays on one journal, two production roots and local-only
     inspectDeviceLifecycleAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null",
-        "const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === undefined",
+        "const inbound = boundInboundRouter === undefined || boundInboundRouter === null",
+        "const inbound = boundInboundRouter === undefined || boundInboundRouter === undefined",
       ),
     )).join("\n"),
     /static lifecycle contribution ownership drifted/,
@@ -4195,8 +4215,8 @@ test("device lifecycle stays on one journal, two production roots and local-only
     inspectDeviceLifecycleAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "    ctx.meshRuntimePreparation = preparation;",
-        "    ctx.meshRuntimePreparation = preparation;\n    await mesh.start({});",
+        "  return preparation;",
+        "  return preparation;\n    await mesh.start({});",
       ),
     )).join("\n"),
     /static lifecycle contribution ownership drifted/,
@@ -4418,8 +4438,8 @@ test("Device Administration reads, paired/current removal and duty migration hav
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission,",
-        "dutyMigrationContext: { read: () => ctx.meshRuntime!.dutyMigrationCommandContext() },",
+        "dutyMigrationAdmission: meshRuntime!.dutyMigrationAdmission,",
+        "dutyMigrationContext: { read: () => meshRuntime!.dutyMigrationCommandContext() },",
       ),
     )).join("\n"),
     /unique Host application composition drifted/,
@@ -4445,7 +4465,7 @@ test("Device Administration reads, paired/current removal and duty migration hav
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects,",
+        "removalEffects: meshRuntime!.deviceRemovalTargetEffects,",
         "removalEffects: { isConnected: (targetDeviceId) => ctx.meshRuntime!.isDeviceRemovalTargetConnected(targetDeviceId) },",
       ),
     )).join("\n"),
@@ -4666,6 +4686,23 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   })));
   assert.deepEqual(inspectChannelRuntimeBoundary(records), []);
 
+  for (const [relative, before, after] of [
+    ["packages/cli/src/serve/channels.ts", 'phase !== "active" || suspended || !requestedConsumers',
+      'suspended || !requestedConsumers'],
+    ["packages/cli/src/serve/channel-conversation-product-binding.ts", "assertBound(): void",
+      "assertBoundLater(): void"],
+    ["packages/cli/src/serve/command.ts", "      await startAnchorRuntime();",
+      "      void startAnchorRuntime;"],
+    ["packages/cli/src/serve/command.ts", "      sessionBroadcastLifecycle.install(sessionTransport);",
+      "      await boundChannelConnections?.activate();\n      sessionBroadcastLifecycle.install(sessionTransport);"],
+    ["packages/cli/src/serve/command.ts", "      await recoverHostStop();",
+      "      void recoverHostStop;"],
+  ]) {
+    const changed = records.map((record) => record.relative === relative
+      ? { ...record, text: record.text.replace(before, after) } : record);
+    assert.match(inspectChannelRuntimeBoundary(changed).join("\n"), /precede activation readiness/u);
+  }
+
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
@@ -4700,8 +4737,8 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "ctx.channelDelivery = result.delivery",
-        "ctx.channelDelivery = result.registry",
+        "const channelDelivery = preparedChannels.delivery",
+        "const channelDelivery = preparedChannels.registry",
       ),
     )).join("\n"),
     /separate finite Channel ports/u,
@@ -4744,7 +4781,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "ctx.channelConversationProduct?.bind(productApi);",
+        "boundChannelConversationProduct?.bind(productApi);",
         "void productApi;",
       ),
     )).join("\n"),
@@ -4853,10 +4890,10 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/cli/src/serve/access-surfaces.ts",
+      "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "    createChannelSurface(channelCredentials),\n    losslessDataPlaneSurface,",
-        "    losslessDataPlaneSurface,\n    createChannelSurface(channelCredentials),",
+        "await prepareChannel({",
+        "await retiredPrepareChannel({",
       ),
     )).join("\n"),
     /challenge static composition or physical callback drifted/u,
@@ -4893,17 +4930,17 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/cli/src/serve/access-surfaces.ts",
+      "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        /(\s*)assembly\.assertComplete\(\);\n\1const mechanism = ctx\.channelMechanism;/u,
-        "$1const mechanism = ctx.channelMechanism;",
+        "conversationLosslessDataPlane.assertComplete();",
+        "",
       ),
     )).join("\n"),
     /Conversation lossless data-plane required static assembly drifted/u,
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/cli/src/serve/access-surfaces.ts",
+      "packages/cli/src/serve/command.ts",
       (text) => `${text}\ncreateConversationLosslessDataPlaneAssemblyHandle();\n`,
     )).join("\n"),
     /Conversation lossless data-plane required static assembly drifted/u,
@@ -5950,13 +5987,13 @@ test("validated configuration crosses composition roots as finite frozen project
   );
   assert.match(
     inspectRuntimeConfigurationProjectionBoundary(mutate(
-      "packages/cli/src/serve/access-surface.ts",
+      "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "readonly modelConfiguration: RuntimeModelConfigurationProjection;",
+        "readonly channelConfiguration: RuntimeChannelConfigurationProjection;",
         "readonly config: ZhixingConfig;",
       ),
     )).join("\n"),
-    /Anchor assembly can still consume/,
+    /Anchor surfaces can still consume/,
   );
   assert.match(
     inspectRuntimeConfigurationProjectionBoundary(mutate(
@@ -8260,7 +8297,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/serve/access-surface.ts",
+      "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
         "readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication;",
         "readonly conversationDirectory: AnchorConversationDirectoryMechanism;",
@@ -8272,7 +8309,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "ctx.conversationIdentityLifecycle.identityExists(conversationId)",
+        "inputConversationIdentityLifecycle.identityExists(conversationId)",
         "ctx.conversationDirectory.exists(conversationId)",
       ),
     )).join("\n"),
@@ -9099,8 +9136,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "ctx.deliveryStack?.lifecycle.install({",
-        "ctx.deliveryStack?.authority.installLifecycleAdmission({",
+        "boundDeliveryStack?.lifecycle.install({",
+        "boundDeliveryStack?.authority.installLifecycleAdmission({",
       ),
     )).join("\n"),
     /accepted-work lifecycle does not have one domain application/,

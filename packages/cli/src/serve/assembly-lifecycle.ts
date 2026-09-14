@@ -22,7 +22,7 @@ interface AssemblyLifecycleDescriptor extends CleanupRegistrationDescriptor {
 /**
  * The exact pre-server lifecycle identities in normal registration order.
  *
- * Setup order remains owned by `createAssemblyUnits`; this order only mirrors
+ * Construction order remains explicit in the Host graph; this order only mirrors
  * the established CleanupRegistry LIFO contract. Conditional resources simply
  * omit their contribution rather than manufacturing an empty cleanup.
  */

@@ -18,11 +18,6 @@ import type {
 } from "@zhixing/server";
 import { createChannelCancellationResponseEffect } from "./conversation-run-control-binding.js";
 
-type ProductApiWaiter = Readonly<{
-  resolve(productApi: ProductApiDispatcher): void;
-  reject(error: Error): void;
-}>;
-
 /**
  * Host composition binding from the Channel Surface to the one sealed Product
  * API dispatcher and the finite Owner execution mechanism.
@@ -32,7 +27,6 @@ export class ChannelConversationProductBinding
 {
   readonly #manager: ConversationManager;
   readonly #delivery: "authoritative" | "surface";
-  readonly #waiters = new Set<ProductApiWaiter>();
   #productApi: ProductApiDispatcher | undefined;
   #closed = false;
 
@@ -62,16 +56,15 @@ export class ChannelConversationProductBinding
       }
     }
     this.#productApi = productApi;
-    for (const waiter of this.#waiters) waiter.resolve(productApi);
-    this.#waiters.clear();
+  }
+
+  assertBound(): void {
+    this.#requireProductApi();
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    const error = new Error("Channel Conversation Product API binding is closed");
-    for (const waiter of this.#waiters) waiter.reject(error);
-    this.#waiters.clear();
   }
 
   async prepareAgentTurn(input: Readonly<{
@@ -79,7 +72,7 @@ export class ChannelConversationProductBinding
     platformSubject: string;
     messageId?: string;
   }>): Promise<ConversationPreparedAgentTurnIdentity> {
-    const productApi = await this.#requireProductApi();
+    const productApi = this.#requireProductApi();
     const dispatch = await productApi.command(
       CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
       {
@@ -101,7 +94,7 @@ export class ChannelConversationProductBinding
   ): Promise<
     Awaited<ReturnType<InboundConversationApplicationPort["admitAgentTurn"]>>
   > {
-    const productApi = await this.#requireProductApi();
+    const productApi = this.#requireProductApi();
     const execution = this.#execution(input);
     try {
       const dispatch = await productApi.command(
@@ -141,7 +134,7 @@ export class ChannelConversationProductBinding
   async abort(
     input: Parameters<InboundConversationApplicationPort["abort"]>[0],
   ): Promise<Awaited<ReturnType<InboundConversationApplicationPort["abort"]>>> {
-    const productApi = await this.#requireProductApi();
+    const productApi = this.#requireProductApi();
     const dispatch = await productApi.command(CONVERSATION_ABORT_COMMAND, {
       kind: "abort",
       conversationId: input.conversationId,
@@ -201,16 +194,14 @@ export class ChannelConversationProductBinding
     });
   }
 
-  #requireProductApi(): Promise<ProductApiDispatcher> {
+  #requireProductApi(): ProductApiDispatcher {
     if (this.#closed) {
-      return Promise.reject(
-        new Error("Channel Conversation Product API binding is closed"),
-      );
+      throw new Error("Channel Conversation Product API binding is closed");
     }
-    if (this.#productApi) return Promise.resolve(this.#productApi);
-    return new Promise((resolve, reject) => {
-      this.#waiters.add(Object.freeze({ resolve, reject }));
-    });
+    if (!this.#productApi) {
+      throw new Error("Channel Conversation Product API is not bound");
+    }
+    return this.#productApi;
   }
 }
 

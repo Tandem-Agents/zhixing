@@ -762,20 +762,17 @@ export function inspectChannelRuntimeBoundary(records) {
     routerConstruction,
   );
   const connectionPublication = access.indexOf(
-    "ctx.channelConnections = Object.freeze({",
+    "const channelConnections = Object.freeze({",
     routerContribution,
   );
-  const assemblyOrder = access.slice(
-    access.indexOf("export function createAssemblyUnits("),
-    access.indexOf("function usageReporterContext("),
-  );
+  const assemblyOrder = command;
   const channelPreparation = assemblyOrder.lastIndexOf(
-    "createChannelSurface(channelCredentials)",
+    "await prepareChannel({",
   );
-  const losslessComposition = assemblyOrder.lastIndexOf("losslessDataPlaneSurface");
-  const jobOwnerRecovery = assemblyOrder.lastIndexOf("executorJobOwnerStartUnit");
-  const interactionRecovery = assemblyOrder.lastIndexOf("channelInteractionRecoveryUnit");
-  const deliveryAssembly = assemblyOrder.lastIndexOf("deliverySurface");
+  const losslessComposition = assemblyOrder.lastIndexOf("await createHostLosslessDataPlane({");
+  const jobOwnerRecovery = assemblyOrder.lastIndexOf("await startExecutorJobOwner({");
+  const interactionRecovery = assemblyOrder.lastIndexOf("await recoverChannelInteractions({");
+  const deliveryAssembly = assemblyOrder.lastIndexOf("await prepareDelivery({");
   const challengeCallback = composition.indexOf("const onChallengeAction = Object.freeze(");
   const protocolCompletion = access.indexOf(
     "assembly.complete(composition.coordinator)",
@@ -787,15 +784,15 @@ export function inspectChannelRuntimeBoundary(records) {
     /export type ConversationLosslessDataPlaneTopology\s*=([\s\S]*?);\n\n/u,
   )?.[1] ?? "";
   const conversationAssembly = access.slice(
-    access.indexOf("createConversationSurface"),
+    access.indexOf("createConversationServices"),
     access.indexOf("/** Device-local owner:"),
   );
   const losslessAssembly = access.slice(
-    access.indexOf("createLosslessDataPlaneSurface"),
+    access.indexOf("createHostLosslessDataPlane"),
     access.indexOf("/** 会话执行面"),
   );
   const recoveryAssembly = access.slice(
-    access.indexOf("createChannelInteractionRecoveryUnit"),
+    access.indexOf("recoverChannelInteractions"),
     access.indexOf("/** 投递栈"),
   );
   if (
@@ -807,7 +804,7 @@ export function inspectChannelRuntimeBoundary(records) {
     count(channels, "channels: options.channels") !== 1 ||
     !channels.includes("satisfies ChannelChallengeDeliveryPort") ||
     !channels.includes("statusSnapshot") ||
-    !channels.includes("dispose: () => registry.dispose()") ||
+    !channels.includes("disposal = registry.dispose()") ||
     resultContract.includes("ChannelRegistry") ||
     /\bregistry\s*:/u.test(resultContract)
   ) {
@@ -838,10 +835,10 @@ export function inspectChannelRuntimeBoundary(records) {
     failures.push("concrete Channel registry or adapter escaped the Host infrastructure edge");
   }
   if (
-    !access.includes("ctx.channelStatuses = result.statusSnapshot") ||
-    !access.includes("ctx.channelDelivery = result.delivery") ||
-    count(access, "ctx.channelMechanism = Object.freeze({") !== 3 ||
-    !assemblyContext.includes("channelMechanism?: PreparedChannelMechanism") ||
+    !command.includes("channelMechanism.channels.statusSnapshot") ||
+    !access.includes("const channelDelivery = preparedChannels.delivery") ||
+    !access.includes("conversationProduct,") ||
+    !access.includes("readonly channelMechanism: PreparedChannelMechanism") ||
     /channelChallenges\??:/u.test(assemblyContext) ||
     access.includes("ctx.channelChallenges") ||
     access.includes("bindChannelChallenges") ||
@@ -935,8 +932,8 @@ export function inspectChannelRuntimeBoundary(records) {
     challengeCallback < 0 || protocolCompletion < 0 ||
     !composition.includes("if (!options.isCurrentOwner())") ||
     !composition.includes("await coordinator.handleChallengeAction(action)") ||
-    !assemblyContext.includes(
-      'channelChallengeAction?: LosslessDataPlaneComposition["onChallengeAction"]',
+    !access.includes(
+      'readonly channelChallengeAction: LosslessDataPlaneComposition["onChallengeAction"]',
     ) ||
     !access.includes("onChallengeAction: channelChallengeAction") ||
     access.includes("await coordinator.handleChallengeAction(action)")
@@ -963,19 +960,15 @@ export function inspectChannelRuntimeBoundary(records) {
     /#losslessDataPlane\s*:[^;]*(?:undefined|\?)/u.test(protocol) ||
     /#losslessDataPlane\?\.|\bbindLosslessDataPlane\s*\(/u.test(protocol) ||
     /recoverConversationChannels[\s\S]{0,120}\?\?\s*0/u.test(protocol) ||
-    count(access, "createConversationLosslessDataPlaneAssemblyHandle()") !== 1 ||
+    count(command, "createConversationLosslessDataPlaneAssemblyHandle()") !== 1 ||
     count(access, "assembly.complete(composition.coordinator)") !== 1 ||
-    !/createConversationSurface\(\s*conversationLosslessDataPlane,?\s*\)/u.test(access) ||
-    !/createLosslessDataPlaneSurface\(\s*conversationLosslessDataPlane,?\s*\)/u.test(
-      access,
-    ) ||
-    !/createChannelInteractionRecoveryUnit\(\s*conversationLosslessDataPlane,?\s*\)/u.test(
-      access,
-    ) ||
+    count(command, "}, conversationLosslessDataPlane)") !== 2 ||
+    command.indexOf("conversationLosslessDataPlane.assertComplete()") < 0 ||
+    command.indexOf("conversationLosslessDataPlane.assertComplete()") >= command.indexOf("await startExecutorJobOwner({") ||
     !conversationAssembly.includes('kind: "available"') ||
     !conversationAssembly.includes("port: losslessDataPlane.port") ||
     !losslessAssembly.includes("assembly.complete(composition.coordinator)") ||
-    !recoveryAssembly.includes("assembly.assertComplete()") ||
+    !access.includes("readonly channelCoordinator: ChannelInteractionCoordinator") ||
     !localOwner.includes('kind: "absent"') ||
     !localOwner.includes('reason: "executor-only"')
   ) {
@@ -996,11 +989,42 @@ export function inspectChannelRuntimeBoundary(records) {
     count(access, "new ChannelConversationProductBinding(") !== 1 ||
     !access.includes("conversation: channelConversationProduct") ||
     !access.includes("conversationProduct.close()") ||
-    count(command, "ctx.channelConversationProduct?.bind(productApi)") !== 1
+    count(command, "boundChannelConversationProduct?.bind(productApi)") !== 1
   ) {
     failures.push(
       "Channel Conversation Product API binding or unique Host composition drifted",
     );
+  }
+  const activation = command.slice(
+    command.indexOf("beforeActivate: async (openingRunner) =>"),
+    command.indexOf("beforePublish: async (openingServer) =>"),
+  );
+  const startupReadinessOrder = [
+    "sessionBroadcastLifecycle.install(sessionTransport)",
+    "await installConfirmationBridge({",
+    "boundChannelConversationProduct?.assertBound()",
+    "await startAnchorRuntime()",
+    "await recoverHostStop()",
+    "await currentRemovalMigrationApplication?.resumeActive()",
+    "await currentRemovalRecoveryApplication?.resumeActive()",
+    "await recoverAdvancementAcceptedWork()",
+    "await boundChannelConnections?.activate()",
+  ].map((token) => activation.indexOf(token));
+  if (
+    startupReadinessOrder.some((position, index) =>
+      position < 0 || (index > 0 && position <= startupReadinessOrder[index - 1])) ||
+    count(command, "await startAnchorRuntime()") !== 1 ||
+    count(command, "await recoverHostStop()") !== 1 ||
+    count(command, "await boundChannelConnections?.activate()") !== 1 ||
+    command.indexOf("boundChannelConversationProduct?.bind(productApi)") >=
+      command.indexOf("runner = await runServer({") ||
+    !binding.includes("assertBound(): void") || /#waiters|new Promise\(/u.test(binding) ||
+    !access.includes("channelConversationProduct.assertBound()") ||
+    !access.includes("preparedChannels.activate()") ||
+    !channels.includes('phase !== "active" || suspended || !requestedConsumers') ||
+    !channels.includes('phase = "closed"')
+  ) {
+    failures.push("Host recovery consumers or Channel physical ingress precede activation readiness");
   }
   if (
     !conversationApplication.includes('source?: "interactive" | "channel"') ||
@@ -3702,6 +3726,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
 
   const allowedConfigurationSourceOwners = new Set([
     "packages/cli/src/maintenance/doctor.ts",
+    "packages/cli/src/repl.ts",
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/runtime/runtime-configuration-provider.ts",
     "packages/cli/src/serve/backup-command.ts",
@@ -3793,15 +3818,15 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   }
 
   if (
-    !assembly.includes("readonly modelConfiguration: RuntimeModelConfigurationProjection;") ||
-    !assembly.includes("readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;") ||
-    !assembly.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
-    !assembly.includes("readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;") ||
+    !runtimeBindings.includes("RuntimeModelConfigurationProjection") ||
+    !surfaces.includes("readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;") ||
+    !surfaces.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
+    /readonly (?:modelConfiguration|authorityConfiguration):/u.test(surfaces) ||
     !anchor.includes("config: authorityConfiguration") ||
     !anchor.includes("optimalMaxTokens: resolveModelCapability(") ||
     !anchor.includes("modelConfiguration.llm?.main?.model") ||
     surfaces.includes("modelConfiguration.llm?.main?.model") ||
-    !surfaces.includes("configuration: ctx.advancementConfiguration") ||
+    !surfaces.includes("configuration: input.advancementConfiguration") ||
     !surfaces.includes("entries: channelConfiguration.messaging") ||
     !surfaces.includes("cancelKeywords: channelConfiguration.intent?.cancelKeywords") ||
     /ctx\.config/u.test(surfaces)
@@ -5194,16 +5219,16 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     composition.split("createDeviceAdministrationProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations") ||
     !composition.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents") ||
-    !composition.includes("list: () => ctx.meshRuntime!.removableDevices()") ||
-    !composition.includes("ctx.meshRuntime!.deviceRemovalStatus({ targetName })") ||
-    !composition.includes("list: () => ctx.meshRuntime!.plannedAnchorTargets()") ||
-    !composition.includes("ctx.meshRuntime!.deviceRemovalCommandContext()") ||
-    !composition.includes("ctx.meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
-    !composition.includes("removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects") ||
-    !composition.includes("dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission") ||
-    !composition.includes("ctx.meshRuntime!.preparePlannedAnchorTransfer(input)") ||
-    !composition.includes("ctx.meshRuntime!.commitPlannedAnchorTransfer(input)") ||
-    !composition.includes("ctx.meshRuntime!.abortPlannedAnchorTransfer(input)") ||
+    !composition.includes("list: () => meshRuntime!.removableDevices()") ||
+    !composition.includes("meshRuntime!.deviceRemovalStatus({ targetName })") ||
+    !composition.includes("list: () => meshRuntime!.plannedAnchorTargets()") ||
+    !composition.includes("meshRuntime!.deviceRemovalCommandContext()") ||
+    !composition.includes("meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
+    !composition.includes("removalEffects: meshRuntime!.deviceRemovalTargetEffects") ||
+    !composition.includes("dutyMigrationAdmission: meshRuntime!.dutyMigrationAdmission") ||
+    !composition.includes("meshRuntime!.preparePlannedAnchorTransfer(input)") ||
+    !composition.includes("meshRuntime!.commitPlannedAnchorTransfer(input)") ||
+    !composition.includes("meshRuntime!.abortPlannedAnchorTransfer(input)") ||
     !composition.includes("currentRemovalAdmission,") ||
     !composition.includes("currentRemovalMigrationTargets: {") ||
     !composition.includes("currentRemovalRecovery: currentRemovalRecoveryApplication") ||
@@ -5214,7 +5239,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("createDeviceAdministrationCurrentRemovalMechanismPort({") ||
     !composition.includes("createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({") ||
     !composition.includes("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({") ||
-    !composition.includes("ctx.authorityCheckpointOwner.status()") ||
+    !composition.includes("authorityCheckpointOwner.status()") ||
     composition.includes("AnchorUninstallCoordinator") ||
     composition.includes("new CurrentRemovalCoordinator") ||
     composition.includes("anchorUninstall.") ||
@@ -5370,7 +5395,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("prepareAcceptedBinding: async (input) =>") ||
     !composition.includes("verifyAcceptedBinding: async (input) =>") ||
     !composition.includes("currentRemovalRecoveryBinding.assertCurrent({") ||
-    !composition.includes("anchorEpoch: ctx.authorityRuntime!.anchorEpoch")
+    !composition.includes("anchorEpoch: boundAuthorityRuntime!.anchorEpoch")
   ) {
     failures.push("Current-removal physical recovery binding is not uniquely Host-composed");
   }
@@ -6450,7 +6475,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       accessSurfaces,
     ) ||
     accessSurfaces.indexOf("committedTurnListenerAssembly.complete((info) =>") >
-      accessSurfaces.indexOf("ctx.conversations = manager") ||
+      accessSurfaces.indexOf("conversations: manager,\n    conversationProtocol: protocol,") ||
     /bindTurnCommittedListener|assertTurnCommittedListenerBound/u.test(accessSurfaces) ||
     accessSurfaces.includes("createAdvancementReviewMaintenance") ||
     accessSurfaces.includes("advancementRecoveryRef") ||
@@ -6848,9 +6873,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("getBusySource(conversationId)") ||
     !composition.includes("abortInFlight(conversationId, {") ||
     !composition.includes("recoverConversation(conversationId)") ||
-    !composition.includes("ctx.conversations!.runMaintenance(conversationId, operation)") ||
+    !composition.includes("boundConversations!.runMaintenance(conversationId, operation)") ||
     !composition.includes('.ensureShell({ kind: "ensure-shell", conversationId })') ||
-    !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
+    !composition.includes("boundConversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: {") ||
     !composition.includes(
@@ -6883,7 +6908,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
 
   const managerCompleted = accessSurfaces.indexOf("managerAssembly.complete(manager);");
   const advancementCreated = accessSurfaces.indexOf(
-    "await ctx.advancementConversationComposition.create({",
+    "await input.advancementConversationComposition.create({",
   );
   const advancementRecoveryCreated = accessSurfaces.indexOf(
     "const advancementRecovery = createAdvancementRecoveryMaintenance({",
@@ -6892,22 +6917,22 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     "auxiliaryRecoveryAssembly.complete(async (conversationId) =>",
   );
   const applicationPublished = accessSurfaces.indexOf(
-    "ctx.advancement = advancementController;",
+    "conversations: manager,\n    conversationProtocol: protocol,",
   );
   const readinessRecovery = accessSurfaces.indexOf(
     "await protocol.recoverReadinessProjections();",
   );
   const firstAssemblyPass = composition.indexOf(
-    "assemblyUnits.slice(0, conversationAssemblyIndex + 1)",
+    "await createConversationServices({",
   );
   const runtimeHostConstruction = composition.indexOf(
     "const runtimeHost = new RuntimeHost({",
   );
   const secondAssemblyPass = composition.indexOf(
-    "assemblyUnits.slice(conversationAssemblyIndex + 1)",
+    "const localExecutor = executor ?",
   );
   if (
-    !assemblyContext.includes(
+    !accessSurfaces.includes(
       "readonly advancementConversationComposition: AdvancementConversationComposition;",
     ) ||
     !assemblyContext.includes("sessionState: SessionStatePort;") ||
@@ -6932,7 +6957,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     advancementRecoveryCreated <= advancementCreated ||
     recoveryCompleted <= advancementRecoveryCreated ||
     applicationPublished <= recoveryCompleted ||
-    readinessRecovery <= applicationPublished ||
+    readinessRecovery <= recoveryCompleted ||
+    applicationPublished <= readinessRecovery ||
     firstAssemblyPass < 0 ||
     runtimeHostConstruction <= firstAssemblyPass ||
     secondAssemblyPass <= runtimeHostConstruction
@@ -8007,24 +8033,24 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !conversationApplication.includes("await mechanism.ensure(conversationId)") ||
     conversationIndex.includes("ConversationIdentityLifecycle") ||
-    !accessSurfaceContext.includes(
+    !accessSurfaces.includes(
       "readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication",
     ) ||
     /AnchorConversationDirectoryMechanism|readonly conversationDirectory\s*:/u.test(
       accessSurfaceContext,
     ) ||
-    accessSurfaces.split("ctx.conversationIdentityLifecycle.").length - 1 !== 4 ||
+    accessSurfaces.split("inputConversationIdentityLifecycle.").length - 1 !== 4 ||
     /ctx\.conversationDirectory\.(?:exists|ensure|ensureTranscript)\s*\(/u.test(
       accessSurfaces,
     ) ||
     !accessSurfaces.includes(
-      "ctx.conversationIdentityLifecycle.identityExists(conversationId)",
+      "inputConversationIdentityLifecycle.identityExists(conversationId)",
     ) ||
     !accessSurfaces.includes(
-      "ctx.conversationIdentityLifecycle.ensureShell(",
+      "inputConversationIdentityLifecycle.ensureShell(",
     ) ||
     !accessSurfaces.includes(
-      "ctx.conversationIdentityLifecycle.initializeRuntimeStorage(",
+      "inputConversationIdentityLifecycle.initializeRuntimeStorage(",
     ) ||
     !composition.includes(
       "createConversationIdentityLifecycleApplication({",
@@ -8247,7 +8273,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "packages/cli/src/serve/workscene-session-owner.ts" ||
     directConversationStorageDeleteConsumers.length !== 0 ||
     !composition.includes("worksceneConversationStorageProjectionCleanup,") ||
-    !/conversationStorageProjectionCleanup:\s*\n\s*ctx\.worksceneConversationStorageProjectionCleanup/u.test(
+    !/conversationStorageProjectionCleanup:\s*\n\s*input\.worksceneConversationStorageProjectionCleanup/u.test(
       accessSurfaces,
     ) ||
     !worksceneDirectory.includes(
@@ -8846,9 +8872,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !setupDelivery.includes("effects: authorityDelivery!") ||
     !accessSurfaces.includes("await deliveryStack.lifecycle.restore(") ||
     accessSurfaces.includes("authority.restoreLifecycleAdmission") ||
-    !composition.includes("ctx.deliveryStack?.lifecycle.install({") ||
-    !composition.includes("ctx.deliveryStack?.lifecycle.settle({") ||
-    /deliveryStack\?*\.authority\.(?:install|restore|seal|release)LifecycleAdmission/u.test(
+    !composition.includes("boundDeliveryStack?.lifecycle.install({") ||
+    !composition.includes("boundDeliveryStack?.lifecycle.settle({") ||
+    /(?:deliveryStack|boundDeliveryStack)\?*\.authority\.(?:install|restore|seal|release)LifecycleAdmission/u.test(
       composition,
     ) ||
     /\.authority\.(?:install|restore|seal|release)LifecycleAdmission/u.test(
@@ -9352,7 +9378,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     "this.#installDeviceRemovalTarget(options.deviceRemovalLifecycle)",
   );
   const anchorAssembly = command.indexOf(
-    "assemblyUnits.slice(conversationAssemblyIndex + 1)",
+    "const localExecutor = executor ?",
   );
   const anchorScheduler = command.indexOf(
     "await schedulerGenerationOwner.installInitial({",
@@ -9361,7 +9387,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
   );
   const anchorMeshStart = command.indexOf("await preparedMesh.start({");
-  const anchorMeshPublication = command.indexOf("ctx.meshRuntime = activeMesh;");
+  const anchorMeshPublication = command.indexOf("activeMesh.resumeAcceptingAfterLifecycle();");
   const anchorContributionBlock = command.slice(anchorContribution, anchorMeshStart);
   const executorContribution = executor.indexOf(
     "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
@@ -9390,12 +9416,12 @@ export function inspectDeviceLifecycleAssembly(records) {
     anchorAssembly < 0 || anchorScheduler <= anchorAssembly ||
     anchorContribution <= anchorScheduler || anchorMeshStart <= anchorContribution ||
     anchorMeshPublication <= anchorMeshStart ||
-    !command.includes("const assemblyUnits = createAssemblyUnits(channelCredentials)") ||
-    !command.includes("const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null") ||
-    !command.includes("const jobOwner = ctx.executorJobOwner === undefined") ||
-    !command.includes("const delivery = ctx.deliveryStack === undefined") ||
+    !command.includes("const authorityServices = await prepareAuthorityServices({") ||
+    !command.includes("const inbound = boundInboundRouter === undefined || boundInboundRouter === null") ||
+    !command.includes("const jobOwner = boundExecutorJobOwner === undefined") ||
+    !command.includes("const delivery = boundDeliveryStack === undefined") ||
     /ctx\.[A-Za-z]+\?\./u.test(anchorContributionBlock) ||
-    !access.includes("ctx.meshRuntimePreparation = preparation;") ||
+    !access.includes("return preparation;") ||
     access.includes("ctx.meshRuntime = mesh;") ||
     count(access, "await mesh.start(") !== 1 ||
     !access.includes("await mesh.start(options)") ||
@@ -9531,13 +9557,13 @@ export function inspectManagedHostAssembly(records) {
   const contributionCount = (identity) => {
     const escaped = identity.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     const pattern = new RegExp(
-      `lifecycleContributions\\.(?:acquire|contribute)\\(\\s*"${escaped}"`,
+      `(?:lifecycleContributions|inputLifecycleContributions)\\.(?:acquire|contribute)\\(\\s*"${escaped}"`,
       "gu",
     );
     return [...`${accessSurfaces}\n${command}`.matchAll(pattern)].length;
   };
   const postServerSetup = command.indexOf(
-    'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+    'await installConfirmationBridge({',
   );
   const postServerTransfer = command.indexOf(
     'lifecycleContributions.transferExactTo(\n        registry,\n        "post-server",',
@@ -9562,7 +9588,7 @@ export function inspectManagedHostAssembly(records) {
   );
   const schedulerFirstAwait = command.indexOf("await ", schedulerContribution);
   const evidenceConstruction = accessSurfaces.indexOf(
-    "const evidenceHandler = new ExecutorEvidenceHandler({",
+    "const handler = new ExecutorEvidenceHandler({",
   );
   const evidenceContribution = accessSurfaces.indexOf(
     '"evidenceHandler.stopAccepting",',
@@ -9619,7 +9645,7 @@ export function inspectManagedHostAssembly(records) {
     broadcastTransportRead,
   );
   const broadcastDeliveryActivation = command.indexOf(
-    "ctx.deliveryStack?.activate()",
+    "boundDeliveryStack?.activate()",
     broadcastInstall,
   );
   if (
@@ -9667,8 +9693,8 @@ export function inspectManagedHostAssembly(records) {
     broadcastDeliveryActivation <= broadcastInstall || activationTransfer <= broadcastInstall ||
     !command.includes("const sessionBroadcast = sessionBroadcastLifecycle.port.session") ||
     !command.includes("const sessionActivityBroadcast = sessionBroadcastLifecycle.port.activity") ||
-    !accessSurface.includes("readonly sessionBroadcast: SessionBroadcast;") ||
-    !accessSurface.includes("readonly sessionActivityBroadcast: SessionActivityBroadcast;") ||
+    !accessSurfaces.includes("readonly sessionBroadcast: SessionBroadcast;") ||
+    !accessSurfaces.includes("readonly sessionActivityBroadcast: SessionActivityBroadcast;") ||
     [command, accessSurface, accessSurfaces].some((source) =>
       source.includes("sessionBroadcastRef") ||
       source.includes("sessionActivityBroadcastRef")
@@ -9879,7 +9905,7 @@ export function inspectManagedHostAssembly(records) {
   if (
     count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
     count(pairing, 'reconcileAfterPairing(input.input, "pairing-joiner-committed")') !== 1 ||
-    count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
+    count(config, 'reconcileCurrentManagedService("local-role-config-committed", undefined, homeDir)') !== 1 ||
     !config.includes("const reload = await captureConfigPostCommitEffect(() => input.reload({") ||
     !config.includes("const reconcile = input.launchSelectionChanged") ||
     config.indexOf("const reload = await captureConfigPostCommitEffect(() => input.reload({") >=
@@ -9892,8 +9918,8 @@ export function inspectManagedHostAssembly(records) {
     count(executorRoot, "coordinateManagedHostTrustTransition({") !== 1 ||
     count(executorRoot, "captureManagedHostAdmission(") !== 1 ||
     count(executorRoot, "onTrustApplied,") !== 1 ||
-    count(topology, 'reconcileCurrentManagedService("managed-preflight")') < 1 ||
-    count(connection, 'reconcileCurrentManagedService("host-missing")') !== 1
+    count(topology, 'reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome)') < 1 ||
+    count(connection, 'reconcileCurrentManagedService("host-missing", undefined, zhixingHome)') !== 1
   ) failures.push("managed host production trigger exact-set drifted");
   if (
     count(service, "<UserId>${osUser}</UserId>") !== 2 ||
@@ -9902,7 +9928,7 @@ export function inspectManagedHostAssembly(records) {
     count(serviceRuntime, 'loadCurrentManagedServiceState("activate", homeDir)') !== 2 ||
     count(serviceRuntime, 'loadCurrent("activate")') !== 1 ||
     count(serviceRuntime, 'loadCurrent("activate", homeDir)') !== 1 ||
-    count(topology, 'loadCurrentManagedServiceState("activate")') !== 2 ||
+    count(topology, 'loadCurrentManagedServiceState("activate", zhixingHome)') !== 2 ||
     count(status, 'loadCurrentManagedServiceState("inspect")') !== 1
   ) failures.push("managed host OS user or current-state intent exact-set drifted");
   if (
@@ -9929,7 +9955,7 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('"--managed-home"') ||
     !service.includes('"--managed-secret-backend"') ||
     !service.includes("applyManagedServiceLaunchContext(") ||
-    !topology.includes("await waitForManagedHostTurn()") ||
+    !topology.includes("await waitForManagedHostTurn({ zhixingHome })") ||
     count(topology, "createPersistentApplicationHost({") !== 1 ||
     count(topology, "await host.run()") !== 1 ||
     topology.includes("runConfiguredServeTopology(") ||
@@ -9973,7 +9999,7 @@ export function inspectManagedHostAssembly(records) {
     !serviceRuntime.includes(".disableFuture(current.spec, signal)") ||
     !config.includes("? { beforeTurnover: input.prepareManagedServiceTurnover }") ||
     !repl.includes('strategy: "drain"') ||
-    !repl.includes("prepareManagedServiceTurnover: prepareCurrentManagedServiceConfigTurnover") ||
+    !repl.includes("prepareManagedServiceTurnover: () => prepareCurrentManagedServiceConfigTurnover(undefined, zhixingHome)") ||
     !serverContext.includes("lifecycleShutdown?: LifecycleShutdownAdapter;") ||
     !serverShutdown.includes("return await lifecycle.prepare({") ||
     !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
@@ -10072,7 +10098,7 @@ export function inspectManagedHostAssembly(records) {
     "hostShellLifecycle.assertActivationOwnership({",
     anchorOpenGate,
   );
-  const deliveryActivation = command.indexOf("ctx.deliveryStack?.activate()", anchorOpenGate);
+  const deliveryActivation = command.indexOf("boundDeliveryStack?.activate()", anchorOpenGate);
   const schedulerActivation = command.indexOf("schedulerApplication.activate()", anchorOpenGate);
   const foundationTransfer = command.indexOf(
     'lifecycleContributions.transferTo(registry, "foundation")',
@@ -10083,7 +10109,7 @@ export function inspectManagedHostAssembly(records) {
     foundationTransfer,
   );
   const postServerContribution = command.indexOf(
-    'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+    'await installConfirmationBridge({',
     anchorOpenGate,
   );
   const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
@@ -10499,7 +10525,7 @@ export function inspectRecoveryBackupAssembly(records) {
     count(backup, ".setup(selection.directory !== undefined") !== 1 ||
     count(backup, "createBackupRecoveryAdministration(context, options).verify()") !== 1 ||
     count(backup, "createBackupRecoveryAdministration(context, options).status()") !== 1 ||
-    !command.includes("projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner") ||
+    !command.includes("projectBackupRecoveryPublicStatus(authorityCheckpointOwner") ||
     backup.includes("completeBackupSetup(") ||
     backup.includes("pairedDeviceId") ||
     backupApplication.includes('kind: "device-id"') ||
@@ -10651,8 +10677,8 @@ export function inspectRecoveryBackupAssembly(records) {
   }
   if (
     count(command, "createConfiguredCheckpointOwner({") !== 1 ||
-    count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
-    count(command, "hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner)") !== 1 ||
+    count(command, "authorityCheckpointOwner?.start()") !== 1 ||
+    count(command, "hostShellLifecycle.acquireCheckpointOwner(authorityCheckpointOwner)") !== 1 ||
     command.includes('id: "authorityCheckpointOwner.stop"')
   ) {
     failures.push("packages/cli/src/serve/command.ts: recovery checkpoint owner must have one create/start/stop lifecycle");
@@ -10703,13 +10729,13 @@ export function inspectRecoveryBackupAssembly(records) {
     !borrowedPairedTargetConstruction.includes('kind: "available"') ||
     !borrowedPairedTargetConstruction.includes('kind: "runtime-unavailable"') ||
     !borrowedPairedTargetConstruction.includes(
-      "connections: ctx.meshRuntimePreparation.connections",
+      "connections: preparedMeshRuntime.connections",
     ) ||
     !backup.includes("createOwnedMeshPairedCheckpointTargetSession({") ||
     !disasterCommand.includes("createOwnedMeshPairedCheckpointInventorySession({") ||
     !pairing.includes("createPairingSocketPublishedCheckpointTarget({") ||
     !backup.includes("storageMaintenance: context.capacity.storage") ||
-    !command.includes("storageMaintenance: ctx.storageMaintenance") ||
+    !command.includes("storageMaintenance: boundStorageMaintenance") ||
     !disasterCommand.includes("storageMaintenance: context.storageMaintenance") ||
     !pairing.includes("storageMaintenance: input.storageMaintenance") ||
     pairedDemandSources.some((text) =>
@@ -11294,7 +11320,7 @@ export function inspectRecoveryBackupAssembly(records) {
     count(pairedIncomingInfrastructure, "new FilePairedCheckpointStaging({") !== 1 ||
     count(pairedIncomingInfrastructure, '"recovery-checkpoint-incoming"') !== 1 ||
     count(accessRoot, "createPersistentPairedCheckpointCommandReceiverInfrastructure({") !== 1 ||
-    !accessRoot.includes("const pairedCheckpointDeviceId = ctx.authorityRuntime.deviceId") ||
+    !accessRoot.includes("const pairedCheckpointDeviceId = input.authorityRuntime.deviceId") ||
     !accessRoot.includes("deviceId: pairedCheckpointDeviceId") ||
     count(executorRoot, "createPersistentPairedCheckpointCommandReceiverInfrastructure({") !== 1 ||
     count(applicationHost, "createRecoveryRootPairedCheckpointReceiver") !== 3 ||
@@ -11655,11 +11681,13 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor staging Host/bootstrap required instance flow drifted");
   }
   if (
-    count(accessRoot, "ctx.meshRuntime?.currentAnchorDeviceId()") !== 3 ||
+    count(accessRoot, "inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()") !== 2 ||
+    count(accessRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
     count(executorRoot, "mesh?.currentAnchorDeviceId()") !== 1 ||
     count(assembly, "currentSourceDeviceId: () => this.#control.currentTrust().issuer.deviceId") !== 1 ||
     count(assembly, "this.#plannedCommittedTargetDeviceId ??") !== 1 ||
-    count(assembly, "this.#plannedCommittedTargetDeviceId = targetDeviceId") !== 1 ||
+    count(assembly, "this.#plannedCommittedTargetDeviceId = deviceId") !== 1 ||
+    count(assembly, "this.options.executorTopologyTrust.acceptPlannedTarget(targetDeviceId)") !== 1 ||
     count(transfer, "this.options.onSourceCommitted?.(state.identity.targetDeviceId)") !== 3
   ) {
     failures.push("planned anchor transfer current-owner resolver exact-set drifted");
@@ -11774,7 +11802,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "definePlannedDutyMigrationLifecycleContribution({",
   );
   const preparedStart = command.indexOf("await preparedMesh.start({", staticContribution);
-  const activePublication = command.indexOf("ctx.meshRuntime = activeMesh", preparedStart);
+  const activePublication = command.indexOf("activeMesh.resumeAcceptingAfterLifecycle()", preparedStart);
   const runtimeStart = assembly.indexOf("  async start(options: {");
   const runtimeStop = assembly.indexOf("  async stop(): Promise<void>", runtimeStart);
   const runtimeContribution = assembly.indexOf(
@@ -11887,9 +11915,9 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor installed authority generation rebind exact-set drifted");
   }
   const plannedLifecycle = command.indexOf("definePlannedDutyMigrationLifecycleContribution({");
-  const stopInbound = command.indexOf("plannedInbound.refuseNewMessages()", plannedLifecycle);
+  const stopInbound = command.indexOf("inbound.refuseNewMessages()", plannedLifecycle);
   const drainInbound = command.indexOf(
-    "await plannedInbound.drainAcceptedMessages()",
+    "await inbound.drainAcceptedMessages()",
     stopInbound,
   );
   const disconnectChannels = command.indexOf(
@@ -11918,7 +11946,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     drainAccepted < quiesceDelivery ||
     /ctx\.[A-Za-z]+\?\./u.test(command.slice(plannedLifecycle, preparedStart)) ||
     count(command, "await plannedDelivery.stack.resumeAfterAuthorityTransfer()") !== 1 ||
-    count(command, "await ctx.deliveryStack?.lifecycle.resume()") !== 3 ||
+    count(command, "await boundDeliveryStack?.lifecycle.resume()") !== 3 ||
     count(command, "await conversationProtocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 3 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
@@ -11930,11 +11958,14 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor source quiesce or installed consumer read-back order drifted");
   }
   if (
-    count(accessRoot, "isCurrentOwner: () => isCurrentChannelOwner(ctx)") !== 2 ||
+    count(accessRoot, "isCurrentOwner: channelOwnership(input.meshBootstrap, input.meshRuntimePreparation)") !== 1 ||
+    count(accessRoot, "const isCurrentOwner = channelOwnership(input.meshBootstrap, input.meshRuntimePreparation)") !== 1 ||
+    !accessRoot.includes("sessionActivityBroadcast: input.sessionActivityBroadcast,\n    isCurrentOwner,") ||
+    !accessRoot.includes("if (!isCurrentOwner()) await preparedChannels.disconnectConfigured()") ||
     accessRoot.includes("if (!isCurrentChannelOwner(ctx))") ||
     !command.includes("await channel.connectConfigured()") ||
     count(accessRoot, "preparedChannels.connectConfigured(consumers)") !== 1 ||
-    count(accessRoot, "preparedChannels.disconnectConfigured()") !== 1 ||
+    count(accessRoot, "preparedChannels.disconnectConfigured()") !== 2 ||
     count(channels, "isCurrentOwner,") !== 1 ||
     channels.includes("connectImmediately") ||
     channels.includes("if (isCurrentOwner?.() === false)") ||
@@ -12178,7 +12209,7 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     count(executor, "directory: NO_REMOTE_CONVERSATION_EXECUTORS") !== 1 ||
     access.indexOf("new MeshConversationExecutorTopologyDirectory({") < 0 ||
     access.indexOf("new MeshConversationExecutorTopologyDirectory({") >
-      access.indexOf("const executorBoundary = ctx.executorRoleModule") ||
+      access.indexOf("const executorBoundary = inputExecutorRoleModule") ||
     mesh.includes("bindRemoteExecution") ||
     count(dispatch, "this.#authority.prepareConversationAssignment({") !== 1 ||
     dispatch.includes("supportsOffDeviceExecution") ||
@@ -12290,6 +12321,7 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
   const projectionIndex = command.indexOf(
     "const worksceneAuthority = createAnchorWorksceneAuthorityProjection({",
   );
+  const probeAssembly = command.slice(portIndex, projectionIndex);
   if (
     trustIndex < 0 || connectionsIndex < 0 || portIndex < 0 || projectionIndex < 0 ||
     trustIndex > portIndex || connectionsIndex > portIndex || portIndex > projectionIndex ||
@@ -12297,10 +12329,8 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
     count(command, "new MeshExecutorTopologyTrustState(") !== 1 ||
     count(command, "new MeshWorksceneRemoteWorkspaceProbe({") !== 1 ||
     count(command, "remoteWorkspaceProbe,") !== 1 ||
-    !command.includes("...(meshConnections ? { meshConnections } : {}),") ||
-    !command.includes(
-      "...(meshExecutorTopologyTrust ? { meshExecutorTopologyTrust } : {}),",
-    ) ||
+    !probeAssembly.includes("connections: meshConnections,") ||
+    !probeAssembly.includes("trust: meshExecutorTopologyTrust,") ||
     /meshRuntimeRef|probeRemote|workspaceProbeForDevice|MeshRuntimeAssembly\s*\|\s*undefined/u.test(
       command,
     )
@@ -12311,8 +12341,8 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
   if (
     access.includes("new MeshConnectionRegistry({") ||
     access.includes("new MeshExecutorTopologyTrustState(") ||
-    !access.includes("trust: ctx.meshExecutorTopologyTrust") ||
-    !access.includes("connections: ctx.meshConnections") ||
+    !access.includes("trust: input.meshExecutorTopologyTrust") ||
+    !access.includes("connections: input.meshConnections") ||
     access.includes("ctx.meshConnections =") ||
     access.includes("ctx.meshExecutorTopologyTrust =") ||
     mesh.includes("workspaceProbeForDevice(")
@@ -12364,17 +12394,17 @@ export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) 
   }
 
   if (
-    !context.includes("readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;") ||
-    !context.includes(
+    !surfaces.includes("readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;") ||
+    !surfaces.includes(
       "readonly worksceneConversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;",
     ) ||
-    !context.includes(
+    !surfaces.includes(
       "readonly worksceneSceneStorageRemoval: WorksceneSceneStorageRemovalPort;",
     ) ||
-    context.includes("conversationAuthorityRef") ||
-    /readonly worksceneAuthority\?:/u.test(context)
+    surfaces.includes("conversationAuthorityRef") ||
+    /readonly worksceneAuthority\?:/u.test(surfaces)
   ) {
-    failures.push("Assembly context no longer requires the complete Workscene product projection");
+    failures.push("Conversation construction no longer requires the complete Workscene product projection");
   }
 
   const completeManager = surfaces.indexOf("managerAssembly.complete(manager);");
@@ -12385,17 +12415,17 @@ export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) 
     createDirectory,
     surfaces.indexOf("const worksceneApplicationPorts =", createDirectory),
   );
-  const publishManager = surfaces.indexOf("ctx.conversations = manager;");
+  const publishManager = surfaces.indexOf("conversations: manager,\n    conversationProtocol: protocol,");
   if (
     count(surfaces, "createWorksceneDirectory({") !== 1 ||
     count(surfaces, "new WorksceneApplicationService(") !== 1 ||
     completeManager < 0 || createDirectory < completeManager ||
     publishManager < createDirectory ||
-    !directoryBlock.includes("authority: ctx.worksceneAuthority,") ||
+    !directoryBlock.includes("authority: input.worksceneAuthority,") ||
     !directoryBlock.includes("conversations: manager,") ||
     !directoryBlock.includes("conversationAuthority: protocol,") ||
-    !surfaces.includes("ctx.worksceneDirectory = worksceneDirectory;") ||
-    !surfaces.includes("ctx.worksceneApplication = worksceneApplication;")
+    !surfaces.includes("worksceneDirectory,") ||
+    !surfaces.includes("worksceneApplication,")
   ) {
     failures.push("Conversation surface publishes a partial or late-bound Workscene product");
   }
@@ -12532,7 +12562,7 @@ export function inspectAssignmentDataPlaneBoundary(records) {
     !access.includes("authority: boundary.localLedger,") ||
     !executorRole.includes("authority: ledger") ||
     access.indexOf("if (dataPlane) await dataPlane.start();") < 0 ||
-    access.indexOf("ctx.executorDataPlane = dataPlane;") <
+    access.indexOf("executorDataPlane: dataPlane,") <
       access.indexOf("if (dataPlane) await dataPlane.start();")
   ) {
     failures.push("Host assignment/data-plane pair composition or publication order drifted");
@@ -12600,12 +12630,12 @@ export function inspectAdvancementEvidenceTopologyBoundary(records) {
     failures.push("command restored an AssemblyContext or Mesh evidence service-locator path");
   }
   if (
-    !context.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
-    count(access, "ctx.advancementEvidenceRuntime.bind({") !== 1 ||
+    !access.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
+    count(access, "input.advancementEvidenceRuntime.bind({") !== 1 ||
     count(access, "new AdvancementEvidenceTopologyAdapter({") !== 1 ||
-    !/createMeshSurface\(\),\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+createChannelSurface\(channelCredentials\),\r?\n\s+losslessDataPlaneSurface/u.test(
-      access,
-    ) ||
+    command.indexOf("return prepareMeshRuntime({") < 0 ||
+    command.indexOf("await bindAdvancementEvidenceTopology({") <= command.indexOf("return prepareMeshRuntime({") ||
+    command.indexOf("await prepareChannel({") <= command.indexOf("await bindAdvancementEvidenceTopology({") ||
     count(localOwner, "new AdvancementEvidenceTopologyAdapter({") !== 1
   ) {
     failures.push("Host Advancement evidence topology construction exact-set drifted");
@@ -12727,7 +12757,7 @@ export function inspectAssignmentResourcePortBoundary(records) {
   }
   if (
     !access.includes("createConversationResourceRecoveryPort({") ||
-    !access.includes("resources: ctx.authorityRuntime.executorResourceGovernor") ||
+    !access.includes("resources: input.authorityRuntime.executorResourceGovernor") ||
     !executorRole.includes("createConversationResourceRecoveryPort({") ||
     !executorRole.includes("resources: authority.executorResourceGovernor") ||
     !mesh.includes("resources: options.authority.executorResourceGovernor")
@@ -13612,8 +13642,8 @@ export function inspectAssignmentArtifactReceiverBoundary(records) {
 
   if (
     count(anchor, "createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
-    count(anchor, "ctx.assignmentArtifactReceiver = receiver;") !== 1 ||
-    count(anchor, "assignmentArtifactReceiver: ctx.assignmentArtifactReceiver") !== 1 ||
+    count(anchor, "assignmentArtifactReceiver = receiver;") !== 1 ||
+    count(anchor, "assignmentArtifactReceiver: input.assignmentArtifactReceiver") !== 1 ||
     anchor.includes("FileResumableArtifactReceiver") ||
     anchor.includes("mesh-artifact-partials")
   ) {
@@ -14144,7 +14174,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "packages/cli/src/serve/executor-role-runtime.ts",
   ]);
   const dependencyOwners = new Map([
-    ["packages/cli/src/serve/access-surfaces.ts", "ctx.authorityRuntime"],
+    ["packages/cli/src/serve/access-surfaces.ts", "inputAuthorityRuntime"],
     ["packages/cli/src/serve/executor-role-runtime.ts", "authority"],
   ]);
   const projectedResourceDependencies = new Set([
@@ -14509,7 +14539,7 @@ export function inspectConversationAdoptionAssembly(records) {
   const surfaceComposition = required.get("packages/cli/src/serve/command.ts");
   const surfaceContext = surfaceComposition.text.indexOf("serverCtx = createServerContext({");
   const surfaceOwner = surfaceComposition.text.indexOf(
-    "ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
+    "meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
     surfaceContext,
   );
   const surfaceCleanup = surfaceComposition.text.indexOf(
@@ -14613,8 +14643,8 @@ export function inspectConversationAdoptionAssembly(records) {
   const accessRoot = required.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = required.get("packages/cli/src/serve/executor-role-runtime.ts");
   if (
-    !/storageMaintenance:\s*ctx\.authorityRuntime\.storageMaintenance/u.test(accessRoot.text) ||
-    !/authority:\s*ctx\.authorityRuntime/u.test(accessRoot.text)
+    !/storageMaintenance:\s*input\.authorityRuntime\.storageMaintenance/u.test(accessRoot.text) ||
+    !/authority:\s*input\.authorityRuntime/u.test(accessRoot.text)
   ) {
     failures.push(`${accessRoot.relative}: combined production root must share one authority storage governor with source and target`);
   }

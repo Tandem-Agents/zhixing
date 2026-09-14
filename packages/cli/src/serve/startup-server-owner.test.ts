@@ -3,6 +3,37 @@ import { describe, expect, it } from "vitest";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 
 describe("production startup server ownership", () => {
+  it("installs consumers before startup recovery and opens Channel transport only after recovery", async () => {
+    const source = await readSource("command.ts");
+    const gate = source.slice(location(source, "beforeActivate: async (openingRunner) =>"),
+      location(source, "beforePublish: async (openingServer) =>"));
+    const order = [
+      "sessionBroadcastLifecycle.install(sessionTransport)",
+      "await installConfirmationBridge({",
+      "boundChannelConversationProduct?.assertBound()",
+      "await startAnchorRuntime()",
+      "await recoverHostStop()",
+      "await currentRemovalMigrationApplication?.resumeActive()",
+      "await currentRemovalRecoveryApplication?.resumeActive()",
+      "anchorInternalStopLifecycle.assertServerStartAllowed()",
+      "await recoverAdvancementAcceptedWork()",
+      "anchorInternalStopLifecycle.install({",
+      "await startConversationRecovery({",
+      "await boundChannelConnections?.activate()",
+      "startupRollback.commit()",
+    ].map((token) => location(gate, token));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(location(source, "boundChannelConversationProduct?.bind(productApi)"))
+      .toBeLessThan(location(source, "runner = await runServer({"));
+    const stopRecovery = source.slice(location(source, "const recoverHostStop = async"),
+      location(source, "async function cleanupLocalDevice()"));
+    expect(stopRecovery).toContain("await recoverAdvancementAcceptedWork()");
+    expect(stopRecovery).toContain("startupLifecycle = undefined");
+    const surfaces = await readSource("access-surfaces.ts");
+    expect(surfaces).toContain('if (channelMechanism.kind === "absent") return;');
+    expect(surfaces).toContain("channelConversationProduct.assertBound()");
+  });
+
   it("uses the same finite inbound lifecycle for no-channel removal and planned migration", async () => {
     const source = await readSource("command.ts");
     const mesh = source.slice(source.indexOf("if (preparedMesh) {"), source.indexOf("if (preparedMesh) {") + 18000);
@@ -183,14 +214,12 @@ describe("production startup server ownership", () => {
       source,
       "definePostAdoptionReviewLifecycleContribution({",
     );
-    const assemblyUnits = location(
-      source,
-      "const assemblyUnits = createAssemblyUnits(channelCredentials)",
-    );
-    expect(assemblyUnits).toBeGreaterThan(location(source, "const ctx: AssemblyContext = {"));
-    expect(assemblyUnits).toBeLessThan(
-      location(source, "assemblyUnits.slice(0, conversationAssemblyIndex + 1)"),
-    );
+    const authority = location(source, "const authorityServices = await prepareAuthorityServices({");
+    const conversation = location(source, "const conversationServices = await createConversationServices({");
+    const runtimeHost = location(source, "const runtimeHost = new RuntimeHost({");
+    expect(authority).toBeLessThan(conversation);
+    expect(conversation).toBeLessThan(runtimeHost);
+    expect(runtimeHost).toBeLessThan(location(source, "const owner = await startLocalConversationOwner({"));
     expect(removalContribution).toBeGreaterThan(
       schedulerGenerationInstall,
     );
@@ -203,24 +232,24 @@ describe("production startup server ownership", () => {
     expect(removalContribution).toBeLessThan(
       location(source, "await preparedMesh.start({"),
     );
-    expect(location(source, "ctx.meshRuntime = activeMesh")).toBeGreaterThan(
+    expect(location(source, "activeMesh.resumeAcceptingAfterLifecycle()")).toBeGreaterThan(
       location(source, "await preparedMesh.start({"),
     );
-    expect(surfaces).toContain("ctx.meshRuntimePreparation = preparation;");
+    expect(surfaces).toContain("return preparation;");
     expect(surfaces).not.toContain("bindAuthorityCheckpointOwner");
     expect(surfaces.match(/await mesh\.start\(/gu)).toHaveLength(1);
     expect(surfaces).toContain("await mesh.start(options)");
-    expect(surfaces).toContain("ctx.channelMechanism = Object.freeze({");
+    expect(surfaces).toContain('kind: "available",');
     expect(surfaces).not.toContain("bindChannelChallenges");
     expect(surfaces).not.toContain("ctx.channelChallenges");
     expect(surfaces).toContain("onChallengeAction: channelChallengeAction");
-    const channelPreparation = surfaces.lastIndexOf(
-      "createChannelSurface(channelCredentials),",
+    const channelPreparation = location(source,
+      "await prepareChannel({",
     );
-    const losslessComposition = surfaces.lastIndexOf("losslessDataPlaneSurface,");
-    const jobOwnerRecovery = surfaces.lastIndexOf("executorJobOwnerStartUnit,");
-    const interactionRecovery = surfaces.lastIndexOf(
-      "channelInteractionRecoveryUnit,",
+    const losslessComposition = location(source, "await createHostLosslessDataPlane({");
+    const jobOwnerRecovery = location(source, "await startExecutorJobOwner({");
+    const interactionRecovery = location(source,
+      "await recoverChannelInteractions({",
     );
     expect(channelPreparation).toBeLessThan(losslessComposition);
     expect(losslessComposition).toBeLessThan(jobOwnerRecovery);
@@ -250,9 +279,9 @@ describe("production startup server ownership", () => {
     ]) {
       expect(source).toContain(explicitProfile);
     }
-    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "ctx.meshRuntime = activeMesh")))
+    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "activeMesh.resumeAcceptingAfterLifecycle()")))
       .toContain("plannedDutyMigrationLifecycle,");
-    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "ctx.meshRuntime = activeMesh")))
+    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "activeMesh.resumeAcceptingAfterLifecycle()")))
       .toContain("postAdoptionReviewLifecycle,");
     expect(source).not.toContain("bindPlannedAnchorLifecycle");
     expect(source).not.toContain("bindPlannedAnchorPostInstallConsumers");
@@ -268,16 +297,17 @@ describe("production startup server ownership", () => {
     );
     const firstPartySurfaceCleanup = location(
       source,
-      'lifecycleContributions.acquire(\n      "firstPartyConversationMeshSurface.close",',
+      '"firstPartyConversationMeshSurface.close",',
     );
     const serverRun = location(source, "runner = await runServer({");
     expect(firstPartySurfaceOwner).toBeGreaterThan(serverContext);
     expect(firstPartySurfaceCleanup).toBeGreaterThan(firstPartySurfaceOwner);
-    expect(firstPartySurfaceCleanup).toBeLessThan(serverRun);
+    expect(firstPartySurfaceOwner).toBeGreaterThan(serverRun);
+    expect(firstPartySurfaceOwner).toBeGreaterThan(location(source, "      await recoverHostStop();"));
     expect(source.match(/schedulerGenerationOwner\.postAdoptionReview/gu)).toHaveLength(2);
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(
-      location(source, "assemblyUnits.slice(0, conversationAssemblyIndex + 1)"),
+      location(source, "const conversationServices = await createConversationServices({"),
     );
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
     const broadcastOwner = location(
@@ -328,7 +358,7 @@ describe("production startup server ownership", () => {
     );
     const contribution = location(
       activation,
-      'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+      "await installConfirmationBridge({",
     );
     const postServerTransfer = location(
       activation,
@@ -424,7 +454,7 @@ describe("production startup server ownership", () => {
     }
     expect(surfaces).not.toContain("registerCleanup(");
     expect(location(surfaces, '"evidenceHandler.stopAccepting",'))
-      .toBeGreaterThan(location(surfaces, "const evidenceHandler = new ExecutorEvidenceHandler({"));
+      .toBeGreaterThan(location(surfaces, "const handler = new ExecutorEvidenceHandler({"));
     expect(location(surfaces, '"execution.abortAllAndWait",'))
       .toBeGreaterThan(location(surfaces, "manager = new ConversationManager("));
     const deliverySetup = location(
@@ -441,7 +471,7 @@ describe("production startup server ownership", () => {
     );
     const connectionPublication = location(
       surfaces,
-      "ctx.channelConnections = Object.freeze({",
+      "const channelConnections = Object.freeze({",
     );
     expect(routerConstruction).toBeGreaterThan(deliverySetup);
     expect(surfaces).toContain(
