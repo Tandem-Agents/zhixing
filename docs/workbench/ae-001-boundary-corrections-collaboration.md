@@ -26,7 +26,7 @@
 | 3 | KERNEL-C01 | Kernel 中残留 Workscene 产品指引与 Profile 策略 |
 | 4 | NOTICE-C01 | 共享 Journal 与投递参与适配中残留产品通知、文案和结果语义 |
 
-单元 1、2 已完成开发、独立审查与最终验证，已提交到 `16051748`。单元 3 已完成开发；2026-09-14 用户授权双方协作完成其审查与修复，原“开发后停止”检查点已解除。当前不启动单元 4，不操作 Git，已有暂存内容保持不变。前两单元已成立的运行期显式依赖、身份/数据根隔离和静态装配图不得回退。审查依据[AE-001 权威设计](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)、任务范围、源码及真实调用链，不以测试数量、文件大小或执行者自述代替结论。
+前三单元已完成开发、独立审查与最终验证，已提交到 `87a21773`。单元 4 已完成开发；2026-09-14 用户授权双方协作完成 NOTICE-C01 的审查与修复，原“开发后停止”检查点已解除。当前不操作 Git，已有暂存内容保持不变。前三单元已成立的运行期显式依赖、身份/数据根隔离、静态装配图和 Kernel 产品策略边界不得回退。审查依据[AE-001 权威设计](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)、任务范围、源码及真实调用链，不以测试数量、文件大小或执行者自述代替结论。
 
 ## 协作顺序与结束条件
 
@@ -40,7 +40,65 @@
 
 验证纪律参考[开发工作台](../../research/design/workbench/unit-development-workbench.md)、[审查工作台](../../research/design/workbench/unit-review-workbench.md)、[验证手册](../../research/design/workbench/verification-runbook.md)和[验证耗时复盘](../postmortems/2026-08-06-final-validation-overrun.md)。本次双方分工与最终验证失败处置按以上用户约定执行，不套用额外角色或重复审批流程。
 
-## 当前工作：KERNEL-C01
+## 当前工作：NOTICE-C01
+
+- 基线：`87a21773ed5e4dfc2b3fa486be844387eaddaff7`。开始协作时 21 项开发变更已在暂存区，任务文档另有未暂存交接更新，无未跟踪文件；双方不操作索引，修复和记录只写工作区。
+- 状态：2026-09-14 NOTICE-C01 已完成。R2 独立复核及必要最终验证通过，R1 两项关闭，无范围内未解决问题；四单元已完成 4/4，停止。A7 及整体退出门仍待单独验收，不自动启动，不操作 Git。
+- 最终输入：`git -c core.safecrlf=false diff HEAD -- packages scripts`，包含暂存与未暂存代码；输出按行以 LF 连接（无末尾额外换行），UTF-8 SHA-256 为 `92be754c92ace301d0340bf350f3d1d6a6ee2028ee9933eff62dcab41e548357`，与 R2 一致。完整暂存区 `git diff --cached --binary` 同算法指纹始终为 `a3ee4b8836873cb68bfaba09df4abb2d49ea69276bab2b603b437b3af9788b1f`。修复只在工作区，索引和 HEAD 未动。
+- 实现交接：Conversation 的 `publish-results.ts`、`notifications.ts` 拥有公共发布结果反馈、会话状态通知及空取消回执；Schedule 的 `user-notices.ts` 拥有能力缺口开闭、任务发布反馈、离线摘要及任务状态通知。Journal 在原事务快照中调用领域决定，Delivery participant 的提交准备与重放校验复用同一决定。CLI、实时及历史结果消费同一领域来源，旧 owner-kernel 文案模块及出口退出。
+
+### 单元 4 的任务、目标与验收要求
+
+1. **任务与目标**：核实产品通知的生成、更新、关闭、文案、操作建议及结果投影真正归属 Conversation/Schedule，机制层只负责事务、身份、持久化、重放和交付；不能只搬文字、留下第二套产品选择，也不能新增通知框架或把业务目录挪到另一个共享层。
+2. **完整范围**：覆盖 ConversationJournal、JobJournal、SchedulerUserNoticeJournal、SchedulerAuthority 和 OwnerDeliveryParticipant 的生产调用、prepare/assert、实时与历史、CLI/Channel 消费、正常启动及权威换代装配；反查其他 Journal 和投递生产者中的同根遗留。已有 Schedule 失败策略、领域权威适配、技术错误与协议合法性检查保留其合法责任，不做无关 Assignment 重构。
+3. **功能与数据保护**：保持公开分类、原文、建议、结果细节和投递目标，保留原记录格式/摘要、稳定身份、去重、水位、回源和 Delivery 义务。依赖快照的决定仍在同一事务内执行，触发事实和通知原子提交；不得异步补写、双写、复制状态机或削弱重放伴随记录校验。非通道会话、系统任务、无来源与无需通知状态不产生相应义务。
+4. **审查与证据**：以基线实现和真实生产链核对冲突/成功、能力缺口开闭、离线摘要、取消/失败/过期/不确定状态、空取消回执及重试恢复；检查领域依赖方向、事务调用时点、全部同根消费者和旧出口退场。开发记录不是正确性自证，不能仅凭搬移或测试数量通过。一次返回完整根因清单或明确通过；只读且先审查，不先跑重型测试。
+5. **验证与结束**：复用下列未失效证据；独立通过后才补实际未覆盖交界或修复影响的最终验证，不跑整包/完整 S7/A7、不重复同输入构建。审查与必要验证通过、无本单元未解决问题后标记单元 4 完成并停止；四单元总验收 A7 单独保留，不自动提交。
+
+### NOTICE-C01 开发证据与协作记录
+
+| 已有证据 | 结果与复用边界 |
+|---|---|
+| Core Conversation notifications/publish-results、Schedule user-notices | 3 文件 7/7；纯领域决定、公共原文、开闭/去重及离线成员身份 |
+| owner-kernel delivery-participant、scheduler-user-notices | 2 文件 16/16；prepare/assert、伴随记录拒绝、无通知分支、持久去重与实时/历史水位 |
+| Executor Job/Conversation ledger 定向用例 | 3/3；能力诊断不外泄、无效 staged delivery 冲突、durable publish summary/detail |
+| CLI presenter、会话批取消与空回执重放 | 5/5；实际呈现与幂等消费 |
+| Core S7 invalid-reset-genesis 单例 | 1/1；修正基线夹具缺失 lease/abort 的调用，损坏恢复断言保留，不运行完整 S7 |
+| 17 包构建、Core/owner-kernel/CLI 类型检查、出口检查、变更 TS 的 Biome 与 diff 检查 | 通过；Core 声明初次堆上限失败后仅补失败步骤并串行完成剩余包，未持久改变构建配置；只有输入或依赖变化才使相应证据失效 |
+
+| 轮次 | 请求/结论 | 处置与下一步 |
+|---|---|---|
+| 背景交接 | 原审查任务已主动回送“背景已理解”，确认权威边界、完整生产/消费链、保护合同及只读分工，无阻碍正式审查的缺口；指出旧调度台账状态差异，执行方已同步校准 | 背景交接完成，正式派发 R1 |
+| R1 | 以代码指纹 `288dc26ee99f85fcbf40676791ba289c9a9ce42ed2174f507c0dd2f016860397` 的当前工作区开始完整独立审查 | 执行方冻结代码与构建，审查方只读核实并主动回送根因清单或通过结论；暂不执行最终验证 |
+| R1 结论 | 不通过，共两项基线遗留：P1，批取消按整个事务准备状态通知，Journal 却按单条状态校验全部义务，多 channel queued 或 running+channel queued 会在提交前失败；P2，Job ControlAdmission 的 queued 取消/手动替换漏接缺口关闭与 notice companion stream，终态后通知仍 open。其他完整范围无确认问题，首尾输入不变；独立证据为真实生产链和必要内存反例，不冒充持久集成测试 | 执行方核实并集中修复两个 Journal 的事务级 exact-set 校验、Job 两种事务入口共用的领域关闭适配及提交后通知；补真实持久控制、重放恢复、缺失/多余拒绝及无来源分支，完成直接证据后派发 R2 |
+| R2 交接 | 代码指纹 `92be754c92ace301d0340bf350f3d1d6a6ee2028ee9933eff62dcab41e548357`；完整索引指纹不变。Conversation/Job 的 replay 改为从整个事务取状态输入，保留 exact-set；Job 两种事务复用唯一关闭适配，ControlAdmission 同步声明通知流，提交后只发布已耐久事实，不引入失败策略重构 | owner-kernel 构建通过（声明 12.66 秒）。直接回归合计 11 项：两个真实 Conversation 批次（两个 channel queued、running+channel queued，均混合第一方 queued）、Job cancel/replace × 有/无来源四项、原空批次重放/正常 assigned 关闭两项、participant 完整集合及缺失/多余/无通知三项；首次新增夹具的队列序号、取消 source 和选取提交条件已修正，仅复验失败项，最终全通过。5 个修复文件 Biome 与 diff 检查通过。执行方再次冻结代码和构建，仅请求受影响范围复核 |
+| R2 结论 | 独立通过，P1/P2 均关闭。完整事务输入与 exact-set 未降级；Job 普通/控制事务共用关闭决定，控制结果与终态/gap/notice 同事务提交，随后发布耐久事实。已核对新增持久测试及保护反例，R1 未失效结论复用；首尾代码/索引指纹一致 | 审查方未重复跑测试或构建。执行方进入下列最终验证，失败自行定位修复并复验，不再增加正式审查轮次 |
+
+### NOTICE-C01 最终验证计划
+
+复用修复后 owner-kernel 构建及 11 项直接回归；其他 16 包构建和未失效的纯领域/公开呈现证据保持有效。修复只改变 owner-kernel 内部事务接线及重放输入，没有公开类型变化；CLI 产物仍以包导入消费 owner-kernel，未内联旧实现，因此不重复全量或 CLI 构建。以下严格串行执行，不跑完整 S7/A7 或整包测试。
+
+| 顺序 | 精确命令/范围 | 新增证据、预算与截止 |
+|---|---|---|
+| 1 | Executor：`node node_modules/vitest/vitest.mjs run src/__tests__/assignment-ledger.test.ts src/__tests__/job-assignment.test.ts --testNamePattern ' state: real production, full/guard acceptance, adversarial-vector rejection$' --maxWorkers=1 --reporter=verbose` | 两个 Journal 的普通已提交状态、full/guard 重放及损坏记录拒绝，补批取消以外直接交界；预计 20 秒，截止 90 秒，仅两项 |
+| 2 | owner-kernel：`node node_modules/vitest/vitest.mjs run src/__tests__/scheduler-authority.test.ts --testNamePattern 'redrives a missed summary only after a durable miss hint' --maxWorkers=1 --reporter=verbose` | 调度通知失败后的耐久提示重试/停止重试；预计 5 秒，截止 30 秒，仅一项 |
+| 3 | CLI：`node node_modules/vitest/vitest.mjs run src/__tests__/setup-authority-delivery.test.ts --testNamePattern 'publishes a revisioned resolved notice\|rebuilds queued delivery authority' --maxWorkers=1 --reporter=verbose` | 真实投递装配、live/history 消费及共享日志重建，补纯领域和 Journal 测试外的直接交界；预计 15 秒，截止 60 秒，仅两项 |
+| 4 | 根目录 `node scripts/check-runtime-package-exports.mjs`；`git -c core.safecrlf=false diff --check`；核对 HEAD/代码/索引指纹 | 检查更新后的 owner-kernel 制品可加载与旧出口退场，确认最终冻结输入及索引未变；预计 5 秒，截止 30 秒 |
+
+各测试命令输出保留；若失败只重验失败项或修复造成的失效输入，不能重跑整集取日志。完整应用进程重启/物理 Channel/Mesh 端到端不在本轮证据内，未变装配链复用独立审查结论。
+
+### NOTICE-C01 最终验证结果（2026-09-14）
+
+| 验证 | 结果 |
+|---|---|
+| Executor 两个 Journal 的 state 生产/full+guard/损坏拒绝 | 2/2 通过，14.90 秒；446 项无关用例跳过 |
+| AnchorScheduler missed summary 耐久提示重试 | 1/1 通过，2.47 秒；11 项无关用例跳过 |
+| CLI 真实投递控制通知与共享日志重建 | 2/2 通过，10.75 秒；live/history、queued 义务及停止/恢复链保持 |
+| runtime package exports、diff 与冻结输入 | 通过；代码与 R2 相同，完整索引及 HEAD 与协作开始时相同，无未跟踪文件 |
+
+最终阶段未再修改生产代码或测试，未运行整包、完整 S7/A7、重复构建或 Git 写操作。所有本轮验证命令均已退出；修复与协作记录留在工作区，外部既有暂存内容原样保留。四个执行单元均已独立通过并完成必要终验，不表示 A7/整体退出门已关闭。
+
+## 已完成交接：KERNEL-C01
 
 - 基线：`16051748ca1a5ca4bc333444ba734783a0b277bd`。本轮开始时第三单元 18 个变更文件已在暂存区，无未跟踪文件；双方只读暂存区，修复与记录更新留在工作区。
 - 状态：2026-09-14 KERNEL-C01 已完成。R2 独立复核和必要最终验证全部通过，R1 唯一 P2 已关闭，无范围内未解决问题；四单元完成 3/4（75%），停止，等待下一单元授权。修复留在工作区，原暂存区、HEAD 未动。

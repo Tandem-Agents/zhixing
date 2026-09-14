@@ -29,7 +29,6 @@ export default defineConfig({
     "src/channel-challenge-outbox.ts",
     "src/conversation-transfer.ts",
     "src/session-state-adapter.ts",
-    "src/publish-result-product-language.ts",
     "src/test-support/s7-durable.ts",
   ],
   format: ["esm"],

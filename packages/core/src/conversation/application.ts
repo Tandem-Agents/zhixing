@@ -7,6 +7,8 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
+export { projectPublishConflicts, projectPublishResults, productizePublishAuthorityError, publishConflictProductCopy } from "./publish-results.js";
+export { decideConversationStatusNotification, decideConversationControlResponse, conversationControlResponseText, type ConversationControlResponse } from "./notifications.js";
 import { isProtocolIdentifier, protocolDigest } from "../protocol/index.js";
 import type { RunRecordWithRef } from "../transcript/shard/reader.js";
 import {

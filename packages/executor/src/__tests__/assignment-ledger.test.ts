@@ -9131,6 +9131,65 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     expect(await harness.log.readAll()).toHaveLength(afterEmpty.length);
   });
 
+  it.each([false, true])("atomically cancels a channel batch and replays its full notification set (running=%s)", async (running) => {
+    const responder = { channelId: "feishu", platformSubject: "user-1", tenant: "tenant-1" };
+    const channel: IngressContext = {
+      kind: "channel", surfacePrincipal: channelSurfacePrincipal(responder), responder,
+      replyTarget: { channelId: "feishu", to: "chat-1" }, deviceId: "device-1",
+      ingressId: "channel-batch-first", receivedAt: NOW,
+    };
+    const harness = await createUnassignedHarness({ ingress: channel });
+    if (running) {
+      const dispatch = await harness.journal.assign(harness.unsigned);
+      await harness.ledger.dispatch(dispatch.envelope, dispatch.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+      const adapter = new InProcessAssignmentSubmission({ ledger: harness.ledger, owner: harness.journal });
+      await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+      expect(await harness.journal.runState(RUN_ID)).toBe("running");
+    }
+    for (const [runId, runIngress] of [
+      ["channel-batch-queued", { ...channel, ingressId: "channel-batch-second" }],
+      ["first-party-batch-queued", ingress()],
+    ] as const) {
+      await harness.journal.admit({
+        ingressKey: `${runIngress.surfacePrincipal}/${runId}`, runId,
+        userInput: { parts: [{ type: "text", text: "queued" }] }, ingress: runIngress,
+        invocation: { kind: "agent", source: "interactive" }, queuedPosition: runId === "channel-batch-queued" ? 1 : 2,
+      });
+    }
+    const source = trustedControlSource();
+    const envelope = createConversationControlEnvelope({
+      requestId: "cancel-channel-batch", source, at: NOW,
+      body: { t: "cancel-batch", conversationId: CONVERSATION_ID, ownerEpoch: 3 },
+    });
+    const result = await harness.journal.applyControl({ admission: harness.control, envelope, source });
+    expect(result).toMatchObject({ kind: "applied", result: { status: "ok", body: {
+      t: "cancel-batch", runs: expect.arrayContaining([
+        { runId: RUN_ID, runState: running ? "cancel-requested" : "cancelled", source: "interactive", ingressId: channel.ingressId },
+        expect.objectContaining({ runId: "channel-batch-queued", runState: "cancelled" }),
+        expect.objectContaining({ runId: "first-party-batch-queued", runState: "cancelled" }),
+      ]),
+    } } });
+    const commits = await harness.log.readAll();
+    const batch = commits.find((commit) => commit.entries.some((entry) =>
+      entry.stream === `run:${CONVERSATION_ID}` &&
+      (entry.body as { t?: string; runId?: string }).t === "state" &&
+      (entry.body as { state?: string }).state === "cancelled" &&
+      (entry.body as { runId?: string }).runId === "channel-batch-queued"));
+    expect(batch).toBeDefined();
+    const notifications = batch!.entries.filter((entry) => entry.stream === "delivery" &&
+      (entry.body as { keyBody?: { kind?: string } }).keyBody?.kind === "conversation-status-delivery");
+    expect(notifications).toHaveLength(running ? 1 : 2);
+    expect(notifications.map((entry) => (entry.body as { keyBody: { runId: string } }).keyBody.runId).sort())
+      .toEqual((running ? ["channel-batch-queued"] : [RUN_ID, "channel-batch-queued"]).sort());
+    const recovered = reopenJournal(harness);
+    expect(await recovered.runState(RUN_ID)).toBe(running ? "cancel-requested" : "cancelled");
+    expect(await recovered.runState("channel-batch-queued")).toBe("cancelled");
+    expect(await recovered.runState("first-party-batch-queued")).toBe("cancelled");
+    const replay = await recovered.applyControl({ admission: new ControlAdmissionJournal(harness.log, harness.artifacts), envelope, source });
+    expect(replay).toMatchObject({ kind: "replayed", result: result.result });
+    expect(await harness.log.readAll()).toHaveLength(commits.length);
+  });
+
   it("rejects runtime attempts to cross the initial and atomic control entrypoints", async () => {
     const harness = await createHarness();
     const source = trustedControlSource();
@@ -9862,7 +9921,7 @@ function createBundleSubmission(
 }
 
 function reopenJournal(
-  harness: Awaited<ReturnType<typeof createHarness>>,
+  harness: Awaited<ReturnType<typeof createUnassignedHarness>>,
   options: {
     readonly ownerEpoch?: number;
     readonly artifacts?: ArtifactStore;

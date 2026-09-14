@@ -1,9 +1,9 @@
-import type { AuthorityError, GlobalStagedMutation } from "@zhixing/core/contracts";
+import type { AuthorityError, GlobalStagedMutation } from "../../contracts/index.js";
 import { describe, expect, it } from "vitest";
 import {
   productizePublishAuthorityError,
   publishConflictProductCopy,
-} from "../publish-result-product-language.js";
+} from "../publish-results.js";
 
 const ERROR_CODES = [
   "unauthorized",

@@ -1,4 +1,6 @@
 import { assertDeliveryEnvelopeCompanions, projectDeliveryDisplayText, validateDeliveryStreamRecord, type DeliveryLifecycleSourceRef } from "@zhixing/core/delivery";
+import { decideConversationStatusNotification, conversationControlResponseText, type ConversationControlResponse } from "@zhixing/core/conversation/application";
+import { decideScheduleStatusNotification } from "@zhixing/core/scheduler/application";
 import type {
   DeliveryObligation,
   DeliveryObligationApplication,
@@ -86,7 +88,7 @@ export interface ConversationControlResponseInput {
   readonly conversationId: string;
   readonly requestId: string;
   readonly replyTarget: DeliveryTargetDto;
-  readonly response: "empty-cancel-batch";
+  readonly response: ConversationControlResponse;
 }
 
 export interface JobStatusDeliveryInput {
@@ -142,52 +144,6 @@ export interface JobDeliveryParticipant {
   ): void;
 }
 
-const CONVERSATION_CHANNEL_STATUS_TEXT = {
-  cancelled: "本次运行已取消。",
-  failed: "本次运行失败。",
-  expired: "本次请求未能开始执行，已过期。你可以重新发送。",
-  uncertain: "本次运行结果不确定，需要你裁决处理方式。",
-} as const satisfies Readonly<Partial<Record<ConversationRunState, string>>>;
-
-const CONVERSATION_CONTROL_RESPONSE_TEXT = {
-  "empty-cancel-batch": "当前没有正在处理的任务。",
-} as const satisfies Readonly<
-  Record<ConversationControlResponseInput["response"], string>
->;
-
-function jobChannelStatusText(
-  state: JobRunState,
-  taskName: string,
-): string | undefined {
-  switch (state) {
-    case "cancelled":
-      return `定时任务「${taskName}」已取消。`;
-    case "failed":
-      return `定时任务「${taskName}」运行失败。`;
-    case "expired":
-      return `定时任务「${taskName}」本次未能开始执行，已过期；后续计划不受影响。`;
-    case "uncertain":
-      return `定时任务「${taskName}」结果不确定，需要你裁决处理方式。`;
-    default:
-      return undefined;
-  }
-}
-
-function statusText<State extends string>(
-  messages: Readonly<Partial<Record<State, string>>>,
-  state: State,
-): string | undefined {
-  return messages[state];
-}
-
-function conversationStatusText(input: ConversationStatusDeliveryInput): string | undefined {
-  if (input.state !== "failed") {
-    return statusText(CONVERSATION_CHANNEL_STATUS_TEXT, input.state);
-  }
-  return input.reason
-    ? `本次运行失败：${input.reason}。`
-    : CONVERSATION_CHANNEL_STATUS_TEXT.failed;
-}
 
 /**
  * Producer adapter: maps source facts to generic Delivery obligations and
@@ -691,9 +647,9 @@ function jobCommitInputs(
 function conversationStatusInputs(
   input: ConversationStatusDeliveryInput,
 ): DeliveryObligation[] {
-  if (input.ingress.kind !== "channel") return [];
-  const text = conversationStatusText(input);
-  if (!text) return [];
+  const notification = decideConversationStatusNotification(input);
+  if (!notification) return [];
+  const { text } = notification;
   return [
     {
       keyBody: {
@@ -703,13 +659,13 @@ function conversationStatusInputs(
         statusRevision: input.statusRevision,
       },
       intent: {
-        endpoint: { kind: "channel", target: input.ingress.replyTarget },
+        endpoint: { kind: "channel", target: notification.target },
         content: { text, markdown: text },
         priority: "normal",
         source: {
           kind: "agent",
           conversationId: input.conversationId,
-          turnSlotId: input.ingress.ingressId,
+          turnSlotId: notification.ingressId,
         },
         createdAt: input.at,
       },
@@ -721,7 +677,7 @@ function conversationStatusInputs(
 function conversationControlResponseInput(
   input: ConversationControlResponseInput,
 ): DeliveryObligation {
-  const text = CONVERSATION_CONTROL_RESPONSE_TEXT[input.response];
+  const text = conversationControlResponseText(input.response);
   return {
     keyBody: {
       kind: "conversation-control-response-delivery",
@@ -750,13 +706,12 @@ function noDurableRoute(): AuthorityError {
 function jobStatusInputs(
   input: JobStatusDeliveryInput,
 ): DeliveryObligation[] {
-  if (input.definition.definition.kind !== "user") return [];
-  const definition = requireUserDefinition(input.definition, input.occurrence);
-  const taskName = projectDeliveryDisplayText(definition.definition.spec.name);
-  const origin = definition.definition.origin;
-  if (!origin) return [];
-  const text = jobChannelStatusText(input.state, taskName);
-  if (!text) return [];
+  const definition = input.definition.definition.kind === "user"
+    ? requireUserDefinition(input.definition, input.occurrence)
+    : undefined;
+  const notification = decideScheduleStatusNotification(input);
+  if (!definition || !notification) return [];
+  const { text, taskName, target: origin } = notification;
   return [
     {
       keyBody: {

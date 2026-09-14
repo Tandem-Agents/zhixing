@@ -29,6 +29,8 @@ export type {
   ScheduleFailurePolicyDecision,
 } from "./runtime-policy.js";
 export { ScheduleRuntimePolicyError } from "./runtime-policy.js";
+export { decideScheduleCapabilityGap, decideScheduleCapabilityGapClosure, projectSchedulePublishNotices, decideScheduleMissedSummary, decideScheduleStatusNotification, schedulerNoticeGroupKey } from "./user-notices.js";
+export type { SchedulerNoticeDraft, MissedSummaryMember, MissedSummaryGroup, ScheduleCapabilityGapState } from "./user-notices.js";
 
 /** User-authored schedule definition before domain defaults are applied. */
 export type ScheduleTaskDraft = Omit<TaskSpec, "enabled" | "priority"> & {

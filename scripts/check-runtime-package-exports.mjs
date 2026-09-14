@@ -380,11 +380,6 @@ const migrationPackageSurfaces = [
         "ConversationSessionStateAdapter",
       ],
       [
-        "./publish-result-product-language",
-        "publish-result-product-language",
-        "publishConflictProductCopy",
-      ],
-      [
         "./test-support/s7-durable",
         "test-support/s7-durable",
         "createOwnerKernelS7DurableScenarios",
@@ -739,6 +734,10 @@ async function verifyOwnerKernelConversationControlExport(failures) {
 
 async function verifyOwnerKernelRetiredCompatibilitySurface(failures) {
   const packageRoot = new URL("../packages/owner-kernel/", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("package.json", packageRoot), "utf8"));
+  if (manifest.exports?.["./publish-result-product-language"]) {
+    failures.push("owner-kernel-exports:retired:publish-result-product-language");
+  }
   const [
     sessionStateDeclaration,
     typesDeclaration,
@@ -1270,6 +1269,10 @@ async function verifyCorePackageExports(failures) {
       "function" ||
     typeof coreConversationApplication.createConversationDirectoryProductApiContribution !==
       "function" ||
+    ["projectPublishConflicts", "projectPublishResults", "publishConflictProductCopy",
+      "decideConversationStatusNotification", "decideConversationControlResponse",
+      "conversationControlResponseText"].some((name) =>
+      typeof coreConversationApplication[name] !== "function" || name in coreRoot) ||
     "ConversationDirectoryApplicationService" in coreRoot
   ) {
     failures.push(
@@ -1350,6 +1353,10 @@ async function verifyCorePackageExports(failures) {
     scheduleApplicationConditions.import !== "./dist/scheduler/application.js" ||
     typeof coreScheduleApplication.ScheduleManagementApplicationService !== "function" ||
     typeof coreScheduleApplication.createScheduleManagementProductApiContribution !== "function" ||
+    ["decideScheduleCapabilityGap", "decideScheduleCapabilityGapClosure",
+      "projectSchedulePublishNotices", "decideScheduleMissedSummary",
+      "decideScheduleStatusNotification"].some((name) =>
+      typeof coreScheduleApplication[name] !== "function" || name in coreRoot) ||
     "ScheduleManagementApplicationService" in coreRoot
   ) {
     failures.push("core-exports:schedule-application:invalid-runtime-boundary");

@@ -1,7 +1,15 @@
+/** Conversation owns feedback for agent-proposed changes, including scheduled turns.
+ * Consumers reuse this projection; mutation decisions remain with their domain authority.
+ */
 import type {
   AuthorityError,
   GlobalStagedMutation,
-} from "@zhixing/core/contracts";
+  MutationBatch,
+  PublishRecord,
+  PublishConflictNotice,
+  PublishResultNotice,
+} from "../contracts/index.js";
+import { canonicalize } from "../protocol/canonical.js";
 
 interface ProductErrorCopy {
   readonly reason: string;
@@ -61,4 +69,57 @@ export function productizePublishAuthorityError(
     message: `${copy.reason}。${copy.actions.join("，")}。`,
     retryable: error.retryable,
   };
+}
+
+export function projectPublishConflicts(input: PublishConflictNotice): PublishConflictNotice | undefined {
+  if (input.conflicts.length === 0) return undefined;
+  return { ...input, conflicts: input.conflicts.map((conflict) => ({
+    ...conflict, error: productizePublishAuthorityError(conflict.error),
+  })) };
+}
+
+export function projectPublishResults(input: {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly commitRevision: number;
+  readonly assignmentId: string;
+  readonly decision: Extract<PublishRecord, { t: "publish-decision" }>;
+  readonly batch: MutationBatch;
+}): PublishResultNotice[] {
+  const results: PublishResultNotice[] = [];
+  for (const item of input.decision.outcomes) {
+    const record = input.batch.records[item.seq - 1];
+    if (!record || record.domain !== "global") continue;
+    if (item.outcome.t === "granted" && item.outcome.appliedResult === undefined) {
+      continue;
+    }
+    const publicOutcome = item.outcome.t === "conflicted"
+      ? {
+          t: "conflicted" as const,
+          error: productizePublishAuthorityError(item.outcome.error),
+        }
+      : item.outcome;
+    results.push({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      commitRevision: input.commitRevision,
+      assignmentId: input.assignmentId,
+      seq: item.seq,
+      mutation: snapshot(record.mutation, "Publish result mutation") as GlobalStagedMutation,
+      decision: snapshot(
+        publicOutcome,
+        "Publish result decision",
+      ) as PublishResultNotice["decision"],
+    });
+  }
+  return results;
+}
+
+
+function snapshot<T>(value: T, label: string): T {
+  try {
+    return JSON.parse(canonicalize(value)) as T;
+  } catch (error) {
+    throw new TypeError(`${label} is not canonical protocol data`, { cause: error });
+  }
 }

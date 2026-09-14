@@ -5,6 +5,7 @@ import {
 } from "@zhixing/core/authority";
 import { DeliveryAuthority } from "@zhixing/core/delivery";
 import type {
+  CommitEnvelope,
   ConversationRunState,
   IngressContext,
   JobOccurrence,
@@ -625,6 +626,92 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       message: "Delivery request has no durable route",
       retryable: false,
     });
+  });
+
+  it("uses the same domain status decision for commit and replay and rejects missing or extra companions", async () => {
+    const owner = await participant();
+    const facts = jobFacts();
+    for (const state of ["cancelled", "failed", "expired", "uncertain"] as const) {
+      const conversation = { at: NOW, conversationId: "conversation-1", runId: "run-1",
+        state, reason: "模型不可用", statusRevision: 1, ingress: channelIngress };
+      const job = { at: NOW, occurrence: facts.occurrence, definition: facts.definition,
+        state, statusRevision: 1 };
+      const preparedConversation = owner.prepareConversationStatuses([conversation]);
+      const preparedJob = owner.prepareJobStatuses([job]);
+      if (!preparedConversation.accepted || !preparedJob.accepted) throw new Error("status rejected");
+      const envelope = (entries: readonly LogicalRecord<unknown>[]) => ({
+        v: 1 as const, lsn: 1, at: NOW, envelopeDigest: DIGEST, entries: [
+          { stream: "run:conversation-1", body: { t: "state", runId: "run-1", state, statusRevision: 1 } },
+          { stream: "job:task-1", body: { t: "state", jobRunId: facts.occurrence.jobRunId, state, statusRevision: 1 } },
+          ...entries,
+        ],
+      });
+      expect(() => owner.assertConversationStatuses([conversation], envelope(preparedConversation.records))).not.toThrow();
+      expect(() => owner.assertJobStatuses([job], envelope(preparedJob.records))).not.toThrow();
+      expect(() => owner.assertConversationStatuses([conversation], envelope([]))).toThrow("source authority facts");
+      expect(() => owner.assertJobStatuses([job], envelope([]))).toThrow("source authority facts");
+      expect(() => owner.assertConversationStatuses([{ ...conversation, state: "committed" }], envelope(preparedConversation.records))).toThrow("source authority facts");
+      expect(() => owner.assertJobStatuses([{ ...job, state: "missed" }], envelope(preparedJob.records))).toThrow("source authority facts");
+      if (state === "failed") expect(deliveryTexts(preparedConversation.records)).toEqual(["本次运行失败：模型不可用。"]);
+    }
+  });
+
+  it("requires the exact full batch of status companions for both source authorities", async () => {
+    const owner = await participant();
+    const facts = jobFacts();
+    const conversations = ["run-1", "run-2"].map((runId) => ({
+      at: NOW, conversationId: "conversation-1", runId, state: "cancelled" as const,
+      statusRevision: 1, ingress: channelIngress,
+    }));
+    const jobs = ["job-1", "job-2"].map((jobRunId) => ({
+      at: NOW, occurrence: { ...facts.occurrence, jobRunId }, definition: facts.definition,
+      state: "cancelled" as const, statusRevision: 1,
+    }));
+    const preparedConversation = owner.prepareConversationStatuses(conversations);
+    const preparedJob = owner.prepareJobStatuses(jobs);
+    if (!preparedConversation.accepted || !preparedJob.accepted) throw new Error("batch rejected");
+    const sourceRecords = [
+      ...conversations.map((fact) => ({ stream: "run:conversation-1", body: { t: "state", runId: fact.runId, state: fact.state, statusRevision: 1 } })),
+      ...jobs.map((fact) => ({ stream: "job:task-1", body: { t: "state", jobRunId: fact.occurrence.jobRunId, state: fact.state, statusRevision: 1 } })),
+    ];
+    for (const [records, assert] of [
+      [preparedConversation.records, (envelope: CommitEnvelope<unknown>) => owner.assertConversationStatuses(conversations, envelope)],
+      [preparedJob.records, (envelope: CommitEnvelope<unknown>) => owner.assertJobStatuses(jobs, envelope)],
+    ] as const) {
+      expect(records).toHaveLength(2);
+      const envelope = (companions: readonly LogicalRecord<unknown>[]) => ({
+        v: 1 as const, lsn: 1, at: NOW, envelopeDigest: DIGEST, entries: [...sourceRecords, ...companions],
+      });
+      expect(() => assert(envelope(records))).not.toThrow();
+      expect(() => assert(envelope(records.slice(0, 1)))).toThrow();
+      expect(() => assert(envelope([...records, records[0]!]))).toThrow();
+    }
+  });
+
+  it("keeps no-route and system status paths empty and freezes one control receipt identity", async () => {
+    const owner = await participant();
+    const facts = jobFacts();
+    const definition = structuredClone(facts.definition);
+    if (definition.definition.kind === "user") delete definition.definition.origin;
+    const system: TaskDefinition = { ...definition, definition: { kind: "system", handler: "__transcript-gc" } };
+    const conversation = owner.prepareConversationStatuses([{
+      at: NOW, conversationId: "conversation-1", runId: "run-1", state: "failed", statusRevision: 1,
+      ingress: { kind: "first-party", surfacePrincipal: "surface:user-1", deviceId: "device-1", ingressId: "in-1", receivedAt: NOW },
+    }]);
+    expect(conversation).toMatchObject({ accepted: true, records: [] });
+    for (const candidate of [definition, system]) expect(owner.prepareJobStatuses([{
+      at: NOW, occurrence: facts.occurrence, definition: candidate, state: "failed", statusRevision: 1,
+    }])).toMatchObject({ accepted: true, records: [] });
+    const input = { at: NOW, conversationId: "conversation-1", requestId: "request-1",
+      replyTarget: channelIngress.replyTarget, response: "empty-cancel-batch" as const };
+    const first = owner.prepareConversationControlResponses([input]);
+    expect(owner.prepareConversationControlResponses([input])).toEqual(first);
+    if (!first.accepted) throw new Error("control receipt rejected");
+    expect(first.records).toHaveLength(1);
+    expect(deliveryTexts(first.records)).toEqual(["当前没有正在处理的任务。"]);
+    expect(first.records[0]?.body).toMatchObject({ keyBody: {
+      kind: "conversation-control-response-delivery", conversationId: "conversation-1", requestId: "request-1",
+    } });
   });
 
   it("validates replay identity without recomputing the current retry policy", async () => {

@@ -112,10 +112,6 @@
       "types": "./dist/session-state-adapter.d.ts",
       "import": "./dist/session-state-adapter.js"
     },
-    "./publish-result-product-language": {
-      "types": "./dist/publish-result-product-language.d.ts",
-      "import": "./dist/publish-result-product-language.js"
-    },
     "./test-support/s7-durable": {
       "types": "./dist/test-support/s7-durable.d.ts",
       "import": "./dist/test-support/s7-durable.js"

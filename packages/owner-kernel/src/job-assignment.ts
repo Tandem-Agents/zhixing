@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import {
   DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
+  decideScheduleCapabilityGap,
+  decideScheduleCapabilityGapClosure,
+  projectSchedulePublishNotices,
+  type ScheduleCapabilityGapState,
   decideScheduleFailurePolicy,
   ScheduleRuntimePolicyError,
   selectPendingScheduleAutoDisable,
@@ -35,7 +39,6 @@ import type {
   CommitEnvelope,
   DispatchResult,
   GovernorRecord,
-  GlobalStagedMutation,
   JobOccurrence,
   JobChannelChallengeToken,
   JobRunState,
@@ -61,7 +64,6 @@ import type {
   TaskDefinitionBody,
   StreamFrame,
   UncertainResolutionFact,
-  WorksceneAppliedResult,
 } from "@zhixing/core/contracts";
 import {
   assertProtocolIdentifier as assertIdentifier,
@@ -135,7 +137,6 @@ import {
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { ManifestSelectionError } from "./conversation-assignment-authority.js";
 import type { AssignmentResourceCoordinator } from "./resource-governor.js";
-import { publishConflictProductCopy } from "./publish-result-product-language.js";
 import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
 import type {
   AssignmentSubmissionAuthorizer,
@@ -217,7 +218,7 @@ import type {
   JobDeliveryParticipant,
 } from "./delivery-participant.js";
 import type { PendingChannelChallenge } from "./channel-challenge-outbox.js";
-import type { SchedulerUserNoticeJournal } from "./scheduler-user-notices.js";
+import { SCHEDULER_NOTICE_STREAM, type SchedulerUserNoticeJournal } from "./scheduler-user-notices.js";
 // 权威记录注册表随公开 job 模块再导出:执行点行为矩阵(生产/full/guard/
 // 恢复/对抗)按它做类型级闭合,新增记录类型缺行即编译失败。
 export {
@@ -387,17 +388,7 @@ interface JobProjection {
     Extract<JobJournalRecord, { t: "failure-policy" }>
   >;
   readonly autoDisableSettledRuns: Set<string>;
-  readonly capabilityGapByRun: Map<
-    string,
-    {
-      readonly round: number;
-      readonly noticeId: string;
-      readonly capabilityRevision: number;
-      readonly reasonDigest: string;
-      readonly reason: string;
-      readonly open: boolean;
-    }
-  >;
+  readonly capabilityGapByRun: Map<string, ScheduleCapabilityGapState>;
   readonly systemMissAliases: Map<
     string,
     { readonly scheduledFor: string; readonly coalescedJobRunId: string }
@@ -1260,61 +1251,28 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     assertIdentifier(input.jobRunId, "Capability gap jobRunId");
     assertPositive(input.capabilityRevision, "Capability gap revision");
     if (input.reason.length === 0) throw new TypeError("Capability gap reason is required");
-    const reasonDigest = protocolDigest("SchedulerCapabilityGapReason", 1, {
-      reason: input.reason,
-    });
     await this.#transact<void>((state) => {
       const occurrence = state.occurrences.get(input.jobRunId);
       const current = state.states.get(input.jobRunId);
       const definition = occurrence
         ? requireDefinitionRevision(state, occurrence.taskRevision)
         : undefined;
-      if (!occurrence || !current || current.state !== "queued" || !definition) {
-        throw new Error("Capability gap requires a queued user occurrence");
-      }
-      if (definition.definition.kind !== "user") {
-        throw new Error("System jobs do not emit user capability-gap notices");
-      }
-      const previous = state.capabilityGapByRun.get(input.jobRunId);
-      if (
-        previous?.open &&
-        previous.capabilityRevision === input.capabilityRevision &&
-        previous.reasonDigest === reasonDigest
-      ) {
-        return { kind: "return", value: undefined };
-      }
-      const round = previous?.open ? previous.round : (previous?.round ?? 0) + 1;
-      const noticeId = previous?.open
-        ? previous.noticeId
-        : `scheduler-gap:${protocolDigest("SchedulerCapabilityGap", 1, {
-            taskId: this.#taskId,
-            jobRunId: input.jobRunId,
-            round,
-          })}`;
-      const kind = previous?.open ? "capability-gap-updated" : "capability-gap-opened";
-      const text = `定时任务「${definition.definition.spec.name}」暂时找不到可用的执行环境，已排队等待；请检查目标设备及所需能力。`;
+      const decision = decideScheduleCapabilityGap({
+        taskId: this.#taskId, jobRunId: input.jobRunId,
+        ...(definition ? { definition } : {}),
+        ...(current ? { state: current.state } : {}),
+        previous: state.capabilityGapByRun.get(input.jobRunId),
+        capabilityRevision: input.capabilityRevision, reason: input.reason,
+      });
+      if (!decision) return { kind: "return", value: undefined };
       const entries: LogicalRecord<unknown>[] = [
         jobRecord(this.#taskId, {
-          t: kind,
-          jobRunId: input.jobRunId,
-          round,
-          noticeId,
+          t: decision.kind, jobRunId: input.jobRunId,
+          round: decision.round, noticeId: decision.noticeId,
           capabilityRevision: input.capabilityRevision,
-          reasonDigest,
-          reason: input.reason,
+          reasonDigest: decision.reasonDigest, reason: input.reason,
         }),
-        ...this.#schedulerNotices!.prepareRecords({
-          noticeId,
-          kind: "capability-gap",
-          state: previous?.open ? "updated" : "open",
-          ref: { kind: "capability-gap", taskId: this.#taskId, jobRunId: input.jobRunId, round },
-          reason: text,
-          actions: ["检查目标设备在线状态", "检查任务所需工具与能力"],
-          at: this.#clock(),
-          ...(!previous?.open && definition.definition.origin
-            ? { target: definition.definition.origin, channelText: text }
-            : {}),
-        }),
+        ...this.#schedulerNotices!.prepareRecords({ ...decision.notice, at: this.#clock() }),
       ];
       return { kind: "append", entries, value: undefined };
     });
@@ -3152,7 +3110,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       stream: jobStream(this.#taskId),
       initial: emptyProjection(),
       reducer: (state, record, commit) => this.#reduce(state, record, commit),
-      companionStreams: ["delivery", "governor"],
+      companionStreams: ["delivery", "governor", ...(this.#schedulerNotices ? [SCHEDULER_NOTICE_STREAM] : [])],
       prepareCompanions: (state, context, plan) => {
         const statuses = jobStatusDeliveryInputs(
           this.#taskId,
@@ -3162,7 +3120,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         );
         const prepared = this.#delivery.prepareJobStatuses(statuses);
         if (!prepared.accepted) throw corruptJobJournal(prepared.error.message);
-        return prepared.records;
+        return [
+          ...this.#prepareCapabilityGapClosureRecords(
+            state, plan.authorityEntries ?? [], context.authorityPrefix.at,
+          ),
+          ...prepared.records,
+        ];
       },
       onCommitted: (state, commit) => {
         this.#publishStatusNotices(
@@ -3455,6 +3418,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         };
       },
     }));
+    await this.#schedulerNotices?.publishNew();
     await this.resumeCompatibilityProjection();
     return outcome;
   }
@@ -4384,33 +4348,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               } satisfies Extract<PublishRecord, { t: "publish-progress" }>,
             });
           }
-          if (
-            this.#schedulerNotices &&
-            definition.definition.kind === "user"
-          ) {
-            for (const item of publishOutcomes) {
-              const record = mutationBatch.records[item.seq - 1];
-              if (
-                !record ||
-                record.domain !== "global" ||
-                (item.outcome.t === "granted" &&
-                  item.outcome.appliedResult === undefined)
-              ) {
-                continue;
-              }
-              entries.push(...this.#schedulerNotices.prepareRecords(
-                schedulerPublishResultDraft({
-                  taskId: this.#taskId,
-                  jobRunId: occurrence.jobRunId,
-                  assignmentId,
-                  seq: item.seq,
-                  mutation: record.mutation as GlobalStagedMutation,
-                  outcome: item.outcome,
-                  taskName: definition.definition.spec.name,
-                  at: prefix.at,
-                }),
-              ));
-            }
+          if (this.#schedulerNotices) {
+            for (const draft of projectSchedulePublishNotices({
+              taskId: this.#taskId, jobRunId: occurrence.jobRunId, assignmentId,
+              definition, batch: mutationBatch, outcomes: publishOutcomes, at: prefix.at,
+            })) entries.push(...this.#schedulerNotices.prepareRecords(draft));
           }
         }
         if (current.state === "uncertain") {
@@ -6924,15 +6866,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         const definition = requireDefinitionRevision(state, occurrence.taskRevision);
         try {
           this.#delivery.assertJobStatuses(
-            [
-              {
-                at: envelope.at,
-                occurrence,
-                definition,
-                state: body.state,
-                statusRevision: body.statusRevision,
-              },
-            ],
+            jobStatusDeliveryInputs(this.#taskId, state, envelope.entries, envelope.at),
             envelope,
           );
         } catch (error) {
@@ -8473,41 +8407,36 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         autoDisableRequired: policy.autoDisableRequired,
       }));
     }
+    return [...result, ...this.#prepareCapabilityGapClosureRecords(state, entries, at)];
+  }
+
+  #prepareCapabilityGapClosureRecords(
+    state: JobProjection,
+    entries: readonly LogicalRecord<unknown>[],
+    at: string,
+  ): readonly LogicalRecord<unknown>[] {
+    const result: LogicalRecord<unknown>[] = [];
     if (this.#schedulerNotices) {
-      const closingRun = entries
-        .filter((entry) => entry.stream === jobStream(this.#taskId))
-        .map((entry) => entry.body as {
-          readonly t?: string;
-          readonly jobRunId?: string;
-          readonly state?: JobRunState;
-        })
-        .find((body) =>
-          (body.t === "assigned" && typeof body.jobRunId === "string") ||
-          (body.t === "state" && typeof body.jobRunId === "string" &&
-            body.state !== undefined && isTerminal(body.state)),
-        )?.jobRunId;
-      const gap = closingRun ? state.capabilityGapByRun.get(closingRun) : undefined;
-      if (closingRun && gap?.open) {
+      const decision = decideScheduleCapabilityGapClosure({
+        taskId: this.#taskId,
+        events: entries.filter((entry) => entry.stream === jobStream(this.#taskId))
+          .flatMap((entry): { kind: "assigned" | "terminal"; jobRunId: string }[] => {
+            const body = entry.body as Partial<JobJournalRecord>;
+            if (body.t !== "assigned" && body.t !== "state") return [];
+            if (typeof body.jobRunId !== "string") return [];
+            if (body.t === "assigned") return [{ kind: "assigned", jobRunId: body.jobRunId }];
+            if (body.t === "state" && body.state !== undefined && isTerminal(body.state))
+              return [{ kind: "terminal", jobRunId: body.jobRunId }];
+            return [];
+          }),
+        gaps: state.capabilityGapByRun, at,
+      });
+      if (decision) {
         result.push(jobRecord(this.#taskId, {
-          t: "capability-gap-closed",
-          jobRunId: closingRun,
-          round: gap.round,
-          noticeId: gap.noticeId,
+          t: "capability-gap-closed", jobRunId: decision.jobRunId,
+          round: decision.round, noticeId: decision.noticeId,
         }));
-        result.push(...this.#schedulerNotices.prepareRecords({
-          noticeId: gap.noticeId,
-          kind: "capability-gap",
-          state: "closed",
-          ref: {
-            kind: "capability-gap",
-            taskId: this.#taskId,
-            jobRunId: closingRun,
-            round: gap.round,
-          },
-          reason: "已找到可用执行环境，任务继续处理。",
-          actions: [],
-          at,
-        }));
+        result.push(...this.#schedulerNotices.prepareRecords(decision.notice));
       }
     }
     return result;
@@ -10518,76 +10447,6 @@ function bundleAcknowledgementRecord(
   };
 }
 
-function schedulerPublishResultDraft(input: {
-  readonly taskId: string;
-  readonly jobRunId: string;
-  readonly assignmentId: string;
-  readonly seq: number;
-  readonly mutation: GlobalStagedMutation;
-  readonly outcome: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"][number]["outcome"];
-  readonly taskName: string;
-  readonly at: string;
-}): Parameters<SchedulerUserNoticeJournal["prepareRecords"]>[0] {
-  const decision = input.outcome.t === "conflicted" ? "conflicted" : "applied";
-  const noticeId = `scheduler-publish:${protocolDigest("SchedulerPublishResult", 1, {
-    assignmentId: input.assignmentId,
-    seq: input.seq,
-    outcome: input.outcome,
-  })}`;
-  const product = input.outcome.t === "conflicted"
-    ? (() => {
-        const copy = publishConflictProductCopy(
-          input.mutation.kind,
-          input.outcome.error.code,
-        );
-        return {
-          reason: `定时任务「${input.taskName}」未能完成“${copy.mutationLabel}”：${copy.reason}。`,
-          actions: [...copy.actions],
-        };
-      })()
-    : {
-        reason: schedulerAppliedResultText(
-          input.taskName,
-          input.outcome.appliedResult!,
-        ),
-        actions: ["查看场景"],
-      };
-  return {
-    noticeId,
-    kind: "publish-result",
-    state: "closed",
-    ref: {
-      kind: "publish-result",
-      taskId: input.taskId,
-      jobRunId: input.jobRunId,
-      assignmentId: input.assignmentId,
-      seq: input.seq,
-      decision,
-    },
-    reason: product.reason,
-    actions: product.actions,
-    at: input.at,
-  };
-}
-
-function schedulerAppliedResultText(
-  taskName: string,
-  result: WorksceneAppliedResult,
-): string {
-  if (result.kind === "workscene-deleted") {
-    return `定时任务「${taskName}」已删除场景。`;
-  }
-  switch (result.operation) {
-    case "create":
-      return `定时任务「${taskName}」已创建场景「${result.scene.name}」。`;
-    case "rename":
-      return `定时任务「${taskName}」已将场景重命名为「${result.scene.name}」。`;
-    case "set-workdir":
-      return result.scene.workspace
-        ? `定时任务「${taskName}」已更新场景「${result.scene.name}」的工作目录。`
-        : `定时任务「${taskName}」已解除场景「${result.scene.name}」的工作目录。`;
-  }
-}
 
 function assertLedgerAcknowledgesCommittedBundle(
   ledger: Pick<

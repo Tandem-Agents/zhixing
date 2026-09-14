@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
-> 状态：执行中（HOST-C01、HOST-C02、KERNEL-C01 已完成；NOTICE-C01 待授权）<br>
-> 当前检查点：2026-09-14 第三单元 KERNEL-C01 已完成协作审查、修复与必要最终验证，按约定停止。R2 独立复核通过，Executor 未装配工具却获得控制指引的唯一 P2 已关闭；CLI 构建、类型及 24 项最终定向验证通过，未失效开发证据复用。修复留在工作区，原 18 个暂存变更及 HEAD `16051748` 未动；未启动 NOTICE-C01。完整交接和证据见[双人协作记录](../workbench/ae-001-boundary-corrections-collaboration.md)；四单元总验收及相关整体退出门仍未关闭<br>
-> 完成度：本次追加纠偏 3/4 个执行单元完成（75%）；此前 8/8 追加审查为历史验收，不再表示当前任务整体完成<br>
+> 状态：执行中（四个纠偏单元已完成，待 A7 整体总验收）<br>
+> 当前检查点：2026-09-14 NOTICE-C01 的 R1 两项问题已修复，R2 独立复核及必要最终验证通过；范围、处置及证据见[双人协作记录](../workbench/ae-001-boundary-corrections-collaboration.md)。批量取消通知的事务级校验、Job 取消/手动替换时能力缺口原子关闭已闭合；修复后 owner-kernel 构建、11 项直接回归及最终 5 项验证/制品出口检查通过。四单元工作停止，A7 及整体退出门尚未关闭。已有 21 项暂存变更保持不动，修复与协作记录仅写工作区，HEAD 仍为 `87a21773`，未执行 Git 写操作<br>
+> 完成度：本次追加纠偏 4/4 个执行单元完成（单元完成率 100%，不含 A7 整体总验收）；此前 8/8 追加审查为历史验收，不表示当前任务整体完成<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -219,11 +219,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 当前取证基线 | `16051748ca1a5ca4bc333444ba734783a0b277bd`；KERNEL-C01 从干净工作区开始，HOST-C02 的独立通过与最终验证已随该提交固化 |
+| 当前取证基线 | `87a21773ed5e4dfc2b3fa486be844387eaddaff7`；NOTICE-C01 从干净工作区开始，前三单元的独立审查、修复与必要最终验证已提交 |
 | 当前 A 项 | A1、A4、A5 的 Conversation/Schedule 行及 A7 重开；其余领域和已成立的独立责任不因本次发现重做。此前 REVIEW-A7-C02-FINAL 仅保留为历史证据 |
-| 活跃工作包 | 无运行中的工作包；KERNEL-C01 已完成，R2 与必要最终验证通过，唯一 P2 关闭，修复留在工作区。已有暂存变更原样保留 |
-| 下一责任链 | 等待 NOTICE-C01 授权；完成第四单元后统一完成 A7 终验。本轮停止，不自动提交或进入下一单元 |
-| 待退出结构 | Journal 自定产品通知/文案留待 NOTICE-C01；Kernel 内 Workscene 策略及旧 Profile 出口已验收退出。HOST-C01 的运行期取服务、身份单例与数据根旁路，以及 HOST-C02 的共享 `AssemblyContext`、统一 setup、名称切片和业务期等待构造依赖均已验收退出 |
+| 活跃工作包 | 无；NOTICE-C01 已完成开发、独立审查修复及必要终验，R1 两项关闭，四个纠偏单元均完成 |
+| 下一责任链 | 四单元 A7 整体总验收与相关退出门恢复另行开展；本轮完成单元 4 后停止，不自动启动 A7、不操作 Git |
+| 待退出结构 | 四单元登记的旧责任路径已分别独立验收退出：通知决定及共用发布文案归领域，Kernel Workscene 策略及旧 Profile 出口退役，运行期取服务/身份单例/数据根旁路、共享 AssemblyContext/统一 setup/名称切片/业务期等待构造依赖已清除；整体残留清零与统一退出门仍须 A7 验收 |
 | 已失效结论 | A1 的显式依赖/配置投影、A4 的产品策略隔离、A5 的相关通知与结果投影归属、A7 的残留清零与最终完成结论；相关退出门已撤勾。历史测试通过不等于能识别本次反证，纠偏后按影响重取证据并完成终验 |
 | 边界与授权 | 只做保持功能不变的架构纠偏，不重启全项目迁移，不改首版范围；实施及 Git 操作分别遵守用户授权 |
 
@@ -309,13 +309,28 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 - 等价证据：以基线实际构建函数输出取得指纹，验证进入指引、场景身份指引及 main/scene/子 Agent 静态前缀逐字一致；直接用例覆盖工具筛选后指引移除、无工作区工具限制、身份隔离、提示段顺序、缓存分界和既有窗口投影。
 - `pnpm build` 与 `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 均通过；中断后读取原构建完成结果，未重复构建。未执行完整 S7、全量测试或最终重型门禁，未启动独立审查或下一单元，未操作 Git 暂存区、历史或远程。
 
-**NOTICE-C01　产品通知与发布结果投影归位（对应 A5 的 Conversation/Schedule，待授权）。**
+**NOTICE-C01　产品通知与发布结果投影归位（对应 A5 的 Conversation/Schedule，已完成独立审查、修复与必要最终验证）。**
 
 - 结果：通知何时生成/更新/关闭、如何形成产品结果和操作建议，由对应领域拥有；产品决定不再内嵌于共享 Journal 或投递参与适配，其提交、身份、去重、重放和交付机制保留。共用的发布结果文案有唯一产品投影来源，不继续成为共享正确性层的业务目录。
 - 实施与消费者：闭合 Job 能力缺口、发布结果、离线错过摘要及其通知生命周期，Conversation 的 `publishConflicts/projectPublishResults`，以及 `publish-result-product-language` 的 CLI presenter、状态/历史与 Channel 消费者。将仍内嵌的产品决定/文案交给领域拥有的纯决策或有限事务参与合同；已在 Schedule 领域内的失败策略等直接复用，不复制、不重写。反查其他 Journal 及投递生产者适配中的同根产品通知决定，按同一责任处理；技术错误消息、协议合法性校验、领域权威适配及必要事务协调不因名称含产品对象就被删除。
 - 状态与回执闭合：将 `OwnerDeliveryParticipant` 内 Conversation/Schedule 的运行状态通知选择、文案和空取消回执交回各自产品责任者；覆盖两个 Journal 调用的 `prepare*Statuses`、`prepareConversationControlResponses`、重放时的 `assert*Statuses`，以及启动/权威换代后的生产装配。提交与重放共用同一有效决定，不遗留第二套状态选择；来源事实到投递义务的合法映射、稳定身份及既有 Delivery 应用继续复用，不为移出文案新建通知框架或重写投递参与者。
 - 原子性保护：通知与触发事实的原子提交、旧记录格式与摘要、通知身份、去重、水位、重放、回源目标、公开错误分类/文案/建议、Delivery 义务及不重复发送必须保持。需要基于事务快照裁决的逻辑仍在同一事务内调用领域决定，禁止改成提交后异步补写、双写或第二通知状态机。
 - 完成与交接：上述通知和结果的每条生成、提交、重放、查询、实时消费链均有唯一语义所有者；改变产品通知策略不要求修改通用事务机制。直接回归覆盖冲突/成功、能力缺口开闭、离线摘要、取消/失败/过期/不确定状态、空取消回执、重试/恢复去重及通知交付；保留非通道会话、系统任务、无来源及无需状态通知时不产生相应义务的行为，重放的伴随记录校验不回退。旧产品逻辑与转发残留退场；随后四单元统一进入 A7，不对大型 Assignment 文件作无关重构。
+
+#### NOTICE-C01 开发记录（2026-09-14）
+
+- 基线与边界：用户只授权第四单元开发；从干净 HEAD `87a21773` 开始，开发完成后停止，未开启协作审查、最终重型测试、A7 或 Git 写操作。
+- 责任归位：Conversation 的 `publish-results.ts` 拥有 Agent 修改结果的公共反馈（Schedule 与 CLI 复用），`notifications.ts` 拥有会话状态选择、失败说明与空取消回执；Schedule 的 `user-notices.ts` 拥有能力缺口开闭、发布结果、离线摘要与任务状态通知。通过既有 `conversation/application`、`scheduler/application` 窄面消费，不新增通知框架或公共业务目录。
+- 生产闭包：Job/通知 Journal 在原事务快照内调用领域决定，原样写入触发事实及通知；Conversation 实时/历史结果共用投影。Delivery participant 的 prepare/assert 共用领域选择，保留来源映射、生命周期 identity 和伴随记录校验；正常启动及权威换代仍由同一工厂创建。旧 owner-kernel 发布文案文件、出口和测试位置退役，测试迁入对应领域。
+- 直接证据（32 项，重复自检不重复计数）：Core 的 Conversation notifications/publish-results、Schedule user-notices 三文件 7/7，覆盖状态白名单、失败详情、空取消选择、能力缺口 open/update/dedupe/reopen/closure、离线摘要成员/身份及冲突/成功投影；owner-kernel delivery-participant 与 scheduler-user-notices 两文件 16/16，覆盖七类生产来源、prepare/assert 一致性、缺少/多余伴随记录拒绝、无通知分支、持久去重和实时/历史单水位；Executor 只选 job-assignment 的能力缺口及无效 staged delivery 两项、assignment-ledger 的 durable publish summary/detail 一项，3/3；CLI presenter 四项及 conversation-protocol-runtime 的批取消/空批次重放一项，5/5。均使用包内 Vitest 单 worker 定向执行，未执行全包测试。
+- 构建与夹具：17 个包构建完成；Core 首次声明生成命中 Node 堆上限，保留已完成包，以仅作用于本轮进程的 6 GiB 堆补建 Core 声明成功（约 123 秒），并串行补齐其余 14 包；没有重跑整仓或持久修改构建配置。Core/owner-kernel/CLI 的 `tsc --noEmit` 均通过，runtime package exports、18 个变更 TS 文件的 Biome 和 staged/worktree diff 检查通过。类型预检发现早于本单元的 S7 夹具 `invalid-reset-genesis` 错用 global read context，改用既有 `control()`，保留其损坏恢复断言；新增该单例直接验证 1/1，计入上述 32 项，不启动全量 S7。
+- 交接与失效边界：开发完成即停止，未开启审查或最终验证，不撤销 A5/A7 的待验收状态。复核范围是本次领域决定、两个 Journal、通知 Journal、participant 的提交/重放、正常启动与换代共用工厂，以及发布结果的实时/历史/CLI 消费；不重做未受影响的失败策略、Delivery 状态机或其他三个单元。领域决定、调用接线、持久映射或公开呈现变化时重取受影响直接证据。HEAD `87a21773` 未变；21 项变更由外部暂存，本执行者未改索引，最终记录仅在工作区。
+
+#### NOTICE-C01 验收记录（2026-09-14）
+
+R1 完整独立审查确认两项范围内基线遗漏：批量取消按事务准备通知却按单状态校验整组义务，导致多 channel queued 或 running+channel queued 取消在提交前失败；Job ControlAdmission 的排队取消/手动替换漏接能力缺口关闭，终态后通知仍 open。两个 Journal 现使用整个事务的状态事实执行原 exact-set 校验；Job 普通与控制事务在原快照中复用唯一领域关闭适配，同事务写入 state、gap-closed、notice 和控制结果，并在提交后发布已持久通知，未放宽校验、异步补写或扩展失败策略。
+
+R2 独立复核通过，两项关闭，其余未失效审查结论复用。修复后 owner-kernel 构建通过；11 项直接回归覆盖真实多运行控制、第一方混合、Job cancel/replace × origin/no-origin、原通知/空回执、重放恢复与缺失/多余义务拒绝。最终两个 Journal 的 state 生产/full+guard/损坏拒绝 2 项、调度通知重试 1 项、CLI 真实控制通知与共享日志重建 2 项及制品出口检查均通过，无最终阶段新增代码修改。最新代码指纹 `92be754c92ace301d0340bf350f3d1d6a6ee2028ee9933eff62dcab41e548357` 与独立通过输入一致，完整暂存区及 HEAD 未变；四单元完成后停止，A7/整体退出门不提前关闭。
 
 #### 共同保护边界与验收
 

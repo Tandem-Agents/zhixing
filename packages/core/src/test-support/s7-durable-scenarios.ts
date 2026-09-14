@@ -518,7 +518,7 @@ export async function executeWorkspaceBindingRootCase(
     });
     assert(status.reason === "commit-log-corrupt", "invalid reset genesis did not retain its diagnostic");
     await expectInstance(
-      () => fixture.catalog.list(globalReadContext("invalid-genesis-list")),
+      () => fixture.catalog.list(control("invalid-genesis-list")),
       WorkspaceBindingCatalogDegradedError,
       { kind: "corruption", caseKey: "invalid-reset-genesis" },
     );

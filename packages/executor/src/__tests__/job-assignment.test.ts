@@ -740,6 +740,61 @@ describe("user job durable protocol", {
     expect(internal?.body).toMatchObject({ reason: diagnostic });
   });
 
+  it.each([
+    { action: "cancel", withOrigin: true },
+    { action: "replace", withOrigin: true },
+    { action: "cancel", withOrigin: false },
+    { action: "replace", withOrigin: false },
+  ] as const)("closes capability gaps atomically through control $action (origin=$withOrigin)", async ({ action, withOrigin }) => {
+    const base = userDefinition();
+    if (base.definition.kind !== "user") throw new Error("expected user definition");
+    const definition: TaskDefinition = { ...base, definition: {
+      ...base.definition, ...(withOrigin ? { origin: { channelId: "feishu", to: "chat-1" } } : {}),
+    } };
+    const harness = await createUserHarness({ assign: false, schedulerNotices: true, definition });
+    const notices = harness.schedulerNotices!;
+    await harness.journal.noteCapabilityGap({ jobRunId: JOB_RUN_ID, capabilityRevision: 1, reason: "tool unavailable", context: hostContext("gap-open") });
+    await harness.journal.noteCapabilityGap({ jobRunId: JOB_RUN_ID, capabilityRevision: 2, reason: "still unavailable", context: hostContext("gap-update") });
+    const before = await notices.history(0);
+    expect(before.map((notice) => notice.state)).toEqual(["open", "updated"]);
+    const live: unknown[] = [];
+    notices.onNotice((notice) => { live.push(notice); });
+    const source = action === "cancel" ? trustedSource() : jobRunSource();
+    const envelope = createJobControlEnvelope({
+      requestId: `gap-${action}`, source, at: NOW,
+      body: action === "cancel"
+        ? { t: "job-cancel", taskId: TASK_ID, anchorEpoch: 3, jobRunId: JOB_RUN_ID }
+        : { t: "job-run", taskId: TASK_ID, anchorEpoch: 3 },
+    });
+    const result = await harness.journal.applyControl({ admission: new ControlAdmissionJournal(harness.log, harness.artifacts), envelope, source });
+    expect(result).toMatchObject({ kind: "applied", result: { status: "ok" } });
+    const history = await notices.history(0);
+    expect(history.map((notice) => notice.state)).toEqual(["open", "updated", "closed"]);
+    expect(history[2]).toMatchObject({ noticeId: before[0]!.noticeId, ref: before[0]!.ref, actions: [] });
+    expect(live).toEqual([history[2]]);
+    const commits = await harness.log.readAll();
+    const closedCommit = commits.find((commit) => commit.entries.some((entry) =>
+      (entry.body as { t?: string }).t === "capability-gap-closed"));
+    expect(closedCommit).toBeDefined();
+    expect(closedCommit!.entries).toEqual(expect.arrayContaining([
+      { stream: `job:${TASK_ID}`, body: expect.objectContaining({ t: "state", jobRunId: JOB_RUN_ID, state: action === "cancel" ? "cancelled" : "expired" }) },
+      { stream: `job:${TASK_ID}`, body: expect.objectContaining({ t: "capability-gap-closed", jobRunId: JOB_RUN_ID, noticeId: before[0]!.noticeId, round: 1 }) },
+      expect.objectContaining({ body: expect.objectContaining({ t: "scheduler-user-notice", state: "closed", noticeId: before[0]!.noticeId }) }),
+    ]));
+    const statusDeliveries = closedCommit!.entries.filter((entry) => entry.stream === "delivery" &&
+      (entry.body as { keyBody?: { kind?: string } }).keyBody?.kind === "job-status-delivery");
+    expect(statusDeliveries).toHaveLength(withOrigin ? 1 : 0);
+    const recovered = reopenUserJournal(harness);
+    expect((await recovered.occurrences()).find((run) => run.jobRunId === JOB_RUN_ID)?.state).toBe(action === "cancel" ? "cancelled" : "expired");
+    const replay = await recovered.applyControl({ admission: new ControlAdmissionJournal(harness.log, harness.artifacts), envelope, source });
+    expect(replay).toMatchObject({ kind: "replayed", result: result.result });
+    expect(await harness.log.readAll()).toHaveLength(commits.length);
+    const coldNotices = new SchedulerUserNoticeJournal({ log: harness.log, delivery: deliveryParticipant(harness.log) });
+    expect(await coldNotices.history(0)).toEqual(history);
+    await notices.publishNew();
+    expect(live).toEqual([history[2]]);
+  });
+
   it("issues data-plane tickets only for a manual job's original surface", async () => {
     const scheduled = await createUserHarness();
     await receive(scheduled);

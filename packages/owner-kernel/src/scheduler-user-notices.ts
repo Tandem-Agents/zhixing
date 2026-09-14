@@ -1,12 +1,12 @@
 import type {
   CommitEnvelope,
-  DeliveryTargetDto,
   LogicalRecord,
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import { protocolDigest } from "@zhixing/core/protocol";
+import { decideScheduleMissedSummary, type SchedulerNoticeDraft, type MissedSummaryGroup } from "@zhixing/core/scheduler/application";
 import type {
   JobDeliveryParticipant,
   SchedulerNoticeDeliveryInput,
@@ -25,31 +25,6 @@ export interface SchedulerNoticeFact {
   readonly missedMembers?: readonly string[];
 }
 
-export interface SchedulerNoticeDraft {
-  readonly noticeId: string;
-  readonly kind: SchedulerUserNotice["kind"];
-  readonly state: SchedulerUserNotice["state"];
-  readonly ref: SchedulerUserNotice["ref"];
-  readonly reason: string;
-  readonly actions: readonly string[];
-  readonly at: string;
-  readonly target?: DeliveryTargetDto;
-  readonly channelText?: string;
-  readonly missedMembers?: readonly string[];
-}
-
-export interface MissedSummaryMember {
-  readonly taskId: string;
-  readonly jobRunId: string;
-  readonly taskName: string;
-  readonly scheduledFor: string;
-}
-
-export interface MissedSummaryGroup {
-  readonly groupKey: string;
-  readonly members: readonly MissedSummaryMember[];
-  readonly target?: DeliveryTargetDto;
-}
 
 interface NoticeProjection {
   readonly noticeIds: Set<string>;
@@ -119,40 +94,10 @@ export class SchedulerUserNoticeJournal {
         emptyProjection(),
         noticeReducer,
         (state) => {
-          const members = [...group.members]
-            .sort((a, b) =>
-              a.scheduledFor.localeCompare(b.scheduledFor) ||
-              a.taskId.localeCompare(b.taskId) ||
-              a.jobRunId.localeCompare(b.jobRunId),
-            )
-            .filter((member) => !state.missedMembers.has(missedMemberKey(member)));
-          if (members.length === 0) return { kind: "return", value: undefined };
-          const memberKeys = members.map(missedMemberKey);
-          const noticeId = `scheduler-missed:${protocolDigest(
-            "SchedulerMissedSummary",
-            1,
-            { groupKey: group.groupKey, members: memberKeys },
-          )}`;
-          const text = missedSummaryText(members);
-          return {
-            kind: "append",
-            entries: this.prepareRecords({
-              noticeId,
-              kind: "missed-summary",
-              state: "prepared",
-              ref: {
-                kind: "missed-summary",
-                batchId: noticeId,
-                memberCount: members.length,
-              },
-              reason: text,
-              actions: ["查看任务状态", "按需重新运行"],
-              at,
-              ...(group.target ? { target: group.target, channelText: text } : {}),
-              missedMembers: memberKeys,
-            }),
-            value: undefined,
-          };
+          const draft = decideScheduleMissedSummary(group, state.missedMembers, at);
+          return draft
+            ? { kind: "append", entries: this.prepareRecords(draft), value: undefined }
+            : { kind: "return", value: undefined };
         },
         { stream: SCHEDULER_NOTICE_STREAM },
       ));
@@ -298,9 +243,6 @@ function projectNotice(
   };
 }
 
-function missedMemberKey(member: MissedSummaryMember): string {
-  return `${member.taskId}\u0000${member.jobRunId}`;
-}
 
 function schedulerNoticeLifecycleSources(
   draft: SchedulerNoticeDraft,
@@ -331,16 +273,4 @@ function schedulerNoticeLifecycleSources(
   if (draft.ref.kind === "publish-result") add("assignment", draft.ref.assignmentId);
   return Object.freeze([...sources.values()].sort((left, right) =>
     `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
-}
-
-function missedSummaryText(members: readonly MissedSummaryMember[]): string {
-  const names = [...new Set(members.map((member) => member.taskName))];
-  const label = names.length > 3
-    ? `${names.slice(0, 3).join("、")}等 ${names.length} 个任务`
-    : names.join("、");
-  return `设备离线期间，${label}共错过 ${members.length} 次执行；可查看状态并按需重新运行。`;
-}
-
-export function schedulerNoticeGroupKey(target: DeliveryTargetDto | undefined): string {
-  return target ? canonicalize(target) : "first-party";
 }

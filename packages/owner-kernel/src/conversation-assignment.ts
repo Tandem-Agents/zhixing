@@ -135,7 +135,7 @@ import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
 import { parseConversationId } from "@zhixing/core/conversation";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
-import { productizePublishAuthorityError } from "./publish-result-product-language.js";
+import { projectPublishConflicts, projectPublishResults, decideConversationControlResponse } from "@zhixing/core/conversation/application";
 import {
   DEFERRED_INTENT_PROJECTION_ID,
   type DeferredIntentConversationAuthorityState,
@@ -5185,16 +5185,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return records ? snapshot(records, "Publish conflicts") : undefined;
       }),
     ]);
-    if (!committed || !conflicts || conflicts.length === 0) return undefined;
-    return {
-      conversationId: this.#conversationId,
-      runId: committed.runId,
-      commitRevision: committed.commitRevision,
-      conflicts: conflicts.map((conflict) => ({
-        ...conflict,
-        error: productizePublishAuthorityError(conflict.error),
-      })),
-    };
+    if (!committed || !conflicts) return undefined;
+    return projectPublishConflicts({
+      conversationId: this.#conversationId, runId: committed.runId,
+      commitRevision: committed.commitRevision, conflicts,
+    });
   }
 
   async publishResults(assignmentId: string): Promise<PublishResultNotice[]> {
@@ -6519,16 +6514,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         try {
           this.#delivery?.assertConversationStatuses(
-            [
-              {
-                at: envelope.at,
-                conversationId: this.#conversationId,
-                runId: body.runId,
-                state: body.state,
-                statusRevision: body.statusRevision,
-                ingress: admitted.record.ingress,
-              },
-            ],
+            // Preparation and replay both compare the complete transaction's
+            // status obligations, including batches with non-notifying states.
+            conversationStatusDeliveryInputs(
+              this.#conversationId, state, envelope.entries, envelope.at,
+            ),
             envelope,
           );
         } catch (error) {
@@ -9744,24 +9734,8 @@ function conversationControlResponseDeliveryInputs(
   canonicalRequestId: string,
   at: string,
 ): ConversationControlResponseInput[] {
-  const body = envelope.body;
-  if (body.t !== "cancel-batch" || body.response === undefined) return [];
-  if (
-    plan.result.status !== "ok" ||
-    plan.result.body.t !== "cancel-batch" ||
-    plan.result.body.runs.length > 0
-  ) {
-    return [];
-  }
-  return [
-    {
-      at,
-      conversationId,
-      requestId: canonicalRequestId,
-      replyTarget: body.response.replyTarget,
-      response: "empty-cancel-batch",
-    },
-  ];
+  const response = decideConversationControlResponse(envelope.body, plan.result);
+  return response ? [{ at, conversationId, requestId: canonicalRequestId, ...response }] : [];
 }
 
 // 权威记录注册表随公开 conversation 模块再导出:执行点行为矩阵按它做
@@ -11160,42 +11134,6 @@ function finalFrame(record: FinalOutboxRecord, publishConflicts = 0): FinalFrame
   };
 }
 
-function projectPublishResults(input: {
-  readonly conversationId: string;
-  readonly runId: string;
-  readonly commitRevision: number;
-  readonly assignmentId: string;
-  readonly decision: Extract<PublishRecord, { t: "publish-decision" }>;
-  readonly batch: MutationBatch;
-}): PublishResultNotice[] {
-  const results: PublishResultNotice[] = [];
-  for (const item of input.decision.outcomes) {
-    const record = input.batch.records[item.seq - 1];
-    if (!record || record.domain !== "global") continue;
-    if (item.outcome.t === "granted" && item.outcome.appliedResult === undefined) {
-      continue;
-    }
-    const publicOutcome = item.outcome.t === "conflicted"
-      ? {
-          t: "conflicted" as const,
-          error: productizePublishAuthorityError(item.outcome.error),
-        }
-      : item.outcome;
-    results.push({
-      conversationId: input.conversationId,
-      runId: input.runId,
-      commitRevision: input.commitRevision,
-      assignmentId: input.assignmentId,
-      seq: item.seq,
-      mutation: snapshot(record.mutation, "Publish result mutation") as GlobalStagedMutation,
-      decision: snapshot(
-        publicOutcome,
-        "Publish result decision",
-      ) as PublishResultNotice["decision"],
-    });
-  }
-  return results;
-}
 
 async function applyFinalRecord(
   projection: FinalOutboxProjection,
