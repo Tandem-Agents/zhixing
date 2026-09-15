@@ -43,8 +43,8 @@ const MAX_PROMPT_LENGTH = 1000;
 const WEB_FETCH_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `web_fetch` to read content from a URL the user provided or that you already know — this tool fetches a URL, it does not search the web",
   "- For large pages, pass `prompt` so a light LLM extracts only the requested information; omit `prompt` when raw Markdown is needed",
-  "- Do not invent URLs — only fetch what the user gave you or what appeared in prior tool results",
-  "- If the user asks a question without a URL, ask for the URL or suggest a search engine instead of guessing",
+  "- 不编造网址；使用用户提供、可靠已知或已读取材料中出现的地址",
+  "- 缺少网址时，先用其他可用能力查找来源；确实无法定位时再向用户索取必要信息，不编造网址，也不把 web_fetch 当搜索工具",
 ];
 
 export interface WebFetchToolOptions {

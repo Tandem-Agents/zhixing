@@ -38,6 +38,7 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly securityPipeline: SecurityPipeline;
   readonly securityApproval: KernelSecurityApprovalPort;
   readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  readonly delegationInstructions?: string;
   readonly workspace: string | null;
   readonly workspaceSource?: string;
   readonly globalConfigPath?: string;
@@ -91,6 +92,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
       securityPipeline: this.options.securityPipeline,
       securityApproval: this.options.securityApproval,
       agentIdentity: this.options.agentIdentity,
+      delegationInstructions: this.options.delegationInstructions,
       workspace: this.options.workspace,
       workspaceSource: this.options.workspaceSource,
       globalConfigPath: this.options.globalConfigPath,

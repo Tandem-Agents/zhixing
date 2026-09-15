@@ -12,7 +12,7 @@ import {
   type WorksceneAssignmentToolApplication,
   type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
-import { mainProfile } from "@zhixing/orchestrator/profile";
+import { zhixingProfile } from "./zhixing-agent-profile.js";
 import { powerProfile } from "./workscene-agent-guidance.js";
 import {
   type AgentRuntimeLifecycle,
@@ -92,7 +92,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
     capabilityCatalog() {
       const mcp = input.mcpTools.snapshot();
       const tools = new Set<string>([
-        ...mainProfile().enabledTools,
+        ...zhixingProfile().enabledTools,
         ...powerProfile({
           id: "capability-catalog",
           name: "capability-catalog",
@@ -191,7 +191,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     return createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),
       primaryRole: "main",
-      profile: mainProfile({ agentIdentity: input.agentIdentity, hasWorkspace: workspace !== null }),
+      profile: zhixingProfile({ agentIdentity: input.agentIdentity, hasWorkspace: workspace !== null }),
       lifecycle: [input.createGuidanceLifecycle()],
       ...product,
     });
@@ -224,7 +224,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   };
   const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");
   const job = (instruction: JobExecutionInstruction) => {
-    const baseProfile = mainProfile({ agentIdentity: input.agentIdentity });
+    const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity });
     const available = runtimeProduct("main");
     const selection = selectJobRuntimeTools({
       instruction,

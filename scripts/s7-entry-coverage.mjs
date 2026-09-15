@@ -4092,13 +4092,13 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("securityExecution: input.securityExecution.bind(") ||
     !product.includes('Object.freeze({ kind: "scene", sceneId })') ||
     !product.includes("lifecycle: [input.createGuidanceLifecycle(options.scene.sceneId)]") ||
-    !product.includes("profile: mainProfile(") ||
+    !product.includes("profile: zhixingProfile(") ||
     !product.includes("profile: powerProfile(") ||
     !product.includes('const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");') ||
     !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
     !product.includes("selectJobRuntimeTools({") ||
     !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
-    !product.includes("...mainProfile().enabledTools") ||
+    !product.includes("...zhixingProfile().enabledTools") ||
     !product.includes("...powerProfile({") ||
     !product.includes("...Object.values(WORKSCENE_PRODUCT_TOOL_IDS)") ||
     !product.includes("mcpServers: mcp.serverIds") ||

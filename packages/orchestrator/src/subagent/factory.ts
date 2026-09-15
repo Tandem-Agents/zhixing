@@ -118,6 +118,8 @@ export interface RunChildAgentOptions {
   securityPipeline: SecurityPipeline;
   /** 共享父级有限安全批准端口，子执行不取得产品领域应用。 */
   agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  /** 由产品显式投影的共同指令，不接收父 profile 或全部个人约定。 */
+  delegationInstructions?: string;
   securityApproval: KernelSecurityApprovalPort;
   /** 工作区路径(透传 buildSystemPrompt;null 表示无工作区) */
   workspace: string | null;
@@ -278,7 +280,10 @@ async function runChildAgentInner(
       lifecycleObserver: opts.parentBroker.lifecycleObserver,
     });
 
-    const profile = subAgentProfile({ subAgentId });
+    const profile = subAgentProfile({
+      subAgentId,
+      delegationInstructions: opts.delegationInstructions,
+    });
 
     // 子工具集：按 profile.enabledTools 过滤 parent tools —— profile 是工具
     // 装配的唯一权威源（与主 agent 装配同机制）。声明在 enabledTools 但 parent

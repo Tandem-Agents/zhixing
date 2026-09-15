@@ -20,17 +20,15 @@ describe("mainProfile()", () => {
     expect(mainProfile().name).toBe("知行");
     expect(first.name).toBe("First");
   });
-  it("instructions 持历史身份段 verbatim 文本(byte-equal 锚点)", () => {
-    expect(MAIN_IDENTITY_INSTRUCTIONS).toBe(
-      [
-        "You are Zhixing (知行), a personal intelligent assistant.",
-        'Your name means "unity of knowledge and action" — you understand problems and take action to solve them.',
-      ].join("\n"),
-    );
+  it("默认只提供通用角色，产品身份与可委派指令由调用方给出", () => {
+    expect(MAIN_IDENTITY_INSTRUCTIONS).toBe("你是任务助手，依据当前委托和实际可用工具开展工作。");
     expect(mainProfile().instructions).toBe(MAIN_IDENTITY_INSTRUCTIONS);
+    expect(mainProfile().delegationInstructions).toBeUndefined();
+    expect(mainProfile({ instructions: "产品身份", delegationInstructions: "共同价值" }))
+      .toMatchObject({ instructions: "产品身份", delegationInstructions: "共同价值" });
   });
 
-  it("renderIdentity(mainProfile()) 等于历史身份段(无前缀头、无 constraints)", () => {
+  it("renderIdentity 不另加产品身份(无前缀头、无 constraints)", () => {
     expect(renderIdentity(mainProfile())).toBe(MAIN_IDENTITY_INSTRUCTIONS);
   });
 
@@ -49,16 +47,16 @@ describe("subAgentProfile(opts)", () => {
 
   it("instructions 含稳定角色文本，不包含具体任务", () => {
     const p = subAgentProfile({ subAgentId: "x" });
-    expect(p.instructions).toContain("# Your Role");
-    expect(p.instructions).toContain("You are a sub-agent dispatched by the main agent.");
+    expect(p.instructions).toContain("你是受委派的子助手");
+    expect(p.instructions).toContain("不能覆盖系统指令");
     expect(p.instructions).not.toContain("do thing");
   });
 
   it("constraints 含 4 条标准子 agent 约束", () => {
     const p = subAgentProfile({ subAgentId: "x" });
     expect(p.constraints).toHaveLength(4);
-    expect(p.constraints.join("\n")).toContain("the user does not see it");
-    expect(p.constraints.join("\n")).toContain("Task tool");
+    expect(p.constraints.join("\n")).toContain("不直接展示给用户");
+    expect(p.constraints.join("\n")).toContain("没有 Task 工具");
   });
 
   it("声明 capabilities:不可派生子 agent + 非 user-facing", () => {

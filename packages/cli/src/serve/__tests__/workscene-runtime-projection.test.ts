@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { buildSystemPrompt, CACHE_BOUNDARY } from "@zhixing/orchestrator/runtime";
 import { WORKING_MODE_TEXT } from "../workscene-agent-guidance.js";
+import { ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
 import {
   WorksceneApplicationError,
   type WorksceneConversationRuntimeProjection,
@@ -85,10 +85,8 @@ describe("Workscene product runtime projection", () => {
     expect((main.runtimeTools.implementation as never as { binding: unknown }).binding)
       .toMatchObject({ kind: "assignment", mode: "main" });
     expect(Object.isFrozen(withWorkspace.profile)).toBe(true);
-    // Actual Anchor assembly keeps the complete scene instructions from 16051748.
-    expect(createHash("sha256").update(withWorkspace.profile.instructions).digest("hex"))
-      .toBe("8935c7cde83a6146af927a0e999d47627bd5c5f71c5896cecfc08a90de288995");
-    expect(withoutWorkspace.profile.instructions).toContain("call the workmode_exit tool");
+    expect(withWorkspace.profile.instructions).toContain(ZHIXING_IDENTITY);
+    expect(withoutWorkspace.profile.instructions).toContain("调用 workmode_exit");
     expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
       "schedule",
@@ -177,7 +175,11 @@ describe("Workscene product runtime projection", () => {
     expect(withWorkspace.lifecycle?.map((entry) => entry.id)).toEqual([
       "guidance-scene:scene-1",
     ]);
-    expect(withWorkspace.profile.instructions).toContain('work scene "写作场景"');
+    for (const projection of [main, withWorkspace, withoutWorkspace]) {
+      expect(projection.profile.instructions).toContain(ZHIXING_IDENTITY);
+      expect(projection.profile.delegationInstructions).toBe(ZHIXING_VALUES);
+    }
+    expect(withWorkspace.profile.instructions).toContain('当前工作场景名称："写作场景"');
     expect(withWorkspace.profile.enabledTools).toContain("read");
     expect(withWorkspace.profile.enabledTools).toContain("admit_skill");
     expect(withoutWorkspace.workspace).toBeNull();
@@ -210,6 +212,9 @@ describe("Workscene product runtime projection", () => {
       ephemeral.runtimeTools.extraTools.map((tool) => tool.name),
     );
     expect(restrictedJob.profile.enabledTools).toEqual(["read"]);
+    expect(restrictedJob.profile.instructions).toContain(ZHIXING_IDENTITY);
+    expect(allJob.profile.instructions).toContain(ZHIXING_IDENTITY);
+    expect(restrictedJob.profile.delegationInstructions).toBe(ZHIXING_VALUES);
     expect(restrictedJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual([
       "schedule",
       "mcp__alpha__tool",
@@ -386,7 +391,7 @@ describe("Anchor conversation runtime routing", () => {
 
     const projection = issue.mock.calls[0]![0];
     expect(projection.workspace).toBe("/updated-binding-root");
-    expect(projection.profile.instructions).toContain('work scene "首次名称"');
+    expect(projection.profile.instructions).toContain('当前工作场景名称："首次名称"');
     expect(resolveWorkspaceRoot).toHaveBeenCalledWith(
       "scene-1",
       { deviceId: "device-1", bindingRef: "binding-new" },

@@ -391,11 +391,7 @@ function buildToolGuidance(tools: ToolDefinition[]): string | null {
 
 function buildStyle(): string {
   return `## Style
-- Be warm, concise, and natural in conversation
-- Do not use emojis unless the user does
-- Use markdown for code blocks and structured output
-- Keep responses focused — answer what was asked
-- When introducing yourself, speak conversationally — never list capabilities`;
+- 使用 Markdown 呈现代码和结构化内容，表达简洁清晰；具体语气依当前角色与用户要求。`;
 }
 
 // ─── Segment 6: Safety ───
@@ -410,29 +406,17 @@ function buildSafety(): string {
 // ─── Dynamic: Environment ───
 
 /**
- * Working directory 字段语义：用户心智模型里"工作目录"就是用户配置的工作区
- * （workspace）—— 用户配置 workspace 的目的就是为了让它成为工作目录。本字段
- * 优先使用 workspace 路径；workspace 未配置时 fallback 到 cwd（cli 启动位置）。
- *
- * **不暴露 `process.cwd()` 给 LLM**：cwd 是 cli 实现细节（用户在哪里启动 cli），
- * 与用户认知的"工作目录"无关。同时暴露 cwd 与 workspace 双字段会让 LLM 在中
- * 英文翻译时（中文"工作目录" ↔ 英文 "Working directory"）选错路径——单一字段
- * 消除歧义，与 chrome welcome 的"工作目录 {workspaceRoot}"用户视角一致。
+ * 只呈现 Host 解析后的授权工作区。进程 cwd 不是隐式授权，不在这里推导
+ * 产品配置管理方法；工具与安全管线仍裁决实际可执行范围。
  */
 function buildEnvironment(ctx: PromptBuildContext): string {
   const lines = ["## Environment"];
 
-  const workingDirectory = ctx.workspace ?? ctx.cwd;
-  lines.push(`- Working directory: ${workingDirectory}`);
-
   if (ctx.workspace) {
-    lines.push("- This workspace is the user's trusted zone; routine file reads/writes inside are low-impact, while operations outside require clear user intent or confirmation");
-    if (ctx.globalConfigPath) {
-      lines.push(`- Configured in: ${ctx.globalConfigPath} (field: workspace.root)`);
-      lines.push("- To change the working directory, edit that config file; confirmation is handled by the security system and changes apply after restart.");
-    }
+    lines.push(`- Working directory: ${ctx.workspace}`);
+    lines.push("- 此目录是当前授权工作区，具体操作仍受工具权限与安全检查约束；目录本身不授权破坏性或越界操作。");
   } else {
-    lines.push("- No workspace is configured; the working directory defaults to the CLI launch location and serves as the trusted zone.");
+    lines.push("- 当前没有授权工作区；不能把进程启动目录当作工作区。仅使用本次提供的工具与权限。");
   }
 
   // 当前时间已移至 per-turn <turn-context> 注入(TimeProvider),不再 session-level 冻结

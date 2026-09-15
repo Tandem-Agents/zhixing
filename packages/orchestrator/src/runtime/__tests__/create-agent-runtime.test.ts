@@ -1049,6 +1049,24 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
 // ─── 契约 7: profile 含 Task 时装配 —— Task 可被 LLM 派调,完成端到端委派 ───
 
 describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动）", () => {
+  it("专用单发调用不继承主身份、工具或个人约定", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "摘要" }, { text: "判断" }]);
+    const runtime = await createAgentRuntime({
+      profile: mainProfile({ instructions: "主助手身份", delegationInstructions: "共同价值" }),
+      lifecycle: [{ id: "private-guidance", onWindowOpen: (ctx) => {
+        ctx.contributeMessagePrefix(buildGuidanceMessagePair("个人约定"));
+      } }],
+    });
+    await runtime.callText("仅生成摘要");
+    await runtime.callTextWithUsage("仅作专业判断", "main");
+    for (const request of providerRef.current.calls) {
+      expect(request.systemPrompt).toBeUndefined();
+      expect(request.tools).toEqual([]);
+      expect(JSON.stringify(request.messages)).not.toMatch(/主助手身份|个人约定|共同价值/);
+    }
+    await runtime.dispose();
+  });
+
   it("meters main and Task child provider attempts through one run sequence", async () => {
     providerRef.current = new MockLLMProvider([
       {
@@ -1105,7 +1123,16 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
       { text: "synthesized response based on sub-agent output" },
     ]);
 
-    const runtime = await createAgentRuntime({ profile: mainProfile() });
+    const profile = mainProfile({
+      instructions: "主助手身份，不可传播的主职责",
+      delegationInstructions: "共同价值",
+    });
+    const runtime = await createAgentRuntime({
+      profile,
+      lifecycle: [{ id: "private-guidance", onWindowOpen: (ctx) => {
+        ctx.contributeMessagePrefix(buildGuidanceMessagePair("仅父会话可见的约定"));
+      } }],
+    });
     const result = await runKernel(runtime, {
       modelInput: {
         messages: [userMessage("research X please")],
@@ -1121,6 +1148,13 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     expect(result.terminal.reason).toBe("completed");
     // 序列消费断言:主 LLM 第 1 次(派 Task)+ 子 LLM 第 1 次(产 final)+ 主 LLM 第 2 次(综合)= 3 次
     expect(providerRef.current!.callCount).toBe(3);
+    const [parent, child, resumed] = providerRef.current!.calls;
+    expect(parent!.systemPrompt).toContain(profile.instructions);
+    expect(resumed!.systemPrompt).toBe(parent!.systemPrompt);
+    expect(child!.systemPrompt).toContain("共同价值");
+    expect(child!.systemPrompt).not.toContain("不可传播的主职责");
+    expect(JSON.stringify(parent!.messages)).toContain("仅父会话可见的约定");
+    expect(JSON.stringify(child!.messages)).not.toContain("仅父会话可见的约定");
     // 主回收的最后 assistant 文本来自第 3 次 chat 的综合输出
     expect(result.artifacts.newMessages.length).toBeGreaterThan(0);
     const lastAssistant = result.artifacts.newMessages.findLast((m) => m.role === "assistant");
@@ -2647,7 +2681,10 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     const projection = windowPromptPort({
       project: async () => windowPromptProjection(7, "ZX_STABLE_WINDOW_PROMPT"),
     });
-    const runtime = await createAgentRuntime({ windowPrompt: projection });
+    const runtime = await createAgentRuntime({
+      profile: mainProfile({ instructions: "稳定产品身份", delegationInstructions: "共同价值" }),
+      windowPrompt: projection,
+    });
 
     await runKernel(runtime, {
       modelInput: {
@@ -2676,6 +2713,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       observation: {},
     });
     expect(projection.calls).toHaveLength(1);
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain("稳定产品身份");
     expect(providerRef.current.calls[1]!.systemPrompt).toBe(
       providerRef.current.calls[0]!.systemPrompt,
     );

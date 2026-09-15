@@ -86,6 +86,7 @@ export interface TaskToolEnv {
   /** 与父 runtime 共用的有限安全批准端口。 */
   securityApproval: KernelSecurityApprovalPort;
   readonly agentIdentity?: import("@zhixing/core/identity").AgentIdentity;
+  readonly delegationInstructions?: string;
   /** 工作区路径(null 表示无工作区) */
   workspace: string | null;
   /** 工作区来源标识(runtime / global-config / cwd-fallback / none) */
@@ -572,7 +573,8 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         llmRoles: env.llmRoles,
         securityPipeline: env.securityPipeline,
         securityApproval: env.securityApproval,
-      agentIdentity: env.agentIdentity,
+        agentIdentity: env.agentIdentity,
+        delegationInstructions: env.delegationInstructions,
         workspace: env.workspace,
         workspaceSource: env.workspaceSource,
         globalConfigPath: env.globalConfigPath,

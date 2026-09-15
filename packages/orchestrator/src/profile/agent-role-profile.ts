@@ -20,6 +20,8 @@ export interface AgentRoleProfile {
    * 渲染层按需在文本前后添加 markdown 头 / Constraints 段。
    */
   instructions: string;
+  /** 产品明确允许传给子任务的共同指令；不隐式继承父身份、约定或历史。 */
+  delegationInstructions?: string;
   /** 硬约束(逐条注入到身份段后的 Constraints 列表)。空数组表示无额外约束 */
   constraints: readonly string[];
   /** 语气 / 风格指引(可选,默认中性) */

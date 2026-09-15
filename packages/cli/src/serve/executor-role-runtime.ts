@@ -11,8 +11,10 @@ import {
   type KernelRuntimeEnvironmentFactory,
 } from "@zhixing/orchestrator/runtime";
 import type { RuntimeSecurityExecutionInfrastructure } from "./permission-storage-infrastructure.js";
-import { mainProfile } from "@zhixing/orchestrator/profile";
+import { zhixingProfile } from "./zhixing-agent-profile.js";
 import { powerProfile } from "./workscene-agent-guidance.js";
+import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
+import { readGuidanceFile } from "./read-guidance-file.js";
 import { parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
@@ -1122,7 +1124,12 @@ export class ExecutorRuntimeSubstrate {
       ),
       profile:
         workscene?.profile ??
-        mainProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null }),
+        zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null }),
+      lifecycle: [createZhixingGuidanceLifecycle({
+        zhixingHome: this.options.zhixingHome,
+        readGuidanceFile,
+        ...(workscene ? { resolveWorkspaceRoot: async () => runtimeEnvironment.workspace.path } : {}),
+      })],
       extraTools: [...mcp.tools],
       executionMcpServers: mcp.serverIds,
       confirmationLifecycleObserver: this.options.interactions,
@@ -1142,7 +1149,7 @@ export class ExecutorRuntimeSubstrate {
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});
-    const baseProfile = mainProfile({ agentIdentity: runtimeEnvironment.agentIdentity });
+    const baseProfile = zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity });
     const selection = selectJobRuntimeTools({
       instruction,
       baseProfile,
@@ -1186,7 +1193,7 @@ export class ExecutorRuntimeSubstrate {
     return {
       tools: [
         ...new Set([
-          ...mainProfile().enabledTools,
+          ...zhixingProfile().enabledTools,
           ...mcp.tools.map((tool) => tool.name),
         ]),
       ].sort(),

@@ -36,6 +36,7 @@ describe("ChildAgentNodeExecutorV1", () => {
       ...createExecutorOptions(),
       authorizeToolExecution,
       agentIdentity,
+      delegationInstructions: "共同价值，不包含主助手个人上下文",
       runChildAgent,
     });
 
@@ -66,6 +67,7 @@ describe("ChildAgentNodeExecutorV1", () => {
       },
     });
     expect(captured?.agentIdentity).toBe(agentIdentity);
+    expect(captured?.delegationInstructions).toBe("共同价值，不包含主助手个人上下文");
     expect(captured?.parentBus).toBe(context.bus);
     expect(captured?.parentLineage).toBe(context.lineage);
     expect(captured?.parentSignal).toBe(context.abortSignal);
