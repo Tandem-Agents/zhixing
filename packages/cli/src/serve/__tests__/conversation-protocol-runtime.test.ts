@@ -26,6 +26,9 @@ import {
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import { projectSessionTurn } from "@zhixing/rpc";
+import { WorksceneContinuationApplication, type WorksceneApplication, type WorksceneTaskReference } from "@zhixing/core/workscene/application";
+import type { PostTurnControlOutcome } from "@zhixing/core/types";
+import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -310,6 +313,135 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("workscene continuation survives projection eviction and preserves one admission/result chain", async () => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    const source = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    expect(source.control?.intent.handoff?.goal).toBe("交付报告");
+    f.protocol.releaseConversation("main-handoff");
+    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.control).toEqual(source.control);
+    await vi.waitFor(async () => {
+      await f.protocol.recoverConversation("main-handoff");
+      await f.protocol.recoverConversation("ws:reports:primary");
+      expect(f.executions).toEqual(["main-handoff", "ws:reports:primary", "main-handoff"]);
+    }, { timeout: TEST_DURABLE_IO_TIMEOUT_MS, interval: 100 });
+    await f.protocol.recover();
+    await f.application.recover("main-handoff");
+    await f.application.recover("ws:reports:primary");
+    expect(f.executions).toHaveLength(3);
+    const returns = (await f.protocol.worksceneContinuationSources("main-handoff")).filter((item) => item.origin?.worksceneContinuation?.kind === "result");
+    expect(returns).toHaveLength(1);
+    expect(returns[0]?.state).toBe("committed");
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("workscene continuation obeys an empty durable batch cancel after source commit", async () => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    const before = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    expect(before.current).toBe(true);
+    const cancelled = await f.protocol.cancel({ conversationId: "main-handoff", requestId: "cancel-handoff", principal: { surfacePrincipal: "rpc:owner", deviceId: f.authority.deviceId, connectionId: "test" } });
+    expect(cancelled.dispositions).toEqual([]);
+    f.protocol.releaseConversation("main-handoff");
+    const after = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    expect(after.current).toBe(false);
+    await f.application.recover("main-handoff");
+    expect(await f.manager.findDurableRunByIngress("ws:reports:primary", `handoff:${protocolDigest("WorksceneContinuation", 1, { conversationId: before.conversationId, runId: before.runId })}`, "interactive")).toBeUndefined();
+    expect(f.executions).toEqual(["main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["现在进度如何？", "补充要求：报告用中文"])("workscene continuation preserves entrusted work for ordinary input: %s", async (text) => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    await f.application.recover("main-handoff");
+    const child = (await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]!;
+    expect(child.state).toBe("queued");
+    await f.protocol.admit({ conversationId: "main-handoff", input: text, invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "new-user-intent" } }, surfacePrincipal: "rpc:owner" });
+    await f.application.recover("main-handoff");
+    f.protocol.releaseConversation("main-handoff");
+    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("queued");
+    expect(await f.protocol.isWorksceneContinuationCurrent({ conversationId: child.conversationId, runId: child.runId })).toBe(true);
+    expect(f.executions).toEqual(["main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["conversation-clear", "conversation-delete"] as const)("workscene continuation stops descendants after %s", async (kind) => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    await f.application.recover("main-handoff");
+    await f.protocol.writeSession({ conversationId: "main-handoff", requestId: `stop:${kind}`, mutation: kind === "conversation-clear" ? { kind: "window-op", op: "clear" } : { kind }, principal: f.protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "lifecycle-handoff" }), conversationExists: async () => true });
+    await f.application.recover("main-handoff");
+    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.current).toBe(false);
+    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect(f.executions).toEqual(["main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("workscene continuation keeps target-side supplemental input without cancelling its delegation", async () => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    await f.application.recover("main-handoff");
+    const target = "ws:reports:primary";
+    await f.protocol.admit({ conversationId: target, input: "报告需要包含来源", invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "target-new-intent" } }, surfacePrincipal: "rpc:owner" });
+    await f.application.recover(target);
+    expect((await f.protocol.worksceneContinuationSources(target))[0]?.state).toBe("queued");
+    expect(f.executions).toEqual(["main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+  it("workscene continuation precisely stops a committed source and replays the stop without reviving descendants", async () => {
+    const f = await worksceneContinuationHarness();
+    await f.start();
+    await f.application.recover("main-handoff");
+    const source = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    const request = { conversationId: source.conversationId, runId: source.runId, requestId: "stop-original", principal: f.protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "stop-source" }) };
+    await f.protocol.cancel(request);
+    f.protocol.releaseConversation(source.conversationId);
+    await f.protocol.cancel(request);
+    expect((await f.protocol.worksceneContinuationSources(source.conversationId))[0]).toMatchObject({ state: "committed", current: false });
+    await f.application.recover(source.conversationId);
+    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect(f.executions).toEqual(["main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+  it("workscene continuation commits a targeted stop before a new handoff in the same turn and replays both", async () => {
+    const f = await worksceneContinuationHarness((tasks) => {
+      expect(tasks).toHaveLength(1);
+      const { conversationId, runId } = tasks[0]!;
+      return { intent: { kind: "enter", sceneId: "replacement", handoff: { goal: "整理新报告", constraints: [], completed: [], remaining: ["整理新资料"] } }, stops: [{ conversationId, runId }] };
+    });
+    await f.start();
+    await f.application.recover("main-handoff");
+    const managed = await f.manager.getOrCreate("main-handoff");
+    expectSettled(await projectSessionTurn({ manager: f.manager, managed, text: "停止原报告，改为整理新报告", turnId: "replace-original", runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "replace-original" } }, notify: () => {} }));
+    await f.application.recover("main-handoff");
+    f.protocol.releaseConversation("main-handoff");
+    await f.application.recover("main-handoff");
+    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
+    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect(await f.protocol.worksceneContinuationSources("ws:replacement:primary")).toHaveLength(1);
+    expect((await f.protocol.worksceneContinuationSources("ws:replacement:primary"))[0]?.state).toBe("queued");
+    expect(f.executions).toEqual(["main-handoff", "main-handoff"]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+  it("workscene continuation consumes the issued root stop after returning and redelegating, including durable reload", async () => {
+    let rootRunId: string;
+    const f = await worksceneContinuationHarness((tasks, index) => {
+      if (index === 3) return { intent: { kind: "enter", sceneId: "second", handoff: { goal: "交付报告", constraints: ["不发布"], completed: ["第一阶段完成"], remaining: ["第二阶段核实"] } } };
+      if (index === 4) {
+        expect(tasks).toEqual([{ conversationId: "main-handoff", runId: rootRunId, goal: "交付报告" }]);
+        const target = { conversationId: "main-handoff", runId: rootRunId };
+        return { intent: { kind: "stop_task", ...target }, stops: [target] };
+      }
+      return undefined;
+    });
+    await f.start();
+    rootRunId = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!.runId;
+    await vi.waitFor(async () => {
+      for (const id of ["main-handoff", "ws:reports:primary", "ws:second:primary"]) await f.protocol.recoverConversation(id);
+      expect(f.executions).toEqual(["main-handoff", "ws:reports:primary", "main-handoff", "ws:second:primary"]);
+      expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.current).toBe(false);
+    }, { timeout: TEST_DURABLE_IO_TIMEOUT_MS, interval: 100 });
+    for (const id of ["main-handoff", "ws:reports:primary", "ws:second:primary"]) f.protocol.releaseConversation(id);
+    await f.application.stop({ conversationId: "ws:second:primary", target: { conversationId: "main-handoff", runId: rootRunId }, requestId: "repeat-root-stop" });
+    await f.protocol.recover();
+    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
+    expect(await f.application.tasks("ws:second:primary")).toEqual([]);
+    expect(f.executions).toHaveLength(4);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("requires its private manager assembly handle to complete exactly once", () => {
     const assembly = createConversationManagerAssemblyHandle();
     const manager = {} as ConversationManager;
@@ -3325,6 +3457,52 @@ function mutationPublisher(label: string): ConversationMutationPublisher {
     decideGlobalBatchAtPrefix: vi.fn(() => []),
     apply: vi.fn(async () => undefined),
   };
+}
+
+async function worksceneContinuationHarness(nextControl?: (tasks: readonly WorksceneTaskReference[], executionIndex: number) => PostTurnControlOutcome | undefined) {
+  const home = await createTempDir("workscene-continuation");
+  const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+  const executions: string[] = [];
+  const control = { intent: { kind: "enter" as const, sceneId: "reports", handoff: { goal: "交付报告", constraints: ["不发布"], completed: [], remaining: ["生成报告"] } } };
+  const factory: RuntimeFactory = {
+    create: async (conversationId) => ({
+      ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+        executions.push(conversationId);
+        const meter = options?.modelCallResourceMeter;
+        if (!meter) throw new Error("missing governed model call");
+        const reserved = await meter.reserve({ callIndex: 1, tokenUpperBound: 8 });
+        await meter.consume({ usageId: reserved.usageId, tokens: 2 });
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: conversationId.startsWith("ws:") ? "报告已生成，未发布" : "原任务回复" }] };
+        const proposal = executions.length === 1 ? control : nextControl?.(options?.turnContext?.worksceneTasks ?? [], executions.length);
+        return { agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } }, runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], ...(proposal ? { postTurnControl: proposal } : {}) }, newMessages: [assistant], durationMs: 1, ...(proposal ? { pendingPostTurnControl: proposal } : {}) };
+      },
+      abort: () => false, async dispose() {},
+    }),
+  };
+  let manager!: ConversationManager;
+  let application!: WorksceneContinuationApplication;
+  const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(), recoverAuxiliary: (id) => application.recover(id), projectLifecycle: async () => {} });
+  const committed = new Set<string>();
+  manager = new ConversationManager(factory, undefined, {
+    durableTurnExecutor: protocol, onTurnCommitted: () => {}, loadHistory: async () => undefined, initTranscript: async () => {}, appendRun: async () => { throw new Error("durable handoff must not use legacy append"); },
+    appendCommittedRun: async (_id, record) => { const appended = !committed.has(record.runId); committed.add(record.runId); return { runIndex: record.runIndex, shardId: "owner-log", appended }; },
+  });
+  const workscene: WorksceneApplication = {
+    query: vi.fn(), projectConversationRuntime: vi.fn(),
+    execute: async (command) => {
+      if (command.kind !== "enter") throw new Error("unexpected workscene command");
+      const conversationId = `ws:${command.sceneId}:primary`;
+      await protocol.ensureSession(conversationId);
+      await manager.getOrCreate(conversationId);
+      return { kind: "entered", conversationId, scene: { sceneId: command.sceneId, name: command.sceneId, revision: 1 } };
+    },
+  };
+  application = new WorksceneContinuationApplication(createWorksceneContinuationPort({ manager, protocol, workscene, advancement: { queryActiveState: async () => null, cancelSession: vi.fn() } }));
+  return { authority, protocol, manager, application, executions, start: async () => {
+    const managed = await getOrCreateActiveConversation(authority, manager, "main-handoff");
+    expectSettled(await projectSessionTurn({ manager, managed, text: "报告整理", turnId: "handoff-start", runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "handoff-start" } }, notify: () => {} }));
+  } };
 }
 
 function secretKey(ref: SecretRef): string {

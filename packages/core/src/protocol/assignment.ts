@@ -2912,11 +2912,19 @@ function assertTurnOrigin(value: unknown): void {
   assertObject(value, "Turn origin");
   assertExactKeys(
     value,
-    ["channel", "surface", "target", "triggeredBy"],
+    ["channel", "surface", "target", "triggeredBy", "worksceneContinuation"],
     "Turn origin",
     true,
   );
   assertIdentifier(value.channel, "Turn origin channel");
+  if (value.worksceneContinuation !== undefined) {
+    assertObject(value.worksceneContinuation, "Workscene continuation");
+    assertExactKeys(value.worksceneContinuation, ["kind", "conversationId", "runId", "returnConversationId"], "Workscene continuation", true);
+    if (!["task", "resume", "result"].includes(value.worksceneContinuation.kind as string)) throw new TypeError("Invalid continuation kind");
+    assertIdentifier(value.worksceneContinuation.conversationId, "Continuation conversation");
+    assertIdentifier(value.worksceneContinuation.runId, "Continuation run");
+    if (value.worksceneContinuation.returnConversationId !== undefined) assertIdentifier(value.worksceneContinuation.returnConversationId, "Continuation return conversation");
+  }
   if (value.target !== undefined) assertDeliveryTarget(value.target);
   if (value.triggeredBy !== undefined) {
     assertIdentifier(value.triggeredBy, "Turn origin triggeredBy");

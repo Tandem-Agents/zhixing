@@ -61,11 +61,12 @@ import {
 } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
 import { renderReviewAttribution } from "./attribution.js";
+import { hasPendingWorksceneTask } from "../workscene/continuation.js";
 
 export type AdvancementTurnReviewResult =
   | {
       readonly kind: "skipped";
-      readonly reason: "no-active-session" | "not-active" | "already-reviewed";
+      readonly reason: "no-active-session" | "not-active" | "already-reviewed" | "handoff-pending";
     }
   | {
       readonly kind: "review-deferred";
@@ -483,6 +484,7 @@ export class AdvancementReviewAttemptApplicationService
   async #reviewAcceptedRun(
     input: AdvancementReviewAttemptInput,
   ): Promise<AdvancementTurnReviewResult> {
+    if (hasPendingWorksceneTask(input.runRecord)) return { kind: "skipped", reason: "handoff-pending" };
     let session = await this.#state.loadActiveSession(input.conversationId);
     if (!session) return { kind: "skipped", reason: "no-active-session" };
     if (session.status !== "active") {

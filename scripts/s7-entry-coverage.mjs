@@ -99,7 +99,7 @@ const coverageGroups = [
   ["task-list", ["rpc:session.taskList", "rpc:session.taskListUpdate", "slash:task:repl", "slash:tasklist:repl", "tool:extra:task-list"]],
   ["advancement", ["rpc:session.advancementCancel", "rpc:session.advancementConfirm", "rpc:session.advancementDetail", "rpc:session.advancementRevise", "slash:advancement:repl"]],
   ["workscene-manage", ["rpc:workscene.create", "rpc:workscene.delete", "rpc:workscene.rename", "rpc:workscene.setWorkdir", "tool:extra:workscene:change-approve", "tool:extra:workscene:rename-current", "tool:extra:workscene:set-workdir-current", "tool:extra:workscene:clear-workdir-current"]],
-  ["workscene-switch", ["rpc:workscene.enter", "rpc:workscene.exit", "slash:work:repl", "slash:exit:repl", "tool:extra:workscene:enter", "tool:extra:workscene:exit"]],
+  ["workscene-switch", ["rpc:workscene.enter", "rpc:workscene.exit", "rpc:workscene.tasks", "rpc:workscene.stopTask", "slash:work:repl", "slash:exit:repl", "tool:extra:workscene:enter", "tool:extra:workscene:exit", "tool:extra:workscene:task-stop"]],
   ["schedule-manage", ["rpc:schedule.create", "rpc:schedule.update", "rpc:schedule.delete", "tool:extra:schedule:manage"]],
   ["schedule-run", ["rpc:schedule.run", "rpc:schedule.abortRun", "tool:extra:schedule:run"]],
   ["skill-manage", ["rpc:skill.archive", "rpc:skill.setState", "slash:skills:repl", "tool:builtin:save_skill", "tool:builtin:admit_skill"]],
@@ -1098,7 +1098,7 @@ async function collectProductionConstants() {
         });
     return new Set(projection.runtimeTools.extraTools.map((tool) => tool.name));
   };
-  const nonAuthorityNames = new Set(["workscene_list"]);
+  const nonAuthorityNames = new Set(["workscene_list", "workscene_task_list"]);
   for (const kind of ["main", "workscene"]) {
     const actual = [...assembledNames(kind)]
       .filter((name) => !nonAuthorityNames.has(name))

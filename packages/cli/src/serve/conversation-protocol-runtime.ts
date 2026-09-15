@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
 import { parseConversationId } from "@zhixing/core/conversation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
@@ -708,6 +709,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     await this.ensureSession(input.conversationId);
     const admission = await this.#applyInputAdmission(input);
+    // New user input also invalidates unconsumed continuations from older runs.
+    this.#markRecovery(input.conversationId);
     let state: Awaited<ReturnType<ConversationRunJournal["runState"]>> = "queued";
     if (admission.replayed) {
       try {
@@ -950,7 +953,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         ...local,
       });
     }
-    if (dispositions.length > 0) this.#markRecovery(input.conversationId);
+    this.#markRecovery(input.conversationId);
     this.#kickDelivery();
     return { dispositions };
   }
@@ -1211,6 +1214,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         attempt,
         resourceLease,
         ingress: executionIngress,
+        controlContext: worksceneTaskContext(await WorksceneContinuationApplication.tasks((id) => this.worksceneContinuationSources(id), input.conversationId)),
         contentAssets: [...appliedAdmission.attachments],
         windowInput: {
           t: "full",
@@ -1379,6 +1383,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       try {
         const generator = executionRuntime.run(input.messages, {
           ...input.options,
+          turnContext: { ...input.options?.turnContext, worksceneTasks: readWorksceneTaskContext(dispatch.envelope.work.controlContext) },
           onProtocolEvent: async (event, meta) => {
             await stream.append(
               { kind: "agent-event", event },
@@ -2476,6 +2481,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       },
     });
     journal.onStatus(async (notice) => {
+      this.#markRecovery(conversationId);
       await this.#onStatus?.(notice);
       for (const listener of this.#statusListeners) await listener(notice);
     });
@@ -2707,6 +2713,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     managed: ManagedSession,
     abortSignal?: AbortSignal,
   ): Promise<void> {
+    const continuation = pending.ingress.turnOrigin?.worksceneContinuation;
+    if (continuation && !await this.isWorksceneContinuationCurrent({ conversationId, runId: pending.runId })) {
+      await this.cancelAdmitted(conversationId, pending.runId);
+      return;
+    }
     const options = runOptionsForPending(pending, abortSignal, true);
     const invocation = pending.invocation;
     if (invocation.kind === "perspectives") {
@@ -2856,7 +2867,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   ): Promise<number> {
     const state = await journal.authorityState();
     if (state.pendingLifecycleProjections === 0) {
-      if (state.deleted) this.#retireConversation(conversationId);
+      if (state.deleted) {
+        await this.#recoverAuxiliary(conversationId);
+        this.#retireConversation(conversationId);
+      }
       return 0;
     }
     if (!this.#projectLifecycle) {
@@ -2869,6 +2883,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await this.#projectLifecycle!(input);
     });
     const after = await journal.authorityState();
+    await this.#recoverAuxiliary(conversationId);
     if (after.deleted && after.pendingLifecycleProjections === 0) {
       this.#retireConversation(conversationId);
     }
@@ -3012,6 +3027,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#assignmentArtifactAuthority.remove(assignmentId);
     this.#assignmentIngress.delete(assignmentId);
     this.#interactions.releaseAssignment(assignmentId);
+  }
+
+  worksceneContinuationSources(conversationId: string) {
+    return this.#journal(conversationId).worksceneContinuationSources();
+  }
+
+  async isWorksceneContinuationCurrent(source: { conversationId: string; runId: string }): Promise<boolean> {
+    return isWorksceneContinuationCurrent((id) => this.worksceneContinuationSources(id), source);
   }
 
   #requiredManager(): ConversationManager {
@@ -3349,7 +3372,9 @@ function replayCommittedRun(
       ...(runRecord.source ? { source: runRecord.source } : {}),
       ...(runRecord.advancement ? { advancement: runRecord.advancement } : {}),
       ...(runRecord.perspectives ? { perspectives: runRecord.perspectives } : {}),
+      ...(runRecord.postTurnControl ? { postTurnControl: runRecord.postTurnControl } : {}),
     },
+    ...(runRecord.postTurnControl ? { pendingPostTurnControl: runRecord.postTurnControl } : {}),
     ...(windowCompact ? { windowCompact } : {}),
     newMessages: runRecord.messages.slice(1),
     durationMs: 0,
@@ -3484,6 +3509,9 @@ function discoverRecoveryConversations(
       result.add(conversationId);
       continue;
     }
+    // A committed run may carry an unconsumed product continuation even when
+    // its final frame was acknowledged. Inspect that projection once at startup.
+    if (facts.commits.size > 0) result.add(conversationId);
     if (facts.deleted) continue;
     if ([...facts.runStates.values()].some((state) => openStates.has(state))) {
       result.add(conversationId);

@@ -176,6 +176,8 @@ export class ShardedTranscriptStore {
         source: input.source,
         advancement: input.advancement,
         perspectives: input.perspectives,
+        postTurnControl: input.postTurnControl,
+        worksceneContinuation: input.worksceneContinuation,
       };
       await this.appendLineInLock(conversationId, state, record);
       state.nextRunIndex += 1;

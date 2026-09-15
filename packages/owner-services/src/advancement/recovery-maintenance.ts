@@ -17,6 +17,8 @@ import {
   type ScheduleProxyMessageResult,
 } from "./proxy-scheduler.js";
 
+import { hasPendingWorksceneTask } from "@zhixing/core/workscene/application";
+
 const RECOVERY_SCAN_PAGE_SIZE = 50;
 
 export interface AdvancementRecoveryMaintenanceOptions {
@@ -610,6 +612,7 @@ function isRecoverableAcceptedRun(
   session: AdvancementSession,
   record: RunRecord,
 ): boolean {
+  if (hasPendingWorksceneTask(record)) return false;
   if (record.source === "advancement") {
     return (
       record.advancement?.sessionId === session.id &&

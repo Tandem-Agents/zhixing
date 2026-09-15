@@ -5,6 +5,8 @@
  * handles, not references to services or a general-purpose setup registry.
  */
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
+import { WorksceneContinuationApplication } from "@zhixing/core/workscene/application";
+import { createWorksceneContinuationPort } from "./workscene-continuation-adapter.js";
 import {
   createExecutorLocalWorkspaceHost,
   type LocalWorkspaceAssemblyIdentity,
@@ -880,6 +882,8 @@ export async function createConversationServices(
       results: reviewResults,
     });
   auxiliaryRecoveryAssembly.complete(async (conversationId) => {
+    await worksceneContinuation.recover(conversationId);
+    if (!await protocol.sessionExists(conversationId)) return;
     const result = await advancementRecovery.recoverConversation(conversationId);
     if (
       result.status === "failed" ||
@@ -923,6 +927,14 @@ export async function createConversationServices(
     worksceneApplicationPorts.runtime,
     worksceneAdvancementApplicationPort,
   );
+  const worksceneContinuation = new WorksceneContinuationApplication(
+    createWorksceneContinuationPort({
+      manager,
+      protocol,
+      workscene: worksceneApplication,
+      advancement: advancementReviews,
+    }),
+  );
   inputLifecycleContributions.acquire(
     "execution.abortAllAndWait",
     () => manager.abortAllAndWait(
@@ -942,6 +954,7 @@ export async function createConversationServices(
     advancementConversationLifecycle,
     worksceneDirectory,
     worksceneApplication,
+    worksceneContinuation,
     conversationExecutorDispatch: executorBoundary.application,
     conversationExecutorTopologyDirectory: topologyDirectory,
     conversationAssignmentStaging: executorBoundary.staging,

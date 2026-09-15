@@ -1082,6 +1082,32 @@
         }
       },
       "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.stopTask",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.tasks",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
     }
   ],
   "session": {

@@ -907,8 +907,8 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
    * 命令)。宿主侧场景对话取建是原子的(workscene.enter),接入面只切指针——
    * cli 侧无事务、无 undo 栈;失败即不切,当前对话原样。
    *
-   * 触发句语义:LLM 在 main 对话里产生 enter 意图时,场景新对话的首轮输入
-   * 由用户自己给出——切换横幅后输入区即场景对话,用户的下一句话就是首轮。
+   * 含任务交接的控制由产品应用耐久消费；CLI 留在原对话接收成果。
+   * 无交接内容的控制仅切换视图，不自动启动旧任务。
    */
   const applyPostTurnControl = async (
     control: PostTurnControlOutcome,
@@ -916,6 +916,11 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
     const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
     const sep = "─".repeat(sepWidth);
     const intent = control.intent;
+
+    if (intent.handoff?.remaining.length) {
+      cliWriter.line(chalk.dim("\n  已提交任务交接；后续结果将在原对话中返回。\n"));
+      return;
+    }
 
     if (control.conflict) {
       cliWriter.line(
@@ -1394,6 +1399,12 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
     // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
     const bottomInfo = new BottomInfoModel();
     inputController = new InputController({
+      onEmptyEscape: () => {
+        if (state.running) return;
+        void controller.abortWorksceneTask().then((stopped) => {
+          if (stopped) cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+        }).catch((error) => cliWriter.line(chalk.yellow(formatErrorMessage(error))));
+      },
       broker: typeaheadBroker,
       dispatcher: typeaheadDispatcher,
       getRuntime,
@@ -1546,6 +1557,15 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
       const result = await inputController.waitOnce();
 
       if (result.kind === "cancelled") {
+        if (result.cause === "ctrl-c") {
+          try {
+            if (await controller.abortWorksceneTask()) {
+              cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+              continue;
+            }
+          }
+          catch (error) { cliWriter.line(chalk.yellow(formatErrorMessage(error))); continue; }
+        }
         if (result.cause === "ctrl-c" || result.cause === "ctrl-d") break;
         continue;
       }
@@ -1732,10 +1752,31 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
       }
     } else {
       // ── Legacy 路径 ──
+      let stopping = false;
+      const stopIdleTask = async (exitIfIdle: boolean) => {
+        if (stopping) return;
+        stopping = true;
+        try {
+          if (await controller.abortWorksceneTask()) cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+          else if (exitIfIdle) rl.close();
+        } catch (error) {
+          cliWriter.line(chalk.yellow(formatErrorMessage(error)));
+        } finally { stopping = false; }
+      };
+      const stopOnSigint = () => { void stopIdleTask(true); };
+      const stopOnEscape = (_text: string, key: { name?: string }) => {
+        if (key?.name === "escape" && !rl.line) void stopIdleTask(false);
+      };
+      // Keep readline's editing ownership while an automatic task runs without a local turn.
+      rl.on("SIGINT", stopOnSigint);
+      process.stdin.on("keypress", stopOnEscape);
       try {
         input = await rl.question(chalk.green("❯ "));
       } catch {
         break;
+      } finally {
+        rl.off("SIGINT", stopOnSigint);
+        process.stdin.off("keypress", stopOnEscape);
       }
 
       const trimmed = input.trim();

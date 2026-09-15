@@ -16,6 +16,8 @@
 
 import {
   WORKSCENE_MANAGEMENT_CREATE_COMMAND,
+  WORKSCENE_TASKS_QUERY,
+  WORKSCENE_TASK_STOP_COMMAND,
   WORKSCENE_MANAGEMENT_DELETE_COMMAND,
   WORKSCENE_MANAGEMENT_LIST_QUERY,
   WORKSCENE_MANAGEMENT_RENAME_COMMAND,
@@ -148,6 +150,25 @@ export function buildWorksceneListMethod(): MethodEntry {
       };
     },
   };
+}
+
+export function buildWorksceneTasksMethod(): MethodEntry {
+  return { name: "workscene.tasks", requiresAuth: true, async handler(rawParams, ctx) {
+    const params = requireOnlyFields(rawParams, "workscene.tasks", ["conversationId"]);
+    return requireWorksceneApplication(ctx.server).query(WORKSCENE_TASKS_QUERY, { conversationId: requestId(params.conversationId, "workscene.tasks") });
+  } };
+}
+
+export function buildWorksceneTaskStopMethod(): MethodEntry {
+  return { name: "workscene.stopTask", requiresAuth: true, async handler(rawParams, ctx) {
+    const params = requireOnlyFields(rawParams, "workscene.stopTask", ["conversationId", "targetConversationId", "runId", "requestId"]);
+    const result = await requireWorksceneApplication(ctx.server).command(WORKSCENE_TASK_STOP_COMMAND, {
+      conversationId: requestId(params.conversationId, "workscene.stopTask"),
+      target: { conversationId: requestId(params.targetConversationId, "workscene.stopTask"), runId: requestId(params.runId, "workscene.stopTask") },
+      requestId: requestId(params.requestId, "workscene.stopTask"),
+    });
+    return result.result;
+  } };
 }
 
 export function buildWorksceneCreateMethod(): MethodEntry {

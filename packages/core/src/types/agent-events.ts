@@ -93,16 +93,25 @@ export interface InterruptFiredEvent {
 
 /**
  * turn 边界控制意图 —— 由需要在本轮结束后改变运行上下文的工具 emit。
- * accumulator last-wins 收集，run() 带出到 RunResult.pendingPostTurnControl。
- * 仅意图，不含执行；消费方必须在 turn 边界以单一事务执行。
+ * 场景变更取最后一次，停止委托独立去重；run() 带出 pendingPostTurnControl。
+ * 仅提议，不执行；产品应用在成功提交后消费，接入面只呈现或切换视图。
  */
+export interface WorksceneTaskHandoff {
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly completed: readonly string[];
+  readonly remaining: readonly string[];
+}
+
 export type PostTurnControlIntent =
-  | { kind: "enter"; sceneId: string }
-  | { kind: "exit" }
+  | { kind: "stop_task"; conversationId: string; runId: string; handoff?: never }
+  | { kind: "enter"; sceneId: string; handoff?: WorksceneTaskHandoff }
+  | { kind: "exit"; handoff?: WorksceneTaskHandoff }
   | {
       kind: "set_workdir";
       sceneId: string;
       workspace: { deviceId: string; bindingRef: string } | null;
+      handoff?: WorksceneTaskHandoff;
     };
 
 export interface PostTurnControlConflict {
@@ -111,6 +120,8 @@ export interface PostTurnControlConflict {
 
 export interface PostTurnControlOutcome {
   readonly intent: PostTurnControlIntent;
+  /** 停止请求独立保留，不被同轮后续导航/交接的 last-wins 覆盖。 */
+  readonly stops?: readonly { conversationId: string; runId: string }[];
   readonly conflict?: PostTurnControlConflict;
 }
 
@@ -515,10 +526,8 @@ export type AgentEventMap = {
   // ─── 工作模式 ───
 
   /**
-   * turn 边界控制意图请求 —— 工具在用户确认且发起接入面声明可消费后 emit。
-   * accumulator last-wins 收集后由 run() 带出 RunResult.pendingPostTurnControl，
-   * 发起接入面在 turn 边界单一事务消费。命令触发路径不经此事件（直接调
-   * 对应控制事务）。
+   * 工具经各自权限边界后提交场景控制提议；收集器保留最后场景变更和独立停止引用。
+   * 产品应用消费成功提交的提议；用户命令可直接调用相同产品用例。
    */
   "post_turn_control:requested": PostTurnControlIntent;
 

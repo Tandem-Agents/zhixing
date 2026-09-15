@@ -124,6 +124,8 @@ export interface PendingTextSubmission {
 // ─── 选项 ───
 
 export interface InputControllerOptions {
+  /** 空输入 Esc 的任务中断；不与候选关闭、草稿清空争抢按键。 */
+  readonly onEmptyEscape?: () => void;
   readonly broker: ITypeaheadBroker;
   readonly dispatcher: CommandDispatcher;
   /** 构造 RuntimeContext —— 每次按键调一次，取最新 sessionBusy / cwd 等 */
@@ -846,6 +848,10 @@ export class InputController implements InputRegion {
       this.lastSessionState.suggestions.length > 0;
 
     if (key.name === "escape") {
+      if (!this.buffer.draft && !hasActiveSuggestions && this.options.onEmptyEscape) {
+        this.options.onEmptyEscape();
+        return;
+      }
       if (
         this.lastSessionState &&
         this.lastSessionState.trigger &&

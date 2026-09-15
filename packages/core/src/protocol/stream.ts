@@ -1344,10 +1344,19 @@ function validateTurnOrigin(value: NonNullable<StreamFrameMeta["turnOrigin"]>): 
       ...(value.surface === undefined ? [] : ["surface"]),
       ...(value.target === undefined ? [] : ["target"]),
       ...(value.triggeredBy === undefined ? [] : ["triggeredBy"]),
+      ...(value.worksceneContinuation === undefined ? [] : ["worksceneContinuation"]),
     ],
     "Stream turn origin",
   );
   assertProtocolIdentifier(value.channel, "Stream turn origin channel");
+  if (value.worksceneContinuation !== undefined) {
+    assertPlainObject(value.worksceneContinuation, "Stream continuation");
+    assertExactKeys(value.worksceneContinuation, ["kind", "conversationId", "runId", ...(value.worksceneContinuation.returnConversationId === undefined ? [] : ["returnConversationId"])], "Stream continuation");
+    if (!["task", "resume", "result"].includes(value.worksceneContinuation.kind as string)) throw new TypeError("Invalid stream continuation kind");
+    assertProtocolIdentifier(value.worksceneContinuation.conversationId, "Stream continuation conversation");
+    assertProtocolIdentifier(value.worksceneContinuation.runId, "Stream continuation run");
+    if (value.worksceneContinuation.returnConversationId !== undefined) assertProtocolIdentifier(value.worksceneContinuation.returnConversationId, "Stream continuation return conversation");
+  }
   if (value.triggeredBy !== undefined) {
     assertProtocolIdentifier(value.triggeredBy, "Stream turn origin trigger");
   }

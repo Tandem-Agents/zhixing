@@ -36,6 +36,13 @@ import type { BoundaryCrossing } from "../security/types.js";
  * REPL / 一次性 CLI 命令下 turnOrigin 为 undefined（本地 TTY 走 TerminalRenderer，不需要回程地址）。
  */
 export interface TurnOrigin {
+  /** 产品应用提供的交接来源；不由模型或接入参数指定，也不授予权限。 */
+  worksceneContinuation?: {
+    readonly kind: "task" | "resume" | "result";
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly returnConversationId?: string;
+  };
   /** 入口通道标识符。已知值：feishu / dingtalk / wechat / rpc / cli / scheduler；新通道可自由扩展。 */
   channel: string;
   /** 投递目标——若可达则确认请求路由到这里（通道用户回复的原会话）。 */
@@ -74,6 +81,8 @@ export function generateTurnId(): string {
 }
 
 export interface TurnContext {
+  /** 产品应用投影的当前可停止委托，仅供本次运行定位，不产生授权。 */
+  worksceneTasks?: readonly import("../workscene/continuation.js").WorksceneTaskReference[];
   /** 全局唯一 turn 标识（用于观测 / Outbox Turn Slot 关联）。 */
   turnId?: string;
   /** 当前 turn 绑定的用户 target */

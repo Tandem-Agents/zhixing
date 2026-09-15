@@ -2,8 +2,8 @@
  * turn 边界控制意图 L1 收集订阅。
  *
  * 结构形态与 segment-marker-accumulator 同款（订阅 → getter → run 结束带出 →
- * 显式 dispose），语义为 last-wins 单一意图。纯管道：仅收集意图，不执行
- * 任何控制动作。消费方在 turn 边界以单一事务处理 Kernel artifacts 中的提议。
+ * 显式 dispose）。场景变更取最后一次，停止委托按引用独立去重，避免被新交接覆盖。
+ * 只收集提议，不执行动作；产品应用在成功提交后消费。
  */
 
 import type {
@@ -44,10 +44,16 @@ export function subscribePostTurnControlAccumulator(
 ): PostTurnControlAccumulator {
   let last: PostTurnControlIntent | undefined;
   const kindsSeen = new Set<PostTurnControlIntent["kind"]>();
+  const stops = new Map<string, { conversationId: string; runId: string }>();
 
   const unsubscribe = eventBus.on("post_turn_control:requested", (intent) => {
     onEvent?.(intent);
     // last-wins：同 turn 多次控制请求以最后一次用户确认的意图为准。
+    if (intent.kind === "stop_task") {
+      stops.set(`${intent.conversationId}/${intent.runId}`, { conversationId: intent.conversationId, runId: intent.runId });
+      if (!last) last = intent;
+      return;
+    }
     last = intent;
     kindsSeen.add(intent.kind);
   });
@@ -58,6 +64,7 @@ export function subscribePostTurnControlAccumulator(
       if (!last) return undefined;
       return {
         intent: last,
+        ...(stops.size ? { stops: [...stops.values()] } : {}),
         ...(kindsSeen.size > 1
           ? { conflict: { kindsSeen: [...kindsSeen] } }
           : {}),

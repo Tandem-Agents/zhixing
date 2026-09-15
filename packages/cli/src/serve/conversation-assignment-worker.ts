@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { readWorksceneTaskContext } from "@zhixing/core/workscene/application";
 import { type ArtifactStore } from "@zhixing/core/authority";
 import { type Message } from "@zhixing/core";
 import { type RunResult } from "@zhixing/core/loop";
@@ -319,6 +320,7 @@ export class ConversationAssignmentWorker {
         turnIndex: envelope.work.baseRevision,
         source: envelope.work.ingress.kind === "channel" ? "channel" : "interactive",
         turnContext: {
+          worksceneTasks: readWorksceneTaskContext(envelope.work.controlContext),
           turnId: envelope.work.ingress.ingressId,
           ...(envelope.work.ingress.kind === "channel"
             ? { emissionTarget: envelope.work.ingress.replyTarget }

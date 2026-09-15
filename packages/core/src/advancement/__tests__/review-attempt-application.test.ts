@@ -24,6 +24,20 @@ const NOW = "2026-08-31T00:00:00.000Z";
 const RUN_REF = { shardId: "000001", runIndex: 0 } as const;
 
 describe("AdvancementReviewAttemptApplicationService", () => {
+  it("does not review or settle an intermediate handoff; the returned run remains independently reviewed", async () => {
+    const state = new ReviewAttemptState(session({ outstandingProxyMessageId: "proxy-1" }));
+    const roots = new ReviewRoots();
+    const reviewer = vi.fn(async () => reviewedOutcome());
+    const application = createApplication(state, roots, { mechanism: mechanism(state, { reviewer }) });
+    const base = request();
+    const advancement = { sessionId: "adv-1", proxyMessageId: "proxy-1" };
+    await expect(application.reviewAcceptedRun({ ...base, runRecord: { ...base.runRecord, source: "advancement", advancement, postTurnControl: { intent: { kind: "enter", sceneId: "reports", handoff: { goal: "交付", constraints: [], completed: [], remaining: ["核对结果"] } } } } })).resolves.toMatchObject({ kind: "skipped", reason: "handoff-pending" });
+    expect(state.settledProxyIds).toEqual([]);
+    expect(reviewer).not.toHaveBeenCalled();
+    await application.reviewAcceptedRun({ ...base, runRecord: { ...base.runRecord, source: "advancement", advancement } });
+    expect(state.settledProxyIds).toEqual(["proxy-1"]);
+    expect(reviewer).toHaveBeenCalledOnce();
+  });
   it("owns the finite active-state projection for awaiting and active sessions", async () => {
     const { confirmedRubric: _confirmedRubric, ...awaitingBase } = session();
     const pendingRubricDraft = {

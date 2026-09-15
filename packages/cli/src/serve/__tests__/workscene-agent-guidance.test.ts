@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { subAgentProfile } from "@zhixing/orchestrator/profile";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY as MAIN_IDENTITY_INSTRUCTIONS, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
@@ -92,10 +91,9 @@ function stubTool(name: string): ToolDefinition {
 
 describe("Workscene model guidance", () => {
   const entry = () => createWorkmodeEnterTool({ get: async () => null });
-  const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
-  it("保持无关工具指引不变，同一产品身份在不同场景使用同源前缀", () => {
-    expect(hash(WORKING_MODE_TEXT)).toBe("73413a99baffdba62f0eaf804a5b5741c4bd2d678d84c900eb7ed6ee16991ff9");
+  it("任务交接指引保持中文与边界清晰，同一产品身份在不同场景使用同源前缀", () => {
+    expect(WORKING_MODE_TEXT).toContain("单纯切换时省略 handoff，不启动旧任务");
     for (const profile of [mainProfile(), powerProfile(makeScene())]) {
       const input = { profile, tools: [stubTool("Task"), entry()], cwd: "/unused" };
       const prefix = buildSystemPrompt(input).split(CACHE_BOUNDARY)[0]!;
@@ -112,7 +110,7 @@ describe("Workscene model guidance", () => {
   it("keeps scene choice, confirmation, workspace and turn-boundary decisions", () => {
     const prompt = buildSystemPrompt({ tools: [entry()], cwd: "/test/project" });
     expect(prompt).toContain(WORKING_MODE_TEXT);
-    for (const content of ["workscene_list", "set_workdir", "clear_workdir", "optional device workspace", "ask the user before switching", "with confirmation", "finish the current turn normally", "Never request or transmit a remote filesystem path"]) {
+    for (const content of ["workscene_list", "已授权工作区", "归属不明时先确认", "请求确认后先结束本轮", "不请求或传递远端文件路径", "不复制无关历史、私人约定或秘密"]) {
       expect(prompt).toContain(content);
     }
     expect(prompt).not.toContain("workscene_memory_query");

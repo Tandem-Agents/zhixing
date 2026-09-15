@@ -18,11 +18,13 @@
  */
 
 import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
+import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
 import { generateTurnId, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
 import type {
   ConversationStatusNotice,
   FinalFrame,
+  StreamFrame,
 } from "@zhixing/core/contracts";
 import type {
   SessionAdvancementCancelResult,
@@ -292,6 +294,14 @@ export class ConversationController {
   private readonly finalRevisionByConversation = new Map<string, number>();
   private readonly pendingStatuses = new Map<string, ConversationStatusNotice>();
   private readonly finalLookups = new Map<string, Promise<void>>();
+  private readonly continuationFinalLookups = new Map<string, Promise<void>>();
+  private readonly observedContinuations = new Map<string, {
+    conversationId: string;
+    sequences: Map<string, number>;
+    text: string;
+    streamIncomplete?: boolean;
+    settled: boolean;
+  }>();
   private readonly pendingAbortByTurn = new Map<
     string,
     {
@@ -306,6 +316,8 @@ export class ConversationController {
     (turn: { readonly conversationId: string; readonly turnId: string }) => void
   >();
   private readonly unsubscribes: Array<() => void>;
+  private disposed = false;
+  private readonly focusedTaskByConversation = new Map<string, string>();
 
   constructor(
     private readonly opts: ConversationControllerOptions,
@@ -313,6 +325,7 @@ export class ConversationController {
   ) {
     this.active = initial;
     this.unsubscribes = [
+      opts.conversation.onAssignmentStream((frame) => this.consumeContinuationFrame(frame)),
       // 主通道:当前对话的产出流喂渲染(旁观帧同样可见——多端同看一个 turn)
       opts.conversation.onDelta((p) => {
         if (p.conversationId !== this.active.conversationId) return;
@@ -720,6 +733,10 @@ export class ConversationController {
     }
     this.markLocalTurnAccepted({ conversationId, turnId });
     this.resolvePendingAbort(turnId);
+    if (intent?.intent.handoff?.remaining.length) {
+      const runId = this.durableRunByTurn.get(turnId);
+      if (runId) this.focusedTaskByConversation.set(conversationId, runId);
+    }
     this.releaseDurableRun(turnId);
     waiter({ result, postTurnControl: intent });
   }
@@ -772,7 +789,17 @@ export class ConversationController {
     }
     const watch = this.durableRuns.get(frame.runId);
     if (!watch) {
-      if (this.localTurnsByConversation.has(frame.conversationId)) {
+      const observed = this.observedContinuations.get(frame.runId);
+      if (this.active.conversationId === frame.conversationId && !observed?.settled) {
+        if (!this.continuationFinalLookups.has(frame.runId)) {
+          const lookup = this.presentContinuationFinal(frame).finally(() => {
+            if (this.continuationFinalLookups.get(frame.runId) === lookup) this.continuationFinalLookups.delete(frame.runId);
+          });
+          this.continuationFinalLookups.set(frame.runId, lookup);
+          void lookup.catch(() => {});
+        }
+      }
+      if (this.active.conversationId === frame.conversationId || this.localTurnsByConversation.has(frame.conversationId)) {
         rememberBounded(this.pendingFinals, frame.runId, frame);
       }
       return;
@@ -785,6 +812,16 @@ export class ConversationController {
     const runId = notice.ref.runId;
     const watch = this.durableRuns.get(runId);
     if (!watch) {
+      const observed = this.observedContinuations.get(runId);
+      const result = terminalResultForStatus(notice);
+      if (observed && !observed.settled && result) {
+        observed.settled = true;
+        if (observed.conversationId === this.active.conversationId) {
+          this.opts.onObservedTurnDelta?.({ conversationId: observed.conversationId, turnId: runId });
+          this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n续接未完成：${result.error.message}\n` : "\n任务续接已停止。\n" });
+          this.opts.onObservedTurnComplete?.({ conversationId: observed.conversationId, turnId: runId });
+        }
+      }
       if (this.localTurnsByConversation.has(notice.ref.conversationId)) {
         const prior = this.pendingStatuses.get(runId);
         if (!prior || prior.statusRevision < notice.statusRevision) {
@@ -824,6 +861,84 @@ export class ConversationController {
     void lookup.catch(() => {});
   }
 
+  /** Automatically admitted work has no local send waiter or legacy delta producer. */
+  private consumeContinuationFrame(frame: StreamFrame): void {
+    if (frame.ref.execution !== "conversation" || !frame.meta.turnOrigin?.worksceneContinuation) return;
+    if (frame.ref.conversationId !== this.active.conversationId) return;
+    let observed = this.observedContinuations.get(frame.ref.runId);
+    if (!observed) {
+      observed = { conversationId: frame.ref.conversationId, sequences: new Map(), text: "", settled: false };
+      rememberBounded(this.observedContinuations, frame.ref.runId, observed);
+    }
+    // Final delivery and assignment streaming can arrive in either order.
+    const final = this.pendingFinals.get(frame.ref.runId);
+    if (final) {
+      this.consumeFinal(final);
+      return;
+    }
+    const sequenceKey = `${frame.assignmentId}:${frame.streamEpoch}`;
+    const previousSeq = observed.sequences.get(sequenceKey) ?? 0;
+    if (observed.settled || frame.seq <= previousSeq) return;
+    // A reference, missing frame or replacement stream breaks the displayable prefix.
+    // Keep only its contiguous prefix and let the committed history supply the rest.
+    if (frame.seq !== previousSeq + 1 || (observed.sequences.size > 0 && !observed.sequences.has(sequenceKey))) observed.streamIncomplete = true;
+    observed.sequences.set(sequenceKey, frame.seq);
+    if (observed.streamIncomplete) return;
+    if (frame.payload.kind !== "agent-yield") return;
+    if ("ref" in frame.payload.yield) {
+      observed.streamIncomplete = true;
+      return;
+    }
+    const delta = frame.payload.yield;
+    if (delta.type === "text_delta") observed.text += delta.text;
+    // Only the final assistant segment can be a prefix of the committed answer.
+    if (delta.type === "tool_start") observed.text = "";
+    this.opts.onObservedTurnDelta?.({ conversationId: observed.conversationId, turnId: frame.ref.runId });
+    this.opts.onYield(delta);
+  }
+
+  private async presentContinuationFinal(frame: FinalFrame): Promise<void> {
+    let before: { shardId: string; runIndex: number } | undefined;
+    let delayMs = 25;
+    while (!this.disposed && this.active.conversationId === frame.conversationId) {
+      try {
+        const page = await this.opts.conversation.history(frame.conversationId, {
+          limit: 200, ...(before ? { before } : {}),
+        });
+        const match = page.runs.find((item) => "runId" in item.record && item.record.runId === frame.runId);
+        let observed = this.observedContinuations.get(frame.runId);
+        if (this.active.conversationId !== frame.conversationId || observed?.settled) return;
+        if (match) {
+          if (!observed && !match.record.worksceneContinuation) return;
+          if (!observed) {
+            observed = { conversationId: frame.conversationId, sequences: new Map(), text: "", settled: false };
+            rememberBounded(this.observedContinuations, frame.runId, observed);
+          }
+          observed.settled = true;
+          const message = finalAssistantMessageOf(match.record.messages);
+          const text = message?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+          const remaining = text?.startsWith(observed.text) ? text.slice(observed.text.length) : text;
+          if (remaining) {
+            this.opts.onObservedTurnDelta?.({ conversationId: frame.conversationId, turnId: frame.runId });
+            this.opts.onYield({ type: "text_delta", text: remaining });
+          }
+          this.opts.onObservedTurnComplete?.({ conversationId: frame.conversationId, turnId: frame.runId });
+          return;
+        }
+        const last = page.runs.at(-1);
+        if (page.hasMore && last) {
+          before = { shardId: last.shardId, runIndex: last.record.runIndex };
+          continue;
+        }
+      } catch {
+        // A committed result may outlive a transient history projection/link failure.
+      }
+      before = undefined;
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
+    }
+  }
+
   private async retryCommittedRunLookup(runId: string): Promise<void> {
     const watch = this.durableRuns.get(runId);
     if (!watch) return;
@@ -853,6 +968,9 @@ export class ConversationController {
         (item) => "runId" in item.record && item.record.runId === runId,
       );
       if (match) {
+        if (match.record.postTurnControl) {
+          this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
+        }
         this.finishTurn(watch.conversationId, watch.turnId, {
           reason: "completed",
           message: finalAssistantMessageOf(match.record.messages),
@@ -908,7 +1026,7 @@ export class ConversationController {
   /** 打断当前对话的 in-flight turn——complete 随宿主 cleanup 自然到达。 */
   async abort(): Promise<void> {
     const turnId = this.localTurnsByConversation.get(this.active.conversationId);
-    if (!turnId) return;
+    if (!turnId) { await this.abortWorksceneTask(); return; }
     const runId = this.durableRunByTurn.get(turnId);
     const requestId = `cancel:${generateTurnId()}`;
     if (runId) {
@@ -929,6 +1047,19 @@ export class ConversationController {
     });
     this.pendingAbortByTurn.set(turnId, { requestId, promise, resolve, reject });
     return promise;
+  }
+
+  /** Resolve current entrusted work from owner facts even without a local send waiter or stream. */
+  async abortWorksceneTask(): Promise<boolean> {
+    const conversationId = this.active.conversationId;
+    const tasks = await this.opts.workscene.tasks(conversationId);
+    if (!tasks.length || this.active.conversationId !== conversationId) return false;
+    const focused = tasks.find((task) => task.runId === this.focusedTaskByConversation.get(conversationId));
+    const target = focused ?? (tasks.length === 1 ? tasks[0] : undefined);
+    if (!target) throw new Error("当前对话有多项委托，请说明要停止哪一项；未取消任何任务。");
+    await this.opts.workscene.stopTask(conversationId, target, `stop-task:${generateTurnId()}`);
+    this.focusedTaskByConversation.delete(conversationId);
+    return true;
   }
 
   // ─── 会话命令执行体(分发在 cli、执行在宿主) ───
@@ -1134,46 +1265,24 @@ export class ConversationController {
     await this.opts.workscene.exit(sceneId, leavingConversationId);
     // 目标可能从 mainTarget 逐级降级到候选——每次 resume 前把切换窗口
     // 收敛到当次精确目标，不按整个 main 域放行。
-    this.pendingSwitchTarget = (id) => id === mainTarget.conversationId;
-    const resumed = await this.opts.conversation.resumeIfExists(
-      mainTarget.conversationId,
-    );
-    if (resumed) {
-      await this.switchActive(toMainActive(resumed));
-      return {
-        kind: "returned",
-        active: this.active,
-        ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
-      };
-    }
-
-    for (const candidate of await this.opts.conversation.list()) {
-      if (!isMainConversationId(candidate.conversationId)) continue;
-      this.pendingSwitchTarget = (id) => id === candidate.conversationId;
-      const fallback = await this.opts.conversation.resumeIfExists(
-        candidate.conversationId,
-      );
-      if (fallback) {
-        await this.switchActive(toMainActive(fallback));
-        return {
-          kind: "fallback-latest",
-          active: this.active,
-          missingConversationId: mainTarget.conversationId,
-          ...(fallback.advancement ? { advancement: fallback.advancement } : {}),
-        };
-      }
-    }
-
-    const created = await this.opts.conversation.newConversation();
-    await this.switchActive({
-      conversationId: created.conversationId,
-      name: created.name,
-      mode: { kind: "main" },
+    const resolved = await resolveWorksceneMainReturn(mainTarget.conversationId, {
+      resume: (conversationId) => {
+        this.pendingSwitchTarget = (id) => id === conversationId;
+        return this.opts.conversation.resumeIfExists(conversationId);
+      },
+      list: () => this.opts.conversation.list(),
+      create: () => this.opts.conversation.newConversation(),
     });
+    await this.switchActive(toMainActive(resolved.conversation));
+    if (resolved.kind === "returned") return {
+      kind: "returned", active: this.active,
+      ...(resolved.conversation.advancement ? { advancement: resolved.conversation.advancement } : {}),
+    };
     return {
-      kind: "fallback-new",
+      kind: resolved.kind,
       active: this.active,
       missingConversationId: mainTarget.conversationId,
+      ...(resolved.kind !== "fallback-new" && resolved.conversation.advancement ? { advancement: resolved.conversation.advancement } : {}),
     };
   }
 
@@ -1203,6 +1312,8 @@ export class ConversationController {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.observedContinuations.clear();
     for (const unsub of this.unsubscribes) unsub();
     for (const turnId of this.pendingAbortByTurn.keys()) {
       this.resolvePendingAbort(turnId);
@@ -1216,6 +1327,7 @@ export class ConversationController {
     this.finalRevisionByConversation.clear();
     this.pendingStatuses.clear();
     this.finalLookups.clear();
+    this.continuationFinalLookups.clear();
     this.observedConversationId = null;
   }
 }

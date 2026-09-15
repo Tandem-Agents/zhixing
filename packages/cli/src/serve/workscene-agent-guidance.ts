@@ -22,26 +22,16 @@ export function powerProfile(
   return {
     ...base,
     instructions: focusInstructions + (scene.hasSceneControlTools
-      ? ` 可通过需确认的场景工具重命名、更换设备工作区或解除绑定。重命名即时更新元数据；工作区变更在本轮结束、重新进入场景后生效。工作完成或用户希望回到主对话时，调用 workmode_exit；仅口头说离开不会切换场景。`
+      ? ` 可通过需确认的场景工具重命名、更换设备工作区或解除绑定。工作区变更在本轮成功提交后生效；仍需继续任务时附 handoff，随后结束本轮。受托任务的结果自动回到原对话；单纯切换视图时使用 workmode_exit。`
       : ""),
   };
 }
 
 /** Attached only to the entry tool; filtering that tool also removes its guidance. */
-export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
+export const WORKING_MODE_TEXT = `## 工作场景
 
-A work scene is an isolated context for a bounded line of work, with an optional device workspace and model. Entering one switches the conversation into that scene; leaving returns here.
+工作场景隔离一项工作的上下文，可绑定设备上的已授权工作区。先用 workscene_list 核实目标，明确适合时进入；普通讨论留在当前对话，归属不明时先确认。
 
-Tools:
-- \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
-- \`workscene_list\`: list scenes and their ids, names, optional device workspace names, and recent activity.
-- \`workscene_change_approve\`: create, rename, remove, bind/change a device workspace, or clear the workspace binding with confirmation.
+需要在场景中继续当前任务时，向 workmode_enter 提供获准的 handoff：原目标、用户限制、已有结果和剩余事项。不复制无关历史、私人约定或秘密；单纯切换时省略 handoff，不启动旧任务。请求确认后先结束本轮，成功提交后才交接。
 
-How to decide:
-- Need scene ids or current workspace bindings: call \`workscene_list\`.
-- Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
-- Ambiguous fit: ask the user before switching.
-- Workspace management: use \`workscene_change_approve\` action \`set_workdir\` with a device and workspace name already authorized on that device, and action \`clear_workdir\` only for an explicit unbind request. Never request or transmit a remote filesystem path.
-- Casual or one-off questions: stay in the main conversation.
-
-After \`workmode_enter\`, finish the current turn normally; do not assume you are already inside the scene.`;
+管理场景只用实际提供的管理工具；选择设备上已有的授权工作区，不请求或传递远端文件路径。`;

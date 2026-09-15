@@ -8,6 +8,8 @@
 
 import type { Message } from "../../types/messages.js";
 import type { TokenUsage } from "../../types/llm.js";
+import type { PostTurnControlOutcome } from "../../types/agent-events.js";
+import type { TurnOrigin } from "../../types/tools.js";
 import type {
   RunRecordAdvancementMetadata,
   RunRecordPerspectivesMetadata,
@@ -74,6 +76,10 @@ export interface RunRecord {
   source?: TurnSource;
   advancement?: RunRecordAdvancementMetadata;
   perspectives?: RunRecordPerspectivesMetadata;
+  /** 已确认的轮次后交接提议；随原运行提交，不能仅留在接入面的通知中。 */
+  postTurnControl?: PostTurnControlOutcome;
+  /** 由准入来源提供，最终结果回源不依赖实时帧是否到达。 */
+  worksceneContinuation?: TurnOrigin["worksceneContinuation"];
 }
 
 /** 跨执行边界提交的 run 记录，以 runId 提供不依赖存储序号的稳定身份。 */
@@ -101,6 +107,8 @@ export interface RunRecordInput {
   source?: TurnSource;
   advancement?: RunRecordAdvancementMetadata;
   perspectives?: RunRecordPerspectivesMetadata;
+  postTurnControl?: PostTurnControlOutcome;
+  worksceneContinuation?: TurnOrigin["worksceneContinuation"];
 }
 
 /** appendRunRecord 的结果 —— 供调用方做派生缓存的覆盖锚点等 */

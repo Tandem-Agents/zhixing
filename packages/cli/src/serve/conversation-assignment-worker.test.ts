@@ -20,6 +20,7 @@ import {
 } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
+import { worksceneTaskContext } from "@zhixing/core/workscene/application";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 
 function interactionObserver(): DurableConversationInteractionObserver {
@@ -471,6 +472,7 @@ describe("ConversationAssignmentWorker", () => {
       work: {
         conversationId,
         runId: "run-worker-cancel",
+        controlContext: worksceneTaskContext([{ conversationId: "main-1", runId: "root-1", goal: "整理报告" }]),
         baseRevision: 2,
         ingress: {
           kind: "first-party",
@@ -530,6 +532,7 @@ describe("ConversationAssignmentWorker", () => {
 
     worker.accept(envelope);
     await vi.waitFor(() => expect(observedSignal).toBeDefined());
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ turnContext: { worksceneTasks: [{ conversationId: "main-1", runId: "root-1", goal: "整理报告" }] } });
     expect(worker.abort(assignmentId, new Error("cancelled"))).toBe(true);
     await worker.drain();
 
@@ -610,6 +613,7 @@ describe("ConversationAssignmentWorker", () => {
       work: {
         conversationId,
         runId: "run-worker-ticket-answer",
+        controlContext: [],
         ownerEpoch: 1,
         baseRevision: 2,
         ingress: {
@@ -848,6 +852,7 @@ describe("ConversationAssignmentWorker", () => {
       work: {
         conversationId,
         runId: "run-turn-origin",
+        controlContext: [],
         ownerEpoch: 2,
         baseRevision: 3,
         ingress: {

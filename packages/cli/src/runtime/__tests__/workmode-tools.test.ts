@@ -16,6 +16,7 @@ import {
   createWorksceneChangeApproveTool,
   createWorksceneClearWorkdirCurrentTool,
   createWorksceneListTool,
+  createWorksceneTaskTools,
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
@@ -52,6 +53,7 @@ function makeDirectory(
 }
 
 interface RunFixture {
+  readonly worksceneTasks?: readonly { conversationId: string; runId: string; goal: string }[];
   readonly scenes?: readonly WorksceneDto[];
   readonly postTurnControl?: boolean;
   readonly overlays?: AssignmentMutationOverlayRecord[];
@@ -123,6 +125,7 @@ async function callInRun<T>(
       lineage: "main",
       conversationId: "conversation-1",
       assignmentIssuedAt: NOW,
+      worksceneTasks: fixture.worksceneTasks,
       assignmentMutations: mutations,
       globalQuery: query,
       turnOrigin: {
@@ -139,7 +142,48 @@ async function callInRun<T>(
   return { result, emitted, staged, reads };
 }
 
+describe("workscene entrusted task tools", () => {
+  const reference = { conversationId: "main-1", runId: "run-1", goal: "整理获准资料" };
+  it("uses issued references without UI capability and preserves pending stop semantics", async () => {
+    const [list, stop] = createWorksceneTaskTools();
+    const listed = await callInRun(() => list!.call({}, CTX), { worksceneTasks: [reference], postTurnControl: false });
+    expect(JSON.parse(listed.result.content as string)).toEqual([reference]);
+    const stopped = await callInRun(() => stop!.call({ conversationId: reference.conversationId, runId: reference.runId }, CTX), { worksceneTasks: [reference], postTurnControl: false });
+    expect(stopped.emitted).toEqual([{ kind: "stop_task", conversationId: reference.conversationId, runId: reference.runId }]);
+    expect(stopped.result.content).toContain("待本轮成功提交");
+    expect(stopped.staged).toEqual([]);
+  });
+  it("rejects guessed targets and contexts without the parent's task snapshot", async () => {
+    const stop = createWorksceneTaskTools()[1]!;
+    for (const worksceneTasks of [undefined, [reference]]) {
+      const denied = await callInRun(() => stop.call({ conversationId: "foreign", runId: "guessed" }, CTX), { worksceneTasks });
+      expect(denied.result.isError).toBe(true);
+      expect(denied.emitted).toEqual([]);
+    }
+  });
+});
+
 describe("workmode enter/exit", () => {
+  it("含获准交接时不依赖 CLI consumer；交接仍要求显式确认", async () => {
+    const handoff = { goal: "交付报告", constraints: ["不发布"], completed: ["数据已核对"], remaining: ["写报告"] };
+    const tool = createWorkmodeEnterTool(application);
+    const call = await callInRun(() => tool.call({ sceneId: "scene-a", handoff }, CTX), { scenes: [scene("scene-a", "报告")], postTurnControl: false });
+    expect(call.emitted).toEqual([{ kind: "enter", sceneId: "scene-a", handoff }]);
+    expect(tool.requiresExplicitConfirmation).toBe(true);
+    expect(call.result.content).toContain("当前尚未开始");
+    await expect(callInRun(() => tool.call({ sceneId: "scene-a", handoff: { ...handoff, privateHistory: "不可转交" } }, CTX))).rejects.toThrow("交接只接受");
+    const exit = await callInRun(() => createWorkmodeExitTool().call({ handoff }, CTX));
+    expect(exit.result.isError).toBe(true);
+    expect(exit.emitted).toEqual([]);
+  });
+
+  it("工作区续接只随暂存变更提交，不在工具调用里重载自身运行", async () => {
+    const handoff = { goal: "继续任务", constraints: [], completed: [], remaining: ["核对新环境"] };
+    const current = { sceneId: "scene-a", sceneName: "报告" };
+    const call = await callInRun(() => createWorksceneClearWorkdirCurrentTool(current, application).call({ handoff }, CTX), { scenes: [scene("scene-a", "报告")] });
+    expect(call.staged).toHaveLength(1);
+    expect(call.emitted).toEqual([{ kind: "set_workdir", sceneId: "scene-a", workspace: null, handoff }]);
+  });
   it("enter 只读权威场景并 emit，缺少 consumer 时在查询前拒绝", async () => {
     const tool = createWorkmodeEnterTool(application);
     const admitted = await callInRun(
@@ -155,7 +199,7 @@ describe("workmode enter/exit", () => {
       { scenes: [scene("scene-1", "场景一")], postTurnControl: false },
     );
     expect(unsupported.result.isError).toBe(true);
-    expect(unsupported.result.content).toContain("暂不支持");
+    expect(unsupported.result.content).toContain("不支持单纯切换");
     expect(unsupported.reads).toEqual([]);
     expect(unsupported.emitted).toEqual([]);
   });

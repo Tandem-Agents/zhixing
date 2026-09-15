@@ -2907,6 +2907,7 @@ async function runServerProcess(
       createScheduleRuntimeProductApiContribution(schedulerApplication),
       createWorksceneProductApiContribution(
         worksceneApplication,
+        conversationServices.worksceneContinuation,
       ),
       ...(advancementProductApi ? [advancementProductApi] : []),
       ...(deliveryProductApi ? [deliveryProductApi] : []),

@@ -1611,6 +1611,7 @@ export async function createAgentRuntime(
             lineage: "main",
             conversationId: envelope.identity.conversationId,
             turnOrigin: envelope.identity.turnContext?.turnOrigin,
+            worksceneTasks: envelope.identity.turnContext?.worksceneTasks,
             authorizeToolExecution:
               envelope.correctness.authorizeToolExecution,
             assignmentMutations: envelope.correctness.assignmentMutations,

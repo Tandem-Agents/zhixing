@@ -62,6 +62,17 @@ describe("ObservedTurnPresenter", () => {
     vi.useRealTimers();
   });
 
+  it("labels an automatic continuation without displaying its internal handoff input as user speech", () => {
+    const bus = new FakeBus();
+    const writer = makeWriter();
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false });
+    presenter.decorateRunBus({ bus: bus as never, conversationId: "conv-1", turnContext: { turnId: "auto", turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } });
+    bus.emit("agent:run_start", { prompt: "内部交接说明及核实依据" });
+    expect(writer.line.mock.calls[0]![0]).toContain("原任务续接");
+    expect(writer.line.mock.calls[0]![0]).not.toContain("内部交接");
+    expect(writer.line.mock.calls[0]![0]).not.toContain("来自另一个接入面");
+  });
+
   it("agent:run_start 为旁观端补远端用户边界", () => {
     const bus = new FakeBus();
     const writer = makeWriter();

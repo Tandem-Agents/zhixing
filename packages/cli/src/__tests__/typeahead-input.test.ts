@@ -1342,6 +1342,23 @@ describe("readInputLine — 历史回显视觉护栏", () => {
 });
 
 describe("InputController — suspend/resume 输入态快照恢复", () => {
+  it("empty Escape stops entrusted work without replacing draft or panel Escape semantics", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const onEmptyEscape = vi.fn();
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime, screen: makeScreen(), stdin, columns: 80, onEmptyEscape });
+    controller.start();
+    try {
+      await sendSyntheticKey(stdin, { name: "escape", sequence: "\x1b" });
+      expect(onEmptyEscape).toHaveBeenCalledTimes(1);
+      await typeChars(stdin, "草稿");
+      await sendSyntheticKey(stdin, { name: "escape", sequence: "\x1b" });
+      expect(onEmptyEscape).toHaveBeenCalledTimes(1);
+      await typeChars(stdin, "/he");
+      await sendSyntheticKey(stdin, { name: "escape", sequence: "\x1b" });
+      expect(onEmptyEscape).toHaveBeenCalledTimes(1);
+    } finally { controller.stop(); }
+  });
   function makeScreen(): ScreenController {
     return {
       attachInput: vi.fn(),

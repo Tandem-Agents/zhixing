@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import {
   applyAdvancementEvent,
@@ -38,6 +39,7 @@ import type {
   ContentAssetRef,
   DataPlaneTicket,
   ControlResult,
+  ControlRecord,
   ControlResultBody,
   FinalFrame,
   FinalOutboxRecord,
@@ -584,6 +586,7 @@ export interface ConversationDispatchPort {
 }
 
 interface AdmittedProjection {
+  readonly lsn: number;
   readonly record: Extract<ConversationRunJournalRecord, { t: "admitted" }>;
   readonly input: UserTurnInput;
 }
@@ -675,6 +678,8 @@ interface RunProjection {
   taskList: TaskListState;
   readonly segments: SegmentRecord[];
   readonly transcript: TranscriptRunRecord[];
+  readonly worksceneControls: Map<string, { readonly record: TranscriptRunRecord; readonly advancementSessionId?: string }>;
+  clearedThroughLsn: number;
   sessionName?: string;
   lastActiveAt?: string;
   sessionMeta?: Extract<
@@ -994,6 +999,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   #runProjection:
     | { readonly state: RunProjection; readonly cursor: ProjectionCursor }
     | undefined;
+  #continuationStopProjection: { readonly state: { through: number; requests: Map<string, string>; stopped: Set<string> }; readonly cursor: ProjectionCursor } | undefined;
   #submissionGuardProjection:
     | { readonly state: SubmissionGuardProjection; readonly cursor: ProjectionCursor }
     | undefined;
@@ -1964,6 +1970,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           };
         }
         const queuedPosition = context.authorityPrefix.nextLsn;
+        if (worksceneTaskConflictsWithAdvancement(
+          ingress.turnOrigin,
+          [...state.advancementSessions.values()].find((session) => session.status === "active")?.id,
+          invocation.kind === "agent" ? invocation.advancement?.sessionId : undefined,
+        )) {
+          return { result: rejectedControl("fence-rejected", "目标场景已有独立验收中的任务，未接纳另一项委托") };
+        }
         if (state.admittedByRun.has(input.runId)) {
           return {
             result: rejectedControl(
@@ -2798,6 +2811,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             };
           }
           const current = state.stateByRun.get(body.runId);
+          // A committed delegation source has finished its Run, not its entrusted work.
+          // The control receipt revokes continuation without rewriting the committed Run.
+          if (current?.state === "committed" && hasPendingWorksceneTask(state.worksceneControls.get(body.runId)?.record ?? {})) {
+            return { result: { v: 1, status: "ok", body: { t: "cancel", runState: "committed" } } };
+          }
           if (
             !current ||
             (current.state !== "queued" &&
@@ -4334,6 +4352,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       references,
       runRecord: committedRunRecord,
     } = closure;
+    try {
+      validateWorksceneContinuationCommit(committedRunRecord, preflight.assigned.envelope.work);
+    } catch (error) {
+      return rejected("fence-rejected", error instanceof Error ? error.message : "Invalid workscene commit", false);
+    }
     if (canonicalize(closedArtifact.ref) !== canonicalize(artifact.ref)) {
       throw new Error("Bundle closure changed its artifact identity");
     }
@@ -5087,6 +5110,69 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => state.stateByRun.get(runId)?.state);
   }
 
+  /** Continuation facts are derived from admission, commit, lifecycle and control authority. */
+  async worksceneContinuationSources(): Promise<readonly WorksceneContinuationSource[]> {
+    const sources = await this.#select((state) => {
+      return [...state.admittedByRun.values()].flatMap(({ record: admitted, lsn }) => {
+        const control = state.worksceneControls.get(admitted.runId);
+        const record = control?.record;
+        const runState = record ? "committed" : state.stateByRun.get(admitted.runId)?.state;
+        if (!record && !admitted.ingress.turnOrigin?.worksceneContinuation) return [];
+        const advancement = record?.advancement ?? (admitted.invocation.kind === "agent" ? admitted.invocation.advancement : undefined);
+        const advancementSessionId = control?.advancementSessionId ?? advancement?.sessionId;
+        const active = advancementSessionId ? state.advancementSessions.get(advancementSessionId)?.status === "active" : true;
+        const result = record
+          ? record.messages.filter((message) => message.role === "assistant").at(-1)
+            ?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") ||
+            "本次运行没有最终文本结果，请核对任务记录。"
+          : `受托运行状态为 ${runState}，任务未完成。可能已经产生部分动作；先核对原运行记录，不重复执行已发生或不确定的副作用。`;
+        return [{
+          admissionLsn: lsn,
+          conversationId: this.#conversationId,
+          runId: admitted.runId,
+          ingressId: admitted.ingress.ingressId,
+          state: runState as WorksceneContinuationSource["state"],
+          current: !state.deleted && active && lsn > state.clearedThroughLsn,
+          ...(record?.postTurnControl ? { control: structuredClone(record.postTurnControl) } : {}),
+          result,
+          ...(admitted.ingress.turnOrigin ? { origin: structuredClone(admitted.ingress.turnOrigin) } : {}),
+          surfacePrincipal: admitted.ingress.surfacePrincipal,
+          ...(advancement ? { advancement: structuredClone(advancement) } : {}),
+          ...(advancementSessionId ? { advancementSessionId } : {}),
+        }];
+      });
+    });
+    if (sources.length === 0) return [];
+    // Empty batch cancellation still stops handed-off work. Its existing control
+    // receipt is authoritative; this cursor is only a rebuildable read cache.
+    const stoppedAt = await this.#operations.run(async () => {
+      const cached = this.#continuationStopProjection;
+      const result = await this.#log.transactProjection<{ through: number; requests: Map<string, string>; stopped: Set<string> }, ControlRecord, void>(
+        cached?.state ?? { through: 0, requests: new Map(), stopped: new Set() },
+        async (state, record, envelope) => {
+          if (record.body.t === "received") {
+            const request = await loadStored<import("@zhixing/core/contracts").ControlEnvelope>(record.body.envelope, this.#artifacts);
+            if (request.body.t === "cancel" && request.body.conversationId === this.#conversationId) state.requests.set(record.body.requestId, request.body.runId);
+          }
+          if (record.body.t !== "applied") return state;
+          const applied = await loadStored<ControlResult>(record.body.result, this.#artifacts);
+          if (applied.status === "ok") {
+            if (applied.body.t === "cancel-batch" && applied.body.conversationId === this.#conversationId) state.through = envelope.lsn;
+            const runId = state.requests.get(record.body.requestId);
+            if (applied.body.t === "cancel" && runId) state.stopped.add(runId);
+          }
+          state.requests.delete(record.body.requestId);
+          return state;
+        },
+        () => ({ kind: "return", value: undefined }),
+        { stream: "control", ...(cached ? { cursor: cached.cursor } : {}) },
+      );
+      this.#continuationStopProjection = { state: result.state, cursor: result.cursor };
+      return result.state;
+    });
+    return sources.map(({ admissionLsn, ...source }) => ({ ...source, current: source.current && admissionLsn > stoppedAt.through && !stoppedAt.stopped.has(source.runId) }));
+  }
+
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
   async advancementSessions(): Promise<AdvancementSession[]> {
     return this.#select((state) =>
@@ -5701,6 +5787,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.lifecycleByRequest.set(body.requestId, body);
         state.pendingLifecycleProjections.set(body.domainRevision, body);
         if (body.mutation === "clear") {
+          state.clearedThroughLsn = envelope.lsn;
           state.taskList = { items: [] };
           state.segments.length = 0;
           state.transcript.length = 0;
@@ -5733,7 +5820,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         } catch {
           throw corruptRunJournal("Run journal contains invalid user input");
         }
-        state.admittedByRun.set(body.runId, { record: body, input });
+        state.admittedByRun.set(body.runId, { record: body, input, lsn: envelope.lsn });
         state.runByIngress.set(body.ingressKey, body.runId);
         return state;
       }
@@ -6992,6 +7079,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         let closure: ValidatedConversationBundleClosure;
         try {
           closure = await validateConversationBundleClosure(bundle, this.#artifacts);
+          validateWorksceneContinuationCommit(closure.runRecord, assigned.envelope.work);
         } catch (error) {
           throw corruptRunJournal(
             error instanceof Error
@@ -7052,6 +7140,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
         state.pendingCommitProjections.set(body.assignmentId, body);
         state.transcript.push(snapshot(closure.runRecord, "Committed transcript record"));
+        if (closure.runRecord.postTurnControl || state.admittedByRun.get(closure.runRecord.runId)?.record.ingress.turnOrigin?.worksceneContinuation) {
+          const advancement = [...state.advancementSessions.values()].find((session) => session.status === "active");
+          state.worksceneControls.set(closure.runRecord.runId, {
+            record: snapshot(closure.runRecord, "Committed workscene control"),
+            ...(advancement ? { advancementSessionId: advancement.id } : {}),
+          });
+        }
         for (const record of closure.batch?.records ?? []) {
           if (record.domain !== "session") continue;
           const digest = protocolDigest("SessionStagedMutation", 1, record.mutation);
@@ -8950,6 +9045,8 @@ function emptyProjection(conversationId: string): RunProjection {
     taskList: { items: [] },
     segments: [],
     transcript: [],
+    worksceneControls: new Map(),
+    clearedThroughLsn: 0,
     sessionMeta: undefined,
     sessionMetaByRequest: new Map(),
     lifecycleByRequest: new Map(),

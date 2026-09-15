@@ -152,13 +152,20 @@ function projectKernelTerminalToConversationAgentResult(
 /** Kernel completion → existing Conversation persistence/result contract. */
 function projectKernelCompletionToConversationRunResult(
   completion: KernelRunCompletion,
+  continuation?: import("@zhixing/core").TurnOrigin["worksceneContinuation"],
 ): RunResult {
   const artifacts = completion.artifacts;
   return {
     agentResult: projectKernelTerminalToConversationAgentResult(
       completion.terminal,
     ),
-    runRecord: artifacts.runRecord,
+    runRecord: {
+      ...artifacts.runRecord,
+      ...(continuation ? { worksceneContinuation: continuation } : {}),
+      ...(completion.terminal.reason === "completed" && artifacts.pendingPostTurnControl
+        ? { postTurnControl: artifacts.pendingPostTurnControl }
+        : {}),
+    },
     // Conversation's legacy RunResult exposes a mutable array. Transfer the
     // Kernel-owned messages by reference and copy only this small container;
     // message/tool/image payloads remain the single artifact object graph.
@@ -260,7 +267,7 @@ export function createOwnerRuntimeAdapter(
           (completion) => {
             queue.push({
               kind: "done",
-              result: projectKernelCompletionToConversationRunResult(completion),
+              result: projectKernelCompletionToConversationRunResult(completion, options?.turnContext?.turnOrigin?.worksceneContinuation),
             });
             wakeOne();
           },

@@ -16,6 +16,8 @@ import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementController } from "@zhixing/owner-services/advancement";
 import {
   buildWorksceneListMethod,
+  buildWorksceneTasksMethod,
+  buildWorksceneTaskStopMethod,
   buildWorksceneCreateMethod,
   buildWorksceneRenameMethod,
   buildWorksceneSetWorkdirMethod,
@@ -157,6 +159,7 @@ function memoryWorkscenes(): TestWorksceneMechanism {
 }
 
 function makeCtx(opts: {
+  continuation?: Pick<import("@zhixing/core/workscene/application").WorksceneContinuationApplication, "tasks" | "stop">;
   workscenes?: TestWorksceneMechanism;
   activeConversations?: string[];
   advancement?: AdvancementController;
@@ -232,6 +235,7 @@ function makeCtx(opts: {
             },
           },
         ),
+        opts.continuation,
       )
     : undefined;
   const productApi = worksceneContribution
@@ -258,12 +262,26 @@ async function call(entry: { handler: (p: unknown, c: never) => unknown }, param
 }
 
 describe("workscene.* 方法", () => {
-  it("全部七项 Workscene 行为只经同一 Product API，旧 Directory 桥归零", async () => {
+  it("uses the same product task query/stop without cancellation of other conversations", async () => {
+    const task = { conversationId: "main-1", runId: "run-1", goal: "报告" };
+    const continuation = { tasks: vi.fn(async () => [task]), stop: vi.fn(async () => {}) };
+    const ctx = makeCtx({ workscenes: memoryWorkscenes(), continuation });
+    const query = buildWorksceneTasksMethod();
+    const stop = buildWorksceneTaskStopMethod();
+    expect(query.requiresAuth).toBe(true);
+    expect(stop.requiresAuth).toBe(true);
+    expect(await query.handler({ conversationId: "ws:reports:primary" }, ctx)).toEqual([task]);
+    expect(await stop.handler({ conversationId: "ws:reports:primary", targetConversationId: "main-1", runId: "run-1", requestId: "stop:stable" }, ctx)).toEqual({ accepted: true });
+    expect(continuation.stop).toHaveBeenCalledWith({ conversationId: "ws:reports:primary", target: { conversationId: "main-1", runId: "run-1" }, requestId: "stop:stable" });
+    await expect(stop.handler({ conversationId: "main-1", targetConversationId: "main-1", runId: "run-1", requestId: "stop:bad", all: true }, ctx)).rejects.toThrow(/unknown fields/);
+    expect(continuation.stop).toHaveBeenCalledTimes(1);
+  });
+  it("全部九项 Workscene 行为只经同一 Product API，旧 Directory 桥归零", async () => {
     const source = await readFile(
       new URL("../methods/workscene.ts", import.meta.url),
       "utf8",
     );
-    expect(source.match(/requireWorksceneApplication\(ctx\.server\)/gu)).toHaveLength(7);
+    expect(source.match(/requireWorksceneApplication\(ctx\.server\)/gu)).toHaveLength(9);
     expect(source).not.toContain("requireWorkscenes");
     expect(source).not.toContain("sceneSummary(");
     expect(source).not.toContain("server.workscenes");

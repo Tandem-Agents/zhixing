@@ -1,6 +1,7 @@
 import { assertDeliveryEnvelopeCompanions, projectDeliveryDisplayText, validateDeliveryStreamRecord, type DeliveryLifecycleSourceRef } from "@zhixing/core/delivery";
 import { decideConversationStatusNotification, conversationControlResponseText, type ConversationControlResponse } from "@zhixing/core/conversation/application";
 import { decideScheduleStatusNotification } from "@zhixing/core/scheduler/application";
+import { worksceneResultReturnTarget } from "@zhixing/core/workscene/application";
 import type {
   DeliveryObligation,
   DeliveryObligationApplication,
@@ -502,7 +503,7 @@ function conversationCommitInputs(
   durableConflicts: ReadonlySet<number> = new Set(),
 ): DeliveryObligation[] {
   const result: DeliveryObligation[] = [];
-  if (input.ingress.kind === "channel") {
+  if (input.ingress.kind === "channel" && !worksceneResultReturnTarget(input.ingress.turnOrigin, input.conversationId)) {
     const text = finalAssistantText(input.runRecord);
     if (text.trim().length > 0) result.push({
       keyBody: {

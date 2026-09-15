@@ -120,6 +120,7 @@ export type {
   PostTurnControlIntent,
   PostTurnControlOutcome,
   PostTurnControlConflict,
+  WorksceneTaskHandoff,
   ProjectedPassthroughEvent,
   SessionEventProjection,
 } from "./agent-events.js";

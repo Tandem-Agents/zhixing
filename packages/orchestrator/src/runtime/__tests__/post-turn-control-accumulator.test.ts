@@ -8,6 +8,15 @@ function makeBus(): EventBus<AgentEventMap> {
 }
 
 describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => {
+  it("keeps explicit stops independently of later navigation or replacement", () => {
+    const bus = makeBus();
+    const acc = subscribePostTurnControlAccumulator(bus);
+    bus.emit("post_turn_control:requested", { kind: "stop_task", conversationId: "main", runId: "old-task" });
+    bus.emit("post_turn_control:requested", { kind: "enter", sceneId: "new" });
+    bus.emit("post_turn_control:requested", { kind: "stop_task", conversationId: "main", runId: "old-task" });
+    expect(acc.getOutcome()).toEqual({ intent: { kind: "enter", sceneId: "new" }, stops: [{ conversationId: "main", runId: "old-task" }] });
+    acc.dispose();
+  });
   it("从未 emit 时 getOutcome 返回 undefined", () => {
     const acc = subscribePostTurnControlAccumulator(makeBus());
     expect(acc.getOutcome()).toBeUndefined();

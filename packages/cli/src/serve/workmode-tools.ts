@@ -5,7 +5,7 @@
  *   - 工具只捕获工作场景领域服务窄接口（不反依赖宿主具体类），故可脱离
  *     核心宿主用 mock 接口单测。
  *   - 切换类工具（enter/exit）**只 emit 意图、不执行切换**：run() 侧 accumulator
- *     收集、随 RunResult 带出，CLI 主回路 turn 边界唯一 post-turn consumer 消费。
+ *     收集并随成功运行提交；产品应用消费任务交接，接入面只呈现或切换视图。
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把
  *     本 turn 收尾。
  *   - by-construction 隔离：注入哪组由 spec.kind 决定（见 assembleTools），
@@ -33,11 +33,15 @@ import {
   type WorksceneManagementToolName,
 } from "@zhixing/core/workscene";
 import { type JsonSchema, type ToolDefinition } from "@zhixing/core";
+import type { WorksceneTaskHandoff } from "@zhixing/core/types";
+import { isLocalConversationId } from "@zhixing/core/conversation";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { WorksceneAssignmentToolApplication } from "@zhixing/core/workscene/application";
+import { validateWorksceneTaskHandoff } from "@zhixing/core/workscene/application";
 import {
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,
+  runContextStorage,
 } from "@zhixing/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import { WORKING_MODE_TEXT } from "./workscene-agent-guidance.js";
@@ -52,7 +56,34 @@ export const WORKSCENE_PRODUCT_TOOL_IDS = Object.freeze({
   renameCurrent: "workscene_rename_current",
   setWorkdirCurrent: "workscene_set_workdir_current",
   clearWorkdirCurrent: "workscene_clear_workdir_current",
+  taskList: "workscene_task_list",
+  taskStop: "workscene_task_stop",
 } as const);
+
+export function createWorksceneTaskTools(): ToolDefinition[] {
+  return [{
+    name: WORKSCENE_PRODUCT_TOOL_IDS.taskList,
+    description: "查看当前对话尚未交付的场景委托及其停止引用；这里只列本轮开始时的事实快照。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    isReadOnly: true, isParallelSafe: true,
+    boundaries: [{ boundaryType: "filesystem", access: "read", dynamic: false }],
+    async call() { return ok(JSON.stringify(runContextStorage.getStore()?.worksceneTasks ?? [])); },
+  }, {
+    name: WORKSCENE_PRODUCT_TOOL_IDS.taskStop,
+    description: "用户明确撤销或替换场景委托时，按 workscene_task_list 的原委托引用请求停止。进度询问、补充约束或另开话题不等于撤销；含糊时先澄清。停止请求随本轮成功提交，不撤销已发生的动作。",
+    inputSchema: { type: "object", properties: { conversationId: { type: "string" }, runId: { type: "string" } }, required: ["conversationId", "runId"], additionalProperties: false },
+    isReadOnly: false, isParallelSafe: false,
+    boundaries: [{ boundaryType: "agent-context", access: "switch", dynamic: false }],
+    async call(input) {
+      const run = runContextStorage.getStore();
+      if (!run?.assignmentMutations || run.assignmentMutations.execution !== "conversation") return fail("停止委托需要当前耐久对话");
+      const target = run.worksceneTasks?.find((task) => task.conversationId === input.conversationId && task.runId === input.runId);
+      if (!target) return fail("停止引用不在本轮获准委托列表中，请核对任务，不要猜测引用");
+      emitPostTurnControlIntent({ kind: "stop_task", conversationId: target.conversationId, runId: target.runId });
+      return ok("已请求停止该委托，待本轮成功提交后生效；请结束本轮。尚未确认停止，不代表动作已回滚。");
+    },
+  }];
+}
 
 export interface WorksceneCurrentToolContext {
   readonly sceneId: string;
@@ -71,7 +102,28 @@ function postTurnControlUnsupported(): Promise<{
   content: string;
   isError: true;
 }> {
-  return fail("当前接入面暂不支持本轮结束后的工作场景控制，请在 CLI 中操作");
+  return fail("当前接入面不支持单纯切换对话；如需在场景中继续已受托任务，请明确交接内容并确认。");
+}
+
+const handoffSchema = {
+  type: "object",
+  description: "需要继续当前任务时提供，仅含获准交接的目标、用户限制、已完成结果和剩余事项。只切换对话时省略；不复制私人约定、无关历史或秘密。",
+  properties: {
+    goal: { type: "string", description: "原任务目标，不改变交付含义" },
+    constraints: { type: "array", items: { type: "string" }, description: "用户已确认的限制" },
+    completed: { type: "array", items: { type: "string" }, description: "已有结果及核对依据，区分确定事实和不确定状态" },
+    remaining: { type: "array", items: { type: "string" }, description: "尚需完成的事项；已完成的任务用空列表" },
+  },
+  required: ["goal", "constraints", "completed", "remaining"],
+  additionalProperties: false,
+};
+
+function readHandoff(input: Record<string, unknown>): WorksceneTaskHandoff | undefined {
+  if (input.handoff === undefined) return undefined;
+  validateWorksceneTaskHandoff(input.handoff);
+  const run = runContextStorage.getStore();
+  if (run?.assignmentMutations?.execution !== "conversation" || (run.conversationId && isLocalConversationId(run.conversationId))) throw new Error("任务交接需要 Anchor 所属的耐久对话，当前运行不能接纳场景续接。");
+  return structuredClone(input.handoff);
 }
 
 function assertPostTurnControlSupported(
@@ -154,6 +206,7 @@ export function createWorkmodeEnterTool(
         type: "string",
         description: "要进入的工作场景 id（用 workscene_list 确认 id）",
       },
+      handoff: handoffSchema,
     },
     required: ["sceneId"],
   };
@@ -161,8 +214,8 @@ export function createWorkmodeEnterTool(
     name: WORKSCENE_PRODUCT_TOOL_IDS.enter,
     systemPromptGuidance: WORKING_MODE_TEXT,
     description:
-      "进入一个工作场景：后续对话切到该场景的独立运行态（场景目录 + power 模型）。" +
-      "切换在用户确认后、于本 turn 结束的 turn 边界发生——调用本工具后请正常把本轮回复收尾，不要假设已经切换。",
+      "在工作场景的独立上下文、授权工作区与 power 模型中处理任务。" +
+      "有未完成任务时用 handoff 交接，确认并成功提交本轮后自动续接，结果返回原对话；只切换视图时省略 handoff，不启动旧任务。调用后先结束本轮，不假设已经切换。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -174,13 +227,14 @@ export function createWorkmodeEnterTool(
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
-      const unsupported = assertPostTurnControlSupported("workmode_enter");
+      const handoff = readHandoff(input);
+      const unsupported = handoff?.remaining.length ? undefined : assertPostTurnControlSupported("workmode_enter");
       if (unsupported) return unsupported;
       const scene = await application.get(sceneId);
       if (!scene) return fail(`工作场景 "${sceneId}" 不存在，未切换`);
-      emitPostTurnControlIntent({ kind: "enter", sceneId });
+      emitPostTurnControlIntent({ kind: "enter", sceneId, ...(handoff ? { handoff } : {}) });
       return ok(
-        `已请求进入工作场景「${scene.name}」，将在本轮结束后切换。请先把本轮回复收尾。`,
+        `已请求进入工作场景「${scene.name}」。${handoff?.remaining.length ? "交接将在本轮成功提交后接纳并续接；当前尚未开始。" : "将在本轮结束后切换，不自动开始任务。"}请先结束本轮。`,
       );
     },
   };
@@ -198,13 +252,13 @@ export function createWorkmodeEnterTool(
 export function createWorkmodeExitTool(): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
-    properties: {},
+    properties: { handoff: handoffSchema },
   };
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.exit,
     description:
       "结束当前工作场景、返回主对话。当本场景的工作已告一段落时调用。" +
-      "切换在本 turn 结束的 turn 边界发生——调用后请正常把本轮回复收尾。",
+      "仍有原任务需要在主对话处理时提供 handoff，沿已记录的来源交接；单纯退出则省略。成功提交后生效，调用后结束本轮。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -212,10 +266,12 @@ export function createWorkmodeExitTool(): ToolDefinition {
     requiresExplicitConfirmation:
       worksceneToolRequiresExplicitConfirmation("workmode_exit"),
     boundaries: getWorksceneToolBoundaries("workmode_exit"),
-    async call() {
-      const unsupported = assertPostTurnControlSupported("workmode_exit");
+    async call(input) {
+      const handoff = readHandoff(input);
+      if (handoff && !runContextStorage.getStore()?.turnOrigin?.worksceneContinuation?.returnConversationId) return fail("当前场景没有已记录的原任务来源，未交接；请在当前场景继续处理，或明确返回的目标对话。");
+      const unsupported = handoff?.remaining.length ? undefined : assertPostTurnControlSupported("workmode_exit");
       if (unsupported) return unsupported;
-      emitPostTurnControlIntent({ kind: "exit" });
+      emitPostTurnControlIntent({ kind: "exit", ...(handoff ? { handoff } : {}) });
       return ok("已请求退出工作场景，将在本轮结束后返回主对话。");
     },
   };
@@ -353,7 +409,7 @@ export function createWorksceneChangeApproveTool(
  */
 export function createWorksceneListTool(
   application: Pick<WorksceneAssignmentToolApplication, "list">,
-  workscenes: Pick<WorksceneToolDirectory, "workspaceCatalog">,
+  workscenes?: Pick<WorksceneToolDirectory, "workspaceCatalog">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -371,7 +427,7 @@ export function createWorksceneListTool(
     async call() {
       const scenes = await application.list();
       if (scenes.length === 0) return ok("当前没有任何工作场景");
-      const catalog = await workscenes.workspaceCatalog();
+      const catalog = workscenes ? await workscenes.workspaceCatalog() : [];
       return ok(
         scenes
           .map((scene) => {
@@ -470,13 +526,14 @@ export function createWorksceneSetWorkdirCurrentTool(
         type: "string",
         description: "目标设备已授权工作区的显示名称",
       },
+      handoff: handoffSchema,
     },
     required: ["deviceName", "workspaceName"],
   };
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.setWorkdirCurrent,
     description:
-      "更换当前工作场景的设备工作区。变更在本轮成功提交后生效，后续运行使用新工作区。",
+      "更换当前工作场景的设备工作区。本轮成功提交后生效；需要在新环境继续原任务时提供 handoff，随后结束本轮。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -486,6 +543,7 @@ export function createWorksceneSetWorkdirCurrentTool(
     boundaries: getWorksceneToolBoundaries("workscene_set_workdir_current"),
     confirmationDisplayContext: currentDisplayContext(scene),
     async call(input, context) {
+      const handoff = readHandoff(input);
       const selected = await selectWorkspace(workscenes, input);
       if ("error" in selected) return fail(selected.error);
       const changed = await application.setWorkspace({
@@ -494,6 +552,7 @@ export function createWorksceneSetWorkdirCurrentTool(
         toolCallId: context?.toolCallId,
       });
       if (!changed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
+      if (handoff) emitPostTurnControlIntent({ kind: "set_workdir", sceneId: scene.sceneId, workspace: selected.workspace, handoff });
       return ok("已记录当前工作场景的工作区变更；本轮成功完成后生效。");
     },
   };
@@ -508,12 +567,12 @@ export function createWorksceneClearWorkdirCurrentTool(
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
-    properties: {},
+    properties: { handoff: handoffSchema },
   };
   return {
     name: WORKSCENE_PRODUCT_TOOL_IDS.clearWorkdirCurrent,
     description:
-      "解除当前工作场景的设备工作区绑定。变更在本轮成功提交后生效，后续运行使用无工作区工具面。",
+      "解除当前工作场景的设备工作区绑定。本轮成功提交后生效；需要在无工作区环境继续原任务时提供 handoff，随后结束本轮。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -522,13 +581,15 @@ export function createWorksceneClearWorkdirCurrentTool(
       worksceneToolRequiresExplicitConfirmation("workscene_clear_workdir_current"),
     boundaries: getWorksceneToolBoundaries("workscene_clear_workdir_current"),
     confirmationDisplayContext: currentDisplayContext(scene),
-    async call(_input, context) {
+    async call(input, context) {
+      const handoff = readHandoff(input);
       const changed = await application.setWorkspace({
         sceneId: scene.sceneId,
         workspace: null,
         toolCallId: context?.toolCallId,
       });
       if (!changed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
+      if (handoff) emitPostTurnControlIntent({ kind: "set_workdir", sceneId: scene.sceneId, workspace: null, handoff });
       return ok("已记录解除当前工作场景的工作区绑定；本轮成功完成后生效。");
     },
   };

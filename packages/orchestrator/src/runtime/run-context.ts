@@ -64,6 +64,7 @@ export interface RunContext {
    * 远程确认或通知目标时从这里读取明确目标。
    */
   turnOrigin?: TurnOrigin;
+  worksceneTasks?: readonly import("@zhixing/core/workscene/application").WorksceneTaskReference[];
   /** Assignment-scoped authority inherited by every descendant tool executor. */
   authorizeToolExecution?: DurableToolExecutionAuthorizer;
   /** One shared metering sequence for every provider attempt in this durable run tree. */

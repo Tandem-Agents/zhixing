@@ -75,7 +75,7 @@ export async function projectSessionTurn(
       const iter = await gen.next();
       if (iter.done) {
         const runResult = iter.value;
-        if (runResult.pendingPostTurnControl) {
+        if (runResult.agentResult.reason === "completed" && runResult.pendingPostTurnControl) {
           opts.onPostTurnControlIntent?.(runResult.pendingPostTurnControl);
         }
         opts.notify(SESSION_NOTIFICATIONS.complete, {

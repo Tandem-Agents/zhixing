@@ -14,6 +14,8 @@ import { validateJobCommitFence } from "./job.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
 
+import { validateWorksceneControl } from "../workscene/continuation.js";
+
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
 type JobSealedBundle = SealedBundle & { body: JobCommitBundle };
@@ -359,6 +361,8 @@ export function validateTranscriptRunRecord(
       "advancement",
       "messages",
       "perspectives",
+      "postTurnControl",
+      "worksceneContinuation",
       "runId",
       "runIndex",
       "source",
@@ -387,6 +391,16 @@ export function validateTranscriptRunRecord(
     throw new TypeError("Transcript run must begin with the originating user message");
   }
   if (value.usage !== undefined) validateTranscriptUsage(value.usage);
+  if (value.postTurnControl !== undefined) validateWorksceneControl(value.postTurnControl);
+  if (value.worksceneContinuation !== undefined) {
+    const continuation = value.worksceneContinuation;
+    assertPlainObject(continuation, "Workscene continuation");
+    assertExactKeys(continuation, ["kind", "conversationId", "runId", "returnConversationId"], "Workscene continuation", true);
+    if (!["task", "resume", "result"].includes(continuation.kind)) throw new TypeError("Invalid continuation kind");
+    assertIdentifier(continuation.conversationId, "Continuation conversation");
+    assertIdentifier(continuation.runId, "Continuation run");
+    if (continuation.returnConversationId !== undefined) assertIdentifier(continuation.returnConversationId, "Continuation return conversation");
+  }
   if (
     value.source !== undefined &&
     !new Set(["interactive", "scheduler", "channel", "advancement"]).has(value.source)

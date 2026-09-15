@@ -245,6 +245,14 @@
       {
         "name": "workscene.setWorkdir",
         "requiresAuth": true
+      },
+      {
+        "name": "workscene.stopTask",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.tasks",
+        "requiresAuth": true
       }
     ],
     "anchor-executor-surface": [
@@ -490,6 +498,14 @@
       },
       {
         "name": "workscene.setWorkdir",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.stopTask",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.tasks",
         "requiresAuth": true
       }
     ],
@@ -737,6 +753,14 @@
       {
         "name": "workscene.setWorkdir",
         "requiresAuth": true
+      },
+      {
+        "name": "workscene.stopTask",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.tasks",
+        "requiresAuth": true
       }
     ],
     "anchor-surface": [
@@ -983,6 +1007,14 @@
       {
         "name": "workscene.setWorkdir",
         "requiresAuth": true
+      },
+      {
+        "name": "workscene.stopTask",
+        "requiresAuth": true
+      },
+      {
+        "name": "workscene.tasks",
+        "requiresAuth": true
       }
     ],
     "executor-only": [],
@@ -1226,6 +1258,8 @@
           "rpc:workscene.list",
           "rpc:workscene.rename",
           "rpc:workscene.setWorkdir",
+          "rpc:workscene.stopTask",
+          "rpc:workscene.tasks",
           "slash:advancement:repl",
           "slash:clear:repl",
           "slash:compact:repl",
@@ -1260,6 +1294,7 @@
           "tool:extra:workscene:exit",
           "tool:extra:workscene:rename-current",
           "tool:extra:workscene:set-workdir-current",
+          "tool:extra:workscene:task-stop",
           "tool:orchestrator:Task"
         ]
       },
@@ -1409,6 +1444,8 @@
           "rpc:workscene.list",
           "rpc:workscene.rename",
           "rpc:workscene.setWorkdir",
+          "rpc:workscene.stopTask",
+          "rpc:workscene.tasks",
           "slash:advancement:repl",
           "slash:clear:repl",
           "slash:compact:repl",
@@ -1443,6 +1480,7 @@
           "tool:extra:workscene:exit",
           "tool:extra:workscene:rename-current",
           "tool:extra:workscene:set-workdir-current",
+          "tool:extra:workscene:task-stop",
           "tool:orchestrator:Task"
         ]
       },
@@ -1577,6 +1615,8 @@
           "rpc:workscene.list",
           "rpc:workscene.rename",
           "rpc:workscene.setWorkdir",
+          "rpc:workscene.stopTask",
+          "rpc:workscene.tasks",
           "slash:advancement:repl",
           "slash:clear:repl",
           "slash:compact:repl",
@@ -1734,6 +1774,8 @@
           "rpc:workscene.list",
           "rpc:workscene.rename",
           "rpc:workscene.setWorkdir",
+          "rpc:workscene.stopTask",
+          "rpc:workscene.tasks",
           "slash:advancement:repl",
           "slash:clear:repl",
           "slash:compact:repl",
@@ -1847,6 +1889,7 @@
           "tool:extra:workscene:exit",
           "tool:extra:workscene:rename-current",
           "tool:extra:workscene:set-workdir-current",
+          "tool:extra:workscene:task-stop",
           "tool:orchestrator:Task"
         ]
       },
@@ -1939,6 +1982,7 @@
           "tool:extra:workscene:exit",
           "tool:extra:workscene:rename-current",
           "tool:extra:workscene:set-workdir-current",
+          "tool:extra:workscene:task-stop",
           "tool:orchestrator:Task"
         ]
       },
@@ -3406,6 +3450,24 @@
         }
       },
       {
+        "name": "workscene.stopTask",
+        "requiresAuth": true,
+        "key": "rpc:workscene.stopTask",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
+        "name": "workscene.tasks",
+        "requiresAuth": true,
+        "key": "rpc:workscene.tasks",
+        "category": "rpc",
+        "target": {
+          "rowId": "workscene-switch"
+        }
+      },
+      {
         "id": "advancement:repl",
         "name": "advancement",
         "execution": "local",
@@ -3808,6 +3870,19 @@
         "category": "tool",
         "target": {
           "rowId": "workscene-manage"
+        }
+      },
+      {
+        "key": "tool:extra:workscene:task-stop",
+        "toolName": "workscene_task_stop",
+        "authorityWrite": true,
+        "runtimeKinds": [
+          "main",
+          "workscene"
+        ],
+        "category": "tool",
+        "target": {
+          "rowId": "workscene-switch"
         }
       },
       {

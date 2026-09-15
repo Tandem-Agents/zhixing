@@ -201,6 +201,22 @@ function jobFacts() {
 }
 
 describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("delivers the integrated handoff result once while preserving explicit delivery and failure obligations", async () => {
+    const owner = await participant();
+    for (const [kind, nested] of [["task", true], ["resume", false], ["resume", true], ["result", false]] as const) {
+      const committed = owner.prepareConversationCommit({
+        at: NOW, conversationId: "conversation-1", runId: "run-1", assignmentId: "assignment-conversation", commitRevision: 1,
+        conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE, assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
+        ingress: { ...channelIngress, turnOrigin: { channel: "feishu", target: channelIngress.replyTarget, worksceneContinuation: { kind, conversationId: "source", runId: "source-run", ...(nested ? { returnConversationId: "source" } : {}) } } },
+        runRecord, mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
+      });
+      if (!committed.accepted) throw new Error("commit rejected");
+      expect(deliveryKinds(committed.records)).toEqual(nested ? ["staged-delivery"] : ["conversation-final-delivery", "staged-delivery"]);
+    }
+    const failure = owner.prepareConversationStatuses([{ at: NOW, conversationId: "conversation-1", runId: "run-1", state: "uncertain", statusRevision: 2, ingress: { ...channelIngress, turnOrigin: { channel: "feishu", target: channelIngress.replyTarget, worksceneContinuation: { kind: "task", conversationId: "source", runId: "source-run" } } } }]);
+    if (!failure.accepted) throw new Error("status rejected");
+    expect(deliveryKinds(failure.records)).toEqual(["conversation-status-delivery"]);
+  });
   it("binds all seven canonical producer paths to the frozen lifecycle source exact-set", async () => {
     const { authority, owner } = await participantFixture();
     const lifecycle = createOwnerDeliveryLifecycleBinding({ authority }).application;

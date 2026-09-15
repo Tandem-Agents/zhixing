@@ -59,6 +59,12 @@ export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
     runtimeKinds: ["main"],
   },
   {
+    key: "workscene:task-stop",
+    toolName: "workscene_task_stop",
+    authorityWrite: true,
+    runtimeKinds: ["main", "workscene"],
+  },
+  {
     key: "workscene:exit",
     toolName: "workmode_exit",
     authorityWrite: true,

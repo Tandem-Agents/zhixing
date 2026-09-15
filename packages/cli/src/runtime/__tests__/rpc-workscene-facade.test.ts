@@ -20,6 +20,18 @@ const scene = {
 };
 
 describe("RpcWorksceneFacade", () => {
+  it("queries task references and stops only the selected root using a stable request id", async () => {
+    const fake = makeFakeHostLink();
+    const task = { conversationId: "main-1", runId: "run-1", goal: "报告" };
+    fake.setResponder((method) => method === "workscene.tasks" ? [task] : { accepted: true });
+    const facade = new RpcWorksceneFacade(fake.link);
+    expect(await facade.tasks("ws:reports:primary")).toEqual([task]);
+    await facade.stopTask("ws:reports:primary", task, "stop:stable");
+    expect(fake.requests).toMatchObject([
+      { method: "workscene.tasks", params: { conversationId: "ws:reports:primary" } },
+      { method: "workscene.stopTask", params: { conversationId: "ws:reports:primary", targetConversationId: "main-1", runId: "run-1", requestId: "stop:stable" } },
+    ]);
+  });
   it("list 还原 scenes 数组", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder(() => ({ scenes: [scene] }));

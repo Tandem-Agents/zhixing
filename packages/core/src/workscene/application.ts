@@ -13,10 +13,58 @@ import type {
 import type { AdvancementActiveStateProjection } from "../advancement/application.js";
 import { parseConversationId } from "../conversation/scope-id.js";
 import { normalizeSceneName } from "./validation.js";
+import type { WorksceneContinuationApplication, WorksceneTaskReference } from "./continuation.js";
+export {
+  WorksceneContinuationApplication,
+  isWorksceneContinuationCurrent,
+  worksceneTaskContext,
+  readWorksceneTaskContext,
+  validateWorksceneContinuationCommit,
+  worksceneContinuationTarget,
+  worksceneContinuationTurnId,
+  worksceneResultReturnTarget,
+  worksceneTaskConflictsWithAdvancement,
+  renderWorksceneHandoff,
+  hasPendingWorksceneTask,
+  validateWorksceneControl,
+  validateWorksceneTaskHandoff,
+  type WorksceneContinuationPort,
+  type WorksceneContinuationSource,
+  type WorksceneTaskReference,
+} from "./continuation.js";
 
 export interface WorksceneWorkspaceReference {
   readonly deviceId: string;
   readonly bindingRef: string;
+}
+
+/** Product fallback for leaving a scene; access surfaces own only the active pointer. */
+export async function resolveWorksceneMainReturn<
+  Resumed extends { conversationId: string },
+  Created extends { conversationId: string },
+>(
+  preferredConversationId: string,
+  port: {
+    resume(conversationId: string): Promise<Resumed | null | undefined>;
+    list(): Promise<readonly { conversationId: string }[]>;
+    create(): Promise<Created>;
+  },
+): Promise<
+  | { kind: "returned" | "fallback-latest"; conversation: Resumed }
+  | { kind: "fallback-new"; conversation: Created }
+> {
+  if (parseConversationId(preferredConversationId).scope.kind !== "user") {
+    throw new WorksceneApplicationError("invalid-input", "退出目标必须是主对话");
+  }
+  const resumed = await port.resume(preferredConversationId);
+  if (resumed) return { kind: "returned", conversation: resumed };
+  for (const candidate of await port.list()) {
+    if (candidate.conversationId === preferredConversationId ||
+      parseConversationId(candidate.conversationId).scope.kind !== "user") continue;
+    const fallback = await port.resume(candidate.conversationId);
+    if (fallback) return { kind: "fallback-latest", conversation: fallback };
+  }
+  return { kind: "fallback-new", conversation: await port.create() };
 }
 
 export interface WorksceneWorkspaceMetadata extends WorksceneWorkspaceReference {
@@ -770,6 +818,9 @@ export const WORKSCENE_ENTRY_EXIT_COMMAND = defineProductApiCommand<
   never
 >("workscene-entry.command.exit", []);
 
+export const WORKSCENE_TASKS_QUERY = defineProductApiQuery<"workscene-task.query.pending", { conversationId: string }, readonly WorksceneTaskReference[]>("workscene-task.query.pending");
+export const WORKSCENE_TASK_STOP_COMMAND = defineProductApiCommand<"workscene-task.command.stop", { conversationId: string; target: { conversationId: string; runId: string }; requestId: string }, { accepted: true }, never>("workscene-task.command.stop", []);
+
 export const WORKSCENE_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     WORKSCENE_MANAGEMENT_LIST_QUERY,
@@ -779,15 +830,27 @@ export const WORKSCENE_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
     WORKSCENE_MANAGEMENT_DELETE_COMMAND,
     WORKSCENE_ENTRY_ENTER_COMMAND,
     WORKSCENE_ENTRY_EXIT_COMMAND,
+    WORKSCENE_TASKS_QUERY,
+    WORKSCENE_TASK_STOP_COMMAND,
   ],
   factEvents: [],
 });
 
 export function createWorksceneProductApiContribution(
   application: WorksceneApplication,
+  continuation?: Pick<WorksceneContinuationApplication, "tasks" | "stop">,
 ): ProductApiContribution {
   return defineProductApiContribution({
     operations: [
+      bindProductApiOperation(WORKSCENE_TASKS_QUERY, async (query) => {
+        if (!continuation) throw new Error("Workscene continuation API is not configured");
+        return { result: await continuation.tasks(query.conversationId), facts: [] };
+      }),
+      bindProductApiOperation(WORKSCENE_TASK_STOP_COMMAND, async (command) => {
+        if (!continuation) throw new Error("Workscene continuation API is not configured");
+        await continuation.stop(command);
+        return { result: { accepted: true as const }, facts: [] };
+      }),
       bindProductApiOperation(WORKSCENE_MANAGEMENT_LIST_QUERY, async (query) => ({
         result: await application.query(query),
         facts: [],

@@ -30,6 +30,7 @@ function makeFakes() {
     status: [] as Handler<never>[],
     activity: [] as Handler<never>[],
     intent: [] as Handler<never>[],
+    assignment: [] as Handler<never>[],
   };
   const conversation = {
     send: vi.fn(async (_text: string, _id: string, turnId: string) => ({
@@ -94,6 +95,10 @@ function makeFakes() {
       handlers.final.push(h);
       return () => {};
     },
+    onAssignmentStream: (h: Handler<never>) => {
+      handlers.assignment.push(h);
+      return () => {};
+    },
     onStatus: (h: Handler<never>) => {
       handlers.status.push(h);
       return () => {};
@@ -125,6 +130,8 @@ function makeFakes() {
     statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
   };
   const workscene = {
+    tasks: vi.fn(async (_conversationId: string) => [] as Array<{ conversationId: string; runId: string; goal: string }>),
+    stopTask: vi.fn(async (_conversationId: string, _target: { conversationId: string; runId: string }, _requestId: string) => {}),
     enter: vi.fn(async (sceneId: string) => ({
       conversationId: `ws:${sceneId}:conv-9`,
       scene: { sceneId, name: "写作场景" },
@@ -147,6 +154,7 @@ function makeFakes() {
     status: (p: unknown) => handlers.status.forEach((h) => h(p as never)),
     activity: (p: unknown) => handlers.activity.forEach((h) => h(p as never)),
     intent: (p: unknown) => handlers.intent.forEach((h) => h(p as never)),
+    assignment: (p: unknown) => handlers.assignment.forEach((h) => h(p as never)),
   };
   return { conversation, workscene, emit };
 }
@@ -247,6 +255,87 @@ function makeController(
 }
 
 describe("ConversationController", () => {
+  it.each(["reference", "sequence-gap", "late-subscribe", "replacement-stream"])("restores a contiguous final without duplicated or out-of-order text after %s", async (gap) => {
+    const f = makeFakes();
+    const complete = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedTurnComplete: complete });
+    const origin = { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } };
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: "000001", record: { type: "run", runId: "gap", runIndex: 1, worksceneContinuation: origin.worksceneContinuation, timestamp: "2026-09-16T00:00:00Z", messages: [{ role: "assistant", content: [{ type: "text", text: "甲乙丙" }] }] } }], hasMore: false } as never);
+    const frame = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "gap" }, assignmentId: "a", streamEpoch: 1, seq: 1, meta: { turnOrigin: origin }, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "甲" } } };
+    if (gap !== "late-subscribe") f.emit.assignment(frame);
+    if (gap === "reference") f.emit.assignment({ ...frame, seq: 2, payload: { kind: "agent-yield", yield: { ref: { digest: `sha256:${"1".repeat(64)}`, bytes: 3 } } } });
+    f.emit.assignment({ ...frame, ...(gap === "replacement-stream" ? { streamEpoch: 2, seq: 1 } : { seq: 3 }), payload: { kind: "agent-yield", yield: { type: "text_delta", text: "丙" } } });
+    const final = { v: 1, conversationId: "conv-1", runId: "gap", commitRevision: 1, digest: `sha256:${"0".repeat(64)}` };
+    f.emit.final(final);
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    f.emit.final(final);
+    f.emit.assignment({ ...frame, seq: 4 });
+    expect(onYield.mock.calls.map(([item]) => item.text ?? "").join("")).toBe("甲乙丙");
+    expect(complete).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+  it("stops the current delegated task after reconnect without a local waiter or any stream", async () => {
+    const f = makeFakes();
+    const task = { conversationId: "conv-1", runId: "source-run", goal: "交付报告" };
+    f.workscene.tasks.mockResolvedValue([task]);
+    const { controller } = makeController(f);
+    await controller.start();
+    await controller.reattachActiveObserver();
+    await controller.abort();
+    expect(f.workscene.stopTask).toHaveBeenCalledWith("conv-1", task, expect.stringMatching(/^stop-task:/));
+    expect(f.conversation.abort).not.toHaveBeenCalled();
+    f.workscene.tasks.mockResolvedValue([task, { ...task, runId: "unrelated" }]);
+    await expect(controller.abort()).rejects.toThrow("多项委托");
+    expect(f.workscene.stopTask).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+  it("renders automatic continuation streams once and closes them on durable final", async () => {
+    const f = makeFakes();
+    const complete = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedTurnComplete: complete });
+    const frame = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-result" }, assignmentId: "assignment-return", streamEpoch: 1, seq: 1, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "已核实报告，尚未发布。" } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } };
+    f.emit.assignment({ ...frame, ref: { ...frame.ref, conversationId: "other" } });
+    f.emit.assignment({ ...frame, meta: {} });
+    f.emit.assignment(frame);
+    f.emit.assignment(frame);
+    expect(onYield).toHaveBeenCalledTimes(1);
+    expect(onYield).toHaveBeenCalledWith(frame.payload.yield);
+    const final = { v: 1, conversationId: "conv-1", runId: "auto-result", commitRevision: 2, digest: `sha256:${"0".repeat(64)}` };
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: "000001", record: { type: "run", runId: "auto-result", runIndex: 1, timestamp: "2026-09-15T00:00:00Z", messages: [{ role: "assistant", content: [{ type: "text", text: "已核实报告，尚未发布。" }] }] } }], hasMore: false } as never);
+    f.emit.final(final);
+    f.emit.final(final);
+    f.emit.assignment({ ...frame, seq: 2 });
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1));
+    expect(onYield).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it.each(["reference-only", "partial-then-reference", "final-first", "final-only", "partial-final-late"])("loads the full durable continuation result: %s", async (order) => {
+    const f = makeFakes();
+    const complete = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedTurnComplete: complete });
+    vi.mocked(f.conversation.history).mockResolvedValue({ runs: [{ shardId: "000001", record: { type: "run", runId: "auto-ref", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" }, runIndex: 1, timestamp: "2026-09-15T00:00:00Z", messages: [{ role: "assistant", content: [{ type: "text", text: "完整的最终结果" }] }] } }], hasMore: false } as never);
+    vi.mocked(f.conversation.history).mockRejectedValueOnce(new Error("暂时断线"));
+    const final = { v: 1, conversationId: "conv-1", runId: "auto-ref", commitRevision: 1, digest: `sha256:${"0".repeat(64)}` };
+    if (order === "final-first") f.emit.final(final);
+    if (order === "partial-final-late") {
+      const partial = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-ref" }, assignmentId: "a", streamEpoch: 1, seq: 1, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "完整的" } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } };
+      f.emit.assignment(partial);
+      f.emit.final(final);
+      f.emit.assignment({ ...partial, seq: 2, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "最终结果" } } });
+      await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+      expect(onYield.mock.calls.map(([delta]) => delta.type === "text_delta" ? delta.text : "").join("")).toBe("完整的最终结果");
+      controller.dispose();
+      return;
+    }
+    if (order === "partial-then-reference") f.emit.assignment({ v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-ref" }, assignmentId: "a", streamEpoch: 1, seq: 1, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "正在核对。" } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } });
+    if (order !== "final-only") f.emit.assignment({ v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-ref" }, assignmentId: "a", streamEpoch: 1, seq: 2, payload: { kind: "agent-yield", yield: { ref: { digest: `sha256:${"0".repeat(64)}`, bytes: 20 } } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } });
+    f.emit.final(final);
+    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "完整的最终结果" }));
+    expect(complete).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
   it("selectInitialConversation:启动恢复跳过 list/resume 之间被删除的 stale 候选", async () => {
     const conversation = {
       list: vi.fn(async () => [

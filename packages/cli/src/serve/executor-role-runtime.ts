@@ -15,7 +15,9 @@ import { zhixingProfile } from "./zhixing-agent-profile.js";
 import { powerProfile } from "./workscene-agent-guidance.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
-import { parseConversationId } from "@zhixing/core/conversation";
+import { createAnchorWorksceneAssignmentToolApplication } from "./workscene-application-adapter.js";
+import { createWorkmodeEnterTool, createWorkmodeExitTool, createWorksceneListTool, createWorksceneTaskTools, WORKSCENE_PRODUCT_TOOL_IDS } from "./workmode-tools.js";
+import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
@@ -1130,7 +1132,13 @@ export class ExecutorRuntimeSubstrate {
         readGuidanceFile,
         ...(workscene ? { resolveWorkspaceRoot: async () => runtimeEnvironment.workspace.path } : {}),
       })],
-      extraTools: [...mcp.tools],
+        extraTools: [
+          ...mcp.tools,
+          ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools()),
+        ...(sessionId && isLocalConversationId(sessionId) ? [] : workscene
+          ? [createWorkmodeExitTool()]
+          : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
+      ],
       executionMcpServers: mcp.serverIds,
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
@@ -1195,6 +1203,9 @@ export class ExecutorRuntimeSubstrate {
         ...new Set([
           ...zhixingProfile().enabledTools,
           ...mcp.tools.map((tool) => tool.name),
+          WORKSCENE_PRODUCT_TOOL_IDS.enter,
+          WORKSCENE_PRODUCT_TOOL_IDS.exit,
+          WORKSCENE_PRODUCT_TOOL_IDS.list,
         ]),
       ].sort(),
       mcpServers: mcp.serverIds,

@@ -49,9 +49,10 @@ export class ObservedTurnPresenter {
       turnId: ctx.turnContext?.turnId,
     };
     const originChannel = ctx.turnContext?.turnOrigin?.channel;
+    const continuation = Boolean(ctx.turnContext?.turnOrigin?.worksceneContinuation);
     const unsubs = [
       ctx.bus.on("agent:run_start", (payload) =>
-        this.renderPrompt(identity, payload, originChannel),
+        this.renderPrompt(identity, payload, originChannel, continuation),
       ),
       ctx.bus.on("agent:run_end", () => this.scheduleFallbackFlush(identity)),
     ];
@@ -75,15 +76,16 @@ export class ObservedTurnPresenter {
     identity: ObservedTurnIdentity,
     payload: RunStartPayload,
     originChannel: string | undefined,
+    continuation = false,
   ): void {
-    const prompt = collapsePrompt(payload.prompt);
+    const prompt = continuation ? "原任务续接" : collapsePrompt(payload.prompt);
     if (prompt.length === 0) return;
     const active = this.ensureActive(identity);
     if (!active || active.promptShown) return;
 
     this.opts.flushOutput();
     this.opts.writer.ensureSegmentBreak();
-    this.opts.writer.line(this.promptLine(prompt, originChannel));
+    this.opts.writer.line(continuation ? `${layout.contentPrefix}${chalk.dim(`◇ ${prompt}`)}` : this.promptLine(prompt, originChannel));
     active.promptShown = true;
   }
 

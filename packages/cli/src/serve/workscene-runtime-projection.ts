@@ -30,6 +30,7 @@ import {
 import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
 import {
   createWorkmodeEnterTool,
+  createWorksceneTaskTools,
   createWorkmodeExitTool,
   createWorksceneChangeApproveTool,
   createWorksceneClearWorkdirCurrentTool,
@@ -119,6 +120,7 @@ function mainProductTools(
 ): ToolDefinition[] {
   return [
     createWorkmodeEnterTool(application),
+    ...createWorksceneTaskTools(),
     createWorksceneChangeApproveTool(application, workscenes),
     createWorksceneListTool(application, workscenes),
   ];
@@ -132,6 +134,7 @@ function sceneProductTools(
   const identity = { sceneId: scene.sceneId, sceneName: scene.name };
   return [
     createWorkmodeExitTool(),
+    ...createWorksceneTaskTools(),
     createWorksceneRenameCurrentTool(identity, application),
     createWorksceneSetWorkdirCurrentTool(identity, application, workscenes),
     createWorksceneClearWorkdirCurrentTool(identity, application),

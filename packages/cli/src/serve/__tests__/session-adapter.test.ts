@@ -393,7 +393,8 @@ describe("createOwnerRuntimeAdapter", () => {
         },
       }),
     });
-    const run = createOwnerRuntimeAdapter("artifacts", agent).run([um("hello")]);
+    const worksceneContinuation = { kind: "result" as const, conversationId: "ws:reports:primary", runId: "child-1" };
+    const run = createOwnerRuntimeAdapter("artifacts", agent).run([um("hello")], { turnContext: { turnOrigin: { channel: "rpc", worksceneContinuation } } });
     const next = await run.next();
 
     expect(next).toMatchObject({
@@ -413,7 +414,7 @@ describe("createOwnerRuntimeAdapter", () => {
     }
     expect(next.value.agentResult.message).toBe(terminalMessage);
     expect(next.value.agentResult.usage).toBe(terminalUsage);
-    expect(next.value.runRecord).toBe(runRecord);
+    expect(next.value.runRecord).toEqual({ ...runRecord, postTurnControl: pendingPostTurnControl, worksceneContinuation });
     expect(next.value.newMessages).not.toBe(newMessages);
     expect(next.value.newMessages[0]).toBe(assistant);
     expect(next.value.windowCompact).toBe(windowCompact);

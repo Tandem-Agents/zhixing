@@ -18,6 +18,16 @@ import type { CoreHostRpcLink } from "./core-host-connection.js";
 export class RpcWorksceneFacade {
   constructor(private readonly link: CoreHostRpcLink) {}
 
+  async tasks(conversationId: string): Promise<readonly import("@zhixing/core/workscene/application").WorksceneTaskReference[]> {
+    const client = await this.link.getClient();
+    return client.request("workscene.tasks", { conversationId });
+  }
+
+  async stopTask(conversationId: string, target: { conversationId: string; runId: string }, requestId: string): Promise<void> {
+    const client = await this.link.getClient();
+    await client.request("workscene.stopTask", { conversationId, targetConversationId: target.conversationId, runId: target.runId, requestId });
+  }
+
   /** 场景候选列表(/work 选择器数据源)。 */
   async list(): Promise<WorksceneSummary[]> {
     const client = await this.link.getClient();

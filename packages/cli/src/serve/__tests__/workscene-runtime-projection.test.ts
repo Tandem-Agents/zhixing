@@ -86,7 +86,8 @@ describe("Workscene product runtime projection", () => {
       .toMatchObject({ kind: "assignment", mode: "main" });
     expect(Object.isFrozen(withWorkspace.profile)).toBe(true);
     expect(withWorkspace.profile.instructions).toContain(ZHIXING_IDENTITY);
-    expect(withoutWorkspace.profile.instructions).toContain("调用 workmode_exit");
+    expect(withoutWorkspace.profile.instructions).toContain("单纯切换视图时使用 workmode_exit");
+    expect(withoutWorkspace.profile.instructions).toContain("受托任务的结果自动回到原对话");
     expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
       "mcp__alpha__tool",
       "schedule",
@@ -94,6 +95,8 @@ describe("Workscene product runtime projection", () => {
       "workmode_enter",
       "workscene_change_approve",
       "workscene_list",
+      "workscene_task_list",
+      "workscene_task_stop",
     ]);
     const mainSystemPrompt = buildSystemPrompt({
       profile: main.profile, tools: [...main.runtimeTools.extraTools], cwd: "/workspace",
@@ -112,6 +115,8 @@ describe("Workscene product runtime projection", () => {
       "workscene_clear_workdir_current",
       "workscene_rename_current",
       "workscene_set_workdir_current",
+      "workscene_task_list",
+      "workscene_task_stop",
     ]);
     expect(withWorkspace.workspace).toBe("/workspace");
     expect(withWorkspace.primaryRole).toBe("power");
