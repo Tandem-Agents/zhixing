@@ -47,7 +47,7 @@ import { validateInteractionDisplay } from "./interaction-display.js";
 import { validateExecutionManifest } from "./manifest.js";
 import { validateReservableResourceLease } from "./resource-governor.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
-import { validateMessages } from "./values.js";
+import { validateMessages, validateMessageInputIdentity } from "./values.js";
 import {
   validateAuthorityCapability,
   validateControlLease,
@@ -2912,11 +2912,12 @@ function assertTurnOrigin(value: unknown): void {
   assertObject(value, "Turn origin");
   assertExactKeys(
     value,
-    ["channel", "surface", "target", "triggeredBy", "worksceneContinuation"],
+    ["channel", "surface", "target", "triggeredBy", "worksceneContinuation", "messageIdentity"],
     "Turn origin",
     true,
   );
   assertIdentifier(value.channel, "Turn origin channel");
+  if (value.messageIdentity !== undefined) validateMessageInputIdentity(value.messageIdentity);
   if (value.worksceneContinuation !== undefined) {
     assertObject(value.worksceneContinuation, "Workscene continuation");
     assertExactKeys(value.worksceneContinuation, ["kind", "conversationId", "runId", "returnConversationId"], "Workscene continuation", true);

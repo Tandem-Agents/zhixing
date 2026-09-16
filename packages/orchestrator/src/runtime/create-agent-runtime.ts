@@ -1695,6 +1695,10 @@ export async function createAgentRuntime(
         const executeToolWithCapacity = options.deviceCapacity
           ? governToolExecution(baseExecuteTool, options.deviceCapacity)
           : baseExecuteTool;
+        const runToolContext = {
+          ...envelope.identity.turnContext,
+          userIntent: extractText(originalUserMessage),
+        };
         const secureExecuteTool = createSecureExecuteTool({
           pipeline: securityPipeline,
           agentIdentity: options.runtimeEnvironment.agentIdentity,
@@ -1703,10 +1707,7 @@ export async function createAgentRuntime(
           broker: confirmationBroker,
           sessionType,
           confirmationFallback: options.confirmationFallback,
-          turnContext: {
-            ...envelope.identity.turnContext,
-            userIntent: extractText(originalUserMessage),
-          },
+          turnContext: runToolContext,
           onBlocked: options.onSecurityBlocked,
           onUserDenied: options.onUserDenied,
           // per-run 事件总线 —— 启用安全审计发射（pipeline 决策事件 + 管家三态裁决事件）
@@ -1717,6 +1718,18 @@ export async function createAgentRuntime(
         const governedExecuteTool = secureExecuteTool;
 
         const gen = runAgentLoop({
+          ...(envelope.correctness.inputPort ? {
+            inputPort: {
+              receive: async (boundary) => {
+                const messages = await envelope.correctness.inputPort!.receive(boundary);
+                newMessages.push(...structuredClone(messages));
+                const additionalIntent = messages.map(extractText).filter(Boolean).join("\n\n");
+                if (additionalIntent) runToolContext.userIntent += `\n\n${additionalIntent}`;
+                return messages;
+              },
+              close: () => envelope.correctness.inputPort!.close(),
+            },
+          } : {}),
           provider: roles[primaryRole].provider,
           model: roles[primaryRole].model,
           // 主对话走 roles[primaryRole]，loop 思考解析同 role（装配期已校验兜底）。

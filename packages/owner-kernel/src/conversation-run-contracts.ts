@@ -56,6 +56,23 @@ import {
 export type Stored<T> = T | { readonly ref: ArtifactRef };
 
 export type ConversationRunJournalRecord =
+  | { readonly t: "run-input-opened"; readonly runId: string; readonly assignmentId: string }
+  | { readonly t: "run-input-closed"; readonly runId: string; readonly assignmentId: string }
+  | {
+      readonly t: "run-input-appended";
+      readonly runId: string;
+      readonly ingressKey: string;
+      readonly ingress: IngressContext;
+      readonly input: Stored<UserTurnInput>;
+      readonly position: number;
+    }
+  | {
+      readonly t: "run-input-consumed";
+      readonly runId: string;
+      readonly assignmentId: string;
+      readonly boundary: number;
+      readonly ingressKeys: readonly string[];
+    }
   | {
       readonly t: "session-lifecycle";
       readonly mutation: "clear" | "delete";
@@ -273,6 +290,10 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
     ],
     optional: ["attachments", "environment"],
   },
+  "run-input-opened": { required: ["t", "runId", "assignmentId"] },
+  "run-input-closed": { required: ["t", "runId", "assignmentId"] },
+  "run-input-appended": { required: ["t", "runId", "ingressKey", "ingress", "input", "position"] },
+  "run-input-consumed": { required: ["t", "runId", "assignmentId", "boundary", "ingressKeys"] },
   assigned: {
     required: [
       "assignmentId",
@@ -431,6 +452,27 @@ export function validateConversationRunRecord(
         );
         assertIdentifier(value.requestId, "Session control request id");
         validateSessionMutation(value.mutation);
+        break;
+      case "run-input-opened":
+      case "run-input-closed":
+        assertIdentifier(value.runId, "Input run id");
+        assertIdentifier(value.assignmentId, "Input assignment id");
+        break;
+      case "run-input-appended":
+        assertIdentifier(value.runId, "Input run id");
+        assertIdentifier(value.ingressKey, "Input ingress key");
+        assertNonNegativeSafeInteger(value.position, "Input position");
+        validateIngressContext(value.ingress as IngressContext);
+        if (!(value.ingress as IngressContext).turnOrigin?.messageIdentity) throw corruptRunJournal("Appended input requires message identity");
+        if (isStoredReference(value.input)) assertArtifactReference(value.input.ref, "Input reference");
+        else validateNonEmptyUserTurnInput(value.input);
+        break;
+      case "run-input-consumed":
+        assertIdentifier(value.runId, "Input run id");
+        assertIdentifier(value.assignmentId, "Input assignment id");
+        assertPositiveSafeInteger(value.boundary, "Input boundary");
+        if (!Array.isArray(value.ingressKeys) || new Set(value.ingressKeys).size !== value.ingressKeys.length) throw corruptRunJournal("Input consumption keys are invalid");
+        for (const key of value.ingressKeys) assertIdentifier(key, "Consumed ingress key");
         break;
       case "admitted": {
         assertIdentifier(value.ingressKey, "Admitted ingress key");

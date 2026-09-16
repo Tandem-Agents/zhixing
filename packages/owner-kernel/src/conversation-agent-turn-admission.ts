@@ -29,7 +29,7 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
                 exists: identity.exists,
               }
             : { createConversation: identity.create }),
-          connectionId: request.caller.connectionId,
+          ...(request.observe === false ? {} : { connectionId: request.caller.connectionId }),
           source: request.source ?? "interactive",
           beforeEnqueue: (managed) =>
             input.manager.admitDurableTurn({

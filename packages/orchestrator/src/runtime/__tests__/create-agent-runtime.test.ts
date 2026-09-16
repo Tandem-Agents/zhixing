@@ -325,6 +325,39 @@ function makeDecorateRunBus() {
 // ─── 契约 1: lineage="main" 标记 ───
 
 describe("createAgentRuntime · run() lineage 契约", () => {
+  it("Turn 边界输入同时更新工具决策依据，不覆盖原始任务", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "first" }, { toolCalls: [{ id: "capture-1", name: "capture", input: {} }] }, { text: "done" }]);
+    const intents: Array<string | undefined> = [];
+    const runtime = await createAgentRuntime({ extraTools: [{
+      name: "capture", description: "fixture", inputSchema: { type: "object" },
+      isReadOnly: true, isParallelSafe: true, needsPermission: false,
+      boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+      call: async (_input, context) => { intents.push(context?.userIntent); return { content: "ok" }; },
+    }] });
+    try {
+      await runKernel(runtime, { modelInput: { messages: [userMessage("原始任务")] }, identity: { turnIndex: 0 }, control: {}, observation: {},
+        correctness: { inputPort: { receive: async ({ boundary }) => boundary === 1 ? [userMessage("补充约束")] : [], close: async () => {} } } });
+      expect(intents).toEqual(["原始任务\n\n补充约束"]);
+    } finally { await runtime.dispose(); }
+  });
+  it("Turn 边界输入进入正式记录，逐条来源不丢失且不另开 Run", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "first" }, { text: "second" }]);
+    const runtime = await createAgentRuntime();
+    const incoming = { ...userMessage("follow-up"), inputIdentity: { id: "message-2", source: { kind: "conversation" as const, conversationId: "source-a" } } };
+    const close = vi.fn(async () => {});
+    try {
+      const completion = await runKernel(runtime, {
+        modelInput: { messages: [userMessage("original")] }, identity: { turnIndex: 0 }, control: {}, observation: {},
+        correctness: { inputPort: { receive: async ({ boundary }) => boundary === 1 ? [incoming] : [], close } },
+      });
+      expect(completion.artifacts.runRecord.messages).toEqual([
+        userMessage("original"), { role: "assistant", content: [{ type: "text", text: "first" }] }, incoming,
+        { role: "assistant", content: [{ type: "text", text: "second" }] },
+      ]);
+      expect(completion.terminal.usage).toMatchObject({ inputTokens: 200, outputTokens: 100 });
+      expect(close).toHaveBeenCalledOnce();
+    } finally { await runtime.dispose(); }
+  });
   it("per-run EventBus 必须标记 lineage='main'(子 agent 派生路径的前提)", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const { decorate } = makeDecorateRunBus();

@@ -245,6 +245,7 @@ export function createOwnerRuntimeAdapter(
             modelCallResourceMeter: options?.modelCallResourceMeter,
           },
           correctness: {
+            inputPort: options?.inputPort,
             toolSideEffectObserver: options?.toolSideEffectObserver,
             authorizeToolExecution: options?.authorizeToolExecution,
             assignmentMutations: options?.assignmentMutations,

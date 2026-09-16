@@ -4,6 +4,7 @@ export type {
   ImageBlock,
   ImageSource,
   Message,
+  MessageInputIdentity,
   Role,
   TextBlock,
   ThinkingBlock,

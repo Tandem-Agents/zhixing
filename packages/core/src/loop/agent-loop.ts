@@ -206,6 +206,7 @@ export async function* runAgentLoop(
     result: AgentResult,
     toolGraceMs = 0,
   ): Promise<AgentResult> => {
+    await params.inputPort?.close();
     runEndEmitted = true;
 
     let finalResult: AgentResult = result;
@@ -461,9 +462,8 @@ export async function* runAgentLoop(
         // turn 结束副作用（attention 切段 + tokens 快照 + 未来扩展）统一由 runTurnEnd
         // 编排，与工具循环路径调用同一钩子（钩子内部不感知 caller 路径）。
         //
-        // 钩子返回 messages 不消费 —— 本 run 即将 finalizeRun，下一轮 LLM call 不存在；
-        // 段切换 marker 走 segment:new_started 事件 → orchestrator accumulator → 下次
-        // run 启动时从 transcript 重建用切段后历史，跨 run 生效。
+        // 有追加输入时，用钩子返回的窗口继续下一 Turn；否则正常收尾。
+        // 段切换 marker 仍经 accumulator 留给后续 Run 的窗口重建。
         //
         // turn-end 已无 terminal 来源（segmentManager 永不返 terminal）：
         // aborted 但 abortReason 缺失会在 finalizeRun 内部从 controller 补提，让
@@ -485,6 +485,20 @@ export async function* runAgentLoop(
         });
         if (turnEnd.kind === "terminal") {
           return await finalizeRun(turnEnd.result);
+        }
+        // 纯文本也可能有下一轮输入；空读与关门必须由输入所有者原子完成。
+        const incoming = !controller.signal.aborted && state.turnCount + 1 < maxTurns
+          ? await params.inputPort?.receive({ boundary: state.turnCount + 1, closing: true }) ?? []
+          : [];
+        if (incoming.length > 0) {
+          state = {
+            messages: [...turnEnd.messages, ...incoming],
+            turnCount: state.turnCount + 1,
+            totalUsage: usage,
+            transition: { reason: "input" },
+            anchor: turnEnd.anchorInvalidated ? undefined : state.anchor,
+          };
+          continue;
         }
         // 正常 completed 路径 —— 若 abort 在钩子之后到达（race window），
         // finalizeRun 自动覆盖为 aborted，避免 abort 被静默丢失。
@@ -595,10 +609,13 @@ export async function* runAgentLoop(
         return await finalizeRun(turnEnd.result);
       }
 
+      const incoming = !controller.signal.aborted && newTurnCount < maxTurns
+        ? await params.inputPort?.receive({ boundary: newTurnCount, closing: false }) ?? []
+        : [];
       // tool 路径 state 重建 —— 保留 anchor（同 run 内 anchor 跨 turn 有效，
       // 下一次 LLM call 成功后写入新 anchor 自然覆盖）。
       state = {
-        messages: turnEnd.messages,
+        messages: [...turnEnd.messages, ...incoming],
         turnCount: newTurnCount,
         totalUsage: usage,
         transition: { reason: "tool_use" },

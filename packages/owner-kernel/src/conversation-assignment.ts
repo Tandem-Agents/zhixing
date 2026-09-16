@@ -1,4 +1,7 @@
 import { Buffer } from "node:buffer";
+import { userMessageFromTurnInput, type Message } from "@zhixing/core";
+import type { RunInputPort } from "@zhixing/core/loop";
+import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import {
@@ -700,6 +703,10 @@ interface RunProjection {
   >;
   readonly projectedLifecycleRevisions: Set<number>;
   readonly admittedByRun: Map<string, AdmittedProjection>;
+  readonly appendedInputs: Map<string, { readonly record: Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>; readonly input: UserTurnInput; readonly lsn: number }>;
+  readonly openInputAssignments: Map<string, string>;
+  readonly closedInputAssignments: Set<string>;
+  readonly inputConsumptions: Map<string, Extract<ConversationRunJournalRecord, { t: "run-input-consumed" }>>;
   readonly runByIngress: Map<string, string>;
   readonly assignedById: Map<string, AssignedProjection>;
   readonly assignmentByRun: Map<string, string>;
@@ -1832,7 +1839,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     );
   }
 
-  /** Atomically admits an input control request and creates its queued run. */
+  /** 原子接纳普通输入：追加到可接收的 Run，或创建后续排队 Run。 */
   async applyInputControl(input: {
     readonly admission: ControlAdmissionJournal;
     readonly envelope: InitialControlEnvelope;
@@ -1970,6 +1977,19 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           };
         }
         const queuedPosition = context.authorityPrefix.nextLsn;
+        const activeRunId = state.activeRunId;
+        if (ingress.turnOrigin?.messageIdentity && activeRunId &&
+            state.openInputAssignments.has(activeRunId) &&
+            state.stateByRun.get(activeRunId)?.state === "running" &&
+            invocation.kind === "agent" && !environment && attachments.length === 0) {
+          return {
+            result: { v: 1, status: "ok", body: { t: "input", runId: activeRunId, queuedPosition } },
+            authorityEntries: [runRecord(this.#conversationId, {
+              t: "run-input-appended", runId: activeRunId, ingressKey, ingress,
+              input: prepared.stored, position: queuedPosition,
+            })],
+          };
+        }
         if (worksceneTaskConflictsWithAdvancement(
           ingress.turnOrigin,
           [...state.advancementSessions.values()].find((session) => session.status === "active")?.id,
@@ -2015,6 +2035,72 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       },
     });
     return this.#delivery ? this.#delivery.coordinate(apply) : apply();
+  }
+
+  /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
+  async openRunInput(runId: string, assignmentId: string): Promise<RunInputPort> {
+    await this.#transact<void>((state) => {
+      if (state.assignmentByRun.get(runId) !== assignmentId || state.stateByRun.get(runId)?.state !== "running") {
+        throw new Error("Only the running assignment can receive input");
+      }
+      if (state.closedInputAssignments.has(assignmentId)) throw new Error("Run input is already closed");
+      if (state.openInputAssignments.get(runId) === assignmentId) return { kind: "return", value: undefined };
+      return { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-opened", runId, assignmentId })], value: undefined };
+    });
+    return {
+      receive: (boundary) => this.receiveRunInput(runId, assignmentId, boundary),
+      close: () => this.closeRunInput(runId, assignmentId),
+    };
+  }
+
+  async receiveRunInput(runId: string, assignmentId: string, input: { readonly boundary: number; readonly closing: boolean }): Promise<readonly Message[]> {
+    if (!Number.isSafeInteger(input.boundary) || input.boundary < 1) throw new TypeError("Invalid input boundary");
+    const result = await this.#transact<readonly Message[]>((state) => {
+      const previous = state.inputConsumptions.get(`${assignmentId}/${input.boundary}`);
+      const materialize = (keys: readonly string[]) => keys.map((key) => {
+        const entry = state.appendedInputs.get(key)!;
+        return { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(entry.record.ingress.turnOrigin!.messageIdentity!) };
+      });
+      if (state.assignmentByRun.get(runId) !== assignmentId) throw new Error("Stale input assignment");
+      if (previous) return { kind: "return", value: materialize(previous.ingressKeys) };
+      if (state.openInputAssignments.get(runId) !== assignmentId || state.stateByRun.get(runId)?.state !== "running") return { kind: "return", value: [] };
+      const consumed = new Set([...state.inputConsumptions.values()].filter((value) => value.assignmentId === assignmentId).flatMap((value) => [...value.ingressKeys]));
+      const keys = [...state.appendedInputs.entries()]
+        .filter(([key, value]) => value.record.runId === runId && !consumed.has(key))
+        .sort((a, b) => a[1].record.position - b[1].record.position).map(([key]) => key);
+      if (keys.length === 0) {
+        if (input.closing) return {
+          kind: "append",
+          entries: [runRecord(this.#conversationId, { t: "run-input-closed", runId, assignmentId })],
+          value: [],
+        };
+      }
+      return {
+        kind: "append",
+        entries: [runRecord(this.#conversationId, { t: "run-input-consumed", runId, assignmentId, boundary: input.boundary, ingressKeys: keys })],
+        value: materialize(keys),
+      };
+    });
+    return result.value;
+  }
+
+  async closeRunInput(runId: string, assignmentId: string): Promise<void> {
+    // 关闭事实同时终结未消费来信的本次投递；原文保留可读，但不重开运行或重置额度。
+    await this.#transact<void>((state) => state.openInputAssignments.get(runId) !== assignmentId
+      ? { kind: "return", value: undefined }
+      : { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-closed", runId, assignmentId })], value: undefined });
+  }
+
+  async messageStatus(messageId: string): Promise<ConversationMessageStatus | undefined> {
+    return this.#select((state) => projectMessageInputs(state).find((entry) => entry.status.message.inputIdentity?.id === messageId)?.status);
+  }
+
+  async messageInputsOutsideHistory(): Promise<{ readonly inputs: readonly ConversationMessageStatus[]; readonly truncated: boolean }> {
+    return this.#select((state) => {
+      const inputs = state.deleted ? [] : projectMessageInputs(state).filter(({ lsn, status }) =>
+        lsn > state.clearedThroughLsn && (status.state !== "committed" || !status.consumed));
+      return { inputs: inputs.slice(-200).map((entry) => entry.status), truncated: inputs.length > 200 };
+    });
   }
 
   async assign(
@@ -4427,6 +4513,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             value: rejected("fence-rejected", "Bundle names an unknown assignment", false),
           };
         }
+        try {
+          assertRunInputCommit(state, assigned.record.runId, assignmentId, committedRunRecord.messages);
+        } catch (error) {
+          return { kind: "return", value: rejected("fence-rejected", error instanceof Error ? error.message : "Invalid input commit", false) };
+        }
         const body = bundle.body;
         if (state.assignmentByRun.get(assigned.record.runId) !== bundle.assignmentId) {
           this.#authorizeSubmission(state, ctx, {
@@ -5798,6 +5889,33 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state.lastActiveAt = envelope.at;
         return state;
       }
+      case "run-input-opened": {
+        if (state.assignmentByRun.get(body.runId) !== body.assignmentId || state.closedInputAssignments.has(body.assignmentId) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid input opening");
+        state.openInputAssignments.set(body.runId, body.assignmentId);
+        return state;
+      }
+      case "run-input-closed": {
+        if (state.openInputAssignments.get(body.runId) !== body.assignmentId) throw corruptRunJournal("Invalid input closing");
+        state.openInputAssignments.delete(body.runId);
+        state.closedInputAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "run-input-appended": {
+        if (!state.openInputAssignments.has(body.runId) || state.runByIngress.has(body.ingressKey) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid appended input");
+        const input = validateNonEmptyUserTurnInput(await loadStored(body.input, this.#artifacts));
+        state.appendedInputs.set(body.ingressKey, { record: body, input, lsn: envelope.lsn });
+        state.runByIngress.set(body.ingressKey, body.runId);
+        return state;
+      }
+      case "run-input-consumed": {
+        const key = `${body.assignmentId}/${body.boundary}`;
+        const prior = [...state.inputConsumptions.values()].filter((value) => value.assignmentId === body.assignmentId);
+        if (state.openInputAssignments.get(body.runId) !== body.assignmentId || state.inputConsumptions.has(key) ||
+            prior.some((value) => value.boundary >= body.boundary) ||
+            body.ingressKeys.some((id) => state.appendedInputs.get(id)?.record.runId !== body.runId || prior.some((value) => value.ingressKeys.includes(id)))) throw corruptRunJournal("Invalid input consumption");
+        state.inputConsumptions.set(key, body);
+        return state;
+      }
       case "admitted": {
         if (state.deleted) {
           throw corruptRunJournal("Deleted conversation contains a later admitted run");
@@ -7081,6 +7199,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         try {
           closure = await validateConversationBundleClosure(bundle, this.#artifacts);
           validateWorksceneContinuationCommit(closure.runRecord, assigned.envelope.work);
+          assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
         } catch (error) {
           throw corruptRunJournal(
             error instanceof Error
@@ -9035,6 +9154,54 @@ export class InProcessConversationDispatcher {
   }
 }
 
+function projectMessageInputs(state: RunProjection): Array<{ readonly position: number; readonly lsn: number; readonly status: ConversationMessageStatus }> {
+  const result: Array<{ position: number; lsn: number; status: ConversationMessageStatus }> = [];
+  const delivery = (runId: string, consumed: boolean) => {
+    const runState = state.stateByRun.get(runId)!.state;
+    const assignmentId = state.assignmentByRun.get(runId);
+    const closed = assignmentId !== undefined && state.closedInputAssignments.has(assignmentId);
+    // 完全从接收方耐久的关闭／终态派生；崩溃恢复也不能把停止投递误报为待消费。
+    const disposition = consumed ? "consumed" : closed || runState === "committed" || runState === "failed" || runState === "cancelled" ? "stopped" : "pending";
+    return { runId, state: runState, consumed, disposition } as const;
+  };
+  for (const [runId, entry] of state.admittedByRun) {
+    const identity = entry.record.ingress.turnOrigin?.messageIdentity;
+    if (!identity) continue;
+    const consumed = [...state.assignedById.entries()].some(([assignmentId, assigned]) =>
+      assigned.record.runId === runId && (hasDurableStartedObservation(state, assignmentId) ||
+      state.committedByAssignment.has(assignmentId) || state.openInputAssignments.get(runId) === assignmentId ||
+      state.closedInputAssignments.has(assignmentId)));
+    result.push({ position: entry.record.queuedPosition, lsn: entry.lsn, status: {
+      ...delivery(runId, consumed),
+      message: { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(identity) },
+    } });
+  }
+  const consumed = new Set([...state.inputConsumptions.values()].flatMap((entry) => [...entry.ingressKeys]));
+  for (const [key, entry] of state.appendedInputs) {
+    result.push({ position: entry.record.position, lsn: entry.lsn, status: {
+      ...delivery(entry.record.runId, consumed.has(key)),
+      message: { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(entry.record.ingress.turnOrigin!.messageIdentity!) },
+    } });
+  }
+  return result.sort((left, right) => left.position - right.position);
+}
+
+function assertRunInputCommit(state: RunProjection, runId: string, assignmentId: string, messages: readonly Message[]): void {
+  if (state.openInputAssignments.get(runId) === assignmentId) throw new Error("Run input must close before commit");
+  const initial = state.admittedByRun.get(runId)!;
+  const initialIdentity = initial.record.ingress.turnOrigin?.messageIdentity;
+  const consumed = [...state.inputConsumptions.values()]
+    .filter((entry) => entry.assignmentId === assignmentId)
+    .sort((a, b) => a.boundary - b.boundary)
+    .flatMap((entry) => entry.ingressKeys.map((key) => state.appendedInputs.get(key)!));
+  const expected = [
+    ...(initialIdentity ? [{ ...userMessageFromTurnInput(initial.input), inputIdentity: initialIdentity }] : []),
+    ...consumed.map((entry) => ({ ...userMessageFromTurnInput(entry.input), inputIdentity: entry.record.ingress.turnOrigin!.messageIdentity! })),
+  ];
+  const actual = messages.filter((message) => message.inputIdentity !== undefined);
+  if (canonicalize(expected) !== canonicalize(actual)) throw new Error("Run record does not match admitted and consumed message identities/content");
+}
+
 function emptyProjection(conversationId: string): RunProjection {
   return {
     conversationId,
@@ -9054,6 +9221,10 @@ function emptyProjection(conversationId: string): RunProjection {
     pendingLifecycleProjections: new Map(),
     projectedLifecycleRevisions: new Set(),
     admittedByRun: new Map(),
+    appendedInputs: new Map(),
+    openInputAssignments: new Map(),
+    closedInputAssignments: new Set(),
+    inputConsumptions: new Map(),
     runByIngress: new Map(),
     assignedById: new Map(),
     assignmentByRun: new Map(),

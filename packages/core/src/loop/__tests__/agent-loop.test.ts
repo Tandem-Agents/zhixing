@@ -39,6 +39,53 @@ function filterYields(yields: AgentYield[], type: AgentYield["type"]): AgentYiel
 // ─── 测试 ───
 
 describe("Agent Loop", () => {
+  describe("Turn 边界追加输入", () => {
+    it("纯文本后接收输入并继续同一 Run，累计额度且不修改旧消息", async () => {
+      const provider = new MockLLMProvider([{ text: "first" }, { text: "second" }]);
+      const incoming = { ...userMessage("follow-up"), inputIdentity: { id: "message-2", source: { kind: "conversation" as const, conversationId: "a" } } };
+      const receive = vi.fn(async ({ boundary }: { boundary: number }) => boundary === 1 ? [incoming] : []);
+      const close = vi.fn(async () => {});
+      const { result } = await drainAgentLoop(baseParams(provider, { inputPort: { receive, close } }));
+      expect(result.reason).toBe("completed");
+      expect(result.usage).toMatchObject({ inputTokens: 200, outputTokens: 100 });
+      expect(provider.calls[0]!.messages).toEqual([userMessage("Hello")]);
+      expect(provider.calls[1]!.messages.at(-1)).toEqual(incoming);
+      expect(receive.mock.calls.map(([request]) => request)).toEqual([{ boundary: 1, closing: true }, { boundary: 2, closing: true }]);
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it("工具全部结束才接收输入，原工具结果在新输入之前", async () => {
+      let toolFinished = false;
+      const provider = new MockLLMProvider([{ toolCalls: [{ id: "call-1", name: "test", input: {} }] }, { text: "done" }]);
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        tools: [makeTool("test", async () => { toolFinished = true; return { content: "tool-result" }; })],
+        inputPort: {
+          receive: async ({ boundary }) => { expect(toolFinished).toBe(true); return boundary === 1 ? [userMessage("incoming")] : []; },
+          close: async () => {},
+        },
+      }));
+      expect(result.reason).toBe("completed");
+      const messages = provider.calls[1]!.messages;
+      expect(messages.at(-2)?.content[0]?.type).toBe("tool_result");
+      expect(messages.at(-1)).toEqual(userMessage("incoming"));
+    });
+
+    it.each(["limit", "abort"])("%s 不为来信重置或越过终止规则", async (mode) => {
+      const controller = new AbortController();
+      const provider = new MockLLMProvider([{ toolCalls: [{ id: "call-1", name: "test", input: {} }] }]);
+      const receive = vi.fn(async () => [userMessage("incoming")]);
+      const close = vi.fn(async () => {});
+      const { result } = await drainAgentLoop(baseParams(provider, {
+        maxTurns: mode === "limit" ? 1 : 10, abortSignal: controller.signal,
+        tools: [makeTool("test", async () => { if (mode === "abort") controller.abort(); return { content: "result" }; })],
+        inputPort: { receive, close },
+      }));
+      expect(result.reason).toBe(mode === "limit" ? "max_turns" : "aborted");
+      expect(receive).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledOnce();
+      expect(provider.callCount).toBe(1);
+    });
+  });
   // ──────────────────────────────────────
   // 核心流程
   // ──────────────────────────────────────

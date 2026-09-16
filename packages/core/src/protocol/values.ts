@@ -78,13 +78,35 @@ export function validateMessages(value: unknown, label = "Messages"): Message[] 
 /** Validates one exact closed Message value. */
 export function validateMessage(value: unknown, label = "Message"): Message {
   assertPlainRecord(value, label);
-  assertExactKeys(value, ["content", "role"], label);
+  assertAllowedKeys(value, ["content", "role", "inputIdentity"], label);
   if (value.role !== "user" && value.role !== "assistant") {
     throw new TypeError(`${label} role is invalid`);
   }
   assertDenseArray(value.content, `${label} content`);
   for (const block of value.content) validateContentBlock(block, `${label} content block`);
+  if (value.inputIdentity !== undefined) {
+    if (value.role !== "user" || value.content.some((block) => (block as { type?: string }).type === "tool_result")) {
+      throw new TypeError(`${label} input identity requires a user input`);
+    }
+    validateMessageInputIdentity(value.inputIdentity);
+  }
   return value as unknown as Message;
+}
+
+export function validateMessageInputIdentity(value: unknown): import("../types/messages.js").MessageInputIdentity {
+  assertPlainRecord(value, "Message input identity");
+  assertExactKeys(value, ["id", "source"], "Message input identity");
+  assertIdentifier(value.id, "Message input id");
+  assertPlainRecord(value.source, "Message input source");
+  if (value.source.kind === "user") {
+    assertExactKeys(value.source, ["kind"], "User message source");
+  } else if (value.source.kind === "conversation") {
+    assertExactKeys(value.source, ["kind", "conversationId"], "Conversation message source");
+    assertIdentifier(value.source.conversationId, "Source conversation id");
+  } else {
+    throw new TypeError("Invalid message input source");
+  }
+  return value as unknown as import("../types/messages.js").MessageInputIdentity;
 }
 
 /** Validates the exact EnvironmentRequirement shape embedded in a manifest. */

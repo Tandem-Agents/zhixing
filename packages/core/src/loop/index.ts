@@ -12,6 +12,7 @@ export {
 } from "./run-record-builder.js";
 
 export type {
+  RunInputPort,
   AgentLoopParams,
   AgentLoopDeps,
   LoopState,

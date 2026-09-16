@@ -150,6 +150,7 @@ export {
 export {
   validateEnvironmentRequirement,
   validateMessage,
+  validateMessageInputIdentity,
   validateMessages,
   validateNonEmptyUserTurnInput,
   validateUserTurnInput,

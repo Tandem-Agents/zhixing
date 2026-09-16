@@ -21,6 +21,12 @@ import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 import type { ContextBudget } from "../context/types.js";
 import type { TaskItem, TaskListState } from "./types.js";
 import { parseConversationId } from "./scope-id.js";
+export {
+  ConversationCommunicationApplicationService,
+  type ConversationMessageStatus,
+  type ConversationMessageProjectionPort,
+  type ConversationMessageExecutionRequest,
+} from "./communication-application.js";
 import type {
   ConversationPerspectivesApplication,
   ConversationPerspectivesTurnObserver,
@@ -265,6 +271,7 @@ export interface ConversationAgentTurnAdmissionPort {
     identity: ConversationAgentTurnIdentity;
     input: UserTurnInput;
     turnId: string;
+    observe?: boolean;
     source?: "interactive" | "channel";
     caller: Extract<ConversationCommandCaller, { readonly kind: "surface" }>;
     turnOrigin?: TurnOrigin;
@@ -860,6 +867,8 @@ export type ConversationDirectoryCommand =
     }>
   | Readonly<{
       kind: "admit-agent-turn";
+      /** 通信仅发送消息，不订阅或切换接收方界面。默认保留交互入口的订阅。 */
+      observe?: boolean;
       conversationId?: string;
       preallocatedConversationId?: string;
       input: UserTurnInput;
@@ -2013,6 +2022,7 @@ export class ConversationDirectoryApplicationService
         : {}),
       invocation,
       execution,
+      ...(command.kind === "admit-agent-turn" && command.observe !== undefined ? { observe: command.observe } : {}),
     });
     if (outcome.status === "not-found") {
       throw new ConversationApplicationError(

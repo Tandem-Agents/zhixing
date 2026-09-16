@@ -251,6 +251,14 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 describe("createOwnerRuntimeAdapter", () => {
+  it("passes the owner input port unchanged into the Kernel correctness boundary", async () => {
+    const inputPort = { receive: async () => [], close: async () => {} };
+    let captured: KernelRunEnvelope | undefined;
+    const runtime = createOwnerRuntimeAdapter("input-port", createMockAgentRuntime({ capture: envelope => { captured = envelope; } }));
+    const run = runtime.run([um("hello")], { inputPort });
+    while (!(await run.next()).done) { /* drain */ }
+    expect(captured?.correctness.inputPort).toBe(inputPort);
+  });
   it("forwards orchestration through the required AgentRuntime capability", async () => {
     let captured:
       | Parameters<AgentRuntime["runOrchestrationV1"]>[0]

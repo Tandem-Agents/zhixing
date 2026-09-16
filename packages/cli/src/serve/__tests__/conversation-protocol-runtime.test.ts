@@ -11,7 +11,10 @@ import { createServerConfirmationBinding, createServerConversationBinding } from
 import { buildConfirmationListMethod, buildConfirmationResolveMethod } from "../../../../server/src/rpc/methods/confirmation.js";
 import { localConversationId } from "@zhixing/core/conversation";
 import { userMessageFromTurnInput, type Message } from "@zhixing/core";
-import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import { trackMessages } from "../../../../orchestrator/src/runtime/track-messages.js";
 import { type PermissionRule } from "@zhixing/core/security";
 import {
   createSignedTrustRuleSnapshot,
@@ -320,6 +323,276 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("conversation communication unit 1: durable busy input, retry, closing race, provenance and history recovery", async () => {
+    const home = await createTempDir("conversation-input-boundary");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const conversationId = "communication-target";
+    const caller = { kind: "surface" as const, surfacePrincipal: "rpc:owner", connectionId: "communication-test" };
+    const context = { principal: { kind: "host" as const, component: "communication-test" }, requestId: "history", deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    let manager!: ConversationManager;
+    let application!: ConversationCommunicationApplicationService;
+    let userApplication!: ConversationCommunicationApplicationService;
+    let firstRunId = "";
+    let executions = 0;
+    let busyReceipt!: Awaited<ReturnType<ConversationCommunicationApplicationService["send"]>>;
+    let closingReceipt!: typeof busyReceipt;
+    let closingSent = false;
+    const outcomes: unknown[] = [];
+    const provider = new MockLLMProvider([
+      { toolCalls: [{ id: "read-1", name: "work", input: {} }] },
+      { text: "processed busy inputs" },
+      { text: "processed closing input" },
+      { text: "processed recovered input" },
+    ]);
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+        executions++;
+        const received: Message[] = [];
+        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const port = options!.inputPort!;
+        expect(port).toBeDefined();
+        const iterator = runAgentLoop({ provider, model: "mock-model", messages: [...messages],
+          tools: [{ name: "work", description: "fixture", inputSchema: { type: "object" }, isReadOnly: true, isParallelSafe: true, needsPermission: false,
+            call: async () => {
+              const request = { conversationId, operationId: "from-a", input: "请补充分析" };
+              busyReceipt = await application.send(request);
+              expect(await application.send(request)).toEqual(busyReceipt);
+              expect((await application.observe({ conversationId, messageId: busyReceipt.messageId }))?.consumed).toBe(false);
+              expect((await application.read({ conversationId })).inputsOutsideHistory.find((entry) => entry.message.inputIdentity?.id === busyReceipt.messageId)?.message.inputIdentity?.source).toEqual({ kind: "conversation", conversationId: "source-a" });
+              await expect(application.send({ ...request, input: "different" })).rejects.toThrow();
+              await userApplication.send({ conversationId, operationId: "from-user", input: "用户补充" });
+              // 丢弃可重建投影后，来信仍然存在；活动端口与新 journal 共用权威顺序。
+              protocol.releaseConversation(conversationId);
+              expect((await application.observe({ conversationId, messageId: busyReceipt.messageId }))?.runId).toBe(busyReceipt.runId);
+              return { content: "tool done", isError: false };
+            },
+          }],
+          inputPort: {
+            receive: async (boundary) => {
+              const input = await port.receive(boundary);
+              if (input.length > 0) {
+                expect(await port.receive(boundary)).toEqual(input);
+                received.push(...structuredClone(input));
+              }
+              if (boundary.closing && input.length === 0 && !closingSent) {
+                closingSent = true;
+                closingReceipt = await application.send({ conversationId, operationId: "during-close", input: "收尾时的新消息" });
+              }
+              return input;
+            },
+            close: () => port.close(),
+          },
+        });
+        while (true) {
+          const step = await iterator.next();
+          if (step.done) return { agentResult: step.value, runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, ...received], usage: step.value.usage }, newMessages: received, durationMs: 1 };
+          trackMessages(step.value, received, pending);
+          yield step.value;
+        }
+      },
+      abort: () => false, async dispose() {},
+    };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "owner-log", appended: true }),
+    });
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const directory = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => [{ conversationId, name: "目标", createdAt: "2026-01-01T00:00:00.000Z", lastActiveAt: "2026-01-01T00:00:00.000Z" }],
+        create: async () => { throw new Error("must not create"); }, rename: async () => null,
+        readHistory: async (id, request) => { const page = await protocol.sessionState.readTranscriptTail(id, context, request.before, request.limit); return { runs: [...page.records].reverse().map(record => ({ record, shardId: "owner-log" })), hasMore: !!page.next }; },
+      },
+      runtime: { read: id => ({ active: true, busy: manager.getSession(id)?.busy ?? false, pendingCount: 0, observerCount: 0 }) },
+      agentTurns: createConversationAgentTurnAdmissionPort({ manager }),
+      agentTurnIdentity: { exists: async id => id === conversationId, create: async () => { throw new Error("must not create"); }, ensure: async () => {} },
+    });
+    const execution = (request: ConversationMessageExecutionRequest) => ({
+      execute: async ({ conversationId: id, turnId }: { conversationId: string; turnId: string }) => {
+        try { outcomes.push(await projectSessionTurn({ manager, managed: manager.getSession(id)!, input: request.input, turnId, runOptions: { source: "interactive", surfacePrincipal: request.caller.surfacePrincipal, turnContext: { turnId, turnOrigin: request.turnOrigin } }, notify: () => {} })); }
+        finally { manager.setBusy(id, false); }
+      },
+      cancelPending: () => {},
+    });
+    const shared = { directory, caller, messages: {
+      inspect: (id: string, messageId: string) => protocol.inspectMessage(id, messageId),
+      inputsOutsideHistory: (id: string) => protocol.messageInputsOutsideHistory(id),
+    }, execution };
+    application = new ConversationCommunicationApplicationService({ ...shared, source: { kind: "conversation", conversationId: "source-a" } });
+    userApplication = new ConversationCommunicationApplicationService({ ...shared, source: { kind: "user" } });
+    try {
+      await expect(application.send({ conversationId: "missing", operationId: "bad", input: "no" })).rejects.toThrow("not found");
+      expect(executions).toBe(0);
+      const initial = await userApplication.send({ conversationId, operationId: "initial", input: "原任务" });
+      firstRunId = initial.runId;
+      await vi.waitFor(() => expect(outcomes).toHaveLength(2), { timeout: 20000 });
+      for (const outcome of outcomes) expectSettled(outcome as Parameters<typeof expectSettled>[0]);
+      expect(busyReceipt.runId).toBe(firstRunId);
+      expect(closingReceipt.runId).not.toBe(firstRunId);
+      expect(executions).toBe(2);
+      expect(provider.callCount).toBe(3);
+      expect(manager.getObserverConnectionIds(conversationId).has(caller.connectionId)).toBe(false);
+      expect(provider.calls[1]!.messages.slice(-3).map(m => m.content[0]?.type)).toEqual(["tool_result", "text", "text"]);
+      expect(provider.calls[1]!.messages.slice(-2).map(m => m.inputIdentity?.source.kind)).toEqual(["conversation", "user"]);
+      const history = await application.read({ conversationId });
+      expect(history.runs).toHaveLength(2);
+      expect(history.inputsOutsideHistory).toEqual([]);
+      const inputs = history.runs.flatMap(r => r.record.messages).filter(m => m.inputIdentity);
+      expect(inputs).toHaveLength(4);
+      expect(new Set(inputs.map(m => m.inputIdentity!.id)).size).toBe(4);
+      expect((await application.observe({ conversationId, messageId: busyReceipt.messageId }))).toMatchObject({ consumed: true, disposition: "consumed", state: "committed", message: { inputIdentity: { source: { kind: "conversation", conversationId: "source-a" } } } });
+      expect((await application.discover()).conversations[0]).toMatchObject({ name: "目标", summary: "processed closing input" });
+      protocol.releaseConversation(conversationId);
+      await protocol.recoverConversation(conversationId);
+      expect((await application.read({ conversationId })).runs).toEqual(history.runs);
+      expect(await application.send({ conversationId, operationId: "from-a", input: "请补充分析" })).toEqual(busyReceipt);
+      expect(executions).toBe(2);
+      const pendingIdentity = { id: "message-before-restart", source: { kind: "conversation" as const, conversationId: "source-a" } };
+      const pending = await protocol.admit({ conversationId, input: "尚未开始的来信", invocation: { kind: "agent", source: "interactive" },
+        surfacePrincipal: caller.surfacePrincipal, options: { surfacePrincipal: caller.surfacePrincipal, source: "interactive", turnContext: { turnId: pendingIdentity.id, turnOrigin: { channel: "rpc", messageIdentity: pendingIdentity } } } });
+      expect(await protocol.inspectMessage(conversationId, pendingIdentity.id)).toMatchObject({ state: "queued", consumed: false, disposition: "pending", runId: pending.runId });
+      await protocol.stopRecoveryLoop(); await manager.disposeAll();
+      const restartedAuthority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+      await restartedAuthority.resourceGovernor.snapshot();
+      let restartedManager!: ConversationManager;
+      const restarted = createProtocol({ authority: restartedAuthority, manager: () => restartedManager, interactions: new DurableConversationInteractionObserver() });
+      restartedManager = new ConversationManager({ create: async () => runtime }, undefined, {
+        durableTurnExecutor: restarted, onTurnCommitted: () => {},
+        appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "owner-log", appended: false }),
+      });
+      try {
+        await restarted.recoverConversation(conversationId);
+        await vi.waitFor(async () => {
+          await restarted.recoverConversation(conversationId);
+          expect(await restarted.inspectMessage(conversationId, pendingIdentity.id)).toMatchObject({ state: "committed", consumed: true });
+        }, { timeout: 20000, interval: 100 });
+        expect(await restarted.inspectMessage(conversationId, busyReceipt.messageId)).toMatchObject({ consumed: true, state: "committed", runId: firstRunId });
+        expect(await restarted.inspectMessage(conversationId, initial.messageId)).toMatchObject({ consumed: true, state: "committed" });
+        const recovered = await restarted.sessionState.readTranscriptTail(conversationId, context, undefined, 10);
+        expect(recovered.records.flatMap(r => r.messages).filter(m => m.inputIdentity)).toHaveLength(5);
+        expect(recovered.records.flatMap(r => r.messages).find(m => m.inputIdentity?.id === pendingIdentity.id)?.inputIdentity).toEqual(pendingIdentity);
+        expect(executions).toBe(3);
+      } finally { await restarted.stopRecoveryLoop(); await restartedManager.disposeAll(); }
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+  it.each(["tool-limit", "text-limit", "cancel", "error"] as const)("conversation communication termination: %s preserves stopped input without restarting", async (ending) => {
+    const home = await createTempDir("conversation-input-termination");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const conversationId = "communication-termination";
+    const caller = { kind: "surface" as const, surfacePrincipal: "rpc:owner", connectionId: "communication-test" };
+    const context = { principal: { kind: "host" as const, component: "communication-test" }, requestId: "history", deadlineAt: new Date(Date.now() + 120_000).toISOString() };
+    const controller = new AbortController();
+    let manager!: ConversationManager;
+    let application!: ConversationCommunicationApplicationService;
+    let receipt!: Awaited<ReturnType<ConversationCommunicationApplicationService["send"]>>;
+    let executions = 0;
+    const outcomes: unknown[] = [];
+    const send = { conversationId, operationId: "from-a", input: "请补充分析" };
+    const admitIncoming = async () => {
+      receipt = await application.send(send);
+      expect(await application.observe({ conversationId, messageId: receipt.messageId })).toMatchObject({ consumed: false, disposition: "pending" });
+    };
+    const provider = new MockLLMProvider([ending === "tool-limit"
+      ? { toolCalls: [{ id: "work-1", name: "work", input: {} }] }
+      : ending === "error" ? { error: new Error("provider unavailable") } : { text: "done" }]);
+    const chat = provider.chat.bind(provider);
+    provider.chat = async function* (request) {
+      if (ending !== "tool-limit") await admitIncoming();
+      if (ending === "cancel") await protocol.cancel({
+        conversationId, runId: receipt.runId, requestId: "cancel-current",
+        principal: { surfacePrincipal: caller.surfacePrincipal, deviceId: authority.deviceId, connectionId: caller.connectionId },
+      });
+      yield* chat(request);
+    };
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+        executions++;
+        const received: Message[] = [];
+        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const port = options!.inputPort!;
+        const iterator = runAgentLoop({ provider, model: "mock-model", maxTurns: ending.endsWith("limit") ? 1 : 3,
+          messages: [...messages], abortSignal: controller.signal,
+          tools: [{ name: "work", description: "fixture", inputSchema: { type: "object" }, isReadOnly: true, isParallelSafe: true, needsPermission: false,
+            call: async () => { await admitIncoming(); return { content: "done", isError: false }; } }],
+          inputPort: {
+            receive: async (boundary) => { const input = await port.receive(boundary); received.push(...input); return input; },
+            close: async () => {
+              await port.close();
+              expect(await application.observe({ conversationId, messageId: receipt.messageId })).toMatchObject({ consumed: false, disposition: "stopped" });
+            },
+          },
+        });
+        while (true) {
+          const step = await iterator.next();
+          if (step.done) return { agentResult: step.value, runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, ...received], usage: step.value.usage }, newMessages: received, durationMs: 1 };
+          trackMessages(step.value, received, pending);
+          yield step.value;
+        }
+      },
+      abort: reason => { const fresh = !controller.signal.aborted; controller.abort(reason); return fresh; }, async dispose() {},
+    };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "owner-log", appended: true }),
+    });
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const directory = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => [{ conversationId, name: "目标", createdAt: "2026-01-01T00:00:00.000Z", lastActiveAt: "2026-01-01T00:00:00.000Z" }],
+        create: async () => { throw new Error("must not create"); }, rename: async () => null,
+        readHistory: async (id, request) => { const page = await protocol.sessionState.readTranscriptTail(id, context, request.before, request.limit); return { runs: [...page.records].reverse().map(record => ({ record, shardId: "owner-log" })), hasMore: !!page.next }; },
+      },
+      runtime: { read: id => ({ active: true, busy: manager.getSession(id)?.busy ?? false, pendingCount: 0, observerCount: 0 }) },
+      agentTurns: createConversationAgentTurnAdmissionPort({ manager }),
+      agentTurnIdentity: { exists: async id => id === conversationId, create: async () => { throw new Error("must not create"); }, ensure: async () => {} },
+    });
+    const shared = { directory, caller, messages: {
+      inspect: (id: string, messageId: string) => protocol.inspectMessage(id, messageId),
+      inputsOutsideHistory: (id: string) => protocol.messageInputsOutsideHistory(id),
+    }, execution: (request: ConversationMessageExecutionRequest) => ({
+      execute: async ({ conversationId: id, turnId }: { conversationId: string; turnId: string }) => {
+        try { outcomes.push(await projectSessionTurn({ manager, managed: manager.getSession(id)!, input: request.input, turnId,
+          runOptions: { source: "interactive", surfacePrincipal: caller.surfacePrincipal, turnContext: { turnId, turnOrigin: request.turnOrigin } }, notify: () => {} })); }
+        finally { manager.setBusy(id, false); }
+      }, cancelPending: () => {},
+    }) };
+    application = new ConversationCommunicationApplicationService({ ...shared, source: { kind: "conversation", conversationId: "source-a" } });
+    const userApplication = new ConversationCommunicationApplicationService({ ...shared, source: { kind: "user" } });
+    try {
+      const initial = await userApplication.send({ conversationId, operationId: "initial", input: "原任务" });
+      await vi.waitFor(() => expect(outcomes).toHaveLength(1), { timeout: 20000 });
+      expectSettled(outcomes[0] as Parameters<typeof expectSettled>[0]);
+      expect(receipt.runId).toBe(initial.runId);
+      const expectedState = ending === "text-limit" ? "committed" : ending === "cancel" ? "cancelled" : "failed";
+      const before = await application.read({ conversationId });
+      const status = await application.observe({ conversationId, messageId: receipt.messageId });
+      expect(status).toMatchObject({ runId: initial.runId, state: expectedState, consumed: false, disposition: "stopped",
+        message: { content: [{ type: "text", text: send.input }], inputIdentity: { id: receipt.messageId, source: { kind: "conversation", conversationId: "source-a" } } } });
+      expect(before.inputsOutsideHistory.filter(entry => entry.message.inputIdentity?.id === receipt.messageId)).toEqual([status]);
+      expect(before.runs.flatMap(r => r.record.messages).some(m => m.inputIdentity?.id === receipt.messageId)).toBe(false);
+      expect(before.runs).toHaveLength(ending === "text-limit" ? 1 : 0);
+      protocol.releaseConversation(conversationId);
+      await protocol.recoverConversation(conversationId);
+      expect(await application.read({ conversationId })).toEqual(before);
+      expect(await application.send(send)).toEqual(receipt);
+      await protocol.recoverConversation(conversationId);
+      expect(await application.observe({ conversationId, messageId: receipt.messageId })).toEqual(status);
+      expect(executions).toBe(1);
+      expect(provider.callCount).toBe(1);
+      // 已明确清空的输入不得从历史之外的投影重新出现。
+      expect(await protocol.writeSession({ conversationId, requestId: "clear-after-stop", mutation: { kind: "window-op", op: "clear" },
+        principal: protocol.controlPrincipal({ surfacePrincipal: caller.surfacePrincipal, connectionId: caller.connectionId }), conversationExists: async () => true })).toMatchObject({ status: "accepted" });
+      protocol.releaseConversation(conversationId);
+      expect((await application.read({ conversationId })).inputsOutsideHistory).toEqual([]);
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("projects isolated support MCP confirmation to its real source across reconnect without exposing it to another observer", async () => {
     const scene = "ws:reports:primary";
     const broker = new ConfirmationBroker();

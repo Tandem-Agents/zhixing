@@ -36,6 +36,8 @@ import type { BoundaryCrossing } from "../security/types.js";
  * REPL / 一次性 CLI 命令下 turnOrigin 为 undefined（本地 TTY 走 TerminalRenderer，不需要回程地址）。
  */
 export interface TurnOrigin {
+  /** 对话应用绑定的输入来源，不由消息正文或模型指定。 */
+  messageIdentity?: import("./messages.js").MessageInputIdentity;
   /** 产品应用提供的交接来源；不由模型或接入参数指定，也不授予权限。 */
   worksceneContinuation?: {
     readonly kind: "task" | "resume" | "result";

@@ -23,7 +23,7 @@ import {
   validateInteractionDisplay,
 } from "./interaction-display.js";
 import { assertProtocolIdentifier } from "./validation.js";
-import { validateMessage } from "./values.js";
+import { validateMessage, validateMessageInputIdentity } from "./values.js";
 
 export type StreamDataFramePayload = Exclude<
   StreamFrame["payload"],
@@ -1345,10 +1345,12 @@ function validateTurnOrigin(value: NonNullable<StreamFrameMeta["turnOrigin"]>): 
       ...(value.target === undefined ? [] : ["target"]),
       ...(value.triggeredBy === undefined ? [] : ["triggeredBy"]),
       ...(value.worksceneContinuation === undefined ? [] : ["worksceneContinuation"]),
+      ...(value.messageIdentity === undefined ? [] : ["messageIdentity"]),
     ],
     "Stream turn origin",
   );
   assertProtocolIdentifier(value.channel, "Stream turn origin channel");
+  if (value.messageIdentity !== undefined) validateMessageInputIdentity(value.messageIdentity);
   if (value.worksceneContinuation !== undefined) {
     assertPlainObject(value.worksceneContinuation, "Stream continuation");
     assertExactKeys(value.worksceneContinuation, ["kind", "conversationId", "runId", ...(value.worksceneContinuation.returnConversationId === undefined ? [] : ["returnConversationId"])], "Stream continuation");

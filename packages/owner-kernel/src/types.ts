@@ -31,6 +31,7 @@ export type { TurnContext };
 
 /** SessionRuntime.run 的 per-turn 选项 */
 export interface RunTurnOptions {
+  inputPort?: import("@zhixing/core/loop").RunInputPort;
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
   /** Authenticated stable surface identity; transport connection ids are not identities. */

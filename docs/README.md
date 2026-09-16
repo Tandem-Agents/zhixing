@@ -31,6 +31,9 @@ This page is an index only. Use the root README as the user quick-start authorit
 
 ## 架构与研究 / Architecture and research
 
+- [多智能体机制梳理](research/agent-concepts-and-multi-agent-direction.md)
+- [Codex 跨会话协作能力调研](research/codex-cross-thread-collaboration.md)
+- [对话间通信：产品与架构设计](modules/conversation/collaboration.md)
 - [生命周期概念定义与规范](architecture/lifecycle-concepts.md)
 - [运行体生命周期钩子](modules/conversation/runtime-lifecycle.md)
 - [对话持久化与注意力窗口架构](modules/conversation/persistence.md)

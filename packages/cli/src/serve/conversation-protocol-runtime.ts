@@ -677,6 +677,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#sessionIdentities.delete(conversationId);
   }
 
+  /** 对话应用的只读消息投影；查询不会创建会话或启动运行。 */
+  async inspectMessage(conversationId: string, messageId: string) {
+    if (!(await this.listSessions()).includes(conversationId)) return undefined;
+    return this.#journal(conversationId).messageStatus(messageId);
+  }
+
+  async messageInputsOutsideHistory(conversationId: string) {
+    if (!(await this.listSessions()).includes(conversationId)) return { inputs: [], truncated: false };
+    return this.#journal(conversationId).messageInputsOutsideHistory();
+  }
+
   /**
    * Establishes the owner-routed conversation identity before any dependent fact.
    * The deterministic request is the sole creation identity, so response loss and
@@ -712,7 +723,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // New user input also invalidates unconsumed continuations from older runs.
     this.#markRecovery(input.conversationId);
     let state: Awaited<ReturnType<ConversationRunJournal["runState"]>> = "queued";
-    if (admission.replayed) {
+    if (admission.replayed || input.options?.turnContext?.turnOrigin?.messageIdentity) {
       try {
         state = await this.#journal(input.conversationId).runState(admission.runId);
       } catch {
@@ -1144,6 +1155,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
       executionIngress = pending.ingress;
     }
+    const executionMessages = input.messages.map((message, index) =>
+      index === input.messages.length - 1 && message.role === "user" && executionIngress.turnOrigin?.messageIdentity
+        ? { ...message, inputIdentity: structuredClone(executionIngress.turnOrigin.messageIdentity) }
+        : message);
     const attempt = await journal.nextAssignmentAttempt(runId);
     const assignmentId = conversationAssignmentId(runId, attempt);
     let channelSession: LosslessDataPlaneSession | undefined;
@@ -1219,7 +1234,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         windowInput: {
           t: "full",
           windowEpoch: authority.commitRevision + 1,
-          messages: [...input.messages],
+          messages: [...executionMessages],
         },
         policy: preparedAuthority.policy,
         environment: preparedAuthority.environment,
@@ -1380,9 +1395,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       });
       const controlHeartbeat = effect.startHeartbeat();
       let runResult: RunResult;
+      let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
       try {
-        const generator = executionRuntime.run(input.messages, {
+        inputPort = input.invocation.kind === "agent"
+          ? await journal.openRunInput(runId, assignmentId)
+          : undefined;
+        const generator = executionRuntime.run(executionMessages, {
           ...input.options,
+          inputPort,
           turnContext: { ...input.options?.turnContext, worksceneTasks: readWorksceneTaskContext(dispatch.envelope.work.controlContext) },
           onProtocolEvent: async (event, meta) => {
             await stream.append(
@@ -1498,6 +1518,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           );
         }
         throw error;
+      } finally {
+        await inputPort?.close();
       }
       await controlHeartbeat.stop();
 

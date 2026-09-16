@@ -68,7 +68,15 @@ export interface PreparedSendView {
 
 // ─── Agent Loop 参数 ───
 
+/** 在完整 Turn 边界接收正式输入；关闭与接纳由输入所有者原子协调。 */
+export interface RunInputPort {
+  /** boundary 是已完成 Turn 数；重读返回同批输入。closing 空读须同时关闭接纳。 */
+  receive(input: { readonly boundary: number; readonly closing: boolean }): Promise<readonly Message[]>;
+  close(): Promise<void>;
+}
+
 export interface AgentLoopParams {
+  inputPort?: RunInputPort;
   /** LLM Provider 实例 */
   provider: LLMProvider;
   /** 使用的模型 ID */
@@ -276,7 +284,7 @@ export type AgentResult =
 
 // ─── 继续原因 ───
 
-export type ContinueReason = "tool_use";
+export type ContinueReason = "tool_use" | "input";
 
 // ─── 消费者可见的 yield 事件 ───
 

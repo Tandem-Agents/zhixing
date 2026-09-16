@@ -21,6 +21,7 @@ import {
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   CONVERSATION_USAGE_QUERY,
   ConversationApplicationError,
+  ConversationCommunicationApplicationService,
   ConversationDirectoryApplicationService,
   ConversationTaskListToolApplicationService,
   createConversationIdentityLifecycleApplication,
@@ -219,6 +220,39 @@ function fixture(records: ConversationDirectoryRecord[] = []) {
   );
   return { application, dispatcher, history, storage };
 }
+
+describe("Conversation communication history", () => {
+  it("pages descending history without overlap and preserves single/empty pages", async () => {
+    const f = fixture();
+    f.history.mockImplementation(async (_id, request) => {
+      const remaining = [3, 2, 1].filter(index => !request.before || index < request.before.runIndex);
+      const limit = request.limit ?? 2;
+      return { runs: remaining.slice(0, limit).map(runIndex => ({ shardId: "owner-log", record: {
+        type: "run", runIndex, timestamp: "2026-01-01T00:00:00.000Z", messages: [], usage: { inputTokens: 0, outputTokens: 0 },
+      } })), hasMore: remaining.length > limit };
+    });
+    const outside = vi.fn(async () => ({ inputs: [], truncated: false }));
+    const directory = new ConversationDirectoryApplicationService({ storage: f.storage,
+      agentTurnIdentity: { exists: async () => true, create: async () => { throw new Error("must not create"); }, ensure: async () => {} },
+    });
+    const application = new ConversationCommunicationApplicationService({ directory,
+      caller: { kind: "surface", surfacePrincipal: "rpc:owner", connectionId: "test" }, source: { kind: "user" },
+      messages: { inspect: async () => undefined, inputsOutsideHistory: outside },
+      execution: () => { throw new Error("reading must not execute"); },
+    });
+    const first = await application.read({ conversationId: "target", limit: 2 });
+    expect(first.runs.map(run => run.record.runIndex)).toEqual([3, 2]);
+    expect(first.next).toEqual({ shardId: "owner-log", runIndex: 2 });
+    const last = await application.read({ conversationId: "target", limit: 2, before: first.next });
+    expect(last.runs.map(run => run.record.runIndex)).toEqual([1]);
+    expect(last.next).toBeUndefined();
+    expect(outside).toHaveBeenCalledTimes(1);
+    expect((await application.read({ conversationId: "target", limit: 1 })).next).toEqual({ shardId: "owner-log", runIndex: 3 });
+    const empty = await application.read({ conversationId: "target", limit: 2, before: { shardId: "owner-log", runIndex: 1 } });
+    expect(empty.runs).toEqual([]);
+    expect(empty.next).toBeUndefined();
+  });
+});
 
 function taskListFixture(input?: Readonly<{
   requiresStableOperationIdentity?: boolean;

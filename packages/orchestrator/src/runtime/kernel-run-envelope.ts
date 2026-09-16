@@ -42,6 +42,7 @@ export interface KernelRunEnvelope {
     readonly modelCallResourceMeter?: ModelCallResourceMeter;
   };
   readonly correctness: {
+    readonly inputPort?: import("@zhixing/core/loop").RunInputPort;
     readonly toolSideEffectObserver?: ToolSideEffectObserver;
     readonly authorizeToolExecution?: DurableToolExecutionAuthorizer;
     readonly assignmentMutations?: AssignmentMutationPort;
@@ -123,6 +124,7 @@ export function captureKernelRunEnvelope(
       modelCallResourceMeter: input.control.modelCallResourceMeter,
     }),
     correctness: Object.freeze({
+      inputPort: input.correctness.inputPort,
       toolSideEffectObserver: input.correctness.toolSideEffectObserver,
       authorizeToolExecution: input.correctness.authorizeToolExecution,
       assignmentMutations: input.correctness.assignmentMutations,

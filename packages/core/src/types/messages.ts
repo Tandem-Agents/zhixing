@@ -89,6 +89,15 @@ export type ContentBlock =
 export interface Message {
   role: Role;
   content: ContentBlock[];
+  /** 应用层的输入身份；不作为提示正文发送给模型。 */
+  inputIdentity?: MessageInputIdentity;
+}
+
+export interface MessageInputIdentity {
+  readonly id: string;
+  readonly source:
+    | { readonly kind: "user" }
+    | { readonly kind: "conversation"; readonly conversationId: string };
 }
 
 // ─── 消息构建辅助函数 ───
