@@ -319,8 +319,8 @@ describe("RpcConversationFacade · 方法域", () => {
       afterStatusRevision: 4,
     };
     fake.setResponder(() => ({
-      conversationStatus: [],
-      conversationStatusNext: [cursor],
+      notices: [],
+      next: [cursor],
     }));
     const facade = new RpcConversationFacade(fake.link);
 
@@ -330,10 +330,24 @@ describe("RpcConversationFacade · 方法域", () => {
     });
     expect(fake.requests).toEqual([
       {
-        method: "server.info",
-        params: { conversationStatusAfter: [cursor] },
+        method: "session.statusHistory",
+        params: { conversationId: cursor.conversationId, cursors: [{ runId: cursor.runId, afterStatusRevision: cursor.afterStatusRevision }] },
       },
     ]);
+  });
+
+  it("statusHistory groups owners by conversation and bounds each request", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder((_method, raw) => {
+      const params = raw as { conversationId: string; cursors: { runId: string; afterStatusRevision: number }[] };
+      return { notices: [], next: params.cursors.map(cursor => ({ conversationId: params.conversationId, ...cursor })) };
+    });
+    const cursors = Array.from({ length: 65 }, (_, index) => ({ conversationId: "a", runId: `r-${index}`, afterStatusRevision: 2 }));
+    cursors.push({ conversationId: "b", runId: "r-b", afterStatusRevision: 3 });
+    const facade = new RpcConversationFacade(fake.link);
+    expect((await facade.statusHistory(cursors)).next).toEqual(cursors);
+    expect(fake.requests.map(request => (request.params as { cursors: unknown[] }).cursors.length)).toEqual([64, 1, 1]);
+    expect(fake.requests.every(request => request.method === "session.statusHistory")).toBe(true);
   });
 
   it("rename / delete / abort / taskList / subscribe / unsubscribe 的方法名与参数", async () => {

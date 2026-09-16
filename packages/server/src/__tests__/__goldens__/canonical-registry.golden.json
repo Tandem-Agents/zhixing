@@ -183,6 +183,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.statusHistory",
+        "requiresAuth": true
+      },
+      {
         "name": "session.subscribe",
         "requiresAuth": true
       },
@@ -438,6 +442,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.statusHistory",
         "requiresAuth": true
       },
       {
@@ -699,6 +707,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.statusHistory",
+        "requiresAuth": true
+      },
+      {
         "name": "session.subscribe",
         "requiresAuth": true
       },
@@ -954,6 +966,10 @@
       },
       {
         "name": "session.send",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.statusHistory",
         "requiresAuth": true
       },
       {
@@ -1258,6 +1274,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
           "rpc:session.taskListUpdate",
@@ -1445,6 +1462,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
           "rpc:session.taskListUpdate",
@@ -1617,6 +1635,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
           "rpc:session.taskListUpdate",
@@ -1777,6 +1796,7 @@
           "rpc:session.resume",
           "rpc:session.security",
           "rpc:session.send",
+          "rpc:session.statusHistory",
           "rpc:session.subscribe",
           "rpc:session.taskList",
           "rpc:session.taskListUpdate",
@@ -3323,6 +3343,15 @@
         "category": "rpc",
         "target": {
           "rowId": "session-send"
+        }
+      },
+      {
+        "name": "session.statusHistory",
+        "requiresAuth": true,
+        "key": "rpc:session.statusHistory",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
         }
       },
       {

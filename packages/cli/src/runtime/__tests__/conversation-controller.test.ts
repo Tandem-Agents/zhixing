@@ -257,6 +257,82 @@ function makeController(
 }
 
 describe("ConversationController", () => {
+  it("all three status readers stop at unchanged durable watermarks and retain live delivery", async () => {
+    const f = makeFakes();
+    const { controller, onYield } = makeController(f);
+    let calls = 0;
+    const cursor = { conversationId: "conv-1", runId: "run-waiter", afterStatusRevision: 0 };
+    f.conversation.send.mockResolvedValueOnce({ conversationId: "conv-1", sessionId: "conv-1", turnId: "turn-waiter", runId: cursor.runId });
+    f.conversation.statusHistory.mockImplementation(async (...args: unknown[]) => {
+      if (++calls > 3) throw new Error("unexpected repeated status request");
+      return { notices: [], next: args[0] } as never;
+    });
+    try {
+      await controller.start();
+      const accepted = await controller.beginTurn("用户任务");
+      await vi.waitFor(() => expect(f.conversation.statusHistory).toHaveBeenCalledOnce());
+      f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "run-observed", message: { role: "user", content: [{ type: "text", text: "通信任务" }], inputIdentity: { id: "m", source: { kind: "conversation", conversationId: "a" } } } }] } as never);
+      await controller.reattachActiveObserver();
+      expect(f.conversation.statusHistory).toHaveBeenCalledTimes(3);
+      f.emit.status(statusNotice(cursor.runId, 1, "failed"));
+      await expect(accepted.outcome).resolves.toMatchObject({ result: { reason: "error" } });
+      f.emit.status(statusNotice("run-observed", 1, "failed"));
+      await vi.waitFor(() => expect(JSON.stringify(onYield.mock.calls)).toContain("来信处理未完成：durable failure"));
+    } finally { controller.dispose(); }
+  });
+  it.each(["failed", "cancelled", "expired"] as const)("reconnect reconciles %s communication with and without a previously observed frame", async state => {
+    const f = makeFakes(), writer = { line: vi.fn(), ensureSegmentBreak: vi.fn() };
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });
+    const { controller, onYield } = makeController(f, vi.fn(), {
+      onObservedInputs: value => presenter.onObservedInputs(value),
+      onObservedTurnDelta: value => presenter.onObservedTurnDelta(value),
+      onObservedTurnComplete: value => presenter.onObservedTurnComplete(value),
+    });
+    const identity = (id: string) => ({ id, source: { kind: "conversation", conversationId: id } });
+    const frame = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "seen", ownerEpoch: 1 }, assignmentId: "assignment", streamEpoch: 1, seq: 1,
+      meta: { turnOrigin: { channel: "rpc", messageIdentity: identity("source-seen") } }, payload: { kind: "agent-event", event: { event: "agent:run_start", payload: { prompt: "已见的任务" } } } };
+    const notices = ["seen", "offline"].map(runId => ({ ...statusNotice(runId, 3, state), reason: "offline terminal" }));
+    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: ["seen", "offline"].map(runId => ({ runId, state, consumed: true, disposition: "consumed",
+      message: { role: "user", content: [{ type: "text", text: runId === "seen" ? "已见的任务" : "离线任务" }], inputIdentity: identity(`source-${runId}`) } })) } as never);
+    f.conversation.statusHistory.mockResolvedValueOnce({ notices: [notices[0]], next: [{ conversationId: "conv-1", runId: "offline", afterStatusRevision: 1 }] } as never)
+      .mockResolvedValueOnce({ notices: [notices[1]], next: [] } as never);
+    try {
+      await controller.start();
+      f.emit.assignment(frame);
+      await controller.reattachActiveObserver();
+      await vi.waitFor(() => expect(onYield).toHaveBeenCalledTimes(2));
+      expect(f.conversation.statusHistory).toHaveBeenNthCalledWith(1, [
+        { conversationId: "conv-1", runId: "seen", afterStatusRevision: 0 },
+        { conversationId: "conv-1", runId: "offline", afterStatusRevision: 0 },
+      ]);
+      expect(writer.line).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(writer.line.mock.calls)).toContain("source-offline");
+      await controller.reattachActiveObserver();
+      for (const notice of notices) f.emit.status(notice);
+      f.emit.assignment({ ...frame, seq: 2, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "迟到输出" } } });
+      expect(f.conversation.statusHistory).toHaveBeenCalledTimes(2);
+      expect(writer.line).toHaveBeenCalledTimes(2);
+      expect(onYield).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(onYield.mock.calls)).not.toContain("迟到输出");
+    } finally { controller.dispose(); }
+  });
+
+  it("does not reconcile another conversation after switching during reconnect history read", async () => {
+    const f = makeFakes();
+    let finish!: (value: never) => void;
+    f.conversation.history.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const { controller, onYield } = makeController(f);
+    try {
+      const reconnect = controller.reattachActiveObserver();
+      await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalled());
+      controller.setActive({ conversationId: "other", name: "other", mode: { kind: "main" } });
+      finish({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "old-run", message: { inputIdentity: { source: { kind: "conversation", conversationId: "a" } } } }] } as never);
+      await reconnect;
+      expect(f.conversation.statusHistory).not.toHaveBeenCalled();
+      expect(onYield).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+
   it.each(["failed", "cancelled", "expired"] as const)("terminal before stream: %s keeps source and terminal once across retries, old revisions and late frames", async (state) => {
     const f = makeFakes(), writer = { line: vi.fn(), ensureSegmentBreak: vi.fn() };
     const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });

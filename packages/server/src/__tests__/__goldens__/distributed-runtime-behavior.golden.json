@@ -877,6 +877,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "session.statusHistory",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "session.subscribe",
       "outcome": {
         "code": -32602,

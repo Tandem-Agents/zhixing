@@ -144,9 +144,17 @@ describe("distributed runtime migration behavior golden", () => {
     const registered = new Set(descriptor.map(({ name }) => name));
     for (const retired of golden.retiredMethods) expect(registered.has(retired)).toBe(false);
     expect(golden.entryCoverage.entries.find(({ key }) => key === "rpc:mcp.pending")?.target).toEqual({ rowId: "runtime-config" });
+    expect(golden.entryCoverage.entries.find(({ key }) => key === "rpc:session.statusHistory")?.target).toEqual({ rowId: "conversation-read" });
     for (const role of Object.values(golden.entryCoverage.roleConfigurations)) {
       expect(role.entryKeys.includes("rpc:mcp.pending")).toBe(role.topology === "anchor-host");
+      expect(role.entryKeys.includes("rpc:session.statusHistory")).toBe(role.topology === "anchor-host");
     }
+  });
+
+  it("records the status history query's actual empty-request behavior", async () => {
+    const actual = (await captureRpcCatalog()).find(({ method }) => method === "session.statusHistory");
+    const golden = JSON.parse(await readFile(new URL("./__goldens__/distributed-runtime-behavior.golden.json", import.meta.url), "utf8")) as { rpc: { method: string }[] };
+    expect(actual).toEqual(golden.rpc.find(({ method }) => method === "session.statusHistory"));
   });
 });
 

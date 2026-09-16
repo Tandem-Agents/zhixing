@@ -8,6 +8,7 @@ import {
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
 import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
+import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
 import type {
   SessionConversationEntry,
@@ -22,6 +23,7 @@ import {
   RpcAppError,
   RpcErrors,
   requireRpcSurfacePrincipal,
+  parseConversationStatusRequest,
   type FirstPartyConversationRpcRouter,
 } from "@zhixing/server";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
@@ -43,6 +45,7 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.contextBudget",
   "session.delete",
   "session.history",
+  "session.statusHistory",
   "session.list",
   "session.new",
   "session.rename",
@@ -331,10 +334,28 @@ export class LocalConversationRpcRouter
       }
       case "session.subscribe": {
         const conversationId = this.#conversationId(params, method);
+        const revision = params.afterCommitRevision === undefined ? 0 : params.afterCommitRevision;
+        if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+          throw RpcErrors.invalidParams("订阅修订号必须是非负整数。");
+        }
         const exists = (await this.input.owner.listConversations()).includes(
           conversationId,
         );
-        if (exists) this.#subscribe(conversationId, connection);
+        if (exists) {
+          this.#subscribe(conversationId, connection);
+          // 先订阅再补读同一 Owner 的提交事实，覆盖断线期间完成的自动运行。
+          const history = await this.input.owner.finalHistory(conversationId, revision);
+          for (const item of history) {
+            if (connection.closed || !this.#observers.get(conversationId)?.has(connection.id)) break;
+            connection.notify("session.final", item.frame);
+            for (const notice of item.publishResults) {
+              connection.notify("session.event", createControlSessionEventEnvelope({
+                conversationId: notice.conversationId, runId: notice.runId, seq: notice.seq,
+                event: "publish:result", payload: notice,
+              }));
+            }
+          }
+        }
         return { subscribed: exists };
       }
       case "session.unsubscribe": {
@@ -344,6 +365,8 @@ export class LocalConversationRpcRouter
       }
       case "session.history":
         return this.#history(params);
+      case "session.statusHistory":
+        return this.input.owner.statusHistory(parseConversationStatusRequest(params));
       case "session.send":
         return this.#send(params, connection);
       case "session.abort": {

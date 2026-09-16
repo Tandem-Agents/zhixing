@@ -10,6 +10,8 @@ import { HandlerRegistry } from "../handlers.js";
 import { buildMcpPendingMethod } from "./mcp.js";
 import { buildAuthMethod } from "./auth.js";
 import { buildHealthMethod } from "./health.js";
+import { buildSessionStatusHistoryMethod } from "./conversation-status.js";
+export { parseConversationStatusRequest } from "./conversation-status.js";
 import {
   buildSessionSendMethod,
   buildSessionAdvancementConfirmMethod,
@@ -108,6 +110,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionAdvancementCancelMethod(),
     buildSessionListMethod(),
     buildSessionHistoryMethod(),
+    buildSessionStatusHistoryMethod(),
     buildSessionAbortMethod(),
     buildSessionResolveMethod(),
     buildSessionDeleteMethod(),

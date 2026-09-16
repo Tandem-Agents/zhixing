@@ -48,7 +48,7 @@ import type {
 } from "@zhixing/rpc";
 import type { ConversationCommunicationHistory as RunsPage } from "@zhixing/core/conversation/application";
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
-import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
+import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 
 /** 当前对话指针 + 模式视图(由全域键派生,场景显示名取自 enter 响应) */
@@ -410,6 +410,7 @@ export class ConversationController {
     this.observedConversationId = null;
     await this.subscribeActive();
     await this.reconcileDurableRuns();
+    await this.reconcileObservedRuns();
   }
 
   /** 切当前对话指针(纯 UI 态变更,无宿主副作用)。 */
@@ -1081,12 +1082,38 @@ export class ConversationController {
       while (cursors.length > 0) {
         const history = await this.opts.conversation.statusHistory(cursors);
         for (const notice of history.notices) this.consumeStatus(notice);
-        cursors = history.next.map((cursor) => ({ ...cursor }));
+        cursors = advancedStatusCursors(cursors, history.next);
       }
     }
     await Promise.all(
       [...this.durableRuns.keys()].map((runId) => this.resolveCommittedRun(runId)),
     );
+  }
+
+  /** 自动运行没有本地 waiter；重连从当前 Owner 补齐断线期间的运行身份和状态。 */
+  private async reconcileObservedRuns(): Promise<void> {
+    const conversationId = this.active.conversationId;
+    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    if (this.disposed || this.active.conversationId !== conversationId) return;
+    const runIds = new Set([...this.observedContinuations.entries()]
+      .filter(([, run]) => run.conversationId === conversationId && !run.settled)
+      .map(([runId]) => runId));
+    for (const input of page.inputsOutsideHistory ?? []) {
+      if (input.message.inputIdentity?.source.kind === "conversation" &&
+          !this.observedContinuations.get(input.runId)?.terminalInputsReconciled) runIds.add(input.runId);
+    }
+    const pending = [...runIds].filter(runId => !this.durableRuns.has(runId));
+    for (let offset = 0; offset < pending.length; offset += 64) {
+      let cursors = pending.slice(offset, offset + 64).map(runId => ({
+        conversationId, runId, afterStatusRevision: this.pendingStatuses.get(runId)?.statusRevision ?? 0,
+      }));
+      while (cursors.length > 0 && !this.disposed && this.active.conversationId === conversationId) {
+        const history = await this.opts.conversation.statusHistory(cursors);
+        if (this.disposed || this.active.conversationId !== conversationId) return;
+        for (const notice of history.notices) this.consumeStatus(notice);
+        cursors = advancedStatusCursors(cursors, history.next);
+      }
+    }
   }
 
   private async reconcileDurableRun(runId: string): Promise<void> {
@@ -1102,7 +1129,7 @@ export class ConversationController {
     while (cursors.length > 0 && this.durableRuns.get(runId) === watch) {
       const history = await this.opts.conversation.statusHistory(cursors);
       for (const notice of history.notices) this.consumeStatus(notice);
-      cursors = history.next.map((cursor) => ({ ...cursor }));
+      cursors = advancedStatusCursors(cursors, history.next);
     }
     if (this.durableRuns.get(runId) === watch) this.startFinalLookup(runId);
   }
@@ -1458,6 +1485,16 @@ function terminalResultForStatus(
     };
   }
   return undefined;
+}
+
+/** Owner 到尾页仍保留 subject 水位；只续读确有推进的游标。 */
+function advancedStatusCursors(
+  previous: readonly ConversationStatusCursor[],
+  next: readonly ConversationStatusCursor[],
+): ConversationStatusCursor[] {
+  return next.filter(cursor => previous.some(before =>
+    before.conversationId === cursor.conversationId && before.runId === cursor.runId &&
+    cursor.afterStatusRevision > before.afterStatusRevision));
 }
 
 function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V): void {

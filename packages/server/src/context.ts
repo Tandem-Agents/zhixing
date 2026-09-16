@@ -158,7 +158,7 @@ export interface ServerConfirmationBinding {
   resolve(requestId: string, decision: ConfirmationDecision): Promise<boolean>;
 }
 
-/** The exact runtime status/history demand of the server.info handler. */
+/** Runtime status/history ports for server.info and session.statusHistory. */
 export interface ServerInfoRuntimeBinding {
   readonly openFirstPartyFinality?: (input: {
     readonly lastSeen: readonly {

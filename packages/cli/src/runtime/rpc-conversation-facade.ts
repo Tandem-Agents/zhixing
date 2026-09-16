@@ -199,14 +199,28 @@ export class RpcConversationFacade {
     readonly next: readonly ConversationStatusCursor[];
   }> {
     const client = await this.link.getClient();
-    const result = await client.request<{
-      readonly conversationStatus: readonly ConversationStatusNotice[];
-      readonly conversationStatusNext: readonly ConversationStatusCursor[];
-    }>("server.info", { conversationStatusAfter: cursors });
-    return {
-      notices: result.conversationStatus,
-      next: result.conversationStatusNext,
-    };
+    const groups = new Map<string, ConversationStatusCursor[]>();
+    for (const cursor of cursors) {
+      const group = groups.get(cursor.conversationId) ?? [];
+      group.push(cursor);
+      groups.set(cursor.conversationId, group);
+    }
+    const notices: ConversationStatusNotice[] = [];
+    const next: ConversationStatusCursor[] = [];
+    for (const [conversationId, group] of groups) {
+      for (let offset = 0; offset < group.length; offset += 64) {
+        const page = await client.request<{
+          readonly notices: readonly ConversationStatusNotice[];
+          readonly next: readonly ConversationStatusCursor[];
+        }>("session.statusHistory", {
+          conversationId,
+          cursors: group.slice(offset, offset + 64).map(({ runId, afterStatusRevision }) => ({ runId, afterStatusRevision })),
+        });
+        notices.push(...page.notices);
+        next.push(...page.next);
+      }
+    }
+    return { notices, next };
   }
 
   /**

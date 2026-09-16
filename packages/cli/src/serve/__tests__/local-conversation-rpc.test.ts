@@ -15,6 +15,38 @@ const CONVERSATION_ID = localConversationId(
 );
 
 describe("LocalConversationRpcRouter", () => {
+  it("status history follows the current owner and refuses reads during takeover", async () => {
+    const owner = ownerPort();
+    const request = { method: "session.statusHistory", params: { conversationId: CONVERSATION_ID, cursors: [{ runId: "run-b", afterStatusRevision: 2 }] }, connection: fakeConnection() };
+    const remote = { dispatch: vi.fn(async () => ({ notices: [], next: [] })) };
+    const router = new LocalConversationRpcRouter({ deviceId: DEVICE_ID, owner, remoteFor: () => remote as never });
+    await router.dispatch(request);
+    expect(owner.statusHistory).toHaveBeenCalledExactlyOnceWith([{ conversationId: CONVERSATION_ID, runId: "run-b", afterStatusRevision: 2 }]);
+    vi.mocked(owner.currentAuthority).mockResolvedValue(fencedRoute(CONVERSATION_ID, "new-owner", 2).authority);
+    await router.dispatch(request);
+    expect(remote.dispatch).toHaveBeenCalledExactlyOnceWith(request.method, request.params, request.connection);
+    for (const state of ["frozen", "importing"] as const) {
+      vi.mocked(owner.currentAuthority).mockResolvedValue({ ...fencedRoute(CONVERSATION_ID, "new-owner", 2).authority, state });
+      await expect(router.dispatch(request)).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
+    }
+    expect(owner.statusHistory).toHaveBeenCalledOnce();
+    expect(remote.dispatch).toHaveBeenCalledOnce();
+  });
+  it("replays owner finals from the requested subscription revision and rejects invalid cursors", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({ deviceId: DEVICE_ID, owner: port, remoteFor: () => { throw new Error("not remote"); } });
+    const connection = fakeConnection();
+    const frame = { conversationId: CONVERSATION_ID, runId: "run-final", commitRevision: 4 };
+    vi.mocked(port.finalHistory).mockResolvedValue([{ frame, publishResults: [] }] as never);
+    await router.dispatch({ method: "session.subscribe", params: { conversationId: CONVERSATION_ID, afterCommitRevision: 3 }, connection });
+    expect(port.finalHistory).toHaveBeenCalledExactlyOnceWith(CONVERSATION_ID, 3);
+    expect(connection.notify).toHaveBeenCalledWith("session.final", frame);
+    for (const revision of [-1, 1.5, "3", null]) {
+      await expect(router.dispatch({ method: "session.subscribe", params: { conversationId: CONVERSATION_ID, afterCommitRevision: revision }, connection })).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+    expect(port.finalHistory).toHaveBeenCalledOnce();
+  });
+
   it("公开受限能力并在明确接受前拒绝全部变更入口", async () => {
     const owner = ownerPort();
     const router = new LocalConversationRpcRouter({
