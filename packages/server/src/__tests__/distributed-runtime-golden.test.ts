@@ -112,6 +112,12 @@ describe("distributed runtime migration behavior golden", () => {
     expect(Object.isFrozen(descriptor)).toBe(true);
   });
 
+  it("records the new MCP query's actual empty-request behavior", async () => {
+    const actual = (await captureRpcCatalog()).find(({ method }) => method === "mcp.pending");
+    const golden = JSON.parse(await readFile(new URL("./__goldens__/distributed-runtime-behavior.golden.json", import.meta.url), "utf8")) as { rpc: { method: string }[] };
+    expect(actual).toEqual(golden.rpc.find(({ method }) => method === "mcp.pending"));
+  });
+
   it("derives every applicable role golden from the canonical production registry", async () => {
     const golden = JSON.parse(await readFile(new URL(
       "./__goldens__/canonical-registry.golden.json",
@@ -119,6 +125,10 @@ describe("distributed runtime migration behavior golden", () => {
     ), "utf8")) as {
       roleConfigurations: Record<string, unknown>;
       retiredMethods: string[];
+      entryCoverage: {
+        entries: { key: string; target: { rowId?: string } }[];
+        roleConfigurations: Record<string, { topology: string; entryKeys: string[] }>;
+      };
     };
     const descriptor = captureBuiltinRegistryDescriptor();
     expect(golden.roleConfigurations).toEqual({
@@ -133,6 +143,10 @@ describe("distributed runtime migration behavior golden", () => {
     });
     const registered = new Set(descriptor.map(({ name }) => name));
     for (const retired of golden.retiredMethods) expect(registered.has(retired)).toBe(false);
+    expect(golden.entryCoverage.entries.find(({ key }) => key === "rpc:mcp.pending")?.target).toEqual({ rowId: "runtime-config" });
+    for (const role of Object.values(golden.entryCoverage.roleConfigurations)) {
+      expect(role.entryKeys.includes("rpc:mcp.pending")).toBe(role.topology === "anchor-host");
+    }
   });
 });
 

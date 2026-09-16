@@ -64,5 +64,5 @@
 ## 实现与核对入口
 
 - [循环实现](../../../packages/core/src/tool-loop/run.ts)、[合同类型](../../../packages/core/src/tool-loop/types.ts)、[JSON 提取](../../../packages/core/src/json.ts)、[直接测试](../../../packages/core/src/tool-loop/__tests__/run.test.ts)。核对多轮调用、真实结果回灌、final 拒绝纠正、轮数耗尽及工具错误与模型错误的区别。
-- [MCP 场景](../../../packages/cli/src/config-editor/mcp-discovery.ts)、[配置命令接线](../../../packages/cli/src/runtime/config-command.ts)。
+- [MCP 场景](../../../packages/core/src/mcp-management/discovery.ts)、[配置命令接线](../../../packages/cli/src/runtime/config-command.ts)。
 - [工作场景创建](../../../packages/cli/src/runtime/workscene-create-assist.ts)、[REPL 接线](../../../packages/cli/src/repl.ts)。场景测试另负责事实集合、确认、取消和已完成副作用的处理，不能只用循环 mock 证明业务安全。

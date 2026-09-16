@@ -8,11 +8,11 @@ import {
   mcpProgressText,
   runMcpDiscovery,
   type McpDiscoveryDeps,
-} from "../mcp-discovery.js";
+} from "@zhixing/core/mcp-management";
 import type {
   McpManagementSearchResult,
   McpManagementSourceResult,
-} from "../mcp-management-contract.js";
+} from "@zhixing/core/mcp-management";
 
 function pkg(
   name: string,

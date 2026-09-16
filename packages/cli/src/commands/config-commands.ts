@@ -93,6 +93,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
       ...editorDeps(),
       readMcpStatusWire: async () =>
         (await deps.management.serverInfo()).mcpServers ?? [],
+      readMcpPending: () => deps.management.mcpPending(deps.getConversationId()),
       llmComplete: (prompt, role, signal) =>
         deps.management.llmComplete(prompt, role, signal),
     });

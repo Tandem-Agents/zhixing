@@ -61,7 +61,7 @@ describe("REPL config command home binding", () => {
       requestHostReload: reload,
     });
     expect(calls.load).toHaveBeenCalledWith({ configPath });
-    expect(calls.write).toHaveBeenCalledWith(updated, { configPath });
+    expect(calls.write).toHaveBeenCalledWith(updated, { configPath, expected: current });
     expect(calls.store).toHaveBeenCalledWith({ homeDir: home });
     expect(calls.writeCredentials).toHaveBeenCalledWith({}, { store: { marker: "selected-store" } });
     expect(reload).toHaveBeenCalledOnce();

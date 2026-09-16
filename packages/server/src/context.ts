@@ -152,6 +152,7 @@ export interface ServerConfirmationPendingEntry {
 
 /** Confirmation RPC's finite pending-query/resolve demand. */
 export interface ServerConfirmationBinding {
+  continuationSource?(entry: ServerConfirmationPendingEntry): Promise<{ conversationId: string; surfacePrincipal: string } | undefined>;
   listPending(): readonly ServerConfirmationPendingEntry[];
   findPending(requestId: string): ServerConfirmationPendingEntry | undefined;
   resolve(requestId: string, decision: ConfirmationDecision): Promise<boolean>;

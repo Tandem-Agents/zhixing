@@ -8,11 +8,11 @@
  * 判断（搜什么、换不换词、挑哪几个）全交给 LLM；框架与本层都不替它臆造事实。
  */
 
-import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing/core/tool-loop";
+import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "../tool-loop/index.js";
 import type {
   McpManagementSearchResult,
   McpManagementSourceResult,
-} from "./mcp-management-contract.js";
+} from "./ports.js";
 
 /** 一个呈现给用户的候选 —— 真实包名 + LLM 给的一句话用途 / 选它的理由。 */
 export interface McpDiscoveryChoice {

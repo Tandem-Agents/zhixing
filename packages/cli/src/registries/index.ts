@@ -26,4 +26,4 @@ export {
   applyMcpSecretFields,
   type McpPreset,
   type McpSecretFieldSpec,
-} from "./mcp-presets.js";
+} from "@zhixing/core/mcp-management";

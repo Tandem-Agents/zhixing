@@ -17,10 +17,11 @@ import type {
   SectionEntry,
   WorkingState,
 } from "../types.js";
-import type { McpManagementServerStatus } from "../mcp-management-contract.js";
+import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
 import { isMcpServerEnabled, listMcpServerIds } from "../state.js";
-import { presetToCandidate } from "../mcp-setup.js";
+import { presetToCandidate } from "@zhixing/core/mcp-management";
 import { MCP_PRESETS } from "../../registries/index.js";
+import { canonicalize } from "@zhixing/core/protocol";
 
 export const mcpSection: Section = {
   id: "mcp",
@@ -38,7 +39,14 @@ export const mcpSection: Section = {
     );
     // 未接入的预设列为"添加 X"入口——已接入的不重复列（按 server id 判定）
     const installed = new Set(ids);
-    const additions = MCP_PRESETS.filter((p) => !installed.has(p.id)).map(
+    const pending = (runtime?.mcpPending ?? []).filter(({ candidate }) => !installed.has(candidate.serverId) || canonicalize(state.config.mcp?.servers?.[candidate.serverId]) === canonicalize(candidate.entry));
+    const pendingIds = new Set(pending.map(({ candidate }) => candidate.serverId));
+    const requests: SectionEntry[] = pending.map(({ candidate, goal, status, deviceId }) => ({
+      label: `继续接入 ${candidate.serverId}`,
+      state: { kind: "disabled", statusText: status === "needs-credentials" ? "等待安全录入凭据" : "原任务待接入" },
+      enterTarget: { kind: "mcp-add", candidate, description: `原任务：${goal}${deviceId ? `；执行设备：${deviceId}` : ""}`, inputs: {}, fieldIndex: 0 },
+    }));
+    const additions = MCP_PRESETS.filter((p) => !installed.has(p.id) && !pendingIds.has(p.id)).map(
       (preset): SectionEntry => ({
         label: `添加 ${preset.label}`,
         state: { kind: "disabled", statusText: "未接入" },
@@ -60,7 +68,7 @@ export const mcpSection: Section = {
       state: { kind: "disabled", statusText: "自定义 / 输入标识" },
       enterTarget: { kind: "mcp-add-input" },
     };
-    return [...servers, ...additions, custom];
+    return [...requests, ...servers, ...additions, custom];
   },
 };
 

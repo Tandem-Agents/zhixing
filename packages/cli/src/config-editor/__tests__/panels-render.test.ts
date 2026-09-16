@@ -32,7 +32,7 @@ import {
   renderMcpAddInputPanel,
   renderMcpChoicesPanel,
 } from "../panels/mcp.js";
-import { presetToCandidate, type McpSetupCandidate } from "../mcp-setup.js";
+import { presetToCandidate, type McpSetupCandidate } from "@zhixing/core/mcp-management";
 import { findMcpPreset } from "../../registries/index.js";
 import { renderLoadingFrame } from "../loading.js";
 import {
@@ -644,7 +644,7 @@ describe("mcp 面板渲染冒烟", () => {
     expect(out).toContain("无需密钥");
   });
 
-  it("mcp-add panel · 预设来源不显示'将运行'命令（curated 可信）", () => {
+  it("mcp-add panel · 预设来源也显示实际命令，不把来源标签当授权", () => {
     const candidate: McpSetupCandidate = {
       serverId: "x",
       entry: { type: "stdio", command: "npx", args: ["y"] },
@@ -658,7 +658,7 @@ describe("mcp 面板渲染冒烟", () => {
         renderer,
       );
     });
-    expect(out).not.toContain("将在本机运行");
+    expect(out).toContain("将在本机运行");
   });
 
   it("mcp-add-input panel · 提示输入标识 + 错误回显（标识明文不 mask）", () => {

@@ -6249,12 +6249,14 @@ test("MCP runtime consumers use finite demand-owned ports behind one Host adapte
 
 test("MCP management consumes finite status, probe and discovery contracts behind one Host adapter", async () => {
   const paths = [
-    "packages/cli/src/config-editor/mcp-management-contract.ts",
+    "packages/core/src/mcp-management/ports.ts",
+    "packages/core/src/mcp-management/application.ts",
+    "packages/cli/src/serve/mcp-tools.ts",
     "packages/cli/src/runtime/mcp-management-adapter.ts",
     "packages/cli/src/runtime/mcp-config.ts",
     "packages/cli/src/runtime/mcp-runtime-adapter.ts",
-    "packages/cli/src/config-editor/mcp-setup.ts",
-    "packages/cli/src/config-editor/mcp-discovery.ts",
+    "packages/core/src/mcp-management/setup.ts",
+    "packages/core/src/mcp-management/discovery.ts",
     "packages/cli/src/config-editor/types.ts",
     "packages/cli/src/config-editor/panels/mcp.ts",
     "packages/cli/src/config-editor/sections/mcp.ts",
@@ -6272,7 +6274,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   assert.deepEqual(inspectMcpManagementBoundary(records), []);
   assert.match(
     inspectMcpManagementBoundary(mutate(
-      "packages/cli/src/config-editor/mcp-management-contract.ts",
+      "packages/core/src/mcp-management/ports.ts",
       (text) => `${text}\nexport interface Leak { spec: McpServerSpec }`,
     )).join("\n"),
     /not finite or leaks infrastructure types/,
@@ -6286,7 +6288,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   );
   assert.match(
     inspectMcpManagementBoundary(mutate(
-      "packages/cli/src/config-editor/mcp-setup.ts",
+      "packages/core/src/mcp-management/setup.ts",
       (text) => text.replace("probe.probe({", "probeServer(toServerSpec("),
     )).join("\n"),
     /regained concrete MCP ownership|bypasses its finite adapter/,

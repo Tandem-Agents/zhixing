@@ -9,7 +9,7 @@ type AgentRuntime = Parameters<typeof createOwnerRuntimeAdapter>[1];
 export interface ExecutorRoleOptions {
   readonly createAgentRuntime: (
     sessionId: string,
-    environment?: { readonly workspaceRoot: string | null },
+    environment?: Parameters<RuntimeFactory["create"]>[1],
   ) => Promise<AgentRuntime>;
 }
 
@@ -17,11 +17,11 @@ export interface ExecutorRoleOptions {
 export interface ExecutorRole {
   createSessionRuntime(
     sessionId: string,
-    environment?: { readonly workspaceRoot: string | null },
+    environment?: Parameters<RuntimeFactory["create"]>[1],
   ): Promise<SessionRuntime>;
   createAssignmentRuntime(
     sessionId: string,
-    environment?: { readonly workspaceRoot: string | null },
+    environment?: Parameters<RuntimeFactory["create"]>[1],
   ): Promise<SessionRuntime>;
 }
 

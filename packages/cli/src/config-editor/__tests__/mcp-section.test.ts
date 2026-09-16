@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   McpManagementProbePort,
   McpManagementServerStatus,
-} from "../mcp-management-contract.js";
+} from "@zhixing/core/mcp-management";
 import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
 import {
@@ -20,7 +20,7 @@ import {
   handleMcpChoicesPanelKey,
   handleMcpServerPanelKey,
 } from "../panels/mcp.js";
-import { presetToCandidate, type McpSetupCandidate } from "../mcp-setup.js";
+import { presetToCandidate, type McpSetupCandidate } from "@zhixing/core/mcp-management";
 import { findMcpPreset } from "../../registries/index.js";
 import type {
   ConfigEditorContext,
@@ -37,6 +37,15 @@ function runtimeOf(statuses: McpManagementServerStatus[]): ConfigEditorRuntime {
 }
 
 describe("mcpSection.entries", () => {
+  it("prefills pending task candidates without overriding a changed user configuration", () => {
+    const candidate: McpSetupCandidate = { serverId: "demo", source: "inferred", entry: { command: "node" }, secretFields: [{ key: "TOKEN", label: "令牌", hint: "安全输入", example: "" }] };
+    const runtime: ConfigEditorRuntime = { mcpPending: [{ candidate, goal: "原任务", deviceId: "anchor-device", status: "needs-credentials" }] };
+    const entry = mcpSection.entries(stateWith({}), runtime)[0]!;
+    expect(entry.enterTarget).toMatchObject({ kind: "mcp-add", candidate, inputs: {} });
+    expect(entry.state.statusText).toBe("等待安全录入凭据");
+    expect(entry.enterTarget).toMatchObject({ description: "原任务：原任务；执行设备：anchor-device" });
+    expect(mcpSection.entries(stateWith({ demo: { command: "changed" } }), runtime).some((item) => item.label === "继续接入 demo")).toBe(false);
+  });
   // 过滤出"已接入 server"条目（排除"添加预设"入口）
   const serverEntries = (entries: ReturnType<typeof mcpSection.entries>) =>
     entries.filter((e) => e.enterTarget?.kind === "mcp-server");

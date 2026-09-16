@@ -264,21 +264,33 @@ describe("confirmation.list", () => {
     await expect(p).resolves.toEqual({ kind: "allow-once" });
   });
 
-  it("hub 未配置 → INTERNAL_ERROR", () => {
+  it("hub 未配置 → INTERNAL_ERROR", async () => {
     const server = {
       conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
     const method = buildConfirmationListMethod();
-    // handler 同步抛错（非 async）
-    expect(() => method.handler({}, ctx)).toThrow(RpcAppError);
+    await expect(method.handler({}, ctx)).rejects.toThrow(RpcAppError);
   });
 });
 
 // ─── confirmation.resolve ───
 
 describe("confirmation.resolve", () => {
+  it("does not expose or accept a stale continuation even from its former owner", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker(); broker.onRequest(() => {});
+    hub.attach("support", broker, { conversationId: "support" });
+    const pending = broker.requestConfirmation({ ...makeRequest("stale"), turnOrigin: { channel: "rpc", triggeredBy: "rpc:owner", worksceneContinuation: { kind: "task", conversationId: "scene", runId: "source", returnConversationId: "scene" } } });
+    const source = vi.fn(async () => undefined);
+    const server = { confirmation: { ...makeConfirmationBinding(hub), continuationSource: source }, conversation: makeFakeConversations(new Map([["scene", new Set(["1"])], ["support", new Set(["1"])]])) } as unknown as ServerContext;
+    const context = makeContext(server, makeConnection(1, { surfacePrincipal: "rpc:owner" }));
+    expect(await buildConfirmationListMethod().handler({}, context)).toEqual({ items: [] });
+    await expect(buildConfirmationResolveMethod().handler({ requestId: "stale", decision: { kind: "allow-once" } }, context)).rejects.toThrow();
+    expect(hub.findEntry("stale")).toBeDefined();
+    broker.cancelAll("session-end"); await pending;
+  });
   it("caller 是发起接入面(origin triggeredBy 匹配)→ 成功 resolve 返回 { ok: true }", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();

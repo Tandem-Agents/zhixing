@@ -2,8 +2,8 @@
  * MCP 接入引导编排 —— 把"用户选预设 / 输入标识"变成"可验证、可写盘的接入候选"。
  *
  * 两条路径殊途同归到 McpSetupCandidate：
- *   - 预设命中：直接用内置预设（registries/mcp-presets）
- *   - 非预设：调注入的 light LLM 从包名 / URL / 命令推断启动方式
+ *   - 预设命中：直接用产品预设
+ *   - 非预设：查真实来源，由注入的模型提取启动方式
  *
  * 纯编排：discovery 探测（probe）与 LLM 都是注入依赖，便于单测、可取消（透传 AbortSignal）。
  * 验证用**带密钥**的有限 draft；Host adapter 再按 transport 组装具体 spec，既证启动方式也
@@ -14,23 +14,23 @@ import type {
   McpManagementProbePort,
   McpManagementSearchResult,
   McpManagementSourceResult,
-} from "./mcp-management-contract.js";
-import type { McpServerConfigEntry } from "@zhixing/providers";
+} from "./ports.js";
+import type { McpServerConfigEntry } from "./types.js";
 import {
   applyMcpSecretFields,
   findMcpPreset,
   MCP_PRESETS,
   type McpPreset,
   type McpSecretFieldSpec,
-} from "../registries/index.js";
+} from "./presets.js";
 import {
   mcpProgressText,
   runMcpDiscovery,
   type McpDiscoveryChoice,
-} from "./mcp-discovery.js";
+} from "./discovery.js";
 
 /**
- * 接入引导所需的 LLM 能力 —— 由 config-editor ctx 注入（light 模型），与工具调用上下文无关。
+ * 接入引导所需的 LLM 能力，由宿主按当前模型选择注入，与工具调用上下文无关。
  * 收 AbortSignal 以支持面板 loading 态的取消（注入方把它透传给底层 LLM 调用）。
  */
 export type McpSetupLlm = (prompt: string, signal?: AbortSignal) => Promise<string>;

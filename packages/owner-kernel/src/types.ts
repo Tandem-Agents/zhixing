@@ -286,7 +286,9 @@ export interface RuntimeFactory {
     sessionId: string,
     environment?: {
       /** Executor-local path obtained only after the frozen binding is revalidated. */
-      readonly workspaceRoot: string | null;
+        readonly workspaceRoot: string | null;
+        /** Select the already-frozen capability set when newer additive capabilities exist. */
+        readonly executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile;
     },
   ): Promise<SessionRuntime>;
 }

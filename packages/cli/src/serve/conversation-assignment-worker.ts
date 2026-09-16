@@ -295,7 +295,11 @@ export class ConversationAssignmentWorker {
       );
       runtime = await this.options.runtimeFactory.create(
         envelope.work.conversationId,
-        { workspaceRoot: environment.workspaceRoot },
+        { workspaceRoot: environment.workspaceRoot, executionProfile: {
+          tools: envelope.manifest.tools,
+          mcpServers: envelope.manifest.mcpServers,
+          providerIds: [],
+        } },
       );
       const runtimeProfile = runtime.executionProfile?.();
       if (

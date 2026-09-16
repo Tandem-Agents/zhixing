@@ -17,6 +17,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { acquireFileLock } from "@zhixing/core/persistence";
+import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import {
   parse as parseJsonc,
   printParseErrorCode,
@@ -34,6 +36,7 @@ import {
   type RoleRecommendation,
 } from "./role-recommendations.js";
 import type { ZhixingConfig } from "./types.js";
+import { isValidMcpServerId } from "@zhixing/core/mcp-management";
 
 export {
   getGlobalConfigDir,
@@ -115,11 +118,68 @@ export async function writeConfig(
     configPath?: string;
     homeDir?: string;
     env?: Record<string, string | undefined>;
+    expected?: ZhixingConfig;
   } = {},
 ): Promise<void> {
   const filePath = options.configPath ?? (options.homeDir
     ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
     : getGlobalConfigPath(options.env ?? process.env));
+
+  const release = await acquireFileLock(`${filePath}.write.lock`, { staleMs: 30_000, waitMs: 5_000, resourceName: "Configuration" });
+  try {
+    if (options.expected && canonicalize(loadConfig({ configPath: filePath, noAutoCreate: true })) !== canonicalize(options.expected))
+      throw new Error("配置在编辑期间已变更，未覆盖；请重新打开配置面板");
+    await writeConfigUnlocked(config, filePath);
+  } finally { await release(); }
+}
+
+/** Add-only compare-and-set: an autonomous request cannot replace user configuration. */
+export function mcpConfigurationRevision(options: { configPath?: string } = {}): string {
+  const configPath = options.configPath ?? getGlobalConfigPath();
+  // Atomic replacement changes file identity even when values return to their old state.
+  // This prevents a delayed proposal from reinstalling a service the user has removed.
+  try {
+    const stat = fs.statSync(configPath, { bigint: true });
+    return protocolDigest("McpConfiguration", 1, {
+      value: loadConfig({ configPath, noAutoCreate: true }).mcp ?? {},
+      file: [stat.ino, stat.mtimeNs, stat.ctimeNs].map(String),
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return protocolDigest("McpConfiguration", 1, { missing: true });
+  }
+}
+
+export async function addMcpServerConfiguration(
+  serverId: string,
+  entry: import("./types.js").McpServerConfigEntry,
+  options: { configPath: string; expectedRevision?: string },
+): Promise<"added" | "unchanged" | "conflict"> {
+  if (!isValidMcpServerId(serverId)) throw new TypeError("无效的 MCP 服务标识");
+  const release = await acquireFileLock(`${options.configPath}.write.lock`, { staleMs: 30_000, waitMs: 5_000, resourceName: "Configuration" });
+  try {
+    const current = loadConfig({ configPath: options.configPath, noAutoCreate: true });
+    const existing = current.mcp?.servers?.[serverId];
+    if (existing) return canonicalize(existing) === canonicalize(entry) ? "unchanged" : "conflict";
+    if (options.expectedRevision && mcpConfigurationRevision(options) !== options.expectedRevision) return "conflict";
+    await writeConfigUnlocked({ ...current, mcp: { ...current.mcp, servers: { ...current.mcp?.servers, [serverId]: entry } } }, options.configPath);
+    return "added";
+  } finally { await release(); }
+}
+
+/** The local management command owns only MCP entries; other config domains are preserved. */
+export async function editMcpServerConfiguration(expected: Record<string, import("./types.js").McpServerConfigEntry>, servers: Record<string, import("./types.js").McpServerConfigEntry>, options: { configPath: string; saveCredentials(): Promise<void> }): Promise<void> {
+  const release = await acquireFileLock(`${options.configPath}.write.lock`, { staleMs: 30_000, waitMs: 5_000, resourceName: "Configuration" });
+  try {
+    const current = loadConfig({ configPath: options.configPath });
+    if (canonicalize(current.mcp?.servers ?? {}) !== canonicalize(expected)) throw new Error("MCP 配置在编辑期间已变更，未覆盖；请重新打开面板");
+    await options.saveCredentials();
+    try { await writeConfigUnlocked({ ...current, mcp: { servers } }, options.configPath); }
+    catch { throw new Error("MCP 凭据已保存，配置提交未确认；尚未启用新配置，请重新核对"); }
+  } finally { await release(); }
+}
+
+async function writeConfigUnlocked(config: ZhixingConfig, filePath: string): Promise<void> {
 
   let current: Partial<ZhixingConfig> = {};
   if (fs.existsSync(filePath)) {

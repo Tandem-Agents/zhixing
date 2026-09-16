@@ -1,9 +1,9 @@
 /**
  * MCP management demand contract.
  *
- * The config editor owns only the finite values it presents and the operations it needs. Concrete
- * MCP SDK/server specifications, network clients and transport lifecycle stay behind the CLI Host
- * infrastructure adapter.
+ * Product-owned finite inputs and outcomes shared by user and model bindings.
+ * MCP SDK specifications, network clients, secret storage and transport lifecycle
+ * remain behind infrastructure ports.
  */
 
 export type McpManagementTransport = "stdio" | "http";

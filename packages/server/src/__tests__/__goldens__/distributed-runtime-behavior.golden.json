@@ -435,6 +435,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "mcp.pending",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "schedule.abortRun",
       "outcome": {
         "code": -32602,

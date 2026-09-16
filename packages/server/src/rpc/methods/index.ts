@@ -7,6 +7,7 @@
  */
 
 import { HandlerRegistry } from "../handlers.js";
+import { buildMcpPendingMethod } from "./mcp.js";
 import { buildAuthMethod } from "./auth.js";
 import { buildHealthMethod } from "./health.js";
 import {
@@ -98,6 +99,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
   registry.registerAll([
     buildAuthMethod(),
     buildHealthMethod(),
+    buildMcpPendingMethod(),
     // session.*
     buildSessionSendMethod(),
     buildSessionAdvancementConfirmMethod(),
@@ -185,6 +187,7 @@ export function captureBuiltinRegistryDescriptor(): readonly {
 export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "auth",
   "health",
+  "mcp.pending",
   "server.shutdown",
   "server.uninstall.preflight",
   "server.uninstall.begin",

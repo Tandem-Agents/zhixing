@@ -9,6 +9,10 @@
  */
 
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
+import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
+import { createMcpManagementTools } from "./mcp-tools.js";
+import { McpManagementApplication, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET, createMcpManagementProductApiContribution } from "@zhixing/core/mcp-management";
 import { resolveAgentIdentity } from "@zhixing/core/identity";
 import { loadLayeredGuidance } from "@zhixing/core/context";
 import { type SchedulerEventMap } from "@zhixing/core/scheduler";
@@ -111,7 +115,7 @@ import {
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
-import { loadCredentials, resolveModelCapability } from "@zhixing/providers";
+import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath } from "@zhixing/providers";
 import chalk from "chalk";
 import { configureLlmChunkDump } from "../output/llm-chunk-dump.js";
 import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
@@ -212,6 +216,7 @@ import {
   createWorksceneConversationRuntimeFactory,
   createAnchorRuntimeCapabilityCatalog,
   createAnchorRuntimeProjectionAssembly,
+  projectConversationCapabilitiesForDevice,
 } from "./workscene-runtime-projection.js";
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
@@ -674,6 +679,12 @@ async function runServerProcess(
     mcpRuntime.lifecycle.close(),
   );
   await mcpRuntime.lifecycle.connect();
+  const mcpManagement = createMcpManagementAdapter({ proxy: mcpConfiguration.network?.proxy, readStatusWire: async () => mcpRuntime.status.snapshot() });
+  // Match the explicit home-bound startup input; do not re-resolve process environment here.
+  const mcpConfigPath = getGlobalConfigPath({}, zhixingHome);
+  const mcpConnection = createMcpConnectionAdapter({ configPath: mcpConfigPath, deviceId: bootstrap.mesh.deviceKey.deviceId, credentialGeneration: bootstrap.credentialGeneration, credentials: mcpCredentials, configuredServers: mcpConfiguration.mcp?.servers ?? {}, secretStore: bootstrap.secretStore, runtime: mcpRuntime });
+  const mcpApplication = new McpManagementApplication({ discovery: mcpManagement, connection: mcpConnection });
+  const mcpProductTools = createMcpManagementTools(mcpApplication, { deviceId: bootstrap.mesh.deviceKey.deviceId, revision: () => mcpConfigurationRevision({ configPath: mcpConfigPath }) });
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
@@ -684,6 +695,7 @@ async function runServerProcess(
     createAnchorConversationTaskListToolApplication(),
   );
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
+    mcpProductTools,
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
     scheduler: schedulerFacade,
@@ -714,6 +726,7 @@ async function runServerProcess(
       executableVersion: ZHIXING_CLI_VERSION,
     },
     executorReadiness,
+    projectConversationCapabilities: projectConversationCapabilitiesForDevice,
     enableLocalExecutor: bootstrap.mesh.roles.includes("executor"),
     storageMaintenance: deviceCapacity.storage,
     deviceCapacity: deviceCapacity.arbiter,
@@ -728,6 +741,7 @@ async function runServerProcess(
     remoteWorkspaceProbe,
   });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
+    mcpProductTools,
     agentIdentity: resolveAgentIdentity(kernelEnvironmentConfiguration.agent),
     capabilities: anchorRuntimeCapabilities,
     workscenes: worksceneAuthority.tools,
@@ -912,6 +926,7 @@ async function runServerProcess(
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
   const conversationServices = await createConversationServices({
+    mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,
     meshBootstrap: bootstrap.mesh,
     meshConnections,
@@ -2862,6 +2877,7 @@ async function runServerProcess(
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
         ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
+        ...MCP_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...(advancementProductApi
           ? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -2909,6 +2925,8 @@ async function runServerProcess(
         worksceneApplication,
         conversationServices.worksceneContinuation,
       ),
+      createMcpManagementProductApiContribution((conversationId) =>
+        conversationServices.worksceneContinuation.pendingMcpConnections(conversationId, bootstrap.mesh.deviceKey.deviceId)),
       ...(advancementProductApi ? [advancementProductApi] : []),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
@@ -2968,7 +2986,8 @@ async function runServerProcess(
     })(),
     channelStatuses: boundChannelStatuses,
     channelHttpRoutes,
-    confirmation: createServerConfirmationBinding(confirmationHub),
+    confirmation: createServerConfirmationBinding(confirmationHub, async (entry) =>
+      entry.conversationId ? conversationServices.worksceneContinuation.interactionSource(entry.conversationId, entry.request.turnOrigin) : undefined),
     serverInfoRuntime: {
       openFirstPartyFinality: async (input) => {
         const factory = firstPartyFinality;
@@ -3105,6 +3124,9 @@ async function runServerProcess(
           confirmationHub,
           runner: openingRunner,
           lifecycleContributions,
+          continuationSource: async (entry) => entry.conversationId
+            ? conversationServices.worksceneContinuation.interactionSource(entry.conversationId, entry.request.turnOrigin)
+            : undefined,
         });
       }
       // Recovery may emit events, run accepted work, or request Channel reopen.

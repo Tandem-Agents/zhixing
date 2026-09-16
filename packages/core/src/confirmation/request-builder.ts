@@ -25,6 +25,7 @@ import type {
   DisplayBody,
 } from "./types.js";
 import { DEFAULT_AGENT_DISPLAY_NAME, type AgentIdentity } from "../identity/index.js";
+import { validateMcpCandidate } from "../mcp-management/application.js";
 import {
   suggestTrustAdministrationPatterns,
   type TrustAdministrationSuggestedPattern as SuggestedPattern,
@@ -82,6 +83,13 @@ export function buildDisplayBody(
   displayContext?: ConfirmationDisplayContext,
 ): DisplayBody {
   const name = toolName.toLowerCase();
+
+  if (name === "mcp_connect") {
+    validateMcpCandidate(input.candidate);
+    const candidate = input.candidate;
+    const entry = candidate?.entry;
+    return { kind: "generic", summary: `接入 MCP 服务「${candidate?.serverId ?? "未知"}」\n执行设备：${sanitizeCommandPreview(displayContext?.executionDeviceId ?? "当前执行设备")}\n${entry?.type === "http" ? `访问：${entry.url}` : `运行程序（可能下载安装）：${JSON.stringify([entry?.command, ...(entry?.args ?? [])])}`}\n允许保存配置并启动连接，实际可用后继续原任务；不向其他设备安装或复制凭据。服务工具的调用仍须分别获准。凭据仅通过安全配置面板输入，不发送到对话。` };
+  }
 
   if (name === "bash" || name === "shell") {
     const command = asString(input["command"]);
@@ -348,6 +356,11 @@ export function buildConfirmationRequest(
     params.confirmationDisplayContext,
   );
   const title = buildPanelTitle(toolName);
+  if (toolName.toLowerCase() === "mcp_connect" && body.kind === "generic") {
+    const reference = params.turnOrigin?.worksceneContinuation;
+    const source = reference?.returnConversationId ?? reference?.conversationId;
+    body.summary += `\n批准不代表接入已完成。可在执行设备 ${sanitizeCommandPreview(params.confirmationDisplayContext?.executionDeviceId ?? "当前设备")} 打开${source ? `原任务对话 ${sanitizeCommandPreview(source)}` : "当前对话"}，用 /mcp 查看实际待接入状态并安全补齐凭据；完成后自动继续原任务。`;
+  }
 
   const hasBypassImmune = result.decision?.matchedRules.some(
     (r) => r.bypassImmune,

@@ -23,6 +23,7 @@ import type { MethodEntry } from "../handlers.js";
 import type { RpcConnection } from "../connection.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
+import { canObserveContinuationConfirmation } from "@zhixing/rpc";
 import type {
   ServerConfirmationBinding,
   ServerConfirmationPendingEntry,
@@ -89,13 +90,16 @@ export function buildConfirmationListMethod(): MethodEntry {
   return {
     name: "confirmation.list",
     requiresAuth: true,
-    handler(rawParams, ctx): ConfirmationListResult {
+    async handler(rawParams, ctx): Promise<ConfirmationListResult> {
       const params = (rawParams ?? {}) as ConfirmationListParams;
       const hub = requireHub(ctx.server);
       const conversations = requireConversations(ctx.server);
       const connectionId = String(ctx.connection.id);
 
-      const all = hub.listPending();
+      const allPending = hub.listPending();
+      const inherited = (await Promise.all(allPending.filter((entry) => entry.request.turnOrigin?.worksceneContinuation).map(async (entry) =>
+        await canObserveContinuationConfirmation(entry, ctx.connection, conversations, hub.continuationSource, params.conversationId) ? entry : undefined))).filter((entry): entry is ServerConfirmationPendingEntry => entry !== undefined);
+      const all = allPending.filter((entry) => !entry.request.turnOrigin?.worksceneContinuation);
       let visible: ServerConfirmationPendingEntry[];
 
       if (typeof params.conversationId === "string" && params.conversationId) {
@@ -123,7 +127,7 @@ export function buildConfirmationListMethod(): MethodEntry {
         });
       }
 
-      return { items: visible.map((entry) =>
+      return { items: [...visible, ...inherited].map((entry) =>
         toListItem(entry, ctx.connection)
       ) };
     },
@@ -196,6 +200,10 @@ export function buildConfirmationResolveMethod(): MethodEntry {
         throw RpcErrors.unauthorized(
           "Only the originating surface may resolve this confirmation",
         );
+      }
+
+      if (entry.request.turnOrigin?.worksceneContinuation && !await canObserveContinuationConfirmation(entry, ctx.connection, requireConversations(ctx.server), hub.continuationSource)) {
+        throw RpcErrors.unauthorized("原委托已失效或当前接入面未观察原任务，不能应答此确认");
       }
 
       // ── 4. 实际 resolve（race：权限校验后到 resolve 之间可能已被其它路径解决） ──

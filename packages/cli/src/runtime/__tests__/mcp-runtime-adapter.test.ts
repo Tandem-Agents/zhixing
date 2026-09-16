@@ -45,6 +45,21 @@ function hubFixture() {
 }
 
 describe("Host MCP runtime adapter", () => {
+  it("adds without replacing existing connections and keeps issued projections frozen", async () => {
+    const fixture = hubFixture();
+    const firstSpec = { serverId: "demo", transport: "stdio" as const, command: "node" };
+    const runtime = adaptMcpHub(fixture.hub, [firstSpec]);
+    const issued = runtime.tools.snapshot();
+    const nextSpec = { serverId: "next", transport: "http" as const, url: "https://example.org/mcp" };
+    await Promise.all([runtime.lifecycle.add!({ ...nextSpec, credentials: {} }), runtime.lifecycle.add!({ ...nextSpec, credentials: {} })]);
+    expect(fixture.hub.applyConfig).toHaveBeenCalledExactlyOnceWith([firstSpec, nextSpec]);
+    await expect(runtime.lifecycle.add!({ ...firstSpec, command: "different", credentials: {} })).rejects.toThrow("替换");
+    fixture.replaceCatalog([{ server: nextSpec, tools: [{ name: "new", inputSchema: {} }] }]);
+    expect(issued.tools.map((tool) => tool.name)).toEqual(["mcp__demo__read_item"]);
+    expect(runtime.tools.snapshot().tools[0]!.name).toBe("mcp__next__new");
+    await runtime.lifecycle.close();
+    await expect(runtime.lifecycle.add!({ ...nextSpec, credentials: {} })).rejects.toThrow("关闭");
+  });
   it("projects one frozen coherent catalog and preserves call/security metadata", async () => {
     const fixture = hubFixture();
     const runtime = adaptMcpHub(fixture.hub);

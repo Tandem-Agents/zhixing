@@ -9,7 +9,7 @@ import type {
   McpManagementInfrastructurePort,
   McpManagementServerDraft,
   McpManagementServerStatus,
-} from "../config-editor/mcp-management-contract.js";
+} from "@zhixing/core/mcp-management";
 import { toServerSpec } from "./mcp-config.js";
 
 export interface CreateMcpManagementAdapterOptions {

@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, open, readFile, readdir, rm, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { canonicalize } from "@zhixing/core/protocol";
 import { mergeIdMap } from "./internal/io.js";
 import type { ZhixingCredentials } from "./types.js";
 
@@ -328,6 +329,27 @@ export async function writeCredentials(
       credentialEntries(merged),
       merged.version,
     );
+  });
+}
+
+/** Local MCP management cannot overwrite other credential domains or a newer edit. */
+export async function writeMcpCredentials(expected: NonNullable<ZhixingCredentials["mcp"]>, next: NonNullable<ZhixingCredentials["mcp"]>, options: CredentialMutationOptions): Promise<void> {
+  await mutationCoordinator(options).runExclusive(async () => {
+    const current = await loadCredentialsUnlocked(options);
+    if (canonicalize(current.mcp ?? {}) !== canonicalize(expected)) throw new Error("MCP 凭据在编辑期间已变更，未覆盖");
+    const updated = { ...current, mcp: next };
+    validateCredentials(updated, "SecretStore input");
+    await replaceCredentialSet(options.store, credentialEntries(updated), updated.version);
+  });
+}
+
+/** Non-secret binding metadata for configuration CAS; never reads credential payloads. */
+export async function readCredentialBindingState(options: CredentialMutationOptions): Promise<{ generation: string | null; mcpIds: readonly string[] }> {
+  return mutationCoordinator(options).runExclusive(async () => {
+    const encoded = await options.store.get(MANIFEST_REF);
+    if (encoded === null) return { generation: null, mcpIds: [] };
+    const manifest = parseManifest(encoded);
+    return { generation: manifest.generation, mcpIds: manifest.entries.filter(({ kind }) => kind === "mcp").map(({ id }) => id) };
   });
 }
 

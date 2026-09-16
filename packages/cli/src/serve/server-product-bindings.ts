@@ -65,6 +65,7 @@ export function createServerConversationBinding(
 /** Adapts Confirmation ownership without exposing the hub implementation. */
 export function createServerConfirmationBinding(
   hub: ConfirmationHub,
+  continuationSource?: ServerConfirmationBinding["continuationSource"],
 ): ServerConfirmationBinding {
   const project = (
     entry: ReturnType<ConfirmationHub["findEntry"]>,
@@ -78,6 +79,7 @@ export function createServerConfirmationBinding(
         })
       : undefined;
   const binding: ServerConfirmationBinding = {
+    ...(continuationSource ? { continuationSource } : {}),
     listPending: () =>
       Object.freeze(hub.listAllPending().map((entry) => project(entry)!)),
     findPending: (requestId) => project(hub.findEntry(requestId)),

@@ -59,6 +59,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.pending",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -310,6 +314,10 @@
       },
       {
         "name": "llm.complete",
+        "requiresAuth": true
+      },
+      {
+        "name": "mcp.pending",
         "requiresAuth": true
       },
       {
@@ -567,6 +575,10 @@
         "requiresAuth": true
       },
       {
+        "name": "mcp.pending",
+        "requiresAuth": true
+      },
+      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -818,6 +830,10 @@
       },
       {
         "name": "llm.complete",
+        "requiresAuth": true
+      },
+      {
+        "name": "mcp.pending",
         "requiresAuth": true
       },
       {
@@ -1211,6 +1227,7 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
+          "rpc:mcp.pending",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1397,6 +1414,7 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
+          "rpc:mcp.pending",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1568,6 +1586,7 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
+          "rpc:mcp.pending",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1727,6 +1746,7 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
+          "rpc:mcp.pending",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -3024,6 +3044,15 @@
         "category": "rpc",
         "target": {
           "rowId": "light-inference"
+        }
+      },
+      {
+        "name": "mcp.pending",
+        "requiresAuth": true,
+        "key": "rpc:mcp.pending",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
         }
       },
       {

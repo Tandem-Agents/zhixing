@@ -111,6 +111,7 @@ export interface TurnContext {
 }
 
 export interface ConfirmationDisplayContext {
+  readonly executionDeviceId?: string;
   readonly workscene?: {
     readonly sceneId: string;
     readonly sceneName: string;

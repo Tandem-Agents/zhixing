@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/mcp-management/application.ts",
     "src/events/index.ts",
     "src/types/index.ts",
     "src/tool-loop/index.ts",

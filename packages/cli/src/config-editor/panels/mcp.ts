@@ -14,7 +14,7 @@ import type {
   PanelDescriptor,
   WorkingState,
 } from "../types.js";
-import type { McpManagementServerStatus } from "../mcp-management-contract.js";
+import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
 import {
   clearInputBuffer,
   isMcpServerEnabled,
@@ -26,7 +26,7 @@ import {
   setMcpServerEnabled,
   upsertMcpServer,
 } from "../state.js";
-import { applyMcpSetup, validateMcpSetup } from "../mcp-setup.js";
+import { applyMcpSetup, validateMcpSetup } from "@zhixing/core/mcp-management";
 import { maskForInput } from "../ui/mask.js";
 import {
   CONTENT_INDENT,
@@ -207,14 +207,15 @@ export function renderMcpAddPanel(
   const bodyLines: string[] = [];
   if (descriptor.description) bodyLines.push(...wrapProse(descriptor.description));
 
-  // 推断来源的 stdio 候选：显式展示将运行的本机命令——Enter 验证即在本机 spawn 它，
-  // 此展示是探测前的知情同意；预设 curated（可信），不展示。
-  if (candidate.source === "inferred" && candidate.entry.type === "stdio") {
+  // 所有候选都展示实际作用目标；来源标签不是授权。
+  if (candidate.entry.type !== "http") {
     const cmd = [candidate.entry.command, ...(candidate.entry.args ?? [])]
       .filter(Boolean)
       .join(" ");
     if (bodyLines.length > 0) bodyLines.push("");
     for (const line of wrapProse(`将在本机运行：${cmd}`)) bodyLines.push(tone.warn(line));
+  } else {
+    for (const line of wrapProse(`将连接：${candidate.entry.url}`)) bodyLines.push(tone.warn(line));
   }
 
   if (field) {

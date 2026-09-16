@@ -116,6 +116,35 @@ describe("ConversationManager", () => {
 
   // ─── 基本生命周期（与 RuntimeRegistry 兼容） ───
 
+  it("refreshes an idle runtime without replacing session/window/observer identity", async () => {
+    const session = await manager.getOrCreate("refresh-idle");
+    const oldRuntime = session.runtime;
+    const window = session.window;
+    const observers = session.observers;
+    manager.invalidateRuntimeProjections();
+    const refreshed = await manager.getOrCreate("refresh-idle");
+    expect(refreshed).toBe(session);
+    expect(refreshed.runtime).not.toBe(oldRuntime);
+    expect(refreshed.window).toBe(window);
+    expect(refreshed.observers).toBe(observers);
+    const runtime = refreshed.runtime;
+    expect((await manager.getOrCreate("refresh-idle")).runtime).toBe(runtime);
+  });
+
+  it("leaves busy runtime frozen, then refreshes the same captured session before its next turn", async () => {
+    const session = await manager.getOrCreate("refresh-busy");
+    session.busy = true;
+    const oldRuntime = session.runtime;
+    manager.invalidateRuntimeProjections();
+    expect((await manager.getOrCreate("refresh-busy")).runtime).toBe(oldRuntime);
+    await manager.prepareRuntimeProjectionForTurn("refresh-busy");
+    expect(session.runtime).not.toBe(oldRuntime);
+    const refreshed = session.runtime;
+    await manager.prepareRuntimeProjectionForTurn("refresh-busy");
+    expect(session.runtime).toBe(refreshed);
+    session.busy = false;
+  });
+
   describe("basic lifecycle", () => {
     it("creates a new session when no id provided", async () => {
       const session = await manager.getOrCreate();

@@ -24,6 +24,20 @@ import {
 } from "../first-party-conversation-mesh.js";
 
 describe("first-party conversation mesh", () => {
+  it("keeps MCP configuration pending device-local even while Anchor is offline", async () => {
+    const { ExecutorFirstPartyRpcRouter } = await import("../local-conversation-rpc.js");
+    const { buildMcpPendingMethod } = await import("../../../../server/src/rpc/methods/mcp.js");
+    const remote = vi.fn(async () => { throw new Error("Anchor offline"); });
+    const router = new ExecutorFirstPartyRpcRouter({ local: { dispatch: vi.fn() }, currentAnchor: new CurrentAnchorFirstPartyRpcRouter({ deviceId: "remote", currentAnchorDeviceId: () => "anchor", remoteFor: () => ({ dispatch: remote }) as never }) });
+    const connection = ingressConnection(1);
+    expect(await router.dispatch({ method: "mcp.pending", params: { conversationId: "main-1" }, connection })).toEqual({ handled: false });
+    expect(remote).not.toHaveBeenCalled();
+    expect(await buildMcpPendingMethod().handler({ conversationId: "main-1" }, { connection, server: {} } as never)).toEqual([]);
+    const dispatch = vi.fn();
+    const target = new FirstPartyConversationMeshTarget({ surface: { dispatch } as never });
+    expect(decode(await target.handle(encode({ v: 1, op: "dispatch", surface: identity(1, "connection-1"), method: "mcp.pending", params: { conversationId: "main-1" } }), { peer: { deviceId: "device-source" } } as never, new AbortController().signal))).toMatchObject({ ok: false });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
   it("relays only the finite canonical surface and closes the prior generation", async () => {
     let relay: { notify(method: string, params: unknown): void; onClose(handler: () => void): () => void } | undefined;
     const closed = vi.fn();

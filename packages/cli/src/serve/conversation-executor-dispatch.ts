@@ -1,4 +1,5 @@
 import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import { isWorksceneSupportConversation } from "@zhixing/core/workscene/application";
 import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type {
   AssignmentMutationPort,
@@ -453,7 +454,9 @@ class DefaultConversationExecutorDispatchApplication
   async plan(
     input: ConversationExecutorApplicationPlanInput,
   ): Promise<ConversationExecutorDispatchPlan> {
-    const candidates = await this.#topology.candidates(input.requirement);
+    const candidates = isWorksceneSupportConversation(input.conversationId)
+      ? []
+      : await this.#topology.candidates(input.requirement);
     if (candidates.length === 0 && !this.#topology.hasLocal()) {
       throw new Error("No authorized conversation executor is currently available");
     }
@@ -840,7 +843,7 @@ function createLocalConversationExecutorMechanism(
         try {
           baseRuntime = await local.runtimeFactory.create(
             input.conversationId,
-            { workspaceRoot: preflight.workspaceRoot },
+            { workspaceRoot: preflight.workspaceRoot, executionProfile: input.binding.executionProfile },
           );
           runtime = input.adaptRuntime?.(baseRuntime) ?? baseRuntime;
           const projected = runtime.executionProfile?.();

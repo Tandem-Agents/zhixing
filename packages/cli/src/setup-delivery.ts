@@ -497,6 +497,13 @@ export interface SetupAuthorityRuntimeOptions {
    * workspace projection advances.
    */
   readonly executorReadiness?: ExecutorReadiness | (() => ExecutorReadiness);
+  /** Product projection after selecting a device; authority still validates and freezes it. */
+  readonly projectConversationCapabilities?: (input: {
+    readonly profile: RuntimeExecutionProfile;
+    readonly ownerDeviceId: string;
+    readonly executorDeviceId: string;
+    readonly capabilities: { readonly tools: readonly string[]; readonly mcpServers: readonly string[] };
+  }) => RuntimeExecutionProfile;
   readonly enableAnchor?: boolean;
   readonly enableLocalExecutor?: boolean;
   readonly resourceCandidateTtlMs?: number;
@@ -1193,10 +1200,17 @@ export async function setupAuthorityRuntime(
         ...(input.environment ? { explicit: input.environment } : {}),
         ...(workscene ? { workscene } : {}),
       });
-      const executionProfile = executionProfileForEnvironment(
+      const environmentProfile = executionProfileForEnvironment(
         inputExecutionProfile,
         environmentRequirement,
       );
+      const profileForTarget = (target: ExecutorCapabilitySnapshot): RuntimeExecutionProfile =>
+        normalizeRuntimeExecutionProfile(options.projectConversationCapabilities?.({
+          profile: environmentProfile,
+          ownerDeviceId: key.deviceId,
+          executorDeviceId: target.descriptor.signature.keyId,
+          capabilities: target.descriptor,
+        }) ?? environmentProfile);
       const permissionPublication = await permissionSnapshots.publishRules({
         rules: input.permissionRules,
         signer: key,
@@ -1207,6 +1221,7 @@ export async function setupAuthorityRuntime(
         deviceDigest: string,
         environment: EnvironmentRequirement,
       ): PreparedConversationAssignmentAuthority => {
+        const executionProfile = profileForTarget(target);
         const requiredCredentialBindings = requiredBindingsForRuntime(
           executionProfile,
           target.descriptor.credentialBindings,
@@ -1273,7 +1288,7 @@ export async function setupAuthorityRuntime(
             throw new Error(
               "Target executor capability snapshot is unavailable",
             );
-          assertRuntimeAvailable(executionProfile, {
+          assertRuntimeAvailable(profileForTarget(target), {
             tools: target.descriptor.tools,
             mcpServers: target.descriptor.mcpServers,
             credentialBindings: target.descriptor.credentialBindings,

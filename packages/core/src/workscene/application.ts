@@ -16,6 +16,7 @@ import { normalizeSceneName } from "./validation.js";
 import type { WorksceneContinuationApplication, WorksceneTaskReference } from "./continuation.js";
 export {
   WorksceneContinuationApplication,
+  isWorksceneSupportConversation,
   isWorksceneContinuationCurrent,
   worksceneTaskContext,
   readWorksceneTaskContext,

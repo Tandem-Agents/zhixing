@@ -53,6 +53,7 @@ function makeDirectory(
 }
 
 interface RunFixture {
+  readonly conversationId?: string;
   readonly worksceneTasks?: readonly { conversationId: string; runId: string; goal: string }[];
   readonly scenes?: readonly WorksceneDto[];
   readonly postTurnControl?: boolean;
@@ -123,7 +124,7 @@ async function callInRun<T>(
     {
       bus,
       lineage: "main",
-      conversationId: "conversation-1",
+      conversationId: fixture.conversationId ?? "conversation-1",
       assignmentIssuedAt: NOW,
       worksceneTasks: fixture.worksceneTasks,
       assignmentMutations: mutations,
@@ -175,6 +176,9 @@ describe("workmode enter/exit", () => {
     const exit = await callInRun(() => createWorkmodeExitTool().call({ handoff }, CTX));
     expect(exit.result.isError).toBe(true);
     expect(exit.emitted).toEqual([]);
+    const direct = await callInRun(() => createWorkmodeExitTool().call({ handoff }, CTX), { conversationId: "ws:reports:primary", postTurnControl: false });
+    expect(direct.result.isError).not.toBe(true);
+    expect(direct.emitted).toEqual([{ kind: "exit", handoff }]);
   });
 
   it("工作区续接只随暂存变更提交，不在工具调用里重载自身运行", async () => {

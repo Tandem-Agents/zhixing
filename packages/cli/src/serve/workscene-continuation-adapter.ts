@@ -17,9 +17,20 @@ export function createWorksceneContinuationPort(input: {
     AdvancementReviewAttemptApplication,
     "queryActiveState" | "cancelSession"
   >;
+  readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
+  readonly canRunIsolatedMain?: boolean;
 }): WorksceneContinuationPort {
   const { manager, protocol, workscene } = input;
   return {
+    pendingMcpStatus: (candidate, scope) => input.mcp?.pendingStatus?.(candidate, scope) ?? Promise.resolve("pending"),
+    canRunIsolatedMain: () => input.canRunIsolatedMain === true,
+    connectMcp: async (candidate, source, scope) => {
+      if (!input.mcp) return { status: "failed", message: "MCP 接入入口不可用" };
+      if (!await protocol.isWorksceneContinuationCurrent(source)) return { status: "failed", message: "原任务已经停止，未接入新能力" };
+      const result = await input.mcp.connect(candidate, undefined, () => protocol.isWorksceneContinuationCurrent(source), scope);
+      if (result.status === "active") manager.invalidateRuntimeProjections();
+      return result;
+    },
     stop: async (conversationId, runId, requestId) => {
       const source = (
         await protocol.worksceneContinuationSources(conversationId)

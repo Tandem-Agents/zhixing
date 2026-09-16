@@ -20,6 +20,7 @@
  */
 
 import type {
+  ConfirmationRequest,
   DisplayBody,
 } from "@zhixing/core/confirmation";
 import type { ConfirmationHub, HubEntry, HubEvent } from "@zhixing/owner-kernel/confirmation-hub";
@@ -33,12 +34,38 @@ export const CONFIRMATION_NOTIFICATIONS = {
 } as const;
 
 export interface ConfirmationBridgeDeps {
+  continuationSource?: ConfirmationContinuationSource;
   /** 当前活跃的 RPC 连接集合，由宿主装配并维护。 */
   connections: ReadonlySet<RpcNotificationConnection>;
   /** 确认聚合层——订阅其事件 */
   hub: ConfirmationHub;
   /** 会话管理器——按 conversationId 反查 observer connectionIds */
   conversations: ConversationManager;
+}
+
+export type ConfirmationContinuationSource = (entry: {
+  request: ConfirmationRequest;
+  conversationId?: string;
+}) => Promise<{ conversationId: string; surfacePrincipal: string } | undefined>;
+
+/** Both push and replay use the same source projection; the request retains its real owner. */
+export async function canObserveContinuationConfirmation(
+  entry: { request: ConfirmationRequest; conversationId?: string },
+  connection: Pick<RpcNotificationConnection, "id" | "authenticated" | "closed" | "surfacePrincipal">,
+  conversations: Pick<ConversationManager, "getObserverConnectionIds">,
+  resolve?: ConfirmationContinuationSource,
+  requestedConversationId?: string,
+): Promise<boolean> {
+  if (!connection.authenticated || connection.closed || !resolve) return false;
+  const source = await resolve(entry).catch(() => undefined);
+  if (!source) return false;
+  const id = String(connection.id);
+  if (entry.conversationId && (!requestedConversationId || requestedConversationId === entry.conversationId) && conversations.getObserverConnectionIds(entry.conversationId).has(id)) return true;
+  const origin = entry.request.turnOrigin;
+  return (!requestedConversationId || requestedConversationId === source.conversationId) &&
+    source.surfacePrincipal === connection.surfacePrincipal && origin?.channel === "rpc" &&
+    (origin.triggeredBy === id || origin.triggeredBy === connection.surfacePrincipal) &&
+    conversations.getObserverConnectionIds(source.conversationId).has(id);
 }
 
 export interface ConfirmationBridge {
@@ -53,6 +80,23 @@ export function createConfirmationBridge(
   deps: ConfirmationBridgeDeps,
 ): ConfirmationBridge {
   const { connections, hub, conversations } = deps;
+  const inheritedRecipients = new Map<string, Set<RpcNotificationConnection>>();
+  const inheritedSources = new Map<string, { conversationId: string; surfacePrincipal: string }>();
+  let disposed = false;
+  const pushContinuation = async (entry: HubEntry): Promise<void> => {
+    const source = await deps.continuationSource?.(entry).catch(() => undefined);
+    if (!source || disposed || !hub.findEntry(entry.request.id)) return;
+    inheritedSources.set(entry.request.id, source);
+    for (const conn of connections) {
+      if (!await canObserveContinuationConfirmation(entry, conn, conversations, async () => source)) continue;
+      if (disposed || !hub.findEntry(entry.request.id) || conn.closed) continue;
+      const recipients = inheritedRecipients.get(entry.request.id) ?? new Set();
+      recipients.add(conn);
+      inheritedRecipients.set(entry.request.id, recipients);
+      const base = buildPendingPayload(entry);
+      conn.notify(CONFIRMATION_NOTIFICATIONS.pending, canReceiveFullRequest(entry, conn) ? { ...base, request: entry.request } : base);
+    }
+  };
 
   /** 推送到指定连接集合（过滤未认证 / 已关闭连接） */
   const notifyTargets = (
@@ -81,6 +125,10 @@ export function createConfirmationBridge(
 
   const unsubHub = hub.onEvent((event: HubEvent) => {
     if (event.type === "request") {
+      if (event.entry.request.turnOrigin?.worksceneContinuation) {
+        void pushContinuation(event.entry);
+        return;
+      }
       const targets = resolveTargets(event.entry.conversationId);
       const base = buildPendingPayload(event.entry);
       // 摘要按 observer 推送；完整 request 是可操作控制面 payload，只给
@@ -94,7 +142,14 @@ export function createConfirmationBridge(
         conn.notify(CONFIRMATION_NOTIFICATIONS.pending, payload);
       }
     } else {
-      const targets = resolveTargets(event.conversationId);
+      const targets = new Set([...resolveTargets(event.conversationId), ...(inheritedRecipients.get(event.requestId) ?? [])]);
+      const source = inheritedSources.get(event.requestId);
+      if (source) for (const conn of connections) {
+        // This only clears an already-issued request; it grants no action or content access.
+        if (conn.surfacePrincipal === source.surfacePrincipal && conversations.getObserverConnectionIds(source.conversationId).has(String(conn.id))) targets.add(conn);
+      }
+      inheritedSources.delete(event.requestId);
+      inheritedRecipients.delete(event.requestId);
       notifyTargets(targets, CONFIRMATION_NOTIFICATIONS.resolved, {
         requestId: event.requestId,
         conversationId: event.conversationId,
@@ -104,8 +159,15 @@ export function createConfirmationBridge(
     }
   });
 
+  for (const entry of hub.listAllPending()) {
+    if (entry.request.turnOrigin?.worksceneContinuation) void pushContinuation(entry);
+  }
+
   return {
     dispose() {
+      disposed = true;
+      inheritedRecipients.clear();
+      inheritedSources.clear();
       unsubHub();
     },
   };

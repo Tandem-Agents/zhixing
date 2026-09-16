@@ -133,7 +133,7 @@ const coverageGroups = [
     "cli:zhixing device continue",
     "slash:stop:repl",
   ]],
-  ["runtime-config", ["slash:config:repl", "slash:mcp:repl"]],
+  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending"]],
   ["device-trust", [
     "cli:zhixing pair",
     "cli:zhixing duty targets",
@@ -4174,12 +4174,14 @@ export function inspectMcpRuntimeBoundary(records) {
   }
 
   if (
-    !adapter.includes("adaptMcpHub(createMcpHub(specs, options))") ||
+    !adapter.includes("adaptMcpHub(createMcpHub(specs, options), specs)") ||
     !adapter.includes("mapServerTools(server, descriptors, hub.callTool)") ||
     !adapter.includes("const catalog = hub.catalog();") ||
     !adapter.includes("hub.serverStatuses().map") ||
     !adapter.includes("connect: () => hub.connectAll()") ||
-    !adapter.includes("close: () => hub.dispose()") ||
+    !adapter.includes("await tail; await hub.dispose()") ||
+    !adapter.includes("await hub.applyConfig(nextSpecs)") ||
+    !adapter.includes("canonicalize(current) !== canonicalize(spec)") ||
     !adapter.includes(".map((tool) => Object.freeze({ ...tool }))") ||
     !adapter.includes("Object.freeze(catalog.map(({ server }) => server.serverId).sort())")
   ) {
@@ -4194,7 +4196,8 @@ export function inspectMcpRuntimeBoundary(records) {
 
   if (
     !command.includes("mcpTools: mcpRuntime.tools") ||
-    !command.includes("mcpStatus: mcpRuntime.status") ||
+    !command.includes("const boundMcpStatus = mcpRuntime.status") ||
+    !command.includes("mcpStatuses: () => boundMcpStatus.snapshot()") ||
     access.includes("McpRuntimeLifecyclePort") ||
     access.includes("readonly mcpLifecycle") ||
     !projection.includes("const mcp = input.mcpTools.snapshot();") ||
@@ -4222,7 +4225,7 @@ export function inspectMcpRuntimeBoundary(records) {
   return failures;
 }
 
-/** A6 MCP management owns finite UI contracts while concrete discovery stays at the Host edge. */
+/** MCP product owns management policy; UI/model bindings only use its finite ports. */
 export function inspectMcpManagementBoundary(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -4231,10 +4234,12 @@ export function inspectMcpManagementBoundary(records) {
     if (source === undefined) failures.push(`${relative}: MCP management boundary source is missing`);
     return source ?? "";
   };
-  const contract = required("packages/cli/src/config-editor/mcp-management-contract.ts");
+  const contract = required("packages/core/src/mcp-management/ports.ts");
+  const application = required("packages/core/src/mcp-management/application.ts");
+  const modelTools = required("packages/cli/src/serve/mcp-tools.ts");
   const adapter = required("packages/cli/src/runtime/mcp-management-adapter.ts");
-  const setup = required("packages/cli/src/config-editor/mcp-setup.ts");
-  const discovery = required("packages/cli/src/config-editor/mcp-discovery.ts");
+  const setup = required("packages/core/src/mcp-management/setup.ts");
+  const discovery = required("packages/core/src/mcp-management/discovery.ts");
   const editorTypes = required("packages/cli/src/config-editor/types.ts");
   const panel = required("packages/cli/src/config-editor/panels/mcp.ts");
   const section = required("packages/cli/src/config-editor/sections/mcp.ts");
@@ -4267,6 +4272,8 @@ export function inspectMcpManagementBoundary(records) {
   }
 
   const managementConsumers = [
+    application,
+    modelTools,
     setup,
     discovery,
     editorTypes,
@@ -4287,11 +4294,16 @@ export function inspectMcpManagementBoundary(records) {
     !configCommand.includes("createMcpManagementAdapter({") ||
     !configCommand.includes("const statusSnapshot = await management.snapshot()") ||
     !configCommand.includes("mcpProbe: management") ||
-    !configCommand.includes("management.readSource") ||
-    !configCommand.includes("management.search") ||
+    !configCommand.includes("application.resolve(") ||
+    !configCommand.includes("application.extract(") ||
+    !configCommand.includes("application.edit(") ||
+    !application.includes("class McpManagementApplication") ||
+    !application.includes("class McpConnectionApplication") ||
+    !modelTools.includes("requiresExplicitConfirmation: true") ||
+    !modelTools.includes('kind: "connect_mcp"') ||
     !configCommand.includes('deps.llmComplete(prompt, "main", signal)') ||
     !commandRegistration.includes("readMcpStatusWire: async () =>") ||
-    /applyConfig/u.test([setup, discovery, editorTypes, panel, section, configCommand, commandRegistration].join("\n"))
+    /applyConfig/u.test(managementConsumers.join("\n"))
   ) {
     failures.push("MCP management production graph bypasses its finite adapter or hot-applies config");
   }

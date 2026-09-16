@@ -161,6 +161,11 @@ export class RpcManagementFacade {
     return client.request<ServerInfoResult>("server.info");
   }
 
+  async mcpPending(conversationId: string): Promise<readonly import("@zhixing/core/mcp-management").McpPendingConnection[]> {
+    const client = await this.link.getClient();
+    return client.request("mcp.pending", { conversationId });
+  }
+
   /** 只读取当前已连接宿主状态；无连接时返回 null，不发现、不拉起。 */
   async serverInfoIfConnected(): Promise<ServerInfoResult | null> {
     const client = this.link.getConnectedClient?.();

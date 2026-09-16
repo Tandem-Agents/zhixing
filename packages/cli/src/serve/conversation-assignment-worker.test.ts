@@ -23,6 +23,27 @@ import { ConversationAssignmentWorker } from "./conversation-assignment-worker.j
 import { worksceneTaskContext } from "@zhixing/core/workscene/application";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 
+it("instantiates the exact signed profile when new tools appear before execution", async () => {
+  const failExecution = vi.fn(async () => {});
+  const create = vi.fn(async (_id: string, environment: Parameters<RuntimeFactory["create"]>[1]) => ({ executionProfile: () => environment?.executionProfile ?? { tools: ["mcp_discover", "mcp__new__tool"], mcpServers: ["new"], providerIds: [] }, run: () => { throw new Error("RUN_REACHED"); }, dispose: vi.fn(async () => {}) }));
+  const errors: string[] = [];
+  const worker = new ConversationAssignmentWorker({
+    InProcessAssignmentSubmission,
+    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, failExecution },
+    runtimeFactory: { create }, artifacts: {},
+    submissionFor: () => ({ reportStarted: async () => {}, mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof: vi.fn() }),
+    finalizeUsage: async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }),
+    interactions: { withBinding: (_binding: unknown, operation: () => unknown) => operation(), drainAssignment: async () => {}, releaseAssignment: () => {} },
+    preflightEnvironment: async () => ({ workspaceRoot: "D:\\fixture" }),
+    releasePreflightEnvironment: () => {},
+    onError: (_id: string, error: Error) => { errors.push(error.message); },
+  } as never);
+  worker.accept({ execution: "conversation", assignmentId: "probe", capabilities: [globalAuthorityCapability("probe", "ws:reports:primary")], manifest: { tools: ["mcp_discover"], mcpServers: [], environment: { deviceId: "remote" } }, work: { conversationId: "ws:reports:primary", controlContext: [], windowInput: { t: "full", messages: [] }, ingress: { kind: "first-party" } } } as never);
+  await worker.drain();
+  expect(create.mock.calls[0]?.[1]).toEqual({ workspaceRoot: "D:\\fixture", executionProfile: { tools: ["mcp_discover"], mcpServers: [], providerIds: [] } });
+  expect(errors).toEqual(["RUN_REACHED"]);
+});
+
 function interactionObserver(): DurableConversationInteractionObserver {
   return {
     withBinding: vi.fn((_binding: unknown, operation: () => Promise<unknown>) => operation()),
@@ -242,7 +263,7 @@ describe("ConversationAssignmentWorker", () => {
     );
     expect(createRuntime).toHaveBeenCalledWith(
       envelope.work.conversationId,
-      { workspaceRoot: "D:\\workspace-a" },
+      { workspaceRoot: "D:\\workspace-a", executionProfile: { tools: undefined, mcpServers: undefined, providerIds: [] } },
     );
     expect(releasePreflightEnvironment).toHaveBeenCalledWith(
       envelope.manifest,

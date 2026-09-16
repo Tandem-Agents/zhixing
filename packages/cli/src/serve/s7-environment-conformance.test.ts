@@ -85,6 +85,11 @@ import {
 } from "./environment-probe-mesh.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { REJECT_REMOTE_WORKSPACE_PROBE } from "./workscene-remote-workspace-probe.js";
+import { createMcpManagementTools } from "./mcp-tools.js";
+import { createAnchorRuntimeCapabilityCatalog, createAnchorRuntimeProjectionAssembly, projectConversationCapabilitiesForDevice } from "./workscene-runtime-projection.js";
+import { ExecutorRuntimeSubstrate } from "./executor-role-runtime.js";
+import { projectRuntimeConfiguration } from "../runtime/runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
 
@@ -117,6 +122,22 @@ const TEST_ANCHOR_LOSSLESS_DATA_PLANE = Object.freeze({
 }) satisfies ConversationLosslessDataPlaneTopology;
 
 describe("S7 environment/workscene production conformance", () => {
+  it("signs the real remote product catalog independently of Anchor-only MCP capabilities", async () => {
+    const configuration = projectRuntimeConfiguration(createRuntimeConfigurationSnapshot({}));
+    const mcpTool = { name: "mcp__remote__lookup", description: "lookup", inputSchema: { type: "object" as const }, call: async () => ({ content: "fixture" }) };
+    const remote = new ExecutorRuntimeSubstrate({ zhixingHome: "/fixture", modelConfiguration: configuration.model, kernelEnvironmentConfiguration: configuration.kernelEnvironment, credentials: {}, createToolImplementation: () => Object.freeze({ create: () => {} }) as never, permissionStorage: { bind: () => Object.freeze({ create: () => {} }) } as never, mcpTools: { snapshot: () => ({ tools: [mcpTool], serverIds: ["remote"] }) }, mcpProductTools: createMcpManagementTools({} as never, { deviceId: "remote", revision: () => "v1", canConnect: false }), systemProtectedPaths: [], interactions: {} as never, artifactStore: () => ({} as never), deviceCapacity: { interactive: {} as never, scheduler: {} as never, orchestration: {} as never } });
+    const mcpProductTools = createMcpManagementTools({} as never, { deviceId: "owner", revision: () => "v1" });
+    const extraTools = { assembleTools: () => [{ name: "schedule" }, { name: "task_list" }] } as never;
+    const mcpTools = { snapshot: () => ({ tools: [{ ...mcpTool, name: "mcp__owner__lookup" }], serverIds: ["owner"] }) };
+    const capabilities = createAnchorRuntimeCapabilityCatalog({ mcpProductTools, extraTools, mcpTools, scheduler: {} as never });
+    const projections = createAnchorRuntimeProjectionAssembly({ mcpProductTools, agentIdentity: { displayName: "知行" }, capabilities, workscenes: {} as never, worksceneAssignmentTools: {} as never, extraTools, mcpTools, scheduler: {} as never, skillArtifacts: {} as never, createToolImplementation: () => Object.freeze({ create: () => {} }) as never, securityExecution: { bind: () => Object.freeze({ create: () => {} }) } as never, createGuidanceLifecycle: () => ({ id: "fixture" }) });
+    const scene = projections.scene({ scene: { sceneId: "reports", name: "Reports" }, absolutePath: "/fixture" });
+    const profile = { tools: [...scene.profile.enabledTools, ...scene.runtimeTools.extraTools.map(tool => tool.name)], mcpServers: [...scene.runtimeTools.executionMcpServers], providerIds: [] };
+    const result = await runChain("mesh", { profile, capabilities: remote.capabilityCatalog() });
+    expect(result).toMatchObject({ tools: expect.arrayContaining(["mcp_discover", "mcp__remote__lookup", "workscene_task_stop"]), mcpServers: ["remote"] });
+    expect((result as typeof profile).tools).not.toContain("mcp_connect");
+    expect((result as typeof profile).tools).not.toContain("mcp__owner__lookup");
+  }, 30_000);
   it("drives the same finite chain through real in-process and mesh composition roots", async () => {
     const local = await runChain("in-process");
     const distributed = await runChain("mesh");
@@ -139,7 +160,10 @@ describe("S7 environment/workscene production conformance", () => {
   }, 120_000);
 });
 
-async function runChain(topology: "in-process" | "mesh") {
+async function runChain(topology: "in-process" | "mesh", prepareOnly?: {
+  profile: { tools: string[]; mcpServers: string[]; providerIds: string[] };
+  capabilities: { readonly tools: readonly string[]; readonly mcpServers: readonly string[] };
+}) {
   const root = await createTempDir(`s7-${topology}`);
   const anchorHome = resolve(root, "anchor");
   const executorHome =
@@ -182,7 +206,7 @@ async function runChain(topology: "in-process" | "mesh") {
         topology === "mesh" ? [anchorIdentity] : [],
       authorizedDeviceIds:
         topology === "mesh" ? [anchorIdentity.deviceId] : [],
-      executorReadiness: READINESS,
+      executorReadiness: prepareOnly ? { ...READINESS, ...prepareOnly.capabilities } : READINESS,
       enableAnchor: topology === "in-process",
       enableLocalExecutor: true,
       deviceCapacity: executorCapacity.arbiter,
@@ -199,6 +223,7 @@ async function runChain(topology: "in-process" | "mesh") {
             trustedIdentities: [executorIdentity],
             authorizedDeviceIds: [executorIdentity.deviceId],
             executorReadiness: READINESS,
+            projectConversationCapabilities: projectConversationCapabilitiesForDevice,
             enableAnchor: true,
             enableLocalExecutor: false,
             deviceCapacity: anchorCapacity.arbiter,
@@ -282,7 +307,7 @@ async function runChain(topology: "in-process" | "mesh") {
     const conversationId = `ws:${created.scene.id}:conv_main`;
     const prepared = await anchor.prepareConversationAssignment({
       conversationId,
-      executionProfile: EMPTY_PROFILE,
+      executionProfile: prepareOnly?.profile ?? EMPTY_PROFILE,
       permissionRules: [],
       environment: {
         workspace: {
@@ -303,6 +328,7 @@ async function runChain(topology: "in-process" | "mesh") {
           }
         : {}),
     });
+    if (prepareOnly) return prepared.binding.executionProfile;
     const manifest = createExecutionManifest({
       baseRef: {
         execution: "conversation",

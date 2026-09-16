@@ -14,7 +14,7 @@
  *   2. id 须是合法 server id（无 `__` 等，见 @zhixing/mcp 的 isValidServerId）
  */
 
-import type { McpServerConfigEntry } from "@zhixing/providers";
+import type { McpServerConfigEntry } from "./types.js";
 
 /** 预设里一个需用户填写的密钥字段——驱动接入面板的单字段引导。 */
 export interface McpSecretFieldSpec {

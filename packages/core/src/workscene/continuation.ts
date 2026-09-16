@@ -10,6 +10,7 @@ import {
 import { protocolDigest } from "../protocol/canonical.js";
 import type { RunRecordAdvancementMetadata } from "../transcript/types.js";
 import type { ConversationDispatch } from "../contracts/protocol.js";
+import { validateMcpCandidate, type McpSetupCandidate, type McpConnectionResult } from "../mcp-management/application.js";
 
 /** The proposal is persisted with the successful source run, not in UI state. */
 export interface WorksceneContinuationSource {
@@ -36,6 +37,9 @@ export interface WorksceneContinuationSource {
 }
 
 export interface WorksceneContinuationPort {
+  pendingMcpStatus?(candidate: McpSetupCandidate, scope: import("../mcp-management/application.js").McpConnectionScope): Promise<"needs-credentials" | "pending">;
+  canRunIsolatedMain?(): boolean;
+  connectMcp?(candidate: McpSetupCandidate, source: { conversationId: string; runId: string }, scope: import("../mcp-management/application.js").McpConnectionScope): Promise<McpConnectionResult>;
   read(conversationId: string): Promise<readonly WorksceneContinuationSource[]>;
   inspect(
     conversationId: string,
@@ -142,6 +146,52 @@ export function validateWorksceneContinuationCommit(
 export class WorksceneContinuationApplication {
   private readonly pending = new Map<string, Promise<void>>();
   constructor(private readonly port: WorksceneContinuationPort) {}
+
+  /** Resolve interaction visibility from active, authoritative delegation facts. */
+  async interactionSource(conversationId: string, origin?: TurnOrigin): Promise<{
+    conversationId: string;
+    surfacePrincipal: string;
+  } | undefined> {
+    const reference = origin?.worksceneContinuation;
+    if (!reference || !await isWorksceneContinuationCurrent(this.port.read, reference)) return;
+    const parent = (await this.port.read(reference.conversationId)).find((run) => run.runId === reference.runId);
+    if (!parent) return;
+    const child = (await this.port.read(conversationId)).find((run) =>
+      run.current && ["queued", "dispatched", "running", "uncertain"].includes(run.state) &&
+      run.surfacePrincipal === parent.surfacePrincipal &&
+      protocolDigest("WorksceneOrigin", 1, run.origin?.worksceneContinuation ?? null) === protocolDigest("WorksceneOrigin", 1, reference));
+    if (!child) return;
+    const original = await this.originalTask(parent, reference.returnConversationId ?? reference.conversationId);
+    if (!original?.current || original.surfacePrincipal !== child.surfacePrincipal) return;
+    return { conversationId: original.conversationId, surfacePrincipal: original.surfacePrincipal };
+  }
+
+  /** Credential forms are reconstructed from committed, still-current proposals, never a second queue. */
+  async pendingMcpConnections(conversationId: string, deviceId?: string): Promise<readonly import("../mcp-management/application.js").McpPendingConnection[]> {
+    const seen = new Set<string>();
+    const result: import("../mcp-management/application.js").McpPendingConnection[] = [];
+    const visit = async (source: WorksceneContinuationSource): Promise<void> => {
+        const id = source.conversationId;
+        const key = `${id}/${source.runId}`;
+        if (seen.has(key) || !source.current || source.state !== "committed") return;
+        seen.add(key);
+        const intent = source.control?.intent;
+        if (intent?.kind === "connect_mcp" && (!deviceId || intent.scope.deviceId === deviceId)) {
+          const turnId = worksceneContinuationTurnId(source);
+          const returnTarget = worksceneResultReturnTarget(source.origin, id) ?? id;
+          if (await this.port.inspect(id, turnId) === "missing" && await this.port.inspect(returnTarget, `${turnId}:result`) === "missing") result.push({ candidate: structuredClone(intent.candidate), goal: intent.handoff.goal, deviceId: intent.scope.deviceId, status: await this.port.pendingMcpStatus?.(intent.candidate, intent.scope).catch(() => "pending" as const) ?? "pending" });
+        }
+        if (intent?.handoff?.remaining.length) {
+          const target = worksceneContinuationTarget(source);
+          if (target) for (const child of await this.port.read(target)) {
+            const parent = child.origin?.worksceneContinuation;
+            if (parent?.conversationId === id && parent.runId === source.runId) await visit(child);
+          }
+        }
+    };
+    for (const source of await this.port.read(conversationId)) await visit(source);
+    return result;
+  }
 
   /** A read projection of existing run lineage; no independent task state is stored. */
   async tasks(
@@ -376,6 +426,22 @@ export class WorksceneContinuationApplication {
         "missing"
       )
         continue;
+      if (isWorksceneSupportConversation(target) && this.port.canRunIsolatedMain?.() !== true) {
+        await this.returnResult(source, returnTarget,
+          "当前 Anchor 未启用本机执行器，无法承接本机能力接入，未创建承接任务或安装服务。请继续围绕原目标组合现有工具、程序或服务；确需新增能力时，说明具体阻塞及可用的设备本地管理入口，不反复交回同一路径。");
+        continue;
+      }
+      if (source.control?.intent.kind === "connect_mcp") {
+        if (source.state !== "committed") continue;
+        const connection = this.port.connectMcp
+          ? await this.port.connectMcp(source.control.intent.candidate, source, source.control.intent.scope)
+          : { status: "failed" as const, message: "当前运行未装配 MCP 接入入口" };
+        if (connection.status === "needs-credentials") continue;
+        if (connection.status === "failed") {
+          await this.returnResult(source, returnTarget, `能力接入未完成：${connection.message}。请据此继续处理原任务，不假设能力已经生效。`);
+          continue;
+        }
+      }
       if (source.control?.intent.kind === "enter") {
         try {
           if (await this.port.hasActiveAdvancement(target))
@@ -409,7 +475,9 @@ export class WorksceneContinuationApplication {
         (item) => item.runId === source.runId && item.current,
       );
       if (!stillCurrent) continue;
-      const exiting = source.control?.intent.kind === "exit";
+      const isolatedDelegate = source.control?.intent.kind === "exit" &&
+        !source.origin?.worksceneContinuation?.returnConversationId;
+      const exiting = source.control?.intent.kind === "exit" && !isolatedDelegate;
       const original = exiting
         ? await this.originalTask(source, target)
         : source;
@@ -425,7 +493,7 @@ export class WorksceneContinuationApplication {
               : "task",
           conversationId: source.conversationId,
           runId: source.runId,
-          ...(source.control?.intent.kind === "enter"
+          ...(source.control?.intent.kind === "enter" || isolatedDelegate
             ? { returnConversationId: source.conversationId }
             : source.origin?.worksceneContinuation?.returnConversationId
               ? {
@@ -438,7 +506,9 @@ export class WorksceneContinuationApplication {
       const admission = await this.port.admit({
         conversationId: target,
         turnId,
-        input: renderWorksceneHandoff(handoff),
+        input: renderWorksceneHandoff(handoff) + (isolatedDelegate
+          ? "\n你在独立的主对话承接受托部分，仅使用已交接材料和当前设备能力；接入只作用于当前设备。完成后带回已核实结果，仍需原工作区处理的事项交还原场景，不假设远端已获得这里的工具。"
+          : ""),
         origin,
         surfacePrincipal: source.surfacePrincipal,
         ...((exiting || target === source.conversationId) &&
@@ -556,6 +626,7 @@ export function worksceneContinuationTarget(
   const intent = source.control?.intent;
   if (!intent) return undefined;
   if (intent.kind === "stop_task") return undefined;
+  if (intent.kind === "connect_mcp") return source.conversationId;
   const scope = parseConversationId(source.conversationId).scope;
   if (intent.kind === "enter") {
     return scope.kind === "user"
@@ -567,9 +638,13 @@ export function worksceneContinuationTarget(
     return scope.sceneId === intent.sceneId ? source.conversationId : undefined;
   }
   const target = source.origin?.worksceneContinuation?.returnConversationId;
-  return target && parseConversationId(target).scope.kind === "user"
-    ? target
-    : undefined;
+  if (target) return parseConversationId(target).scope.kind === "user" ? target : undefined;
+  return `workscene-support-${protocolDigest("WorksceneSupport", 1, { conversationId: source.conversationId, runId: source.runId }).replace("sha256:", "")}`;
+}
+
+/** Isolated main-role delegation, never another user's existing conversation. */
+export function isWorksceneSupportConversation(id: string): boolean {
+  return /^workscene-support-[a-f0-9]{64}$/u.test(id);
 }
 
 export function renderWorksceneHandoff(handoff: WorksceneTaskHandoff): string {
@@ -657,7 +732,9 @@ export function validateWorksceneControl(
   if (!intent || typeof intent !== "object" || Array.isArray(intent))
     throw new TypeError("Invalid workscene intent");
   const keys =
-    intent.kind === "stop_task"
+    intent.kind === "connect_mcp"
+      ? ["kind", "candidate", "scope", "handoff"]
+      : intent.kind === "stop_task"
       ? ["kind", "conversationId", "runId"]
       : intent.kind === "enter"
         ? ["kind", "sceneId", "handoff"]
@@ -673,6 +750,7 @@ export function validateWorksceneControl(
     throw new TypeError("Invalid workscene intent kind/fields");
   if (
     intent.kind !== "exit" &&
+    intent.kind !== "connect_mcp" &&
     intent.kind !== "stop_task" &&
     (typeof intent.sceneId !== "string" ||
       !/^[a-zA-Z0-9_-]+$/.test(intent.sceneId))
@@ -691,6 +769,13 @@ export function validateWorksceneControl(
   }
   if (intent.handoff !== undefined)
     validateWorksceneTaskHandoff(intent.handoff);
+  if (intent.kind === "connect_mcp") {
+    const scope = intent.scope as Record<string, unknown> | undefined;
+    if (!scope || Object.keys(scope).sort().join(",") !== "configurationRevision,deviceId" || [scope.deviceId, scope.configurationRevision].some((value) => typeof value !== "string" || !value.trim() || value.length > 256)) throw new TypeError("接入缺少设备与配置版本");
+    validateMcpCandidate(intent.candidate);
+    validateWorksceneTaskHandoff(intent.handoff);
+    if (intent.handoff.remaining.length === 0) throw new TypeError("能力接入必须关联未完成的任务");
+  }
   const stops = outcome.stops;
   if (stops !== undefined) {
     if (!Array.isArray(stops) || stops.length > 64)
@@ -722,9 +807,9 @@ export function validateWorksceneControl(
       !conflict ||
       Object.keys(conflict).join(",") !== "kindsSeen" ||
       !Array.isArray(conflict.kindsSeen) ||
-      conflict.kindsSeen.length > 3 ||
+      conflict.kindsSeen.length > 4 ||
       conflict.kindsSeen.some(
-        (kind) => !["enter", "exit", "set_workdir"].includes(kind),
+        (kind) => !["enter", "exit", "set_workdir", "connect_mcp"].includes(kind),
       )
     )
       throw new TypeError("Invalid workscene conflict");

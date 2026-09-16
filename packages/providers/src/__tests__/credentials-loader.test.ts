@@ -1,10 +1,12 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyCredentialsPatch,
   loadCredentialSnapshot,
   loadCredentials,
   writeCredentials,
+  writeMcpCredentials,
+  readCredentialBindingState,
 } from "../credentials-loader.js";
 
 class MemorySecretStore implements SecretStorePort {
@@ -50,6 +52,24 @@ class MemorySecretStore implements SecretStorePort {
 }
 
 describe("SecretStore credentials repository", () => {
+  it("projects MCP binding metadata without reading secret payloads", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { main: { apiKey: "fixture-provider" } }, mcp: { demo: { TOKEN: "fixture-token" } } }, { store });
+    const read = vi.spyOn(store, "get");
+    const state = await readCredentialBindingState({ store });
+    expect(state.mcpIds).toEqual(["demo"]);
+    expect(state.generation).toBeTruthy();
+    expect(read.mock.calls.map(([ref]) => ref.bindingId)).toEqual(["credentials/v1/manifest"]);
+    expect(JSON.stringify(state)).not.toContain("fixture-token");
+  });
+  it("edits only MCP bindings and rejects stale changes before overwriting secrets", async () => {
+    const store = new MemorySecretStore();
+    const providers = { main: { apiKey: "fixture-provider" } };
+    await writeCredentials({ providers, mcp: {} }, { store });
+    await writeMcpCredentials({}, { demo: { TOKEN: "fixture-token" } }, { store });
+    await expect(writeMcpCredentials({}, {}, { store })).rejects.toThrow();
+    expect(await loadCredentials({ store })).toEqual({ providers, mcp: { demo: { TOKEN: "fixture-token" } } });
+  });
   it("loads credentials and their opaque generation from one coordinated snapshot", async () => {
     const store = new MemorySecretStore();
     await writeCredentials({ providers: { main: { apiKey: "first-secret" } } }, { store });

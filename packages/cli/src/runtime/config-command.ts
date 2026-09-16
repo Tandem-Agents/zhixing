@@ -25,14 +25,14 @@ import {
 
   writeConfig,
   writeCredentials,
+  editMcpServerConfiguration,
+  writeMcpCredentials,
 } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
 import {
   BASE_CONFIG_SECTION_IDS,
-  extractMcpCandidate,
-  resolveMcpSetup,
   runConfigEditor,
 } from "../config-editor/index.js";
 import type {
@@ -41,6 +41,7 @@ import type {
   SectionId,
 } from "../config-editor/index.js";
 import { createMcpManagementAdapter } from "./mcp-management-adapter.js";
+import { McpManagementApplication } from "@zhixing/core/mcp-management";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
@@ -197,7 +198,7 @@ export function formatHostReloadChannelMessages(
 
 async function runEditorCommand(
   deps: ConfigCommandDeps,
-  opts: { sections: SectionId[]; title: string; runtime?: ConfigEditorRuntime },
+  opts: { sections: SectionId[]; title: string; runtime?: ConfigEditorRuntime; mcpApplication?: (editor: import("@zhixing/core/mcp-management").McpManagementEditorPort) => McpManagementApplication },
 ): Promise<void> {
   const { rl, state, renderer, writer } = deps;
 
@@ -231,8 +232,8 @@ async function runEditorCommand(
       writers: {
         // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
         // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
-        writeConfig: (next) => writeConfig(next, { configPath }),
-        writeCredentials: (next) => writeCredentials(next, { store: secretStore }),
+        writeConfig: (next) => opts.mcpApplication ? Promise.resolve() : writeConfig(next, { configPath, expected: config }),
+        writeCredentials: (next) => opts.mcpApplication ? Promise.resolve() : writeCredentials(next, { store: secretStore }),
       },
       stdin: process.stdin,
       stdout: process.stdout,
@@ -241,6 +242,23 @@ async function runEditorCommand(
 
     switch (editorResult.kind) {
       case "completed": {
+        if (opts.mcpApplication) {
+          const application = opts.mcpApplication({
+            save: async (edit) => {
+              await editMcpServerConfiguration(config.mcp?.servers ?? {}, edit.servers, {
+                configPath,
+                saveCredentials: () => writeMcpCredentials(credentials.mcp ?? {}, edit.credentials, { store: secretStore }),
+              });
+            },
+            activate: async () => {
+              if (state.activeTurnPromise) await state.activeTurnPromise.catch(() => {});
+              await deps.requestHostReload();
+            },
+          });
+          const result = await application.edit({ servers: editorResult.config.mcp?.servers ?? {}, credentials: editorResult.credentials.mcp ?? {} });
+          writer.line((result.status === "active" ? chalk.green : chalk.yellow)(`${layout.contentPrefix}${result.message}`));
+          break;
+        }
         const launchSelectionChanged = canonicalize({
           enabledRoles: config.mesh?.enabledRoles ?? [],
           executorAutoStart: config.mesh?.executorAutoStart ?? false,
@@ -332,6 +350,7 @@ export async function handleMcpCommand(
   deps: ConfigCommandDeps & {
     /** MCP 连接状态 wire（宿主快照——具体结构由 infrastructure adapter 严格解码）。 */
     readMcpStatusWire: () => Promise<unknown>;
+    readMcpPending?: () => Promise<readonly import("@zhixing/core/mcp-management").McpPendingConnection[]>;
     /** 宿主轻推理通道(llm.complete)——接入向导的源解析 / 提取 */
     llmComplete: (
       prompt: string,
@@ -351,32 +370,26 @@ export async function handleMcpCommand(
   // 面板取消（Esc）放弃等待、后台结果丢弃即可。
   const inferLlm: McpSetupLlm = (prompt, signal) =>
     deps.llmComplete(prompt, "main", signal);
+  const application = new McpManagementApplication({ discovery: management, llm: inferLlm });
 
   // 连接状态取进屏时刻的宿主快照——管理屏打开期间不实时刷新(编辑器 runtime
   // 期望同步读;状态权威在宿主,重开 /mcp 即最新)。
   const statusSnapshot = await management.snapshot().catch(() => []);
 
   const runtime: ConfigEditorRuntime = {
+    mcpPending: await deps.readMcpPending?.() ?? [],
     mcpServerStatuses: () => statusSnapshot,
     mcpProbe: management,
     // 统一输入解析：确定性输入直接出候选，裸输入经搜索引导出 choices（onStep 回报当前步骤）
     mcpResolve: (input, signal, onStep) =>
-      resolveMcpSetup(input, {
-        fetchSource: (name, sig) => management.readSource(name, sig),
-        search: (query, sig) => management.search(query, sig),
-        isServerIdValid: management.isServerIdValid,
-        llm: inferLlm,
-      }, signal, onStep),
+      application.resolve(input, signal, onStep),
     // 阶段2：搜索引导选中真实包后，读其 README 提取启动配置（与 mcpResolve 分开）
-    mcpExtract: (name, signal) => extractMcpCandidate(name, {
-      fetchSource: (packageName, sig) => management.readSource(packageName, sig),
-      isServerIdValid: management.isServerIdValid,
-      llm: inferLlm,
-    }, signal),
+    mcpExtract: (name, signal) => application.extract(name, signal),
   };
   await runEditorCommand(deps, {
     sections: ["mcp"],
     title: "MCP 服务",
     runtime,
+    mcpApplication: (editor) => new McpManagementApplication({ discovery: management, llm: inferLlm, editor }),
   });
 }

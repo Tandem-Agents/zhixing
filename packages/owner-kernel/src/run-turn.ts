@@ -268,6 +268,7 @@ export async function* runTurnWithCommit(
   hooks?: RunTurnHooks,
   environment?: ExplicitEnvironmentSelection,
 ): AsyncGenerator<AgentYield, RunResult> {
+  await manager.prepareRuntimeProjectionForTurn(conversationId);
   const session = manager.getSession(conversationId);
   if (!session) {
     throw new Error(

@@ -81,6 +81,9 @@ export {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   writeConfig,
+  addMcpServerConfiguration,
+  editMcpServerConfiguration,
+  mcpConfigurationRevision,
 } from "./config-loader.js";
 export type {
   ResolvedWorkspace,
@@ -99,6 +102,8 @@ export {
   loadCredentialSnapshot,
   loadCredentials,
   writeCredentials,
+  writeMcpCredentials,
+  readCredentialBindingState,
 } from "./credentials-loader.js";
 export type {
   CredentialMutationOptions,

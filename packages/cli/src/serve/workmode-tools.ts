@@ -34,7 +34,7 @@ import {
 } from "@zhixing/core/workscene";
 import { type JsonSchema, type ToolDefinition } from "@zhixing/core";
 import type { WorksceneTaskHandoff } from "@zhixing/core/types";
-import { isLocalConversationId } from "@zhixing/core/conversation";
+import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { WorksceneAssignmentToolApplication } from "@zhixing/core/workscene/application";
 import { validateWorksceneTaskHandoff } from "@zhixing/core/workscene/application";
@@ -258,7 +258,7 @@ export function createWorkmodeExitTool(): ToolDefinition {
     name: WORKSCENE_PRODUCT_TOOL_IDS.exit,
     description:
       "结束当前工作场景、返回主对话。当本场景的工作已告一段落时调用。" +
-      "仍有原任务需要在主对话处理时提供 handoff，沿已记录的来源交接；单纯退出则省略。成功提交后生效，调用后结束本轮。",
+      "仍有原任务需要主对话能力时提供 handoff；沿原来源交接，没有来源则由隔离的主对话承接并把结果带回当前场景。只交接获准材料；单纯退出省略 handoff。成功提交后生效，调用后结束本轮。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -268,7 +268,8 @@ export function createWorkmodeExitTool(): ToolDefinition {
     boundaries: getWorksceneToolBoundaries("workmode_exit"),
     async call(input) {
       const handoff = readHandoff(input);
-      if (handoff && !runContextStorage.getStore()?.turnOrigin?.worksceneContinuation?.returnConversationId) return fail("当前场景没有已记录的原任务来源，未交接；请在当前场景继续处理，或明确返回的目标对话。");
+      if (handoff && parseConversationId(runContextStorage.getStore()?.conversationId ?? "").scope.kind !== "workscene")
+        return fail("只有当前工作场景可以交接到主对话。");
       const unsupported = handoff?.remaining.length ? undefined : assertPostTurnControlSupported("workmode_exit");
       if (unsupported) return unsupported;
       emitPostTurnControlIntent({ kind: "exit", ...(handoff ? { handoff } : {}) });

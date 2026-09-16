@@ -19,8 +19,12 @@ import { createAnchorWorksceneAssignmentToolApplication } from "./workscene-appl
 import { createWorkmodeEnterTool, createWorkmodeExitTool, createWorksceneListTool, createWorksceneTaskTools, WORKSCENE_PRODUCT_TOOL_IDS } from "./workmode-tools.js";
 import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
+import { mcpConfigurationRevision } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
+import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
+import { createMcpManagementTools } from "./mcp-tools.js";
+import { McpManagementApplication } from "@zhixing/core/mcp-management";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
 import { createSkillCatalogWindowPromptProjection } from "../runtime/skill-catalog-window-projection.js";
@@ -290,6 +294,7 @@ export async function runExecutorRole(
       createToolImplementation: bootstrap.createToolImplementation,
       permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
+      mcpProductTools: createMcpManagementTools(new McpManagementApplication({ discovery: createMcpManagementAdapter({ proxy: mcpConfiguration.network?.proxy, readStatusWire: async () => mcpRuntime.status.snapshot() }) }), { deviceId: bootstrap.mesh.deviceKey.deviceId, revision: mcpConfigurationRevision, canConnect: false }),
       systemProtectedPaths: resolveSystemProtectedSecretPaths(zhixingHome),
       interactions,
       artifactStore: () => {
@@ -458,6 +463,7 @@ export async function runExecutorRole(
         runtime.createConversationRuntime(
           environment?.workspaceRoot,
           sessionId,
+          environment?.executionProfile,
         ),
     });
     const runtimeFactory =
@@ -1064,6 +1070,7 @@ export class ExecutorRuntimeSubstrate {
     readonly createToolImplementation: HostKernelToolImplementationFactory;
     readonly permissionStorage: RuntimeSecurityExecutionInfrastructure;
     readonly mcpTools: McpRuntimeToolProjectionPort;
+    readonly mcpProductTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
     readonly artifactStore: () => ArtifactStore;
@@ -1086,6 +1093,7 @@ export class ExecutorRuntimeSubstrate {
   createConversationRuntime(
     workspaceRoot?: string | null,
     sessionId?: string,
+    executionProfile?: import("@zhixing/core/types").RuntimeExecutionProfile,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
@@ -1106,6 +1114,7 @@ export class ExecutorRuntimeSubstrate {
         : undefined;
     const primaryRole = workscene ? "power" : "main";
     const artifacts = this.options.artifactStore();
+    const profile = workscene?.profile ?? zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null });
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.interactive,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
@@ -1124,22 +1133,21 @@ export class ExecutorRuntimeSubstrate {
           ? Object.freeze({ kind: "scene", sceneId: workscene.sceneId })
           : Object.freeze({ kind: "default" }),
       ),
-      profile:
-        workscene?.profile ??
-        zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null }),
+      profile: executionProfile ? { ...profile, enabledTools: profile.enabledTools.filter(name => executionProfile.tools.includes(name)) } : profile,
       lifecycle: [createZhixingGuidanceLifecycle({
         zhixingHome: this.options.zhixingHome,
         readGuidanceFile,
         ...(workscene ? { resolveWorkspaceRoot: async () => runtimeEnvironment.workspace.path } : {}),
       })],
         extraTools: [
+          ...(this.options.mcpProductTools ?? []),
           ...mcp.tools,
           ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools()),
         ...(sessionId && isLocalConversationId(sessionId) ? [] : workscene
           ? [createWorkmodeExitTool()]
           : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
-      ],
-      executionMcpServers: mcp.serverIds,
+      ].filter((tool) => !executionProfile || executionProfile.tools.includes(tool.name)),
+      executionMcpServers: mcp.serverIds.filter((id) => !executionProfile || executionProfile.mcpServers.includes(id)),
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
@@ -1161,7 +1169,7 @@ export class ExecutorRuntimeSubstrate {
     const selection = selectJobRuntimeTools({
       instruction,
       baseProfile,
-      extraTools: [...mcp.tools],
+      extraTools: [...(this.options.mcpProductTools ?? []).filter((tool) => tool.name !== "mcp_connect"), ...mcp.tools],
       executionMcpServers: mcp.serverIds,
       implementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",
@@ -1201,11 +1209,13 @@ export class ExecutorRuntimeSubstrate {
     return {
       tools: [
         ...new Set([
+          ...(this.options.mcpProductTools ?? []).map((tool) => tool.name),
           ...zhixingProfile().enabledTools,
           ...mcp.tools.map((tool) => tool.name),
           WORKSCENE_PRODUCT_TOOL_IDS.enter,
           WORKSCENE_PRODUCT_TOOL_IDS.exit,
           WORKSCENE_PRODUCT_TOOL_IDS.list,
+          ...createWorksceneTaskTools().map(tool => tool.name),
         ]),
       ].sort(),
       mcpServers: mcp.serverIds,

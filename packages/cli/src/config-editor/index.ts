@@ -61,4 +61,4 @@ export {
   type McpSourceFetcher,
   type McpResolveDeps,
   type McpResolveResult,
-} from "./mcp-setup.js";
+} from "@zhixing/core/mcp-management";

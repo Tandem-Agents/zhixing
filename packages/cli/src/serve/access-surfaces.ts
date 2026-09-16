@@ -492,6 +492,7 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
   readonly conversationNamingStorage: NamerConversationRepo;
   readonly meshBootstrap: MeshRuntimeBootstrap;
   readonly meshConnections?: MeshConnectionRegistry;
@@ -933,6 +934,8 @@ export async function createConversationServices(
       protocol,
       workscene: worksceneApplication,
       advancement: advancementReviews,
+      mcp: input.mcp,
+      canRunIsolatedMain: Boolean(inputExecutorRoleModule),
     }),
   );
   inputLifecycleContributions.acquire(
@@ -1384,6 +1387,7 @@ export async function prepareDelivery(
  * activation gate 统一移交正常关闭链。
  */
 export interface InstallConfirmationBridgeInput {
+  readonly continuationSource?: import("@zhixing/rpc").ConfirmationContinuationSource;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly conversations: ConversationManager;
   readonly confirmationHub: ConfirmationHub;
@@ -1398,6 +1402,7 @@ export async function installConfirmationBridge(
     connections: runner.server.connections,
     hub: confirmationHub,
     conversations,
+    continuationSource: input.continuationSource,
   });
   input.lifecycleContributions.acquire(
     "confirmationBridge.dispose",

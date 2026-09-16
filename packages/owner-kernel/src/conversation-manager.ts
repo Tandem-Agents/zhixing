@@ -334,6 +334,36 @@ export class WorksceneBusyError extends Error {
 // ─── ConversationManager ───
 
 export class ConversationManager implements ConversationCommitProjection {
+  private readonly runtimeProjectionHandles = new WeakMap<ManagedSession, { runtime: SessionRuntime; generation: number }>();
+  private runtimeProjectionGeneration = 0;
+
+  /** Replace idle projections on next acquisition; never alter an executing assignment. */
+  invalidateRuntimeProjections(): void {
+    this.runtimeProjectionGeneration++;
+  }
+
+  /** Called by the turn owner after acquiring its slot, before issuing an assignment. */
+  async prepareRuntimeProjectionForTurn(conversationId: string): Promise<void> {
+    await this.refreshRuntimeProjection(conversationId, true);
+  }
+
+  private async refreshRuntimeProjection(conversationId: string, beforeTurn = false): Promise<void> {
+    await this.withIdLock(conversationId, async () => {
+      const current = this.sessions.get(conversationId);
+      if (!current || (current.busy && !beforeTurn)) return;
+      const handle = this.runtimeProjectionHandles.get(current)!;
+      if (handle.generation === this.runtimeProjectionGeneration) return;
+      const generation = this.runtimeProjectionGeneration;
+      const next = await this.factory.create(conversationId);
+      if (this.sessions.get(conversationId) !== current || (current.busy && !beforeTurn)) { await next.dispose(); return; }
+      const previous = handle.runtime;
+      this.detachFromHub(conversationId);
+      handle.runtime = next;
+      handle.generation = generation;
+      this.attachToHub(conversationId, next);
+      await previous.dispose();
+    });
+  }
   private readonly sessions = new Map<string, ManagedSession>();
   /**
    * observer 名册是 conversation 身份层状态,不是活跃 runtime 状态。
@@ -560,6 +590,8 @@ export class ConversationManager implements ConversationCommitProjection {
     if (conversationId && this.sessions.has(conversationId)) {
       this.assertNotQuiescing(conversationId);
       const session = this.sessions.get(conversationId)!;
+      if (!session.busy && this.runtimeProjectionHandles.get(session)?.generation !== this.runtimeProjectionGeneration)
+        await this.refreshRuntimeProjection(conversationId);
       session.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
       return session;
@@ -609,15 +641,17 @@ export class ConversationManager implements ConversationCommitProjection {
     const history = ephemeral ? undefined : await this.loadHistory?.(id);
     // factory 先于持久身份确保:装配失败(如对话所属场景已删)时 fail-fast
     // 在任何写盘之前——否则会在已删除的归属目录里重建空身份壳。
+    const generation = this.runtimeProjectionGeneration;
     const runtime = await this.factory.create(id);
     if (!ephemeral) {
       await this.ensurePersistentConversation(id, history !== undefined);
     }
     const now = new Date().toISOString();
 
+    const runtimeHandle = { runtime, generation };
     const session: ManagedSession = {
       conversationId: id,
-      runtime,
+      get runtime() { return runtimeHandle.runtime; },
       window: createAttentionWindow({
         conversationId: id,
         bootstrap: history?.bootstrap ?? undefined,
@@ -634,6 +668,7 @@ export class ConversationManager implements ConversationCommitProjection {
     };
 
     this.sessions.set(id, session);
+    this.runtimeProjectionHandles.set(session, runtimeHandle);
     this.attachToHub(id, runtime);
     return session;
   }

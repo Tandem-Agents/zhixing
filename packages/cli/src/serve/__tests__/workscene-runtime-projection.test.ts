@@ -10,6 +10,8 @@ import {
   createAnchorRuntimeCapabilityCatalog,
   createWorksceneConversationRuntimeFactory,
   createAnchorRuntimeProjectionAssembly,
+  selectFrozenRuntimeCapabilities,
+  projectConversationCapabilitiesForDevice,
 } from "../workscene-runtime-projection.js";
 
 function scene(
@@ -67,6 +69,30 @@ function fixture(mcpTools = {
 }
 
 describe("Workscene product runtime projection", () => {
+  it("projects device-local MCP without silently dropping a portable capability", () => {
+    const profile = { tools: ["read", "mcp_connect", "schedule", "workscene_task_stop", "mcp__owner__tool"], mcpServers: ["owner"], providerIds: ["provider"] };
+    const input = { profile, ownerDeviceId: "anchor", executorDeviceId: "remote", capabilities: { tools: ["mcp__remote__tool"], mcpServers: ["remote"] } };
+    expect(projectConversationCapabilitiesForDevice(input)).toEqual({ tools: ["mcp__remote__tool", "read", "workscene_task_stop"], mcpServers: ["remote"], providerIds: ["provider"] });
+    expect(projectConversationCapabilitiesForDevice({ ...input, executorDeviceId: "anchor" })).toBe(profile);
+  });
+  it("keeps isolated support free of personal guidance, skill indexes and default workspace", async () => {
+    const projection = fixture().main(null, true);
+    expect(projection.lifecycle).toEqual([]);
+    expect(projection.workspace).toBe(null);
+    expect(projection.profile.enabledTools).not.toContain("read");
+    const read = vi.fn();
+    expect((await projection.windowPrompt.project({ read } as never)).content).toBe("");
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("does not widen already-issued tool/server sets after additive activation", () => {
+    const current = fixture().main();
+    const frozen = selectFrozenRuntimeCapabilities(current, { tools: ["workscene_list"], mcpServers: [] } as never);
+    expect(frozen.runtimeTools.extraTools.map((tool) => tool.name)).toEqual(["workscene_list"]);
+    expect(frozen.runtimeTools.executionMcpServers).toEqual([]);
+    expect(current.runtimeTools.extraTools.some((tool) => tool.name === "mcp__alpha__tool")).toBe(true);
+    expect(frozen.windowPrompt).toBe(current.windowPrompt);
+    expect(frozen.securityExecution).toBe(current.securityExecution);
+  });
   it("forms frozen main and scene projections with the exact product tool split", async () => {
     const assembly = fixture();
     const main = assembly.main();

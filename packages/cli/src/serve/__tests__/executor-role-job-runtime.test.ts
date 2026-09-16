@@ -147,6 +147,13 @@ describe("executor role conversation runtime production assembly", () => {
         inputSchema: { properties: { handoff: { required: ["goal", "constraints", "completed", "remaining"] } } },
       });
       expect(issued.executionMcpServers).toEqual(["alpha"]);
+      expect(substrate.capabilityCatalog().tools).toEqual(expect.arrayContaining(["workscene_task_list", "workscene_task_stop"]));
+      runtimeMocks.runtimeEnvironmentCreate.mockImplementationOnce((input) => ({ kind: "environment", input, agentIdentity, workspace: { path: workspace } }));
+      await substrate.createConversationRuntime(workspace, "ws:scene-a:primary", { tools: ["workmode_exit"], mcpServers: [], providerIds: [] });
+      const frozen = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
+      expect(frozen.extraTools.map((tool: { name: string }) => tool.name)).toEqual(["workmode_exit"]);
+      expect(frozen.executionMcpServers).toEqual([]);
+      expect(frozen.profile.enabledTools).toEqual([]);
       const availableNames = [...issued.profile.enabledTools, ...issued.extraTools.map((tool: { name: string }) => tool.name)];
       for (const name of ["workscene_rename_current", "workscene_set_workdir_current", "workscene_clear_workdir_current"]) {
         expect(availableNames).not.toContain(name);
