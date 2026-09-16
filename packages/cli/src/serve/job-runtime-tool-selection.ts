@@ -12,21 +12,34 @@ export interface JobRuntimeToolSelection {
   readonly modelOverride?: string;
 }
 
+export type JobRuntimeCapabilities = Pick<
+  import("@zhixing/core/types").RuntimeExecutionProfile,
+  "tools" | "mcpServers"
+>;
+
 /**
- * The one Host-edge policy for applying a durable job's requested-tool
- * allowlist to the concrete tools available in the selected topology.
+ * 装配已签发 Job 的冻结能力；实时目录只能提供实现，不能扩张签发范围。
  */
-export function selectJobRuntimeTools(input: Readonly<{
-  instruction: JobExecutionInstruction;
-  baseProfile: AgentRoleProfile;
-  extraTools: readonly ToolDefinition[];
-  executionMcpServers: readonly string[];
-  implementation: RuntimeToolProjection["implementation"];
-}>): JobRuntimeToolSelection {
-  const requested = input.instruction.tools
-    ? new Set(input.instruction.tools)
-    : undefined;
-  if (requested) {
+export function selectJobRuntimeTools(
+  input: Readonly<{
+    instruction: JobExecutionInstruction;
+    capabilities: JobRuntimeCapabilities;
+    baseProfile: AgentRoleProfile;
+    extraTools: readonly ToolDefinition[];
+    executionMcpServers: readonly string[];
+    implementation: RuntimeToolProjection["implementation"];
+  }>,
+): JobRuntimeToolSelection {
+  const requested = new Set(input.capabilities.tools);
+  if (
+    input.instruction.tools &&
+    (input.instruction.tools.some((tool) => !requested.has(tool)) ||
+      requested.size !== new Set(input.instruction.tools).size)
+  )
+    throw new TypeError(
+      "Job instruction tools differ from its frozen manifest",
+    );
+  {
     const available = new Set([
       ...input.baseProfile.enabledTools,
       ...input.extraTools.map((tool) => tool.name),
@@ -38,13 +51,19 @@ export function selectJobRuntimeTools(input: Readonly<{
       );
     }
   }
+  const unavailableServers = input.capabilities.mcpServers.filter(
+    (server) => !input.executionMcpServers.includes(server),
+  );
+  if (unavailableServers.length) {
+    throw new TypeError(
+      `Job requested unavailable MCP servers: ${unavailableServers.join(", ")}`,
+    );
+  }
   const profile = Object.freeze({
     ...input.baseProfile,
     constraints: Object.freeze([...input.baseProfile.constraints]),
     enabledTools: Object.freeze(
-      requested
-        ? input.baseProfile.enabledTools.filter((tool) => requested.has(tool))
-        : [...input.baseProfile.enabledTools],
+      input.baseProfile.enabledTools.filter((tool) => requested.has(tool)),
     ),
     ...(input.baseProfile.capabilities
       ? { capabilities: Object.freeze({ ...input.baseProfile.capabilities }) }
@@ -53,10 +72,8 @@ export function selectJobRuntimeTools(input: Readonly<{
   return Object.freeze({
     profile,
     runtimeTools: createRuntimeToolProjection({
-      extraTools: requested
-        ? input.extraTools.filter((tool) => requested.has(tool.name))
-        : [...input.extraTools],
-      executionMcpServers: input.executionMcpServers,
+      extraTools: input.extraTools.filter((tool) => requested.has(tool.name)),
+      executionMcpServers: [...input.capabilities.mcpServers],
       implementation: input.implementation,
     }),
     ...(input.instruction.model

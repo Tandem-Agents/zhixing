@@ -110,7 +110,7 @@ export interface AnchorSchedulerRuntimeOptions {
   }) => Promise<ManualJobSurfaceSession>;
   readonly localJobOwner?: ExecutorJobOwner;
   readonly mesh: MeshRuntimeAssembly | undefined;
-  readonly capabilities: {
+  readonly capabilities: () => {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
   };
@@ -769,7 +769,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     try {
       prepared = await this.#options.authority.prepareJobAssignment({
         instruction,
-        capabilities: this.#options.capabilities,
+        capabilities: this.#options.capabilities(),
         ...(await this.#remoteTargets()),
       });
     } catch (error) {

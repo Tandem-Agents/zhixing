@@ -32,6 +32,7 @@ const streamProof = {
 const envelope = {
   assignmentId,
   execution: "job",
+  manifest: { tools: ["read"], mcpServers: ["alpha"] },
   work: {
     taskId: "task:recovery",
     jobRunId: "job-run:recovery",
@@ -217,6 +218,7 @@ describe("job assignment audit-only recovery", () => {
       releaseRuntime = resolve;
     });
     let runtimeSignal: AbortSignal | undefined;
+    let issuedCapabilities: unknown;
     const sealJobBundle = vi.fn(async () => ({
       assignmentId,
     }));
@@ -242,7 +244,9 @@ describe("job assignment audit-only recovery", () => {
     const worker = new JobAssignmentWorker({
       ledger,
       runtime: {
-        create: vi.fn(async () => ({
+        create: vi.fn(async ({ capabilities }) => {
+          issuedCapabilities = capabilities;
+          return {
           async *run(
             _instruction: unknown,
             options: { readonly abortSignal: AbortSignal },
@@ -257,7 +261,7 @@ describe("job assignment audit-only recovery", () => {
             };
           },
           dispose: vi.fn(async () => undefined),
-        })),
+        }; }),
       },
       submissionFor: vi.fn(async () => owner),
       finalizeUsage: vi.fn(async () => ({
@@ -287,6 +291,7 @@ describe("job assignment audit-only recovery", () => {
 
     expect(closed).toBe(false);
     expect(runtimeSignal!.aborted).toBe(false);
+    expect(issuedCapabilities).toEqual({ tools: ["read"], mcpServers: ["alpha"] });
 
     releaseRuntime();
     await closing;

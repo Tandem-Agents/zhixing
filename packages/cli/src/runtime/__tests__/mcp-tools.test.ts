@@ -46,7 +46,19 @@ describe("MCP model binding", () => {
     expect(result.content).toContain("connecting");
   });
   it("does not advertise a connection tool on a discovery-only device", () => {
-    expect(fixture(false).tools.map(({ name }) => name)).toEqual(["mcp_discover"]);
-    expect(fixture(false).tools[0]!.description).toContain("交回主对话");
+    expect(fixture(false).tools.map(({ name }) => name)).toEqual(["mcp_discover", "mcp_delegate"]);
+    expect(fixture(false).tools[1]!.description).toContain("主设备的独立对话");
+  });
+  it("delegates only public plans from durable conversations, never background or child runs", async () => {
+    const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const intents: unknown[] = [];
+    bus.on("post_turn_control:requested", (intent) => intents.push(intent));
+    const tool = fixture(false).tools[1]!;
+    for (const execution of ["conversation", "job"] as const) {
+      const result = await runContextStorage.run({ bus, lineage: "main", conversationId: "remote-main", assignmentMutations: { execution } as never }, () => tool.call({ candidate, handoff }, {} as never));
+      expect(result.isError === true).toBe(execution === "job");
+    }
+    expect(intents).toEqual([{ kind: "delegate_mcp", candidate, handoff }]);
+    expect(tool.confirmationDisplayContext).toBeUndefined();
   });
 });

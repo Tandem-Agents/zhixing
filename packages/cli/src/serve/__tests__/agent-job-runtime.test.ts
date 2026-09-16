@@ -81,16 +81,30 @@ function runOptions(signal = new AbortController().signal) {
 }
 
 async function createHandle(runtime: AgentRuntime) {
+  runtime.executionProfile ??= () => ({ tools: ["read"], mcpServers: [], providerIds: [] });
   return createAgentJobRuntimePort({
     create: vi.fn(async () => runtime),
   }).create({
     taskId: "task-1",
     jobRunId: "job-run-1",
+    capabilities: { tools: ["read"], mcpServers: [] },
     confirmationBroker: {} as IConfirmationBroker,
   });
 }
 
 describe("agent job runtime structured lifecycle", () => {
+  it("rejects and disposes a factory runtime that widens the frozen manifest before execution", async () => {
+    const runtime = Object.assign({} as AgentRuntime, {
+      executionProfile: () => ({ tools: ["read", "mcp__later__tool"], mcpServers: ["later"], providerIds: [] }),
+      run: vi.fn(), dispose: vi.fn(async () => undefined),
+    });
+    const handle = await createHandle(runtime);
+    await expect(handle.run(instruction, runOptions()).next()).rejects.toThrow("frozen manifest");
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect(runtime.dispose).toHaveBeenCalledTimes(1);
+    await handle.dispose();
+    expect(runtime.dispose).toHaveBeenCalledTimes(1);
+  });
   it("constructs the durable job Envelope with one identity and all Correctness ports", async () => {
     let captured: KernelRunEnvelope | undefined;
     const runtime = Object.assign({} as AgentRuntime, {
@@ -370,6 +384,7 @@ describe("agent job runtime structured lifecycle", () => {
     const handle = await createAgentJobRuntimePort({ create }).create({
       taskId: "task-1",
       jobRunId: "job-run-1",
+      capabilities: { tools: [], mcpServers: [] },
       confirmationBroker: {} as IConfirmationBroker,
     });
 

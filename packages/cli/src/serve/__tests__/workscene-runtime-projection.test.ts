@@ -69,6 +69,23 @@ function fixture(mcpTools = {
 }
 
 describe("Workscene product runtime projection", () => {
+  it("signs new jobs from the current job-only inventory and preserves old manifests", () => {
+    let servers = ["alpha"];
+    const assembly = fixture({ snapshot: () => ({ tools: servers.map(id => ({ name: `mcp__${id}__tool` })), serverIds: [...servers] }) } as never);
+    const old = assembly.jobCapabilities();
+    servers = ["alpha", "beta"];
+    const fresh = assembly.jobCapabilities();
+    expect(fresh.tools).toContain("mcp__beta__tool");
+    expect(fresh.tools).not.toContain("workmode_enter");
+    expect(fresh.tools).not.toContain("mcp_connect");
+    const frozen = assembly.job({ kind: "agent-turn", prompt: "task" }, old);
+    expect(frozen.runtimeTools.extraTools.map(t => t.name)).not.toContain("mcp__beta__tool");
+    expect(frozen.runtimeTools.executionMcpServers).toEqual(["alpha"]);
+    const explicit = assembly.job({ kind: "agent-turn", prompt: "task", tools: ["read"] }, { tools: ["read"], mcpServers: [] });
+    expect(explicit.runtimeTools.extraTools).toEqual([]);
+    expect(explicit.runtimeTools.executionMcpServers).toEqual([]);
+    expect(() => assembly.job({ kind: "agent-turn", prompt: "task", tools: ["read"] }, old)).toThrow("frozen manifest");
+  });
   it("projects device-local MCP without silently dropping a portable capability", () => {
     const profile = { tools: ["read", "mcp_connect", "schedule", "workscene_task_stop", "mcp__owner__tool"], mcpServers: ["owner"], providerIds: ["provider"] };
     const input = { profile, ownerDeviceId: "anchor", executorDeviceId: "remote", capabilities: { tools: ["mcp__remote__tool"], mcpServers: ["remote"] } };
@@ -221,11 +238,11 @@ describe("Workscene product runtime projection", () => {
   it("forms ephemeral and durable-job projections from the same exact product facts", async () => {
     const assembly = fixture();
     const ephemeral = assembly.ephemeral();
-    const allJob = assembly.job({} as never);
+    const allJob = assembly.job({} as never, assembly.jobCapabilities());
     const restrictedJob = assembly.job({
       tools: ["read", "schedule", "mcp__alpha__tool"],
       model: "job-model",
-    } as never);
+    } as never, { tools: ["read", "schedule", "mcp__alpha__tool"], mcpServers: ["alpha", "beta"] });
 
     expect(ephemeral.runtimeTools.extraTools.map((tool) => tool.name)).toEqual([
       "schedule",
@@ -258,7 +275,7 @@ describe("Workscene product runtime projection", () => {
       jobPrompt.content,
     );
     expect(ephemeralPrompt.content).toContain("提炼技能");
-    expect(() => assembly.job({ tools: ["unknown-tool"] } as never)).toThrow(
+    expect(() => assembly.job({ tools: ["unknown-tool"] } as never, { tools: ["unknown-tool"], mcpServers: [] })).toThrow(
       "Job requested unavailable tools: unknown-tool",
     );
   });

@@ -144,7 +144,7 @@ import type {
   RuntimeKernelEnvironmentConfigurationProjection,
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
-import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
+import { selectJobRuntimeTools, type JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
 import { createPermissionStorageInfrastructure } from "./permission-storage-infrastructure.js";
 
 export async function runExecutorRole(
@@ -504,8 +504,8 @@ export async function runExecutorRole(
     const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker) =>
-          runtime.createJobRuntime(instruction, confirmationBroker),
+        create: (instruction, confirmationBroker, capabilities) =>
+          runtime.createJobRuntime(instruction, confirmationBroker, capabilities),
       }),
       submissionFor: () => {
         if (!mesh) throw new Error("Executor submission transport is not ready");
@@ -1162,14 +1162,16 @@ export class ExecutorRuntimeSubstrate {
   createJobRuntime(
     instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
     confirmationBroker: import("@zhixing/core/confirmation").IConfirmationBroker,
+    capabilities: JobRuntimeCapabilities,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const runtimeEnvironment = this.#runtimeEnvironment.create({});
     const baseProfile = zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity });
     const selection = selectJobRuntimeTools({
       instruction,
+      capabilities,
       baseProfile,
-      extraTools: [...(this.options.mcpProductTools ?? []).filter((tool) => tool.name !== "mcp_connect"), ...mcp.tools],
+      extraTools: [...(this.options.mcpProductTools ?? []).filter((tool) => !["mcp_connect", "mcp_delegate"].includes(tool.name)), ...mcp.tools],
       executionMcpServers: mcp.serverIds,
       implementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",

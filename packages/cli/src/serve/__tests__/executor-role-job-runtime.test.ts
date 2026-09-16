@@ -5,6 +5,11 @@ import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchest
 import { buildSystemPrompt } from "@zhixing/orchestrator/runtime";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createEventBus, type AgentEventMap, type PostTurnControlIntent } from "@zhixing/core";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { WorksceneContinuationApplication, isWorksceneSupportConversation, type WorksceneContinuationSource, type WorksceneContinuationPort } from "@zhixing/core/workscene/application";
+import { createMcpManagementTools } from "../mcp-tools.js";
+import { projectConversationCapabilitiesForDevice } from "../workscene-runtime-projection.js";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
 
@@ -284,6 +289,66 @@ describe("executor role conversation runtime production assembly", () => {
 });
 
 describe("executor role job runtime production assembly", () => {
+  it("freezes remote job tool and server inventories while newer MCP connections are available", async () => {
+    runtimeMocks.createAgentRuntime.mockResolvedValue({} as AgentRuntime);
+    const configuration = projectRuntimeConfiguration(createRuntimeConfigurationSnapshot({}));
+    const substrate = new ExecutorRuntimeSubstrate({
+      zhixingHome: "/executor-home", modelConfiguration: configuration.model, kernelEnvironmentConfiguration: configuration.kernelEnvironment,
+      credentials: {}, createToolImplementation, permissionStorage,
+      mcpTools: { snapshot: () => ({ tools: ["alpha", "beta"].map(id => ({ name: `mcp__${id}__tool` }) as never), serverIds: ["alpha", "beta"] }) },
+      systemProtectedPaths: [], interactions: {} as never, artifactStore: () => ({} as ArtifactStore),
+      deviceCapacity: { interactive: {} as never, scheduler: {} as never, orchestration: {} as never },
+    });
+    await substrate.createJobRuntime({ kind: "agent-turn", prompt: "task" }, {} as IConfirmationBroker, { tools: ["read", "mcp__alpha__tool"], mcpServers: ["alpha"] });
+    const issued = runtimeMocks.createAgentRuntime.mock.lastCall![0];
+    expect(issued.profile.enabledTools).toEqual(["read"]);
+    expect(issued.extraTools.map(t => t.name)).toEqual(["mcp__alpha__tool"]);
+    expect(issued.executionMcpServers).toEqual(["alpha"]);
+  });
+  it("provides a real remote-main support entry without any workscene and returns its result to the original goal", async () => {
+    runtimeMocks.createAgentRuntime.mockResolvedValue({} as AgentRuntime);
+    const configuration = projectRuntimeConfiguration(createRuntimeConfigurationSnapshot({}));
+    const tools = createMcpManagementTools({ search: vi.fn(), readSource: vi.fn(), snapshot: async () => [] }, { deviceId: "remote", revision: () => "r1", canConnect: false });
+    const substrate = new ExecutorRuntimeSubstrate({
+      zhixingHome: "/executor-home", modelConfiguration: configuration.model, kernelEnvironmentConfiguration: configuration.kernelEnvironment,
+      credentials: {}, createToolImplementation, permissionStorage,
+      mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) }, mcpProductTools: tools,
+      systemProtectedPaths: [], interactions: {} as never, artifactStore: () => ({} as ArtifactStore),
+      deviceCapacity: { interactive: {} as never, scheduler: {} as never, orchestration: {} as never },
+    });
+    const profile = projectConversationCapabilitiesForDevice({ profile: { tools: [...mainProfile().enabledTools, "mcp_discover", "mcp_connect"], mcpServers: [], providerIds: [] }, ownerDeviceId: "anchor", executorDeviceId: "remote", capabilities: substrate.capabilityCatalog() });
+    await substrate.createConversationRuntime("/remote-project", "remote-main", profile);
+    const actual = runtimeMocks.createAgentRuntime.mock.lastCall![0];
+    expect(actual.extraTools.map(t => t.name)).toEqual(["mcp_discover", "mcp_delegate"]);
+    const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+    let intent: PostTurnControlIntent | undefined;
+    bus.on("post_turn_control:requested", value => { intent = value; });
+    const handoff = { goal: "交付核实后的资料", constraints: ["不发布"], completed: ["已核实公开来源"], remaining: ["读取并核实资料"] };
+    const candidate = { serverId: "lookup", source: "inferred", entry: { command: "node", args: ["public-server"] }, secretFields: [] };
+    await runContextStorage.run({ bus, lineage: "main", conversationId: "remote-main", assignmentMutations: { execution: "conversation" } as never }, () => actual.extraTools.find(t => t.name === "mcp_delegate")!.call({ candidate, handoff }, {} as never));
+    expect(intent?.kind).toBe("delegate_mcp");
+    const sources: WorksceneContinuationSource[] = [{ conversationId: "remote-main", runId: "root", ingressId: "root-turn", state: "committed", current: true, result: "已交接", surfacePrincipal: "owner", control: { intent: intent! }, origin: { channel: "rpc" } }];
+    const claims = new Set<string>();
+    const port: WorksceneContinuationPort = {
+      canRunIsolatedMain: () => true, read: async id => sources.filter(s => s.conversationId === id), inspect: async (id, turn) => claims.has(`${id}/${turn}`) ? "closed" : "missing",
+      admit: vi.fn(async r => { claims.add(`${r.conversationId}/${r.turnId}`); }), enter: vi.fn(), hasActiveAdvancement: async () => false, workspaceMatches: async () => true, cancelAdvancement: vi.fn(), cancel: vi.fn(), stop: vi.fn(),
+    };
+    await new WorksceneContinuationApplication(port).recover("remote-main");
+    const support = vi.mocked(port.admit).mock.calls[0]![0];
+    expect(isWorksceneSupportConversation(support.conversationId)).toBe(true);
+    expect(support.input).toContain(JSON.stringify(candidate));
+    expect(support.origin.worksceneContinuation?.returnConversationId).toBe("remote-main");
+    expect(port.enter).not.toHaveBeenCalled();
+    sources.push({ ...sources[0]!, conversationId: support.conversationId, runId: "support-result", ingressId: support.turnId, origin: support.origin, control: undefined, result: "已取得并核实资料" });
+    await new WorksceneContinuationApplication(port).recover(support.conversationId);
+    await new WorksceneContinuationApplication(port).recover("remote-main");
+    expect(port.admit).toHaveBeenCalledTimes(2);
+    const returned = vi.mocked(port.admit).mock.calls[1]![0];
+    expect(returned.conversationId).toBe("remote-main");
+    expect(support.input).toContain(handoff.goal);
+    expect(returned.origin.worksceneContinuation).toEqual({ kind: "result", conversationId: support.conversationId, runId: "support-result" });
+    expect(returned.input).toContain("已取得并核实资料");
+  });
   it("capability catalog 与用户 job 工具选择都不再接受旧 memory 工具", () => {
     const configuration = projectRuntimeConfiguration(
       createRuntimeConfigurationSnapshot({}),
@@ -310,6 +375,7 @@ describe("executor role job runtime production assembly", () => {
     expect(() => substrate.createJobRuntime(
       { kind: "agent-turn", prompt: "scheduled", tools: ["memory"] },
       {} as IConfirmationBroker,
+      { tools: ["memory"], mcpServers: [] },
     )).toThrow("Job requested unavailable tools: memory");
     expect(runtimeMocks.createAgentRuntime).not.toHaveBeenCalled();
   });
@@ -346,6 +412,7 @@ describe("executor role job runtime production assembly", () => {
       substrate.createJobRuntime(
         { kind: "agent-turn", prompt: "scheduled" },
         confirmationBroker,
+        { tools: [...mainProfile().enabledTools], mcpServers: [] },
       ),
     ).resolves.toBe(runtime);
     expect(runtimeMocks.createAgentRuntime).toHaveBeenCalledWith(

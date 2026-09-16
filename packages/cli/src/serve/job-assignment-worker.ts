@@ -42,6 +42,7 @@ import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,
 } from "./assignment-global-state-ports.js";
+import type { JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
 
 const COMMIT_REJECTION_PREFIX = "Job commit rejected";
 const JOB_RECOVERY_PAGE_SIZE = 32;
@@ -99,6 +100,7 @@ export interface JobRuntimePort {
     readonly taskId: string;
     readonly jobRunId: string;
     readonly confirmationBroker: IConfirmationBroker;
+    readonly capabilities: JobRuntimeCapabilities;
   }): Promise<JobRuntimeHandle>;
 }
 
@@ -463,6 +465,10 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         taskId: envelope.work.taskId,
         jobRunId: envelope.work.jobRunId,
         confirmationBroker,
+        capabilities: {
+          tools: envelope.manifest.tools,
+          mcpServers: envelope.manifest.mcpServers,
+        },
       });
       const generator = runtime.run(envelope.work.instruction, {
         abortSignal,

@@ -125,6 +125,7 @@ export function createWorksceneContinuationPort(input: {
         const admitted = await manager.admitDurableTurn({
           conversationId: request.conversationId,
           input: request.input,
+          ...(request.environment ? { environment: request.environment } : {}),
           invocation: {
             kind: "agent",
             source: request.advancement ? "advancement" : "interactive",

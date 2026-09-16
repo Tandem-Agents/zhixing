@@ -35,6 +35,8 @@ import { WorksceneContinuationApplication, type WorksceneApplication, type Works
 import type { PostTurnControlOutcome } from "@zhixing/core/types";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createTempDir } from "@zhixing/test-utils";
+import { resolve } from "node:path";
+import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   setupAuthorityRuntime as setupAuthorityRuntimeProduction,
@@ -389,6 +391,37 @@ describe("ConversationProtocolRuntime", () => {
     const runs = await f.protocol.worksceneContinuationSources(scene);
     expect(runs.filter((run) => run.origin?.worksceneContinuation?.kind === "result")).toHaveLength(1);
     await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll();
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("restores the original admission workspace after isolated support without leaking it to the helper", async () => {
+    const f = await worksceneContinuationHarness(undefined, { initialConversationId: "bound-main", withWorkspace: true, firstControl: { intent: { kind: "delegate_mcp", candidate: { serverId: "demo", source: "inferred", entry: { command: "node" }, secretFields: [] }, handoff: { goal: "完成原项目", constraints: [], completed: [], remaining: ["核实后继续原项目"] } } } });
+    const prepare = f.prepare!;
+    try {
+      await f.start();
+      const original = (await f.protocol.worksceneContinuationSources("bound-main"))[0]!;
+      expect(original.environment).toEqual(f.environment);
+      f.protocol.releaseConversation("bound-main");
+      expect((await f.protocol.worksceneContinuationSources("bound-main"))[0]!.environment).toEqual(f.environment);
+      await vi.waitFor(async () => {
+        await f.protocol.recoverConversation("bound-main");
+        const helper = f.executions.find(id => id.startsWith("workscene-support-"));
+        if (helper) await f.protocol.recoverConversation(helper);
+        expect((await f.protocol.worksceneContinuationSources("bound-main")).at(-1)?.origin?.worksceneContinuation?.kind).toBe("result");
+        expect((await f.protocol.worksceneContinuationSources("bound-main")).at(-1)?.state).toBe("committed");
+      }, { timeout: 30000, interval: 500 });
+      const helper = f.executions[1]!;
+      expect(f.executions).toEqual(["bound-main", helper, "bound-main"]);
+      expect((await f.protocol.worksceneContinuationSources(helper))[0]?.environment).toBeUndefined();
+      const returned = (await f.protocol.worksceneContinuationSources("bound-main")).at(-1)!;
+      expect(returned.environment).toEqual(f.environment);
+      const assignments = await Promise.all(prepare.mock.results.map(result => result.value));
+      expect(assignments.map(a => a.environment.workspace?.bindingRef)).toEqual([f.environment!.workspace.bindingRef, undefined, f.environment!.workspace.bindingRef]);
+      await f.application.recover("bound-main");
+      expect(f.executions).toHaveLength(3);
+    } finally {
+      prepare.mockRestore();
+      await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll(); await f.authority.startupCleanup.run();
+    }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("workscene continuation survives projection eviction and preserves one admission/result chain", async () => {
@@ -3541,10 +3574,19 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
   initialConversationId: string;
   firstControl: PostTurnControlOutcome;
   canRunIsolatedMain?: boolean;
+  withWorkspace?: boolean;
   beforeRun?: (conversationId: string, origin: import("@zhixing/core").TurnOrigin | undefined) => Promise<void>;
 }) {
   const home = await createTempDir("workscene-continuation");
-  const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+  const capacity = probe?.withWorkspace ? createDeviceCapacityRuntime(resolve(home, "capacity")) : undefined;
+  const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore(), ...(capacity ? { deviceCapacity: capacity.arbiter, storageMaintenance: capacity.storage } : {}) });
+  let environment: import("@zhixing/core/contracts").ExplicitEnvironmentSelection | undefined;
+  if (probe?.withWorkspace) {
+    const migration = authority.workspaceBindingMigration!;
+    const binding = await migration.importLegacy({ migrationId: "continuation-workspace", sourceSnapshotToken: "initial", displayName: "Original project", absolutePath: resolve(home, "project") }, new AbortController().signal);
+    await migration.activateLegacy({ migrationId: "continuation-workspace", sourceSnapshotToken: "initial" }, new AbortController().signal);
+    environment = { workspace: { deviceId: authority.deviceId, bindingRef: binding.bindingRef } };
+  }
   const executions: string[] = [];
   const control = { intent: { kind: "enter" as const, sceneId: "reports", handoff: { goal: "交付报告", constraints: ["不发布"], completed: [], remaining: ["生成报告"] } } };
   const factory: RuntimeFactory = {
@@ -3566,6 +3608,7 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
   };
   let manager!: ConversationManager;
   let application!: WorksceneContinuationApplication;
+  const prepare = probe?.withWorkspace ? vi.spyOn(authority, "prepareConversationAssignment") : undefined;
   const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(), recoverAuxiliary: (id) => application.recover(id), projectLifecycle: async () => {} });
   const committed = new Set<string>();
   manager = new ConversationManager(factory, undefined, {
@@ -3583,9 +3626,9 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
     },
   };
   application = new WorksceneContinuationApplication(createWorksceneContinuationPort({ manager, protocol, workscene, canRunIsolatedMain: probe?.canRunIsolatedMain ?? true, advancement: { queryActiveState: async () => null, cancelSession: vi.fn() } }));
-  return { authority, protocol, manager, application, executions, start: async () => {
+  return { authority, protocol, manager, application, executions, environment, prepare, start: async () => {
     const managed = await getOrCreateActiveConversation(authority, manager, probe?.initialConversationId ?? "main-handoff");
-    expectSettled(await projectSessionTurn({ manager, managed, text: "报告整理", turnId: "handoff-start", runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "handoff-start", ...(probe ? { turnOrigin: { channel: "rpc", triggeredBy: "rpc:owner" } } : {}) } }, notify: () => {} }));
+    expectSettled(await projectSessionTurn({ manager, managed, ...(environment ? { environment } : {}), text: "报告整理", turnId: "handoff-start", runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "handoff-start", ...(probe ? { turnOrigin: { channel: "rpc", triggeredBy: "rpc:owner" } } : {}) } }, notify: () => {} }));
   } };
 }
 

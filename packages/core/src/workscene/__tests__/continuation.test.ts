@@ -21,6 +21,7 @@ const handoff = {
   completed: ["已取得获准数据"],
   remaining: ["核实并整理结论"],
 };
+const originalEnvironment = { workspace: { deviceId: "remote", bindingRef: "original-project" } };
 
 describe("workscene assignment-bound facts", () => {
   const target = { conversationId: "main-1", runId: "run-1" };
@@ -137,9 +138,17 @@ function child(
   });
 }
 
+function isolatedSource(kind: "scene" | "remote-main", overrides: Partial<WorksceneContinuationSource> = {}) {
+  return original({
+    conversationId: kind === "scene" ? "ws:reports:primary" : "remote-main",
+    control: { intent: kind === "scene" ? { kind: "exit", handoff } : { kind: "delegate_mcp", candidate: { serverId: "demo", source: "inferred", entry: { command: "node" }, secretFields: [] }, handoff } },
+    ...overrides,
+  });
+}
+
 describe("Workscene durable task continuation", () => {
-  it("returns unavailable isolated execution once and preserves the original acceptance", async () => {
-    const root = original({ conversationId: "ws:reports:primary", control: { intent: { kind: "exit", handoff } }, advancement: { sessionId: "adv-original", proxyMessageId: "proxy-original" } });
+  it.each(["scene", "remote-main"] as const)("returns unavailable isolated execution once and preserves the original acceptance (%s)", async (kind) => {
+    const root = isolatedSource(kind, { environment: originalEnvironment, advancement: { sessionId: "adv-original", proxyMessageId: "proxy-original" } });
     const f = fixture([root]);
     f.port.canRunIsolatedMain = () => false;
     await f.app.recover(root.conversationId);
@@ -151,8 +160,8 @@ describe("Workscene durable task continuation", () => {
     expect(request.input).toContain("组合现有工具");
     expect([...f.claims.keys()].some((key) => key.startsWith("workscene-support-"))).toBe(false);
   });
-  it("derives interaction visibility only from a live issued child and its current ancestors", async () => {
-    const root = original({ conversationId: "ws:reports:primary", control: { intent: { kind: "exit", handoff } } });
+  it.each(["scene", "remote-main"] as const)("derives interaction visibility only from a live issued child and its current ancestors (%s)", async (kind) => {
+    const root = isolatedSource(kind);
     const f = fixture([root]);
     await f.app.recover(root.conversationId);
     const request = vi.mocked(f.port.admit).mock.calls[0]![0];
@@ -183,8 +192,9 @@ describe("Workscene durable task continuation", () => {
     await f.app.recover(root.conversationId);
     expect(activate).toHaveBeenCalledTimes(1); expect(f.claims.size).toBe(1);
   });
-  it("delegates a directly started scene to an isolated main and returns after controlled connection", async () => {
-    const root = original({ conversationId: "ws:reports:primary", control: { intent: { kind: "exit", handoff } }, advancement: { sessionId: "adv-original", proxyMessageId: "proxy-original" } });
+  it.each(["scene", "remote-main"] as const)("delegates to an isolated main and returns after controlled connection (%s)", async (kind) => {
+    const root = isolatedSource(kind, { environment: originalEnvironment, advancement: { sessionId: "adv-original", proxyMessageId: "proxy-original" } });
+    expect(() => validateWorksceneControl(root.control)).not.toThrow();
     const f = fixture([root]);
     const target = worksceneContinuationTarget(root)!;
     expect(isWorksceneSupportConversation(target)).toBe(true);
@@ -194,6 +204,7 @@ describe("Workscene durable task continuation", () => {
     const request = vi.mocked(f.port.admit).mock.calls[0]![0];
     expect(request).toMatchObject({ conversationId: target, origin: { worksceneContinuation: { kind: "task", conversationId: root.conversationId, runId: root.runId, returnConversationId: root.conversationId } } });
     expect(request.advancement).toBeUndefined();
+    expect(request.environment).toBeUndefined();
     expect(request.input).toContain(handoff.goal);
     const candidate = { serverId: "demo", source: "inferred" as const, entry: { command: "node" }, secretFields: [] };
     const connecting = original({ conversationId: target, runId: "support-1", origin: request.origin, control: { intent: { kind: "connect_mcp", candidate, scope: { deviceId: "anchor", configurationRevision: "v1" }, handoff } } });
@@ -209,13 +220,13 @@ describe("Workscene durable task continuation", () => {
     f.sources.push(original({ conversationId: target, runId: "support-2", origin: resumed.origin, control: undefined, result: "已用 Anchor 的服务核实，回原场景生成报告" }));
     await new WorksceneContinuationApplication(f.port).recover(target);
     const returned = vi.mocked(f.port.admit).mock.calls[2]![0];
-    expect(returned).toMatchObject({ conversationId: root.conversationId, advancement: root.advancement });
+    expect(returned).toMatchObject({ conversationId: root.conversationId, advancement: root.advancement, environment: originalEnvironment });
     expect(returned.input).toContain("回原场景生成报告");
     await f.app.recover(root.conversationId); await f.app.recover(target);
     expect(f.port.admit).toHaveBeenCalledTimes(3);
   });
-  it("does not create isolated work from a cancelled source or return it after source revocation", async () => {
-    const root = original({ conversationId: "ws:reports:primary", current: false, control: { intent: { kind: "exit", handoff } } });
+  it.each(["scene", "remote-main"] as const)("does not create isolated work from a cancelled source or return it after source revocation (%s)", async (kind) => {
+    const root = isolatedSource(kind, { current: false });
     const f = fixture([root]);
     await f.app.recover(root.conversationId);
     expect(f.port.admit).not.toHaveBeenCalled();
@@ -223,6 +234,25 @@ describe("Workscene durable task continuation", () => {
     f.sources.push(delegated);
     await f.app.recover(delegated.conversationId);
     expect(f.port.admit).not.toHaveBeenCalled();
+  });
+  it.each(["failed", "uncertain", "cancelled"] as const)("does not delegate a remote proposal from a %s run", async (state) => {
+    const root = isolatedSource("remote-main", { state });
+    const f = fixture([root]);
+    await f.app.recover(root.conversationId);
+    expect(f.port.admit).not.toHaveBeenCalled();
+  });
+  it("keeps same-task MCP resumption in its original workspace without leaking it to a new scene", async () => {
+    const candidate = { serverId: "demo", source: "inferred" as const, entry: { command: "node" }, secretFields: [] };
+    const source = original({ environment: originalEnvironment, control: { intent: { kind: "connect_mcp", candidate, scope: { deviceId: "remote", configurationRevision: "r1" }, handoff } } });
+    const f = fixture([source]);
+    f.port.connectMcp = vi.fn(async () => ({ status: "active", serverId: "demo" }));
+    await f.app.recover(source.conversationId);
+    expect(vi.mocked(f.port.admit).mock.calls[0]![0].environment).toEqual(originalEnvironment);
+    for (const root of [original({ environment: originalEnvironment }), original({ conversationId: "ws:reports:primary", environment: originalEnvironment, control: { intent: { kind: "set_workdir", sceneId: "reports", workspace: { deviceId: "remote", bindingRef: "new-project" }, handoff } } })]) {
+      const next = fixture([root]);
+      await next.app.recover(root.conversationId);
+      expect(vi.mocked(next.port.admit).mock.calls[0]![0].environment).toBeUndefined();
+    }
   });
   it("projects pending credentials only along the current task lineage and requested device", async () => {
     const root = original();

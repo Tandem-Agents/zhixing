@@ -1499,6 +1499,7 @@ export async function setupAuthorityRuntime(
       }
       const selected = candidates
         .filter((candidate) =>
+          requestedTools.every((tool) => input.capabilities.tools.includes(tool)) &&
           requestedTools.every((tool) => candidate.descriptor.tools.includes(tool)) &&
           requestedMcpServers.every((server) =>
             candidate.descriptor.mcpServers.includes(server),

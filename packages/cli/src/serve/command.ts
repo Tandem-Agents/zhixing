@@ -881,8 +881,8 @@ async function runServerProcess(
     : runtimeFactory;
   const jobRuntime = executor
     ? createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker) => {
-          const projection = anchorRuntimeProjections.job(instruction);
+        create: (instruction, confirmationBroker, capabilities) => {
+          const projection = anchorRuntimeProjections.job(instruction, capabilities);
           return runtimeHost.createJobRuntime({
             confirmationBroker,
             ...projection,
@@ -1383,7 +1383,7 @@ async function runServerProcess(
       },
       ...(boundExecutorJobOwner ? { localJobOwner: boundExecutorJobOwner } : {}),
       mesh: meshRuntime,
-      capabilities: anchorRuntimeProjections.capabilityCatalog(),
+      capabilities: () => anchorRuntimeProjections.jobCapabilities(),
       systemHandlers,
       systemTasks: new Map([
         [

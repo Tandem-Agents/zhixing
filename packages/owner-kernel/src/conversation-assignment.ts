@@ -5137,6 +5137,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           result,
           ...(admitted.ingress.turnOrigin ? { origin: structuredClone(admitted.ingress.turnOrigin) } : {}),
           surfacePrincipal: admitted.ingress.surfacePrincipal,
+          ...(admitted.environment ? { environment: structuredClone(admitted.environment) } : {}),
           ...(advancement ? { advancement: structuredClone(advancement) } : {}),
           ...(advancementSessionId ? { advancementSessionId } : {}),
         }];

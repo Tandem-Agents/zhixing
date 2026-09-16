@@ -14,11 +14,13 @@ import type {
   JobRuntimePort,
   JobRuntimeRunOptions,
 } from "./job-assignment-worker.js";
+import type { JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
 
 export interface AgentJobRuntimeFactory {
   create(
     instruction: JobExecutionInstruction,
     confirmationBroker: IConfirmationBroker,
+    capabilities: JobRuntimeCapabilities,
   ): Promise<AgentRuntime>;
 }
 
@@ -119,7 +121,7 @@ export function createAgentJobRuntimePort(
   factory: AgentJobRuntimeFactory,
 ): JobRuntimePort {
   return {
-    async create({ confirmationBroker }) {
+    async create({ confirmationBroker, capabilities }) {
       let runtime: AgentRuntime | undefined;
       let activeJoin: (() => Promise<void>) | undefined;
       let activeUnlinkAbort: (() => void) | undefined;
@@ -143,10 +145,17 @@ export function createAgentJobRuntimePort(
           if (runtime) {
             throw new Error("A job runtime handle may execute only one instruction");
           }
-          runtime = await factory.create(instruction, confirmationBroker);
+          runtime = await factory.create(instruction, confirmationBroker, capabilities);
           if (handleDisposed) {
             await disposeOnce();
             throw new Error("A disposed job runtime handle cannot execute");
+          }
+          const actual = runtime.executionProfile?.();
+          const same = (left: readonly string[], right: readonly string[]) =>
+            JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort());
+          if (!actual || !same(actual.tools, capabilities.tools) || !same(actual.mcpServers, capabilities.mcpServers)) {
+            await disposeOnce();
+            throw new TypeError("Job runtime capabilities differ from its frozen manifest");
           }
           const yields = new AsyncYieldQueue();
           const stop = new AbortController();

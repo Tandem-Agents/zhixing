@@ -127,6 +127,7 @@ describe("Workscene model guidance", () => {
   it("removes guidance when a job filters its contributing tool", () => {
     const select = (tools?: string[]) => selectJobRuntimeTools({
       instruction: { ...(tools ? { tools } : {}) } as never,
+      capabilities: { tools: tools ?? [...mainProfile().enabledTools, "workmode_enter"], mcpServers: [] },
       baseProfile: mainProfile(), extraTools: [entry()], executionMcpServers: [],
       implementation: Object.freeze({ create: () => { throw new Error("not used"); } }),
     });

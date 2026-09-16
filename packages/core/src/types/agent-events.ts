@@ -104,6 +104,7 @@ export interface WorksceneTaskHandoff {
 }
 
 export type PostTurnControlIntent =
+  | { kind: "delegate_mcp"; candidate: import("../mcp-management/setup.js").McpSetupCandidate; handoff: WorksceneTaskHandoff }
   | { kind: "connect_mcp"; candidate: import("../mcp-management/setup.js").McpSetupCandidate; scope: import("../mcp-management/application.js").McpConnectionScope; handoff: WorksceneTaskHandoff }
   | { kind: "stop_task"; conversationId: string; runId: string; handoff?: never }
   | { kind: "enter"; sceneId: string; handoff?: WorksceneTaskHandoff }

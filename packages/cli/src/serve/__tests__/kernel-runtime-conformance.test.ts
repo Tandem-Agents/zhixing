@@ -102,6 +102,7 @@ function createKernelProbe(): KernelProbe {
   });
 
   const runtime = Object.assign({} as AgentRuntime, {
+    executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
     confirmationBroker,
     dispose,
     async run(envelope: KernelRunEnvelope): Promise<KernelRunCompletion> {
@@ -269,6 +270,7 @@ const CASES: readonly ConformanceCase[] = [
       }).create({
         taskId: identity,
         jobRunId: `job-${identity}`,
+        capabilities: { tools: [], mcpServers: [] },
         confirmationBroker: probe.confirmationBroker,
       });
       return {

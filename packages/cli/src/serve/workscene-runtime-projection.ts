@@ -29,7 +29,7 @@ import {
   type RuntimeProductProjection,
   type RuntimeToolProjection,
 } from "@zhixing/runtime-host/conversation-runtime-projection";
-import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
+import { selectJobRuntimeTools, type JobRuntimeCapabilities } from "./job-runtime-tool-selection.js";
 import {
   createWorkmodeEnterTool,
   createWorksceneTaskTools,
@@ -67,6 +67,7 @@ export function projectConversationCapabilitiesForDevice(input: {
     tools: [...new Set([
       ...input.profile.tools.filter(name => !ownerTools.has(name) && !name.startsWith("mcp__")),
       ...input.capabilities.tools.filter(name => name.startsWith("mcp__")),
+      ...(input.profile.tools.includes("mcp_connect") && input.capabilities.tools.includes("mcp_delegate") ? ["mcp_delegate"] : []),
     ])].sort(),
     mcpServers: [...input.capabilities.mcpServers],
     providerIds: [...input.profile.providerIds],
@@ -85,7 +86,8 @@ export interface AnchorRuntimeProjectionAssembly {
     readonly absolutePath: string | null;
   }): ConversationRuntimeProjection;
   ephemeral(): RuntimeProductProjection;
-  job(instruction: JobExecutionInstruction): {
+  jobCapabilities(): JobRuntimeCapabilities;
+  job(instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities): {
     readonly profile: ConversationRuntimeProjection["profile"];
     readonly runtimeTools: RuntimeToolProjection;
     readonly windowPrompt: RuntimeProductProjection["windowPrompt"];
@@ -258,11 +260,22 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     });
   };
   const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");
-  const job = (instruction: JobExecutionInstruction) => {
+  const jobCapabilities = (): JobRuntimeCapabilities => {
+    const available = runtimeProduct("main");
+    return {
+      tools: [...new Set([
+        ...zhixingProfile().enabledTools,
+        ...available.runtimeTools.extraTools.map((tool) => tool.name),
+      ])].sort(),
+      mcpServers: [...available.runtimeTools.executionMcpServers],
+    };
+  };
+  const job = (instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities) => {
     const baseProfile = zhixingProfile({ agentIdentity: input.agentIdentity });
     const available = runtimeProduct("main");
     const selection = selectJobRuntimeTools({
       instruction,
+      capabilities,
       baseProfile,
       extraTools: available.runtimeTools.extraTools,
       executionMcpServers: available.runtimeTools.executionMcpServers,
@@ -280,6 +293,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     scene,
     ephemeral,
     job,
+    jobCapabilities,
     capabilityCatalog: () => input.capabilities.capabilityCatalog(),
   });
 }
