@@ -11,6 +11,8 @@ import type {
   EvidenceHandlerPort,
   ExplicitEnvironmentSelection,
   FinalFrame,
+  ConversationStatusNotice,
+  StreamFrame,
   ScheduleWriteMutation,
   SessionStatePort,
   TranscriptRunRecord,
@@ -116,10 +118,18 @@ export async function verifyLocalConversationFinal(
  * admission 逐项经命令 wrapper,副作用前共用同一生命周期栅栏;不暴露任何
  * raw 可写对象(manager / protocol / advancement / consumer)。
  */
+type LocalConversationRunListener = (notification:
+  | { readonly conversationId: string; readonly method: "session.status"; readonly params: ConversationStatusNotice }
+  | { readonly conversationId: string; readonly method: "session.final"; readonly params: FinalFrame }
+  | { readonly conversationId: string; readonly method: "session.assignmentStream"; readonly params: StreamFrame }
+) => void;
+
 export interface LocalConversationOwnerPort {
+  readonly communicationMessages: import("@zhixing/core/conversation/application").ConversationMessageProjectionPort;
   createConversation(): Promise<string>;
   ensureSession(conversationId: string): Promise<void>;
   listConversations(): Promise<readonly string[]>;
+  runtimeState(conversationId: string): { readonly active: boolean; readonly busy: boolean; readonly pendingCount: number };
   listConversationAuthorities(): Promise<readonly {
     readonly conversationId: string;
     readonly authority: CurrentConversationAuthority;
@@ -130,6 +140,7 @@ export interface LocalConversationOwnerPort {
   subscribeConversationFacts(
     listener: (fact: ConversationLifecycleFact) => void,
   ): () => void;
+  subscribeRunNotifications(listener: LocalConversationRunListener): () => void;
   mutateSession: SessionStatePort["mutate"];
   cancelConversationRuns: ConversationRunControlPort["cancel"];
   resolveConversationUncertain: ConversationRunControlPort["resolveUncertain"];
@@ -137,6 +148,8 @@ export interface LocalConversationOwnerPort {
   readonly taskLists: ConversationTaskListPort;
   createAgentTurnExecution(input: {
     readonly input: UserTurnInput;
+    readonly turnOrigin?: import("@zhixing/core").TurnOrigin;
+    readonly surfacePrincipal?: string;
     readonly environment?: ExplicitEnvironmentSelection;
     readonly notify: SessionTurnNotify;
   }): {
@@ -235,6 +248,7 @@ export class LocalConversationOwnerAssembly {
   readonly #conversationFactListeners: Set<
     (fact: ConversationLifecycleFact) => void
   >;
+  readonly #runListeners: Set<LocalConversationRunListener>;
   readonly #transferAbort = new AbortController();
   #removalOperationId: string | undefined;
   #removalSnapshot: LocalConversationRemovalSnapshot | undefined;
@@ -254,6 +268,7 @@ export class LocalConversationOwnerAssembly {
     readonly conversationFactListeners: Set<
       (fact: ConversationLifecycleFact) => void
     >;
+    readonly runListeners: Set<LocalConversationRunListener>;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
@@ -261,6 +276,7 @@ export class LocalConversationOwnerAssembly {
     this.#recovery = input.recovery;
     this.#intents = input.intents;
     this.#conversationFactListeners = input.conversationFactListeners;
+    this.#runListeners = input.runListeners;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
     this.#transferSource = new ConversationTransferSource({
       deviceId: this.#owner.deviceId,
@@ -497,6 +513,7 @@ export class LocalConversationOwnerAssembly {
         return authorities;
       },
       currentAuthority: (conversationId) => this.#currentAuthority(conversationId),
+      runtimeState: (conversationId) => ({ active: this.#manager.has(conversationId), busy: this.#manager.getSession(conversationId)?.busy ?? false, pendingCount: this.#manager.pendingCount(conversationId) }),
       commitConversationClear: async ({ conversationId, operationId }) => {
         return this.#runCommand(async () => {
           if (!(await this.#isConversationCurrent(conversationId))) {
@@ -565,6 +582,10 @@ export class LocalConversationOwnerAssembly {
         this.#conversationFactListeners.add(listener);
         return () => this.#conversationFactListeners.delete(listener);
       },
+      subscribeRunNotifications: (listener) => {
+        this.#runListeners.add(listener);
+        return () => this.#runListeners.delete(listener);
+      },
       mutateSession: async (conversationId, mutation, context) => {
         return this.#runCommand(async () => {
           await this.#assertConversationCurrent(conversationId);
@@ -619,6 +640,10 @@ export class LocalConversationOwnerAssembly {
         });
       },
       agentTurnAdmission,
+      communicationMessages: Object.freeze({
+        inspect: (id: string, messageId: string) => this.#protocol.inspectMessage(id, messageId),
+        inputsOutsideHistory: (id: string) => this.#protocol.messageInputsOutsideHistory(id),
+      }),
       taskLists,
       createAgentTurnExecution: (turn) => {
         let settle!: (result: ProjectedSessionTurnResult) => void;
@@ -650,8 +675,8 @@ export class LocalConversationOwnerAssembly {
                     turnId,
                     runOptions: {
                       source: "interactive",
-                      turnContext: { turnId },
-                      surfacePrincipal: "surface:local:first-party",
+                      turnContext: { turnId, ...(turn.turnOrigin ? { turnOrigin: turn.turnOrigin } : {}) },
+                      surfacePrincipal: turn.surfacePrincipal ?? "surface:local:first-party",
                     },
                     ...(turn.environment
                       ? { environment: turn.environment }
@@ -776,6 +801,10 @@ export class LocalConversationOwnerAssembly {
     const conversationFactListeners = new Set<
       (fact: ConversationLifecycleFact) => void
     >();
+    const runListeners = new Set<LocalConversationRunListener>();
+    const publishRun: LocalConversationRunListener = (notification) => {
+      for (const listener of runListeners) listener(notification);
+    };
 
     let protocol!: ConversationProtocolRuntime;
     protocol = new ConversationProtocolRuntime({
@@ -790,7 +819,14 @@ export class LocalConversationOwnerAssembly {
       executorDispatch: options.executorDispatch,
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: options.assignmentStaging,
-      onFinal: (frame) => verifyLocalConversationFinal(protocol, frame),
+      onStatus: (notice) => publishRun({ conversationId: notice.ref.conversationId, method: "session.status", params: notice }),
+      onFirstPartyFrame: (frame) => {
+        if (frame.ref.execution === "conversation") publishRun({ conversationId: frame.ref.conversationId, method: "session.assignmentStream", params: frame });
+      },
+      onFinal: async (frame) => {
+        await verifyLocalConversationFinal(protocol, frame);
+        publishRun({ conversationId: frame.conversationId, method: "session.final", params: frame });
+      },
       projectLifecycle: async ({ conversationId, mutation, requestId }) => {
         if (mutation === "clear") {
           await projectConversationClear({
@@ -1009,6 +1045,7 @@ export class LocalConversationOwnerAssembly {
       scheduleIntents,
       rubricCatalog,
       conversationFactListeners,
+      runListeners,
     });
   }
 

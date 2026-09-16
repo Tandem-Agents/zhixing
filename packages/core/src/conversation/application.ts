@@ -26,6 +26,15 @@ export {
   type ConversationMessageStatus,
   type ConversationMessageProjectionPort,
   type ConversationMessageExecutionRequest,
+  type ConversationCommunicationApplication,
+  type ConversationCommunicationHistory,
+  type ConversationCommunicationRequest,
+  validateConversationCommunicationRequest,
+  dispatchConversationCommunication,
+  CONVERSATION_COMMUNICATION_QUERY,
+  CONVERSATION_COMMUNICATION_SEND,
+  CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET,
+  createConversationCommunicationProductApiContribution,
 } from "./communication-application.js";
 import type {
   ConversationPerspectivesApplication,

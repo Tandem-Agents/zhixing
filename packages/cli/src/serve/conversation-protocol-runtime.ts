@@ -36,6 +36,7 @@ import {
   ownerControlRequestDigest,
   protocolDigest,
   validateAuthorityCapability,
+  validateStreamFrame,
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
@@ -675,6 +676,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // owners and must survive ordinary cache eviction.
     this.#journals.delete(conversationId);
     this.#sessionIdentities.delete(conversationId);
+  }
+
+  /** 远端执行方仍通过当前 Owner 消费输入；设备身份须匹配已分配的执行者。 */
+  async remoteRunInput(address: { conversationId: string; runId: string; assignmentId: string }, executorId: string) {
+    const journal = this.#journal(address.conversationId);
+    await journal.assertInputExecutor(address.runId, address.assignmentId, executorId);
+    return {
+      open: () => journal.openRunInput(address.runId, address.assignmentId).then(() => undefined),
+      receive: (boundary: { boundary: number; closing: boolean }) => journal.receiveRunInput(address.runId, address.assignmentId, boundary),
+      close: () => journal.closeRunInput(address.runId, address.assignmentId),
+    };
   }
 
   /** 对话应用的只读消息投影；查询不会创建会话或启动运行。 */
@@ -1370,6 +1382,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await effect.startAndReport(submissionContext);
 
       const stream = await effect.createStream({ assignmentId, ref: streamRef });
+      const appendObservedFrame = async (...args: Parameters<typeof stream.append>) => {
+        const frame = await stream.append(...args);
+        // 本机 Owner 没有远端流读者，直接转发已耐久写入的同一帧。
+        if (this.#losslessDataPlane.kind === "absent" && this.#onFirstPartyFrame) {
+          await this.#onFirstPartyFrame(validateStreamFrame(frame));
+        }
+      };
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
@@ -1405,7 +1424,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           inputPort,
           turnContext: { ...input.options?.turnContext, worksceneTasks: readWorksceneTaskContext(dispatch.envelope.work.controlContext) },
           onProtocolEvent: async (event, meta) => {
-            await stream.append(
+            await appendObservedFrame(
               { kind: "agent-event", event },
               {
                 ...streamMeta,
@@ -1471,7 +1490,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             break;
           }
           if (item.value.type === "tool_start") toolCalls += 1;
-          await stream.append(
+          await appendObservedFrame(
             { kind: "agent-yield", yield: item.value },
             streamMeta,
           );

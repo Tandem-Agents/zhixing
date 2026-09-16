@@ -784,6 +784,15 @@ function validateProjectedPassthroughPayload(
       assertExactKeys(payload, ["prompt"], event);
       assertString(payload.prompt, "Agent prompt");
       return;
+    case "agent:input_received":
+      assertExactKeys(payload, ["inputs"], event);
+      if (!Array.isArray(payload.inputs)) throw new TypeError("Input projection must be an array");
+      for (const input of payload.inputs) {
+        assertExactKeys(input, ["text", ...(input.identity === undefined ? [] : ["identity"])], event);
+        assertString(input.text, "Input preview");
+        if (input.identity !== undefined) validateMessageInputIdentity(input.identity);
+      }
+      return;
     case "agent:run_end":
       assertExactKeys(
         payload,

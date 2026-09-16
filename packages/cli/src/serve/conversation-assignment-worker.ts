@@ -44,6 +44,7 @@ import {
 const COMMIT_REJECTION_PREFIX = "Conversation commit rejected";
 
 export interface ConversationAssignmentWorkerOptions {
+  readonly inputFor?: (envelope: Extract<DispatchEnvelope, { execution: "conversation" }>) => Promise<import("@zhixing/core/loop").RunInputPort>;
   readonly ledger: ConversationAssignmentLedger;
   readonly runtimeFactory: RuntimeFactory;
   readonly preflightEnvironment?: (
@@ -271,6 +272,7 @@ export class ConversationAssignmentWorker {
       | Parameters<DurableConversationInteractionObserver["drainAssignment"]>[0]
       | undefined;
     let executionError: Error | undefined;
+    let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
     try {
       const activeStream = this.options.createStream
         ? await this.options.createStream({ assignmentId, ref: streamRef })
@@ -319,7 +321,9 @@ export class ConversationAssignmentWorker {
       }
       activeInteractionBinding.broker = runtime.confirmationBroker;
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
+      inputPort = await this.options.inputFor?.(envelope);
       const generator = runtime.run(messages, {
+        ...(inputPort ? { inputPort } : {}),
         abortSignal,
         turnIndex: envelope.work.baseRevision,
         source: envelope.work.ingress.kind === "channel" ? "channel" : "interactive",
@@ -424,6 +428,7 @@ export class ConversationAssignmentWorker {
     } catch (error) {
       executionError = asError(error);
     }
+    try { await inputPort?.close(); } catch (error) { executionError ??= asError(error); }
     if (runtime) {
       try {
         await runtime.dispose();

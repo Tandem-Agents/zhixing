@@ -3,6 +3,7 @@ import { isProtocolIdentifier, protocolDigest } from "../protocol/index.js";
 import type { Message, MessageInputIdentity } from "../types/messages.js";
 import { normalizeUserTurnInput, isNonEmptyUserTurnInput, type UserTurnInput, type UserTurnInputLike } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
+import { bindProductApiOperation, defineProductApiQuery, defineProductApiCommand, defineProductApiContribution, defineProductApiExactSet } from "../product-api/catalog.js";
 import {
   ConversationApplicationError,
   type ConversationAgentTurnExecutionPort,
@@ -36,6 +37,70 @@ export interface ConversationMessageExecutionRequest {
   readonly turnId: string;
   readonly turnOrigin: TurnOrigin;
   readonly caller: Extract<ConversationCommandCaller, { kind: "surface" }>;
+}
+
+/** 表面与模型共用的通信合同；调用方身份由系统绑定，不来自消息正文。 */
+export type ConversationCommunicationApplication = Pick<ConversationCommunicationApplicationService, "discover" | "read" | "send" | "observe">;
+export type ConversationCommunicationHistory = Awaited<ReturnType<ConversationCommunicationApplication["read"]>>;
+export type ConversationCommunicationRequest =
+  | { readonly action: "discover" }
+  | ({ readonly action: "read" } & Parameters<ConversationCommunicationApplication["read"]>[0])
+  | ({ readonly action: "send" } & Parameters<ConversationCommunicationApplication["send"]>[0])
+  | ({ readonly action: "observe" } & Parameters<ConversationCommunicationApplication["observe"]>[0]);
+
+export function validateConversationCommunicationRequest(value: unknown): ConversationCommunicationRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("需要对话通信参数");
+  const input = value as Record<string, unknown>;
+  const fields = input.action === "discover" ? ["action"] : input.action === "read" ? ["action", "conversationId", "limit", "before"]
+    : input.action === "send" ? ["action", "conversationId", "operationId", "input"] : input.action === "observe" ? ["action", "conversationId", "messageId"] : [];
+  if (!fields.length || Object.keys(input).some(key => !fields.includes(key))) throw new TypeError("对话通信参数无效");
+  if (input.action !== "discover") assertId(input.conversationId as string);
+  if (input.action === "send") {
+    assertId(input.operationId as string);
+    if (typeof input.input !== "string" || !input.input.trim()) throw new TypeError("消息内容不能为空");
+  }
+  if (input.action === "observe") assertId(input.messageId as string);
+  if (input.action === "read") {
+    if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 200)) throw new TypeError("读取数量须为 1 到 200");
+    if (input.before !== undefined) {
+      const cursor = input.before as ConversationHistoryCursor;
+      if (!cursor || typeof cursor !== "object" || Object.keys(cursor).sort().join(",") !== "runIndex,shardId" || !isProtocolIdentifier(cursor.shardId) || !Number.isSafeInteger(cursor.runIndex) || cursor.runIndex < 0) throw new TypeError("历史游标无效");
+    }
+  }
+  return input as ConversationCommunicationRequest;
+}
+
+export async function dispatchConversationCommunication(application: ConversationCommunicationApplication, request: ConversationCommunicationRequest): Promise<unknown> {
+  switch (request.action) {
+    case "discover": return application.discover();
+    case "read": return application.read(request);
+    case "send": return application.send(request);
+    case "observe": return (await application.observe(request)) ?? null;
+  }
+}
+
+export interface ConversationCommunicationInvocation {
+  readonly sourceConversationId: string;
+  readonly request: ConversationCommunicationRequest;
+}
+export const CONVERSATION_COMMUNICATION_QUERY = defineProductApiQuery<"conversation-communication.query.read", ConversationCommunicationInvocation, unknown>("conversation-communication.query.read");
+export const CONVERSATION_COMMUNICATION_SEND = defineProductApiCommand<"conversation-communication.command.send", ConversationCommunicationInvocation, unknown, never>("conversation-communication.command.send", []);
+export const CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({ operations: [CONVERSATION_COMMUNICATION_QUERY, CONVERSATION_COMMUNICATION_SEND], factEvents: [] });
+export function createConversationCommunicationProductApiContribution(invoke: (sourceConversationId: string, request: ConversationCommunicationRequest) => Promise<unknown>) {
+  return defineProductApiContribution({ operations: [
+    bindProductApiOperation(CONVERSATION_COMMUNICATION_QUERY, async input => {
+      assertId(input.sourceConversationId);
+      validateConversationCommunicationRequest(input.request);
+      if (input.request.action === "send") throw new TypeError("查询不能发送消息");
+      return { result: await invoke(input.sourceConversationId, input.request), facts: [] };
+    }),
+    bindProductApiOperation(CONVERSATION_COMMUNICATION_SEND, async input => {
+      assertId(input.sourceConversationId);
+      validateConversationCommunicationRequest(input.request);
+      if (input.request.action !== "send") throw new TypeError("发送命令需要消息");
+      return { result: await invoke(input.sourceConversationId, input.request), facts: [] };
+    }),
+  ], factEvents: [] });
 }
 
 /** 来源由装配时的真实调用上下文绑定，发送参数只包含目标、内容和操作 ID。 */

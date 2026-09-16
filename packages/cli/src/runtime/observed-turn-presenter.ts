@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import type { AgentEventMap } from "@zhixing/core";
+import type { AgentEventMap, MessageInputIdentity } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import { ADVANCEMENT_TURN_LABEL } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
@@ -40,6 +40,7 @@ interface ActiveObservedTurn extends ObservedTurnIdentity {
 
 export class ObservedTurnPresenter {
   private active: ActiveObservedTurn | null = null;
+  private readonly shownInputs = new Set<string>();
 
   constructor(private readonly opts: ObservedTurnPresenterOptions) {}
 
@@ -50,10 +51,14 @@ export class ObservedTurnPresenter {
     };
     const originChannel = ctx.turnContext?.turnOrigin?.channel;
     const continuation = Boolean(ctx.turnContext?.turnOrigin?.worksceneContinuation);
+    const messageIdentity = ctx.turnContext?.turnOrigin?.messageIdentity;
     const unsubs = [
       ctx.bus.on("agent:run_start", (payload) =>
-        this.renderPrompt(identity, payload, originChannel, continuation),
+        this.renderPrompt(identity, payload, originChannel, continuation, messageIdentity),
       ),
+      ctx.bus.on("agent:input_received", payload => {
+        this.onObservedInputs({ ...identity, inputs: payload.inputs });
+      }),
       ctx.bus.on("agent:run_end", () => this.scheduleFallbackFlush(identity)),
     ];
     return () => {
@@ -67,6 +72,21 @@ export class ObservedTurnPresenter {
     active.sawOutput = true;
   }
 
+  onObservedInputs(turn: ObservedTurnIdentity & AgentEventMap["agent:input_received"]): void {
+    for (const input of turn.inputs) {
+      const key = input.identity ? `${turn.conversationId}:${input.identity.id}` : undefined;
+      if (key && this.shownInputs.has(key)) continue;
+      if (key) {
+        this.shownInputs.add(key);
+        if (this.shownInputs.size > 2048) this.shownInputs.delete(this.shownInputs.values().next().value!);
+      }
+      const source = input.identity?.source;
+      this.opts.flushOutput();
+      this.opts.writer.ensureSegmentBreak();
+      this.opts.writer.line(this.promptLine(collapsePrompt(input.text), undefined, source?.kind === "conversation" ? source.conversationId : undefined));
+    }
+  }
+
   onObservedTurnComplete(identity: ObservedTurnIdentity): void {
     if (this.isIgnorable(identity)) return;
     this.finish(identity);
@@ -77,15 +97,20 @@ export class ObservedTurnPresenter {
     payload: RunStartPayload,
     originChannel: string | undefined,
     continuation = false,
+    messageIdentity?: MessageInputIdentity,
   ): void {
     const prompt = continuation ? "原任务续接" : collapsePrompt(payload.prompt);
     if (prompt.length === 0) return;
     const active = this.ensureActive(identity);
     if (!active || active.promptShown) return;
 
-    this.opts.flushOutput();
-    this.opts.writer.ensureSegmentBreak();
-    this.opts.writer.line(continuation ? `${layout.contentPrefix}${chalk.dim(`◇ ${prompt}`)}` : this.promptLine(prompt, originChannel));
+    if (messageIdentity?.source.kind === "conversation") {
+      this.onObservedInputs({ ...identity, inputs: [{ text: prompt, identity: messageIdentity }] });
+    } else {
+      this.opts.flushOutput();
+      this.opts.writer.ensureSegmentBreak();
+      this.opts.writer.line(continuation ? `${layout.contentPrefix}${chalk.dim(`◇ ${prompt}`)}` : this.promptLine(prompt, originChannel));
+    }
     active.promptShown = true;
   }
 
@@ -135,7 +160,7 @@ export class ObservedTurnPresenter {
     );
   }
 
-  private promptLine(prompt: string, originChannel: string | undefined): string {
+  private promptLine(prompt: string, originChannel: string | undefined, sourceConversationId?: string): string {
     const width = Math.max(
       20,
       this.opts.width?.() ?? process.stdout.columns ?? 80,
@@ -143,7 +168,7 @@ export class ObservedTurnPresenter {
     // 来源标记自解释：推进侧代理消息强到明说，零认知用户不得产生
     // 「这是我发的吗」的困惑；其它接入面保持既有旁观措辞。
     const label =
-      originChannel === "advancement"
+      sourceConversationId ? chalk.dim(`◇ 来自对话 ${sourceConversationId}:`) : originChannel === "advancement"
         ? chalk.dim(`◇ ${ADVANCEMENT_TURN_LABEL}:`)
         : chalk.dim("❯ 来自另一个接入面:");
     return clampLine(`${layout.contentPrefix}${label} ${prompt}`, width);

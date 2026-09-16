@@ -342,7 +342,8 @@ describe("createAgentRuntime · run() lineage 契约", () => {
   });
   it("Turn 边界输入进入正式记录，逐条来源不丢失且不另开 Run", async () => {
     providerRef.current = new MockLLMProvider([{ text: "first" }, { text: "second" }]);
-    const runtime = await createAgentRuntime();
+    const received = vi.fn();
+    const runtime = await createAgentRuntime({ decorateRunBus: ({ bus }) => bus.on("agent:input_received", received) });
     const incoming = { ...userMessage("follow-up"), inputIdentity: { id: "message-2", source: { kind: "conversation" as const, conversationId: "source-a" } } };
     const close = vi.fn(async () => {});
     try {
@@ -356,6 +357,8 @@ describe("createAgentRuntime · run() lineage 契约", () => {
       ]);
       expect(completion.terminal.usage).toMatchObject({ inputTokens: 200, outputTokens: 100 });
       expect(close).toHaveBeenCalledOnce();
+      expect(received).toHaveBeenCalledOnce();
+      expect(received.mock.calls[0]?.[0]).toEqual({ inputs: [{ text: "follow-up", identity: incoming.inputIdentity }] });
     } finally { await runtime.dispose(); }
   });
   it("per-run EventBus 必须标记 lineage='main'(子 agent 派生路径的前提)", async () => {

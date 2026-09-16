@@ -151,10 +151,8 @@ export function createLocalConversationDirectoryApplication(input: {
     },
     runtime: {
       read: (conversationId) => ({
-        active: false,
-        busy: false,
+        ...input.owner.runtimeState(conversationId),
         observerCount: input.observerCount(conversationId),
-        pendingCount: 0,
       }),
     },
     availability: {

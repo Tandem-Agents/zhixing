@@ -93,4 +93,17 @@ const ADMIT_SKILL: BuiltinSkillDef = {
 export const BUILTIN_SKILL_DEFS: readonly BuiltinSkillDef[] = [
   DISTILL_SKILL,
   ADMIT_SKILL,
+  {
+    name: "对话通信",
+    description: "需要联系其他对话、了解其进展或处理来信时，使用对话通信工具。",
+    modes: ["main", "work"],
+    tools: ["conversation"],
+    body: `# 对话通信
+
+用 conversation 的 discover 查找对话，按名称、摘要和状态确认目标；read 按需读取，沿 next 继续翻页，注意截断标记。省略读取目标时查看当前对话，来信的 inputIdentity.source.conversationId 是回信地址。
+
+send 向目标发消息，不切换界面或合并历史。对方空闲时开始处理，忙时在当前 Turn 完成后接收。回信仍用 send，只在需要时回复，不预设分工或固定流程。
+
+回执只表示已接纳，不代表任务完成。observe 查询消息的消费与运行状态；stopped 表示本次投递已停止且未消费。发送后可以结束当前运行，不必轮询等待；需要回复时请在消息中说明。`,
+  },
 ];

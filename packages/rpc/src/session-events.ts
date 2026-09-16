@@ -104,6 +104,7 @@ const UI_EVENT_PROJECTION: { [K in keyof AgentEventMap]?: Projector<K> } = {
   // agent loop 展示事件。投影生命周期由显式 closed 帧收束，不能用
   // agent:run_end 推断，否则嵌套子 agent 结束会误拆父 run 投影。
   "agent:run_start": (p) => p,
+  "agent:input_received": (p) => p,
   "agent:run_end": (p) => p,
 
   // LLM 调用摘要——只投状态条消费的摘要字段,完整 systemPrompt / messages /

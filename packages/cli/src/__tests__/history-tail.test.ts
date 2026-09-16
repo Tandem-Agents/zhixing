@@ -41,6 +41,30 @@ function newestFirst(...runs: RunRecord[]): RunRecord[] {
 // ─── projectHistoryTail ───
 
 describe("projectHistoryTail", () => {
+  it("preserves per-message sources, outgoing receipts and stopped unconsumed inputs", () => {
+    const record = run("用户原任务", "完成核实");
+    record.messages.splice(1, 0,
+      { role: "user", content: [{ type: "text", text: "追加意见" }], inputIdentity: { id: "m1", source: { kind: "conversation", conversationId: "source-a" } } },
+      { role: "assistant", content: [{ type: "tool_use", id: "send", name: "conversation", input: { action: "send", conversationId: "source-a", input: "结论" } }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "send", content: JSON.stringify({ accepted: true, messageId: "reply" }) }] },
+    );
+    const writer = { line: vi.fn() };
+    renderHistoryTail({ runs: [record], writer: writer as never, width: 160,
+      inputsOutsideHistory: [{ runId: "r", state: "failed", disposition: "stopped", consumed: false,
+        message: { role: "user", content: [{ type: "text", text: "未读来信" }], inputIdentity: { id: "m2", source: { kind: "conversation", conversationId: "source-c" } } } }],
+    });
+    const text = writer.line.mock.calls.flat().join("\n");
+    expect(text).toContain("来自对话 source-a: 追加意见");
+    expect(text).toContain("→ 对话 source-a · 已接纳 · 不代表任务完成");
+    expect(text).toContain("来自对话 source-c · 已停止、未消费: 未读来信");
+    expect(text).toContain("完成核实");
+  });
+
+  it("renders outside-history inputs even when no Run has committed", () => {
+    const writer = { line: vi.fn() };
+    renderHistoryTail({ runs: [], writer: writer as never, inputsOutsideHistory: [{ runId: "r", state: "queued", consumed: false, disposition: "pending", message: userMessage("尚未启动") }] });
+    expect(writer.line.mock.calls.flat().join("\n")).toContain("已接纳、待处理: 尚未启动");
+  });
   it("取最近 maxRuns 条、时间正序返回，latestAt 为最近一条的时刻", () => {
     const runs = [
       run("q0", "a0"),

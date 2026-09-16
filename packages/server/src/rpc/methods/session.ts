@@ -22,6 +22,7 @@
  *   跟随权归发起接入面由结构保证(旁观端物理不可达)
  */
 
+import { CONVERSATION_COMMUNICATION_QUERY } from "@zhixing/core/conversation/application";
 import {
   abortWithReason,
 } from "@zhixing/core/interrupt";
@@ -1862,6 +1863,9 @@ export function buildSessionHistoryMethod(): MethodEntry {
         CONVERSATION_HISTORY_QUERY,
       );
       try {
+        if (productApi.supports(CONVERSATION_COMMUNICATION_QUERY)) {
+          return await productApi.query(CONVERSATION_COMMUNICATION_QUERY, { sourceConversationId: id, request: { action: "read", conversationId: id, ...(params.limit !== undefined ? { limit: params.limit } : {}), ...(params.before ? { before: params.before } : {}) } });
+        }
         return await productApi.query(CONVERSATION_HISTORY_QUERY, {
           kind: "history",
           conversationId: id,

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startLocalConversationOwner, type StartLocalConversationOwnerInput } from "../access-surfaces.js";
+import { createLocalConversationOwner, type CreateLocalConversationOwnerInput } from "../access-surfaces.js";
+import { createConversationCommunicationAssemblyHandle } from "../conversation-tools.js";
 import {
   LocalConversationOwnerAssembly,
   verifyLocalConversationFinal,
@@ -30,24 +31,26 @@ describe("local conversation owner production surface", () => {
     const rollback = new StartupRollback();
     const ctx = context(["anchor", "executor"], rollback);
 
-    const owner = await startLocalConversationOwner(Object.freeze(ctx));
+    const owner = await createLocalConversationOwner(Object.freeze(ctx));
     expect(create).toHaveBeenCalledTimes(1);
     expect(owner).toBe(assembly);
     expect(ctx).not.toHaveProperty("localConversationOwner");
-    expect(events).toEqual(["start"]);
+    expect(events).toEqual([]);
     await rollback.rollback();
-    expect(events).toEqual(["start", "close"]);
+    expect(events).toEqual(["close"]);
   });
 
   it("rejects missing execution dependencies before creating a local owner", async () => {
     const create = vi.spyOn(LocalConversationOwnerAssembly, "create");
-    await expect(startLocalConversationOwner({} as never)).rejects.toThrow("requires authority");
+    await expect(createLocalConversationOwner({} as never)).rejects.toThrow("requires authority");
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("starts with the durable lifecycle gate before conversation recovery", async () => {
+  it("does not recover a pending tool call before communication binding and retains the lifecycle gate", async () => {
+    const communication = createConversationCommunicationAssemblyHandle();
+    const invoke = vi.fn(async () => ({ conversations: [], partial: false }));
     const assembly = {
-      start: vi.fn(async () => undefined),
+      start: vi.fn(async () => { await communication.port.invoke("recovered", { action: "discover" }); }),
       close: vi.fn(async () => undefined),
     } as unknown as LocalConversationOwnerAssembly;
     vi.spyOn(LocalConversationOwnerAssembly, "create").mockResolvedValue(assembly);
@@ -65,7 +68,18 @@ describe("local conversation owner production surface", () => {
       },
     } as const;
 
-    await startLocalConversationOwner({ ...ctx, startupLifecycle });
+    const owner = await createLocalConversationOwner(ctx);
+    await Promise.resolve();
+    expect(assembly.start).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+    communication.bind({ invoke });
+    await owner.start({ lifecycle: {
+      operationId: startupLifecycle.delivery.operationId,
+      kind: startupLifecycle.kind,
+      recoverAcceptedWork: startupLifecycle.recoverAcceptedWork,
+      alreadySettled: startupLifecycle.alreadySettled,
+    } });
+    expect(invoke).toHaveBeenCalledTimes(1);
 
     expect(assembly.start).toHaveBeenCalledWith({
       lifecycle: {
@@ -102,7 +116,7 @@ describe("local conversation owner production surface", () => {
 function context(
   enabledRoles: readonly ("anchor" | "executor")[],
   startupRollback: StartupRollback,
-): StartLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback } {
+): CreateLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback } {
   const executorResources = {
     finalizeLocalAssignment: async () => ({ reportDigest: "sha256:" + "a".repeat(64), upToUsageSeq: 0 }),
     reclaimExpired: vi.fn(async () => 0),
@@ -143,5 +157,5 @@ function context(
     meshBootstrap: { mode: "single-machine" },
     advancementConfiguration: {},
     lifecycleContributions: new AssemblyLifecycleContributions(startupRollback),
-  } as unknown as StartLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback };
+  } as unknown as CreateLocalConversationOwnerInput & { lifecycleContributionsRollback: StartupRollback };
 }

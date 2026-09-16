@@ -80,6 +80,7 @@ import {
   AssignmentStreamMeshClient,
 } from "../assignment-stream-mesh.js";
 import { ConversationAssignmentWorker } from "../conversation-assignment-worker.js";
+import { createMeshRunInput, registerConversationCommunicationMesh } from "../conversation-communication-mesh.js";
 import { ASSIGNMENT_RECORD_V2_WRITES_ENABLED } from "../conversation-executor-ledger.js";
 import {
   ConversationProtocolRuntime,
@@ -294,6 +295,7 @@ function createRuntime(
   home: string,
   interactions: DurableConversationInteractionObserver,
   surface: ConversationSurface,
+  receiveAtBoundary?: (port: import("@zhixing/core/loop").RunInputPort) => Promise<readonly Message[]>,
 ): SessionRuntime {
   const broker = new ConfirmationBroker({ lifecycleObserver: interactions });
   if (surface === "first-party") {
@@ -313,7 +315,7 @@ function createRuntime(
     ...runtimeAuthorityFacts,
     sessionId: `s6-runtime-${surface}`,
     confirmationBroker: broker,
-    async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+    async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
       const createdAt = Date.parse(NOW);
       await broker.requestConfirmation({
         id: `confirmation-${surface}`,
@@ -331,6 +333,7 @@ function createRuntime(
         createdAt,
         expiresAt: createdAt + 60_000,
       });
+      const received = receiveAtBoundary ? await receiveAtBoundary(options!.inputPort!) : [];
       yield { type: "text_delta", text: "done" };
       return {
         agentResult: {
@@ -340,11 +343,11 @@ function createRuntime(
         },
         runRecord: {
           timestamp: NOW,
-          messages: [messages.at(-1)!, assistant],
+          messages: [messages.at(-1)!, ...received, assistant],
           usage: { inputTokens: 1, outputTokens: 1 },
           source: surface === "channel" ? "channel" : "interactive",
         },
-        newMessages: [assistant],
+        newMessages: [...received, assistant],
         durationMs: 1,
       };
     },
@@ -549,6 +552,12 @@ async function createRemoteConversationExecutor(input: {
     input.authority.deviceId,
   );
   const executorToOwner = serviceClient(ownerHandlers, executorDeviceId);
+  registerConversationCommunicationMesh({
+    registry: captureMeshServices(ownerHandlers),
+    authorizePeer: deviceId => deviceId === executorDeviceId,
+    communication: { invoke: async () => { throw new Error("not used in assignment input test"); } },
+    inputFor: (address) => input.protocol.remoteRunInput(address, executorId),
+  });
   const authorizationForOwner = (assignmentId: string) =>
     input.protocol.assignmentArtifactAuthority(assignmentId);
   const authorizationForExecutor = (assignmentId: string) =>
@@ -596,6 +605,7 @@ async function createRemoteConversationExecutor(input: {
   const usageIntake = new MeshResourceUsageIntake({ client: executorToOwner });
   const workerErrors: Error[] = [];
   const worker = new ConversationAssignmentWorker({
+    inputFor: envelope => createMeshRunInput(() => executorToOwner, { conversationId: envelope.work.conversationId, runId: envelope.work.runId, assignmentId: envelope.assignmentId }),
     ledger,
     runtimeFactory: input.runtimeFactory,
     artifacts,
@@ -749,7 +759,20 @@ async function runConversationScenario(
     clock: () => new Date().toISOString(),
   });
   const interactions = new DurableConversationInteractionObserver();
-  const runtime = createRuntime(home, interactions, surface);
+  const appendedIdentity = { id: "remote-busy-input", source: { kind: "conversation" as const, conversationId: "other-dialog" } };
+  const runtime = createRuntime(home, interactions, surface, topology === "remote" && surface === "first-party" ? async port => {
+    const admission = await protocol.admit({
+      conversationId, input: "运行中来自另一个对话", invocation: { kind: "agent", source: "interactive" },
+      surfacePrincipal: "conversation:other-dialog",
+      options: { source: "interactive", turnContext: { turnId: appendedIdentity.id, turnOrigin: { channel: "rpc", messageIdentity: appendedIdentity } } },
+    });
+    expect(admission.shouldSchedule).toBe(false);
+    const received = await port.receive({ boundary: 1, closing: true });
+    expect(received).toEqual([{ role: "user", content: [{ type: "text", text: "运行中来自另一个对话" }], inputIdentity: appendedIdentity }]);
+    expect(await port.receive({ boundary: 1, closing: true })).toEqual(received);
+    expect(await port.receive({ boundary: 2, closing: true })).toEqual([]);
+    return received;
+  } : undefined);
   const runtimeFactory: RuntimeFactory = { create: async () => runtime };
   const statuses: ExecutionStatusNotice[] = [];
   const finals: Array<{
@@ -1045,6 +1068,11 @@ async function runConversationScenario(
   expect(statuses.length).toBeGreaterThan(0);
   expect(finals).toHaveLength(1);
   const final = finals[0]!;
+  if (topology === "remote" && surface === "first-party") {
+    expect(await protocol.inspectMessage(conversationId, appendedIdentity.id)).toMatchObject({ runId: final.runId, state: "committed", consumed: true, disposition: "consumed", message: { inputIdentity: appendedIdentity } });
+    if (settled.kind !== "settled") throw new Error("Expected committed remote run");
+    expect(settled.runResult.runRecord.messages[1]?.inputIdentity).toEqual(appendedIdentity);
+  }
   expect(statuses.every(
     (notice) =>
       notice.ref.execution === "conversation" &&

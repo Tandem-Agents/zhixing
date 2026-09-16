@@ -19,6 +19,7 @@ import {
 } from "../conversation-controller.js";
 import type { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
+import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 
 type Handler<T> = (p: T) => void;
 
@@ -231,6 +232,7 @@ function makeController(
   f: ReturnType<typeof makeFakes>,
   onYield = vi.fn(),
   observed: {
+    onObservedInputs?: import("../conversation-controller.js").ConversationControllerOptions["onObservedInputs"];
     onObservedTurnDelta?: (turn: {
       conversationId: string;
       turnId?: string;
@@ -255,6 +257,151 @@ function makeController(
 }
 
 describe("ConversationController", () => {
+  it.each(["failed", "cancelled", "expired"] as const)("terminal before stream: %s keeps source and terminal once across retries, old revisions and late frames", async (state) => {
+    const f = makeFakes(), writer = { line: vi.fn(), ensureSegmentBreak: vi.fn() };
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });
+    const { controller, onYield } = makeController(f, vi.fn(), {
+      onObservedInputs: value => presenter.onObservedInputs(value),
+      onObservedTurnDelta: value => presenter.onObservedTurnDelta(value),
+      onObservedTurnComplete: value => presenter.onObservedTurnComplete(value),
+    });
+    const identity = { id: "message", source: { kind: "conversation", conversationId: "source-a" } };
+    f.conversation.history.mockRejectedValueOnce(new Error("temporary disconnect"));
+    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "peer-run", state, message: { role: "user", content: [{ type: "text", text: "核实任务" }], inputIdentity: identity } }] } as never);
+    const ref = { execution: "conversation", conversationId: "conv-1", runId: "peer-run", ownerEpoch: 1 };
+    const notice = { v: 1, ref, state, reason: "fixture terminal", statusRevision: 3, at: "2026-09-16T00:00:00Z", actions: [] };
+    f.emit.status(notice);
+    f.emit.status({ ...notice, state: "running", statusRevision: 1 });
+    f.emit.status({ ...notice, state: "cancelled", statusRevision: 2 });
+    f.emit.status(notice);
+    await vi.waitFor(() => expect(onYield).toHaveBeenCalledOnce());
+    expect(f.conversation.history).toHaveBeenCalledTimes(2);
+    expect(writer.line).toHaveBeenCalledOnce();
+    expect(writer.line.mock.calls[0]?.[0]).toContain("来自对话 source-a: 核实任务");
+    expect(onYield.mock.calls[0]?.[0].text).toContain(state === "cancelled" ? "已停止" : "未完成：fixture terminal");
+    const base = { v: 1, ref, assignmentId: "assignment", streamEpoch: 1, meta: { turnOrigin: { channel: "rpc", messageIdentity: identity } } };
+    f.emit.assignment({ ...base, seq: 1, payload: { kind: "agent-event", event: { event: "agent:run_start", payload: { prompt: "核实任务" } } } });
+    f.emit.assignment({ ...base, seq: 2, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "迟到输出" } } });
+    f.emit.status(notice);
+    expect(onYield).toHaveBeenCalledOnce(); expect(writer.line).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it("a terminal status blocks late output even while its source read is unavailable and ignores other conversations", async () => {
+    const f = makeFakes(), complete = vi.fn(), inputs = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedTurnComplete: complete, onObservedInputs: inputs });
+    let read!: (value: never) => void;
+    f.conversation.history.mockImplementation(() => new Promise(resolve => { read = resolve; }));
+    const ref = { execution: "conversation", conversationId: "conv-1", runId: "peer-run", ownerEpoch: 1 };
+    const notice = { v: 1, ref, state: "failed", statusRevision: 2, at: "2026-09-16T00:00:00Z", actions: [] };
+    f.emit.status({ ...notice, ref: { ...ref, conversationId: "other" } });
+    expect(f.conversation.history).not.toHaveBeenCalled();
+    f.emit.status(notice);
+    f.emit.assignment({ v: 1, ref, seq: 1, assignmentId: "assignment", streamEpoch: 1, meta: { turnOrigin: { channel: "rpc", messageIdentity: { id: "m", source: { kind: "conversation", conversationId: "source-a" } } } }, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "不应显示" } } });
+    expect(onYield).not.toHaveBeenCalled();
+    read({ runs: [], hasMore: false, inputsOutsideHistory: [] } as never);
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(JSON.stringify(onYield.mock.calls)).not.toContain("不应显示");
+    controller.dispose();
+  });
+
+  it.each(["user", "continuation"] as const)("mixed input terminal: %s recovers appended sources without repeating terminal output", async mode => {
+    const f = makeFakes(), writer = { line: vi.fn(), ensureSegmentBreak: vi.fn() }, complete = vi.fn();
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => mode === "user", width: () => 160 });
+    const { controller, onYield } = makeController(f, vi.fn(), {
+      onObservedInputs: value => presenter.onObservedInputs(value),
+      onObservedTurnDelta: value => presenter.onObservedTurnDelta(value),
+      onObservedTurnComplete: value => { complete(value); presenter.onObservedTurnComplete(value); },
+    });
+    try {
+      const turn = mode === "user" ? await controller.beginTurn("用户要求") : undefined;
+      const runId = turn?.runId ?? "continuation";
+      const ref = { execution: "conversation", conversationId: "conv-1", runId, ownerEpoch: 1 };
+      const origin = { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:review:primary", runId: "child" } };
+      if (!turn) f.emit.assignment({ v: 1, ref, assignmentId: "assignment", streamEpoch: 1, seq: 1, meta: { turnOrigin: origin }, payload: { kind: "agent-event", event: { event: "agent:run_start", payload: { prompt: "原任务续接" } } } });
+      const identity = { id: "append-a", source: { kind: "conversation", conversationId: "source-a" } };
+      f.conversation.history.mockRejectedValueOnce(new Error("temporary disconnect"));
+      f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId, state: "failed", message: { role: "user", content: [{ type: "text", text: "追加检查要求" }], inputIdentity: identity } }, { runId: "other-run", message: { role: "user", content: [{ type: "text", text: "别的任务" }], inputIdentity: { ...identity, id: "other" } } }] } as never);
+      const notice = { v: 1, ref, state: "failed", reason: "fixture failure", statusRevision: 3, at: "2026-09-16T00:00:00Z", actions: [] };
+      f.emit.status(notice);
+      if (turn) expect((await turn.outcome).result.reason).toBe("error");
+      // 终态不等待来源读取，来源瞬断后仍可独立补齐。
+      expect(onYield).toHaveBeenCalledTimes(turn ? 0 : 1);
+      await vi.waitFor(() => expect(writer.line).toHaveBeenCalledOnce());
+      expect(writer.line.mock.calls[0]?.[0]).toContain("来自对话 source-a: 追加检查要求");
+      const reads = f.conversation.history.mock.calls.length;
+      f.emit.status(notice);
+      f.emit.status({ ...notice, state: "running", statusRevision: 2 });
+      f.emit.assignment({ v: 1, ref, assignmentId: "assignment", streamEpoch: 1, seq: 2, meta: { turnOrigin: origin }, payload: { kind: "agent-event", event: { event: "agent:input_received", payload: { inputs: [{ text: "追加检查要求", identity }] } } } });
+      f.emit.assignment({ v: 1, ref, assignmentId: "assignment", streamEpoch: 1, seq: 3, meta: { turnOrigin: origin }, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "迟到输出" } } });
+      expect(writer.line).toHaveBeenCalledOnce();
+      expect(f.conversation.history).toHaveBeenCalledTimes(reads);
+      expect(onYield).toHaveBeenCalledTimes(turn ? 0 : 1);
+      expect(complete).toHaveBeenCalledTimes(turn ? 0 : 1);
+      if (!turn) expect(onYield.mock.calls[0]?.[0].text).toContain("任务续接未完成");
+    } finally { controller.dispose(); }
+  });
+
+  it("does not repeat a local waiter's terminal as an observed communication Run", async () => {
+    const f = makeFakes(), complete = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedTurnComplete: complete });
+    const turn = await controller.beginTurn("用户输入");
+    const notice = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: turn.runId, ownerEpoch: 1 }, state: "failed", statusRevision: 2, at: "2026-09-16T00:00:00Z", actions: [] };
+    f.emit.status(notice);
+    expect((await turn.outcome).result.reason).toBe("error");
+    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: turn.runId, state: "failed", message: { inputIdentity: { source: { kind: "conversation", conversationId: "source-a" } } } }] } as never);
+    f.emit.status(notice);
+    await Promise.resolve();
+    expect(complete).not.toHaveBeenCalled(); expect(onYield).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+  it.each(["conv-1", "ws:review:primary"])("stops an incoming Run from owner facts without local waiter or stream: %s", async (conversationId) => {
+    const f = makeFakes();
+    const controller = new ConversationController({ conversation: f.conversation as never, workscene: f.workscene as never, onYield: vi.fn() }, { ...initial, conversationId });
+    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "peer-run", state: "running", message: { inputIdentity: { id: "m", source: { kind: "conversation", conversationId: "a" } } } }] } as never);
+    await controller.abort();
+    expect(f.conversation.abort).toHaveBeenCalledWith(conversationId, expect.stringMatching(/^cancel:/), "peer-run");
+    expect(f.workscene.stopTask).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not abort stale, uncertain or another conversation's work from historical inputs", async () => {
+    const f = makeFakes(); const { controller } = makeController(f);
+    for (const state of ["committed", "cancelled", "failed", "expired", "uncertain"]) {
+      f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "old", state, message: { inputIdentity: { source: { kind: "conversation", conversationId: "a" } } } }] } as never);
+      expect(await controller.abortBackgroundTask()).toBe(false);
+    }
+    expect(f.conversation.abort).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it.each(["stream", "final-only", "user-run", "local-waiter", "no-final-text"])("projects every communication input through the canonical source path: %s", async (mode) => {
+    const f = makeFakes(), inputs = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedInputs: inputs });
+    const c = { id: "message-c", source: { kind: "conversation", conversationId: "c" } };
+    const a = { id: "message-a", source: { kind: "conversation", conversationId: "a" } };
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "原始要求" }], ...(mode === "user-run" || mode === "local-waiter" ? {} : { inputIdentity: c }) },
+      { role: "user", content: [{ type: "text", text: "补充要求" }], inputIdentity: a },
+      ...(mode === "no-final-text" ? [] : [{ role: "assistant", content: [{ type: "text", text: "完成" }] }]),
+    ];
+    let runId = "peer-run";
+    let local: Awaited<ReturnType<ConversationController["beginTurn"]>> | undefined;
+    if (mode === "local-waiter") { local = await controller.beginTurn("原始要求"); runId = local.runId!; }
+    const frame = { v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId }, assignmentId: "a", streamEpoch: 1, meta: { turnOrigin: { channel: "rpc", messageIdentity: c } } };
+    if (mode === "stream") {
+      f.emit.assignment({ ...frame, seq: 1, payload: { kind: "agent-event", event: { event: "agent:run_start", payload: { prompt: "原始要求" } } } });
+      f.emit.assignment({ ...frame, seq: 2, payload: { kind: "agent-event", event: { event: "agent:input_received", payload: { inputs: [{ text: "补充要求", identity: a }] } } } });
+      f.emit.assignment({ ...frame, seq: 3, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "完成" } } });
+    }
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: "s", record: { type: "run", runId, runIndex: 1, messages } }], hasMore: false } as never);
+    f.emit.final({ v: 1, conversationId: "conv-1", runId, commitRevision: 1, digest: `sha256:${"0".repeat(64)}` });
+    await vi.waitFor(() => expect(inputs.mock.calls.flatMap(([value]) => value.inputs)).toContainEqual({ text: "补充要求", identity: a }));
+    if (mode !== "user-run" && mode !== "local-waiter") expect(inputs.mock.calls.flatMap(([value]) => value.inputs)).toContainEqual({ text: "原始要求", identity: c });
+    if (mode === "stream") expect(onYield.mock.calls.filter(([delta]) => delta.type === "text_delta")).toEqual([[{ type: "text_delta", text: "完成" }]]);
+    if (local) await local.outcome;
+    controller.dispose();
+  });
   it.each(["reference", "sequence-gap", "late-subscribe", "replacement-stream"])("restores a contiguous final without duplicated or out-of-order text after %s", async (gap) => {
     const f = makeFakes();
     const complete = vi.fn();
@@ -289,6 +436,25 @@ describe("ConversationController", () => {
     expect(f.workscene.stopTask).toHaveBeenCalledOnce();
     controller.dispose();
   });
+  it("renders a communication Run without a local sender and recovers its final after missing the stream", async () => {
+    const f = makeFakes();
+    const complete = vi.fn();
+    const observed = vi.fn();
+    const { controller, onYield } = makeController(f, vi.fn(), { onObservedInputs: observed, onObservedTurnComplete: complete });
+    const messageIdentity = { id: "message-a", source: { kind: "conversation", conversationId: "other-dialog" } };
+    const record = { type: "run", runId: "communication", runIndex: 1, timestamp: "2026-09-16T00:00:00Z", messages: [
+      { role: "user", content: [{ type: "text", text: "核实" }], inputIdentity: messageIdentity },
+      { role: "assistant", content: [{ type: "text", text: "核实完成" }] },
+    ] };
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: "s", record }], hasMore: false } as never);
+    f.emit.final({ v: 1, conversationId: "conv-1", runId: "communication", commitRevision: 1, digest: `sha256:${"0".repeat(64)}` });
+    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "核实完成" }));
+    expect(complete).toHaveBeenCalledOnce();
+    expect(observed).toHaveBeenCalledWith({ conversationId: "conv-1", turnId: "communication", inputs: [{ text: "核实", identity: messageIdentity }] });
+    expect(controller.current.conversationId).toBe("conv-1");
+    controller.dispose();
+  });
+
   it("renders automatic continuation streams once and closes them on durable final", async () => {
     const f = makeFakes();
     const complete = vi.fn();

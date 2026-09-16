@@ -1,4 +1,5 @@
 import { assertLocalConversationIdForDevice } from "@zhixing/core/conversation";
+import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
 import { isNonEmptyUserTurnInput, userTurnInputFromText, type UserTurnInput } from "@zhixing/core";
 import {
   ConversationApplicationError,
@@ -89,6 +90,9 @@ export class LocalConversationRpcRouter
       if (fact.kind === "conversation-deleted") {
         this.#observers.delete(fact.conversationId);
       }
+    });
+    input.owner.subscribeRunNotifications(({ conversationId, method, params }) => {
+      this.#notify(conversationId, method, params);
     });
   }
 
@@ -533,8 +537,8 @@ export class LocalConversationRpcRouter
       throw RpcErrors.invalidParams("历史记录条数必须是正整数。");
     }
     try {
-      return await this.#application.queryHistory({
-        kind: "history",
+      return await createLocalConversationCommunicationBinding(this.input.owner).invoke(conversationId, {
+        action: "read",
         conversationId,
         ...(params.limit !== undefined ? { limit: params.limit } : {}),
         ...(before ? { before } : {}),

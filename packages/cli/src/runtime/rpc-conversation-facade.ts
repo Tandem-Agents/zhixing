@@ -14,7 +14,7 @@
  */
 
 import type {
-  ConversationHistoryPage as RunsPage,
+  ConversationCommunicationHistory as RunsPage,
   ConversationHistoryCursor as RunsPageCursor,
 } from "@zhixing/core/conversation/application";
 import type {

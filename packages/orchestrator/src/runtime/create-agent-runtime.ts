@@ -1723,6 +1723,17 @@ export async function createAgentRuntime(
               receive: async (boundary) => {
                 const messages = await envelope.correctness.inputPort!.receive(boundary);
                 newMessages.push(...structuredClone(messages));
+                if (messages.length > 0) {
+                  await eventBus.emit("agent:input_received", {
+                    inputs: messages.map(message => {
+                      const text = extractText(message);
+                      return {
+                        text: text.length > 500 ? `${text.slice(0, 500)}…` : text,
+                        ...(message.inputIdentity ? { identity: message.inputIdentity } : {}),
+                      };
+                    }),
+                  });
+                }
                 const additionalIntent = messages.map(extractText).filter(Boolean).join("\n\n");
                 if (additionalIntent) runToolContext.userIntent += `\n\n${additionalIntent}`;
                 return messages;

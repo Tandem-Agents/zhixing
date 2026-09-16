@@ -819,6 +819,8 @@ function ownerPort(): LocalConversationOwnerPort {
     createConversation: vi.fn(async () => CONVERSATION_ID),
     ensureSession: vi.fn(async () => {}),
     listConversations: vi.fn(async () => [CONVERSATION_ID]),
+    runtimeState: vi.fn(() => ({ active: false, busy: false, pendingCount: 0 })),
+    communicationMessages: { inspect: vi.fn(async () => undefined), inputsOutsideHistory: vi.fn(async () => ({ inputs: [], truncated: false })) },
     listConversationAuthorities: vi.fn(async () => [{
       conversationId: CONVERSATION_ID,
       authority: { deviceId: DEVICE_ID, ownerEpoch: 1, state: "current" },
@@ -856,6 +858,7 @@ function ownerPort(): LocalConversationOwnerPort {
       factListeners.add(listener);
       return () => factListeners.delete(listener);
     }),
+    subscribeRunNotifications: vi.fn(() => () => {}),
     mutateSession: vi.fn(async () => ({ revision: 1 })),
     cancelConversationRuns: vi.fn(async () => ({
       matchedDurableRuns: 1,

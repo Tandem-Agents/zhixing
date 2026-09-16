@@ -32,7 +32,7 @@ function fixture(mcpTools = {
     tools: [{ name: "mcp__alpha__tool" }],
     serverIds: ["alpha", "beta"],
   }),
-} as never) {
+} as never, communicationTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
   const workscenes = {} as never;
   const extraTools = {
     taskListService: {},
@@ -42,6 +42,7 @@ function fixture(mcpTools = {
     ],
   } as never;
   const capabilities = createAnchorRuntimeCapabilityCatalog({
+    communicationTools,
     extraTools,
     mcpTools,
     scheduler: {} as never,
@@ -53,6 +54,7 @@ function fixture(mcpTools = {
     id: sceneId === undefined ? "guidance-main" : `guidance-scene:${sceneId}`,
   }));
   return createAnchorRuntimeProjectionAssembly({
+    communicationTools,
     agentIdentity: { displayName: "知行" },
     capabilities,
     workscenes,
@@ -69,6 +71,17 @@ function fixture(mcpTools = {
 }
 
 describe("Workscene product runtime projection", () => {
+  it("binds communication in main/work, keeps it portable and excludes jobs", () => {
+    const communication = { name: "conversation" } as import("@zhixing/core").ToolDefinition;
+    const assembly = fixture(undefined, [communication]);
+    expect(assembly.main().runtimeTools.extraTools).toContainEqual(communication);
+    expect(assembly.scene({ scene: scene().scene, absolutePath: null }).runtimeTools.extraTools).toContainEqual(communication);
+    expect(assembly.ephemeral().runtimeTools.extraTools).not.toContainEqual(communication);
+    expect(assembly.jobCapabilities().tools).not.toContain("conversation");
+    expect(assembly.capabilityCatalog().tools).toContain("conversation");
+    const projected = projectConversationCapabilitiesForDevice({ profile: { tools: ["conversation"], mcpServers: [], providerIds: [] }, ownerDeviceId: "owner", executorDeviceId: "remote", capabilities: { tools: ["conversation"], mcpServers: [] } });
+    expect(projected.tools).toEqual(["conversation"]);
+  });
   it("signs new jobs from the current job-only inventory and preserves old manifests", () => {
     let servers = ["alpha"];
     const assembly = fixture({ snapshot: () => ({ tools: servers.map(id => ({ name: `mcp__${id}__tool` })), serverIds: [...servers] }) } as never);

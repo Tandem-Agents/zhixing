@@ -11,7 +11,7 @@ describe("Host static construction graph", () => {
       "await prepareAuthorityServices({",
       "await createConversationServices({",
       "new RuntimeHost({",
-      "await startLocalConversationOwner({",
+      "await createLocalConversationOwner({",
       "await createExecutorJobOwner({",
       "await startAssetMaintenance({",
       "return prepareMeshRuntime({",
@@ -33,6 +33,10 @@ describe("Host static construction graph", () => {
       previous = position;
     }
     expect(command).toContain("const localExecutor = executor ?");
+    expect(command.indexOf("await localExecutor?.owner.start("))
+      .toBeGreaterThan(command.indexOf("communicationHandle.bind(routedCommunication)"));
+    expect(command.indexOf("await localExecutor?.owner.start("))
+      .toBeGreaterThan(command.indexOf("meshRuntime?.bindConversationCommunication("));
     expect(command).toContain("executorJobOwnerAssembly: localExecutor.jobs");
     expect(command).toContain("conversationProtocol: conversationServices.conversationProtocol");
     expect(command).toContain("channelCoordinator: losslessDataPlane.coordinator");

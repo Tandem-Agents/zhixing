@@ -216,8 +216,10 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       writer.line(chalk.dim(`\n  已切换到 ${chalk.cyan(resumed.active.name)}\n`));
       // 历史尾巴:切换即见最近几轮变暗摘录(与启动恢复同款"回到工位"展示,
       // 清空边界由宿主倒读原语保证——刚清空的对话零输出)
+      const page = await controller.history(target.id);
       renderHistoryTail({
-        runs: (await controller.history(target.id)).runs.map((r) => r.record),
+        ...page,
+        runs: page.runs.map((r) => r.record),
         writer,
       });
       if (resumed.advancement) {

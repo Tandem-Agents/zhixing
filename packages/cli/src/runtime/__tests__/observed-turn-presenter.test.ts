@@ -58,6 +58,43 @@ function decorate(
 }
 
 describe("ObservedTurnPresenter", () => {
+  it("restores a missed incoming prompt from committed history without duplicate labels", () => {
+    const writer = makeWriter();
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });
+    const turn = { conversationId: "b", turnId: "r", inputs: [{ text: "核实", identity: { id: "m1", source: { kind: "conversation" as const, conversationId: "a" } } }] };
+    presenter.onObservedInputs(turn);
+    presenter.onObservedInputs(turn);
+    expect(writer.line).toHaveBeenCalledOnce();
+    expect(writer.line.mock.calls[0]?.[0]).toContain("来自对话 a: 核实");
+    presenter.onObservedTurnComplete(turn);
+  });
+  it("deduplicates each message across live event, assignment stream and final replay even when turn IDs differ", () => {
+    const bus = new FakeBus(), writer = makeWriter();
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 180 });
+    const first = { id: "m1", source: { kind: "conversation" as const, conversationId: "c" } };
+    const second = { id: "m2", source: { kind: "conversation" as const, conversationId: "a" } };
+    presenter.decorateRunBus({ bus: bus as never, conversationId: "b", turnContext: { turnId: "ingress", turnOrigin: { channel: "rpc", messageIdentity: first } } });
+    bus.emit("agent:run_start", { prompt: "原始要求" });
+    const inputs = [{ text: "原始要求", identity: first }, { text: "补充要求", identity: second }];
+    presenter.onObservedInputs({ conversationId: "b", turnId: "durable", inputs });
+    bus.emit("agent:input_received", { inputs: inputs.slice(1) });
+    presenter.onObservedTurnComplete({ conversationId: "b", turnId: "ingress" });
+    presenter.onObservedInputs({ conversationId: "b", turnId: "durable", inputs });
+    expect(writer.line).toHaveBeenCalledTimes(2);
+    expect(writer.line.mock.calls[0]?.[0]).toContain("来自对话 c: 原始要求");
+    expect(writer.line.mock.calls[1]?.[0]).toContain("来自对话 a: 补充要求");
+  });
+  it("labels conversation sources both on initial input and on the next Turn of a locally started Run", () => {
+    const bus = new FakeBus(); const writer = makeWriter();
+    const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });
+    presenter.decorateRunBus({ bus: bus as never, conversationId: "b", turnContext: { turnId: "r", turnOrigin: { channel: "rpc", messageIdentity: { id: "m1", source: { kind: "conversation", conversationId: "a" } } } } });
+    bus.emit("agent:run_start", { prompt: "核实一下" });
+    expect(writer.line.mock.calls[0]?.[0]).toContain("来自对话 a: 核实一下");
+    const localBus = new FakeBus();
+    createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => true, width: () => 160 }).decorateRunBus({ bus: localBus as never, conversationId: "b", turnContext: { turnId: "user-run" } });
+    localBus.emit("agent:input_received", { inputs: [{ text: "补充意见", identity: { id: "m2", source: { kind: "conversation", conversationId: "c" } } }] });
+    expect(writer.line.mock.calls.at(-1)?.[0]).toContain("来自对话 c: 补充意见");
+  });
   afterEach(() => {
     vi.useRealTimers();
   });

@@ -14,6 +14,8 @@ import type { ZhixingConfig } from "@zhixing/providers";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
+  AssignmentStreamSpool,
+  AssignmentStreamWriter,
   type ExecutorResourceGovernor,
 } from "@zhixing/executor";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
@@ -39,7 +41,7 @@ import {
   LocalConversationOwnerAssembly,
   type LocalConversationOwnerPort,
 } from "../local-conversation-owner.js";
-import { createSignedTrustRuleSnapshot, StreamDigestChain } from "@zhixing/core/protocol";
+import { createSignedTrustRuleSnapshot } from "@zhixing/core/protocol";
 import { createLocalConversationDirectoryApplication } from "../local-conversation-directory-application.js";
 import { createHostAdvancementModelProviderFactory } from "../../runtime/advancement-model-provider.js";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
@@ -314,6 +316,7 @@ export async function createLocalOwnerAssemblyFixture(
           ).finalizeLocalAssignment(assignmentId),
       })
     : undefined;
+  const streamSpool = new AssignmentStreamSpool(path.join(home, "fixture-streams"), authority.artifacts);
   const executorBoundary = createConversationExecutorHostBoundary({
     authority: owner,
     directory: NO_REMOTE_CONVERSATION_EXECUTORS,
@@ -323,7 +326,7 @@ export async function createLocalOwnerAssemblyFixture(
       ConversationAssignmentLedger,
       InProcessAssignmentSubmission,
       runtimeFactory,
-      createStream: async ({ assignmentId }) => new StreamDigestChain(assignmentId),
+      createStream: ({ assignmentId, ref }) => AssignmentStreamWriter.open(streamSpool, assignmentId, ref),
     },
   });
   const assembly = await LocalConversationOwnerAssembly.create({

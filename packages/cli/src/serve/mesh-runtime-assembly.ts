@@ -17,6 +17,9 @@ import type {
   EvidenceHandlerPort,
   CheckpointStreamRecord,
 } from "@zhixing/core/contracts";
+import { createMeshRunInput, createMeshConversationCommunication, registerConversationCommunicationMesh } from "./conversation-communication-mesh.js";
+import type { ConversationCommunicationTransport } from "./conversation-tools.js";
+import { discoverConversations, routeAddressedConversationCommunication } from "./conversation-communication-binding.js";
 import {
   canonicalize,
   type DeviceLifecycleAbort,
@@ -715,6 +718,14 @@ export class MeshRuntimeAssembly
     if (roles.has("executor")) {
       const anchorId = () => this.#currentAnchorDeviceId();
       worker = new ConversationAssignmentWorker({
+        inputFor: async envelope => {
+          const address = { conversationId: envelope.work.conversationId, runId: envelope.work.runId, assignmentId: envelope.assignmentId };
+          if (roles.has("anchor") && options.protocol) {
+            const port = await options.protocol.remoteRunInput(address, envelope.executorId);
+            await port.open(); return port;
+          }
+          return createMeshRunInput(() => this.connections.client(anchorId()), address);
+        },
         ledger: options.executor!.ledger,
         runtimeFactory: options.executor!.runtimeFactory,
         preflightEnvironment: (manifest, assignmentId) =>
@@ -1030,7 +1041,41 @@ export class MeshRuntimeAssembly
     );
   }
 
-  /** Executor role 组合根用它绑定 owner submission；mesh 本身不持有 worker 生命周期。 */
+  /** 通信服务绑定应用端口；不持有对话状态或另建执行链。 */
+  bindConversationCommunication(communication: ConversationCommunicationTransport, owned: readonly ConversationCommunicationTransport[]): void {
+    this.#disposers.push(registerConversationCommunicationMesh({
+      registry: this.services,
+      communication: { invoke: (source, request) => request.action === "discover" ? discoverConversations(owned, source) : communication.invoke(source, request) },
+      authorizePeer: id => this.#peerHasRole(id, "executor") || this.#peerHasRole(id, "anchor"),
+      ...(this.options.protocol ? { inputFor: (address, deviceId) => {
+        const executorId = this.#executorIdForPeer(deviceId);
+        if (!executorId) throw new Error("运行输入的执行设备不可用");
+        return this.options.protocol!.remoteRunInput(address, executorId);
+      } } : {}),
+    }));
+  }
+
+  routeConversationCommunication(local: ConversationCommunicationTransport | undefined, anchor?: ConversationCommunicationTransport): ConversationCommunicationTransport {
+    const remote = (id: string) => createMeshConversationCommunication(() => this.connections.client(id));
+    return Object.freeze<ConversationCommunicationTransport>({ invoke: async (source, request) => {
+      if (request.action === "discover") {
+        const primary = anchor ?? remote(this.#currentAnchorDeviceId());
+        const peers = this.#control.currentTrust().members.filter(member =>
+          member.state === "active" && member.device.deviceId !== this.options.authority.deviceId &&
+          member.device.deviceId !== this.#currentAnchorDeviceId() && member.roles.includes("executor"));
+        return discoverConversations([primary, ...(local ? [local] : []), ...peers.map(member => remote(member.device.deviceId))], source);
+      }
+      return routeAddressedConversationCommunication({
+        deviceId: this.options.authority.deviceId,
+        anchorDeviceId: this.#currentAnchorDeviceId(),
+        members: this.#control.currentTrust().members.map(member => member.device.deviceId),
+        ...(local ? { local: { communication: local, owner: this.options.localConversationOwner!.port() } } : {}),
+        ...(anchor ? { anchor: { communication: anchor, owns: async id => (await this.options.protocol!.listSessions()).includes(id) } } : {}),
+        remote,
+      }, source, request);
+    } });
+  }
+
   submissionForAnchor(): JobSubmissionOwner {
     return this.#composition.submissionPort(this.#currentAnchorDeviceId());
   }

@@ -8,8 +8,8 @@
  * 数据纪律：
  *   - 唯一读取通道是 readRunsReverse（UI 渲染不绕开持久层另立读取）；
  *     清空边界在原语层生效——/clear 后倒读即空，尾巴自然不渲染。
- *   - 投影只取 run 两端：用户原文 = messages[0]（持久化不变量：恒为用户
- *     原文）、最终回复 = 末条 assistant 的文本；中间的工具往返不进尾巴
+ *   - 投影取首条输入、带身份的追加输入与末条 assistant 文本；
+ *     通信投递保留去向及回执，中间的其它工具往返不进尾巴
  *     ——尾巴是"瞥一眼桌面"，不是完整回放（完整历史躺在磁盘，可分页倒读）。
  *     run 无最终回复（中断等）时渲染低调占位——不拿中间过程文本冒充
  *     回复，也不留白让用户误以为提问被无视。
@@ -23,6 +23,8 @@
 import chalk from "chalk";
 import { extractText, type Message } from "@zhixing/core";
 import { type RunRecord } from "@zhixing/core/transcript";
+import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
+import { formatToolResult } from "./tool-card-format.js";
 import { ADVANCEMENT_TURN_LABEL } from "./advancement-presentation.js";
 import { layout } from "./tui/style.js";
 import { clampLine } from "./tui/line-width.js";
@@ -42,6 +44,9 @@ export interface HistoryTailEntry {
   fromAdvancement?: boolean;
   /** 多视角评议 run——最终回复来自发散收敛流程，启动尾巴需显式标记。 */
   perspectiveCount?: number;
+  sourceConversationId?: string;
+  inputs?: readonly { text: string; sourceConversationId?: string; status?: string }[];
+  sent?: readonly string[];
 }
 
 export interface HistoryTail {
@@ -49,6 +54,8 @@ export interface HistoryTail {
   entries: HistoryTailEntry[];
   /** 最近一条 run 的时刻（ISO）—— 标题相对时间锚的来源 */
   latestAt?: string;
+  outsideInputs?: readonly ConversationMessageStatus[];
+  outsideInputsTruncated?: boolean;
 }
 
 /**
@@ -69,8 +76,19 @@ export function projectHistoryTail(
 function projectEntry(record: RunRecord): HistoryTailEntry {
   const userText = collapseToLine(extractText(record.messages[0]!));
   const lastAssistant = findLastAssistantText(record.messages);
+  const source = record.messages[0]?.inputIdentity?.source;
+  const appended = record.messages.slice(1).filter(message => message.inputIdentity);
+  const calls = record.messages.flatMap(message => message.content).filter(block => block.type === "tool_use" && block.name === "conversation" && block.input.action === "send");
+  const results = record.messages.flatMap(message => message.content).filter(block => block.type === "tool_result");
   return {
     userText,
+    ...(source?.kind === "conversation" ? { sourceConversationId: source.conversationId } : {}),
+    ...(appended.length ? { inputs: appended.map(message => ({ text: collapseToLine(extractText(message)), ...(message.inputIdentity?.source.kind === "conversation" ? { sourceConversationId: message.inputIdentity.source.conversationId } : {}) })) } : {}),
+    ...(calls.length ? { sent: calls.map(call => {
+      if (call.type !== "tool_use") throw new Error("Expected communication tool call");
+      const result = results.find(block => block.toolUseId === call.id);
+      return `→ 对话 ${call.input.conversationId} · ${result ? formatToolResult("conversation", { content: result.content, ...(result.isError ? { isError: true } : {}) }, 0) : "未取得接纳回执"}`;
+    }) } : {}),
     ...(lastAssistant !== undefined ? { assistantText: lastAssistant } : {}),
     ...(record.source === "advancement" ? { fromAdvancement: true } : {}),
     ...(record.perspectives?.perspectiveCount
@@ -104,7 +122,7 @@ export function renderHistoryTailLines(
   tail: HistoryTail,
   width: number,
 ): string[] {
-  if (tail.entries.length === 0) return [];
+  if (tail.entries.length === 0 && !tail.outsideInputs?.length) return [];
   const prefix = layout.contentPrefix;
   const maxVisible = Math.max(8, width - 1);
 
@@ -117,10 +135,16 @@ export function renderHistoryTailLines(
   for (const entry of tail.entries) {
     // 来源标记与实时旁观同源：代理续推的首行不是用户说的话，
     // 明说来源，与真实用户轮（❯）视觉区分。
-    const userLine = entry.fromAdvancement
+    const userLine = entry.sourceConversationId
+      ? `${prefix}◇ 来自对话 ${entry.sourceConversationId}: ${entry.userText}`
+      : entry.fromAdvancement
       ? `${prefix}◇ ${ADVANCEMENT_TURN_LABEL}: ${entry.userText}`
       : `${prefix}❯ ${entry.userText}`;
     lines.push(clampLine(chalk.dim(userLine), maxVisible));
+    for (const input of entry.inputs ?? []) {
+      lines.push(clampLine(chalk.dim(`${prefix}${input.sourceConversationId ? `◇ 来自对话 ${input.sourceConversationId}:` : "❯"} ${input.text}`), maxVisible));
+    }
+    for (const sent of entry.sent ?? []) lines.push(clampLine(chalk.dim(`${prefix}${sent}`), maxVisible));
     if (entry.assistantText !== undefined) {
       const assistantPrefix = entry.perspectiveCount
         ? `${ANCHOR_AI_DONE} 多视角评议 · ${entry.perspectiveCount} 视角:`
@@ -139,6 +163,13 @@ export function renderHistoryTailLines(
       );
     }
   }
+  for (const input of tail.outsideInputs ?? []) {
+    const source = input.message.inputIdentity?.source;
+    const label = source?.kind === "conversation" ? `来自对话 ${source.conversationId}` : "用户消息";
+    const status = input.disposition === "stopped" ? "已停止、未消费" : input.consumed ? "已进入运行输入" : "已接纳、待处理";
+    lines.push(clampLine(chalk.dim(`${prefix}◇ ${label} · ${status}: ${collapseToLine(extractText(input.message))}`), maxVisible));
+  }
+  if (tail.outsideInputsTruncated) lines.push(chalk.dim(`${prefix}… 尚有更早的未入历史消息，可按消息标识查询。`));
   lines.push("");
   return lines;
 }
@@ -160,8 +191,12 @@ export function renderHistoryTail(opts: {
   writer: CliWriter;
   width?: number;
   maxRuns?: number;
+  inputsOutsideHistory?: readonly ConversationMessageStatus[];
+  inputsOutsideHistoryTruncated?: boolean;
 }): void {
   const tail = projectHistoryTail(opts.runs, opts.maxRuns);
+  tail.outsideInputs = opts.inputsOutsideHistory;
+  tail.outsideInputsTruncated = opts.inputsOutsideHistoryTruncated;
   const width = opts.width ?? process.stdout.columns ?? 80;
   for (const line of renderHistoryTailLines(tail, width)) {
     opts.writer.line(line);

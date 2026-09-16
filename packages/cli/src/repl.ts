@@ -687,6 +687,7 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
       conversation: conversationFacade,
       workscene: worksceneFacade,
       onYield: (e) => renderer.handleEvent(e),
+      onObservedInputs: (turn) => observedTurnPresenter.onObservedInputs(turn),
       onObservedTurnDelta: (turn) =>
         observedTurnPresenter.onObservedTurnDelta(turn),
       onObservedTurnComplete: (turn) =>
@@ -724,10 +725,10 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
   // 经 RPC 倒读宿主落盘事实流。新对话无历史跳过;读失败静默(纯增益展示)。
   if (resumedConversationName !== null) {
     try {
+      const page = await controller.history(controller.current.conversationId);
       renderHistoryTail({
-        runs: (
-          await controller.history(controller.current.conversationId)
-        ).runs.map((r) => r.record),
+        ...page,
+        runs: page.runs.map((r) => r.record),
         writer: cliWriter,
       });
     } catch {
@@ -959,10 +960,10 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
       // 历史尾巴:场景对话的"回到工位"展示(auto-resume 该场景最近对话由宿主
       // enter 保证);新场景对话无历史零输出。
       try {
+        const page = await controller.history(entered.active.conversationId);
         renderHistoryTail({
-          runs: (
-            await controller.history(entered.active.conversationId)
-          ).runs.map((r) => r.record),
+          ...page,
+          runs: page.runs.map((r) => r.record),
           writer: cliWriter,
         });
       } catch {
@@ -1401,8 +1402,8 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
     inputController = new InputController({
       onEmptyEscape: () => {
         if (state.running) return;
-        void controller.abortWorksceneTask().then((stopped) => {
-          if (stopped) cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+        void controller.abortBackgroundTask().then((stopped) => {
+          if (stopped) cliWriter.line(chalk.dim("已请求停止当前任务；已发生的动作不会回滚。"));
         }).catch((error) => cliWriter.line(chalk.yellow(formatErrorMessage(error))));
       },
       broker: typeaheadBroker,
@@ -1559,8 +1560,8 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
       if (result.kind === "cancelled") {
         if (result.cause === "ctrl-c") {
           try {
-            if (await controller.abortWorksceneTask()) {
-              cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+            if (await controller.abortBackgroundTask()) {
+              cliWriter.line(chalk.dim("已请求停止当前任务；已发生的动作不会回滚。"));
               continue;
             }
           }
@@ -1757,7 +1758,7 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
         if (stopping) return;
         stopping = true;
         try {
-          if (await controller.abortWorksceneTask()) cliWriter.line(chalk.dim("已停止该委托的后续推进；已发生的动作不会回滚。"));
+          if (await controller.abortBackgroundTask()) cliWriter.line(chalk.dim("已请求停止当前任务；已发生的动作不会回滚。"));
           else if (exitIfIdle) rl.close();
         } catch (error) {
           cliWriter.line(chalk.yellow(formatErrorMessage(error)));

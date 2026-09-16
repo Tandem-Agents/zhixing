@@ -36,6 +36,7 @@ const TOOL_DISPLAY_NAME: Readonly<Record<string, string>> = Object.freeze({
   web_fetch: "WebFetch",
   schedule: "Schedule",
   Task: "Task",
+  conversation: "对话通信",
 });
 
 /** 工具内部名 → 终端展示 PascalCase 名 */
@@ -190,6 +191,22 @@ export function formatToolResult(
 
   const lines = countLines(result.content);
   switch (name) {
+    case "conversation": {
+      try {
+        const value = JSON.parse(result.content);
+        if (value?.accepted === true) return "已接纳 · 不代表任务完成";
+        if (value?.disposition === "stopped") return "已停止、未消费";
+        if (value?.disposition === "pending") return "已接纳、待处理";
+        if (value?.disposition === "consumed") {
+          const state = ({ queued: "待运行", dispatched: "已派发", running: "运行中", "cancel-requested": "正在停止", committed: "运行已提交", cancelled: "运行已停止", failed: "运行失败", expired: "运行已过期", uncertain: "运行结果待确认" } as Record<string, string>)[value.state];
+          return `已进入运行输入${state ? ` · ${state}` : ""}`;
+        }
+        if (Array.isArray(value?.conversations)) return `${value.conversations.length} 个对话${value.partial ? " · 部分设备不可达" : ""}`;
+        if (Array.isArray(value?.runs)) return `${value.runs.length} 轮历史${value.hasMore ? " · 还有下一页" : ""}`;
+        if (value === null) return "未找到该消息";
+      } catch { /* 返回不完整时不推断投递成功。 */ }
+      return "未取得完整状态";
+    }
     case "read":
       return `${lines} ${pluralize(lines, "line", "lines")}`;
     case "write":
@@ -364,6 +381,11 @@ function extractTarget(
   input: Record<string, unknown>,
 ): string {
   switch (name) {
+    case "conversation": {
+      const action = stringField(input, "action") ?? "";
+      const label = ({ send: "发送至", read: "读取", observe: "查询", discover: "发现对话" } as Record<string, string>)[action] ?? action;
+      return `${label}${input.conversationId ? ` ${input.conversationId}` : ""}`;
+    }
     case "read":
     case "write":
     case "edit": {

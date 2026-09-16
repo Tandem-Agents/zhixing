@@ -24,6 +24,8 @@ import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
+import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
+import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
 import { McpManagementApplication } from "@zhixing/core/mcp-management";
 import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import type { HostKernelToolImplementationFactory } from "../runtime/kernel-tool-implementation.js";
@@ -286,7 +288,9 @@ export async function runExecutorRole(
     await mcpRuntime.lifecycle.connect();
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
+    const communicationHandle = createConversationCommunicationAssemblyHandle();
     const runtime = new ExecutorRuntimeSubstrate({
+      communicationTools: [createConversationTool(communicationHandle.port)],
       zhixingHome,
       modelConfiguration,
       kernelEnvironmentConfiguration,
@@ -692,6 +696,10 @@ export async function runExecutorRole(
       onTrustApplied,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
+    const localCommunication = createLocalConversationCommunicationBinding(localConversationOwner.port());
+    const communication = mesh.routeConversationCommunication(localCommunication);
+    communicationHandle.bind(communication);
+    mesh.bindConversationCommunication(communication, [localCommunication]);
     const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(
       jobOwnerAssembly,
       mesh,
@@ -1063,6 +1071,7 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
+    readonly communicationTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly zhixingHome: string;
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
@@ -1140,6 +1149,7 @@ export class ExecutorRuntimeSubstrate {
         ...(workscene ? { resolveWorkspaceRoot: async () => runtimeEnvironment.workspace.path } : {}),
       })],
         extraTools: [
+          ...(this.options.communicationTools ?? []),
           ...(this.options.mcpProductTools ?? []),
           ...mcp.tools,
           ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools()),
@@ -1211,6 +1221,7 @@ export class ExecutorRuntimeSubstrate {
     return {
       tools: [
         ...new Set([
+          ...(this.options.communicationTools ?? []).map(tool => tool.name),
           ...(this.options.mcpProductTools ?? []).map((tool) => tool.name),
           ...zhixingProfile().enabledTools,
           ...mcp.tools.map((tool) => tool.name),

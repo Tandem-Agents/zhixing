@@ -158,6 +158,9 @@ export type AgentEventMap = {
   "agent:run_start": {
     prompt: string;
   };
+  "agent:input_received": {
+    inputs: readonly { text: string; identity?: import("./messages.js").MessageInputIdentity }[];
+  };
 
   "agent:run_end": {
     reason: AgentRunEndReason;
@@ -575,6 +578,7 @@ export type AgentEventMap = {
 /** 可跨运行时边界原样投影的小型事件。 */
 export const PROJECTED_PASSTHROUGH_EVENTS = [
   "agent:run_start",
+  "agent:input_received",
   "agent:run_end",
   "context:tokens_snapshot",
   "retry:attempt",

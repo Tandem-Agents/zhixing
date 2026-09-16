@@ -219,7 +219,7 @@ describe("production startup server ownership", () => {
     const runtimeHost = location(source, "const runtimeHost = new RuntimeHost({");
     expect(authority).toBeLessThan(conversation);
     expect(conversation).toBeLessThan(runtimeHost);
-    expect(runtimeHost).toBeLessThan(location(source, "const owner = await startLocalConversationOwner({"));
+    expect(runtimeHost).toBeLessThan(location(source, "const owner = await createLocalConversationOwner({"));
     expect(removalContribution).toBeGreaterThan(
       schedulerGenerationInstall,
     );

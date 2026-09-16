@@ -15,6 +15,13 @@ import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "
 import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { trackMessages } from "../../../../orchestrator/src/runtime/track-messages.js";
+import { createEventBus } from "@zhixing/core/events";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createConversationTool } from "../conversation-tools.js";
+import { createConversationCommunicationBinding } from "../conversation-communication-binding.js";
+import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
+import { skillNameToId } from "@zhixing/core/skills/id";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
 import { type PermissionRule } from "@zhixing/core/security";
 import {
   createSignedTrustRuleSnapshot,
@@ -323,6 +330,101 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("conversation communication unit 2: model tools load, discover, read, send busy input and reply after A has finished", async () => {
+    const home = await createTempDir("conversation-model-tools");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const ids = ["dialog-a", "dialog-b"];
+    const skillId = skillNameToId("对话通信");
+    const providers = [new MockLLMProvider([
+      { toolCalls: [{ id: "load", name: "load_skill", input: { id: skillId } }] },
+      { toolCalls: [{ id: "locate", name: "conversation", input: { action: "discover" } }] },
+      { toolCalls: [{ id: "read", name: "conversation", input: { action: "read", conversationId: ids[1] } }] },
+      { toolCalls: [{ id: "send-first", name: "conversation", input: { action: "send", conversationId: ids[1], input: "请核实后回信" } }] },
+      { toolCalls: [{ id: "send-busy", name: "conversation", input: { action: "send", conversationId: ids[1], input: "补充检查边界" } }] },
+      { text: "已发送，结束本轮。" },
+      { text: "收到核实结论。" },
+    ]), new MockLLMProvider([
+      { text: "核实中。" },
+      { toolCalls: [{ id: "reply-read", name: "conversation", input: { action: "read" } }] },
+      { toolCalls: [{ id: "reply", name: "conversation", input: { action: "send", conversationId: ids[0], input: "核实通过" } }] },
+      { text: "已回复。" },
+    ])];
+    let manager!: ConversationManager;
+    let binding!: ReturnType<typeof createConversationCommunicationBinding>;
+    let bStarted!: () => void; const whenBStarts = new Promise<void>(resolve => { bStarted = resolve; });
+    let aFinished!: () => void; const whenAFinishes = new Promise<void>(resolve => { aFinished = resolve; });
+    const committed: string[] = [];
+    const executionDiagnostics: unknown[] = [];
+    const runtimeFactory: RuntimeFactory = { create: async (id) => ({
+      ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: id,
+      async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+        if (id === ids[1]) { bStarted(); await whenAFinishes; }
+        const captured: Message[] = [];
+        const pending: import("@zhixing/core").ToolResultBlock[] = [];
+        const communication = createConversationTool({ invoke: async (source, request) => {
+          const response = await binding.invoke(source, request);
+          if (source === ids[0] && request.action === "send" && request.input === "请核实后回信") await whenBStarts;
+          return response;
+        } });
+        const load = BUILTIN_TOOL_FACTORIES.load_skill({ skillCatalogLoad: new SkillCatalogLoadApplicationService({ readScope: async () => ({ kind: "builtin-only" }), readContent: async () => { throw new Error("unexpected user skill"); }, stageUsage: async () => {} }) } as never);
+        const generator = runAgentLoop({ provider: providers[ids.indexOf(id)]!, model: "mock-model", messages: [...messages], tools: [load, communication],
+          deps: { executeTool: (tool, input, context) => tool.call(input, { ...context, turnId: options?.turnContext?.turnId }) },
+          inputPort: { receive: async boundary => { const values = await options!.inputPort!.receive(boundary); captured.push(...values); return values; }, close: () => options!.inputPort!.close() },
+        });
+        while (true) {
+          const step = await runContextStorage.run({ bus: createEventBus(), lineage: "main", conversationId: id }, () => generator.next());
+          if (step.done) { executionDiagnostics.push({ id, result: step.value }); return { agentResult: step.value, runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, ...captured], usage: step.value.usage }, newMessages: captured, durationMs: 1 }; }
+          if (step.value.type === "tool_end" && step.value.result.isError) executionDiagnostics.push(step.value.result);
+          trackMessages(step.value, captured, pending); yield step.value;
+        }
+      }, abort: () => false, dispose: async () => {},
+    }) };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    const execute = protocol.run.bind(protocol);
+    vi.spyOn(protocol, "run").mockImplementation(async function* (input) {
+      try { return yield* execute(input); }
+      catch (error) { executionDiagnostics.push(String(error)); throw error; }
+    });
+    manager = new ConversationManager(runtimeFactory, undefined, {
+      durableTurnExecutor: protocol,
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "owner-log", appended: true }),
+      onTurnCommitted: ({ conversationId }) => { committed.push(conversationId); if (conversationId === ids[0]) aFinished(); },
+    });
+    for (const id of ids) await getOrCreateActiveConversation(authority, manager, id);
+    const context = { principal: { kind: "host" as const, component: "communication-test" }, requestId: "history", deadlineAt: new Date(Date.now() + 120000).toISOString() };
+    const directory = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => ids.map((id, index) => ({ conversationId: id, name: index ? "核实" : "发起", createdAt: "2026-09-16T00:00:00Z", lastActiveAt: "2026-09-16T00:00:00Z" })),
+        create: async () => { throw new Error("must not create"); }, rename: async () => null,
+        readHistory: async (id, request) => { const page = await protocol.sessionState.readTranscriptTail(id, context, request.before, request.limit); return { runs: [...page.records].reverse().map(record => ({ record, shardId: "owner-log" })), hasMore: !!page.next }; },
+      },
+      runtime: { read: id => ({ active: true, busy: manager.getSession(id)?.busy ?? false, pendingCount: 0, observerCount: 0 }) },
+      agentTurns: createConversationAgentTurnAdmissionPort({ manager }),
+      agentTurnIdentity: { exists: async id => ids.includes(id), create: async () => { throw new Error("must not create"); }, ensure: async () => {} },
+    });
+    binding = createConversationCommunicationBinding({ directory, manager, messages: { inspect: (id, messageId) => protocol.inspectMessage(id, messageId), inputsOutsideHistory: id => protocol.messageInputsOutsideHistory(id) } });
+    try {
+      const initial = await binding.invoke(ids[0]!, { action: "send", conversationId: ids[0]!, operationId: "initial", input: "请联系核实对话" }) as { messageId: string };
+      await vi.waitFor(() => expect(committed, JSON.stringify(executionDiagnostics)).toHaveLength(3), { timeout: 40000, interval: 250 });
+      expect(await binding.invoke(ids[0]!, { action: "observe", conversationId: ids[0]!, messageId: initial.messageId })).toMatchObject({ state: "committed" });
+      const a = await binding.invoke(ids[0]!, { action: "read", conversationId: ids[0]! }) as Awaited<ReturnType<ConversationCommunicationApplicationService["read"]>>;
+      const b = await binding.invoke(ids[0]!, { action: "read", conversationId: ids[1]! }) as typeof a;
+      expect(a.runs).toHaveLength(2); expect(b.runs).toHaveLength(1);
+      expect(committed[0]).toBe(ids[0]);
+      expect(b.runs[0]!.record.messages.filter(message => message.inputIdentity).map(message => message.inputIdentity?.source)).toEqual([{ kind: "conversation", conversationId: ids[0] }, { kind: "conversation", conversationId: ids[0] }]);
+      expect(a.runs[0]!.record.messages[0]?.inputIdentity?.source).toEqual({ kind: "conversation", conversationId: ids[1] });
+      expect(providers[0]!.callCount).toBe(7); expect(providers[1]!.callCount).toBe(4);
+      expect(providers[1]!.calls[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "补充检查边界" }]);
+      expect(providers[0]!.calls[1]?.messages.at(-1)?.content[0]).toMatchObject({ type: "tool_result", isError: false });
+      const outputs = a.runs.flatMap(run => run.record.messages).flatMap(message => message.content).filter(block => block.type === "tool_result");
+      expect(outputs.every(block => !block.isError)).toBe(true);
+      const receipts = outputs.map(block => { try { return JSON.parse(block.content); } catch { return null; } }).filter(value => value?.accepted);
+      expect(receipts).toHaveLength(2); expect(receipts[0].runId).toBe(receipts[1].runId);
+      for (const receipt of receipts) expect(await binding.invoke(ids[0]!, { action: "observe", conversationId: ids[1]!, messageId: receipt.messageId })).toMatchObject({ disposition: "consumed", state: "committed" });
+      expect(committed).toHaveLength(3);
+    } finally { aFinished(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("conversation communication unit 1: durable busy input, retry, closing race, provenance and history recovery", async () => {
     const home = await createTempDir("conversation-input-boundary");
     const secretStore = new MemorySecretStore();

@@ -12,6 +12,9 @@ import { createEventBus, type AgentEventMap } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
+import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
+import { createConversationCommunicationBinding, createLocalConversationCommunicationBinding, discoverConversations } from "./conversation-communication-binding.js";
+import { CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET, createConversationCommunicationProductApiContribution } from "@zhixing/core/conversation/application";
 import { McpManagementApplication, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET, createMcpManagementProductApiContribution } from "@zhixing/core/mcp-management";
 import { resolveAgentIdentity } from "@zhixing/core/identity";
 import { loadLayeredGuidance } from "@zhixing/core/context";
@@ -200,7 +203,7 @@ import {
   bindAdvancementEvidenceTopology,
   createHostLosslessDataPlane,
   createConversationServices,
-  startLocalConversationOwner,
+  createLocalConversationOwner,
   createExecutorJobOwner,
   startExecutorJobOwner,
   prepareChannel,
@@ -694,7 +697,10 @@ async function runServerProcess(
     conversationStorage.taskLists,
     createAnchorConversationTaskListToolApplication(),
   );
+  const communicationHandle = createConversationCommunicationAssemblyHandle();
+  const communicationTools = [createConversationTool(communicationHandle.port)];
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
+    communicationTools,
     mcpProductTools,
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
@@ -741,6 +747,7 @@ async function runServerProcess(
     remoteWorkspaceProbe,
   });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
+    communicationTools,
     mcpProductTools,
     agentIdentity: resolveAgentIdentity(kernelEnvironmentConfiguration.agent),
     capabilities: anchorRuntimeCapabilities,
@@ -1005,7 +1012,7 @@ async function runServerProcess(
     if (!dataPlane || !ledger || !evidence || !jobRuntime) {
       throw new Error("Local executor requires the completed Conversation execution graph");
     }
-    const owner = await startLocalConversationOwner({
+    const owner = await createLocalConversationOwner({
       executorRoleModule: executor,
       evidenceHandler: evidence,
       assignmentRuntimeFactory,
@@ -1013,7 +1020,6 @@ async function runServerProcess(
       advancementConfiguration,
       providerCredentials,
       lifecycleContributions,
-      startupLifecycle,
       executorDataPlane: dataPlane,
       meshBootstrap: bootstrap.mesh,
       meshExecutorTopologyTrust,
@@ -2871,6 +2877,7 @@ async function runServerProcess(
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
+        ...CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET.operations,
         ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.operations,
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
@@ -2907,6 +2914,7 @@ async function runServerProcess(
       ],
     }),
     [
+      createConversationCommunicationProductApiContribution(communicationHandle.port.invoke),
       createConversationDirectoryProductApiContribution(
         conversationApplication,
       ),
@@ -2932,6 +2940,30 @@ async function runServerProcess(
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
     ],
   );
+  const conversationCommunication = createConversationCommunicationBinding({
+    directory: conversationApplication,
+    manager: boundConversations!,
+    messages: { inspect: (id, messageId) => boundConversationProtocol.inspectMessage(id, messageId), inputsOutsideHistory: id => boundConversationProtocol.messageInputsOutsideHistory(id) },
+  });
+  const localCommunication = localExecutor ? createLocalConversationCommunicationBinding(localExecutor.owner.port()) : undefined;
+  const ownedCommunication = [conversationCommunication, ...(localCommunication ? [localCommunication] : [])];
+  const routedCommunication: import("./conversation-tools.js").ConversationCommunicationTransport = meshRuntime
+    ? meshRuntime.routeConversationCommunication(localCommunication, conversationCommunication)
+    : { invoke: async (source, request) => {
+      if (request.action === "discover") return discoverConversations(ownedCommunication, source);
+      if (localCommunication && (await localExecutor!.owner.port().listConversations()).includes(request.conversationId)) return localCommunication.invoke(source, request);
+      return conversationCommunication.invoke(source, request);
+    } };
+  communicationHandle.bind(routedCommunication);
+  meshRuntime?.bindConversationCommunication(routedCommunication, ownedCommunication);
+  await localExecutor?.owner.start(startupLifecycle
+    ? { lifecycle: {
+        operationId: startupLifecycle.delivery.operationId,
+        kind: startupLifecycle.kind,
+        recoverAcceptedWork: startupLifecycle.recoverAcceptedWork,
+        alreadySettled: startupLifecycle.alreadySettled,
+      } }
+    : {});
   boundChannelConversationProduct?.bind(productApi);
   let serverCtx: ServerContext;
   serverCtx = createServerContext({

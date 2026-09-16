@@ -2038,6 +2038,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
+  async assertInputExecutor(runId: string, assignmentId: string, executorId: string): Promise<void> {
+    await this.#select(state => {
+      const assigned = state.assignedById.get(assignmentId);
+      if (!assigned || assigned.record.runId !== runId || assigned.record.executorId !== executorId || state.assignmentByRun.get(runId) !== assignmentId) {
+        throw new Error("Input does not belong to the authenticated executor assignment");
+      }
+    });
+  }
+
   async openRunInput(runId: string, assignmentId: string): Promise<RunInputPort> {
     await this.#transact<void>((state) => {
       if (state.assignmentByRun.get(runId) !== assignmentId || state.stateByRun.get(runId)?.state !== "running") {

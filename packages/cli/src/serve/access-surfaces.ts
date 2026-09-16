@@ -968,7 +968,7 @@ export async function createConversationServices(
 }
 
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
-export interface StartLocalConversationOwnerInput {
+export interface CreateLocalConversationOwnerInput {
   readonly executorRoleModule: ExecutorRoleModule;
   readonly evidenceHandler: EvidenceHandlerPort & { stopAccepting(): void };
   readonly assignmentRuntimeFactory: RuntimeFactory;
@@ -976,15 +976,14 @@ export interface StartLocalConversationOwnerInput {
   readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
-  readonly startupLifecycle?: StartupLifecycleRestoration;
   readonly executorDataPlane: ExecutorDataPlaneRuntime;
   readonly meshBootstrap: MeshRuntimeBootstrap;
   readonly meshExecutorTopologyTrust?: import("./mesh-runtime-assembly.js").MeshExecutorTopologyTrustState;
   readonly authorityRuntime: AuthorityRuntimeStack;
 }
 
-export async function startLocalConversationOwner(
-  input: StartLocalConversationOwnerInput,
+export async function createLocalConversationOwner(
+  input: CreateLocalConversationOwnerInput,
 ) {
   const {
     executorDataPlane: inputExecutorDataPlane,
@@ -1074,16 +1073,6 @@ export async function startLocalConversationOwner(
   input.lifecycleContributions.acquire("localConversationOwner.close", () =>
     assembly.close()
   );
-  await assembly.start(input.startupLifecycle
-    ? {
-        lifecycle: {
-          operationId: input.startupLifecycle.delivery.operationId,
-          kind: input.startupLifecycle.kind,
-          recoverAcceptedWork: input.startupLifecycle.recoverAcceptedWork,
-          alreadySettled: input.startupLifecycle.alreadySettled,
-        },
-      }
-    : {});
   return assembly;
 }
 

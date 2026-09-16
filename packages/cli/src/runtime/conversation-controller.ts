@@ -19,7 +19,7 @@
 
 import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
 import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
-import { generateTurnId, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core";
+import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
 import type {
   ConversationStatusNotice,
@@ -46,7 +46,7 @@ import type {
   SessionSendEngage,
   SessionSendResult,
 } from "@zhixing/rpc";
-import type { ConversationHistoryPage as RunsPage } from "@zhixing/core/conversation/application";
+import type { ConversationCommunicationHistory as RunsPage } from "@zhixing/core/conversation/application";
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
@@ -173,6 +173,7 @@ export interface ConversationControllerOptions {
   onYield: (event: AgentYield) => void;
   /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
+  onObservedInputs?: (turn: ObservedTurnNotification & AgentEventMap["agent:input_received"]) => void;
   /** 同一当前对话里,非本接入面发起的 turn 已落定。 */
   onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
@@ -295,12 +296,15 @@ export class ConversationController {
   private readonly pendingStatuses = new Map<string, ConversationStatusNotice>();
   private readonly finalLookups = new Map<string, Promise<void>>();
   private readonly continuationFinalLookups = new Map<string, Promise<void>>();
+  private readonly continuationStatusLookups = new Map<string, Promise<void>>();
   private readonly observedContinuations = new Map<string, {
     conversationId: string;
+    communication?: boolean;
     sequences: Map<string, number>;
     text: string;
     streamIncomplete?: boolean;
     settled: boolean;
+    terminalInputsReconciled?: boolean;
   }>();
   private readonly pendingAbortByTurn = new Map<
     string,
@@ -737,6 +741,11 @@ export class ConversationController {
       const runId = this.durableRunByTurn.get(turnId);
       if (runId) this.focusedTaskByConversation.set(conversationId, runId);
     }
+    const runId = this.durableRunByTurn.get(turnId);
+    if (runId && (result.reason === "aborted" || result.reason === "error")) {
+      // 本地 waiter 已负责终态展示，重复状态不能再进入旁观展示。
+      rememberBounded(this.observedContinuations, runId, { conversationId, sequences: new Map(), text: "", settled: true });
+    }
     this.releaseDurableRun(turnId);
     waiter({ result, postTurnControl: intent });
   }
@@ -812,21 +821,17 @@ export class ConversationController {
     const runId = notice.ref.runId;
     const watch = this.durableRuns.get(runId);
     if (!watch) {
+      if (notice.ref.conversationId !== this.active.conversationId && !this.localTurnsByConversation.has(notice.ref.conversationId)) return;
+      const prior = this.pendingStatuses.get(runId);
+      if (prior && prior.statusRevision > notice.statusRevision) return;
+      rememberBounded(this.pendingStatuses, runId, notice);
       const observed = this.observedContinuations.get(runId);
       const result = terminalResultForStatus(notice);
-      if (observed && !observed.settled && result) {
-        observed.settled = true;
-        if (observed.conversationId === this.active.conversationId) {
-          this.opts.onObservedTurnDelta?.({ conversationId: observed.conversationId, turnId: runId });
-          this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n续接未完成：${result.error.message}\n` : "\n任务续接已停止。\n" });
-          this.opts.onObservedTurnComplete?.({ conversationId: observed.conversationId, turnId: runId });
+      if (result && notice.ref.conversationId === this.active.conversationId) {
+        if (observed && !observed.communication) {
+          this.finishObservedStatus(notice);
         }
-      }
-      if (this.localTurnsByConversation.has(notice.ref.conversationId)) {
-        const prior = this.pendingStatuses.get(runId);
-        if (!prior || prior.statusRevision < notice.statusRevision) {
-          rememberBounded(this.pendingStatuses, runId, notice);
-        }
+        this.startTerminalInputLookup(notice);
       }
       return;
     }
@@ -840,6 +845,9 @@ export class ConversationController {
     const result = terminalResultForStatus(notice);
     if (result) {
       this.finishTurn(watch.conversationId, watch.turnId, result);
+      // waiter 收束与追加来信的来源补绘相互独立。
+      rememberBounded(this.pendingStatuses, runId, notice);
+      this.startTerminalInputLookup(notice);
       return;
     }
     if (
@@ -861,14 +869,80 @@ export class ConversationController {
     void lookup.catch(() => {});
   }
 
+  private finishObservedStatus(notice: ConversationStatusNotice): void {
+    const observed = this.observedContinuations.get(notice.ref.runId);
+    const result = terminalResultForStatus(notice);
+    if (!observed || observed.settled || !result || observed.conversationId !== this.active.conversationId) return;
+    observed.settled = true;
+    const identity = { conversationId: observed.conversationId, turnId: notice.ref.runId };
+    this.opts.onObservedTurnDelta?.(identity);
+    const label = observed.communication ? "来信处理" : "任务续接";
+    this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` });
+    this.opts.onObservedTurnComplete?.(identity);
+  }
+
+  private startTerminalInputLookup(notice: ConversationStatusNotice): void {
+    const runId = notice.ref.runId;
+    if (notice.ref.conversationId !== this.active.conversationId || this.observedContinuations.get(runId)?.terminalInputsReconciled || this.continuationStatusLookups.has(runId)) return;
+    const lookup = this.presentTerminalInputs(notice.ref.conversationId, runId).finally(() => {
+      if (this.continuationStatusLookups.get(runId) === lookup) this.continuationStatusLookups.delete(runId);
+    });
+    this.continuationStatusLookups.set(runId, lookup);
+    void lookup.catch(() => {});
+  }
+
+  /** 失败/取消没有成功 Final；任何起因的 Run 都可能包含追加来信。 */
+  private async presentTerminalInputs(conversationId: string, runId: string): Promise<void> {
+    let delayMs = 25;
+    while (!this.disposed && this.active.conversationId === conversationId) {
+      const notice = this.pendingStatuses.get(runId);
+      if (!notice || !terminalResultForStatus(notice) || this.observedContinuations.get(runId)?.terminalInputsReconciled) return;
+      try {
+        const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+        if (this.disposed || this.active.conversationId !== conversationId) return;
+        if (this.pendingStatuses.get(runId)?.statusRevision !== notice.statusRevision) continue;
+        const messages = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId).map(input => input.message);
+        let observed = this.observedContinuations.get(runId);
+        this.presentRecordedInputs(conversationId, runId, messages);
+        if (!observed) {
+          const communication = messages.some(message => message.inputIdentity?.source.kind === "conversation");
+          observed = { conversationId, communication, sequences: new Map(), text: "", settled: !communication };
+          rememberBounded(this.observedContinuations, runId, observed);
+        }
+        observed.terminalInputsReconciled = true;
+        this.finishObservedStatus(notice);
+        return;
+      } catch {
+        // 状态仍保留；短暂读取失败不丢终态，也不放行迟到输出。
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 1000);
+    }
+  }
+
   /** Automatically admitted work has no local send waiter or legacy delta producer. */
   private consumeContinuationFrame(frame: StreamFrame): void {
-    if (frame.ref.execution !== "conversation" || !frame.meta.turnOrigin?.worksceneContinuation) return;
+    const communication = frame.meta.turnOrigin?.messageIdentity?.source.kind === "conversation";
+    if (frame.ref.execution !== "conversation") return;
     if (frame.ref.conversationId !== this.active.conversationId) return;
+    if (frame.payload.kind === "agent-event" && "event" in frame.payload.event) {
+      const event = frame.payload.event;
+      if (event.event === "agent:input_received") {
+        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, turnId: frame.ref.runId, ...event.payload });
+      } else if (event.event === "agent:run_start" && communication) {
+        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, turnId: frame.ref.runId, inputs: [{ text: event.payload.prompt, identity: frame.meta.turnOrigin!.messageIdentity! }] });
+      }
+    }
+    if (!frame.meta.turnOrigin?.worksceneContinuation && !communication) return;
     let observed = this.observedContinuations.get(frame.ref.runId);
     if (!observed) {
-      observed = { conversationId: frame.ref.conversationId, sequences: new Map(), text: "", settled: false };
+      observed = { conversationId: frame.ref.conversationId, communication, sequences: new Map(), text: "", settled: false };
       rememberBounded(this.observedContinuations, frame.ref.runId, observed);
+    }
+    const status = this.pendingStatuses.get(frame.ref.runId);
+    if (status && terminalResultForStatus(status)) {
+      this.consumeStatus(status);
+      return;
     }
     // Final delivery and assignment streaming can arrive in either order.
     const final = this.pendingFinals.get(frame.ref.runId);
@@ -909,9 +983,11 @@ export class ConversationController {
         let observed = this.observedContinuations.get(frame.runId);
         if (this.active.conversationId !== frame.conversationId || observed?.settled) return;
         if (match) {
-          if (!observed && !match.record.worksceneContinuation) return;
+          this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages);
+          const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation";
+          if (!observed && !match.record.worksceneContinuation && !communication) return;
           if (!observed) {
-            observed = { conversationId: frame.conversationId, sequences: new Map(), text: "", settled: false };
+            observed = { conversationId: frame.conversationId, communication, sequences: new Map(), text: "", settled: false };
             rememberBounded(this.observedContinuations, frame.runId, observed);
           }
           observed.settled = true;
@@ -937,6 +1013,13 @@ export class ConversationController {
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       delayMs = Math.min(delayMs * 2, 1_000);
     }
+  }
+
+  private presentRecordedInputs(conversationId: string, runId: string, messages: readonly Message[]): void {
+    if (conversationId !== this.active.conversationId) return;
+    const inputs = messages.flatMap(message => message.inputIdentity?.source.kind === "conversation"
+      ? [{ text: extractText(message), identity: message.inputIdentity }] : []);
+    if (inputs.length) this.opts.onObservedInputs?.({ conversationId, turnId: runId, inputs });
   }
 
   private async retryCommittedRunLookup(runId: string): Promise<void> {
@@ -968,6 +1051,7 @@ export class ConversationController {
         (item) => "runId" in item.record && item.record.runId === runId,
       );
       if (match) {
+        this.presentRecordedInputs(watch.conversationId, runId, match.record.messages);
         if (match.record.postTurnControl) {
           this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
         }
@@ -1026,7 +1110,7 @@ export class ConversationController {
   /** 打断当前对话的 in-flight turn——complete 随宿主 cleanup 自然到达。 */
   async abort(): Promise<void> {
     const turnId = this.localTurnsByConversation.get(this.active.conversationId);
-    if (!turnId) { await this.abortWorksceneTask(); return; }
+    if (!turnId) { await this.abortBackgroundTask(); return; }
     const runId = this.durableRunByTurn.get(turnId);
     const requestId = `cancel:${generateTurnId()}`;
     if (runId) {
@@ -1047,6 +1131,25 @@ export class ConversationController {
     });
     this.pendingAbortByTurn.set(turnId, { requestId, promise, resolve, reject });
     return promise;
+  }
+
+  /** 无本地 waiter 时也从当前对话权威事实定位运行；不依赖是否见过实时帧。 */
+  async abortBackgroundTask(): Promise<boolean> {
+    const conversationId = this.active.conversationId;
+    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    if (this.active.conversationId !== conversationId) return false;
+    const runs = new Map((page.inputsOutsideHistory ?? [])
+      .filter(input => input.message.inputIdentity?.source.kind === "conversation" &&
+        ["queued", "dispatched", "running", "cancel-requested"].includes(input.state))
+      .map(input => [input.runId, input]));
+    const current = [...runs.values()].filter(input => input.state !== "queued");
+    const candidates = current.length ? current : [...runs.values()];
+    if (candidates.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");
+    if (candidates[0]) {
+      await this.opts.conversation.abort(conversationId, `cancel:${generateTurnId()}`, candidates[0].runId);
+      return true;
+    }
+    return this.abortWorksceneTask();
   }
 
   /** Resolve current entrusted work from owner facts even without a local send waiter or stream. */
@@ -1328,6 +1431,7 @@ export class ConversationController {
     this.pendingStatuses.clear();
     this.finalLookups.clear();
     this.continuationFinalLookups.clear();
+    this.continuationStatusLookups.clear();
     this.observedConversationId = null;
   }
 }

@@ -41,6 +41,15 @@ describe("displayToolName", () => {
 });
 
 describe("formatToolHeader", () => {
+  it("presents communication destination and distinguishes acceptance, consumption and run outcome", () => {
+    expect(formatToolHeader("conversation", { action: "send", conversationId: "b" })).toBe("对话通信(发送至 b)");
+    const result = (value: unknown) => formatToolResult("conversation", { content: JSON.stringify(value) }, 0);
+    expect(result({ accepted: true })).toBe("已接纳 · 不代表任务完成");
+    expect(result({ disposition: "pending" })).toBe("已接纳、待处理");
+    expect(result({ disposition: "stopped" })).toBe("已停止、未消费");
+    expect(result({ disposition: "consumed", state: "failed" })).toBe("已进入运行输入 · 运行失败");
+    expect(result({ disposition: "consumed", state: "committed" })).toBe("已进入运行输入 · 运行已提交");
+  });
   it("文件类工具——path 作 target", () => {
     expect(formatToolHeader("read", { path: "src/foo.ts" })).toBe(
       "Read(src/foo.ts)",
