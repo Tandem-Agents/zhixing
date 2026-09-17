@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Zhixing · Your personal agent for life and work</title>
+  <desc id="desc">An office workstation, an outdoor phone and a cafe laptop connected by one personal agent. A vision illustration, not a product screenshot.</desc>
+  <defs>
+    <clipPath id="frame"><rect width="1200" height="630" rx="28"/></clipPath>
+  </defs>
+  <g clip-path="url(#frame)">
+    <rect width="1200" height="630" fill="#F1EEE4"/>
+    <g font-family="Segoe UI,Microsoft YaHei,PingFang SC,sans-serif">
+      <g id="identity">
+        <!-- CLI 品牌锚：packages/cli/src/tui/brand-anchor.ts -->
+        <g id="brand-mark" fill="#128776">
+          <path d="M66 41l6 6" fill="none" stroke="#128776" stroke-width="2.5" stroke-linecap="square"/>
+          <path d="M66 49h20v4H66z M60 56h4v10H60z M86 56h4v10h-4z M67 69h16v4H67z"/>
+          <circle cx="71" cy="61" r="3"/>
+          <circle cx="80" cy="61" r="3"/>
+        </g>
+        <text x="102" y="66" fill="#153F3C" font-size="21" letter-spacing="4" font-weight="650">ZHIXING</text>
+        <text x="56" y="205" fill="#153F3C" font-size="70" font-weight="700" letter-spacing="-3">Zhixing</text>
+        <text x="62" y="277" fill="#153F3C" font-size="36" font-weight="600">Wherever you are,</text>
+        <text x="62" y="330" fill="#153F3C" font-size="36" font-weight="600">Zhixing is there.</text>
+        <path d="M63 365h55" stroke="#DEA44D" stroke-width="5" stroke-linecap="round"/>
+        <text x="62" y="413" fill="#526B61" font-size="22">From a general assistant</text>
+        <text x="62" y="448" fill="#526B61" font-size="22">to companion intelligence.</text>
+      </g>
+      <g id="subject-area">
+        <image href="../companion-three-scenes-office.png" x="450" y="44" width="735" height="522" preserveAspectRatio="xMidYMid meet"/>
+      </g>
+      <path d="M62 562H1138" stroke="#D7DED4"/>
+    </g>
+  </g>
+</svg>

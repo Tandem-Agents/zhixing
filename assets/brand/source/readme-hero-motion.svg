@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <filter id="response-soft" x="-80%" y="-100%" width="260%" height="300%"><feGaussianBlur stdDeviation="13"/></filter>
+    <filter id="response-phone-soft" x="-150%" y="-150%" width="400%" height="400%"><feGaussianBlur stdDeviation="8"/></filter>
+    <linearGradient id="response-screen" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#277a6c" stop-opacity=".15"/><stop offset="1" stop-color="#9cdec0" stop-opacity=".8"/></linearGradient>
+    <linearGradient id="response-sheen"><stop stop-color="#b6f2db" stop-opacity="0"/><stop offset=".5" stop-color="#b6f2db" stop-opacity=".4"/><stop offset="1" stop-color="#b6f2db" stop-opacity="0"/></linearGradient>
+    <clipPath id="response-office-clip"><rect width="146" height="88" rx="1"/></clipPath>
+    <clipPath id="response-cafe-clip"><rect width="117" height="71" rx="1"/></clipPath>
+    <filter id="response-thread-glow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="1.8"/></filter>
+    <linearGradient id="response-thread-teal" gradientUnits="userSpaceOnUse" x1="650" y1="380" x2="830" y2="120"><stop stop-color="#368b7a"/><stop offset=".5" stop-color="#72b8a1"/><stop offset="1" stop-color="#368b7a"/></linearGradient>
+    <linearGradient id="response-thread-gold" gradientUnits="userSpaceOnUse" x1="1010" y1="440" x2="647" y2="369"><stop stop-color="#b89960"/><stop offset=".5" stop-color="#d0ac6f"/><stop offset="1" stop-color="#b78c4e"/></linearGradient>
+    <path id="response-route-request" d="M644 368 C666 350 667 319 659 282 C643 218 669 143 760 125" pathLength="1"/>
+    <path id="response-route-collaborate" d="M832 120 C912 89 1001 157 1000 253 C1000 308 986 331 1005 366" pathLength="1"/>
+    <path id="response-route-return" d="M1006 395 C960 412 920 455 828 438 C737 420 709 378 647 369" pathLength="1"/>
+  </defs>
+  <g fill="none" stroke-linecap="round" pointer-events="none">
+    <g id="response-thread-request" opacity="0" stroke="url(#response-thread-teal)">
+      <use href="#response-route-request" stroke-width="1.1" opacity=".38"/>
+      <g id="response-flow-request" opacity="0">
+        <use href="#response-route-request" data-flow="glow" stroke-width="5" opacity=".32" filter="url(#response-thread-glow)"/>
+        <use href="#response-route-request" data-flow="tail" stroke-width="1.8" opacity=".45"/>
+        <use href="#response-route-request" data-flow="core" stroke-width="1.5"/>
+      </g>
+    </g>
+    <g id="response-thread-collaborate" opacity="0" stroke="url(#response-thread-teal)">
+      <use href="#response-route-collaborate" stroke-width="1.1" opacity=".38"/>
+      <g id="response-flow-collaborate" opacity="0">
+        <use href="#response-route-collaborate" data-flow="glow" stroke-width="5" opacity=".32" filter="url(#response-thread-glow)"/>
+        <use href="#response-route-collaborate" data-flow="tail" stroke-width="1.8" opacity=".45"/>
+        <use href="#response-route-collaborate" data-flow="core" stroke-width="1.5"/>
+      </g>
+    </g>
+    <g id="response-thread-return" opacity="0" stroke="url(#response-thread-gold)">
+      <use href="#response-route-return" stroke-width="1.1" opacity=".38"/>
+      <g id="response-flow-return" opacity="0">
+        <use href="#response-route-return" data-flow="glow" stroke-width="5" opacity=".32" filter="url(#response-thread-glow)"/>
+        <use href="#response-route-return" data-flow="tail" stroke-width="1.8" opacity=".45"/>
+        <use href="#response-route-return" data-flow="core" stroke-width="1.5"/>
+      </g>
+    </g>
+  </g>
+  <g id="response-scene" transform="translate(469.5 44) scale(.4806629834)" pointer-events="none">
+    <g id="response-phone" opacity="0">
+      <ellipse cx="361" cy="678" rx="17" ry="19" fill="#77ccb0" opacity=".65" filter="url(#response-phone-soft)"/>
+      <path d="M362 668l7 1-7 10-6-2z" fill="#b8ecda" opacity=".8"/>
+    </g>
+    <g id="response-office" opacity="0">
+      <path d="M606 130l146-47 2 89-146 47z" fill="#7ad8ba" opacity=".25" filter="url(#response-soft)"/>
+      <ellipse cx="697" cy="246" rx="103" ry="23" transform="rotate(-17 697 246)" fill="#95d9bb" opacity=".48" filter="url(#response-soft)"/>
+      <g transform="matrix(1 -.322 0 1 606 130)" clip-path="url(#response-office-clip)">
+        <rect width="146" height="88" fill="url(#response-screen)" opacity=".65"/>
+        <rect id="response-office-sheen" x="-70" y="0" width="70" height="88" fill="url(#response-sheen)"/>
+        <g fill="none" stroke="#bde7d4" stroke-linecap="round">
+          <path d="M66 32h14m-7-7v14" stroke-width="2.5"/>
+          <path d="M49 56h48" stroke-width="2" opacity=".2"/>
+          <path id="response-office-progress" d="M49 56h48" stroke-width="2" pathLength="1" stroke-dasharray="1" stroke-dashoffset="1"/>
+        </g>
+      </g>
+    </g>
+    <g id="response-cafe" opacity="0">
+      <path d="M1110 663l117 26-15 68-117-26z" fill="#7ad8ba" opacity=".25" filter="url(#response-soft)"/>
+      <ellipse cx="1170" cy="787" rx="100" ry="20" transform="rotate(13 1170 787)" fill="#a4dcc1" opacity=".48" filter="url(#response-soft)"/>
+      <g transform="matrix(1 .222 -.211 1 1110 663)" clip-path="url(#response-cafe-clip)">
+        <rect width="117" height="71" fill="url(#response-screen)" opacity=".65"/>
+        <rect id="response-cafe-sheen" x="-60" y="0" width="60" height="71" fill="url(#response-sheen)"/>
+        <g fill="none" stroke="#bde7d4" stroke-linecap="round">
+          <path d="M51 25h14m-7-7v14" stroke-width="2.3"/>
+          <path d="M36 48h44" stroke-width="2" opacity=".2"/>
+          <path id="response-cafe-progress" d="M36 48h44" stroke-width="2" pathLength="1" stroke-dasharray="1" stroke-dashoffset="1"/>
+        </g>
+      </g>
+    </g>
+    <g id="response-complete" opacity="0">
+      <ellipse cx="360" cy="679" rx="19" ry="23" fill="#ecc17d" opacity=".7" filter="url(#response-phone-soft)"/>
+      <ellipse cx="352" cy="692" rx="11" ry="15" fill="#f4c87d" opacity=".3" filter="url(#response-phone-soft)"/>
+      <path d="M362 668l7 1-7 10-6-2z" fill="#ffe6a9" opacity=".9"/>
+    </g>
+  </g>
+</svg>
+

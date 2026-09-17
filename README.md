@@ -1,161 +1,106 @@
-# 知行（Zhixing）
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+</p>
 
-> 知而后行，行而后知。知行是运行在你自己设备上的个人智能体，既能对话，也能在明确边界内执行真实任务。
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="assets/brand/readme-hero-static.png">
+  <img src="assets/brand/readme-hero.png" width="100%" alt="知行：不同地点的办公室电脑、户外手机和咖啡厅笔记本通过光流协作，服务同一个人。伴身智能愿景示意，非产品界面。">
+</picture>
 
-[English](./README.en.md) · [文档导航](./docs/README.md)
+<h1 align="center">生活与工作中的个人助手</h1>
 
-> 发布状态：首个公开版本正在准备中；下列 npm 安装命令仅适用于包正式发布后。
+<p align="center">
+  <a href="#开始使用">开始使用</a> · <a href="docs/README.md">文档</a> · <a href="docs/philosophy.md">产品哲学</a> · <a href="research/design/architecture/overview.md">架构</a> · <a href="assets/brand/readme-hero-static.png">静态图</a>
+</p>
 
-## 适合做什么
+**知行（Zhixing）是可独立部署的通用个人智能体。** 它运行在你自己的设备上，从阅读资料、讨论想法，到整理计划、处理文件、编写代码和执行任务，服务于日常生活，也面向专业工作。
 
-- 延续可恢复的日常对话，并在不同工作场景中保持清晰上下文。
-- 在信任与权限策略允许的范围内读写文件、搜索内容、运行命令和完成多步骤任务。
-- 管理工作场景、任务清单和日程，并支持多视角分析与子任务编排。
-- 使用技能（Skills）、接入经过配置的 MCP 服务，以及可选的飞书和设备协作能力。
+我们的方向是**伴身智能**：同一个知行在你的手机、电脑和服务器间协作，通过离你最近的设备与你交互，持续陪伴生活与工作。产品不依附于特定模型、界面或设备；技术为人的需要服务。
 
-## 支持环境
+## 从一段讨论，到持续的工作
 
-首个公开版本正式支持：
+**一起想清楚。** 研究资料、比较方案、写作和分析；需要不同判断时，可以从多个视角推敲同一个问题。讨论本身就有价值，不必每次都变成执行任务。
 
-- Windows 10/11 x64
-- Node.js `>=24.0.0`
-- npm 全局安装
+**把事情做出来。** 读取、搜索、编辑文件，运行命令，处理数据或代码。复杂任务可以拆分、委派、跟踪；寻找办法和调用工具服务于你要的结果，而不是让你手工编排每一步。
 
-其他操作系统、CPU 架构和包管理器尚不在首发支持范围内。
+**把工作接起来。** 保存与恢复对话，用“工作场景”组织不同工作的上下文与工作目录；按日程安排任务。独立对话也能互相读取和发消息，协作不必依靠你来回转述。
 
-## 快速开始
+**用你自己的环境。** 从终端使用，也可接入飞书。自行选择模型服务，用 Skills 保存可复用的方法，通过 MCP 接入外部工具与服务；单设备即可完整运行，多设备协作按需启用。
+
+例如，你可以带着自己的资料开始：
+
+> “比较这几份旅行资料，按我的预算和时间安排一份行程草案，把还需要我决定的事情列出来。”
+
+> “梳理这个项目的资料和代码，解释它如何运行，再把有依据的问题整理成清单。先不要修改文件。”
+
+## 一心多身
+
+知行不是把每个入口做成一套独立助手。**“一心”是共同的产品规则与可信状态，“多身”是不同的交互入口和运行设备。** 终端、飞书和设备协作，共同服务于同一个产品。
+
+- **产品不绑模型。** 对话、工作场景、日程等能力有自己的规则；模型负责理解、推理与行动，不负责定义整个系统。
+- **可靠性不靠模型自觉。** 状态持久化、权限、确认与恢复由系统承担；模型说“完成了”，不能替代真实执行结果。
+- **扩展不拆散产品。** 模型、工具、消息通道与设备通过明确接口接入；更换实现，不必复制一套业务规则。
+
+这让知行既能利用模型不断进步的能力，也能保持长期可维护的结构。进一步了解[产品哲学](docs/philosophy.md)与[架构设计](research/design/architecture/overview.md)。
+
+## 开始使用
+
+> [!IMPORTANT]
+> **首个公开版本尚未发布，npm 包暂不可用。** 现在希望从源码运行，请先看[开发环境说明](CONTRIBUTING.md#development-environment)。以下为发布后的用户安装流程。
+
+首发支持 **Windows 10/11 x64 · Node.js ≥ 24**。需要可用的模型服务与 API key；模型调用可能产生费用，并将请求内容发送给所选服务。
 
 ### 1. 安装
 
-发布后，在 PowerShell 中运行：
+在 PowerShell 中运行：
 
 ```powershell
 npm install -g @zhixing/cli
 zz --version
 ```
 
-不要使用 `sudo npm` 或通过放宽系统目录权限来安装。若 npm 全局目录不可写，请按 Node.js 官方方式配置用户级安装环境。
+### 2. 启动与配置
 
-### 2. 在单独的试用目录中首次启动
-
-知行依次使用运行时明确指定的工作区、配置中的 `workspace.root`，或在交互模式下回退到当前目录。普通工作目录不是沙箱，不能阻止工具访问其他路径。首次试用可以从单独目录启动；若已有工作区配置，请先确认实际目标目录：
+进入希望让知行工作的目录，再运行 `zz`（也可使用 `zhixing`）。初次体验可先建立一个单独目录：
 
 ```powershell
-New-Item -ItemType Directory -Force .\zhixing-first-task | Out-Null
-Set-Location .\zhixing-first-task
+New-Item -ItemType Directory -Force .\zhixing-start | Out-Null
+Set-Location .\zhixing-start
 zz
 ```
 
-首次交互式启动会在配置不完整时打开配置编辑器。完成最小可运行配置需要：
+缺少必要配置时，知行会打开配置编辑器。选择主模型的服务商与模型，填入 API key 并保存；飞书与 MCP 可稍后配置。凭据保存在设备本地 SecretStore，不应写进对话或公开配置。
 
-- 主模型的 Provider 和模型名；
-- 对应 Provider 的 API key；
-- 接受并保存配置。
+工作目录以显式运行工作区或 `workspace.root` 配置为先，否则交互启动使用当前目录。单独目录便于试用，**不是沙箱**。
 
-公开配置默认位于 `%USERPROFILE%\.zhixing\config.jsonc`；设置 `ZHIXING_HOME` 可以改变知行的数据根目录。API key 由设备本地 SecretStore 保存，不应写进 `config.jsonc`、提示词、仓库、Issue 或日志。消息通道和 MCP 都是可选项，不阻断基础对话就绪。之后可在 REPL 中使用 `/config` 和 `/mcp` 修改配置。
-
-### 3. 完成第一个真实任务
-
-进入 REPL 后发送：
+### 3. 完成第一件事
 
 ```text
-请只在当前工作目录创建 zhixing-check.txt，写入“知行已完成首次任务”，然后重新读取文件并告诉我内容。不要修改其他文件。
+请只在当前工作目录新建 hello-zhixing.txt，写入“你好，知行”，
+再读回来核对。不要修改其他文件。
 ```
 
-知行会按当前信任与权限策略直接放行、拒绝或请求确认。出现确认请求时，先核对目标路径和操作再批准。退出 REPL 后可在同一 PowerShell 中核验：
+出现确认时先检查动作与路径，完成后可在该目录查看文件。接下来，用 `/new` 开始新对话、`/resume` 找回历史、`/work` 管理工作场景、`/skills` 查看技能。完整用法见 [CLI 指南](packages/cli/README.md)。
 
-```powershell
-Get-Content .\zhixing-check.txt
-```
+## 数据与边界
 
-这个任务会调用你配置的模型 Provider，可能产生网络请求与费用，并受该 Provider 的数据政策约束。
+- **本地部署，不等于离线运行。** 运行状态保存在自己的设备上；提示词、上下文与工具结果可能发送给模型服务。MCP、飞书及网络工具也会连接相应外部服务。
+- **执行会产生真实影响。** 工具受信任、权限与确认策略约束，但并非每次操作都弹出确认，也不提供操作系统级强隔离。请从你愿意交给它处理的资料与工作目录开始。
+- **区分已有能力与长期方向。** 当前提供对话持久化与恢复，尚不具备长期记忆；伴身智能是长期方向，不是已经实现全天候、全场景陪伴的承诺。
 
-## 继续对话与管理工作
+运行状态用 `zz status` 查看，离线只读诊断用 `zz doctor`。更新、备份、卸载与数据保留见[安装与维护指南](research/design/modules/distributed-runtime/release-and-maintenance-guide.md)；当前版本边界见 [0.1.0 发布说明](docs/delivery/releases/0.1.0.md)。
 
-直接运行 `zz` 会进入默认 REPL：存在可恢复的主会话时恢复最近一段，否则创建新会话。常用命令包括：
+## 一起把知行做好
 
-| 目的 | REPL 命令 |
-| --- | --- |
-| 新建、恢复、命名或清空会话 | `/new`、`/resume`、`/name`、`/clear` |
-| 查看状态、模型、用量和上下文 | `/status`、`/model`、`/usage`、`/context` |
-| 管理工作场景和任务 | `/work`、`/tasks` |
-| 管理配置、MCP、信任与安全 | `/config`、`/mcp`、`/trust`、`/security` |
-| 查看可用 Skill | `/skills` |
-| 压缩当前上下文或退出 | `/compact`、`/exit` |
+欢迎带着真实的使用问题、改进建议或代码参与。我们关心的是生活与工作中是否真的更好用了。
 
-设备级诊断和维护使用 `zz status`、`zz doctor`、`zz stop`、`zz app`、`zz pair`、`zz device`、`zz duty`、`zz backup` 和 `zz workspace`。完整参数以 `zz help` 和 [CLI 使用说明](./packages/cli/README.md) 为准。
+[提交问题或建议](https://github.com/Tandem-Agents/zhixing/issues) · [贡献指南](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [安全政策](SECURITY.md)
 
-## 数据、网络和执行边界
+请勿公开凭据、私人资料或未经检查的日志；疑似漏洞按安全政策中的当前渠道处理，不在公开 Issue 披露细节。
 
-- 知行的运行时与本机状态存放在你的设备上，但这不表示所有数据永不离开设备。提示词、上下文和工具结果会按任务需要发送给你配置的模型 Provider。
-- MCP、消息通道和网络工具会连接相应的外部服务；各服务的权限、费用、保留和隐私政策分别适用。
-- 文件和命令工具会产生真实效果。知行具有信任、权限与确认边界，但当前不应被视为操作系统级强隔离沙箱。权限策略允许的操作可能直接执行；出现确认请求时，请检查路径和动作后再批准。
-- `zz doctor` 是只读、离线诊断入口，不应打印秘密或内部敏感路径。公开求助时也不要粘贴 API key、SecretStore、私有文件内容或未审查的完整日志。
+---
 
-## 诊断、更新和卸载
-
-检查当前状态与本机环境：
-
-```powershell
-zz status
-zz doctor
-```
-
-同版修复时，先取得当前明确版本，再按该版本重新安装：
-
-```powershell
-$ZhixingVersion = zz --version
-zz stop --maintenance
-npm install -g "@zhixing/cli@$ZhixingVersion"
-zz
-```
-
-主动前向升级时，在安全停止后安装目标新版；安装最新版本的命令是：
-
-```powershell
-zz stop --maintenance
-npm install -g @zhixing/cli@latest
-zz
-```
-
-也可以把 `latest` 替换为已经选定的明确新版号。知行不会在后台自动替换程序；运行新版本后不支持降级。卸载程序但保留全部用户数据：
-
-```powershell
-zz app remove
-npm uninstall -g @zhixing/cli
-```
-
-永久移除当前设备及其本机数据是独立且破坏性的操作：`zz device remove --permanent`。不要把它当作普通卸载。完整流程见[安装、维护与发布指南](./research/design/modules/distributed-runtime/release-and-maintenance-guide.md)。
-
-## 当前限制
-
-- 首发只正式支持 Windows 10/11 x64 和 Node.js 24 及以上版本。
-- 没有后台自动更新，也不支持安装新版本后的降级。
-- 技能（Skills）和 MCP 已是正式能力，但当前没有宣称“无限插件平台”；未发布的长期记忆等未来能力不属于首发合同。
-- 强隔离、外部服务可用性、模型质量和 Provider 费用不由知行单独保证。
-
-## 仓库与文档
-
-```text
-packages/   生产代码包
-docs/       用户与交付文档入口
-research/   架构、设计与研究
-scripts/    构建、验证与发布脚本
-```
-
-- [文档导航](./docs/README.md)
-- [CLI 使用说明](./packages/cli/README.md)
-- [架构概览](./research/design/architecture/overview.md)
-- [首个公开版本交付计划](./docs/delivery/first-public-release.md)
-- [0.1.0 发布说明](./docs/delivery/releases/0.1.0.md)
-- [验证手册](./research/design/workbench/verification-runbook.md)
-- [贡献指南](./CONTRIBUTING.md)
-- [行为准则](./CODE_OF_CONDUCT.md)
-- [安全政策](./SECURITY.md)
-- [缺陷与需求反馈](https://github.com/Tandem-Agents/zhixing/issues)
-
-疑似安全漏洞请勿在公开 Issue 中披露细节。当前私密报告渠道与支持版本状态以[安全政策](./SECURITY.md)为准。
-
-## 许可证
-
-[MIT](./LICENSE)
+<p align="center">
+  知而后行，行而后知。<br>
+  <a href="LICENSE">MIT License</a>
+</p>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "README 内容与呈现"
+  short_description: "编写项目介绍与使用说明，优化 README 的排版、图片和动效"
+  default_prompt: "使用 $write-readme 改进项目 README.md 的内容和显示效果。"
