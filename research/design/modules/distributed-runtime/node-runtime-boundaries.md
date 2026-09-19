@@ -10,7 +10,7 @@
 | 用户 Node | 用户/Node 安装器 | 满足 `engines.node` 的最低版本；运行 npm 安装的 `zz` |
 | 知行托管进程 | 知行 | definition 绑定安装时实际的 `process.execPath` 与绝对 CLI 入口，不调用裸 `node` 或 PATH 猜测 |
 
-当前发布验证范围是 Windows 10/11 x64、Node `>=24.0.0`；不锁死补丁或最高版本。macOS/Linux 的源码与平台 adapter 保持可移植，但取得真实环境证据前不作发布承诺。
+Node 下界为 `>=24.0.0`，不锁死补丁或最高版本。原生产物目标为 Windows x64、macOS x64/arm64、Linux x64/arm64（glibc >=2.35）；入口与交付检查共用 `@zhixing/mesh/checkpoint-bridge-artifact` 的目标表。该表描述已实现的交付范围，不替代真实平台验收：目前 macOS/Linux 仍待验收，不能据此宣告可发布。
 
 ## 安装与维护
 
@@ -24,8 +24,9 @@
 
 - TypeScript target 与 `@types/node` 决定编译边界，不等于运行时版本；升级开发 Node 后必须重新构建并取得受影响验证证据。
 - pnpm 锁文件固定开发依赖解析，发布 tarball 由 packed manifest 的精确 registry 依赖与 CLI shrinkwrap 约束。
-- Windows checkpoint child bridge 是随 `@zhixing/mesh` 发布的预构建 C# helper，不绑定 Node ABI；构建生成 OS/arch、包版本与 SHA-256 descriptor，打包检查和运行时首次 spawn 前复验 exact bytes。
-- 公开包不得在安装时编译 native helper。未发布的 macOS/Linux helper 不构成当前门禁。
+- checkpoint child bridge 随 `@zhixing/mesh` 的 `build/prebuilt/<os>-<arch>/` 交付：Windows 使用既有 C# helper，macOS/Linux 使用 Node-API 8 模块，保留目录句柄、禁止跟随链接和原子不覆盖重命名语义。领域逻辑不承担平台分支。
+- 每个目标携带 OS/arch、包版本、大小和 SHA-256 descriptor；打包检查与适配器加载前复验 exact bytes。缺失或错配不得要求用户自行编译，不得退回不安全文件操作；原生产物不在模块导入时加载，帮助、诊断和维护入口不依赖其预先启动。
+- 原生编译仅发生在开发/发布构建环境，用户安装零生命周期脚本。发布检查必须具备全部目标产物；真实安装与关键功能验收仍按目标独立完成，不得用 Windows 结果替代。
 
 ## 验收底线
 

@@ -14,9 +14,11 @@ Do not put credentials, tokens, SecretStore data, private file contents, persona
 
 The repository requires:
 
-- Windows 10/11 x64 for the currently supported full product and packaging path;
+- a host matching a native target in the [runtime boundaries](./research/design/modules/distributed-runtime/node-runtime-boundaries.md); macOS/Linux release acceptance remains pending;
 - Node.js `>=24.0.0`;
 - pnpm `10.8.0`, as declared by the root `packageManager` field.
+
+Source builds use the Windows .NET Framework C# compiler, or Python and a C++ toolchain for node-gyp on macOS/Linux. End-user npm installs consume prebuilt assets and do not need these compilers.
 
 Clone, install, and perform the initial full workspace build:
 

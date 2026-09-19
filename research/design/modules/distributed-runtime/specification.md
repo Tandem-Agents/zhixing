@@ -2627,11 +2627,11 @@ stop successor 的可执行恢复只消费既有 operation、accepted-work artif
 
 ### 第 38 单元 npm 交付与显式维护合同
 
-唯一正式交付入口是 `npm install -g @zhixing/cli`。用户必须提供满足 `engines.node` 的 Node；当前只承诺 Windows x64，macOS/Linux 只保留源码和平台 adapter 可移植性。共享 package manifest 不用 `os/cpu` 阻断开发；最终 CLI 在配置、身份、服务或 home 首效果前稳定拒绝未支持目标。安装包不得通过生命周期脚本编译、下载、改系统配置、注册服务或创建 home；首次真实运行才可在既有交互与权限边界内创建配置、身份和托管服务。
+唯一正式交付入口是 `npm install -g @zhixing/cli`。用户必须提供满足 `engines.node` 的 Node；跨平台目标、宿主条件与待验收状态以[运行时边界](node-runtime-boundaries.md)为准。共享 package manifest 不用 `os/cpu` 阻断开发；最终 CLI 在配置、身份、服务或 home 首效果前稳定拒绝未支持目标。安装包不得通过生命周期脚本编译、下载、改系统配置、注册服务或创建 home；首次真实运行才可在既有交互与权限边界内创建配置、身份和托管服务。
 
-根版本是全部公开包与 CLI 版本投影的唯一来源。公开包只发布声明的 `dist` 与必要 Windows helper，生产依赖均为精确 registry 版本，CLI 额外用 `npm-shrinkwrap.json` 绑定 registry integrity。`package:check` 在同一源码输入上构建并 pack 全部公开包，复验 tarball manifest 无 workspace/path 泄漏、无安装脚本、版本全等、资产 exact-set，并在隔离临时根中以本轮 tarball 走真实 CLI、runtime subpath 和 Windows helper。第三方安装脚本只按实际精确依赖闭包审计，不把未安装平台、第二台机器、CI、证书或公证变成交付门禁。
+根版本是全部公开包与 CLI 版本投影的唯一来源。公开包只发布声明的 `dist` 与各目标预构建 helper，生产依赖均为精确 registry 版本，CLI 额外用 `npm-shrinkwrap.json` 绑定 registry integrity。`package:check` 在同一源码输入上构建并 pack 全部公开包，复验 tarball manifest 无 workspace/path 泄漏、无安装脚本、版本全等、资产 exact-set，并在隔离临时根中以本轮 tarball 走真实 CLI、runtime subpath 和当前平台 helper。正式发布额外要求 `--all-targets` 产物闭包与各目标运行证据；本机检查不证明异平台可用。第三方安装脚本只按实际精确依赖闭包审计，不增加证书、公证或自有更新系统。
 
-正式发布命令默认零外部写；只有用户另行明确授权后，才用当次 npm 认证只读确认身份、二次验证、scope 与全部包权限。依赖包按拓扑发布到固定候选 tag，重试只接受 registry 中同版本且 integrity 与本轮 tarball 全等的制品；随后生成 CLI shrinkwrap、重 pack 并从 registry exact closure 重跑 package check。CLI 候选也全等后才移动 `latest`，任一失败零 latest 变化。仓库不保存 token，不建设 CI、自有 feed、签名 manifest/index、平台 installer、私有 Node 或发布报告。
+正式发布命令默认零外部写；只有用户另行明确授权后，才用当次 npm 认证只读确认身份、二次验证、scope 与全部包权限。依赖包按拓扑发布到固定候选 tag，重试只接受 registry 中同版本且 integrity 与本轮 tarball 全等的制品；随后生成 CLI shrinkwrap、重 pack 并从 registry exact closure 重跑 package check。CLI 候选也全等后才移动 `latest`，任一失败零 latest 变化。平台 CI 仅构建和验证，不发布；仓库不保存 token，不建设自有 feed、签名 manifest/index、平台 installer、私有 Node 或发布报告。
 
 同版修复或前向升级只允许用户显式运行 `zz stop --maintenance`，再安装当前明确版本或 `@latest` 并运行新 `zz`。maintenance 先对 exact managed definition 关闭 future launch并回读，再复用既有 stop coordinator 到安全终态；拒绝或失败只补偿本操作造成的 enabled→disabled，成功保持 disabled。新 CLI 启动复用既有 reconcile，以自身绝对入口和 `process.execPath` 更新 definition 并恢复托管；不得调用裸 `node`、npm 或 PATH 猜测。已运行新版本后不提供降级行动；协议/schema 不兼容继续沿现有 handshake fail-closed，并在目标设备提示同一完整维护顺序：先运行 `zz stop --maintenance`，成功后安装最新版本，再运行新 `zz` 并重试原操作。
 

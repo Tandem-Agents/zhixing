@@ -1,9 +1,12 @@
+import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion } from "@zhixing/mesh/checkpoint-bridge-artifact";
+
 const MINIMUM_NODE_MAJOR = 24;
 
 export interface RuntimeSupportInput {
   readonly platform?: NodeJS.Platform;
   readonly arch?: string;
   readonly nodeVersion?: string;
+  readonly glibcVersion?: string;
 }
 
 export function assertSupportedRuntime(input: RuntimeSupportInput = {}): void {
@@ -14,7 +17,6 @@ export function assertSupportedRuntime(input: RuntimeSupportInput = {}): void {
   if (!Number.isInteger(major) || major < MINIMUM_NODE_MAJOR) {
     throw new Error("当前 Node.js 版本不受支持；请安装 Node.js 24 或更高版本后重试");
   }
-  if (platform !== "win32" || arch !== "x64") {
-    throw new Error("当前版本仅支持 Windows x64；未执行任何配置、身份或服务操作");
-  }
+  const target = checkpointBridgeTarget(platform, arch);
+  assertCheckpointBridgeHost(target, input.glibcVersion ?? currentGlibcVersion());
 }

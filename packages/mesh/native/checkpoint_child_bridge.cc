@@ -328,7 +328,8 @@ std::vector<std::string> ListEntries(NativeHandle parent, size_t maximumEntries)
     infoClass = FileIdBothDirectoryInfo;
   }
 #else
-  const int copy = dup(parent);
+  // dup shares the directory offset: a second inventory would incorrectly be empty.
+  const int copy = openat(parent, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   if (copy < 0) throw std::runtime_error("Unable to duplicate checkpoint directory handle");
   DIR* directory = fdopendir(copy);
   if (!directory) {

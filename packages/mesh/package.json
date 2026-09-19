@@ -5,6 +5,10 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./checkpoint-bridge-artifact": {
+      "types": "./dist/checkpoint-bridge-artifact.d.ts",
+      "import": "./dist/checkpoint-bridge-artifact.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -120,8 +124,7 @@
   },
   "files": [
     "dist",
-    "build/Release/checkpoint_child_bridge.exe",
-    "build/Release/checkpoint_child_bridge.descriptor.json"
+    "build/prebuilt"
   ],
   "scripts": {
     "build": "node scripts/build-checkpoint-child-bridge.mjs && tsup",
@@ -136,6 +139,7 @@
     "reflect-metadata": "0.2.2"
   },
   "devDependencies": {
+    "node-gyp": "11.5.0",
     "@cipherman/pake-js": "0.1.1",
     "@types/node": "^24.0.0",
     "@zhixing/test-utils": "workspace:*",

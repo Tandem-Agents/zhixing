@@ -451,7 +451,11 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     if (before.state !== "enabled" || !before.matches) {
       throw new ManagedServiceError("read-back-failed", "Managed service is not installed and enabled");
     }
-    await this.requireCommand(startCommand(spec), signal);
+    if (this.platform === "darwin" && !await this.macServiceLoaded(spec, signal)) {
+      await this.requireCommand({ command: "/bin/launchctl", args: ["bootstrap", `gui/${spec.uid ?? 0}`, spec.definitionPath] }, signal);
+    } else {
+      await this.requireCommand(startCommand(spec), signal);
+    }
     const after = await this.inspect(spec, signal);
     if (!after.running) {
       throw new ManagedServiceError("read-back-failed", "Managed service start could not be verified");
@@ -499,7 +503,12 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
       }, signal);
       if (printed.code !== 0) {
         this.requireDefiniteAbsence(printed);
-        return { state: "absent", running: false, matches: true };
+        // bootout unloads the current job, not the LaunchAgent's future login registration.
+        const definitionExists = await readFile(spec.definitionPath).then(() => true, (error: unknown) => {
+          if (isNodeError(error, "ENOENT")) return false;
+          throw error;
+        });
+        if (!definitionExists) return { state: "absent", running: false, matches: true };
       }
       const disabled = await this.command({
         command: "/bin/launchctl",
@@ -512,7 +521,7 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
         .test(disabled.stdout);
       return {
         state: isDisabled ? "disabled" : "enabled",
-        running: /\bpid\s*=\s*\d+/u.test(printed.stdout),
+        running: printed.code === 0 && /\bpid\s*=\s*\d+/u.test(printed.stdout),
         matches: true,
       };
     }
@@ -558,20 +567,13 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     }
     if (this.platform === "darwin") {
       const domain = `gui/${spec.uid ?? 0}`;
-      const bootstrapped = await this.command({
-        command: "/bin/launchctl",
-        args: ["bootstrap", domain, spec.definitionPath],
-      }, signal);
-      if (bootstrapped.code !== 0) {
-        const current = await this.inspectManager(spec, signal);
-        if (current.state === "absent") {
-          throw new ManagedServiceError("command-failed", "Managed service could not be installed");
-        }
-      }
       await this.requireCommand({
         command: "/bin/launchctl",
         args: ["enable", `${domain}/${spec.serviceId}`],
       }, signal);
+      if (!await this.macServiceLoaded(spec, signal)) {
+        await this.requireCommand({ command: "/bin/launchctl", args: ["bootstrap", domain, spec.definitionPath] }, signal);
+      }
       return;
     }
     if (spec.startup === "boot") {
@@ -683,6 +685,13 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     if (result.code === 0 || classifyManagerFailure(this.platform, result) === "not-found") return;
     this.throwManagerFailure(result, false);
     throw new ManagedServiceError("command-failed", "Managed service could not be stopped safely");
+  }
+
+  private async macServiceLoaded(spec: ManagedServiceSpec, signal: AbortSignal): Promise<boolean> {
+    const result = await this.command({ command: "/bin/launchctl", args: ["print", `gui/${spec.uid ?? 0}/${spec.serviceId}`] }, signal);
+    if (result.code === 0) return true;
+    this.requireDefiniteAbsence(result);
+    return false;
   }
 
   private async command(

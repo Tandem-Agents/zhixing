@@ -18,7 +18,7 @@ if (process.env.ZHIXING_ALLOW_NPM_PUBLISH !== "1") {
 
 const temporary = await mkdtemp(path.join(tmpdir(), "zhixing-npm-publish-"));
 try {
-  await run(command("pnpm"), ["package:check", "--", "--skip-build"], root);
+  await run(command("pnpm"), ["package:check", "--", "--skip-build", "--all-targets"], root);
   const identity = (await capture(command("npm"), ["whoami"], root)).trim();
   if (!identity) throw new Error("npm 身份不可用");
   const profile = JSON.parse(await capture(command("npm"), ["profile", "get", "--json"], root));

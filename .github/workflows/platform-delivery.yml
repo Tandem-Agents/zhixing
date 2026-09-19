@@ -1,0 +1,78 @@
+name: Platform delivery verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - id: matrix
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs';
+          import { CHECKPOINT_BRIDGE_TARGETS } from './packages/mesh/src/checkpoint-bridge-artifact.ts';
+          const runners = { 'win32-x64': 'windows-2022', 'darwin-x64': 'macos-15-intel', 'darwin-arm64': 'macos-14', 'linux-x64': 'ubuntu-22.04', 'linux-arm64': 'ubuntu-22.04-arm' };
+          const include = CHECKPOINT_BRIDGE_TARGETS.map(({ id }) => {
+            if (!runners[id]) throw Error(`Missing build host for ${id}`);
+            return { id, runner: runners[id] };
+          });
+          appendFileSync(process.env.GITHUB_OUTPUT, `value=${JSON.stringify({ include })}\n`);
+          JS
+
+  native:
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: node packages/mesh/scripts/build-checkpoint-child-bridge.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checkpoint-${{ matrix.id }}
+          path: packages/mesh/build/prebuilt
+          if-no-files-found: error
+
+  verify:
+    needs: [targets, native]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      npm_config_workspace_concurrency: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: checkpoint-*
+          merge-multiple: true
+          path: packages/mesh/build/prebuilt
+      - run: pnpm build
+      - run: pnpm --filter @zhixing/mesh exec vitest run src/__tests__/checkpoint-bridge-artifact.test.ts src/__tests__/checkpoint-child-bridge.test.ts --maxWorkers=1 --minWorkers=1
+      - run: pnpm --filter @zhixing/cli exec vitest run src/runtime-support.test.ts src/serve/managed-service.test.ts --maxWorkers=1 --minWorkers=1
+      - run: pnpm package:check -- --skip-build --all-targets

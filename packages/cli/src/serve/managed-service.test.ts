@@ -68,6 +68,40 @@ function platformSpec(
 }
 
 describe("managed service platform contract", () => {
+  it("keeps a macOS login registration after bootout and reloads it on explicit start", async () => {
+    const directory = await createTempDir("managed-macos-unloaded");
+    const spec = platformSpec("darwin", directory);
+    await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+    let loaded = true;
+    let disabled = false;
+    const calls: string[] = [];
+    const runner: ManagedServiceCommandRunner = async (_command, args) => {
+      calls.push(args[0]!);
+      if (args[0] === "print") return loaded
+        ? { code: 0, stdout: "pid = 42", stderr: "" }
+        : { code: 113, stdout: "", stderr: "Could not find service" };
+      if (args[0] === "print-disabled") return { code: 0, stdout: `"${spec.serviceId}" => ${disabled}`, stderr: "" };
+      if (args[0] === "disable") disabled = true;
+      if (args[0] === "enable") disabled = false;
+      if (args[0] === "bootout") loaded = false;
+      if (args[0] === "bootstrap") {
+        if (disabled || loaded) return { code: 5, stdout: "", stderr: "bootstrap failed" };
+        loaded = true;
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const adapter = createManagedServiceAdapter({ platform: "darwin", commandRunner: runner });
+    const signal = new AbortController().signal;
+    const before = await adapter.inspect(spec, signal);
+    await expect(adapter.stopCurrentExact(spec, before, signal)).resolves.toEqual({ state: "enabled", running: false, matches: true });
+    await expect(adapter.start(spec, signal)).resolves.toEqual({ state: "enabled", running: true, matches: true });
+    expect(calls).toContain("bootstrap");
+    await expect(adapter.disable(spec, signal)).resolves.toEqual({ state: "disabled", running: false, matches: true });
+    await expect(adapter.install(spec, signal)).resolves.toEqual({ state: "enabled", running: true, matches: true });
+    await expect(adapter.unregisterFutureExact(spec, await adapter.inspect(spec, signal), signal))
+      .resolves.toEqual({ state: "absent", running: false, matches: true });
+  });
+
   it("derives fixed Windows and Unix digests from canonical definition bytes", () => {
     const windows = buildManagedServiceSpec({
       platform: "win32",
@@ -333,16 +367,34 @@ describe("managed service platform contract", () => {
     30_000,
   );
 
-  it("installs, starts and disables through stable platform read-back", async () => {
+  it.each(["win32", "darwin", "linux"] as const)("installs, starts and disables through stable %s read-back", async (platform) => {
     const directory = await createTempDir("managed-service-local");
-    const spec = localSpec(directory);
+    const spec = platformSpec(platform, directory);
     let installed = false;
+    let loaded = false;
     let enabled = false;
     let running = false;
     const calls: string[] = [];
     const runner: ManagedServiceCommandRunner = async (command, args, { signal }) => {
       if (signal.aborted) throw signal.reason;
       calls.push(`${command} ${args.join(" ")}`);
+      if (command === "/bin/launchctl") {
+        switch (args[0]) {
+          case "print":
+            return loaded
+              ? { code: 0, stdout: running ? "pid = 123\n" : "state = not running\n", stderr: "" }
+              : { code: 113, stdout: "", stderr: "Could not find service" };
+          case "print-disabled":
+            return { code: 0, stdout: `"${spec.serviceId}" => ${!enabled}`, stderr: "" };
+          case "enable": enabled = true; break;
+          case "bootstrap": loaded = true; running = true; break;
+          case "kickstart": running = true; break;
+          case "disable": enabled = false; break;
+          case "bootout": loaded = false; running = false; break;
+          default: throw new Error(`Unexpected launchctl command: ${args.join(" ")}`);
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }
       if (command === "powershell.exe") {
         return installed
           ? { code: 0, stdout: windowsInspectionJson(spec, { enabled, running }), stderr: "" }
@@ -363,16 +415,17 @@ describe("managed service platform contract", () => {
       if (args.includes("start") || args.includes("kickstart") || args.includes("/Run")) running = true;
       if (args.includes("disable") || args.includes("/DISABLE")) {
         enabled = false;
-        running = false;
+        if (args.includes("--now")) running = false;
       }
+      if (args.includes("stop") || args.includes("/End")) running = false;
       return { code: 0, stdout: "", stderr: "" };
     };
-    const adapter = createManagedServiceAdapter({ platform: process.platform, commandRunner: runner });
+    const adapter = createManagedServiceAdapter({ platform, commandRunner: runner });
     const signal = new AbortController().signal;
 
     await expect(adapter.install(spec, signal)).resolves.toEqual({
       state: "enabled",
-      running: false,
+      running: platform === "darwin",
       matches: true,
     });
     expect(await readFile(spec.definitionPath)).toEqual(managedServiceDefinitionBytes(spec));
@@ -384,7 +437,7 @@ describe("managed service platform contract", () => {
     });
     expect(calls.some((call) => /daemon-reload|bootstrap|\/Create/u.test(call))).toBe(true);
     expect(calls.some((call) => /\/End|bootout|disable --now/u.test(call))).toBe(true);
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       expect(calls.filter((call) => call.startsWith("schtasks.exe "))
         .every((call) => call.includes("/HRESULT"))).toBe(true);
     }
@@ -715,7 +768,9 @@ describe("managed service platform contract", () => {
         await mkdir(path.dirname(spec.definitionPath), { recursive: true });
         await writeFile(spec.definitionPath, "other installation", "utf8");
       });
-    const runner: ManagedServiceCommandRunner = async () => process.platform === "win32"
+    const runner: ManagedServiceCommandRunner = async (_command, args) => args[0] === "print-disabled"
+      ? { code: 0, stdout: "", stderr: "" }
+      : process.platform === "win32"
       ? { code: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }
       : process.platform === "darwin"
         ? { code: 113, stdout: "", stderr: "Could not find service" }

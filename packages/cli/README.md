@@ -60,7 +60,7 @@
 
 ## 安装与配置
 
-当前唯一正式安装路径要求 Windows 10/11 x64 与 Node `>=24.0.0`：
+安装使用 Node `>=24.0.0` 与 npm；各平台目标及验收状态见[运行时边界](https://github.com/Tandem-Agents/zhixing/blob/main/research/design/modules/distributed-runtime/node-runtime-boundaries.md)。版本发布后使用：
 
 ```text
 npm install -g @zhixing/cli

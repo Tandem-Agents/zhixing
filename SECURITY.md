@@ -4,7 +4,7 @@
 
 Zhixing has not published a supported public release yet. Version `0.1.0` is an unreleased candidate, so there is currently no supported-version promise or security-response service-level agreement.
 
-The initial release scope is Windows 10/11 x64 with Node.js 24 or newer. Other operating systems, CPU architectures, and package managers are outside that scope.
+Platform targets and pending acceptance are listed in the [release notes](./docs/delivery/releases/0.1.0.md). Implemented adapters or a passing test on one operating system do not constitute a support promise for another.
 
 ## Reporting a vulnerability
 

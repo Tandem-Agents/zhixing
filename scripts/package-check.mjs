@@ -4,12 +4,15 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { CHECKPOINT_BRIDGE_TARGETS, checkpointBridgeTarget, assertCheckpointBridgeHost, currentGlibcVersion, verifyCheckpointBridgeArtifact } from "../packages/mesh/src/checkpoint-bridge-artifact.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const canonicalRepositoryUrl = "https://github.com/Tandem-Agents/zhixing.git";
 const canonicalHomepage = "https://github.com/Tandem-Agents/zhixing#readme";
 const canonicalIssues = "https://github.com/Tandem-Agents/zhixing/issues";
 const skipBuild = process.argv.includes("--skip-build");
+const allTargets = process.argv.includes("--all-targets");
+const hostTarget = checkpointBridgeTarget();
 const command = process.platform === "win32" ? (name) => `${name}.cmd` : (name) => name;
 const temporary = await mkdtemp(path.join(root, ".zhixing-package-check-"));
 const npmEnv = { ...process.env };
@@ -22,7 +25,7 @@ npmEnv.npm_config_cache = path.join(temporary, "npm-cache");
 npmEnv.npm_config_userconfig = path.join(temporary, "empty-npmrc");
 
 try {
-  assert(process.platform === "win32" && process.arch === "x64", "package:check 仅验证当前正式目标 Windows x64");
+  assertCheckpointBridgeHost(hostTarget, currentGlibcVersion());
   await writeFile(npmEnv.npm_config_userconfig, "", "utf8");
   await run(process.execPath, ["--test", "scripts/npm-delivery-structure.test.mjs"], root);
   if (!skipBuild) await run(command("pnpm"), ["build"], root);
@@ -59,11 +62,11 @@ try {
   await verifyPublicEntrypoints(installRoot, packages);
   await verifyInstalledBraceExpansionBoundary(installRoot);
   await verifyCli(installRoot, home, rootManifest.version);
-  await verifyWindowsHelper(installRoot, home);
+  await verifyPlatformHelper(installRoot, home);
   await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "@zhixing/cli"], installRoot, npmEnv);
   assert(await exists(path.join(home, "sentinel.txt")), "npm 卸载影响了 ZHIXING_HOME");
   console.log(
-    `package:check 通过：${packages.length} 个公开包，Windows x64 本地安装闭包可消费；tarball sha256 ${tarballFingerprint}`,
+    `package:check 通过：${packages.length} 个公开包，${hostTarget.id} 本地安装闭包可消费；tarball sha256 ${tarballFingerprint}`,
   );
 } finally {
   await rm(temporary, { recursive: true, force: true });
@@ -105,7 +108,8 @@ async function inspectTarball(item, tarball, version) {
   const files = await relativeFiles(packageRoot);
   for (const file of files) {
     const allowed = file === "package.json" || /^(?:README|LICENSE)(?:\.|$)/iu.test(file) || file.startsWith("dist/") ||
-      (item.name === "@zhixing/mesh" && /^build\/Release\/checkpoint_child_bridge\.(?:exe|descriptor\.json)$/u.test(file));
+      (item.name === "@zhixing/mesh" && CHECKPOINT_BRIDGE_TARGETS.some((target) =>
+        file === `build/prebuilt/${target.id}/${target.file}` || file === `build/prebuilt/${target.id}/descriptor.json`));
     assert(allowed, `${item.name} tarball 含未声明资产：${file}`);
   }
   assert(files.includes("README.md"), `${item.name} tarball 缺少 README.md`);
@@ -117,7 +121,12 @@ async function inspectTarball(item, tarball, version) {
   ]);
   assertPackageReadme(readme, item.name);
   assert(packedLicense === rootLicense, `${item.name} tarball LICENSE 与仓库根许可不一致`);
-  if (item.name === "@zhixing/mesh") await verifyHelperDescriptor(packageRoot, version);
+  if (item.name === "@zhixing/mesh") {
+    for (const target of CHECKPOINT_BRIDGE_TARGETS) {
+      const included = files.some((file) => file.startsWith(`build/prebuilt/${target.id}/`));
+      if (allTargets || included || target.id === hostTarget.id) verifyCheckpointBridgeArtifact(packageRoot, target);
+    }
+  }
 }
 
 async function verifyInstalledClosure(installRoot, packages, version) {
@@ -214,31 +223,30 @@ async function verifyCli(installRoot, home, version) {
   assert(`${firstRun.stdout}\n${firstRun.stderr}`.includes("请在 TTY 终端中运行 `zhixing` 完成配置"), "首次运行未给出唯一交互配置行动");
 }
 
-async function verifyWindowsHelper(installRoot, home) {
+async function verifyPlatformHelper(installRoot, home) {
   const packageRoot = path.join(installRoot, "node_modules", "@zhixing", "mesh");
-  await verifyHelperDescriptor(packageRoot, (await json(path.join(packageRoot, "package.json"))).version);
+  verifyCheckpointBridgeArtifact(packageRoot, hostTarget);
   const modulePath = path.join(packageRoot, "dist", "checkpoint-target.js");
   const targetRoot = path.join(home, "helper-smoke");
   const helperSmoke = [
     'const { pathToFileURL } = await import("node:url");',
     "const checkpoint = await import(pathToFileURL(process.argv[1]).href);",
+    "const directory = await checkpoint.freezeCheckpointDirectory(process.argv[2], true);",
+    "try {",
+    "await directory.handle.writeFile('probe.bin', Buffer.from('checkpoint'));",
+    "if ((await directory.handle.readFile('probe.bin', -1, 0, 64)).toString() !== 'checkpoint') throw Error('helper read failed');",
+    "for (let i = 0; i < 2; i++) if (!(await directory.handle.listEntries(10)).includes('probe.bin')) throw Error('helper repeated inventory failed');",
+    "await directory.handle.renameTo('probe.bin', directory.handle, 'renamed.bin');",
+    "await directory.handle.unlink('renamed.bin', false);",
+    "await directory.handle.sync();",
+    "} finally { await directory.handle.close(); }",
     "const target = await checkpoint.FileRecoveryCheckpointTarget.openPaired({ targetRoot: process.argv[2], targetDeviceId: \"package-check-device\" });",
     "await target.close();",
     "process.exit(0);",
   ].join("\n");
   await run(process.execPath, ["--input-type=module", "--eval", helperSmoke, "--", modulePath, targetRoot], installRoot, process.env, true);
   // The helper owns no state after its parent closes the pipe; allow Windows to release the executable before npm removes the package.
-  await delay(250);
-}
-
-async function verifyHelperDescriptor(packageRoot, version) {
-  const binary = await readFile(path.join(packageRoot, "build", "Release", "checkpoint_child_bridge.exe"));
-  const descriptor = await json(path.join(packageRoot, "build", "Release", "checkpoint_child_bridge.descriptor.json"));
-  assert(Object.keys(descriptor).sort().join("\0") === [
-    "arch", "bytes", "file", "os", "packageVersion", "schemaVersion", "sha256",
-  ].sort().join("\0"), "Windows helper descriptor 字段不规范");
-  assert(descriptor.schemaVersion === 1 && descriptor.os === "win32" && descriptor.arch === "x64" && descriptor.packageVersion === version, "Windows helper descriptor identity 不匹配");
-  assert(descriptor.bytes === binary.byteLength && descriptor.sha256 === createHash("sha256").update(binary).digest("hex"), "Windows helper descriptor 摘要不匹配");
+  if (process.platform === "win32") await delay(250);
 }
 
 async function verifyInstalledBraceExpansionBoundary(installRoot) {
