@@ -313,6 +313,7 @@ export interface AuthorityRuntimeStack {
   ) => Promise<ExecutorCapabilitySnapshot>;
   readonly currentExecutorSnapshot: () => Promise<ExecutorCapabilitySnapshot>;
   readonly plannedAnchorReadiness: PlannedAnchorReadinessPort;
+  readonly commitExtensionDecision: <T>(operation: () => Promise<T>) => Promise<T>;
   readonly installPermissionSnapshot: (
     snapshot: TrustRuleSnapshot,
   ) => Promise<ExecutorCapabilitySnapshot>;
@@ -482,6 +483,7 @@ export interface ExecutorReadiness {
 }
 
 export interface SetupAuthorityRuntimeOptions {
+  readonly extensionReadiness?: (log: FileAuthorityCommitLog) => Promise<{ channels: readonly string[]; revision: string }>;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly deviceKey?: DeviceKey;
@@ -1109,11 +1111,12 @@ export async function setupAuthorityRuntime(
     const currentExecutorSnapshot = async () =>
       (await refreshLocalExecutorSnapshot()).snapshot;
     const plannedAnchorReadinessSnapshot = async (): Promise<PlannedAnchorReadySnapshot> => {
+      const extensions = await options.extensionReadiness?.(authorityLog!);
       const assetSnapshot = await executionAssets.current().catch(() => undefined);
       const snapshot = isPlainRecord(options.configurationSnapshot)
         ? options.configurationSnapshot
         : {};
-      return createProductionAnchorReadySnapshot({
+      const ready = createProductionAnchorReadySnapshot({
         configurationSnapshot: options.configurationSnapshot,
         assetRevision: assetSnapshot?.digest ??
           protocolDigest("PlannedAnchorAssetRevision", 1, { state: "empty" }),
@@ -1126,6 +1129,11 @@ export async function setupAuthorityRuntime(
         anchorEnabled,
         executorEnabled: localExecutorEnabled,
       });
+      return extensions ? {
+        ...ready,
+        configuredCapabilities: { ...ready.configuredCapabilities, channels: extensions.channels },
+        assetRevision: protocolDigest("PlannedAnchorExtensionAssets", 1, { base: ready.assetRevision, revision: extensions.revision }),
+      } : ready;
     };
     const plannedAnchorReadiness = createPlannedAnchorReadinessCoordinator(
       plannedAnchorReadinessSnapshot,
@@ -2076,6 +2084,7 @@ export async function setupAuthorityRuntime(
       executionAssetCatalog: executionAssets,
       currentExecutionAssetBundle: () => executionAssets.bundle(),
       plannedAnchorReadiness: plannedAnchorReadiness.port,
+      commitExtensionDecision: plannedAnchorReadiness.runRevisionChange,
       installExecutionAssetBundle,
       currentExecutorSnapshot,
       installPermissionSnapshot,

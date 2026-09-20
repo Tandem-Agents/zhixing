@@ -24,12 +24,12 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
   EventDispatcher: vi.fn().mockImplementation(() => ({
     register: mockRegister.mockReturnThis(),
   })),
-  WSClient: vi.fn().mockImplementation(() => ({
-    start: mockStart,
+  WSClient: vi.fn().mockImplementation(({ logger }) => ({
+    start: async (options: unknown) => { await mockStart(options); logger.debug("[ws]", "ws connect success"); },
     close: mockClose,
   })),
   Domain: { Feishu: 0, Lark: 1 },
-  LoggerLevel: { info: 3 },
+  LoggerLevel: { info: 3, trace: 0 },
   CardActionHandler: vi.fn().mockImplementation(
     (
       _options: unknown,
@@ -43,6 +43,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 }));
 
 import { FeishuAdapter } from "./adapter.js";
+import { WSClient } from "@larksuiteoapi/node-sdk";
 
 // 结构完备的签名 challenge token:严格 callback 校验器只放行规范 wire 形态。
 function challengeToken() {
@@ -118,6 +119,49 @@ describe("FeishuAdapter", () => {
       "/channels/feishu/challenge",
       expect.anything(),
     );
+  });
+
+  it("reports actual socket loss instead of remaining healthy until process exit", async () => {
+    const adapter = new FeishuAdapter();
+    await adapter.connect(makeContext());
+    expect(adapter.health()).toBe("ready");
+    const options = vi.mocked(WSClient).mock.calls[0]![0];
+    expect(options.autoReconnect).toBe(false);
+    options.logger!.debug("[ws]", "client closed");
+    expect(adapter.health()).toBe("unavailable");
+  });
+
+  it("awaits admission and propagates its failure; replay retains the platform identity", async () => {
+    let accept!: () => void;
+    const gate = new Promise<void>((resolve) => { accept = resolve; });
+    const onMessage = vi.fn<ChannelContext["onMessage"]>(async () => gate);
+    await new FeishuAdapter("work").connect(makeContext({ onMessage }));
+    const receive = mockRegister.mock.calls[0]![0]["im.message.receive_v1"];
+    const event = { sender: { sender_type: "user", sender_id: { open_id: "user" } },
+      message: { message_id: "stable-platform-event", create_time: "1", chat_id: "chat", chat_type: "p2p", message_type: "text", content: '{"text":"hello"}' } };
+    let acknowledged = false;
+    const receiving = receive(event).then(() => { acknowledged = true; });
+    await Promise.resolve(); expect(acknowledged).toBe(false);
+    accept(); await receiving;
+    await receive(event);
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    const retryEvent = { ...event, message: { ...event.message, message_id: "retry-event" } };
+    onMessage.mockRejectedValueOnce(new Error("authority unavailable"));
+    await expect(receive(retryEvent)).rejects.toThrow("authority unavailable");
+    await receive(retryEvent);
+    expect(onMessage).toHaveBeenCalledTimes(3);
+    expect(onMessage.mock.calls[0]![0]).toMatchObject({ channelId: "work", messageId: "stable-platform-event" });
+  });
+
+  it("carries stable delivery idempotency into the platform API", async () => {
+    const adapter = new FeishuAdapter();
+    await adapter.connect(makeContext());
+    const target = { channelId: "feishu", to: "ou_user" };
+    const meta = { idempotencyKey: "logical-reply", deliveryAttempt: { itemId: "item", attempt: 1 } };
+    await adapter.send(target, { text: "hello" }, meta);
+    await adapter.send(target, { text: "hello" }, meta);
+    expect(mockCreate.mock.calls[0]![0].data.uuid).toMatch(/^[a-f0-9]{32}$/);
+    expect(mockCreate.mock.calls[1]![0].data.uuid).toBe(mockCreate.mock.calls[0]![0].data.uuid);
   });
 
   it("derives a platform-authenticated responder from a signed card callback", async () => {
@@ -270,18 +314,15 @@ describe("FeishuAdapter", () => {
     expect(result.retryable).toBe(true);
   });
 
-  it("returns retryable=true for network errors", async () => {
+  it("preserves uncertain transport outcomes for Delivery instead of reporting not-sent", async () => {
     const adapter = new FeishuAdapter();
     await adapter.connect(makeContext());
     mockCreate.mockRejectedValue(new Error("ECONNREFUSED"));
 
-    const result = await adapter.send(
+    await expect(adapter.send(
       { channelId: "feishu", to: "ou_user1" },
       { text: "Hello" },
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.retryable).toBe(true);
+    )).rejects.toThrow("ECONNREFUSED");
   });
 
   it("returns error when not connected", async () => {

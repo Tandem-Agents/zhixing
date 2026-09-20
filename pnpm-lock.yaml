@@ -42,9 +42,6 @@ importers:
 
   packages/cli:
     dependencies:
-      '@zhixing/channel-feishu':
-        specifier: workspace:*
-        version: link:../channels/feishu
       '@zhixing/core':
         specifier: workspace:*
         version: link:../core
@@ -109,6 +106,9 @@ importers:
       '@types/qrcode':
         specifier: 1.5.6
         version: 1.5.6
+      '@zhixing/channel-feishu':
+        specifier: workspace:*
+        version: link:../channels/feishu
       '@zhixing/test-utils':
         specifier: workspace:*
         version: link:../test-utils

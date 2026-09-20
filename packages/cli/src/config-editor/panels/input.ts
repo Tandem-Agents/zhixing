@@ -26,7 +26,7 @@ import {
   writeModelThinking,
 } from "../state.js";
 import { maskForDisplay, maskForInput } from "../ui/mask.js";
-import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../../registries/index.js";
+import { SUPPORTED_PROVIDERS, listSupportedChannels } from "../../registries/index.js";
 import {
   tone,
   layout,
@@ -103,6 +103,7 @@ interface InputFieldMeta {
 
 function resolveInputField(
   fieldId: string,
+  state: WorkingState,
 ): InputFieldMeta | null {
   const providerMatch = /^provider-apikey:([^:]+):(.+)$/.exec(fieldId);
   if (providerMatch) {
@@ -124,7 +125,7 @@ function resolveInputField(
   const channelMatch = /^channel-field:([^:]+):(.+)$/.exec(fieldId);
   if (channelMatch) {
     const [, channelId, channelFieldId] = channelMatch;
-    const channel = SUPPORTED_CHANNELS.find((c) => c.id === channelId);
+    const channel = listSupportedChannels().find((c) => c.id === (state.config.messaging?.[channelId!]?.type ?? state.channelStates?.[channelId!]?.type ?? channelId));
     if (!channel) return null;
     const field = channel.requiredFields.find((f) => f.id === channelFieldId);
     if (!field) return null;
@@ -150,7 +151,7 @@ export function renderInputPanel(
   descriptor: Extract<PanelDescriptor, { kind: "input" }>,
   renderer: Renderer,
 ): void {
-  const meta = resolveInputField(descriptor.fieldId);
+  const meta = resolveInputField(descriptor.fieldId, state);
   if (!meta) {
     // 未识别的 fieldId——defensive 渲染
     renderer.clear();
@@ -210,7 +211,7 @@ export function handleInputPanelKey(
   descriptor: Extract<PanelDescriptor, { kind: "input" }>,
   key: KeyEvent,
 ): PanelAction {
-  const meta = resolveInputField(descriptor.fieldId);
+  const meta = resolveInputField(descriptor.fieldId, state);
   if (!meta) {
     return { type: "pop", state };
   }

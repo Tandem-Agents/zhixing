@@ -16,9 +16,9 @@ export const HOST_STOP_ACCEPTED_WORK_OWNERS = [
   "final",
   "assignment",
   "remote",
-  "channel",
   "scheduler",
   "delivery",
+  "channel",
   "lease",
   "permit",
 ] as const;

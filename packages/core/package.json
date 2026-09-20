@@ -4,6 +4,34 @@
   "description": "知行核心引擎 — AsyncGenerator Agent Loop、事件系统、工具管线",
   "type": "module",
   "exports": {
+    "./channels/extension": {
+      "types": "./dist/channels/extension.d.ts",
+      "import": "./dist/channels/extension.js"
+    },
+    "./channels/extension-worker": {
+      "types": "./dist/channels/extension-worker.d.ts",
+      "import": "./dist/channels/extension-worker.js"
+    },
+    "./extensions/contracts": {
+      "types": "./dist/extensions/contracts.d.ts",
+      "import": "./dist/extensions/contracts.js"
+    },
+    "./extensions/application": {
+      "types": "./dist/extensions/application.d.ts",
+      "import": "./dist/extensions/application.js"
+    },
+    "./extensions/runtime": {
+      "types": "./dist/extensions/runtime.d.ts",
+      "import": "./dist/extensions/runtime.js"
+    },
+    "./extensions/artifacts": {
+      "types": "./dist/extensions/artifacts.d.ts",
+      "import": "./dist/extensions/artifacts.js"
+    },
+    "./extensions/protocol": {
+      "types": "./dist/extensions/protocol.d.ts",
+      "import": "./dist/extensions/protocol.js"
+    },
     "./mcp-management": {
       "types": "./dist/mcp-management/application.d.ts",
       "import": "./dist/mcp-management/application.js"

@@ -19,6 +19,7 @@ export async function runConfigEditor(
   const result = await runEventLoop(ctx);
 
   if (result.kind === "completed") {
+    await ctx.writers.prepare?.(result);
     await ctx.writers.writeConfig(result.config);
     await ctx.writers.writeCredentials(result.credentials);
   }

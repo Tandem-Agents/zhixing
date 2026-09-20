@@ -287,11 +287,11 @@ export class InboundRouter {
       this.logger.info(
         `[非当前owner拒绝] channel=${msg.channelId} from=${msg.from}`,
       );
-      return;
+      throw new Error("Channel message not admitted by current owner");
     }
     if (!this.channels.has(msg.channelId)) {
       this.logger.warn(`No adapter found for channel: ${msg.channelId}`);
-      return;
+      throw new Error("Channel message has no active instance");
     }
 
     // 关停期间拒新 —— LIFO 关停顺序保证 channels.dispose 在第 5 步,acceptingNew=false
@@ -305,7 +305,7 @@ export class InboundRouter {
       await this.channels
         .send(replyTarget, { text: SHUTDOWN_REFUSAL_NOTICE_ZH })
         .catch((e) => this.logger.error(`refusal notice send failed: ${errMsg(e)}`));
-      return;
+      throw new Error("Channel message not admitted during shutdown");
     }
 
     this.acceptedInFlight += 1;
@@ -412,10 +412,10 @@ export class InboundRouter {
           { text: "场景正在切换或目录变更，请稍后重试。" },
           { kind: "system", handler: "conversation-admission-failed" },
         ).catch(() => {});
-        return;
+        throw err;
       }
 
-      if (admission.status === "not-found") return;
+      if (admission.status === "not-found") throw new Error("Channel conversation not found");
       const status = admission.status;
 
       this.logger.info(`[调度] status=${status} conv=${conversationId}`);
@@ -430,7 +430,7 @@ export class InboundRouter {
             handler: "conversation-queue-full",
           },
         ).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
-        return;
+        throw new Error("Channel message not admitted: queue full");
       }
 
       if (status === "lifecycle-busy") {
@@ -439,6 +439,7 @@ export class InboundRouter {
           { text: "场景正在切换或目录变更，请稍后重试。" },
           { kind: "system", handler: "conversation-admission-failed" },
         ).catch(() => {});
+        throw new Error("Channel message not admitted: lifecycle busy");
       }
     } finally {
       this.acceptedInFlight -= 1;
@@ -628,6 +629,7 @@ export class InboundRouter {
       );
     }
 
+    if (resolutionError) throw resolutionError;
     return true;
   }
 

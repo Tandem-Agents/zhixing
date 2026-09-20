@@ -85,6 +85,7 @@ export async function runEventLoop(
   const stream: KeyEventStream = createKeyEventStream(ctx.stdin);
 
   let state: WorkingState = createInitialState(ctx.initialConfig, ctx.initialCredentials);
+  if (ctx.channelStates) state = { ...state, channelStates: ctx.channelStates, channelIntents: {} };
   let main: MainFrame = { cursor: initialMainCursor() };
   const stack: PanelFrame[] = [];
 

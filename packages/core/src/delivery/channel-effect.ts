@@ -93,6 +93,7 @@ export function createChannelDeliveryEffect(
         target,
         content,
         idempotencyKey: meta.idempotencyKey,
+        deliveryAttempt: { itemId: meta.itemId, attempt: meta.attempt },
         source: mapSource(meta.source),
         afterSlot: deriveAfterSlot(meta.source),
       };

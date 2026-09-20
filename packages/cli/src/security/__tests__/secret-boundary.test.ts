@@ -14,6 +14,7 @@ describe("resolveSystemProtectedSecretPaths", () => {
     try {
       expect(resolveSystemProtectedSecretPaths(unrelatedHome)).toEqual([
         path.join(unrelatedHome, "credentials.json"),
+        path.join(unrelatedHome, "extensions", "artifacts"),
         path.join(unrelatedHome, "secret-vault"),
       ]);
     } finally {

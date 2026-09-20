@@ -1,5 +1,5 @@
 import { createEventBus } from "../../events/event-bus.js";
-import type { DeliveryResult, DeliveryTarget, OutboundContent } from "../../channels/types.js";
+import type { DeliveryAdapterSendMeta, DeliveryResult, DeliveryTarget, OutboundContent } from "../../channels/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { deliveryIdempotencyKey } from "../authority.js";
 import { createChannelDeliveryEffect } from "../channel-effect.js";
@@ -56,9 +56,9 @@ async function integrationHarness(
 
 describe("delivery authority to outbox integration", () => {
   it("routes authority facts through the outbox and preserves source metadata", async () => {
-    const sent: Array<{ content: OutboundContent; idempotencyKey?: string }> = [];
+    const sent: Array<{ content: OutboundContent } & DeliveryAdapterSendMeta> = [];
     const fixture = await integrationHarness(async (_target, content, meta) => {
-      sent.push({ content, idempotencyKey: meta?.idempotencyKey });
+      sent.push({ content, ...meta });
       return { success: true, retryable: false };
     });
     await fixture.enqueue(
@@ -82,6 +82,7 @@ describe("delivery authority to outbox integration", () => {
 
     expect(sent).toEqual([{
       content: { text: "scheduled result" },
+      deliveryAttempt: { itemId: expect.any(String), attempt: 1 },
       idempotencyKey: deliveryIdempotencyKey({
         kind: "conversation-final-delivery",
         conversationId: "conversation-1",

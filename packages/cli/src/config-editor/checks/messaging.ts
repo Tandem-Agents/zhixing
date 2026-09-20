@@ -2,7 +2,7 @@
  * 消息通道基础配置缺失检测——纯函数。**单一规则源**。
  *
  * 「必要字段」= 启用某 channel 时（出现在 config.messaging）该 channel 的所有
- * 必填凭证字段非空。字段定义读取自 SUPPORTED_CHANNELS——避免与 registries
+ * 必填凭证字段非空。字段定义读取自 listSupportedChannels——避免与 registries
  * 层双源漂移（之前 checks 自带 REQUIRED_FIELDS_BY_CHANNEL 表与 registry 重复）。
  *
  * 未启用任何 channel 时（messaging 空）→ 不视为缺失（用户不需要 channel 也能跑 server，
@@ -15,7 +15,7 @@ import type {
   ChannelCredentialProjection,
   ZhixingConfig,
 } from "@zhixing/providers";
-import { SUPPORTED_CHANNELS } from "../../registries/index.js";
+import { listSupportedChannels } from "../../registries/index.js";
 
 export interface MessagingIssue {
   channelId: string;
@@ -33,13 +33,18 @@ export interface MessagingIssue {
 export function checkMessaging(
   config: ZhixingConfig,
   credentials: ChannelCredentialProjection,
+  enabled?: Readonly<Record<string, boolean>>,
 ): MessagingIssue[] {
   const issues: MessagingIssue[] = [];
   const messaging = config.messaging ?? {};
 
   for (const channelId of Object.keys(messaging)) {
-    const channelDef = SUPPORTED_CHANNELS.find((c) => c.id === channelId);
-    if (!channelDef) continue;
+    if (enabled?.[channelId] === false) continue;
+    const channelDef = listSupportedChannels().find((c) => c.id === (messaging[channelId]?.type ?? channelId));
+    if (!channelDef) {
+      issues.push({ channelId, field: "extension", path: `messaging.${channelId}`, label: `${channelId} - 连接扩展未就绪`, fieldLabel: "连接扩展" });
+      continue;
+    }
 
     const channelCreds = credentials.channels?.[channelId] ?? {};
     // 能力组内任一字段已填,组内其余字段升格为必填(成对凭据只填一半是

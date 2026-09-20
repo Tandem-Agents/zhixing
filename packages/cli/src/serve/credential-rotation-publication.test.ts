@@ -28,7 +28,7 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
         transport: "http",
         toolCount: 1,
       }],
-      channelStatuses: () => [{ channelId: "feishu", state: "connected" }],
+      channelStatuses: () => [{ channelId: "chat", state: "connected" }],
       waitForChannels: async () => undefined,
     });
 
@@ -55,7 +55,7 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
         transport: "http",
         toolCount: 1,
       }],
-      channelStatuses: () => [{ channelId: "feishu", state: "connected" }],
+      channelStatuses: () => [{ channelId: "chat", state: "connected" }],
       waitForChannels: async () => undefined,
     });
     expect(await fixture.log.readStream("exposure")).toHaveLength(firstEntries.length);
@@ -72,6 +72,15 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
 
     expect((await fixture.authority.projection()).rotationRequired).toHaveLength(1);
     expect(await fixture.log.readStream("exposure")).toHaveLength(2);
+  });
+
+  it.each(["pending", "another-instance"])("does not verify channel credentials from %s transport evidence", async (kind) => {
+    const fixture = await createFixture([["channel", "chat"]]);
+    await expect(publishRequiredCredentialRotations({ ...fixture.options,
+      channelStatuses: () => [{ channelId: kind === "pending" ? "chat" : "feishu", state: "connected",
+        ...(kind === "pending" ? { configurationIssue: "配置待应用" } : {}) }],
+    })).rejects.toThrow(/not connected/i);
+    expect((await fixture.authority.projection()).rotationRequired).toHaveLength(1);
   });
 
   it("keeps the compromised exposure when the current service is unavailable", async () => {

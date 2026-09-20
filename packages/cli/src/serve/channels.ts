@@ -1,8 +1,5 @@
 import {
-  ChannelRegistry,
   type ChannelAdapter,
-  type ChannelConfig,
-  type ChannelEventMap,
   type ChannelLogger,
   type ChannelStatus,
   type DeliveryResult,
@@ -12,9 +9,18 @@ import {
   type ChannelChallengeMessage,
   type HttpHandler,
   type OutboundContent,
-  isChallengeChannel,
 } from "@zhixing/core/channels";
-import { createEventBus } from "@zhixing/core";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { ExtensionApplication, ExtensionRevisionConflict } from "@zhixing/core/extensions/application";
+import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
+import { ManagedExtensions } from "@zhixing/core/extensions/runtime";
+import type { ExtensionBinding, ExtensionInstance } from "@zhixing/core/extensions/contracts";
+import type { AuthorityCommitLog } from "@zhixing/core/authority";
+import type { ProductApiContribution } from "@zhixing/core/product-api";
+import { packagedExtensions } from "../runtime/extensions/catalog.js";
+import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
+import { channelDeliveryResult, createChannelTypeBinding } from "../runtime/extensions/channel-binding.js";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import {
   APPROVE_KEYWORDS,
@@ -31,70 +37,18 @@ import type {
   SessionActivityBroadcast,
   SessionBroadcast,
 } from "@zhixing/rpc";
-import type {
-  ChannelCredentialProjection,
-  MessagingChannelEntry,
-} from "@zhixing/providers";
 import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
-
-// ─── Adapter Factory ───
-
-interface ChannelAdapterFactory {
-  readonly adapterType: string;
-  create(): Promise<ChannelAdapter>;
-}
-
-const ADAPTER_FACTORIES: Readonly<Record<string, ChannelAdapterFactory>> = {
-  feishu: {
-    adapterType: "feishu",
-    create: async () => {
-      const { FeishuAdapter } = await import("@zhixing/channel-feishu");
-      return new FeishuAdapter();
-    },
-  },
-};
-
-/** Derived from the production factory table, not a separately maintained channel list. */
-export function captureChannelAdapterFactoryDescriptor(): readonly {
-  readonly configType: string;
-  readonly adapterType: string;
-}[] {
-  return Object.entries(ADAPTER_FACTORIES)
-    .map(([configType, factory]) => ({
-      configType,
-      adapterType: factory.adapterType,
-    }))
-    .sort((left, right) => left.configType.localeCompare(right.configType, "en-US"));
-}
-
-function createAdapter(type: string): Promise<ChannelAdapter> {
-  const factory = ADAPTER_FACTORIES[type];
-  if (!factory) {
-    throw new Error(`Unknown channel type: ${type}. Supported: ${Object.keys(ADAPTER_FACTORIES).join(", ")}`);
-  }
-  return factory.create();
-}
 
 // ─── Channel Setup ───
 
 export interface SetupChannelsOptions {
-  /**
-   * 启用的 channel 列表（来自 config.messaging）。
-   *
-   * 出现在 entries 的 channel 视为启用；entries[id] 是 MessagingChannelEntry，
-   * 仅含功能选项（type / options / defaultTarget），不含凭证。
-   */
-  entries: Record<string, MessagingChannelEntry>;
-  /**
-   * 组合根从 SecretStore 解出的 channel-only 投影。
-   *
-   * setupChannels 内部把 `credentials.channels[id]` 整体作为 ChannelConfig.credentials
-   * 传给 ChannelAdapter.connect；channel adapter 收到 Record<string, string>
-   * 形态不变；本接入面从类型层无法接触 provider / MCP 凭据。
-   */
-  credentials: ChannelCredentialProjection;
+  readonly authorityLog: () => AuthorityCommitLog;
+  readonly commitDecision?: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly isCurrentOwner: () => boolean;
+  readonly configuration: ChannelConfiguration;
+  readonly artifactDirectory: string;
+  readonly httpRoutes: Map<string, HttpHandler>;
   logger: ChannelLogger;
-  registerHttpRoute?: (path: string, handler: HttpHandler) => void;
 }
 
 /** Explicit physical-connection profile; absence is never inferred from a missing router. */
@@ -112,6 +66,7 @@ export interface ConfiguredChannelConsumers {
 }
 
 export interface SetupChannelsResult {
+  readonly productApi: ProductApiContribution;
   statusSnapshot(): readonly Readonly<ChannelStatus>[];
   readonly delivery: ChannelDeliveryEffectSource;
   readonly inbound: InboundChannelPort;
@@ -164,253 +119,209 @@ export function createInboundChannelRouter(
   });
 }
 
-export async function setupChannels(
-  options: SetupChannelsOptions,
-): Promise<SetupChannelsResult> {
-  const {
-    entries,
-    credentials,
-    logger,
-    registerHttpRoute,
-  } = options;
-
-  const eventBus = createEventBus<ChannelEventMap>();
-
-  const connectionJobs: Array<{
-    configId: string;
-    adapterId: string;
-    config: ChannelConfig;
-  }> = [];
-
-  const registry = new ChannelRegistry({
-    eventBus,
-    logger,
-    registerHttpRoute,
+export async function setupChannels(options: SetupChannelsOptions): Promise<SetupChannelsResult> {
+  const application = new ExtensionApplication({
+    log: options.authorityLog,
+    commitDecision: options.commitDecision,
+    assertOwner: () => {
+      if (!options.isCurrentOwner()) throw new Error("Extension decisions require the current owner");
+    },
   });
-  const statusSnapshot = (): readonly Readonly<ChannelStatus>[] =>
-    Object.freeze(
-      registry.listStatuses().map((status) => Object.freeze({ ...status })),
-    );
-  const delivery = Object.freeze({
-    status(channelId: string) {
-      return registry.getStatus(channelId)?.state;
-    },
-    async send(
-      target: DeliveryTarget,
-      content: OutboundContent,
-      meta?: Parameters<ChannelAdapter["send"]>[2],
-    ): Promise<DeliveryResult | undefined> {
-      const adapter = registry.get(target.channelId);
-      if (!adapter) return undefined;
-      return meta
-        ? adapter.send(target, content, meta)
-        : adapter.send(target, content);
-    },
-  } satisfies ChannelDeliveryEffectSource);
-  const inbound = Object.freeze({
-    has(channelId: string): boolean {
-      return registry.get(channelId) !== undefined;
-    },
-    bindingPolicy(channelId: string) {
-      return registry.get(channelId)?.bindingPolicy;
-    },
-    async send(
-      target: DeliveryTarget,
-      content: OutboundContent,
-    ): Promise<DeliveryResult> {
-      const adapter = registry.get(target.channelId);
-      if (!adapter) {
-        throw new Error(`Channel adapter not found: ${target.channelId}`);
-      }
-      return adapter.send(target, content);
-    },
-  } satisfies InboundChannelPort);
-  const challenges = Object.freeze({
-    supports(channelId: string): boolean {
-      const adapter = registry.get(channelId);
-      return adapter !== undefined && isChallengeChannel(adapter);
-    },
-    async sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult> {
-      const channelId = message.token.route.channelId;
-      const adapter = registry.get(channelId);
-      if (!adapter || !isChallengeChannel(adapter)) {
-        throw new Error(`Channel does not support signed challenges: ${channelId}`);
-      }
-      return adapter.sendChallenge(message);
-    },
-  } satisfies ChannelChallengeDeliveryPort);
-
-  for (const [id, entry] of Object.entries(entries)) {
-    const type = entry.type ?? id;
-    let adapter: ChannelAdapter;
-    try {
-      adapter = await createAdapter(type);
-    } catch (err) {
-      logger.error(
-        "Failed to create adapter for channel '%s': %s",
-        id,
-        err instanceof Error ? err.message : String(err),
-      );
-      continue;
-    }
-
-    registry.register(adapter);
-
-    // channel 完整字段（含 appId / appSecret 等）从 credentials.channels.<id> 取——
-    // channel 资源定义集中在设备本地 SecretStore，config.json 只记录"启用列表 + 功能选项"。
-    const channelCredentials = credentials.channels?.[id] ?? {};
-
-    const channelConfig: ChannelConfig = {
-      type,
-      enabled: true,
-      credentials: channelCredentials,
-      options: entry.options,
-      defaultTarget: entry.defaultTarget
-        ? { channelId: id, to: entry.defaultTarget.to }
-        : undefined,
-    };
-
-    connectionJobs.push({
-      configId: id,
-      adapterId: adapter.id,
-      config: channelConfig,
-    });
-  }
-
-  let transition: Promise<void> = Promise.resolve();
-  let phase: "prepared" | "active" | "closed" = "prepared";
-  let disposal: Promise<void> | undefined;
-  let requestedConsumers: ConfiguredChannelConsumers | undefined;
-  let suspended = false;
-  const serialize = (operation: () => Promise<void>): Promise<void> => {
-    const current = transition.then(() => {
-      if (phase === "closed") throw new Error("Channel Host lifecycle is closed");
-      return operation();
-    });
-    transition = current.catch(() => undefined);
-    return current;
-  };
-  const connectIfRequested = async () => {
-    if (phase !== "active" || suspended || !requestedConsumers) return;
-    await connectConfiguredChannels({
-      registry,
-      jobs: connectionJobs,
-      logger,
-      consumers: requestedConsumers,
-    });
-  };
-  const activate = () => serialize(async () => {
-    if (phase !== "prepared") throw new Error("Channel Host lifecycle is already active");
-    phase = "active";
-    await connectIfRequested();
-  });
-  const connectConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
-    requestedConsumers = consumers;
-    await connectIfRequested();
-  });
-  const disconnectConfigured = () => serialize(async () => {
-    requestedConsumers = undefined;
-    await disconnectConfiguredChannels({
-      registry,
-      jobs: connectionJobs,
-      logger,
-    });
-  });
-  const suspendConfigured = () => serialize(async () => {
-    suspended = true;
-  });
-  const resumeConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
-    suspended = false;
-    requestedConsumers = consumers;
-    await connectIfRequested();
-  });
-
-  return {
-    statusSnapshot,
-    delivery,
-    inbound,
-    challenges,
-    activate,
-    connectConfigured,
-    disconnectConfigured,
-    suspendConfigured,
-    resumeConfigured,
-    dispose: () => {
-      if (disposal) return disposal;
-      phase = "closed";
-      requestedConsumers = undefined;
-      // Abort an in-flight connect immediately; waiting for it first can prevent
-      // the adapter from ever receiving the cancellation that releases it.
-      disposal = registry.dispose();
-      return disposal;
-    },
-  };
-}
-
-async function connectConfiguredChannels(options: {
-  registry: ChannelRegistry;
-  jobs: readonly {
-    configId: string;
-    adapterId: string;
-    config: ChannelConfig;
-  }[];
-  logger: ChannelLogger;
-  consumers: ConfiguredChannelConsumers;
-}): Promise<void> {
-  const { registry, jobs, logger, consumers } = options;
-  const { inbound, onChallengeAction } = consumers;
-  const onMessage = inbound.kind === "router"
-    ? (message: InboundMessage) => {
-        inbound.handleMessage(message).catch((error) => {
-          logger.error(
-            "Unhandled error in message routing: %s",
-            error instanceof Error ? error.message : String(error),
-          );
-        });
-      }
-    : undefined;
-  await Promise.all(
-    jobs.map(async ({ configId, adapterId, config }) => {
-      try {
-        await registry.connect(
-          adapterId,
-          config,
-          {
-            ...(onMessage ? { onMessage } : {}),
-            onChallengeAction,
+  const artifacts = new ExtensionArtifacts(options.artifactDirectory);
+  const seeds = packagedExtensions();
+  let instances: readonly ExtensionInstance[] = [];
+  const capabilities = new Map<string, { challenges: boolean; bindingPolicy?: import("@zhixing/core/channels").ChannelBindingPolicy }>();
+  let consumers: ConfiguredChannelConsumers | undefined;
+  let active = false;
+  let closed = false;
+  let ownerRequested = false;
+  let admissionPaused = false;
+  let connectionRevision = 0;
+  const migrationFailures = new Set<string>();
+  const observations = new Set<Promise<void>>();
+  const snapshot = async () => { instances = (await application.list()).instances; };
+  const runtime: ManagedExtensions = new ManagedExtensions({
+    application, artifacts, isOwner: options.isCurrentOwner,
+    projection: (instance) => options.configuration.read(instance),
+    binding: (instance) => createChannelTypeBinding({
+      instance, routes: options.httpRoutes, process: () => runtime.current(instance.id),
+      consumers: () => {
+        if (!consumers) throw new Error("Channel consumers unavailable");
+        const selected = consumers;
+        return {
+          message: async (message) => {
+            if (selected.inbound.kind !== "router") throw new Error("Inbound Channel unavailable");
+            await selected.inbound.handleMessage(message);
           },
-        );
-        logger.info("Channel '%s' connected", configId);
-      } catch (err) {
-        logger.error(
-          "Channel '%s' failed to connect (non-fatal): %s",
-          configId,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
+          challenge: selected.onChallengeAction,
+        };
+      },
+      ready: (ready) => { if (ready) capabilities.set(instance.id, ready); else capabilities.delete(instance.id); },
     }),
-  );
-}
+    onState: () => {
+      if (closed) return;
+      const observation = snapshot().catch(() => undefined);
+      observations.add(observation);
+      void observation.finally(() => observations.delete(observation));
+    },
+  });
 
-async function disconnectConfiguredChannels(options: {
-  registry: ChannelRegistry;
-  jobs: readonly { configId: string; adapterId: string }[];
-  logger: ChannelLogger;
-}): Promise<void> {
-  const { registry, jobs, logger } = options;
-  await Promise.all(
-    jobs.map(async ({ configId, adapterId }) => {
+  // Only distribution-owned migration artifacts are admitted here. Arbitrary
+  // candidates require the preparation/admission workflow, not a directory scan.
+  const adoptConfigured = async () => {
+    for (const [id, entry] of Object.entries(options.configuration.entries())) {
+      if (await application.get(id)) continue;
+      const seed = seeds.find(({ manifest }) => manifest.type === "channel" && manifest.id === (entry.type ?? id));
+      if (!seed) { migrationFailures.add(id); options.logger.error("Channel '%s': no admitted artifact", id); continue; }
       try {
-        await registry.disconnect(adapterId);
-        logger.info("Channel '%s' disconnected", configId);
-      } catch (err) {
-        logger.error(
-          "Channel '%s' failed to disconnect: %s",
-          configId,
-          err instanceof Error ? err.message : String(err),
-        );
-        throw err;
+        const bytes = await readFile(join(seed.directory, seed.manifest.entry));
+        await artifacts.import(seed.manifest, bytes);
+        const binding = await options.configuration.prepare(id, seed.manifest);
+        const enabled = await options.configuration.requestedEnabled(id, undefined, binding.sourceRevision);
+        const adopted = await application.adopt(id, binding, enabled ?? true);
+        if (adopted.binding.projectionRevision !== binding.projectionRevision) await options.configuration.discard(id, binding);
+        await options.configuration.acknowledge(id, adopted.binding.sourceRevision);
+        migrationFailures.delete(id);
+      } catch {
+        migrationFailures.add(id);
+        options.logger.error("Channel '%s': migration blocked; original configuration retained", id);
       }
-    }),
-  );
+    }
+    await snapshot();
+  };
+  const refresh = async (id: string, expectedRevision: number, recovering = false) => {
+    const current = await application.get(id);
+    if (!current) throw new Error("Unknown extension instance");
+    // Validate the entire candidate before retiring the currently working process.
+    if (current.revision !== expectedRevision) throw new Error("Extension revision conflict");
+    const publication = await options.configuration.publication(id);
+    const enabled = await options.configuration.requestedEnabled(id, current, publication?.revision);
+    let binding: ExtensionBinding;
+    let configurationIssue: string | undefined;
+    try {
+      binding = await options.configuration.prepare(id, current.binding.manifest, current, recovering);
+    } catch (error) {
+      if (enabled !== false || !publication) throw error;
+      // Stop intent is independent of candidate validity; keep the last valid pair.
+      await options.configuration.requestedEnabled(id, current, publication.revision);
+      binding = { ...current.binding, sourceRevision: publication.revision };
+      configurationIssue = "连接已停用；新配置尚未应用，请补全配置后保存";
+    }
+    await options.configuration.requestedEnabled(id, current, binding.sourceRevision);
+    if (binding.projectionRevision === current.binding.projectionRevision && enabled === undefined) {
+      await runtime.reconcile(current);
+      await options.configuration.acknowledge(id, current.binding.sourceRevision);
+      await application.noteConfiguration(id, (await application.get(id))!.revision);
+      return (await application.get(id))!;
+    }
+    let next: ExtensionInstance;
+    try { next = await application.refresh(id, binding, expectedRevision, enabled); }
+    catch (error) {
+      if (error instanceof ExtensionRevisionConflict && binding.projectionRevision !== current.binding.projectionRevision) {
+        await options.configuration.discard(id, binding);
+      }
+      throw error;
+    }
+    await runtime.reconcile(next);
+    if (configurationIssue) await application.noteConfiguration(id, next.revision, configurationIssue);
+    await options.configuration.acknowledge(id, next.binding.sourceRevision);
+    await snapshot();
+    return next;
+  };
+  const applyConfiguration = async (ids: readonly string[], recovering = false) => {
+    await adoptConfigured();
+    const entries = options.configuration.entries();
+    for (const instance of (await application.list()).instances) {
+      if (instance.binding.manifest.type !== "channel" || !ids.includes(instance.id)) continue;
+      try {
+      if (!entries[instance.id]) {
+        const publication = await options.configuration.publication(instance.id);
+        if (!instance.enabled && !publication) continue;
+        if (recovering && !publication) throw new Error("配置项已移除但停用尚未提交，请在配置入口确认；旧绑定保持不变");
+        await options.configuration.requestedEnabled(instance.id, instance, publication?.revision);
+        if (publication?.revision !== instance.binding.sourceRevision || instance.enabled) {
+          const stopped = await application.refresh(instance.id, { ...instance.binding,
+            ...(publication ? { sourceRevision: publication.revision } : {}) }, instance.revision, false);
+          await runtime.reconcile(stopped);
+        }
+        await options.configuration.acknowledge(instance.id, publication?.revision);
+      } else {
+        await refresh(instance.id, instance.revision, recovering);
+      }
+      } catch (error) {
+        await application.noteConfiguration(instance.id, (await application.get(instance.id))!.revision,
+          "配置尚未应用：请在本机配置入口确认完整设置；当前启停意图与旧绑定保持不变");
+        await snapshot();
+        if (!recovering) throw error;
+      }
+    }
+    await snapshot();
+    return { instances };
+  };
+  const productApi = application.contribution({
+    changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); },
+    refresh, applyConfiguration,
+  });
+  const send = async (
+    target: DeliveryTarget, content: OutboundContent, meta?: Parameters<ChannelAdapter["send"]>[2],
+  ): Promise<DeliveryResult> => {
+    // Delivery's already-admitted attempts settle under its own drain boundary.
+    if (admissionPaused && !meta?.deliveryAttempt) throw new Error("Channel admission is paused");
+    const process = runtime.current(target.channelId);
+    if (!process) throw new Error("Channel not available");
+    return channelDeliveryResult(await process.call("channel.send", { target, content, ...(meta ? { meta } : {}) }));
+  };
+  const startIfReady = async () => {
+    const revision = connectionRevision;
+    if (closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()) return;
+    await applyConfiguration([...new Set([...Object.keys(options.configuration.entries()),
+      ...(await application.list()).instances.map((instance) => instance.id)])], true);
+    if (revision !== connectionRevision || closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()) return;
+    admissionPaused = false;
+    await runtime.resume();
+  };
+  await snapshot();
+  return {
+    productApi,
+    statusSnapshot: () => Object.freeze([...instances.filter((instance) => instance.binding.manifest.type === "channel").map((instance) => Object.freeze({
+      channelId: instance.id,
+      state: runtime.current(instance.id) ? "connected" as const : runtime.state(instance.id) !== "stopped" ? "connecting" as const :
+        ownerRequested && active && instance.enabled && instance.phase === "blocked" ? "error" as const : "disconnected" as const,
+      ...(instance.reason ? { error: instance.reason } : {}),
+      ...(instance.configurationIssue ? { configurationIssue: instance.configurationIssue } : {}),
+    })), ...[...migrationFailures].map((channelId) => Object.freeze({ channelId,
+      state: ownerRequested && active ? "error" as const : "disconnected" as const,
+      error: "连接迁移受阻，请检查本机制品与账号配置；原数据已保留" }))]),
+    delivery: {
+      status: (id) => runtime.current(id) ? "connected" : "disconnected",
+      send,
+    },
+    inbound: {
+      // During handshake messages may already arrive. Admission is still guarded
+      // by current-owner and router gates and does not wait for another Run.
+      has: (id) => instances.some((instance) => instance.id === id && instance.enabled),
+      bindingPolicy: (id) => capabilities.get(id)?.bindingPolicy,
+      send,
+    },
+    challenges: {
+      supports: (id) => Boolean(runtime.current(id) && capabilities.get(id)?.challenges),
+      sendChallenge: async (message: ChannelChallengeMessage) => {
+        const process = runtime.current(message.token.route.channelId);
+        if (!process || !capabilities.get(message.token.route.channelId)?.challenges) throw new Error("Channel challenge unavailable");
+        return channelDeliveryResult(await process.call("channel.send-challenge", message));
+      },
+    },
+    activate: async () => {
+      if (closed || active) throw new Error("Channel lifecycle cannot activate");
+      active = true; await startIfReady();
+    },
+    connectConfigured: async (next) => { if (closed) throw new Error("Channel lifecycle closed"); connectionRevision++; consumers = next; ownerRequested = true; await startIfReady(); },
+    disconnectConfigured: async () => { connectionRevision++; ownerRequested = false; admissionPaused = true; await runtime.suspend(); },
+    suspendConfigured: async () => { connectionRevision++; ownerRequested = false; admissionPaused = true; runtime.pause(); },
+    resumeConfigured: async (next) => { if (closed) throw new Error("Channel lifecycle closed"); connectionRevision++; consumers = next; ownerRequested = true; await startIfReady(); },
+    dispose: async () => {
+      connectionRevision++; closed = true; ownerRequested = false; consumers = undefined;
+      await runtime.close(); await Promise.all(observations);
+    },
+  };
 }

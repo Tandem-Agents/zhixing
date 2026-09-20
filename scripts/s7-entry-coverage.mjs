@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { FEISHU_INBOUND_EVENT_NAMES } from "../packages/channels/feishu/src/adapter.ts";
 import { SKILL_COMMAND_SOURCE_DESCRIPTOR } from "../packages/cli/src/commands/skill-command-source.ts";
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
-import { captureChannelAdapterFactoryDescriptor } from "../packages/cli/src/serve/channels.ts";
+import { packagedExtensions } from "../packages/cli/src/runtime/extensions/catalog.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
 import { createAnchorRuntimeProjectionAssembly } from "../packages/cli/src/serve/workscene-runtime-projection.ts";
 import { SEGMENT_TRANSITION_HOOK_PHASES } from "../packages/core/src/context/segment/types.ts";
@@ -133,7 +133,7 @@ const coverageGroups = [
     "cli:zhixing device continue",
     "slash:stop:repl",
   ]],
-  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending"]],
+  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration"]],
   ["device-trust", [
     "cli:zhixing pair",
     "cli:zhixing duty targets",
@@ -796,19 +796,17 @@ export function inspectChannelRuntimeBoundary(records) {
     access.indexOf("/** 投递栈"),
   );
   if (
-    count(channels, "new ChannelRegistry({") !== 1 ||
-    count(channels, 'import("@zhixing/channel-feishu")') !== 1 ||
-    !channels.includes("satisfies ChannelDeliveryEffectSource") ||
-    count(channels, "const inbound = Object.freeze({") !== 1 ||
-    count(channels, "satisfies InboundChannelPort") !== 1 ||
+    count(channels, "new ManagedExtensions({") !== 1 ||
+    count(channels, "new ExtensionApplication({") !== 1 ||
+    /ChannelRegistry|@zhixing\/channel-feishu/u.test(channels) ||
+    !channels.includes("createChannelTypeBinding({") ||
     count(channels, "channels: options.channels") !== 1 ||
-    !channels.includes("satisfies ChannelChallengeDeliveryPort") ||
     !channels.includes("statusSnapshot") ||
-    !channels.includes("disposal = registry.dispose()") ||
+    !channels.includes("await runtime.close()") ||
     resultContract.includes("ChannelRegistry") ||
     /\bregistry\s*:/u.test(resultContract)
   ) {
-    failures.push("channel registry, adapter factory or finite Host port assembly drifted");
+    failures.push("managed extension lifecycle or finite Host port assembly drifted");
   }
   if (
     count(resultContract, "readonly inbound: InboundChannelPort;") !== 1 ||
@@ -914,7 +912,7 @@ export function inspectChannelRuntimeBoundary(records) {
     !access.includes("preparedChannels.resumeConfigured(consumers)") ||
     access.includes("setOutboxRegistry") ||
     channels.includes("connectImmediately") ||
-    count(channels, "registry.connect(") !== 1
+    count(channels, "await runtime.resume()") !== 1 || channels.includes("registry.connect(")
   ) {
     failures.push("Channel Delivery Outbox static construction boundary drifted");
   }
@@ -922,13 +920,12 @@ export function inspectChannelRuntimeBoundary(records) {
     channelPreparation < 0 || losslessComposition <= channelPreparation ||
     jobOwnerRecovery <= losslessComposition || interactionRecovery <= jobOwnerRecovery ||
     deliveryAssembly <= interactionRecovery ||
-    !access.includes('reason: "not-configured"') ||
+    !channels.includes("productApi,") ||
     !access.includes('reason: "setup-failed"') ||
     !access.includes("await coordinator.recover()") ||
     access.includes("await ctx.channelCoordinator?.recover()") ||
-    !registry.includes("isChallengeChannel(adapter) && !connection?.onChallengeAction") ||
-    registry.includes("onChallengeAction?: (action: ChannelChallengeAction)") === false ||
-    !channels.includes("onChallengeAction,") ||
+    !channels.includes("if (!consumers) throw new Error") ||
+    !channels.includes("challenge: selected.onChallengeAction,") ||
     challengeCallback < 0 || protocolCompletion < 0 ||
     !composition.includes("if (!options.isCurrentOwner())") ||
     !composition.includes("await coordinator.handleChallengeAction(action)") ||
@@ -1021,8 +1018,9 @@ export function inspectChannelRuntimeBoundary(records) {
     !binding.includes("assertBound(): void") || /#waiters|new Promise\(/u.test(binding) ||
     !access.includes("channelConversationProduct.assertBound()") ||
     !access.includes("preparedChannels.activate()") ||
-    !channels.includes('phase !== "active" || suspended || !requestedConsumers') ||
-    !channels.includes('phase = "closed"')
+    count(channels, 'closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()') !== 2 ||
+    !channels.includes('revision !== connectionRevision || closed') ||
+    !channels.includes('closed = true')
   ) {
     failures.push("Host recovery consumers or Channel physical ingress precede activation readiness");
   }
@@ -1052,7 +1050,7 @@ async function collectProductionConstants() {
   validateInboundRouterAssembly(
     await readFile(path.join(root, "packages/cli/src/serve/channels.ts"), "utf8"),
   );
-  const channelAdapters = [...captureChannelAdapterFactoryDescriptor()];
+  const channelAdapters = packagedExtensions().filter(({ manifest }) => manifest.type === "channel").map(({ manifest }) => ({ configType: manifest.id, adapterType: manifest.id }));
   assertUnique(channelAdapters.map((item) => item.configType), "channel config type");
   assertUnique(channelAdapters.map((item) => item.adapterType), "channel adapter type");
   const inboundEvents = [...FEISHU_INBOUND_EVENT_NAMES];
@@ -11954,14 +11952,15 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "await inbound.drainAcceptedMessages()",
     stopInbound,
   );
-  const disconnectChannels = command.indexOf(
-    "await plannedChannel.connections.disconnectConfigured()",
+  const pauseChannels = command.indexOf(
+    "await plannedChannel.connections.suspendConfigured()",
     drainInbound,
   );
   const quiesceDelivery = command.indexOf(
     "await plannedDelivery.stack.quiesceForAuthorityTransfer()",
-    disconnectChannels,
+    pauseChannels,
   );
+  const disconnectChannels = command.indexOf("await plannedChannel.connections.disconnectConfigured()", quiesceDelivery);
   const drainAccepted = command.indexOf("drainAccepted: async () => {", quiesceDelivery);
   const postInstallReadBack = assembly.indexOf(
     "const readBack = await readBackPlannedAnchorPostInstallObligations({",
@@ -11976,8 +11975,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   );
   if (
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
-    disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
-    drainAccepted < quiesceDelivery ||
+    pauseChannels < drainInbound || quiesceDelivery < pauseChannels || disconnectChannels < quiesceDelivery ||
+    drainAccepted < disconnectChannels ||
     /ctx\.[A-Za-z]+\?\./u.test(command.slice(plannedLifecycle, preparedStart)) ||
     count(command, "await plannedDelivery.stack.resumeAfterAuthorityTransfer()") !== 1 ||
     count(command, "await boundDeliveryStack?.lifecycle.resume()") !== 3 ||
@@ -12000,12 +11999,13 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     !command.includes("await channel.connectConfigured()") ||
     count(accessRoot, "preparedChannels.connectConfigured(consumers)") !== 1 ||
     count(accessRoot, "preparedChannels.disconnectConfigured()") !== 2 ||
-    count(channels, "isCurrentOwner,") !== 1 ||
+    count(channels, "isCurrentOwner: options.isCurrentOwner,") !== 1 ||
+    count(channels, "isOwner: options.isCurrentOwner,") !== 1 ||
     channels.includes("connectImmediately") ||
     channels.includes("if (isCurrentOwner?.() === false)") ||
-    !channels.includes("onChallengeAction,") ||
-    count(channels, "connectConfigured,") !== 2 ||
-    count(channels, "disconnectConfigured,") !== 1 ||
+    !channels.includes("challenge: selected.onChallengeAction,") ||
+    count(channels, "connectConfigured: async (next)") !== 1 ||
+    count(channels, "disconnectConfigured: async ()") !== 1 ||
     count(inboundRouter, "if (!this.isCurrentOwner())") !== 1 ||
     count(inboundRouter, "async drainAcceptedMessages(): Promise<void>") !== 1
   ) {

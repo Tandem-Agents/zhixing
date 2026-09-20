@@ -46,7 +46,7 @@ describe("REPL config command home binding", () => {
       vi.stubEnv("ZHIXING_CONFIG_PATH", path.resolve("unrelated.jsonc"));
       await input.writers.writeConfig(updated);
       await input.writers.writeCredentials({});
-      return { kind: "completed", config: updated };
+      return { kind: "completed", config: updated, credentials: {} };
     });
     const reload = vi.fn(async () => undefined);
     const writer = { line: vi.fn(), appendInline: vi.fn(), notify: vi.fn(), ensureSegmentBreak: vi.fn() };

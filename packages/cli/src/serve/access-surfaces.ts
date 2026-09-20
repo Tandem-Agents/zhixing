@@ -41,6 +41,7 @@ import {
   JobRelayObligationDirectory,
 } from "./channel-interaction-coordinator.js";
 import { createInboundChannelRouter, setupChannels } from "./channels.js";
+import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 import {
@@ -142,7 +143,7 @@ import {
 import {
   createAdvancementReviewProxySchedulePort,
 } from "@zhixing/owner-services/advancement/proxy-scheduler";
-import type { ChannelCredentialProjection, ProviderCredentialProjection } from "@zhixing/providers";
+import type { ProviderCredentialProjection } from "@zhixing/providers";
 import {
   createConfirmationBridge,
   createControlSessionEventEnvelope,
@@ -1186,6 +1187,11 @@ function channelOwnership(
 
 /** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 export interface PrepareChannelInput {
+  readonly authorityRuntime: AuthorityRuntimeStack;
+  readonly zhixingHome: string;
+  readonly configPath: string;
+  readonly secretStore: import("@zhixing/core/contracts").SecretStorePort & import("@zhixing/providers").CredentialStoreCoordinator;
+  readonly isCurrentOwner: () => boolean;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
     string,
@@ -1197,22 +1203,11 @@ export interface PrepareChannelInput {
 
 export async function prepareChannel(
   input: PrepareChannelInput,
-  credentials: ChannelCredentialProjection,
 ): Promise<PreparedChannelMechanism> {
   const { channelHttpRoutes: inputChannelHttpRoutes } = input;
   const {
     conversations,
-    channelConfiguration,
   } = input;
-  if (
-    !channelConfiguration.messaging ||
-    Object.keys(channelConfiguration.messaging).length === 0
-  ) {
-    return Object.freeze({
-      kind: "absent",
-      reason: "not-configured",
-    });
-  }
   if (!conversations) {
     throw new Error("Configured Channel requires Conversation application");
   }
@@ -1221,15 +1216,13 @@ export async function prepareChannel(
       conversations,
     );
     const result = await setupChannels({
-      entries: channelConfiguration.messaging,
-      credentials,
+      authorityLog: () => input.authorityRuntime.authorityLog,
+      commitDecision: input.authorityRuntime.commitExtensionDecision,
+      isCurrentOwner: input.isCurrentOwner,
+      configuration: new ChannelConfiguration(input.configPath, input.secretStore),
+      artifactDirectory: path.join(input.zhixingHome, "extensions", "artifacts"),
+      httpRoutes: inputChannelHttpRoutes,
       logger: channelLogger,
-      registerHttpRoute: (path, handler) => {
-        if (inputChannelHttpRoutes.has(path)) {
-          throw new Error(`Channel HTTP route already registered: ${path}`);
-        }
-        inputChannelHttpRoutes.set(path, handler);
-      },
     });
     input.lifecycleContributions.acquire("channels.dispose", async () => {
       conversationProduct.close();

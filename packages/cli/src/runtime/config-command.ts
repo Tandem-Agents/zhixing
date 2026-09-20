@@ -30,6 +30,7 @@ import {
 } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
+import { ChannelConfiguration } from "./extensions/channel-configuration.js";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
 import {
   BASE_CONFIG_SECTION_IDS,
@@ -47,6 +48,8 @@ import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
 
 export interface ConfigCommandDeps {
+  readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
+  readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
   readonly zhixingHome: string;
   readonly configPath: string;
   rl: readline.Interface;
@@ -217,10 +220,28 @@ async function runEditorCommand(
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
     const config = loadConfig({ configPath });
     const { credentials } = await loadCredentialSnapshot({ store: secretStore });
+    const managed = opts.sections.includes("messaging") && deps.readExtensions ? await deps.readExtensions() : undefined;
+    const configuration = new ChannelConfiguration(configPath, secretStore);
+    const pendingIds = new Set<string>();
+    if (managed) for (const id of new Set([...managed.instances.map((instance) => instance.id), ...Object.keys(config.messaging ?? {})])) {
+      if (await configuration.pending(id)) pendingIds.add(id);
+    }
+    const channelStates = managed ? Object.fromEntries(managed.instances.filter((instance) => instance.binding.manifest.type === "channel")
+      .map((instance) => [instance.id, { enabled: instance.enabled, revision: instance.revision, intentRevision: instance.intentRevision, type: instance.binding.manifest.id,
+        ...(instance.configurationIssue || pendingIds.has(instance.id)
+          ? { configurationIssue: instance.configurationIssue ?? "配置待应用" } : {}) }])) : undefined;
+    const changedChannels = (nextConfig: typeof config, nextCredentials: typeof credentials,
+      intents: Readonly<Record<string, boolean>> = {}) => [...new Set([
+        ...Object.keys(config.messaging ?? {}), ...Object.keys(nextConfig.messaging ?? {}), ...Object.keys(intents),
+        ...pendingIds, ...Object.keys(channelStates ?? {}).filter((id) => channelStates?.[id]?.configurationIssue),
+      ])].filter((id) => intents[id] !== undefined || pendingIds.has(id) || channelStates?.[id]?.configurationIssue ||
+        canonicalize(config.messaging?.[id] ?? null) !== canonicalize(nextConfig.messaging?.[id] ?? null) ||
+        canonicalize(credentials.channels?.[id] ?? null) !== canonicalize(nextCredentials.channels?.[id] ?? null));
 
     const editorResult = await runConfigEditor({
       initialConfig: config,
       initialCredentials: credentials,
+      ...(channelStates ? { channelStates } : {}),
       sections: opts.sections,
       title: opts.title,
       ...(opts.runtime ? { runtime: opts.runtime } : {}),
@@ -230,6 +251,15 @@ async function runEditorCommand(
         secretStoreLabel: "设备本地 SecretStore",
       },
       writers: {
+        prepare: async (result) => {
+          if (opts.mcpApplication || !channelStates) return;
+          const ids = changedChannels(result.config, result.credentials, result.channelIntents);
+          // Reopening an unchanged pending edit retries its original fenced intent.
+          const newIds = ids.filter((id) => !pendingIds.has(id) || result.channelIntents?.[id] !== undefined ||
+            canonicalize(config.messaging?.[id] ?? null) !== canonicalize(result.config.messaging?.[id] ?? null) ||
+            canonicalize(credentials.channels?.[id] ?? null) !== canonicalize(result.credentials.channels?.[id] ?? null));
+          await configuration.stage(newIds, result.config, { channels: result.credentials.channels }, channelStates, result.channelIntents);
+        },
         // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
         // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
         writeConfig: (next) => opts.mcpApplication ? Promise.resolve() : writeConfig(next, { configPath, expected: config }),
@@ -257,6 +287,19 @@ async function runEditorCommand(
           });
           const result = await application.edit({ servers: editorResult.config.mcp?.servers ?? {}, credentials: editorResult.credentials.mcp ?? {} });
           writer.line((result.status === "active" ? chalk.green : chalk.yellow)(`${layout.contentPrefix}${result.message}`));
+          break;
+        }
+        const changedIds = changedChannels(editorResult.config, editorResult.credentials, editorResult.channelIntents);
+        if (changedIds.length > 0) {
+          if (!deps.applyExtensionConfiguration) throw new Error("渠道管理入口不可用，配置已保存但尚未应用");
+          await deps.applyExtensionConfiguration(changedIds);
+        }
+        const { messaging: _oldMessaging, ...oldConfig } = config;
+        const { messaging: _newMessaging, ...newConfig } = editorResult.config;
+        const { channels: _oldChannels, ...oldCredentials } = credentials;
+        const { channels: _newChannels, ...newCredentials } = editorResult.credentials;
+        if (canonicalize(oldConfig) === canonicalize(newConfig) && canonicalize(oldCredentials) === canonicalize(newCredentials)) {
+          writer.line(chalk.green(`${layout.contentPrefix}配置已保存，连接按需局部刷新；其他任务不受影响。`));
           break;
         }
         const launchSelectionChanged = canonicalize({

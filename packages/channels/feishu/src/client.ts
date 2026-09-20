@@ -1,4 +1,5 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { createHash } from "node:crypto";
 import type { FeishuAdapterConfig } from "./config.js";
 
 export function resolveDomain(domain: FeishuAdapterConfig["domain"]): lark.Domain {
@@ -44,6 +45,7 @@ export class FeishuClient {
     receiveId: string,
     card: Record<string, unknown>,
     receiveIdType: "open_id" | "chat_id" = "open_id",
+    idempotencyKey?: string,
   ): Promise<string | undefined> {
     const resp = await this.raw.im.message.create({
       params: { receive_id_type: receiveIdType },
@@ -51,6 +53,7 @@ export class FeishuClient {
         receive_id: receiveId,
         msg_type: "interactive",
         content: JSON.stringify(card),
+        ...(idempotencyKey ? { uuid: createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32) } : {}),
       },
     });
 

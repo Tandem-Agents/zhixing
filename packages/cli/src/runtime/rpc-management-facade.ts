@@ -166,6 +166,16 @@ export class RpcManagementFacade {
     return client.request("mcp.pending", { conversationId });
   }
 
+  async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot> {
+    const client = await this.link.getClient();
+    return client.request("extensions.apply-configuration", { ids });
+  }
+
+  async extensions(): Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot> {
+    const client = await this.link.getClient();
+    return client.request("extensions.list");
+  }
+
   /** 只读取当前已连接宿主状态；无连接时返回 null，不发现、不拉起。 */
   async serverInfoIfConnected(): Promise<ServerInfoResult | null> {
     const client = this.link.getConnectedClient?.();

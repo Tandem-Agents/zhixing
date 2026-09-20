@@ -170,9 +170,9 @@ export function enableMessaging(
   const config = structuredClone(state.config);
   if (!config.messaging) config.messaging = {};
   if (!config.messaging[channelId]) {
-    config.messaging[channelId] = {};
+    config.messaging[channelId] = state.channelStates?.[channelId]?.type ? { type: state.channelStates[channelId]!.type } : {};
   }
-  return { ...state, config };
+  return { ...state, config, ...(state.channelStates ? { channelIntents: { ...state.channelIntents, [channelId]: true } } : {}) };
 }
 
 /** 关闭 channel：从 config.messaging 移除 */
@@ -180,6 +180,7 @@ export function disableMessaging(
   state: WorkingState,
   channelId: string,
 ): WorkingState {
+  if (state.channelStates) return { ...state, channelIntents: { ...state.channelIntents, [channelId]: false } };
   const config = structuredClone(state.config);
   if (!config.messaging) return state;
   delete config.messaging[channelId];
@@ -187,7 +188,12 @@ export function disableMessaging(
 }
 
 export function isMessagingEnabled(state: WorkingState, channelId: string): boolean {
-  return state.config.messaging?.[channelId] !== undefined;
+  return state.channelIntents?.[channelId] ?? state.channelStates?.[channelId]?.enabled ?? (state.config.messaging?.[channelId] !== undefined);
+}
+
+export function messagingEnabledProjection(state: WorkingState): Readonly<Record<string, boolean>> {
+  return Object.fromEntries([...new Set([...Object.keys(state.config.messaging ?? {}), ...Object.keys(state.channelStates ?? {})])]
+    .map((id) => [id, isMessagingEnabled(state, id)]));
 }
 
 // ─── MCP server 字段读写 ───

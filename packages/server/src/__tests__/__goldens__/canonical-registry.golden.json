@@ -51,6 +51,22 @@
         "requiresAuth": true
       },
       {
+        "name": "extensions.apply-configuration",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.refresh",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.set-enabled",
+        "requiresAuth": true
+      },
+      {
         "name": "health",
         "requiresAuth": false
       },
@@ -310,6 +326,22 @@
       },
       {
         "name": "dutyMigration.targets",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.apply-configuration",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.refresh",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.set-enabled",
         "requiresAuth": true
       },
       {
@@ -575,6 +607,22 @@
         "requiresAuth": true
       },
       {
+        "name": "extensions.apply-configuration",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.refresh",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.set-enabled",
+        "requiresAuth": true
+      },
+      {
         "name": "health",
         "requiresAuth": false
       },
@@ -834,6 +882,22 @@
       },
       {
         "name": "dutyMigration.targets",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.apply-configuration",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.refresh",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.set-enabled",
         "requiresAuth": true
       },
       {
@@ -1241,6 +1305,10 @@
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
           "rpc:dutyMigration.targets",
+          "rpc:extensions.apply-configuration",
+          "rpc:extensions.list",
+          "rpc:extensions.refresh",
+          "rpc:extensions.set-enabled",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:mcp.pending",
@@ -1429,6 +1497,10 @@
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
           "rpc:dutyMigration.targets",
+          "rpc:extensions.apply-configuration",
+          "rpc:extensions.list",
+          "rpc:extensions.refresh",
+          "rpc:extensions.set-enabled",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:mcp.pending",
@@ -1602,6 +1674,10 @@
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
           "rpc:dutyMigration.targets",
+          "rpc:extensions.apply-configuration",
+          "rpc:extensions.list",
+          "rpc:extensions.refresh",
+          "rpc:extensions.set-enabled",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:mcp.pending",
@@ -1763,6 +1839,10 @@
           "rpc:dutyMigration.commit",
           "rpc:dutyMigration.prepare",
           "rpc:dutyMigration.targets",
+          "rpc:extensions.apply-configuration",
+          "rpc:extensions.list",
+          "rpc:extensions.refresh",
+          "rpc:extensions.set-enabled",
           "rpc:health",
           "rpc:llm.complete",
           "rpc:mcp.pending",
@@ -3045,6 +3125,42 @@
         "category": "rpc",
         "target": {
           "rowId": "device-trust"
+        }
+      },
+      {
+        "name": "extensions.apply-configuration",
+        "requiresAuth": true,
+        "key": "rpc:extensions.apply-configuration",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
+        "name": "extensions.list",
+        "requiresAuth": true,
+        "key": "rpc:extensions.list",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
+        "name": "extensions.refresh",
+        "requiresAuth": true,
+        "key": "rpc:extensions.refresh",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
+        "name": "extensions.set-enabled",
+        "requiresAuth": true,
+        "key": "rpc:extensions.set-enabled",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
         }
       },
       {

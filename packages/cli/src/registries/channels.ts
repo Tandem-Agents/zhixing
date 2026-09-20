@@ -1,88 +1,18 @@
-/**
- * UI 暴露的 channel（消息通道）子集——CLI 各 UI 入口共享。
- *
- * 与 packages/messaging 包的 channel adapter 实现解耦：
- *   - adapter 实现：协议适配层（@zhixing/channel-feishu 等），全集
- *   - 此 registry：UI 层白名单，当前曝光给用户选择的子集
- *
- * 字段层级与 channel adapter 期望对齐——adapter 通过 `ChannelConfig.credentials`
- * 读这些 key（key 名要严格一致）。
- *
- * 增加 channel 流程：
- *   1. 这里加一项（label + id + 必填字段）
- *   2. 确保 channel adapter 实现存在（如 @zhixing/channel-feishu）
- *   3. 配置编辑器登记该 channel 的 SecretStore 录入字段
- *
- * 文档链接以 `docUrl` 显式声明在每个 field 上（first-class 字段，不内嵌 hint
- * 文本）——让 input panel 单独渲染为可点击文档行，不靠 regex 解析。
- */
+import { channelDeclaration, type ChannelField } from "@zhixing/core/channels/extension";
+import { packagedExtensions } from "../runtime/extensions/catalog.js";
 
-export interface ChannelFieldSpec {
-  id: string;
-  label: string;
-  hint: string;
-  example: string;
-  sensitive: boolean;
-  /**
-   * 能力组:携带此标志的字段不是渠道启用的必填项,而是某项能力的成对
-   * 凭据——同组字段全空时该能力停用(degraded)、渠道照常启用;组内只
-   * 填一部分是配置错误,启用校验(checkMessaging)按缺失字段报 issue。
-   */
-  capabilityGroup?: string;
-  /** 文档链接——input panel 单独渲染为可点击行（OSC 8 hyperlink） */
-  docUrl?: string;
-}
-
+export type ChannelFieldSpec = ChannelField;
 export interface SupportedChannel {
-  id: string;
-  /** UI 显示名 */
-  label: string;
-  /** 短描述（可选），显示在选择列表的右侧 */
-  description?: string;
-  /** 必填字段列表 */
-  requiredFields: ChannelFieldSpec[];
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly requiredFields: readonly ChannelFieldSpec[];
 }
 
-export const SUPPORTED_CHANNELS: SupportedChannel[] = [
-  {
-    id: "feishu",
-    label: "飞书",
-    description: "企业 IM 通道",
-    requiredFields: [
-      {
-        id: "appId",
-        label: "App ID",
-        hint: "飞书开放平台应用的 App ID（公开标识）。",
-        example: "cli_xxxxxxxxxxxx",
-        sensitive: false,
-        docUrl: "https://open.feishu.cn/app",
-      },
-      {
-        id: "appSecret",
-        label: "App Secret",
-        hint: "飞书开放平台应用的 App Secret（私密凭证）。",
-        example: "xxxxxxxxxxxxxxxxxxxxxxxx",
-        sensitive: true,
-        docUrl: "https://open.feishu.cn/app",
-      },
-      {
-        id: "verificationToken",
-        label: "Verification Token",
-        hint: "互动确认（卡片按钮回调）所需，与 Encrypt Key 成对；缺失时基础消息照常、互动确认停用。",
-        example: "xxxxxxxxxxxxxxxxxxxxxxxx",
-        sensitive: true,
-        capabilityGroup: "interactive-confirmation",
-        docUrl: "https://open.feishu.cn/app",
-      },
-      {
-        id: "encryptKey",
-        label: "Encrypt Key",
-        hint: "互动确认（卡片按钮回调）所需，与 Verification Token 成对；缺失时基础消息照常、互动确认停用。",
-        example: "xxxxxxxxxxxxxxxxxxxxxxxx",
-        sensitive: true,
-        capabilityGroup: "interactive-confirmation",
-        docUrl: "https://open.feishu.cn/app",
-      },
-    ],
-  },
-];
+/** UI fields are a projection of validated type declarations, not a platform registry. */
+export function listSupportedChannels(): readonly SupportedChannel[] {
+  return packagedExtensions().filter(({ manifest }) => manifest.type === "channel").map(({ manifest }) => {
+    const declaration = channelDeclaration(manifest);
+    return { id: manifest.id, label: declaration.label, description: declaration.description, requiredFields: declaration.requiredFields };
+  });
+}

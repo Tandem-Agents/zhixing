@@ -553,7 +553,7 @@ describe("InboundRouter", () => {
     const { router } = setup();
     const msg = dmMessage("unknown-ch");
 
-    await router.handleMessage(msg);
+    await expect(router.handleMessage(msg)).rejects.toThrow("no active instance");
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("No adapter found"),
@@ -584,7 +584,7 @@ describe("InboundRouter", () => {
     }
 
     // This one should be rejected
-    await router.handleMessage(dmMessage("test-ch", "user-1", "overflow"));
+    await expect(router.handleMessage(dmMessage("test-ch", "user-1", "overflow"))).rejects.toThrow("queue full");
 
     expect(adapter.send).toHaveBeenCalled();
     const lastCall = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -598,7 +598,7 @@ describe("InboundRouter", () => {
     const { adapter, conversations, router } = setup();
     const release = await conversations.quiescePrefix("default");
 
-    await router.handleMessage(dmMessage("test-ch", "user-1", "during switch"));
+    await expect(router.handleMessage(dmMessage("test-ch", "user-1", "during switch"))).rejects.toThrow("quiescing");
 
     expect(adapter.send).toHaveBeenCalled();
     const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -739,7 +739,7 @@ describe("InboundRouter", () => {
       deliveryOutbox: registry,
     });
 
-    await router.handleMessage(dmMessage());
+    await expect(router.handleMessage(dmMessage())).rejects.toThrow("not found");
 
     expect(outboxSend).toHaveBeenCalledWith(
       { channelId: "test-ch", to: "user-1", threadId: undefined },
@@ -1593,7 +1593,7 @@ describe("InboundRouter", () => {
 
       router.refuseNewMessages();
 
-      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+      await expect(router.handleMessage(dmMessage("test-ch", "user-1", "你好"))).rejects.toThrow("shutdown");
 
       // adapter.send 收到关停文案
       expect(adapter.send).toHaveBeenCalledTimes(1);
@@ -1613,7 +1613,7 @@ describe("InboundRouter", () => {
 
       router.refuseNewMessages();
 
-      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+      await expect(router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"))).rejects.toThrow();
 
       // 不调 abort —— 拒新分支在 IntentClassifier 之前
       expect(abortSpy).not.toHaveBeenCalled();
@@ -1624,7 +1624,7 @@ describe("InboundRouter", () => {
       );
     });
 
-    it("adapter.send 抛错时拒新分支吞错不抛,关停链不被 block", async () => {
+    it("回执发送失败也不得确认尚未接纳的消息", async () => {
       const adapter = createMockAdapter();
       (adapter.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
         new Error("network down during shutdown"),
@@ -1633,10 +1633,10 @@ describe("InboundRouter", () => {
 
       router.refuseNewMessages();
 
-      // 不抛 —— 关停链能继续走
+      // 传输收到否定回执；关停仍能释放已接纳工作
       await expect(
         router.handleMessage(dmMessage("test-ch", "user-1", "你好")),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow("shutdown");
     });
 
     it("幂等:重复调用不抛,后续 handleMessage 仍走拒新分支", async () => {
@@ -1645,7 +1645,7 @@ describe("InboundRouter", () => {
       router.refuseNewMessages();
       router.refuseNewMessages();
 
-      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+      await expect(router.handleMessage(dmMessage("test-ch", "user-1", "你好"))).rejects.toThrow("shutdown");
 
       const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
       expect((content as { text: string }).text).toBe(
@@ -1659,7 +1659,7 @@ describe("InboundRouter", () => {
       const admitSpy = vi.spyOn(conversations, "admitTurn");
       const getOrCreateSpy = vi.spyOn(conversations, "getOrCreate");
 
-      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+      await expect(router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"))).rejects.toThrow();
 
       expect(isCurrentOwner).toHaveBeenCalledOnce();
       expect(admitSpy).not.toHaveBeenCalled();
@@ -1689,7 +1689,8 @@ describe("InboundRouter", () => {
       expect(drained).toBe(false);
 
       resolveAdmission({ status: "not-found" });
-      await Promise.all([handling, draining]);
+      await expect(handling).rejects.toThrow("not found");
+      await draining;
       expect(drained).toBe(true);
     });
   });

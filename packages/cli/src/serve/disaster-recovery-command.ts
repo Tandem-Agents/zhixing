@@ -1,4 +1,6 @@
 import path from "node:path";
+import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
+import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import {
   BackupRecoveryDisasterAdmissionApplicationService,
@@ -734,7 +736,11 @@ function productionRecoveryReadiness(context: RecoveryContext) {
       providers: Object.keys(credentials.credentials.providers ?? {}).sort(),
       mcpServers: Object.keys(credentials.credentials.mcp ?? {}).sort(),
     });
-    return createProductionAnchorReadySnapshot({
+    const extensions = await createChannelExtensionReadiness(
+      new ChannelConfiguration(path.join(context.home, "config.jsonc"), context.secretStore),
+      path.join(context.home, "extensions", "artifacts"),
+    )(context.store.authorityLog());
+    const ready = createProductionAnchorReadySnapshot({
       configurationSnapshot: {
         config: context.config,
         executableVersion: ZHIXING_CLI_VERSION,
@@ -746,6 +752,8 @@ function productionRecoveryReadiness(context: RecoveryContext) {
       anchorEnabled: true,
       executorEnabled: context.configuration.enabledRoles.includes("executor"),
     });
+    return { ...ready, configuredCapabilities: { ...ready.configuredCapabilities, channels: extensions.channels },
+      assetRevision: protocolDigest("PlannedAnchorExtensionAssets", 1, { base: ready.assetRevision, revision: extensions.revision }) };
   });
 }
 

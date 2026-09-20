@@ -193,13 +193,12 @@ describe("checkMessaging", () => {
     ).toEqual([]);
   });
 
-  it("未在内置 channel 注册表的启用项不报（保守）", () => {
-    // 当前 channel registry 仅含 feishu；其他 channel id 无定义 → 不报
+  it("缺少已准入扩展声明时如实报告，而不显示已就绪", () => {
     expect(
       checkMessaging(
         { messaging: { unknown_channel: {} } as never },
         {},
       ),
-    ).toEqual([]);
+    ).toEqual([expect.objectContaining({ channelId: "unknown_channel", field: "extension" })]);
   });
 });

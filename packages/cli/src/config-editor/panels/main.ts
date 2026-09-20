@@ -356,7 +356,8 @@ function completeAction(
   return {
     action: {
       type: "exit",
-      result: { kind: "completed", config: state.config, credentials: state.credentials },
+      result: { kind: "completed", config: state.config, credentials: state.credentials,
+        ...(state.channelIntents ? { channelIntents: state.channelIntents } : {}) },
     },
     cursor,
   };

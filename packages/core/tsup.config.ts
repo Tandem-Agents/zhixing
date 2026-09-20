@@ -3,6 +3,11 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/extensions/contracts.ts",
+    "src/extensions/application.ts",
+    "src/extensions/runtime.ts",
+    "src/extensions/artifacts.ts",
+    "src/extensions/protocol.ts",
     "src/mcp-management/application.ts",
     "src/events/index.ts",
     "src/types/index.ts",
@@ -11,6 +16,8 @@ export default defineConfig({
     "src/resilience/index.ts",
     "src/context/index.ts",
     "src/channels/index.ts",
+    "src/channels/extension.ts",
+    "src/channels/extension-worker.ts",
     "src/transcript/index.ts",
     "src/conversation/index.ts",
     "src/conversation/application.ts",

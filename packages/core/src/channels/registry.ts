@@ -148,12 +148,12 @@ export class ChannelRegistry {
       abortSignal,
       eventBus,
       logger,
-      onMessage: (msg: InboundMessage) => {
+      onMessage: async (msg: InboundMessage) => {
         this.updateStatus(channelId, "connected", {
           lastMessageAt: new Date().toISOString(),
         });
         eventBus.emit("channel:message-received", { channelId, message: msg });
-        onMessage?.(msg);
+        await onMessage?.(msg);
       },
       onChallengeAction: async (action: ChannelChallengeAction) => {
         this.updateStatus(channelId, "connected", {

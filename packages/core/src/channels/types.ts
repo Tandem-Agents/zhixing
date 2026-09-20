@@ -111,6 +111,8 @@ export interface DeliveryResult {
 export interface DeliveryAdapterSendMeta {
   /** Stable across every redrive of the same durable delivery item. */
   idempotencyKey?: string;
+  /** Delivery-owned attempt identity; adapters only carry it across the effect boundary. */
+  deliveryAttempt?: { readonly itemId: string; readonly attempt: number };
 }
 
 // ─── 通道配置 ───
@@ -130,6 +132,7 @@ export type ChannelState = "connected" | "connecting" | "disconnected" | "error"
 export interface ChannelStatus {
   channelId: string;
   state: ChannelState;
+  configurationIssue?: string;
   error?: string;
   lastMessageAt?: string;
   connectedAt?: string;
@@ -157,7 +160,7 @@ export interface ChannelContext {
   eventBus: IEventBus<ChannelEventMap>;
   logger: ChannelLogger;
 
-  onMessage(msg: InboundMessage): void;
+  onMessage(msg: InboundMessage): Promise<void>;
   /**
    * 渠道 callback 的可等待入口:宿主只在耐久裁决完成后 resolve,adapter
    * 必须等它成功才向平台返回成功——发送方看到的"已受理"即已耐久。
@@ -192,6 +195,8 @@ export interface ChannelAdapter {
 
   connect(ctx: ChannelContext): Promise<void>;
   disconnect(): Promise<void>;
+  /** Actual transport readiness, not merely process liveness. */
+  health?(): "ready" | "unavailable";
   send(
     target: DeliveryTarget,
     content: OutboundContent,

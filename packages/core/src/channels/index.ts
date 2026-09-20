@@ -12,6 +12,7 @@ export {
   type ChannelStatus,
   type ChatType,
   type DeliveryResult,
+  type DeliveryAdapterSendMeta,
   type DeliveryTarget,
   type DeliveryTargetDto,
   type Disposable,

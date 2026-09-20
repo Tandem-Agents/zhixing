@@ -1,0 +1,21 @@
+{
+  "id": "feishu",
+  "version": "0.1.0",
+  "runtime": "node24",
+  "entry": "extension.mjs",
+  "protocol": 1,
+  "type": "channel",
+  "contract": 1,
+  "declaration": {
+    "label": "飞书",
+    "identityFields": ["appId"],
+    "description": "企业 IM 通道",
+    "capabilities": { "chatTypes": ["dm", "group"], "media": false, "edit": false, "streaming": false },
+    "requiredFields": [
+      { "id": "appId", "label": "App ID", "hint": "飞书开放平台应用的 App ID（公开标识）。", "example": "cli_xxxxxxxxxxxx", "sensitive": false, "docUrl": "https://open.feishu.cn/app" },
+      { "id": "appSecret", "label": "App Secret", "hint": "飞书开放平台应用的 App Secret（私密凭证）。", "example": "xxxxxxxxxxxxxxxxxxxxxxxx", "sensitive": true, "docUrl": "https://open.feishu.cn/app" },
+      { "id": "verificationToken", "label": "Verification Token", "hint": "互动确认所需，与 Encrypt Key 成对；缺失时仍可收发基础消息。", "example": "xxxxxxxxxxxxxxxxxxxxxxxx", "sensitive": true, "capabilityGroup": "interactive-confirmation", "docUrl": "https://open.feishu.cn/app" },
+      { "id": "encryptKey", "label": "Encrypt Key", "hint": "互动确认所需，与 Verification Token 成对；缺失时仍可收发基础消息。", "example": "xxxxxxxxxxxxxxxxxxxxxxxx", "sensitive": true, "capabilityGroup": "interactive-confirmation", "docUrl": "https://open.feishu.cn/app" }
+    ]
+  }
+}

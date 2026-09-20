@@ -3339,8 +3339,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/channels.ts",
       (text) => text.replace(
-        "            onChallengeAction,",
-        "            onChallengeAction: async () => undefined,",
+        "challenge: selected.onChallengeAction,",
+        "challenge: async () => undefined,",
       ),
     )).join("\n"),
     /channel current-owner connection or final guard drifted/,
@@ -4687,8 +4687,9 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   assert.deepEqual(inspectChannelRuntimeBoundary(records), []);
 
   for (const [relative, before, after] of [
-    ["packages/cli/src/serve/channels.ts", 'phase !== "active" || suspended || !requestedConsumers',
-      'suspended || !requestedConsumers'],
+    ["packages/cli/src/serve/channels.ts", 'closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()',
+      'closed || !ownerRequested || !consumers || !options.isCurrentOwner()'],
+    ["packages/cli/src/serve/channels.ts", 'revision !== connectionRevision || closed', 'closed'],
     ["packages/cli/src/serve/channel-conversation-product-binding.ts", "assertBound(): void",
       "assertBoundLater(): void"],
     ["packages/cli/src/serve/command.ts", "      await startAnchorRuntime();",
@@ -4864,10 +4865,7 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/channels.ts",
-      (text) => text.replace(
-        "  const statusSnapshot = ():",
-        '  void registry.connect("unowned", {} as never);\n  const statusSnapshot = ():',
-      ),
+      (text) => `${text}\nvoid registry.connect("unowned", {} as never);`,
     )).join("\n"),
     /Delivery Outbox static construction boundary drifted/u,
   );
@@ -4900,10 +4898,10 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
-      "packages/core/src/channels/registry.ts",
+      "packages/cli/src/serve/channels.ts",
       (text) => text.replace(
-        "isChallengeChannel(adapter) && !connection?.onChallengeAction",
-        "false",
+        "challenge: selected.onChallengeAction,",
+        "challenge: async () => undefined,",
       ),
     )).join("\n"),
     /challenge static composition or physical callback drifted/u,

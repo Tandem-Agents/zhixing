@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../index.js";
+import { SUPPORTED_PROVIDERS, listSupportedChannels } from "../index.js";
 
 const URL_PATTERN = /https?:\/\//i;
 
@@ -36,7 +36,7 @@ describe("providers registry 一致性", () => {
 
 describe("channels registry 一致性", () => {
   it("field.hint 不得内嵌 URL（URL 走 field.docUrl 字段）", () => {
-    for (const c of SUPPORTED_CHANNELS) {
+    for (const c of listSupportedChannels()) {
       for (const f of c.requiredFields) {
         expect(
           f.hint,
@@ -47,7 +47,7 @@ describe("channels registry 一致性", () => {
   });
 
   it("field.docUrl（如声明）必须是 http(s) 协议", () => {
-    for (const c of SUPPORTED_CHANNELS) {
+    for (const c of listSupportedChannels()) {
       for (const f of c.requiredFields) {
         if (f.docUrl !== undefined) {
           expect(
@@ -60,12 +60,12 @@ describe("channels registry 一致性", () => {
   });
 
   it("channel id 唯一", () => {
-    const ids = SUPPORTED_CHANNELS.map((c) => c.id);
+    const ids = listSupportedChannels().map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("每个 channel 内部 field.id 唯一", () => {
-    for (const c of SUPPORTED_CHANNELS) {
+    for (const c of listSupportedChannels()) {
       const fids = c.requiredFields.map((f) => f.id);
       expect(new Set(fids).size, `channel ${c.id} 字段 id 不唯一`).toBe(
         fids.length,

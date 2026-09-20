@@ -16,7 +16,6 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/channel-feishu": "workspace:*",
     "@zhixing/core": "workspace:*",
     "@zhixing/executor": "workspace:*",
     "@zhixing/mcp": "workspace:*",
@@ -38,6 +37,7 @@
     "qrcode": "1.5.4"
   },
   "devDependencies": {
+    "@zhixing/channel-feishu": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/qrcode": "1.5.6",
     "@zhixing/test-utils": "workspace:*",

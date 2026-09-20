@@ -58,6 +58,8 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
       },
     },
     requestHostReload: deps.requestHostReload,
+    applyExtensionConfiguration: (ids: readonly string[]) => deps.management.applyExtensionConfiguration(ids),
+    readExtensions: () => deps.management.extensions(),
     renderer: deps.renderer,
     writer,
     screen: deps.screen,

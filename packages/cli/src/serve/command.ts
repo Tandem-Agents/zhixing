@@ -8,6 +8,7 @@
  * 类型化生命周期贡献继续以同一幂等 handle 连接启动补偿与正常逆序关闭。
  */
 
+import path from "node:path";
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
@@ -76,6 +77,9 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
+import { EXTENSION_PRODUCT_API_EXACT_SET } from "@zhixing/core/extensions/application";
+import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
+import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
 import {
   createWorksceneProductApiContribution,
   projectWorksceneConversationRuntime,
@@ -435,7 +439,6 @@ async function runServerProcess(
   const authorityConfiguration = bootstrap.authorityConfiguration;
   const providerCredentials = bootstrap.providerCredentials;
   const mcpCredentials = bootstrap.mcpCredentials;
-  const channelCredentials = bootstrap.channelCredentials;
   const credentialExposureCredentials =
     bootstrap.credentialExposureCredentials;
   const credentialRotationCredentials =
@@ -712,6 +715,10 @@ async function runServerProcess(
     credentialGeneration,
   });
   const authorityRuntime = await setupAuthorityRuntime({
+    extensionReadiness: createChannelExtensionReadiness(
+      new ChannelConfiguration(getGlobalConfigPath({}, zhixingHome), bootstrap.secretStore),
+      path.join(zhixingHome, "extensions", "artifacts"),
+    ),
     zhixingHome,
     secretStore: bootstrap.secretStore,
     deviceKey: bootstrap.mesh.deviceKey,
@@ -1079,11 +1086,18 @@ async function runServerProcess(
   });
   const channelMechanism: PreparedChannelMechanism = enabledSurfaces.has("channel")
     ? await prepareChannel({
+        authorityRuntime,
+        zhixingHome,
+        configPath: getGlobalConfigPath({}, zhixingHome),
+        secretStore: bootstrap.secretStore,
+        isCurrentOwner: () => meshBootstrap.mode !== "trusted-home" ||
+          ((preparedMeshRuntime?.currentAnchorDeviceId() ?? meshBootstrap.trust.issuer.deviceId) === meshBootstrap.deviceKey.deviceId &&
+           (preparedMeshRuntime?.plannedCurrentOwnerReady() ?? meshBootstrap.plannedAnchorPostInstall === undefined)),
         lifecycleContributions,
         channelHttpRoutes,
         conversations: conversationServices.conversations,
         channelConfiguration,
-      }, channelCredentials)
+      })
     : Object.freeze({ kind: "absent", reason: "not-configured" });
   const losslessDataPlane = await createHostLosslessDataPlane({
     authorityRuntime,
@@ -1597,10 +1611,13 @@ async function runServerProcess(
                 inbound.refuseNewMessages();
                 await inbound.drainAcceptedMessages();
                 if (plannedChannel.kind === "available") {
-                  await plannedChannel.connections.disconnectConfigured();
+                  await plannedChannel.connections.suspendConfigured();
                 }
                 if (plannedDelivery.kind === "available") {
                   await plannedDelivery.stack.quiesceForAuthorityTransfer();
+                }
+                if (plannedChannel.kind === "available") {
+                  await plannedChannel.connections.disconnectConfigured();
                 }
                 await schedulerApplication.settleAcceptedWork({
                   strategy: "drain",
@@ -1720,7 +1737,7 @@ async function runServerProcess(
                 .map(({ id, revision }) => ({ id, revision })),
             });
             await recoverFrozenOwners(sources);
-            for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+            for (const owner of ["remote", "scheduler", "delivery", "channel"] as const) {
               const frozen = ownerItems
                 .filter((item) => item.owner === owner)
                 .map(({ id, revision }) => ({ id, revision }));
@@ -2269,8 +2286,9 @@ async function runServerProcess(
   const closeAnchorUninstallAdmission = async () => {
     boundInboundRouter?.refuseNewMessages();
     await boundInboundRouter?.drainAcceptedMessages();
-    await boundChannelConnections?.disconnectConfigured();
+    await boundChannelConnections?.suspendConfigured();
     await boundDeliveryStack?.quiesceForAuthorityTransfer();
+    await boundChannelConnections?.disconnectConfigured();
     await settleScheduleForTransfer();
   };
   const currentRemovalAcceptedWork = {
@@ -2885,6 +2903,7 @@ async function runServerProcess(
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
         ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
         ...MCP_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
+        ...(channelMechanism.kind === "available" ? EXTENSION_PRODUCT_API_EXACT_SET.operations : []),
         ...(advancementProductApi
           ? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -2935,6 +2954,7 @@ async function runServerProcess(
       ),
       createMcpManagementProductApiContribution((conversationId) =>
         conversationServices.worksceneContinuation.pendingMcpConnections(conversationId, bootstrap.mesh.deviceKey.deviceId)),
+      ...(channelMechanism.kind === "available" ? [channelMechanism.channels.productApi] : []),
       ...(advancementProductApi ? [advancementProductApi] : []),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),

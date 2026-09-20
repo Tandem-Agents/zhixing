@@ -245,8 +245,8 @@ function readinessFor(
       const adapterId = options.configuration.messaging?.[binding.id]?.type ??
         binding.id;
       const assertConnected = () => {
-        const status = options.channelStatuses().find((item) => item.channelId === adapterId);
-        if (!status || status.state !== "connected") {
+        const status = options.channelStatuses().find((item) => item.channelId === binding.id);
+        if (!status || status.state !== "connected" || status.configurationIssue) {
           throw new Error(`Credential rotation channel is not connected: ${binding.id}`);
         }
       };

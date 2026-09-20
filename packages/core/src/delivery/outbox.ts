@@ -265,6 +265,7 @@ export class Outbox {
       content: input.content,
       source: input.source,
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.deliveryAttempt ? { deliveryAttempt: input.deliveryAttempt } : {}),
       afterSlot: input.afterSlot,
       enqueuedAt: new Date(this.now()).toISOString(),
     };
@@ -509,7 +510,7 @@ export class Outbox {
 
   private sendWithTimeout(entry: OutboxEntry): Promise<DeliveryResult> {
     const meta = entry.idempotencyKey
-      ? { idempotencyKey: entry.idempotencyKey }
+      ? { idempotencyKey: entry.idempotencyKey, ...(entry.deliveryAttempt ? { deliveryAttempt: entry.deliveryAttempt } : {}) }
       : undefined;
     if (this.sendTimeoutMs <= 0) {
       return meta

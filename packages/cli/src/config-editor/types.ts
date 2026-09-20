@@ -103,6 +103,8 @@ export type ModelRole = RoleId;
  * 持久化完成前，配置与秘密改动只存在于本对象中。
  */
 export interface WorkingState {
+  channelStates?: Readonly<Record<string, { enabled: boolean; revision: number; intentRevision: number; type?: string; configurationIssue?: string }>>;
+  channelIntents?: Readonly<Record<string, boolean>>;
   config: ZhixingConfig;
   credentials: ZhixingCredentials;
   /**
@@ -298,6 +300,7 @@ export type PanelAction =
 // ─── 主入口 Context / Result ───
 
 export interface ConfigEditorContext {
+  channelStates?: WorkingState["channelStates"];
   /** 初始 config（从文件加载） */
   initialConfig: ZhixingConfig;
   /** 初始 credentials（从文件加载） */
@@ -329,11 +332,12 @@ export interface ConfigEditorContext {
 }
 
 export interface ConfigEditorWriters {
+  prepare?: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
   writeConfig: (config: ZhixingConfig) => Promise<void>;
   writeCredentials: (credentials: ZhixingCredentials) => Promise<void>;
 }
 
 export type ConfigEditorResult =
-  | { kind: "completed"; config: ZhixingConfig; credentials: ZhixingCredentials }
+  | { kind: "completed"; config: ZhixingConfig; credentials: ZhixingCredentials; channelIntents?: Readonly<Record<string, boolean>> }
   | { kind: "cancelled" }
   | { kind: "non-tty" };

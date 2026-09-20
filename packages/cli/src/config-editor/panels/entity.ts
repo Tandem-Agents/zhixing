@@ -24,12 +24,13 @@ import {
   disableMessaging,
   enableMessaging,
   isMessagingEnabled,
+  messagingEnabledProjection,
   readChannelEntry,
   readModelRole,
   readProviderEntry,
   writeModelRole,
 } from "../state.js";
-import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../../registries/index.js";
+import { SUPPORTED_PROVIDERS, listSupportedChannels } from "../../registries/index.js";
 import { maskForDisplay } from "../ui/mask.js";
 import { checkModel } from "../checks/model.js";
 import { checkMessaging } from "../checks/messaging.js";
@@ -216,7 +217,7 @@ function buildChannelConfigMeta(
   state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "channel-config" }>,
 ): EntityMeta {
-  const channel = SUPPORTED_CHANNELS.find((c) => c.id === descriptor.channelId);
+  const channel = listSupportedChannels().find((c) => c.id === (state.config.messaging?.[descriptor.channelId]?.type ?? state.channelStates?.[descriptor.channelId]?.type ?? descriptor.channelId));
   const channelLabel = channel?.label ?? descriptor.channelId;
   const channelCreds = readChannelEntry(state, descriptor.channelId) ?? {};
   const enabled = isMessagingEnabled(state, descriptor.channelId);
@@ -248,6 +249,7 @@ function buildChannelConfigMeta(
     const myIssues = checkMessaging(
       previewState.config,
       { channels: previewState.credentials.channels },
+      messagingEnabledProjection(previewState),
     ).filter((i) => i.channelId === descriptor.channelId);
     canEnable = myIssues.length === 0;
   }
@@ -268,7 +270,7 @@ function buildChannelConfigMeta(
         }
         // 点击态再算一次 preview——defensive
         const next = enableMessaging(s, descriptor.channelId);
-        const issues = checkMessaging(next.config, { channels: next.credentials.channels }).filter(
+        const issues = checkMessaging(next.config, { channels: next.credentials.channels }, messagingEnabledProjection(next)).filter(
           (i) => i.channelId === descriptor.channelId,
         );
         if (issues.length > 0) {

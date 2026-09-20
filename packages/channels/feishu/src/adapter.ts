@@ -13,12 +13,11 @@ import { validateChannelChallengeCallback } from "@zhixing/core/protocol";
 import { buildChallengeCard, buildReplyCard } from "./cards.js";
 import { FeishuApiError, FeishuClient, detectReceiveIdType, resolveDomain } from "./client.js";
 import { resolveConfig } from "./config.js";
-import { DedupCache } from "./dedup.js";
 import { normalizeMessage } from "./events.js";
 import { toFeishuMarkdown } from "./format.js";
 
 export class FeishuAdapter implements ChannelAdapter {
-  readonly id = "feishu";
+  constructor(readonly id = "feishu") {}
   readonly capabilities: ChannelCapabilities = {
     chatTypes: ["dm", "group"],
     media: false,
@@ -28,8 +27,10 @@ export class FeishuAdapter implements ChannelAdapter {
 
   private client: FeishuClient | null = null;
   private wsClient: lark.WSClient | null = null;
-  private dedup: DedupCache | null = null;
   private logger: ChannelLogger | null = null;
+  private connected = false;
+
+  health(): "ready" | "unavailable" { return this.connected ? "ready" : "unavailable"; }
 
   /**
    * 互动确认能力按凭据挂载:仅当 interactiveConfirmation 凭据在场时才存在,
@@ -43,13 +44,6 @@ export class FeishuAdapter implements ChannelAdapter {
     this.logger = ctx.logger;
 
     this.client = new FeishuClient(config);
-    this.dedup = new DedupCache({
-      ttlMs: config.dedupTtlMs,
-      maxSize: config.dedupMaxSize,
-    });
-
-    const dedup = this.dedup;
-    const logger = this.logger;
     const adapterId = this.id;
     const botOpenId = config.botOpenId;
 
@@ -89,48 +83,69 @@ export class FeishuAdapter implements ChannelAdapter {
       this.logger?.warn(
         "Feishu interactive confirmation is disabled: add verificationToken and encryptKey " +
           "(飞书开放平台 → 事件与回调 → 加密策略) to enable signed challenge cards. " +
-          "Basic messaging stays available; restart after adding the credentials.",
+          "Basic messaging stays available; refresh this connection after adding the credentials.",
       );
     }
 
+    // Coalesce transport retransmits only after the owner has acknowledged them.
+    // Rejections are never cached; durable replay after restart remains core-owned.
+    const acknowledged = new Set<string>();
+    const admitting = new Map<string, Promise<void>>();
     const eventDispatcher = new lark.EventDispatcher({}).register({
       [FEISHU_INBOUND_EVENT_NAMES[0]]: async (data) => {
+        if (ctx.abortSignal.aborted) throw new Error("Channel stopped before admission");
+        const msg = normalizeMessage(data, adapterId, botOpenId);
+        if (!msg) return;
+        const id = msg.messageId;
+        if (!id) throw new Error("Platform event identity missing");
+        if (acknowledged.has(id)) return;
+        const pending = admitting.get(id);
+        if (pending) return pending;
+        const admission = Promise.resolve().then(() => ctx.onMessage(msg));
+        admitting.set(id, admission);
         try {
-          if (ctx.abortSignal.aborted) return;
-
-          if (data.message?.message_id && dedup.isDuplicate(data.message.message_id)) {
-            logger?.debug("Duplicate message skipped: %s", data.message.message_id);
-            return;
-          }
-
-          const msg = normalizeMessage(data, adapterId, botOpenId);
-          if (!msg) return;
-
-          ctx.onMessage(msg);
-        } catch (err) {
-          logger?.error("Event handler error: %s", err);
-        }
+          await admission;
+          acknowledged.add(id);
+          if (acknowledged.size > 2048) acknowledged.delete(acknowledged.values().next().value!);
+        } finally { admitting.delete(id); }
       },
     });
 
     const domain = resolveDomain(config.domain);
+    let connected!: () => void;
+    let failed!: (error: Error) => void;
+    const connection = new Promise<void>((resolve, reject) => { connected = resolve; failed = reject; });
+    // The pinned SDK returns from start() before connection. Its logger is the
+    // public connection-state hook; never forward its credential-bearing data.
+    const observe = (...values: unknown[]) => {
+      if (values.includes("ws connect success")) { this.connected = true; connected(); }
+      if (values.some((value) => ["ws connect failed", "connect failed", "ws error", "client closed"].includes(String(value)))) {
+        this.connected = false;
+        failed(new Error("Feishu transport unavailable"));
+      }
+    };
     this.wsClient = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
       domain,
-      loggerLevel: lark.LoggerLevel.info,
+      loggerLevel: lark.LoggerLevel.trace,
+      logger: { trace: observe, debug: observe, info: observe, warn: observe, error: observe },
+      autoReconnect: false,
     });
 
     ctx.abortSignal.addEventListener("abort", () => {
+      this.connected = false;
+      failed(new Error("Channel stopped"));
       this.wsClient?.close();
     }, { once: true });
 
     try {
-      await this.wsClient.start({ eventDispatcher });
+      await Promise.all([this.wsClient.start({ eventDispatcher }), connection]);
     } catch (err) {
+      this.connected = false;
+      this.wsClient?.close();
       this.wsClient = null;
       this.client = null;
-      this.dedup = null;
       throw err;
     }
 
@@ -138,17 +153,16 @@ export class FeishuAdapter implements ChannelAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.connected = false;
     this.wsClient?.close();
     this.wsClient = null;
     this.client = null;
-    this.dedup?.clear();
-    this.dedup = null;
     delete this.sendChallenge;
     this.logger?.info("Feishu adapter disconnected");
     this.logger = null;
   }
 
-  async send(target: DeliveryTarget, content: OutboundContent): Promise<DeliveryResult> {
+  async send(target: DeliveryTarget, content: OutboundContent, meta?: import("@zhixing/core/channels").DeliveryAdapterSendMeta): Promise<DeliveryResult> {
     if (!this.client) {
       return { success: false, error: "Adapter not connected", retryable: true };
     }
@@ -159,9 +173,10 @@ export class FeishuAdapter implements ChannelAdapter {
       const card = buildReplyCard(formatted);
       const receiveIdType = detectReceiveIdType(target.to);
 
-      const messageId = await this.client.sendCard(target.to, card, receiveIdType);
+      const messageId = await this.client.sendCard(target.to, card, receiveIdType, meta?.idempotencyKey);
       return { success: true, messageId, retryable: false };
     } catch (err) {
+      if (!(err instanceof FeishuApiError)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const retryable = err instanceof FeishuApiError ? err.retryable : true;
       this.logger?.error("Send failed: %s", message);
@@ -197,9 +212,11 @@ export class FeishuAdapter implements ChannelAdapter {
         message.token.route.to,
         card,
         receiveIdType,
+        message.token.challengeId,
       );
       return { success: true, messageId, retryable: false };
     } catch (err) {
+      if (!(err instanceof FeishuApiError)) throw err;
       const error = err instanceof Error ? err.message : String(err);
       return {
         success: false,
