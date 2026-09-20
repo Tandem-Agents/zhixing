@@ -113,6 +113,7 @@ export interface AnchorRuntimeCapabilityCatalog {
  * runtime projection, without manufacturing an unbound Workscene directory.
  */
 export function createAnchorRuntimeCapabilityCatalog(input: {
+  readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
   readonly extraTools: BuiltinExtraToolsAssembly;
@@ -124,6 +125,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
     capabilityCatalog() {
       const mcp = input.mcpTools.snapshot();
       const tools = new Set<string>([
+        ...(input.extensionTools ?? []).map(tool => tool.name),
         ...(input.communicationTools ?? []).map(tool => tool.name),
         ...(input.mcpProductTools ?? []).map((tool) => tool.name),
         ...zhixingProfile().enabledTools,
@@ -176,6 +178,7 @@ function sceneProductTools(
 
 /** Anchor product composition; RuntimeHost only sees the frozen output. */
 export function createAnchorRuntimeProjectionAssembly(input: {
+  readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
   readonly agentIdentity: import("@zhixing/core/identity").AgentIdentity;
@@ -202,6 +205,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     return createRuntimeProductProjection({
       runtimeTools: createRuntimeToolProjection({
         extraTools: [
+          ...(productTools.length > 0 ? input.extensionTools ?? [] : []),
           ...(productTools.length > 0 ? input.communicationTools ?? [] : []),
           ...(input.mcpProductTools ?? []).filter((tool) => tool.name !== "mcp_connect" || productTools.length > 0),
           ...input.extraTools.assembleTools({ scheduler: () => executionScheduler }),

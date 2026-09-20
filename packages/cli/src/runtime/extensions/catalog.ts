@@ -5,14 +5,21 @@ import { validateExtensionManifest, type ExtensionManifest } from "@zhixing/core
 
 export interface PackagedExtension { readonly manifest: ExtensionManifest; readonly directory: string }
 
-/** Distribution-owned migration seeds. Installed candidates are admitted separately. */
-export function packagedExtensions(): readonly PackagedExtension[] {
+export function extensionKitDirectory(): string { return join(cliPackageDirectory(), "dist", "extension-kit"); }
+
+function cliPackageDirectory(): string {
   let directory = dirname(fileURLToPath(import.meta.url));
   while (!existsSync(join(directory, "package.json"))) {
     const parent = dirname(directory);
     if (parent === directory) throw new Error("CLI package root is unavailable");
     directory = parent;
   }
+  return directory;
+}
+
+/** Distribution-owned migration seeds. Installed candidates are admitted separately. */
+export function packagedExtensions(): readonly PackagedExtension[] {
+  const directory = cliPackageDirectory();
   const root = join(directory, "dist", "extensions");
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => {

@@ -9,7 +9,7 @@ export function resolveSystemProtectedSecretPaths(
 
   return [
     path.join(homeDir, "credentials.json"),
-    path.join(homeDir, "extensions", "artifacts"),
+    path.join(homeDir, "extensions"),
     ...getPlatformSecretStoreProtectedPaths(homeDir),
   ];
 }

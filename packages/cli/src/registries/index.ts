@@ -16,6 +16,7 @@ export {
 } from "./providers.js";
 export {
   listSupportedChannels,
+  findSupportedChannel,
   type SupportedChannel,
   type ChannelFieldSpec,
 } from "./channels.js";

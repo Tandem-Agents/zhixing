@@ -45,6 +45,11 @@ import { WorksceneContinuationApplication, type WorksceneApplication, type Works
 import type { PostTurnControlOutcome } from "@zhixing/core/types";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createTempDir } from "@zhixing/test-utils";
+import { ExtensionApplication } from "@zhixing/core/extensions/application";
+import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
+import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
+import { createExtensionContinuation, createExtensionStatusObserver, extensionContinuationText } from "../extension-continuation.js";
 import { resolve } from "node:path";
 import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
 import { describe, expect, it, vi } from "vitest";
@@ -330,6 +335,47 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it.each(["failed", "cancelled"] as const)("settles extension preparation after its run is %s without a later user query", async ending => {
+    const home = await createTempDir("extension-terminal");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    let manager!: ConversationManager;
+    let onboarding!: ExtensionOnboarding;
+    const phases: string[] = [];
+    const observer = createExtensionStatusObserver({ invoke: async request => ({ snapshot: await onboarding.manage(request), targetDeviceId: "device" }) });
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "prepare-scene",
+      async *run() { throw new Error("fixture preparation provider failure"); }, abort: () => false, async dispose() {} };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(), onStatus: observer });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const managed = await getOrCreateActiveConversation(authority, manager, "prepare-scene");
+    const application = new ExtensionApplication({ log: () => authority.authorityLog, assertOwner() {} });
+    const continuation = createExtensionContinuation({ manager, communication: { invoke: async () => { throw new Error("not local"); } }, deviceId: "device" });
+    onboarding = new ExtensionOnboarding(application, new ExtensionArtifacts(resolve(home, "extensions/artifacts")), new ExtensionCandidates(resolve(home, "extensions/candidates")), {
+      validate() {}, configuration: async () => undefined, discard: async () => {}, changed: async () => {},
+      notify: async operation => { const receipt = await continuation.notify(operation); phases.push(operation.phase); return receipt; },
+      preparationClosed: continuation.preparationClosed, isActive: () => true,
+    });
+    try {
+      await onboarding.manage({ action: "prepare", id: "operation", instanceId: "app", source: { conversationId: "prepare-scene", request: "连接 APP" } });
+      const operation = (await application.operation("operation"))!;
+      const turnId = "extension:operation:1";
+      if (ending === "cancelled") {
+        const admitted = (await manager.findDurableRunByIngress("prepare-scene", turnId, "interactive"))!;
+        await protocol.cancelAdmitted("prepare-scene", admitted.runId);
+      } else {
+        await projectSessionTurn({ manager, managed, text: extensionContinuationText(operation, "device"), turnId,
+          runOptions: { source: "interactive", surfacePrincipal: "conversation:prepare-scene", turnContext: { turnId } }, notify: () => {} });
+      }
+      expect((await manager.findDurableRunByIngress("prepare-scene", turnId, "interactive"))?.state).toBe(ending);
+      await expect.poll(() => phases, { timeout: 6000 }).toEqual(["preparing", "blocked"]);
+      expect((await application.operation("operation"))?.phase).toBe("blocked");
+      await expect.poll(async () => (await application.operation("operation"))?.notifiedRevision).toBe(2);
+      expect(await manager.findDurableRunByIngress("prepare-scene", "extension:operation:2", "interactive")).toBeTruthy();
+      await onboarding.reconcile();
+      expect(phases).toEqual(["preparing", "blocked"]);
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, 45000);
+
   it("conversation communication unit 2: model tools load, discover, read, send busy input and reply after A has finished", async () => {
     const home = await createTempDir("conversation-model-tools");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });

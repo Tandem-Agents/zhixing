@@ -1,4 +1,6 @@
 import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
+import { join } from "node:path";
+import { FileResumableArtifactReceiver } from "@zhixing/core/authority";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
@@ -19,6 +21,8 @@ import type {
 } from "@zhixing/core/contracts";
 import { createMeshRunInput, createMeshConversationCommunication, registerConversationCommunicationMesh } from "./conversation-communication-mesh.js";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
+import type { ExtensionManagementTransport } from "./extension-tools.js";
+import { createMeshExtensionManagement, registerExtensionManagementMesh } from "./extension-management-mesh.js";
 import { discoverConversations, routeAddressedConversationCommunication } from "./conversation-communication-binding.js";
 import {
   canonicalize,
@@ -1078,6 +1082,21 @@ export class MeshRuntimeAssembly
 
   submissionForAnchor(): JobSubmissionOwner {
     return this.#composition.submissionPort(this.#currentAnchorDeviceId());
+  }
+
+  extensionManagementForAnchor(local?: ExtensionManagementTransport): ExtensionManagementTransport {
+    return { invoke: request => {
+      if (this.#currentAnchorDeviceId() === this.options.authority.deviceId && local) return local.invoke(request);
+      return createMeshExtensionManagement(() => this.connections.client(this.#currentAnchorDeviceId())).invoke(request);
+    } };
+  }
+
+  bindExtensionManagement(management: ExtensionManagementTransport): void {
+    this.#disposers.push(registerExtensionManagementMesh({ registry: this.services, management,
+      artifacts: this.options.authority.artifacts,
+      receiver: new FileResumableArtifactReceiver(this.options.authority.artifacts,
+        join(this.options.zhixingHome, "extensions", "transfers"), { maxArtifactBytes: 24 * 1024 * 1024 }),
+      authorizePeer: id => this.#peerHasRole(id, "executor") || this.#peerHasRole(id, "anchor") }));
   }
 
   globalQueryForAnchor(

@@ -14,8 +14,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ExtensionApplication, ExtensionRevisionConflict } from "@zhixing/core/extensions/application";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
+import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
+import { channelDeclaration } from "@zhixing/core/channels/extension";
+import { ChannelVerification } from "../runtime/extensions/channel-verification.js";
 import { ManagedExtensions } from "@zhixing/core/extensions/runtime";
-import type { ExtensionBinding, ExtensionInstance } from "@zhixing/core/extensions/contracts";
+import type { ExtensionBinding, ExtensionInstance, ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import type { ProductApiContribution } from "@zhixing/core/product-api";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
@@ -48,6 +52,8 @@ export interface SetupChannelsOptions {
   readonly configuration: ChannelConfiguration;
   readonly artifactDirectory: string;
   readonly httpRoutes: Map<string, HttpHandler>;
+  readonly notifyOperation?: (operation: ExtensionOperation) => Promise<unknown>;
+  readonly preparationClosed?: (operation: ExtensionOperation) => Promise<boolean>;
   logger: ChannelLogger;
 }
 
@@ -139,7 +145,13 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   let connectionRevision = 0;
   const migrationFailures = new Set<string>();
   const observations = new Set<Promise<void>>();
+  let onboarding: ExtensionOnboarding | undefined;
   const snapshot = async () => { instances = (await application.list()).instances; };
+  const changedOperation = () => {
+    const observation = snapshot().then(() => onboarding?.reconcile()).then(() => undefined).catch(() => undefined);
+    observations.add(observation); void observation.finally(() => observations.delete(observation));
+  };
+  const verification = new ChannelVerification(application, options.configuration.secretPort(), (id) => runtime.current(id), changedOperation);
   const runtime: ManagedExtensions = new ManagedExtensions({
     application, artifacts, isOwner: options.isCurrentOwner,
     projection: (instance) => options.configuration.read(instance),
@@ -150,19 +162,26 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
         const selected = consumers;
         return {
           message: async (message) => {
+            const current = await application.get(instance.id);
+            if (!current || !current.enabled || current.generation !== instance.generation) throw new Error("连接代际已失效");
+            if (await verification.accept(current, message)) return;
+            const admitted = await application.get(instance.id);
+            if (!admitted?.enabled || admitted.generation !== instance.generation || (admitted.admission && !admitted.admission.ready)) throw new Error("连接准入已变化");
             if (selected.inbound.kind !== "router") throw new Error("Inbound Channel unavailable");
             await selected.inbound.handleMessage(message);
           },
-          challenge: selected.onChallengeAction,
+          challenge: async (action) => {
+            const current = await application.get(instance.id);
+            if (current?.admission && !current.admission.ready) throw new Error("连接尚未通过验证");
+            await selected.onChallengeAction(action);
+          },
         };
       },
       ready: (ready) => { if (ready) capabilities.set(instance.id, ready); else capabilities.delete(instance.id); },
     }),
     onState: () => {
       if (closed) return;
-      const observation = snapshot().catch(() => undefined);
-      observations.add(observation);
-      void observation.finally(() => observations.delete(observation));
+      changedOperation();
     },
   });
 
@@ -171,6 +190,9 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   const adoptConfigured = async () => {
     for (const [id, entry] of Object.entries(options.configuration.entries())) {
       if (await application.get(id)) continue;
+      // Dynamic candidates (including cancelled operations) never become a
+      // distribution migration just because their type matches a seed.
+      if ((await application.list()).operations?.some(operation => operation.instanceId === id)) continue;
       const seed = seeds.find(({ manifest }) => manifest.type === "channel" && manifest.id === (entry.type ?? id));
       if (!seed) { migrationFailures.add(id); options.logger.error("Channel '%s': no admitted artifact", id); continue; }
       try {
@@ -256,17 +278,49 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       }
     }
     await snapshot();
-    return { instances };
+    await onboarding?.reconcile();
+    return application.list();
   };
-  const productApi = application.contribution({
+  onboarding = new ExtensionOnboarding(application, artifacts, new ExtensionCandidates(join(options.artifactDirectory, "..", "candidates")), {
+    validate: (manifest) => { channelDeclaration(manifest); },
+    configuration: async (operation) => {
+      if (!options.configuration.entries()[operation.instanceId]) return undefined;
+      const publication = await options.configuration.publication(operation.instanceId);
+      if (!publication) throw new Error("候选配置必须经安全入口完整保存");
+      const intent = await options.configuration.requestedEnabled(operation.instanceId, undefined, publication.revision);
+      if (intent === false) { await application.cancel(operation.id, operation.revision); return undefined; }
+      const binding = await options.configuration.prepare(operation.instanceId, operation.candidate!, undefined, true);
+      await verification.code(operation);
+      return binding;
+    },
+    discard: (id, binding) => options.configuration.discard(id, binding),
     changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); },
+    notify: async (operation) => {
+      if (!options.notifyOperation) throw new Error("原请求结果入口尚未就绪");
+      return options.notifyOperation(operation);
+    },
+    preparationClosed: options.preparationClosed,
+    isActive: () => active && ownerRequested && !closed && !admissionPaused && options.isCurrentOwner(),
+  });
+  const productApi = application.contribution({
+    changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); await onboarding?.reconcile(); },
     refresh, applyConfiguration,
+    manage: (request) => onboarding!.manage(request),
+    localSetup: async () => {
+      const instructions: Record<string, string> = {};
+      for (const operation of (await application.list()).operations ?? []) {
+        if (["configuration", "verifying"].includes(operation.phase)) instructions[operation.instanceId] = `保存凭据并启用后，本人在对应 APP 的目标会话发送：连接 ${await verification.code(operation)}；再在同一会话按收到的回复确认。`;
+      }
+      return instructions;
+    },
   });
   const send = async (
     target: DeliveryTarget, content: OutboundContent, meta?: Parameters<ChannelAdapter["send"]>[2],
   ): Promise<DeliveryResult> => {
     // Delivery's already-admitted attempts settle under its own drain boundary.
     if (admissionPaused && !meta?.deliveryAttempt) throw new Error("Channel admission is paused");
+    const instance = await application.get(target.channelId);
+    if (instance?.admission && !instance.admission.ready) throw new Error("连接尚未通过收发验证");
     const process = runtime.current(target.channelId);
     if (!process) throw new Error("Channel not available");
     return channelDeliveryResult(await process.call("channel.send", { target, content, ...(meta ? { meta } : {}) }));
@@ -279,32 +333,33 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     if (revision !== connectionRevision || closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()) return;
     admissionPaused = false;
     await runtime.resume();
+    await onboarding?.reconcile();
   };
   await snapshot();
   return {
     productApi,
     statusSnapshot: () => Object.freeze([...instances.filter((instance) => instance.binding.manifest.type === "channel").map((instance) => Object.freeze({
       channelId: instance.id,
-      state: runtime.current(instance.id) ? "connected" as const : runtime.state(instance.id) !== "stopped" ? "connecting" as const :
+      state: runtime.current(instance.id) ? instance.admission && !instance.admission.ready ? "connecting" as const : "connected" as const : runtime.state(instance.id) !== "stopped" ? "connecting" as const :
         ownerRequested && active && instance.enabled && instance.phase === "blocked" ? "error" as const : "disconnected" as const,
       ...(instance.reason ? { error: instance.reason } : {}),
-      ...(instance.configurationIssue ? { configurationIssue: instance.configurationIssue } : {}),
+      ...(instance.configurationIssue ? { configurationIssue: instance.configurationIssue } : instance.admission && !instance.admission.ready ? { configurationIssue: "待完成本人收发验证，尚未开放正常使用" } : {}),
     })), ...[...migrationFailures].map((channelId) => Object.freeze({ channelId,
       state: ownerRequested && active ? "error" as const : "disconnected" as const,
       error: "连接迁移受阻，请检查本机制品与账号配置；原数据已保留" }))]),
     delivery: {
-      status: (id) => runtime.current(id) ? "connected" : "disconnected",
+      status: (id) => runtime.current(id) && !instances.some(instance => instance.id === id && instance.admission && !instance.admission.ready) ? "connected" : "disconnected",
       send,
     },
     inbound: {
       // During handshake messages may already arrive. Admission is still guarded
       // by current-owner and router gates and does not wait for another Run.
-      has: (id) => instances.some((instance) => instance.id === id && instance.enabled),
+      has: (id) => instances.some((instance) => instance.id === id && instance.enabled && (!instance.admission || instance.admission.ready)),
       bindingPolicy: (id) => capabilities.get(id)?.bindingPolicy,
       send,
     },
     challenges: {
-      supports: (id) => Boolean(runtime.current(id) && capabilities.get(id)?.challenges),
+      supports: (id) => Boolean(runtime.current(id) && capabilities.get(id)?.challenges && !instances.some(instance => instance.id === id && instance.admission && !instance.admission.ready)),
       sendChallenge: async (message: ChannelChallengeMessage) => {
         const process = runtime.current(message.token.route.channelId);
         if (!process || !capabilities.get(message.token.route.channelId)?.challenges) throw new Error("Channel challenge unavailable");

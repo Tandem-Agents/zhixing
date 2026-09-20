@@ -37,11 +37,48 @@ export interface ExtensionInstance {
   readonly phase: ExtensionPhase;
   readonly reason?: string;
   readonly configurationIssue?: string;
+  /** New installations expose only type-owned verification until admission commits. */
+  readonly admission?: { readonly operationId: string; readonly ready: boolean };
 }
 
 export interface ExtensionSnapshot {
   readonly instances: readonly ExtensionInstance[];
+  readonly operations?: readonly ExtensionOperation[];
 }
+
+export interface ExtensionOperation {
+  readonly id: string;
+  readonly instanceId: string;
+  readonly revision: number;
+  readonly source: { readonly conversationId: string; readonly request: string; readonly returnAddress?: unknown };
+  readonly phase: "preparing" | "configuration" | "verifying" | "ready" | "blocked" | "cancelled";
+  readonly candidate?: ExtensionManifest;
+  /** Opaque type-owned verification checkpoint; no credentials. */
+  readonly verification?: unknown;
+  readonly reason?: string;
+  readonly notifiedRevision?: number;
+  /** Existing Conversation admission receipt, interpreted only by its binding. */
+  readonly continuation?: unknown;
+}
+
+export const extensionOperationActive = (operation: ExtensionOperation) =>
+  !["ready", "cancelled"].includes(operation.phase);
+
+export interface ExtensionCandidate {
+  readonly manifest: ExtensionManifest;
+  readonly code: string;
+  readonly provenance: { readonly url: string; readonly revision: string; readonly kind: "existing" | "authored" };
+  /** Versioned source and exact build recipe, retained independently of scratch space. */
+  readonly sources: Readonly<Record<string, string>>;
+  readonly build: string;
+}
+
+export type ExtensionManagementRequest =
+  | { readonly action: "prepare"; readonly id: string; readonly instanceId: string; readonly source: ExtensionOperation["source"] }
+  | { readonly action: "connect"; readonly id: string; readonly expectedRevision: number; readonly candidate: ExtensionCandidate }
+  | { readonly action: "cancel"; readonly id: string; readonly expectedRevision: number }
+  | { readonly action: "disable"; readonly instanceId: string }
+  | { readonly action: "status" };
 
 export function validateExtensionManifest(value: unknown): ExtensionManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

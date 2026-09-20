@@ -26,7 +26,7 @@ import {
   writeModelThinking,
 } from "../state.js";
 import { maskForDisplay, maskForInput } from "../ui/mask.js";
-import { SUPPORTED_PROVIDERS, listSupportedChannels } from "../../registries/index.js";
+import { SUPPORTED_PROVIDERS, listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 import {
   tone,
   layout,
@@ -125,7 +125,8 @@ function resolveInputField(
   const channelMatch = /^channel-field:([^:]+):(.+)$/.exec(fieldId);
   if (channelMatch) {
     const [, channelId, channelFieldId] = channelMatch;
-    const channel = listSupportedChannels().find((c) => c.id === (state.config.messaging?.[channelId!]?.type ?? state.channelStates?.[channelId!]?.type ?? channelId));
+    const channel = findSupportedChannel(state.channelCatalog ?? listSupportedChannels(), channelId!,
+      state.config.messaging?.[channelId!]?.type ?? state.channelStates?.[channelId!]?.type);
     if (!channel) return null;
     const field = channel.requiredFields.find((f) => f.id === channelFieldId);
     if (!field) return null;

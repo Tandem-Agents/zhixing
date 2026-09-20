@@ -86,6 +86,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [轻量工具循环](modules/tools/lightweight-tool-loop.md)
 - [MCP Host 架构](modules/mcp/architecture.md)
 - [MCP 接入与管理](modules/mcp/onboarding-and-management.md)
+- [外部连接适配编写与接入](modules/extensions/authoring.md)
 - [网络出口架构](modules/network/architecture.md)
 - [消息 Outbox 与因果排序](modules/delivery/outbox.md)
 - [飞书通道架构与能力边界](modules/feishu/architecture.md)

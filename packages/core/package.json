@@ -4,6 +4,14 @@
   "description": "知行核心引擎 — AsyncGenerator Agent Loop、事件系统、工具管线",
   "type": "module",
   "exports": {
+    "./extensions/onboarding": {
+      "types": "./dist/extensions/onboarding.d.ts",
+      "import": "./dist/extensions/onboarding.js"
+    },
+    "./extensions/candidate": {
+      "types": "./dist/extensions/candidate.d.ts",
+      "import": "./dist/extensions/candidate.js"
+    },
     "./channels/extension": {
       "types": "./dist/channels/extension.d.ts",
       "import": "./dist/channels/extension.js"

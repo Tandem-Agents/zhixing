@@ -91,6 +91,20 @@ const ADMIT_SKILL: BuiltinSkillDef = {
 
 /** 全部内置能力 def —— 登记处(builtin.ts)从此组装注册集。 */
 export const BUILTIN_SKILL_DEFS: readonly BuiltinSkillDef[] = [
+  {
+    name: "外部能力接入",
+    description: "用户要在外部 APP 中使用知行，或查询、取消接入及停用连接时使用。",
+    modes: ["main", "work"], tools: ["extension"],
+    body: `# 外部能力接入
+
+先用 extension prepare 接纳原请求，然后结束本轮；系统会接续准备。收到接续消息后复用操作标识，不另建请求。
+
+用 extension guide 找到随安装交付的合同、SDK、schema 与校验入口。查官方来源，在工作目录准备固定版本候选；现成包、SDK 包装和自行编写均按同一合同校验，保留源码、依赖锁与构建说明。准备和构建使用既有工具及安全确认，不改核心或生效目录。
+
+用 extension_connect 提交 candidate.json 及已检查的摘要。用户只在目标设备 /config 消息通道中填写凭据和完成本人验证；不把秘密写入对话或候选。安装、进程存活不代表可用，以管理结果为准。等待本人操作时结束运行，不轮询；系统负责接续和返回结果。
+
+status 查询状态与受阻原因；cancel 撤销尚未完成的操作；disable 停用连接。取消或停用后不重新创建请求或绕过验证。`,
+  },
   DISTILL_SKILL,
   ADMIT_SKILL,
   {

@@ -15,7 +15,7 @@ import type {
   WorkingState,
 } from "../types.js";
 import { isMessagingEnabled, messagingEnabledProjection } from "../state.js";
-import { listSupportedChannels } from "../../registries/index.js";
+import { listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 import { checkMessaging, type MessagingIssue } from "../checks/messaging.js";
 
 export const messagingSection: Section = {
@@ -23,11 +23,11 @@ export const messagingSection: Section = {
   title: "消息通道",
   description: "用于接收外部消息触发 agent（如飞书）",
   entries: (state) => {
-    const allIssues = checkMessaging(state.config, { channels: state.credentials.channels }, messagingEnabledProjection(state));
-    const catalog = listSupportedChannels();
-    const ids = [...new Set([...catalog.map((channel) => channel.id), ...Object.keys(state.config.messaging ?? {}), ...Object.keys(state.channelStates ?? {})])];
+    const catalog = state.channelCatalog ?? listSupportedChannels();
+    const allIssues = checkMessaging(state.config, { channels: state.credentials.channels }, messagingEnabledProjection(state), catalog);
+    const ids = [...new Set([...listSupportedChannels().map((channel) => channel.id), ...Object.keys(state.config.messaging ?? {}), ...Object.keys(state.channelStates ?? {})])];
     return ids.map((id) => {
-      const definition = catalog.find((channel) => channel.id === (state.config.messaging?.[id]?.type ?? state.channelStates?.[id]?.type ?? id));
+      const definition = findSupportedChannel(catalog, id, state.config.messaging?.[id]?.type ?? state.channelStates?.[id]?.type);
       return buildEntry(state, id, definition?.id === id ? definition.label : `${definition?.label ?? "连接"} · ${id}`, allIssues);
     });
   },

@@ -30,7 +30,7 @@ import {
   readProviderEntry,
   writeModelRole,
 } from "../state.js";
-import { SUPPORTED_PROVIDERS, listSupportedChannels } from "../../registries/index.js";
+import { SUPPORTED_PROVIDERS, listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 import { maskForDisplay } from "../ui/mask.js";
 import { checkModel } from "../checks/model.js";
 import { checkMessaging } from "../checks/messaging.js";
@@ -217,7 +217,8 @@ function buildChannelConfigMeta(
   state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "channel-config" }>,
 ): EntityMeta {
-  const channel = listSupportedChannels().find((c) => c.id === (state.config.messaging?.[descriptor.channelId]?.type ?? state.channelStates?.[descriptor.channelId]?.type ?? descriptor.channelId));
+  const channel = findSupportedChannel(state.channelCatalog ?? listSupportedChannels(), descriptor.channelId,
+    state.config.messaging?.[descriptor.channelId]?.type ?? state.channelStates?.[descriptor.channelId]?.type);
   const channelLabel = channel?.label ?? descriptor.channelId;
   const channelCreds = readChannelEntry(state, descriptor.channelId) ?? {};
   const enabled = isMessagingEnabled(state, descriptor.channelId);
@@ -250,6 +251,7 @@ function buildChannelConfigMeta(
       previewState.config,
       { channels: previewState.credentials.channels },
       messagingEnabledProjection(previewState),
+      state.channelCatalog,
     ).filter((i) => i.channelId === descriptor.channelId);
     canEnable = myIssues.length === 0;
   }
@@ -270,7 +272,7 @@ function buildChannelConfigMeta(
         }
         // 点击态再算一次 preview——defensive
         const next = enableMessaging(s, descriptor.channelId);
-        const issues = checkMessaging(next.config, { channels: next.credentials.channels }, messagingEnabledProjection(next)).filter(
+        const issues = checkMessaging(next.config, { channels: next.credentials.channels }, messagingEnabledProjection(next), state.channelCatalog).filter(
           (i) => i.channelId === descriptor.channelId,
         );
         if (issues.length > 0) {
@@ -286,7 +288,7 @@ function buildChannelConfigMeta(
 
   return {
     title: `消息通道 · ${channelLabel}`,
-    description: `配置 ${channelLabel} 的连接凭证`,
+    description: `配置 ${channelLabel} 的连接凭证${state.channelSetup?.[descriptor.channelId] ? `\n${state.channelSetup[descriptor.channelId]}` : ""}`,
     rows,
     buttons,
   };

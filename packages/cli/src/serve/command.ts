@@ -14,6 +14,8 @@ import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
+import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
+import { createExtensionContinuation, createExtensionNotificationHandle, createExtensionStatusObserver } from "./extension-continuation.js";
 import { createConversationCommunicationBinding, createLocalConversationCommunicationBinding, discoverConversations } from "./conversation-communication-binding.js";
 import { CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET, createConversationCommunicationProductApiContribution } from "@zhixing/core/conversation/application";
 import { McpManagementApplication, MCP_MANAGEMENT_PRODUCT_API_EXACT_SET, createMcpManagementProductApiContribution } from "@zhixing/core/mcp-management";
@@ -77,7 +79,7 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
-import { EXTENSION_PRODUCT_API_EXACT_SET } from "@zhixing/core/extensions/application";
+import { EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
 import {
@@ -702,7 +704,11 @@ async function runServerProcess(
   );
   const communicationHandle = createConversationCommunicationAssemblyHandle();
   const communicationTools = [createConversationTool(communicationHandle.port)];
+  const extensionHandle = createExtensionManagementHandle();
+  const extensionNotifications = createExtensionNotificationHandle();
+  const extensionTools = createExtensionTools(extensionHandle.port);
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
+    extensionTools,
     communicationTools,
     mcpProductTools,
     extraTools: builtinExtraTools,
@@ -754,6 +760,7 @@ async function runServerProcess(
     remoteWorkspaceProbe,
   });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
+    extensionTools,
     communicationTools,
     mcpProductTools,
     agentIdentity: resolveAgentIdentity(kernelEnvironmentConfiguration.agent),
@@ -940,6 +947,7 @@ async function runServerProcess(
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
   const conversationServices = await createConversationServices({
+    onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,
     meshBootstrap: bootstrap.mesh,
@@ -1020,6 +1028,7 @@ async function runServerProcess(
       throw new Error("Local executor requires the completed Conversation execution graph");
     }
     const owner = await createLocalConversationOwner({
+      onRunStatus: createExtensionStatusObserver(extensionHandle.port),
       executorRoleModule: executor,
       evidenceHandler: evidence,
       assignmentRuntimeFactory,
@@ -1086,6 +1095,8 @@ async function runServerProcess(
   });
   const channelMechanism: PreparedChannelMechanism = enabledSurfaces.has("channel")
     ? await prepareChannel({
+        notifyOperation: extensionNotifications.notify,
+        preparationClosed: extensionNotifications.preparationClosed,
         authorityRuntime,
         zhixingHome,
         configPath: getGlobalConfigPath({}, zhixingHome),
@@ -2976,6 +2987,14 @@ async function runServerProcess(
     } };
   communicationHandle.bind(routedCommunication);
   meshRuntime?.bindConversationCommunication(routedCommunication, ownedCommunication);
+  extensionNotifications.bind(createExtensionContinuation({ manager: boundConversations!, communication: routedCommunication,
+    deviceId: bootstrap.mesh.deviceKey.deviceId }));
+  const localExtensionManagement: import("./extension-tools.js").ExtensionManagementTransport = { invoke: async request => ({
+    snapshot: (await productApi.command(extensionManage, request)).result,
+    targetDeviceId: bootstrap.mesh.deviceKey.deviceId,
+  }) };
+  extensionHandle.bind(meshRuntime ? meshRuntime.extensionManagementForAnchor(localExtensionManagement) : localExtensionManagement);
+  meshRuntime?.bindExtensionManagement(localExtensionManagement);
   await localExecutor?.owner.start(startupLifecycle
     ? { lifecycle: {
         operationId: startupLifecycle.delivery.operationId,

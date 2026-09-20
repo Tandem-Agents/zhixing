@@ -15,7 +15,7 @@ import type {
   ChannelCredentialProjection,
   ZhixingConfig,
 } from "@zhixing/providers";
-import { listSupportedChannels } from "../../registries/index.js";
+import { listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 
 export interface MessagingIssue {
   channelId: string;
@@ -34,13 +34,14 @@ export function checkMessaging(
   config: ZhixingConfig,
   credentials: ChannelCredentialProjection,
   enabled?: Readonly<Record<string, boolean>>,
+  catalog = listSupportedChannels(),
 ): MessagingIssue[] {
   const issues: MessagingIssue[] = [];
   const messaging = config.messaging ?? {};
 
   for (const channelId of Object.keys(messaging)) {
     if (enabled?.[channelId] === false) continue;
-    const channelDef = listSupportedChannels().find((c) => c.id === (messaging[channelId]?.type ?? channelId));
+    const channelDef = findSupportedChannel(catalog, channelId, messaging[channelId]?.type);
     if (!channelDef) {
       issues.push({ channelId, field: "extension", path: `messaging.${channelId}`, label: `${channelId} - 连接扩展未就绪`, fieldLabel: "连接扩展" });
       continue;

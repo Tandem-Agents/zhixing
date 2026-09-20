@@ -17,6 +17,7 @@ interface ConfigurationPublication {
 /** Local immutable projections survive partial source writes, never enter Authority or a Run. */
 export class ChannelConfiguration {
   constructor(private readonly configPath: string, private readonly secrets: SecretStorePort & CredentialStoreCoordinator) {}
+  secretPort(): SecretStorePort & CredentialStoreCoordinator { return this.secrets; }
 
   entries() { return loadConfig({ configPath: this.configPath }).messaging ?? {}; }
 

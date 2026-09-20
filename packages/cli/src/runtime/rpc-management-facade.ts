@@ -175,6 +175,10 @@ export class RpcManagementFacade {
     const client = await this.link.getClient();
     return client.request("extensions.list");
   }
+  async extensionLocalSetup(): Promise<Readonly<Record<string, string>>> {
+    const client = await this.link.getClient();
+    return client.request("extensions.local-setup");
+  }
 
   /** 只读取当前已连接宿主状态；无连接时返回 null，不发现、不拉起。 */
   async serverInfoIfConnected(): Promise<ServerInfoResult | null> {

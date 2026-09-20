@@ -14,7 +14,7 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
     const artifacts = new ExtensionArtifacts(artifactDirectory);
     const seeds = packagedExtensions();
     const application = new ExtensionApplication({ log: () => log, assertOwner: () => { throw new Error("Readiness cannot change extension intent"); } });
-    const instances = (await application.list()).instances;
+    const { instances, operations } = await application.list();
     const ready: { id: string; digest: string; configuration: string }[] = [];
     for (const instance of instances) {
       if (!instance.enabled || instance.binding.manifest.type !== "channel") continue;
@@ -29,6 +29,7 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
     }
     for (const [id, entry] of Object.entries(configuration.entries())) {
       if (instances.some((instance) => instance.id === id)) continue;
+      if (operations?.some(operation => operation.instanceId === id)) continue;
       const seed = seeds.find(({ manifest }) => manifest.type === "channel" && manifest.id === (entry.type ?? id));
       if (!seed) throw new Error(`Channel migration artifact is not ready: ${id}`);
       await artifacts.import(seed.manifest, await readFile(join(seed.directory, seed.manifest.entry)));

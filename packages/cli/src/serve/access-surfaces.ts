@@ -493,6 +493,7 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
   readonly conversationNamingStorage: NamerConversationRepo;
   readonly meshBootstrap: MeshRuntimeBootstrap;
@@ -688,6 +689,7 @@ export async function createConversationServices(
       return execution.runResult;
     },
     onStatus: (notice) => {
+      input.onRunStatus?.(notice);
       inputSessionBroadcast(
         notice.ref.conversationId,
         SESSION_NOTIFICATIONS.status,
@@ -970,6 +972,7 @@ export async function createConversationServices(
 
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
 export interface CreateLocalConversationOwnerInput {
+  readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly executorRoleModule: ExecutorRoleModule;
   readonly evidenceHandler: EvidenceHandlerPort & { stopAccepting(): void };
   readonly assignmentRuntimeFactory: RuntimeFactory;
@@ -1056,6 +1059,7 @@ export async function createLocalConversationOwner(
     throw new Error("Local Conversation owner requires assignment staging");
   }
   const assembly = await LocalConversationOwnerAssembly.create({
+    onRunStatus: input.onRunStatus,
     owner: localOwner,
     executorDispatch: localExecutorBoundary.application,
     assignmentStaging: localExecutorBoundary.staging,
@@ -1187,6 +1191,8 @@ function channelOwnership(
 
 /** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 export interface PrepareChannelInput {
+  readonly notifyOperation?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
+  readonly preparationClosed?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
   readonly authorityRuntime: AuthorityRuntimeStack;
   readonly zhixingHome: string;
   readonly configPath: string;
@@ -1223,6 +1229,8 @@ export async function prepareChannel(
       artifactDirectory: path.join(input.zhixingHome, "extensions", "artifacts"),
       httpRoutes: inputChannelHttpRoutes,
       logger: channelLogger,
+      notifyOperation: input.notifyOperation,
+      preparationClosed: input.preparationClosed,
     });
     input.lifecycleContributions.acquire("channels.dispose", async () => {
       conversationProduct.close();

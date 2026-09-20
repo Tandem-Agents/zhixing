@@ -1,8 +1,14 @@
-import { extensionList, extensionSetEnabled, extensionRefresh, extensionApplyConfiguration } from "@zhixing/core/extensions/application";
+import { extensionList, extensionSetEnabled, extensionRefresh, extensionApplyConfiguration, extensionLocalSetup } from "@zhixing/core/extensions/application";
 import { RpcErrors, type MethodEntry } from "../handlers.js";
 
 export function buildExtensionMethods(): MethodEntry[] {
   return [
+    { name: "extensions.local-setup", requiresAuth: true, async handler(_params, ctx) {
+      if (!ctx.connection.loopback) throw RpcErrors.invalidParams("请在目标设备的配置入口完成账号验证");
+      const api = ctx.server.productApi;
+      if (!api?.supports(extensionLocalSetup)) throw RpcErrors.invalidParams("扩展管理不可用");
+      return api.query(extensionLocalSetup, undefined);
+    } },
     { name: "extensions.list", requiresAuth: true, async handler(_params, ctx) {
       const api = ctx.server.productApi;
       if (!api?.supports(extensionList)) throw RpcErrors.invalidParams("扩展管理在当前宿主不可用");

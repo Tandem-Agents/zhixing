@@ -32,7 +32,8 @@ function fixture(mcpTools = {
     tools: [{ name: "mcp__alpha__tool" }],
     serverIds: ["alpha", "beta"],
   }),
-} as never, communicationTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
+} as never, communicationTools: readonly import("@zhixing/core").ToolDefinition[] = [],
+extensionTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
   const workscenes = {} as never;
   const extraTools = {
     taskListService: {},
@@ -42,6 +43,7 @@ function fixture(mcpTools = {
     ],
   } as never;
   const capabilities = createAnchorRuntimeCapabilityCatalog({
+    extensionTools,
     communicationTools,
     extraTools,
     mcpTools,
@@ -54,6 +56,7 @@ function fixture(mcpTools = {
     id: sceneId === undefined ? "guidance-main" : `guidance-scene:${sceneId}`,
   }));
   return createAnchorRuntimeProjectionAssembly({
+    extensionTools,
     communicationTools,
     agentIdentity: { displayName: "知行" },
     capabilities,
@@ -71,6 +74,20 @@ function fixture(mcpTools = {
 }
 
 describe("Workscene product runtime projection", () => {
+  it("provides extension management in main/work and remote projections without widening frozen jobs", () => {
+    const tools = ["extension", "extension_connect"].map(name => ({ name }) as import("@zhixing/core").ToolDefinition);
+    const assembly = fixture(undefined, [], tools);
+    for (const tool of tools) {
+      expect(assembly.main().runtimeTools.extraTools).toContainEqual(tool);
+      expect(assembly.scene({ scene: scene().scene, absolutePath: null }).runtimeTools.extraTools).toContainEqual(tool);
+      expect(assembly.ephemeral().runtimeTools.extraTools).not.toContainEqual(tool);
+      expect(assembly.jobCapabilities().tools).not.toContain(tool.name);
+      expect(assembly.capabilityCatalog().tools).toContain(tool.name);
+    }
+    const names = tools.map(tool => tool.name);
+    expect(projectConversationCapabilitiesForDevice({ profile: { tools: names, mcpServers: [], providerIds: [] },
+      ownerDeviceId: "owner", executorDeviceId: "remote", capabilities: { tools: names, mcpServers: [] } }).tools).toEqual(names);
+  });
   it("binds communication in main/work, keeps it portable and excludes jobs", () => {
     const communication = { name: "conversation" } as import("@zhixing/core").ToolDefinition;
     const assembly = fixture(undefined, [communication]);

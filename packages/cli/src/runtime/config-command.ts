@@ -31,6 +31,7 @@ import {
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
 import { ChannelConfiguration } from "./extensions/channel-configuration.js";
+import { listSupportedChannels } from "../registries/channels.js";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
 import {
   BASE_CONFIG_SECTION_IDS,
@@ -49,6 +50,7 @@ import { requireChrome } from "../commands/command-visibility.js";
 
 export interface ConfigCommandDeps {
   readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
+  readonly readExtensionLocalSetup?: () => Promise<Readonly<Record<string, string>>>;
   readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
   readonly zhixingHome: string;
   readonly configPath: string;
@@ -221,6 +223,8 @@ async function runEditorCommand(
     const config = loadConfig({ configPath });
     const { credentials } = await loadCredentialSnapshot({ store: secretStore });
     const managed = opts.sections.includes("messaging") && deps.readExtensions ? await deps.readExtensions() : undefined;
+    const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
+    const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
     const configuration = new ChannelConfiguration(configPath, secretStore);
     const pendingIds = new Set<string>();
     if (managed) for (const id of new Set([...managed.instances.map((instance) => instance.id), ...Object.keys(config.messaging ?? {})])) {
@@ -230,6 +234,12 @@ async function runEditorCommand(
       .map((instance) => [instance.id, { enabled: instance.enabled, revision: instance.revision, intentRevision: instance.intentRevision, type: instance.binding.manifest.id,
         ...(instance.configurationIssue || pendingIds.has(instance.id)
           ? { configurationIssue: instance.configurationIssue ?? "配置待应用" } : {}) }])) : undefined;
+    if (channelStates) for (const operation of managed?.operations ?? []) {
+      if (operation.phase === "configuration" && operation.candidate && !channelStates[operation.instanceId]) {
+        channelStates[operation.instanceId] = { enabled: false, revision: 0, intentRevision: 0, type: operation.candidate.id,
+          configurationIssue: "待填写凭据并完成本人收发验证" };
+      }
+    }
     const changedChannels = (nextConfig: typeof config, nextCredentials: typeof credentials,
       intents: Readonly<Record<string, boolean>> = {}) => [...new Set([
         ...Object.keys(config.messaging ?? {}), ...Object.keys(nextConfig.messaging ?? {}), ...Object.keys(intents),
@@ -242,6 +252,8 @@ async function runEditorCommand(
       initialConfig: config,
       initialCredentials: credentials,
       ...(channelStates ? { channelStates } : {}),
+      ...(channelCatalog ? { channelCatalog } : {}),
+      ...(channelSetup ? { channelSetup } : {}),
       sections: opts.sections,
       title: opts.title,
       ...(opts.runtime ? { runtime: opts.runtime } : {}),

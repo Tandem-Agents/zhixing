@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Zhixing Channel Extension / protocol 1 / contract 1",
+  "type": "object",
+  "required": ["id", "version", "digest", "runtime", "entry", "protocol", "type", "contract", "declaration"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$" },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "runtime": { "const": "node24" },
+    "entry": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+\\.mjs$" },
+    "protocol": { "const": 1 }, "type": { "const": "channel" }, "contract": { "const": 1 },
+    "declaration": {
+      "type": "object", "required": ["label", "requiredFields", "identityFields", "capabilities"],
+      "properties": {
+        "label": { "type": "string" }, "description": { "type": "string" },
+        "identityFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "requiredFields": { "type": "array", "items": { "type": "object", "required": ["id", "label", "hint", "example", "sensitive"], "properties": {
+          "id": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
+          "label": { "type": "string" }, "hint": { "type": "string" }, "example": { "type": "string" },
+          "sensitive": { "type": "boolean" }, "capabilityGroup": { "type": "string" }, "docUrl": { "type": "string", "pattern": "^https://" }
+        } } },
+        "capabilities": { "type": "object", "required": ["chatTypes", "media", "edit", "streaming"], "properties": {
+          "chatTypes": { "type": "array", "items": { "enum": ["dm", "group", "thread"] } },
+          "media": { "type": "boolean" }, "edit": { "type": "boolean" }, "streaming": { "type": "boolean" }
+        } }
+      }
+    }
+  }
+}

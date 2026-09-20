@@ -212,6 +212,7 @@ export interface LocalConversationRemovalSnapshot {
 }
 
 export interface LocalConversationOwnerAssemblyOptions {
+  readonly onRunStatus?: (notice: ConversationStatusNotice) => void;
   readonly owner: LocalConversationOwnerRuntimeStack;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
   readonly assignmentStaging: ConversationAssignmentStagingPort;
@@ -819,7 +820,10 @@ export class LocalConversationOwnerAssembly {
       executorDispatch: options.executorDispatch,
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: options.assignmentStaging,
-      onStatus: (notice) => publishRun({ conversationId: notice.ref.conversationId, method: "session.status", params: notice }),
+      onStatus: (notice) => {
+        publishRun({ conversationId: notice.ref.conversationId, method: "session.status", params: notice });
+        options.onRunStatus?.(notice);
+      },
       onFirstPartyFrame: (frame) => {
         if (frame.ref.execution === "conversation") publishRun({ conversationId: frame.ref.conversationId, method: "session.assignmentStream", params: frame });
       },
@@ -1033,8 +1037,9 @@ export class LocalConversationOwnerAssembly {
         throw new Error(result.message ?? `Local advancement recovery failed: ${result.status}`);
       }
     });
-    committedTurnListenerAssembly.complete((info) =>
-      acceptedTurns.acceptCommittedTurn(info));
+    committedTurnListenerAssembly.complete((info) => {
+      acceptedTurns.acceptCommittedTurn(info);
+    });
 
     return new LocalConversationOwnerAssembly({
       options,

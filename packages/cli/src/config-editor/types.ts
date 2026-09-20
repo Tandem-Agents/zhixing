@@ -103,6 +103,8 @@ export type ModelRole = RoleId;
  * 持久化完成前，配置与秘密改动只存在于本对象中。
  */
 export interface WorkingState {
+  channelCatalog?: readonly import("../registries/channels.js").SupportedChannel[];
+  channelSetup?: Readonly<Record<string, string>>;
   channelStates?: Readonly<Record<string, { enabled: boolean; revision: number; intentRevision: number; type?: string; configurationIssue?: string }>>;
   channelIntents?: Readonly<Record<string, boolean>>;
   config: ZhixingConfig;
@@ -300,6 +302,8 @@ export type PanelAction =
 // ─── 主入口 Context / Result ───
 
 export interface ConfigEditorContext {
+  channelCatalog?: WorkingState["channelCatalog"];
+  channelSetup?: WorkingState["channelSetup"];
   channelStates?: WorkingState["channelStates"];
   /** 初始 config（从文件加载） */
   initialConfig: ZhixingConfig;

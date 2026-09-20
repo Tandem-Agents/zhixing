@@ -4,6 +4,8 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/extensions/contracts.ts",
+    "src/extensions/candidate.ts",
+    "src/extensions/onboarding.ts",
     "src/extensions/application.ts",
     "src/extensions/runtime.ts",
     "src/extensions/artifacts.ts",

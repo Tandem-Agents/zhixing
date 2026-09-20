@@ -142,7 +142,7 @@ export class ManagedExtensions {
         slot.finished = true;
         this.ports.onState?.();
         if (this.slots.get(instance.id) === slot && !slot.retired && this.allowed && !this.paused && !this.closed && this.ports.isOwner()) {
-          await this.ports.application.observe(instance.id, slot.generation, "blocked", "连接中断").catch(() => undefined);
+          await this.ports.application.observe(instance.id, slot.generation, "blocked", "连接中断", attempts >= 3).catch(() => undefined);
           if (attempts < 3 && this.slots.get(instance.id) === slot && !slot.retired && this.allowed && !this.paused && !this.closed && this.ports.isOwner()) {
             slot.timer = setTimeout(() => {
               if (this.slots.get(instance.id) !== slot) return;
