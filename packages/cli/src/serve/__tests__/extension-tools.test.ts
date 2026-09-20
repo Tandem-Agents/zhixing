@@ -48,6 +48,22 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
     expect(await continuation.preparationClosed({ ...missing, continuation: receipt })).toBe(true);
     expect(manager.findDurableRunByIngress).toHaveBeenCalledWith("default", "extension:repair:1", "interactive");
   });
+  it("hands an automatic repair confirmation to a reachable surface when the APP is dead", async () => {
+    const admitted: Array<{ conversationId: string; options: { turnContext: Record<string, unknown> } }> = [];
+    const manager = { admitDurableTurn: async (request: { conversationId: string; options: { turnContext: Record<string, unknown> } }) => {
+      admitted.push(request); return { shouldEnqueue: false };
+    }, findDurableRunByIngress: vi.fn(async () => ({ state: "failed" })) };
+    const continuation = createExtensionContinuation({ manager: manager as never, communication: { invoke: vi.fn() }, deviceId: "device",
+      fallbackConversation: async () => "default", isReturnAddressReachable: async () => false });
+    const operation: ExtensionOperation = { id: "repair-dead", instanceId: "app", revision: 1, phase: "preparing", purpose: "repair",
+      source: { conversationId: "app:group:fixture", request: "恢复 APP", returnAddress: { channel: "app", target: { channelId: "app", to: "owner" }, triggeredBy: "owner" } } };
+    const receipt = await continuation.notify(operation);
+    expect(receipt).toMatchObject({ conversationId: "default", kind: "turn" });
+    expect(admitted).toHaveLength(1);
+    expect(admitted[0]!.conversationId).toBe("default");
+    expect(admitted[0]!.options.turnContext).not.toHaveProperty("turnOrigin");
+    expect(admitted[0]!.options.turnContext).not.toHaveProperty("emissionTarget");
+  });
   it("admits the tool-generated operation identity through the real Authority application", async () => {
     const root = await mkdtemp(join(tmpdir(), "extension-tool-"));
     try {

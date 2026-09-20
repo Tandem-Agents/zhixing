@@ -398,7 +398,10 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
       await this.#recordFailure(claim, {
         code: "transport-rejected",
         message: "Delivery transport rejected the request",
-        retryable: result.retryable === true,
+        // A transport that was never entered is always safe to retry. The
+        // shared validator rejects the contradictory false/false pair, while
+        // this guard keeps the lifecycle rule explicit at the authority edge.
+        retryable: result.attempted === false || result.retryable === true,
       });
     } catch {
       this.#logger.warn("Delivery transport outcome is unknown; recovery policy will decide", {

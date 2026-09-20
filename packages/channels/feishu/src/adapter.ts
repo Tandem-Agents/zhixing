@@ -164,7 +164,7 @@ export class FeishuAdapter implements ChannelAdapter {
 
   async send(target: DeliveryTarget, content: OutboundContent, meta?: import("@zhixing/core/channels").DeliveryAdapterSendMeta): Promise<DeliveryResult> {
     if (!this.client) {
-      return { success: false, error: "Adapter not connected", retryable: true };
+      return { success: false, error: "Adapter not connected", retryable: true, attempted: false };
     }
 
     try {
@@ -174,13 +174,13 @@ export class FeishuAdapter implements ChannelAdapter {
       const receiveIdType = detectReceiveIdType(target.to);
 
       const messageId = await this.client.sendCard(target.to, card, receiveIdType, meta?.idempotencyKey);
-      return { success: true, messageId, retryable: false };
+      return { success: true, messageId, retryable: false, attempted: true };
     } catch (err) {
       if (!(err instanceof FeishuApiError)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const retryable = err instanceof FeishuApiError ? err.retryable : true;
       this.logger?.error("Send failed: %s", message);
-      return { success: false, error: message, retryable };
+      return { success: false, error: message, retryable, attempted: true };
     }
   }
 
@@ -188,7 +188,7 @@ export class FeishuAdapter implements ChannelAdapter {
     message: ChannelChallengeMessage,
   ): Promise<DeliveryResult> {
     if (!this.client) {
-      return { success: false, error: "Adapter not connected", retryable: true };
+      return { success: false, error: "Adapter not connected", retryable: true, attempted: false };
     }
     const display =
       "title" in message.display
@@ -214,7 +214,7 @@ export class FeishuAdapter implements ChannelAdapter {
         receiveIdType,
         message.token.challengeId,
       );
-      return { success: true, messageId, retryable: false };
+      return { success: true, messageId, retryable: false, attempted: true };
     } catch (err) {
       if (!(err instanceof FeishuApiError)) throw err;
       const error = err instanceof Error ? err.message : String(err);
@@ -222,6 +222,7 @@ export class FeishuAdapter implements ChannelAdapter {
         success: false,
         error,
         retryable: err instanceof FeishuApiError ? err.retryable : true,
+        attempted: true,
       };
     }
   }

@@ -915,6 +915,8 @@ interface DeliveryResult {
   error?: string;
   /** 是否可重试 */
   retryable: boolean;
+  /** false 表示尚未进入适配器，Delivery 可安全保留并重试；与 success=true 不相容。 */
+  attempted?: boolean;
 }
 
 // ─── 通道配置 ───

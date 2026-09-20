@@ -14,13 +14,17 @@ export function channelDeliveryResult(value: unknown): DeliveryResult {
   const result = value as DeliveryResult | null;
   if (!result || typeof result.success !== "boolean" || typeof result.retryable !== "boolean" ||
       (result.messageId !== undefined && typeof result.messageId !== "string") ||
-      (result.receiptBytes !== undefined && !(result.receiptBytes instanceof Uint8Array))) {
+      (result.receiptBytes !== undefined && !(result.receiptBytes instanceof Uint8Array)) ||
+      (result.attempted !== undefined && typeof result.attempted !== "boolean") ||
+      (result.success && result.attempted === false) ||
+      (!result.success && result.attempted === false && !result.retryable)) {
     throw new Error("Invalid Channel delivery evidence");
   }
   return {
     success: result.success, retryable: result.retryable,
     ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
     ...(result.receiptBytes !== undefined ? { receiptBytes: result.receiptBytes } : {}),
+    ...(result.attempted !== undefined ? { attempted: result.attempted } : {}),
     ...(!result.success ? { error: "Channel rejected delivery" } : {}),
   };
 }

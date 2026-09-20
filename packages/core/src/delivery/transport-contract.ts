@@ -56,12 +56,19 @@ export function normalizeDeliveryResult(value: unknown): DeliveryResult {
     throw new TypeError("Delivery result flags must be boolean");
   }
   if (record.success) {
-    requireExactKeys(record, ["messageId", "receiptBytes", "retryable", "success"], [
+    requireExactKeys(record, ["attempted", "messageId", "receiptBytes", "retryable", "success"], [
       "messageId",
       "receiptBytes",
+      "attempted",
     ]);
     if (record.retryable) {
       throw new TypeError("Successful delivery result cannot be retryable");
+    }
+    if (record.attempted !== undefined && typeof record.attempted !== "boolean") {
+      throw new TypeError("Delivery result attempted flag must be boolean");
+    }
+    if (record.attempted === false) {
+      throw new TypeError("Successful delivery result cannot be marked not attempted");
     }
     if (record.messageId !== undefined) {
       assertDeliveryIdentifier(record.messageId, "Delivery message id");
@@ -72,6 +79,7 @@ export function normalizeDeliveryResult(value: unknown): DeliveryResult {
     return {
       success: true,
       retryable: false,
+      ...(record.attempted !== undefined ? { attempted: record.attempted } : {}),
       ...(record.messageId !== undefined ? { messageId: record.messageId } : {}),
       ...(record.receiptBytes !== undefined
         ? { receiptBytes: new Uint8Array(record.receiptBytes) }
@@ -79,14 +87,21 @@ export function normalizeDeliveryResult(value: unknown): DeliveryResult {
     };
   }
 
-  requireExactKeys(record, ["error", "retryable", "success"], ["error"]);
+  requireExactKeys(record, ["attempted", "error", "retryable", "success"], ["attempted", "error"]);
   if (record.error !== undefined && typeof record.error !== "string") {
     throw new TypeError("Delivery result error must be a string");
+  }
+  if (record.attempted !== undefined && typeof record.attempted !== "boolean") {
+    throw new TypeError("Delivery result attempted flag must be boolean");
+  }
+  if (record.attempted === false && record.retryable === false) {
+    throw new TypeError("Delivery result marked not attempted must be retryable");
   }
   return {
     success: false,
     retryable: record.retryable,
     ...(record.error !== undefined ? { error: record.error } : {}),
+    ...(record.attempted !== undefined ? { attempted: record.attempted } : {}),
   };
 }
 

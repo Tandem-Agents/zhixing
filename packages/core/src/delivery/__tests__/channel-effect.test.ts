@@ -87,7 +87,10 @@ describe("Channel Delivery effect", () => {
     expect(send).toHaveBeenCalledWith(
       ENDPOINT.target,
       { text: "scheduled" },
-      { idempotencyKey: "delivery-key-1" },
+      {
+        idempotencyKey: "delivery-key-1",
+        deliveryAttempt: { itemId: "delivery:item-1", attempt: 1 },
+      },
     );
     expect(events).toContainEqual(expect.objectContaining({
       type: "entry:enqueued",
@@ -160,6 +163,7 @@ describe("Channel Delivery effect", () => {
       success: false,
       error: "Delivery transport rejected the request",
       retryable: true,
+      attempted: false,
     });
     await effect.outboxRegistry.dispose();
   });

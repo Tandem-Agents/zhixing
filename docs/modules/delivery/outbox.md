@@ -82,7 +82,7 @@ CLI Host 的 `setup-delivery.ts` 装配共享效果与 Registry，渠道接入�
 
 ## 五、失败、恢复与生命周期
 
-`post` 的 Promise 可以 resolve 一个 `success:false` 的 DeliveryResult，也可能 reject；resolve 不等于成功到达用户。发送默认 30 秒超时，采用 Promise.race，不会取消底层发送，所以超时后仍可能发生外部效果，不能宣称“要么成功，要么完全未发送”的原子性。
+`post` 的 Promise 可以 resolve 一个 `success:false` 的 DeliveryResult，也可能 reject；resolve 不等于成功到达用户。发送默认 30 秒超时，采用 Promise.race，不会取消底层发送，所以超时后仍可能发生外部效果，不能宣称“要么成功，要么完全未发送”的原子性。只有边界明确返回 `attempted:false` 时，才证明尚未进入适配器并可按 retryable 结果重试；超时、抛错或已进入适配器的异常仍按未知效果处理，不能盲目重发。
 
 Outbox 不内部重试：成功产生 sent，失败产生 failed，最终清除 inflight，交回上游。权威 Pipeline 对明确失败提交结果；传输抛错保留未知结果交恢复策略裁决，不能直接认定未送达并盲目重发。重试仍复用原 Delivery 幂等身份，适配器是否支持去重与响应丢失证据是独立合同。
 

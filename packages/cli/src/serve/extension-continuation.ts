@@ -35,12 +35,15 @@ export function extensionContinuationText(operation: ExtensionOperation, deviceI
 
 /** Existing Conversation admission owns execution, deduplication and result delivery. */
 export function createExtensionContinuation(input: { manager: ConversationManager; communication: ConversationCommunicationTransport; deviceId: string;
-  fallbackConversation?: () => Promise<string | undefined> }) {
+  fallbackConversation?: () => Promise<string | undefined>;
+  isReturnAddressReachable?: (origin: TurnOrigin) => Promise<boolean> }) {
   return { notify: async (operation: ExtensionOperation): Promise<unknown> => {
     const text = extensionContinuationText(operation, input.deviceId);
     const turnId = `extension:${operation.id}:${operation.revision}`;
     const origin = operation.source.returnAddress as TurnOrigin | undefined;
     const affectedOrigin = origin?.target?.channelId === operation.instanceId;
+    const originReachable = origin ? await input.isReturnAddressReachable?.(origin) ?? true : true;
+    const requiresRepairHandoff = operation.purpose === "repair" && affectedOrigin && !originReachable;
     const deliver = async (conversationId: string, id: string, original: boolean) => {
       if (isLocalConversationId(conversationId)) {
         const receipt = await input.communication.invoke(conversationId, { action: "send", conversationId, operationId: id, input: text });
@@ -55,13 +58,21 @@ export function createExtensionContinuation(input: { manager: ConversationManage
       return { kind: "turn", turnId: id, conversationId };
     };
     let receipt;
-    try { receipt = await deliver(operation.source.conversationId, turnId, true); }
+    try {
+      if (requiresRepairHandoff) {
+        const alternate = await input.fallbackConversation?.();
+        if (!alternate || alternate === operation.source.conversationId) throw new Error("原连接不可达，尚无可用的修复确认入口");
+        receipt = await deliver(alternate, turnId, false);
+      } else {
+        receipt = await deliver(operation.source.conversationId, turnId, true);
+      }
+    }
     catch (error) {
       const alternate = await input.fallbackConversation?.();
       if (!alternate || alternate === operation.source.conversationId) throw error;
       return deliver(alternate, turnId, false);
     }
-    if (affectedOrigin && operation.phase !== "preparing") {
+    if (affectedOrigin && !requiresRepairHandoff && operation.phase !== "preparing") {
       const alternate = await input.fallbackConversation?.();
       if (alternate && alternate !== operation.source.conversationId) {
         await deliver(alternate, `${turnId}:notice`, false);

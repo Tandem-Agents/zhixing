@@ -356,11 +356,11 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     target: DeliveryTarget, content: OutboundContent, meta?: Parameters<ChannelAdapter["send"]>[2],
   ): Promise<DeliveryResult> => {
     // Delivery's already-admitted attempts settle under its own drain boundary.
-    if (admissionPaused && !meta?.deliveryAttempt) throw new Error("Channel admission is paused");
+    if (admissionPaused && !meta?.deliveryAttempt) return { success: false, error: "Channel admission is paused", retryable: true, attempted: false };
     const instance = await application.get(target.channelId);
-    if (instance?.admission && !instance.admission.ready) throw new Error("连接尚未通过收发验证");
+    if (instance?.admission && !instance.admission.ready) return { success: false, error: "连接尚未通过收发验证", retryable: true, attempted: false };
     const process = runtime.current(target.channelId);
-    if (!instance?.enabled || !process || instance.generation !== process.generation) throw new Error("Channel not available");
+    if (!instance?.enabled || !process || instance.generation !== process.generation) return { success: false, error: "Channel not available", retryable: true, attempted: false };
     return channelDeliveryResult(await process.call("channel.send", { target, content, ...(meta ? { meta } : {}) }));
   };
   const startIfReady = async () => {

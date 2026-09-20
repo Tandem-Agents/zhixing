@@ -55,6 +55,7 @@ export function createChannelDeliveryEffect(
             success: false as const,
             error: SAFE_REJECTED_EFFECT,
             retryable: true,
+            attempted: false,
           };
         }
         return result.success
@@ -63,6 +64,7 @@ export function createChannelDeliveryEffect(
               success: false as const,
               error: SAFE_REJECTED_EFFECT,
               retryable: result.retryable,
+              ...(result.attempted === false ? { attempted: false } : {}),
             };
       } catch {
         throw new Error(SAFE_UNKNOWN_EFFECT);

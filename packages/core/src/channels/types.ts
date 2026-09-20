@@ -106,6 +106,8 @@ export interface DeliveryResult {
   receiptBytes?: Uint8Array;
   error?: string;
   retryable: boolean;
+  /** False means the adapter was not entered; the obligation remains safe to retry. */
+  attempted?: boolean;
 }
 
 export interface DeliveryAdapterSendMeta {

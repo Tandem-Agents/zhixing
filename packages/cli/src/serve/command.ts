@@ -9,7 +9,7 @@
  */
 
 import path from "node:path";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
@@ -2990,7 +2990,13 @@ async function runServerProcess(
   meshRuntime?.bindConversationCommunication(routedCommunication, ownedCommunication);
   extensionNotifications.bind(createExtensionContinuation({ manager: boundConversations!, communication: routedCommunication,
     deviceId: bootstrap.mesh.deviceKey.deviceId,
-    fallbackConversation: async () => (await conversationDirectory.exists("default")) ? "default" : undefined }));
+    fallbackConversation: async () => (await conversationDirectory.exists("default")) ? "default" : undefined,
+    isReturnAddressReachable: async (origin: TurnOrigin) => {
+      const channelId = origin.target?.channelId;
+      if (!channelId || !boundChannelStatuses) return true;
+      return boundChannelStatuses().some(status => status.channelId === channelId && status.state === "connected");
+    },
+  }));
   const localExtensionManagement: import("./extension-tools.js").ExtensionManagementTransport = { invoke: async request => ({
     snapshot: (await productApi.command(extensionManage, request)).result,
     targetDeviceId: bootstrap.mesh.deviceKey.deviceId,

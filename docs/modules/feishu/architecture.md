@@ -21,25 +21,25 @@
 
 ## 生产链路
 
-[宿主渠道装配](../../../packages/cli/src/serve/channels.ts)创建并注册 `FeishuAdapter`，分别提供入站、投递与 challenge 端口；渠道凭据来自设备本地秘密存储，公开配置仅控制启用与选项。
+[独立扩展制品](../../../packages/channels/feishu/extension.json)由通用宿主通过[Channel 类型绑定](../../../packages/cli/src/serve/channels.ts)装配。宿主只持有实例、代际、准入、投递和 HTTP 路由责任；`FeishuAdapter` 在受管扩展进程中提供入站、投递与 challenge 端口。渠道凭据来自设备本地秘密存储，公开配置仅控制启用与选项；主产品不直接创建平台适配器，也不保留内置／外置双主链。
 
-入站：SDK `WSClient` → `im.message.receive_v1` → 内存去重 → 消息规范化 → `ChannelContext.onMessage` → 宿主渠道消费链与 [InboundRouter](../../../packages/server/src/channels/inbound-router.ts) → Conversation 产品端口接受执行。路由器通过 Delivery Outbox 管理回复位置和内容，不再直接调用旧 `runtime.run()` 循环。
+入站：SDK `WSClient` → `im.message.receive_v1` → 消息规范化 → 宿主 owner admission → 成功后确认消息 ID 并更新进程内去重集合 → 宿主渠道消费链与 [InboundRouter](../../../packages/server/src/channels/inbound-router.ts) → Conversation 产品端口接受执行。拒绝或抛错的消息不会进入去重集合，耐久接受、重启恢复和回复义务仍由核心责任者处理。路由器通过 Delivery Outbox 管理回复位置和内容，不直接调用运行循环。
 
 出站：宿主投递端口 → `adapter.send` → Markdown 降级 → 回复卡片 → `client.im.message.create`。目标以 `oc_` 前缀区分 `chat_id`，其他按 `open_id`；不能据此推断任意平台标识都可发送。
 
-`connect` 初始化客户端、去重缓存及事件订阅，`disconnect` 关闭连接、清缓存并移除 challenge 能力；取消信号也会关闭长连接。基础消息使用 WebSocket，而互动确认使用单独 HTTP 路由，不能把“消息接收免公网回调”扩展为整个确认链都不需要可达回调地址。
+`connect` 初始化客户端、入站确认集合及事件订阅，`disconnect` 关闭连接、清理进程内集合并移除 challenge 能力；取消信号也会关闭长连接。基础消息使用 WebSocket，而互动确认使用按实例注册的 HTTP 路由 `/channels/{instanceId}/challenge`，不能把“消息接收免公网回调”扩展为整个确认链都不需要可达回调地址。
 
 ## 消息与失败处理
 
 - [事件规范化](../../../packages/channels/feishu/src/events.ts)只接收有 `open_id` 的非机器人文本消息；非法 JSON、空文本、媒体消息不进入处理。私聊映射为 `dm`，群聊保留群 ID，根消息 ID 作为 threadId；保留 threadId 不等于已实现平台话题回复能力。
-- [去重缓存](../../../packages/channels/feishu/src/dedup.ts)默认 24 小时、2048 条，按插入顺序淘汰而非访问刷新式 LRU；断开后清空，不持久化。它在向宿主转交前记入消息 ID，因此不等于耐久接受，也不能单独保证失败重投不丢失或跨重启恰好执行一次。
+- 入站去重由当前扩展进程的确认集合和宿主 owner admission 共同完成：只有 owner 成功接受后才记录消息 ID，重连或重启后的耐久事实由核心回放，不依赖已删除的 `dedup.ts` 或单独的缓存模块。
 - [格式转换](../../../packages/channels/feishu/src/format.ts)保留闭合代码块中的表格文本，将匹配到的 Markdown 表格转换成逐行列表。普通回复默认超过 8000 个 UTF-16 代码单元时截断并加省略号，避免切开代理对；当前不分多张卡片，不保证截断后的 Markdown 结构完整。旧“分卡完整展示”方案尚未实现。
-- [客户端](../../../packages/channels/feishu/src/client.ts)发送失败返回可重试分类，不自建重试循环。未连接返回可重试失败，特定平台错误码标记可重试，未知异常也按可重试返回；这不证明网络异常前平台未产生副作用，端到端重复投递边界由投递合同负责。
+- [客户端](../../../packages/channels/feishu/src/client.ts)发送失败返回可重试分类，不自建重试循环。扩展尚未连接时返回“未尝试”的可重试结果；已经进入平台调用后的已知错误按平台分类，未知异常交由 Delivery 归为未知效果，不能盲目重发。这不证明网络异常前平台未产生副作用，端到端重复投递边界由投递合同负责。
 - 普通消息回调快速转交，不等待 Agent 完成；其捕获异常目前仅记日志。官方 SDK 文档说明事件超时会重推，不能以快速返回或日志存在代替业务耐久接受证明。
 
 ## 互动确认
 
-[适配器](../../../packages/channels/feishu/src/adapter.ts)仅在 `verificationToken` 与 `encryptKey` 成对存在时挂载 `sendChallenge`，注册 `/channels/feishu/challenge`。两者都缺少时只关闭互动确认，基础消息保留；只提供一项则报配置错误。
+[适配器](../../../packages/channels/feishu/src/adapter.ts)仅在 `verificationToken` 与 `encryptKey` 成对存在时挂载 `sendChallenge`，通过扩展类型绑定注册 `/channels/{instanceId}/challenge`。两者都缺少时只关闭互动确认，基础消息保留；只提供一项则报配置错误。
 
 卡片携带 challenge token 与决定，回调经过 SDK handler 及 `validateChannelChallengeCallback` 后，将平台应答人 `open_id`、tenant 与决定交给宿主。必须等待 `onChallengeAction` 完成才成功响应；异常上抛供重投，真正的授权、耐久裁决及幂等由宿主权威链负责，不能信任按钮可见性或适配器局部缓存。
 
@@ -47,6 +47,6 @@
 
 ## 配置与实现导航
 
-[配置解析](../../../packages/channels/feishu/src/config.ts)要求 `appId`、`appSecret`；可选 `domain` 为 `feishu` 或 `lark`，另有 `botOpenId`、`dedupTtlMs`、`dedupMaxSize`。旧稿的 `connectionMode`、`webhookPath`、`dmPolicy`、`allowedUsers`、`groupPolicy`、`ackReaction` 等不是该解析器支持的选项；适配器也未把 `maxMessageLength` 暴露为配置选项。
+[配置解析](../../../packages/channels/feishu/src/config.ts)要求 `appId`、`appSecret`；可选 `domain` 为 `feishu` 或 `lark`，另有 `botOpenId`、`dedupTtlMs`、`dedupMaxSize`。其中两个 `dedup*` 字段仍由解析器接受以保持历史配置投影兼容，但当前确认集合只在 owner admission 成功后记录消息 ID，并使用进程内固定上限；这两个历史字段不改变当前运行策略。旧稿的 `connectionMode`、`webhookPath`、`dmPolicy`、`allowedUsers`、`groupPolicy`、`ackReaction` 等不是该解析器支持的选项；适配器也未把 `maxMessageLength` 暴露为配置选项。
 
 平台 API 封装、事件规范化、卡片构建、格式转换、缓存和配置各自分离，具体实现位于[飞书源码目录](../../../packages/channels/feishu/src)。平台对消息大小、速率及权限的限制另按当前官方资料核实，本文的 8000 截断是本地策略，不是平台上限。

@@ -834,6 +834,7 @@ describe("AuthorityDeliveryPipeline", () => {
     { success: true, retryable: false, messageId: "m".repeat(481) },
     { success: true, retryable: false, receiptBytes: "not-bytes" },
     { success: false, retryable: false, error: "rejected", extra: true },
+    { success: false, retryable: false, attempted: false },
   ])("never appends a malformed transport result: %o", async (malformed) => {
     const fixture = await createPipeline(
       transport(async () => malformed as unknown as Awaited<ReturnType<DeliveryEndpointTransport["send"]>>),
