@@ -1,4 +1,5 @@
 import { ExtensionApplication, ExtensionRevisionConflict } from "./application.js";
+import { createHash } from "node:crypto";
 import { ExtensionArtifacts } from "./artifacts.js";
 import { ExtensionCandidates, validateExtensionCandidate } from "./candidate.js";
 import { extensionOperationActive, type ExtensionBinding, type ExtensionInstance, type ExtensionManagementRequest, type ExtensionManifest, type ExtensionOperation } from "./contracts.js";
@@ -11,6 +12,8 @@ export interface ExtensionOnboardingPorts {
   changed(instance: ExtensionInstance): Promise<void>;
   notify(operation: ExtensionOperation): Promise<unknown>;
   preparationClosed?(operation: ExtensionOperation): Promise<boolean>;
+  repairSource?(instance: ExtensionInstance): Promise<ExtensionOperation["source"] | undefined>;
+  replacement?(operation: ExtensionOperation, binding: ExtensionBinding): Promise<void>;
   isActive(): boolean;
 }
 
@@ -25,10 +28,17 @@ export class ExtensionOnboarding {
     if (!this.ports.isActive()) throw new Error("扩展管理等待当前设备就绪");
     switch (request.action) {
       case "prepare": await this.application.prepare(request.id, request.instanceId, request.source); break;
+      case "update": case "repair": await this.application.prepare(request.id, request.instanceId, request.source, request.action); break;
+      case "candidate": {
+        const operation = await this.application.operation(request.id);
+        if (!operation?.previous) throw new Error("此操作没有原版本源码");
+        return { ...await this.application.list(), candidate: await this.candidates.read(operation.previous.binding.manifest.digest) };
+      }
       case "connect": {
         const current = await this.application.operation(request.id);
         if (!current || current.revision !== request.expectedRevision || !["preparing", "blocked"].includes(current.phase)) throw new ExtensionRevisionConflict();
-        if (await this.application.get(current.instanceId)) throw new Error("已有试运行实例，不能覆盖；请查询并取消原操作");
+        if (!current.previous && await this.application.get(current.instanceId)) throw new Error("已有试运行实例，不能覆盖；请查询并取消原操作");
+        if (current.switched) throw new Error("原候选尚未回退，不能覆盖");
         const candidate = validateExtensionCandidate(request.candidate);
         this.ports.validate(candidate.manifest);
         // The accepted operation already exists before storing/installing anything.
@@ -62,6 +72,14 @@ export class ExtensionOnboarding {
     const run = async () => {
       while (this.pending && this.ports.isActive()) {
         this.pending = false;
+        const snapshot = await this.application.list();
+        for (const instance of snapshot.instances) {
+          if (!instance.enabled || instance.phase !== "blocked" || !instance.recoveryExhausted || (instance.admission && !instance.admission.ready) ||
+              snapshot.operations?.some(op => op.instanceId === instance.id && extensionOperationActive(op))) continue;
+          const source = [...snapshot.operations ?? []].reverse().find(op => op.instanceId === instance.id)?.source ?? await this.ports.repairSource?.(instance);
+          if (source) await this.application.prepare(`repair-${createHash("sha256").update(`${instance.id}:${instance.generation}`).digest("hex")}`, instance.id,
+            { ...source, request: "连接有限恢复已耗尽。定位并修复原有能力，不更换账号、扩权、增功能或清除历史。" }, "repair");
+        }
         for (const previous of (await this.application.list()).operations ?? []) {
           if (!this.ports.isActive()) return;
           let operation = previous;
@@ -79,10 +97,11 @@ export class ExtensionOnboarding {
               const binding = await this.ports.configuration(operation);
               if (binding) {
                 try {
+                  if (operation.previous) await this.ports.replacement?.(operation, binding);
                   const instance = await this.application.trial(operation.id, operation.revision, binding);
                   await this.ports.changed(instance);
                 } catch (error) {
-                  if (error instanceof ExtensionRevisionConflict) await this.ports.discard(operation.instanceId, binding);
+                  if (error instanceof ExtensionRevisionConflict && binding.projectionRevision !== operation.previous?.binding.projectionRevision) await this.ports.discard(operation.instanceId, binding);
                   throw error;
                 }
               }
@@ -94,17 +113,19 @@ export class ExtensionOnboarding {
           } catch (error) {
             if (!(error instanceof ExtensionRevisionConflict)) {
               const current = await this.application.operation(operation.id);
-              if (current && extensionOperationActive(current) && (restoringArtifact || current.phase !== "configuration")) {
+              if (current && extensionOperationActive(current) && (restoringArtifact || current.phase !== "configuration" || current.previous)) {
                 await this.application.block(current.id, current.revision, restoringArtifact ? "本机候选制品缺失或校验失败，需要重新准备；未开放正常使用" : "接入执行受阻，请查询操作并检查候选合同；未开放正常使用").catch(() => undefined);
               } else if (current?.phase === "configuration") {
                 await this.application.waiting(current.id, current.revision, "请在目标设备的 /config 消息通道中补全并保存配置；候选尚未开放使用").catch(() => undefined);
               }
             }
           }
+          const settled = await this.application.get(operation.instanceId);
+          if (settled && settled.phase === "stopped") await this.ports.changed(settled);
           operation = (await this.application.operation(operation.id))!;
           // Verification is type-owned and can advance several checkpoints. Do
           // not wake a model on every network event; only user-action/results.
-          if (operation.phase !== "verifying" && operation.notifiedRevision !== operation.revision && this.ports.isActive()) {
+          if ((operation.phase !== "verifying" || (operation.previous && !operation.verification)) && operation.notifiedRevision !== operation.revision && this.ports.isActive()) {
             try {
               const continuation = await this.ports.notify(operation);
               await this.application.notified(operation.id, operation.revision, continuation);

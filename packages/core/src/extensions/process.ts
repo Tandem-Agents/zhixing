@@ -23,6 +23,9 @@ export async function startExtensionProcess(options: {
     execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", env,
   } as import("node:child_process").ForkOptions, { windowsHide: true }));
   let closing = false;
+  let retiring = false;
+  let stopping: Promise<void> | undefined;
+  const accepted = new Set<Promise<unknown>>();
   let exited = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let healthPending = false;
@@ -33,7 +36,7 @@ export async function startExtensionProcess(options: {
     if (!child.connected) throw new Error("Extension disconnected");
     child.send(frame, (error) => { if (error) fault(); });
   }, async (method, payload) => {
-    if (closing || !options.isCurrent()) throw new Error("Expired extension generation");
+    if (closing || (!retiring && !options.isCurrent())) throw new Error("Expired extension generation");
     return options.binding.receive({ method, payload });
   });
   const terminate = () => {
@@ -64,7 +67,15 @@ export async function startExtensionProcess(options: {
   });
   options.signal.addEventListener("abort", terminate, { once: true });
   if (options.signal.aborted) terminate();
+  const call = (method: string, payload: unknown): Promise<unknown> => {
+    if (closing || (!retiring && !options.isCurrent())) return Promise.reject(new Error("Extension is not available"));
+    const request = peer.call(method, payload);
+    accepted.add(request);
+    void request.finally(() => accepted.delete(request)).catch(() => undefined);
+    return request;
+  };
   try {
+    options.binding.bindTransport?.(call);
     const hello = await peer.call("control.start", {
       protocol: options.manifest.protocol, type: options.manifest.type, contract: options.manifest.contract,
       generation: options.generation, projection: options.projection,
@@ -83,10 +94,18 @@ export async function startExtensionProcess(options: {
     heartbeat.unref();
     return { generation: options.generation,
       call: (method, payload) => {
-        if (closing || !options.isCurrent()) return Promise.reject(new Error("Extension is not available"));
-        return peer.call(method, payload);
+        if (closing || retiring || !options.isCurrent()) return Promise.reject(new Error("Extension is not available"));
+        return call(method, payload);
       },
-      stop: async () => { terminate(); await exit; },
+      stop: () => {
+        if (stopping) return stopping;
+        retiring = true;
+        options.binding.quiesce?.();
+        // Already-issued effects retain their original receipt/unknown result.
+        // Peer requests have a finite deadline; do not wait for business Runs.
+        stopping = (async () => { await Promise.allSettled([...accepted]); terminate(); await exit; })();
+        return stopping;
+      },
     };
   } catch (error) { terminate(); await exit; throw error; }
 }

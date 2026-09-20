@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
@@ -11,6 +12,42 @@ import type { ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import { buildExtensionMethods } from "../../../../server/src/rpc/methods/extensions.js";
 
 describe("extension product bindings", { timeout: 20_000 }, () => {
+  it("writes archived source to a new workspace file, without overwriting or exposing credentials", async () => {
+    const root = await mkdtemp(join(tmpdir(), "extension-source-"));
+    const code = "export const version = 1;";
+    const candidate = { manifest: { id: "fixture", version: "1.0.0", digest: createHash("sha256").update(code).digest("hex"),
+      type: "channel", contract: 1, protocol: 1 as const, runtime: "node24" as const, entry: "adapter.mjs", declaration: {} }, code,
+      provenance: { url: "https://example.com/official", revision: "v1", kind: "authored" as const }, sources: { "adapter.mjs": code }, build: "Node 24" };
+    try {
+      const tools = createExtensionTools({ invoke: async () => ({ snapshot: { instances: [], candidate }, targetDeviceId: "remote" }) });
+      const source = tools.find(tool => tool.name === "extension_source")!;
+      await runContextStorage.run({ conversationId: "scene", lineage: "main" } as never, async () => {
+        expect((await source.call({ operationId: "repair", path: "candidate.json" }, { workingDirectory: root })).isError).not.toBe(true);
+        expect(JSON.parse(await readFile(join(root, "candidate.json"), "utf8"))).toEqual(candidate);
+        expect((await source.call({ operationId: "repair", path: "candidate.json" }, { workingDirectory: root })).isError).toBe(true);
+        expect((await source.call({ operationId: "repair", path: "../escape.json" }, { workingDirectory: root })).isError).toBe(true);
+      });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps maintenance notifications reachable outside the affected channel and retains a fallback receipt", async () => {
+    const admitted: Array<{ conversationId: string; options: { turnContext: object } }> = [];
+    const manager = { admitDurableTurn: async (request: { conversationId: string; options: { turnContext: object } }) => {
+      admitted.push(request); if (request.conversationId === "deleted") throw new Error("gone"); return { shouldEnqueue: false };
+    }, findDurableRunByIngress: vi.fn(async () => ({ state: "failed" })) };
+    const continuation = createExtensionContinuation({ manager: manager as never, communication: { invoke: vi.fn() }, deviceId: "device", fallbackConversation: async () => "default" });
+    const operation: ExtensionOperation = { id: "repair", instanceId: "app", revision: 1, phase: "blocked", purpose: "repair",
+      source: { conversationId: "app:group:fixture", request: "修复", returnAddress: { channel: "app", target: { channelId: "app", to: "owner" } } } };
+    await continuation.notify(operation);
+    expect(admitted.map(item => item.conversationId)).toEqual(["app:group:fixture", "default"]);
+    expect(admitted[0]!.options.turnContext).toMatchObject({ emissionTarget: { channelId: "app", to: "owner" } });
+    expect(admitted[1]!.options.turnContext).not.toHaveProperty("emissionTarget");
+    const missing = { ...operation, phase: "preparing" as const, source: { conversationId: "deleted", request: "修复" } };
+    const receipt = await continuation.notify(missing);
+    expect(receipt).toMatchObject({ conversationId: "default", kind: "turn" });
+    expect(await continuation.preparationClosed({ ...missing, continuation: receipt })).toBe(true);
+    expect(manager.findDurableRunByIngress).toHaveBeenCalledWith("default", "extension:repair:1", "interactive");
+  });
   it("admits the tool-generated operation identity through the real Authority application", async () => {
     const root = await mkdtemp(join(tmpdir(), "extension-tool-"));
     try {
@@ -70,6 +107,6 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
   it("keeps account verification instructions off remote RPC and out of model management tools", async () => {
     const method = buildExtensionMethods().find(method => method.name === "extensions.local-setup")!;
     await expect(method.handler({}, { connection: { loopback: false }, server: {} } as never)).rejects.toThrow("目标设备");
-    expect(createExtensionTools({ invoke: vi.fn() }).map(tool => tool.name)).toEqual(["extension", "extension_connect"]);
+    expect(createExtensionTools({ invoke: vi.fn() }).map(tool => tool.name)).toEqual(["extension", "extension_connect", "extension_source"]);
   });
 });

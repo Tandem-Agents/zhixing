@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import { ExtensionApplication } from "@zhixing/core/extensions/application";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { ChannelConfiguration } from "./channel-configuration.js";
 import { packagedExtensions } from "./catalog.js";
@@ -16,8 +17,21 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
     const application = new ExtensionApplication({ log: () => log, assertOwner: () => { throw new Error("Readiness cannot change extension intent"); } });
     const { instances, operations } = await application.list();
     const ready: { id: string; digest: string; configuration: string }[] = [];
+    const candidates = new ExtensionCandidates(join(artifactDirectory, "..", "candidates"));
+    // A handover can still fail after duty transfer. Its pinned rollback input
+    // must be available before the destination is allowed to become owner.
+    for (const operation of operations ?? []) {
+      if (!operation.previous || ["ready", "cancelled"].includes(operation.phase)) continue;
+      const instance = instances.find(item => item.id === operation.instanceId);
+      if (!instance?.enabled) continue;
+      if (!seeds.some(seed => seed.manifest.digest === operation.previous!.binding.manifest.digest)) await candidates.read(operation.previous.binding.manifest.digest);
+      await artifacts.resolve(operation.previous.binding.manifest);
+      await configuration.read({ ...instance, binding: operation.previous.binding });
+      ready.push({ id: `${instance.id}:rollback`, digest: operation.previous.binding.manifest.digest, configuration: operation.previous.binding.configurationRevision });
+    }
     for (const instance of instances) {
       if (!instance.enabled || instance.binding.manifest.type !== "channel") continue;
+      if (!seeds.some(seed => seed.manifest.digest === instance.binding.manifest.digest)) await candidates.read(instance.binding.manifest.digest);
       try { await artifacts.resolve(instance.binding.manifest); }
       catch {
         const seed = seeds.find(({ manifest }) => manifest.digest === instance.binding.manifest.digest);
@@ -26,6 +40,10 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
       }
       await configuration.read(instance);
       ready.push({ id: instance.id, digest: instance.binding.manifest.digest, configuration: instance.binding.configurationRevision });
+    }
+    for (const operation of operations ?? []) {
+      if (operation.phase !== "configuration" || !operation.candidate) continue;
+      await candidates.read(operation.candidate.digest);
     }
     for (const [id, entry] of Object.entries(configuration.entries())) {
       if (instances.some((instance) => instance.id === id)) continue;
@@ -38,6 +56,6 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
       finally { await configuration.discard(id, binding); }
     }
     ready.sort((left, right) => left.id.localeCompare(right.id, "en-US"));
-    return { channels: ready.map(({ id }) => id), revision: createHash("sha256").update(canonicalize(ready)).digest("hex") };
+    return { channels: ready.filter(({ id }) => !id.endsWith(":rollback")).map(({ id }) => id), revision: createHash("sha256").update(canonicalize(ready)).digest("hex") };
   };
 }

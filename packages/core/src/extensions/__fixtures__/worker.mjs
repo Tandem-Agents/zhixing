@@ -11,6 +11,7 @@ process.on("message", (frame) => {
     setTimeout(() => { reply(null); setImmediate(() => process.disconnect()); }, projection.mode === "slow-stop" ? 400 : 0);
   } else if (frame.method === "control.health") reply("ready");
   else if (frame.method === "fixture.echo") reply(frame.payload);
+  else if (frame.method === "fixture.delayed") setTimeout(() => reply(frame.payload), 250);
   else if (frame.method === "fixture.crash") process.exit(1);
   else if (frame.method === "fixture.pid") reply(process.pid);
 });

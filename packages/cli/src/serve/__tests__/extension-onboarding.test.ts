@@ -8,13 +8,15 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { EXTENSION_PRODUCT_API_EXACT_SET, extensionManage, extensionApplyConfiguration, extensionList, extensionLocalSetup } from "@zhixing/core/extensions/application";
+import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionManage, extensionApplyConfiguration, extensionList, extensionLocalSetup } from "@zhixing/core/extensions/application";
+import { resolveConversationId } from "../../../../server/src/channels/conversation-binder.js";
 import type { ExtensionCandidate, ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import { EncryptedVaultSecretStore } from "@zhixing/secrets";
 import { writeConfig, writeCredentials } from "@zhixing/providers";
 import { setupChannels, type SetupChannelsResult } from "../channels.js";
 import { ChannelConfiguration } from "../../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../../runtime/extensions/channel-readiness.js";
+import { createChannelTypeBinding } from "../../runtime/extensions/channel-binding.js";
 import { listSupportedChannels } from "../../registries/channels.js";
 import { messagingSection } from "../../config-editor/sections/messaging.js";
 import { checkMessaging } from "../../config-editor/checks/messaging.js";
@@ -91,6 +93,199 @@ async function fixture(kind: "existing" | "authored" = "authored") {
 }
 
 describe("published extension onboarding production path", { timeout: 20_000 }, () => {
+  it("keeps text controls available during retirement without admitting new business or routes", async () => {
+    const message = vi.fn(async (_message, controlOnly) => { if (!controlOnly) throw new Error("unexpected business admission"); });
+    const binding = createChannelTypeBinding({ instance: { id: "one" } as never,
+      consumers: () => ({ message, challenge: async () => {} }), routes: new Map(), ready: () => {} });
+    binding.quiesce!();
+    const payload = { channelId: "one", messageId: "cancel-original-run", from: "owner", text: "取消", chatType: "dm" };
+    await binding.receive({ method: "channel.message", payload });
+    expect(message).toHaveBeenCalledWith(payload, true);
+    await expect(binding.receive({ method: "channel.register-route", payload: { path: "/channels/one/new" } })).rejects.toThrow("handing over");
+    binding.close();
+    await expect(binding.receive({ method: "channel.message", payload })).rejects.toThrow("expired");
+  });
+
+  async function ready(f: Awaited<ReturnType<typeof fixture>>) {
+    await f.api.command(extensionManage, f.request);
+    await f.api.command(extensionManage, { action: "connect", id: "operation", expectedRevision: 1, candidate: f.candidate });
+    await f.configure();
+    const command = /连接 [a-f0-9]{32}/.exec((await f.api.query(extensionLocalSetup, undefined))["my-app"]!)![0];
+    await f.http({ from: "owner", text: command, messageId: "first-proof" });
+    await f.http({ from: "owner", text: /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0], messageId: "confirmed-proof" });
+    return (await f.api.query(extensionList, undefined)).instances[0]!;
+  }
+  const version = (candidate: ExtensionCandidate, suffix: string, code = `${candidate.code}\n// ${suffix}`): ExtensionCandidate => ({ ...candidate, code,
+    manifest: { ...candidate.manifest, version: "1.0.1", digest: createHash("sha256").update(code).digest("hex") },
+    sources: { "adapter.mjs": code }, provenance: { ...candidate.provenance, revision: suffix } });
+
+  it("preserves HTTP controls while an issued old send drains, but rejects ordinary input", async () => {
+    const originalCode = code;
+    code = code.replace("lastKey = meta?.idempotencyKey;", 'lastKey = meta?.idempotencyKey; if (content.text === "hold-send") await new Promise(resolve => setTimeout(resolve, 3000));');
+    expect(code).not.toBe(originalCode);
+    const f = await fixture(); code = originalCode;
+    await ready(f);
+    const controls: string[] = [];
+    await f.system.connectConfigured({ inbound: { kind: "router", handleMessage: async () => {},
+      handleControlMessage: async message => { if (message.text !== "取消") return false; controls.push(message.text); return true; } }, onChallengeAction: async () => {} });
+    let settled = false;
+    const sending = f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "hold-send" }).finally(() => { settled = true; });
+    await expect.poll(async () => JSON.parse((await f.http()).body).lastReply).toBe("hold-send");
+    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    const switching = f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: version(f.candidate, "http") });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).operations?.find(op => op.id === "maintenance")?.phase).toBe("verifying");
+    const control = await f.http({ from: "owner", text: "取消", messageId: "cancel-original" });
+    const business = await f.http({ from: "owner", text: "new business", messageId: "during-handover" });
+    const settledAtControl = settled;
+    await expect(sending).resolves.toMatchObject({ success: true }); await switching;
+    expect(control.status).toBe(200); expect(controls).toEqual(["取消"]);
+    expect(business.status).toBe(503); expect(settledAtControl).toBe(false);
+  });
+
+  it.each(["cancel", "disable"] as const)("fences new sends after %s commits but before physical handover", async action => {
+    const f = await fixture(); await ready(f);
+    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: version(f.candidate, "rollback") });
+    await expect.poll(async () => { try { return JSON.parse((await f.http()).body).lastReply; } catch { return ""; } }, { timeout: 5000 }).toContain("换版");
+    const operation = (await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "maintenance")!;
+    let release!: () => void; let reached!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const method = action === "cancel" ? "cancel" : "setEnabled";
+    const original = ExtensionApplication.prototype[method];
+    const spy = vi.spyOn(ExtensionApplication.prototype, method).mockImplementation(async function (this: ExtensionApplication, ...args: unknown[]) {
+      const result = await (original as (...values: unknown[]) => Promise<unknown>).apply(this, args); reached(); await barrier; return result;
+    } as never);
+    const stopping = f.api.command(extensionManage, action === "cancel" ? { action, id: operation.id, expectedRevision: operation.revision } : { action, instanceId: "my-app" });
+    await entered;
+    try { await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "unverified-candidate-business" })).rejects.toThrow("not available"); }
+    finally { release(); spy.mockRestore(); await stopping; }
+  });
+
+  it("rejects changed declared grouping before handover and changed runtime grouping before admission", async () => {
+    const f = await fixture(); const original = await ready(f);
+    const message = { channelId: "my-app", chatType: "group" as const, groupId: "group", from: "owner", text: "取消", messageId: "existing-confirmation" };
+    const before = resolveConversationId(message, f.system.inbound.bindingPolicy("my-app"));
+    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    const candidate = version(f.candidate, "declared");
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: { ...candidate,
+      manifest: { ...candidate.manifest, declaration: { ...candidate.manifest.declaration as object, bindingPolicy: { group: "per-user-in-group" } } } } });
+    let state = await f.api.query(extensionList, undefined);
+    expect(state.operations!.find(op => op.id === "maintenance")?.phase).toBe("blocked");
+    expect(state.instances[0]!.generation).toBe(original.generation);
+    const changedCode = f.candidate.code.replace(/id,\s+capabilities:/, 'id, bindingPolicy: { group: "per-user-in-group" }, capabilities:');
+    expect(changedCode).not.toBe(f.candidate.code);
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: state.operations!.find(op => op.id === "maintenance")!.revision,
+      candidate: version(f.candidate, "runtime", changedCode) });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "maintenance")?.phase, { timeout: 14000 }).toBe("blocked");
+    state = await f.api.query(extensionList, undefined);
+    expect(state.instances[0]!.binding.manifest.digest).toBe(original.binding.manifest.digest);
+    expect(resolveConversationId(message, f.system.inbound.bindingPolicy("my-app"))).toBe(before);
+  });
+
+  it.each([false, true])("requires the active source archive before duty transfer (verifying: %s)", async verifying => {
+    const f = await fixture(); await ready(f);
+    let current = f.candidate;
+    if (verifying) {
+      await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+      current = version(f.candidate, "new-active");
+      await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: current });
+    }
+    const readiness = createChannelExtensionReadiness(f.configuration, f.artifactDirectory);
+    expect((await readiness(f.log())).channels).toEqual(["my-app"]);
+    await rm(join(f.root, "extensions", "candidates", current.manifest.digest, "candidate.json"));
+    await expect(readiness(f.log())).rejects.toThrow();
+  });
+
+  it("refuses a repair that expands declared capability before retiring the original process", async () => {
+    const f = await fixture(); const original = await ready(f);
+    await f.api.command(extensionManage, { action: "repair", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    const declaration = f.candidate.manifest.declaration as { capabilities: object };
+    const candidate = version(f.candidate, "expanded");
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1,
+      candidate: { ...candidate, manifest: { ...candidate.manifest, declaration: { ...declaration, capabilities: { ...declaration.capabilities, media: true } } } } });
+    const state = await f.api.query(extensionList, undefined);
+    expect(state.operations?.find(op => op.id === "maintenance")?.phase).toBe("blocked");
+    expect(state.instances[0]?.generation).toBe(original.generation);
+    expect((await f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "old connection" })).success).toBe(true);
+  });
+
+  it("requires the pinned rollback artifact and local account materials before duty transfer", async () => {
+    const f = await fixture(); const original = await ready(f);
+    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    const candidate = version(f.candidate, "transfer");
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    const readiness = createChannelExtensionReadiness(f.configuration, f.artifactDirectory);
+    expect((await readiness(f.log())).channels).toEqual(["my-app"]);
+    await rm(join(f.artifactDirectory, original.binding.manifest.digest, original.binding.manifest.entry));
+    await expect(readiness(f.log())).rejects.toThrow();
+  });
+
+  it.each(["update", "repair"] as const)("runs %s through preparation, archived source, isolated handover and fresh round-trip verification", async action => {
+    const f = await fixture(); const original = await ready(f);
+    await f.api.command(extensionManage, { action, id: "maintenance", instanceId: "my-app", source: f.request.source });
+    expect((await f.api.query(extensionList, undefined)).instances[0]?.generation).toBe(original.generation);
+    expect((await f.api.command(extensionManage, { action: "candidate", id: "maintenance" })).result.candidate).toEqual(f.candidate);
+    expect((await f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "still available during preparation" })).success).toBe(true);
+    const candidate = version(f.candidate, action);
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    await expect.poll(async () => {
+      try { return JSON.parse((await f.http()).body).lastReply; } catch { return ""; }
+    }).toContain("换版");
+    await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "not yet admitted" })).rejects.toThrow("尚未通过");
+    expect((await f.http({ from: "owner", text: "ordinary request", messageId: "no-business" })).status).toBe(503);
+    const confirm = /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0];
+    expect((await f.http({ from: "intruder", text: confirm, messageId: "wrong-owner" })).status).toBe(503);
+    expect((await f.http({ from: "owner", text: confirm, messageId: "new-confirmation" })).status).toBe(200);
+    const state = await f.api.query(extensionList, undefined);
+    expect(state.instances[0]?.binding.manifest.digest).toBe(candidate.manifest.digest);
+    expect(state.instances[0]?.binding.exclusiveKey).toBe(original.binding.exclusiveKey);
+    expect(state.operations?.find(op => op.id === "maintenance")?.phase).toBe("ready");
+    expect((await f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "restored" })).success).toBe(true);
+    expect((await f.http({ from: "owner", text: "normal work", messageId: "after-update" })).status).toBe(200);
+    expect(f.received).toHaveLength(1);
+  });
+
+  it.each(["cancel", "disable"] as const)("honors %s during verification and fences late proof across restart", async action => {
+    const f = await fixture(); const original = await ready(f);
+    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: version(f.candidate, action) });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    const operation = (await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "maintenance")!;
+    await f.api.command(extensionManage, action === "cancel" ? { action, id: operation.id, expectedRevision: operation.revision } : { action, instanceId: "my-app" });
+    await f.system.dispose(); systems.splice(systems.indexOf(f.system), 1);
+    const reopened = await f.open();
+    const state = await reopened.api.query(extensionList, undefined);
+    expect(state.instances[0]?.binding).toEqual(original.binding);
+    expect(state.instances[0]?.enabled).toBe(action === "cancel");
+    expect(state.operations?.find(op => op.id === "maintenance")?.phase).toBe("cancelled");
+    if (action === "cancel") {
+      await expect.poll(() => reopened.system.delivery.status("my-app")).toBe("connected");
+      expect((await reopened.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "old version survives" })).success).toBe(true);
+    }
+  });
+
+  it("automatically rolls back an unusable candidate and can repair it with a different fixed artifact", async () => {
+    const f = await fixture(); const original = await ready(f);
+    await f.api.command(extensionManage, { action: "repair", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1,
+      candidate: version(f.candidate, "broken", 'throw new Error("broken fixture");') });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).operations?.find(op => op.id === "maintenance")?.phase, { timeout: 14000 }).toBe("blocked");
+    await expect.poll(() => f.system.delivery.status("my-app")).toBe("connected");
+    const failed = await f.api.query(extensionList, undefined);
+    expect(failed.instances[0]?.binding).toEqual(original.binding);
+    const candidate = version(f.candidate, "corrected");
+    await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: failed.operations!.find(op => op.id === "maintenance")!.revision, candidate });
+    await expect.poll(async () => {
+      try { return JSON.parse((await f.http()).body).lastReply; } catch { return ""; }
+    }).toContain("换版");
+    await f.http({ from: "owner", text: /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0], messageId: "repaired-proof" });
+    expect((await f.api.query(extensionList, undefined)).instances[0]?.binding.manifest.digest).toBe(candidate.manifest.digest);
+    expect((await f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "fixed" })).success).toBe(true);
+  });
+
   it.each([false, true])("invalidates the previous account verification when configuration changes (already ready: %s)", async ready => {
     const f = await fixture();
     await f.api.command(extensionManage, f.request);

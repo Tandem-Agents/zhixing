@@ -929,7 +929,15 @@ describe("InboundRouter", () => {
       expect(hub.snapshot().brokers).toHaveLength(1);
     });
 
-    it("有 pending + 允许词 → broker.resolve(allow-once) + 埋点 matched-structured", async () => {
+    it("换版控制入口不接纳普通消息，也不创建业务运行", async () => {
+      const { adapter, router, factory } = setupWithHub();
+
+      expect(await router.handleControlMessage(dmMessage("test-ch", "user-1", "hello"))).toBe(false);
+      expect(factory.create).not.toHaveBeenCalled();
+      expect(adapter.send).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("有 pending + 允许词 → broker.resolve(allow-once)，仅控制入口=%s", async (controlOnly) => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
       // 预先创建 conversation + pending request
@@ -956,7 +964,9 @@ describe("InboundRouter", () => {
       };
       const brokerPromise = broker.requestConfirmation(pendingReq);
 
-      await router.handleMessage(dmMessage("test-ch", "user-1", "好"));
+      const reply = dmMessage("test-ch", "user-1", "好");
+      if (controlOnly) expect(await router.handleControlMessage(reply)).toBe(true);
+      else await router.handleMessage(reply);
 
       // broker 应被解决
       const decision = await brokerPromise;

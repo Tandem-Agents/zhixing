@@ -335,6 +335,30 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it.each(["preparing", "ready"] as const)("retains the original APP identity and return target for %s maintenance", async phase => {
+    const home = await createTempDir("extension-return");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let manager!: ConversationManager;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "default",
+      async *run() { throw new Error("admission-only fixture"); }, abort: () => false, async dispose() {} };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const admitted = vi.spyOn(protocol, "admit");
+    try {
+      await getOrCreateActiveConversation(authority, manager, "default");
+      const continuation = createExtensionContinuation({ manager, communication: { invoke: async () => { throw new Error("not local"); } },
+        deviceId: "device", fallbackConversation: async () => "default" });
+      const target = { channelId: "app", to: "owner" };
+      await continuation.notify({ id: "maintenance", instanceId: "app", revision: 4, phase, purpose: "update",
+        source: { conversationId: "default", request: "更新 APP", returnAddress: { channel: "app", triggeredBy: "owner", target } } });
+      const result = await admitted.mock.results[0]!.value;
+      const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries).map(entry => entry.body as { t: string; runId: string; ingress?: unknown });
+      const record = records.find(body => body.t === "admitted" && body.runId === result.runId);
+      expect(record?.ingress).toMatchObject({ kind: "channel", replyTarget: target,
+        responder: { channelId: "app", platformSubject: "owner" }, ingressId: "extension:maintenance:4" });
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, 30000);
+
   it.each(["failed", "cancelled"] as const)("settles extension preparation after its run is %s without a later user query", async ending => {
     const home = await createTempDir("extension-terminal");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });

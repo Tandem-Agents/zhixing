@@ -92,7 +92,7 @@ export class ChannelConfiguration {
     } };
     if (current) {
       const previous = await this.read(current).catch(() => undefined);
-      if (previous && canonicalize(previous) === canonicalize(projection) &&
+      if (current.binding.manifest.digest === manifest.digest && previous && canonicalize(previous) === canonicalize(projection) &&
           (!publication || current.binding.sourceRevision === publication.revision)) return current.binding;
       if (requirePublication && !publication) throw new Error("来源已变化但缺少完整配置发布，请在配置入口确认应用；旧绑定保持不变");
     }
@@ -125,6 +125,14 @@ export class ChannelConfiguration {
     if (projection.id !== instance.id || projection.config.type !== instance.binding.manifest.id) throw new Error("Local extension projection mismatch");
     validateChannelCredentials(channelDeclaration(instance.binding.manifest), projection.config.credentials);
     return projection;
+  }
+
+  /** Reuse the committed local projection, never resolve floating credentials. */
+  async replacement(instance: ExtensionInstance, manifest: ExtensionManifest): Promise<ExtensionBinding> {
+    const projection = await this.read(instance);
+    validateChannelCredentials(channelDeclaration(manifest), projection.config.credentials);
+    if (manifest.id !== instance.binding.manifest.id) throw new Error("换版不能更换连接身份");
+    return { ...instance.binding, manifest };
   }
 
   async discard(id: string, binding: ExtensionBinding): Promise<void> {

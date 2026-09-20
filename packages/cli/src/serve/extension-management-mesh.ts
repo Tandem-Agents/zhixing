@@ -26,7 +26,14 @@ export function registerExtensionManagementMesh(input: {
         const wire = decode(payload);
         if (wire?.v !== 1) throw new Error("扩展管理协议无效");
         let request: ExtensionManagementRequest;
-        if (wire.t === "candidate") {
+        if (wire.t === "source") {
+          if (typeof wire.id !== "string" || !Number.isSafeInteger(wire.offset) || wire.offset < 0) throw new Error("源码请求无效");
+          const result = await input.management.invoke({ action: "candidate", id: wire.id });
+          const bytes = encode(result.snapshot.candidate);
+          if (bytes.length > MAX_CANDIDATE_BYTES || wire.offset > bytes.length) throw new Error("源码体积无效");
+          return encode({ v: 1, ok: true, result: { digest: createHash("sha256").update(bytes).digest("hex"), size: bytes.length,
+            bytes: bytes.subarray(wire.offset, wire.offset + CHUNK_BYTES).toString("base64"), targetDeviceId: result.targetDeviceId } });
+        } else if (wire.t === "candidate") {
           assertArtifactRef(wire.ref);
           if (wire.ref.bytes < 1 || wire.ref.bytes > MAX_CANDIDATE_BYTES || typeof wire.id !== "string" || !Number.isSafeInteger(wire.revision)) throw new Error("候选传输无效");
           const status = await input.management.invoke({ action: "status" });
@@ -45,7 +52,7 @@ export function registerExtensionManagementMesh(input: {
         } else {
           if (wire.t !== undefined || !wire.request || Object.keys(wire).sort().join(",") !== "request,v") throw new Error("扩展管理协议无效");
           request = wire.request as ExtensionManagementRequest;
-          if (request.action === "connect") throw new Error("候选必须经有界分块传输");
+          if (["connect", "candidate"].includes(request.action)) throw new Error("候选必须经有界分块传输");
         }
         signal.throwIfAborted();
         const result = await input.management.invoke(request);
@@ -62,6 +69,21 @@ export function createMeshExtensionManagement(client: () => MeshServiceClient): 
       if (response?.v !== 1 || response.ok !== true) throw new Error(response?.error ?? "扩展管理响应无效");
       return response.result;
     };
+    if (request.action === "candidate") {
+      const chunks: Buffer[] = []; let offset = 0; let digest = ""; let size = 0; let targetDeviceId = "";
+      do {
+        const result = await call({ v: 1, t: "source", id: request.id, offset });
+        if (!Number.isSafeInteger(result.size) || result.size < 1 || result.size > MAX_CANDIDATE_BYTES || typeof result.bytes !== "string" || result.bytes.length > Math.ceil(CHUNK_BYTES / 3) * 4 ||
+            (offset && (digest !== result.digest || size !== result.size))) throw new Error("原版本源码在传输期间变化");
+        digest = result.digest; size = result.size; targetDeviceId = result.targetDeviceId;
+        const bytes = Buffer.from(result.bytes, "base64");
+        if (!bytes.length || bytes.length > CHUNK_BYTES || bytes.toString("base64") !== result.bytes || offset + bytes.length > size) throw new Error("源码分块无效");
+        chunks.push(bytes); offset += bytes.length;
+      } while (offset < size);
+      const bytes = Buffer.concat(chunks);
+      if (createHash("sha256").update(bytes).digest("hex") !== digest) throw new Error("源码摘要不匹配");
+      return { snapshot: { instances: [], candidate: decode(bytes) }, targetDeviceId };
+    }
     if (request.action !== "connect") return call({ v: 1, request });
     const bytes = encode(request.candidate);
     if (bytes.length > MAX_CANDIDATE_BYTES) throw new Error("候选体积超限");

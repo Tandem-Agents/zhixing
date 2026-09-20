@@ -1097,6 +1097,7 @@ async function runServerProcess(
     ? await prepareChannel({
         notifyOperation: extensionNotifications.notify,
         preparationClosed: extensionNotifications.preparationClosed,
+        repairSource: extensionNotifications.repairSource,
         authorityRuntime,
         zhixingHome,
         configPath: getGlobalConfigPath({}, zhixingHome),
@@ -2988,7 +2989,8 @@ async function runServerProcess(
   communicationHandle.bind(routedCommunication);
   meshRuntime?.bindConversationCommunication(routedCommunication, ownedCommunication);
   extensionNotifications.bind(createExtensionContinuation({ manager: boundConversations!, communication: routedCommunication,
-    deviceId: bootstrap.mesh.deviceKey.deviceId }));
+    deviceId: bootstrap.mesh.deviceKey.deviceId,
+    fallbackConversation: async () => (await conversationDirectory.exists("default")) ? "default" : undefined }));
   const localExtensionManagement: import("./extension-tools.js").ExtensionManagementTransport = { invoke: async request => ({
     snapshot: (await productApi.command(extensionManage, request)).result,
     targetDeviceId: bootstrap.mesh.deviceKey.deviceId,

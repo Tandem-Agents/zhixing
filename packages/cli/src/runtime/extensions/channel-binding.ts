@@ -5,7 +5,7 @@ import type { ChannelBindingPolicy, ChannelChallengeAction, DeliveryResult, Http
 import type { ChannelProjection } from "./channel-configuration.js";
 
 export interface ChannelConsumerBinding {
-  message(message: InboundMessage): Promise<void>;
+  message(message: InboundMessage, controlOnly?: boolean): Promise<void>;
   challenge(action: ChannelChallengeAction): Promise<void>;
 }
 
@@ -28,14 +28,16 @@ export function channelDeliveryResult(value: unknown): DeliveryResult {
 export function createChannelTypeBinding(options: {
   instance: ExtensionInstance;
   consumers: () => ChannelConsumerBinding;
-  process: () => ExtensionProcess | undefined;
   routes: Map<string, HttpHandler>;
   ready: (capabilities: { challenges: boolean; bindingPolicy?: ChannelBindingPolicy } | undefined) => void;
 }): ExtensionTypeBinding {
   const owned = new Map<string, HttpHandler>();
   let closed = false;
+  let quiescing = false;
+  let call: ExtensionProcess["call"] | undefined;
   return {
     type: "channel", contract: 1,
+    bindTransport(transport) { call = transport; },
     validate(manifest, payload) {
       const projection = payload as ChannelProjection;
       if (projection.id !== options.instance.id) throw new Error("Channel instance mismatch");
@@ -43,13 +45,14 @@ export function createChannelTypeBinding(options: {
     },
     async receive({ method, payload }) {
       if (closed) throw new Error("Channel generation expired");
+      if (quiescing && method !== "channel.challenge-action" && method !== "channel.message") throw new Error("Channel generation is handing over");
       if (method === "channel.message") {
         const message = payload as InboundMessage;
         if (!message || message.channelId !== options.instance.id || typeof message.messageId !== "string" || !message.messageId ||
             typeof message.from !== "string" || typeof message.text !== "string" || !["dm", "group", "thread"].includes(message.chatType)) {
           throw new Error("Invalid Channel message identity");
         }
-        await options.consumers().message(message);
+        await options.consumers().message(message, quiescing);
         return null;
       }
       if (method === "channel.challenge-action") {
@@ -61,6 +64,8 @@ export function createChannelTypeBinding(options: {
       if (method === "channel.ready") {
         const ready = payload as { challenges: boolean; bindingPolicy?: ChannelBindingPolicy };
         if (typeof ready?.challenges !== "boolean" || (ready.bindingPolicy && !["per-group", "per-user-in-group"].includes(ready.bindingPolicy.group))) throw new Error("Invalid Channel capabilities");
+        const declared = channelDeclaration(options.instance.binding.manifest).bindingPolicy?.group ?? "per-group";
+        if ((ready.bindingPolicy?.group ?? "per-group") !== declared) throw new Error("Channel binding policy differs from its admitted declaration");
         options.ready(ready);
         return null;
       }
@@ -70,8 +75,7 @@ export function createChannelTypeBinding(options: {
         const handler: HttpHandler = async (request, response) => {
           const req = request as IncomingMessage;
           const res = response as ServerResponse;
-          const process = options.process();
-          if (closed || !process) { res.writeHead(503); res.end(); return; }
+          if (closed || !call) { res.writeHead(503); res.end(); return; }
           const chunks: Buffer[] = [];
           let size = 0;
           for await (const chunk of req) {
@@ -80,7 +84,7 @@ export function createChannelTypeBinding(options: {
             chunks.push(Buffer.from(chunk));
           }
           try {
-            const result = await process.call("channel.http", { path, method: req.method, headers: req.headers, body: Buffer.concat(chunks) }) as { status: number; headers: Record<string, string>; body: Uint8Array };
+            const result = await call("channel.http", { path, method: req.method, headers: req.headers, body: Buffer.concat(chunks) }) as { status: number; headers: Record<string, string>; body: Uint8Array };
             if (!result || !Number.isInteger(result.status) || result.status < 200 || result.status > 599 ||
                 !result.headers || typeof result.headers !== "object" ||
                 Object.values(result.headers).some((value) => typeof value !== "string") ||
@@ -93,9 +97,11 @@ export function createChannelTypeBinding(options: {
       }
       throw new Error("Unknown Channel callback");
     },
+    quiesce() { quiescing = true; },
     close() {
       if (closed) return;
       closed = true;
+      call = undefined;
       for (const [path, handler] of owned) if (options.routes.get(path) === handler) options.routes.delete(path);
       owned.clear(); options.ready(undefined);
     },

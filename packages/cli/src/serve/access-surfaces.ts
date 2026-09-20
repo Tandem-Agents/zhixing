@@ -1193,6 +1193,7 @@ function channelOwnership(
 export interface PrepareChannelInput {
   readonly notifyOperation?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
   readonly preparationClosed?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
+  readonly repairSource?: (instance: import("@zhixing/core/extensions/contracts").ExtensionInstance) => Promise<import("@zhixing/core/extensions/contracts").ExtensionOperation["source"] | undefined>;
   readonly authorityRuntime: AuthorityRuntimeStack;
   readonly zhixingHome: string;
   readonly configPath: string;
@@ -1231,6 +1232,7 @@ export async function prepareChannel(
       logger: channelLogger,
       notifyOperation: input.notifyOperation,
       preparationClosed: input.preparationClosed,
+      repairSource: input.repairSource,
     });
     input.lifecycleContributions.acquire("channels.dispose", async () => {
       conversationProduct.close();
@@ -1350,6 +1352,7 @@ export async function prepareDelivery(
     kind: "router" as const,
     handleMessage: (message: import("@zhixing/core/channels").InboundMessage) =>
       router.handleMessage(message),
+    handleControlMessage: (message: import("@zhixing/core/channels").InboundMessage) => router.handleControlMessage(message),
   });
   const consumers = Object.freeze({
     inbound,

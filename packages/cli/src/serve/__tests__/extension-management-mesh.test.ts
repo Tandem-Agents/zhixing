@@ -52,6 +52,16 @@ async function fixture() {
 
 // Multi-MiB durable prefix fsync is real I/O, not an in-memory transport mock.
 describe("extension candidate mesh transport", { timeout: 20_000 }, () => {
+  it("exports a pinned multi-MiB repair source through bounded response chunks", async () => {
+    const f = await fixture();
+    await f.archive.save(f.candidate);
+    await f.application.cancel("op", 1);
+    await f.application.adopt("installed", { manifest: f.candidate.manifest, configurationRevision: "configuration", secretRevision: "local", projectionRevision: "local" });
+    await f.remote.invoke({ action: "repair", id: "repair", instanceId: "installed", source: { conversationId: "scene", request: "修复" } });
+    const exported = await f.remote.invoke({ action: "candidate", id: "repair" });
+    expect(exported.snapshot.candidate).toEqual(f.candidate);
+    expect(exported.targetDeviceId).toBe("anchor");
+  });
   it("resumes a multi-MiB candidate after interrupted transfer without exceeding the Mesh envelope", async () => {
     const f = await fixture();
     const request = { action: "connect" as const, id: "op", expectedRevision: 1, candidate: f.candidate };

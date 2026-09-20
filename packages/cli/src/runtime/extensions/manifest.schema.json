@@ -15,6 +15,7 @@
       "properties": {
         "label": { "type": "string" }, "description": { "type": "string" },
         "identityFields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "bindingPolicy": { "type": "object", "required": ["group"], "properties": { "group": { "enum": ["per-group", "per-user-in-group"] } }, "additionalProperties": false },
         "requiredFields": { "type": "array", "items": { "type": "object", "required": ["id", "label", "hint", "example", "sensitive"], "properties": {
           "id": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$" },
           "label": { "type": "string" }, "hint": { "type": "string" }, "example": { "type": "string" },

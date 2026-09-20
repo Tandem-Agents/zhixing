@@ -16,8 +16,44 @@ interface Verification {
 
 /** Type-owned evidence. Neither a model assertion nor process health admits a channel. */
 export class ChannelVerification {
+  private readonly resuming = new Set<string>();
   constructor(private readonly application: ExtensionApplication, private readonly secrets: SecretStorePort & CredentialStoreCoordinator,
     private readonly process: (id: string) => ExtensionProcess | undefined, private readonly changed: () => void) {}
+
+  /** Reuse the verified owner/route, but require a fresh actual round trip. */
+  async resume(instance: ExtensionInstance): Promise<void> {
+    if (!instance.enabled || instance.phase !== "running" || !instance.admission || instance.admission.ready || this.resuming.has(instance.id)) return;
+    this.resuming.add(instance.id);
+    try {
+      let operation = await this.application.operation(instance.admission.operationId);
+      if (operation?.phase !== "verifying" || !operation.previous) return;
+      const prior = operation.previous.admission && await this.application.operation(operation.previous.admission.operationId);
+      const previous = prior ? prior.verification as Verification | undefined : undefined;
+      if (!previous?.confirmedId) return;
+      const process = this.process(instance.id);
+      if (!process || process.generation !== instance.generation) return;
+      if (!operation.verification) operation = await this.application.checkpoint(operation.id, operation.revision,
+        { from: previous.from, target: previous.target, inboundId: `maintenance:${operation.id}`, challenge: randomBytes(16).toString("hex") });
+      const proof = operation.verification as Verification;
+      const current = await this.application.get(instance.id);
+      if (!current?.enabled || current.generation !== process.generation || current.admission?.operationId !== operation.id) return;
+      const result = channelDeliveryResult(await process.call("channel.send", { target: proof.target,
+        content: { text: `知行正在验证连接换版，请回复：确认 ${proof.challenge}` },
+        meta: { idempotencyKey: `extension-verify:${operation.id}:${proof.challenge}` } }));
+      if (!result.success) {
+        await this.application.block(operation.id, operation.revision, "换版验证消息未送达，已恢复原版本绑定；请从其他入口查询状态");
+        this.changed();
+      }
+    } catch {
+      const current = await this.application.get(instance.id);
+      const operation = current?.admission && await this.application.operation(current.admission.operationId);
+      if (current?.enabled && current.generation === instance.generation && operation?.phase === "verifying" && operation.previous) {
+        await this.application.block(operation.id, operation.revision, "换版收发验证受阻，已恢复原版本绑定；请查询连接状态").catch(() => undefined);
+        this.changed();
+      }
+    }
+    finally { this.resuming.delete(instance.id); }
+  }
 
   async code(operation: ExtensionOperation): Promise<string> {
     return this.secrets.runExclusive(async () => {

@@ -37,6 +37,42 @@ async function fixture(mode = "normal", projection = async () => ({ mode })) {
 }
 
 describe("managed extensions", () => {
+  it("final host close settles an unresponsive effect as unknown without another request deadline", async () => {
+    const f = await fixture();
+    await f.application.adopt("one", f.binding);
+    await f.runtime.resume();
+    await expect.poll(() => Boolean(f.runtime.current("one"))).toBe(true);
+    const request = f.runtime.current("one")!.call("fixture.unresponsive", null).catch(error => error);
+    const started = Date.now();
+    await f.runtime.close();
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(await request).toBeInstanceOf(Error);
+    expect((await request as Error).message).toContain("outcome may be unknown");
+    expect(f.runtime.state("one")).toBe("stopped");
+  });
+
+  it("settles an already-issued effect under its original generation before swapping and leaves the peer instance alone", async () => {
+    const f = await fixture();
+    await f.application.adopt("one", f.binding); await f.application.adopt("two", f.binding);
+    await f.runtime.resume();
+    await expect.poll(() => Boolean(f.runtime.current("one") && f.runtime.current("two"))).toBe(true);
+    const process = f.runtime.current("one")!;
+    const sibling = f.runtime.current("two")!;
+    const receipt = process.call("fixture.delayed", { attemptId: "original-attempt", receipt: "committed-external-effect" });
+    await f.application.prepare("update", "one", { conversationId: "scene", request: "更新" }, "update");
+    const bytes = Buffer.concat([f.bytes, Buffer.from("\n// replacement")]);
+    const manifest = { ...f.binding.manifest, digest: createHash("sha256").update(bytes).digest("hex"), version: "2.0.0" };
+    await f.artifacts.import(manifest, bytes);
+    await f.application.candidate("update", 1, manifest);
+    const trial = await f.application.trial("update", 2, { ...f.binding, manifest });
+    const switching = f.runtime.reconcile(trial);
+    await expect(receipt).resolves.toEqual({ attemptId: "original-attempt", receipt: "committed-external-effect" });
+    await switching;
+    await expect.poll(() => Boolean(f.runtime.current("one"))).toBe(true);
+    expect(f.runtime.current("one")!.generation).not.toBe(process.generation);
+    expect(f.runtime.current("two")).toBe(sibling);
+    await expect(process.call("fixture.echo", "stale")).rejects.toThrow();
+  });
   it("persists identity, disabled intent and generation fences in the real Authority log", async () => {
     const f = await fixture();
     const adopted = await f.application.adopt("primary", f.binding);

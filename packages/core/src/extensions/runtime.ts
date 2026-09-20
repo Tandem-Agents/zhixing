@@ -42,7 +42,9 @@ export class ManagedExtensions {
     this.allowed = false;
     this.decisions.clear();
     const slots = [...this.slots.values()];
-    for (const slot of slots) this.retire(slot);
+    // Host drain has already settled accepted work. Final suspension must not
+    // start a second wait for an unresponsive external implementation.
+    for (const slot of slots) { this.retire(slot); slot.controller.abort(); }
     await Promise.all(slots.map((slot) => slot.stopped));
     for (const [id, slot] of this.slots) if (slots.includes(slot)) this.slots.delete(id);
     this.ports.onState?.();
@@ -59,10 +61,13 @@ export class ManagedExtensions {
   }
 
   private retire(slot: Slot): void {
+    if (slot.retired) return;
     slot.retired = true;
+    const process = slot.process;
     slot.process = undefined;
     if (slot.timer) clearTimeout(slot.timer);
-    slot.controller.abort();
+    if (process) void process.stop().finally(() => slot.controller.abort());
+    else slot.controller.abort();
   }
 
   async close(): Promise<void> { this.closed = true; await this.suspend(); }

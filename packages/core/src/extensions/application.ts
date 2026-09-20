@@ -84,19 +84,28 @@ export class ExtensionApplication {
     return (await this.list()).operations?.find((entry) => entry.id === id);
   }
 
-  async prepare(id: string, instanceId: string, source: ExtensionOperation["source"]): Promise<ExtensionOperation> {
+  async prepare(id: string, instanceId: string, source: ExtensionOperation["source"], purpose?: "update" | "repair"): Promise<ExtensionOperation> {
     if (![id, instanceId].every((value) => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)) ||
         !source || typeof source.conversationId !== "string" || !source.conversationId || source.conversationId.length > 256 ||
         typeof source.request !== "string" || !source.request.trim() || source.request.length > 16000) throw new TypeError("Invalid extension request");
     return this.decide((state) => {
       const previous = state.operations.get(id);
       if (previous) {
-        if (previous.instanceId !== instanceId || previous.source.conversationId !== source.conversationId || previous.source.request !== source.request) throw new Error("Extension request identity conflict");
+        if (previous.instanceId !== instanceId || previous.source.conversationId !== source.conversationId || previous.source.request !== source.request || previous.purpose !== purpose) throw new Error("Extension request identity conflict");
         return { value: previous, records: [] };
       }
-      if (state.instances.has(instanceId) || [...state.operations.values()].some((op) => op.instanceId === instanceId && extensionOperationActive(op))) throw new Error("该连接已存在或正在接入，请查询现有操作");
-      const operation: ExtensionOperation = { id, instanceId, source: structuredClone(source), revision: 1, phase: "preparing" };
-      return { value: operation, records: [{ kind: "extension-operation", operation }] };
+      const instance = state.instances.get(instanceId);
+      const active = [...state.operations.values()].find(op => op.instanceId === instanceId && extensionOperationActive(op));
+      if (purpose === "repair" && active?.purpose === "repair" && active.phase !== "blocked") return { value: active, records: [] };
+      // A new explicit request may replace a finished diagnosis; automatic fault
+      // observation still coalesces against blocked operations and stable ids.
+      const superseded = purpose && active?.previous && active.phase === "blocked" && !active.switched ? active : undefined;
+      if ((active && !superseded) || (!purpose && instance) || (purpose && (!instance?.enabled || (instance.admission && !instance.admission.ready)))) throw new Error("该连接不可创建此操作，请查询现有状态");
+      const operation: ExtensionOperation = { id, instanceId, source: structuredClone(source), revision: 1, phase: "preparing",
+        ...(purpose && instance ? { purpose, previous: { binding: instance.binding, intentRevision: instance.intentRevision,
+          ...(instance.admission ? { admission: instance.admission } : {}) } } : {}) };
+      const records: RecordBody[] = superseded ? [{ kind: "extension-operation", operation: { ...superseded, revision: superseded.revision + 1, phase: "cancelled" } }] : [];
+      return { value: operation, records: [...records, { kind: "extension-operation", operation }] };
     });
   }
 
@@ -109,19 +118,24 @@ export class ExtensionApplication {
     });
   }
 
-  /** First install is atomic with the operation checkpoint; no active binding is overwritten. */
+  /** Trial and rollback input commit together, before retiring the old generation. */
   async trial(id: string, revision: number, binding: ExtensionBinding): Promise<ExtensionInstance> {
     const checked = validateExtensionBinding(binding);
     return this.decide((state) => {
       const operation = state.operations.get(id);
       if (!operation || operation.revision !== revision || operation.phase !== "configuration" || operation.candidate?.digest !== checked.manifest.digest) throw new ExtensionRevisionConflict();
-      if (state.instances.has(operation.instanceId)) throw new Error("Extension instance already exists");
-      const instance: ExtensionInstance = { id: operation.instanceId, revision: 1, enabled: true, intentRevision: 1,
+      const current = state.instances.get(operation.instanceId);
+      if (operation.previous) {
+        if (!current?.enabled || current.intentRevision !== operation.previous.intentRevision ||
+            current.binding.projectionRevision !== operation.previous.binding.projectionRevision ||
+            current.binding.manifest.digest !== operation.previous.binding.manifest.digest) throw new ExtensionRevisionConflict();
+      } else if (current) throw new Error("Extension instance already exists");
+      const instance: ExtensionInstance = { id: operation.instanceId, revision: (current?.revision ?? 0) + 1, enabled: true, intentRevision: current?.intentRevision ?? 1,
         binding: checked, generation: null, phase: "stopped", admission: { operationId: id, ready: false } };
       this.exclusive(state, instance);
       const { reason: _reason, ...accepted } = operation;
       return { value: instance, records: [{ kind: "extension-instance", instance },
-        { kind: "extension-operation", operation: { ...accepted, revision: revision + 1, phase: "verifying" } }] };
+        { kind: "extension-operation", operation: { ...accepted, revision: revision + 1, phase: "verifying", ...(operation.previous ? { switched: true } : {}) } }] };
     });
   }
 
@@ -144,7 +158,7 @@ export class ExtensionApplication {
   }
 
   async block(id: string, revision: number, reason: string): Promise<void> {
-    await this.changeOperation(id, revision, (current) => ({ ...current, reason: reason.slice(0, 1000), phase: "blocked" }));
+    await this.finishUnsuccessful(id, revision, "blocked", reason.slice(0, 1000));
   }
 
   async waiting(id: string, revision: number, reason: string): Promise<void> {
@@ -154,16 +168,28 @@ export class ExtensionApplication {
   }
 
   async cancel(id: string, revision: number): Promise<void> {
+    await this.finishUnsuccessful(id, revision, "cancelled");
+  }
+
+  private async finishUnsuccessful(id: string, revision: number, phase: "blocked" | "cancelled", reason?: string): Promise<void> {
     await this.decide((state) => {
       const operation = state.operations.get(id);
       if (!operation || operation.revision !== revision) throw new ExtensionRevisionConflict();
       if (!extensionOperationActive(operation)) return { value: undefined, records: [] };
       const instance = state.instances.get(operation.instanceId);
-      const records: RecordBody[] = [{ kind: "extension-operation", operation: { ...operation, revision: revision + 1, phase: "cancelled" } }];
-      if (instance?.admission?.operationId === id && !instance.admission.ready) records.push({ kind: "extension-instance", instance: {
+      const records: RecordBody[] = [{ kind: "extension-operation", operation: { ...operation, revision: revision + 1, phase, switched: false, ...(reason ? { reason } : {}) } }];
+      if (operation.previous && operation.switched && instance?.enabled && instance.admission?.operationId === id && instance.intentRevision === operation.previous.intentRevision) {
+        records.push({ kind: "extension-instance", instance: this.rollback(instance, operation) });
+      } else if (!operation.previous && phase === "cancelled" && instance?.admission?.operationId === id && !instance.admission.ready) records.push({ kind: "extension-instance", instance: {
         ...instance, enabled: false, revision: instance.revision + 1, intentRevision: instance.intentRevision + 1, generation: null, phase: "stopped" } });
       return { value: undefined, records };
     });
+  }
+
+  private rollback(instance: ExtensionInstance, operation: ExtensionOperation): ExtensionInstance {
+    const { admission: _admission, recoveryExhausted: _exhausted, reason: _reason, ...rest } = instance;
+    return { ...rest, binding: operation.previous!.binding, ...(operation.previous!.admission ? { admission: operation.previous!.admission } : {}),
+      revision: instance.revision + 1, generation: null, phase: "stopped" };
   }
 
   async notified(id: string, revision: number, continuation?: unknown): Promise<void> {
@@ -214,7 +240,7 @@ export class ExtensionApplication {
       return { ...previous, binding: checked, enabled: enabled ?? current!.enabled, revision: current!.revision + 1,
         intentRevision: (current!.intentRevision ?? 1) + (enabled === undefined ? 0 : 1),
         generation: null, phase: "stopped" };
-    });
+    }, true);
   }
 
   async begin(id: string, expectedRevision: number): Promise<ExtensionInstance> {
@@ -241,10 +267,13 @@ export class ExtensionApplication {
       const current = state.instances.get(id);
       if (!current) throw new Error("Unknown extension instance");
       if (!current.enabled || current.generation !== generation) return { value: false, records: [] };
-      const records: RecordBody[] = [{ kind: "extension-instance", instance: { ...withoutReason(current), phase, ...(reason ? { reason } : {}) } }];
+      const records: RecordBody[] = [{ kind: "extension-instance", instance: { ...withoutReason(current), phase, recoveryExhausted, ...(reason ? { reason } : {}) } }];
       const operation = current.admission && !current.admission.ready ? state.operations.get(current.admission.operationId) : undefined;
-      if (phase === "blocked" && recoveryExhausted && operation?.phase === "verifying") records.push({ kind: "extension-operation", operation: {
-        ...operation, revision: operation.revision + 1, phase: "blocked", reason: "连接启动或恢复失败，尚未通过收发验证；请检查本机连接状态与配置" } });
+      if (phase === "blocked" && recoveryExhausted && operation?.phase === "verifying") {
+        if (operation.previous && operation.switched) records[0] = { kind: "extension-instance", instance: this.rollback(current, operation) };
+        records.push({ kind: "extension-operation", operation: {
+          ...operation, revision: operation.revision + 1, phase: "blocked", switched: false, reason: operation.previous ? "候选启动或恢复失败，已恢复原版本绑定；可用性以当前连接状态为准" : "连接启动或恢复失败，尚未通过收发验证；请检查本机连接状态与配置" } });
+      }
       return { value: true, records };
     });
   }
@@ -282,11 +311,11 @@ export class ExtensionApplication {
     if (!Number.isSafeInteger(revision) || current.revision !== revision) throw new ExtensionRevisionConflict();
   }
 
-  private async change(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance): Promise<ExtensionInstance> {
-    return this.ports.commitDecision ? this.ports.commitDecision(() => this.commit(id, decide)) : this.commit(id, decide);
+  private async change(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh = false): Promise<ExtensionInstance> {
+    return this.ports.commitDecision ? this.ports.commitDecision(() => this.commit(id, decide, configurationRefresh)) : this.commit(id, decide, configurationRefresh);
   }
 
-  private async commit(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance): Promise<ExtensionInstance> {
+  private async commit(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh: boolean): Promise<ExtensionInstance> {
     const result = await this.ports.log().transactProjection<State, RecordBody, ExtensionInstance>(
       empty(), reduce, (state) => {
         this.ports.assertOwner();
@@ -295,6 +324,24 @@ export class ExtensionApplication {
         if (instance === current) return { kind: "return", value: structuredClone(instance) };
         this.exclusive(state, instance);
         const operations = new Map<string, ExtensionOperation>();
+        for (const operation of state.operations.values()) {
+          if (operation.instanceId !== id || !operation.previous || !extensionOperationActive(operation)) continue;
+          if (configurationRefresh && current?.enabled && instance.enabled && current.binding.configurationRevision === instance.binding.configurationRevision) {
+            // A user-approved secret rotation for the same account resumes the
+            // operation and rollback with the same complete local publication.
+            operations.set(operation.id, { ...operation, revision: operation.revision + 1, previous: { ...operation.previous,
+              binding: { ...instance.binding, manifest: operation.previous.binding.manifest }, intentRevision: instance.intentRevision } });
+            continue;
+          }
+          if (!instance.enabled || instance.intentRevision !== operation.previous.intentRevision ||
+              (current && current.binding.projectionRevision !== instance.binding.projectionRevision)) {
+            // Stop/configuration intent revokes the candidate. Never leave it as
+            // the version that a later explicit enable would accidentally start.
+            if (operation.switched && !instance.enabled) instance = { ...this.rollback(instance, operation), enabled: false };
+            else if (operation.switched) throw new Error("换版验证期间请先取消操作，再修改配置");
+            operations.set(operation.id, { ...operation, revision: operation.revision + 1, phase: "cancelled", switched: false });
+          }
+        }
         const admission = instance.admission;
         const admittedBy = admission ? state.operations.get(admission.operationId) : undefined;
         if (admission && admittedBy && current) {

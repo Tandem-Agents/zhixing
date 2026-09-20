@@ -282,6 +282,15 @@ export class InboundRouter {
     await new Promise<void>((resolve) => this.acceptedDrainWaiters.add(resolve));
   }
 
+  /** Preserve control replies while a connection changes implementation. */
+  async handleControlMessage(msg: InboundMessage): Promise<boolean> {
+    if (!this.isCurrentOwner() || !this.acceptingNew) return false;
+    const conversationId = resolveConversationId(msg, this.channels.bindingPolicy(msg.channelId));
+    const intent = this.intentClassifier.classify(msg);
+    if (intent.kind === "control") { await this.handleControlIntent(intent.control, conversationId, msg); return true; }
+    return this.confirmationHub ? this.tryHandleAsConfirmationReply(msg, conversationId) : false;
+  }
+
   async handleMessage(msg: InboundMessage): Promise<void> {
     if (!this.isCurrentOwner()) {
       this.logger.info(

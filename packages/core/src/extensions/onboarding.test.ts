@@ -32,6 +32,117 @@ async function fixture() {
 }
 
 describe("durable extension onboarding", () => {
+  it("resumes after a safe same-account credential rotation and rolls back to the complete renewed projection", async () => {
+    const f = await fixture();
+    await f.application.adopt("app", f.binding);
+    await f.application.prepare("update", "app", { conversationId: "scene", request: "更新" }, "update");
+    const manifest = { ...f.candidate.manifest, version: "2.0.0", digest: "b".repeat(64) };
+    await f.application.candidate("update", 1, manifest);
+    const trial = await f.application.trial("update", 2, { ...f.binding, manifest });
+    const renewed = await f.application.refresh("app", { ...trial.binding, secretRevision: "renewed", projectionRevision: "renewed" }, trial.revision, true);
+    const operation = (await f.application.operation("update"))!;
+    expect(operation.phase).toBe("verifying");
+    expect(operation.previous?.binding.projectionRevision).toBe("renewed");
+    expect(operation.previous?.intentRevision).toBe(renewed.intentRevision);
+    await f.application.cancel("update", operation.revision);
+    expect((await f.application.get("app"))?.binding).toMatchObject({ manifest: f.binding.manifest, secretRevision: "renewed", projectionRevision: "renewed" });
+  });
+  it("does not discard the original immutable configuration when cancellation wins a replacement CAS", async () => {
+    const f = await fixture();
+    await f.application.adopt("app", f.binding);
+    await f.archive.save(f.candidate);
+    await f.application.prepare("update", "app", { conversationId: "scene", request: "更新" }, "update");
+    await f.application.candidate("update", 1, f.candidate.manifest);
+    let discarded = false;
+    const manager = new ExtensionOnboarding(f.application, new ExtensionArtifacts(join(f.root, "artifacts")), f.archive, {
+      validate() {}, configuration: async () => { await f.application.cancel("update", 2); return f.binding; },
+      discard: async () => { discarded = true; }, changed: async () => {}, notify: async () => {}, isActive: () => true,
+    });
+    await manager.reconcile();
+    expect(discarded).toBe(false);
+    expect((await f.application.get("app"))?.binding).toEqual(f.binding);
+  });
+  it.each(["cancel", "failure", "stop"])("restores the previous binding across %s and Authority replay", async cause => {
+    const f = await fixture();
+    const original = await f.application.adopt("app", f.binding);
+    const shared = await f.application.adopt("other", f.binding);
+    await f.application.prepare("change", "app", { conversationId: "scene", request: "更新连接" }, "update");
+    const manifest = { ...f.candidate.manifest, digest: "b".repeat(64), version: "2.0.0" };
+    await f.application.candidate("change", 1, manifest);
+    const trial = await f.application.trial("change", 2, { ...f.binding, manifest });
+    const running = await f.application.begin("app", trial.revision);
+    if (cause === "cancel") await f.application.cancel("change", 3);
+    if (cause === "failure") await f.application.observe("app", running.generation!, "blocked", "fixture", true);
+    if (cause === "stop") await f.application.setEnabled("app", false, running.revision);
+    const replay = new ExtensionApplication({ log: f.log, assertOwner() {} });
+    const after = (await replay.get("app"))!;
+    expect(after.binding).toEqual(original.binding);
+    expect(after.enabled).toBe(cause !== "stop");
+    expect(after.generation).toBeNull();
+    expect((await replay.operation("change"))?.phase).toBe(cause === "failure" ? "blocked" : "cancelled");
+    expect(await replay.get("other")).toEqual(shared);
+    await expect(replay.complete("change", 3, running.generation!)).rejects.toThrow();
+  });
+
+  it("keeps the old version available during preparation and fences late candidates after a stop", async () => {
+    const f = await fixture();
+    const instance = await f.application.adopt("app", f.binding);
+    const running = await f.application.begin("app", instance.revision);
+    await f.application.prepare("update", "app", { conversationId: "scene", request: "更新" }, "update");
+    expect((await f.application.get("app"))?.generation).toBe(running.generation);
+    await f.application.setEnabled("app", false, running.revision);
+    await expect(f.application.candidate("update", 1, f.candidate.manifest)).rejects.toThrow();
+    expect((await f.application.get("app"))?.binding).toEqual(f.binding);
+  });
+
+  it("coalesces an exhausted fault and a user report into one bounded repair operation", async () => {
+    const f = await fixture();
+    const original = await f.application.adopt("app", f.binding);
+    const running = await f.application.begin("app", original.revision);
+    await f.application.observe("app", running.generation!, "blocked", "有限恢复耗尽", true);
+    const notifications: ExtensionOperation[] = [];
+    const manager = new ExtensionOnboarding(f.application, new ExtensionArtifacts(join(f.root, "artifacts")), f.archive, {
+      validate() {}, configuration: async () => undefined, discard: async () => {}, changed: async () => {},
+      notify: async op => { notifications.push(op); return { turn: "finite" }; }, preparationClosed: async () => true,
+      repairSource: async () => ({ conversationId: "scene", request: "恢复" }), isActive: () => true,
+    });
+    await manager.reconcile();
+    const first = (await f.application.list()).operations![0]!;
+    await manager.manage({ action: "repair", id: "user-report", instanceId: "app", source: { conversationId: "scene", request: "收不到消息" } });
+    await manager.reconcile(); await manager.reconcile();
+    const operations = (await f.application.list()).operations!;
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({ id: first.id, phase: "blocked", purpose: "repair" });
+    expect(notifications.map(op => op.phase)).toEqual(["preparing", "blocked"]);
+    const repeated = { action: "repair" as const, id: "try-again", instanceId: "app", source: { conversationId: "scene", request: "条件已修复，请再试" } };
+    await manager.manage(repeated);
+    expect((await f.application.operation(first.id))?.phase).toBe("cancelled");
+    expect(await f.application.operation(repeated.id)).toMatchObject({ phase: "preparing", source: repeated.source });
+    await manager.reconcile(); await manager.manage(repeated); await manager.reconcile();
+    expect(notifications.filter(op => op.phase === "preparing")).toHaveLength(2);
+    expect((await f.application.list()).operations).toHaveLength(2);
+    expect((await f.application.operation(repeated.id))?.phase).toBe("blocked");
+  });
+
+  it("recovers each committed replacement checkpoint without promoting an unverified version", async () => {
+    const f = await fixture();
+    await f.archive.save(f.candidate);
+    await f.application.adopt("app", f.binding);
+    await f.application.prepare("update", "app", { conversationId: "scene", request: "更新" }, "update");
+    const replacement = new ExtensionApplication({ log: f.log, assertOwner() {} });
+    expect((await replacement.get("app"))?.binding).toEqual(f.binding);
+    await replacement.candidate("update", 1, f.candidate.manifest);
+    const trial = await replacement.trial("update", 2, f.binding);
+    const replay = new ExtensionApplication({ log: f.log, assertOwner() {} });
+    expect((await replay.get("app"))?.admission?.ready).toBe(false);
+    const running = await replay.begin("app", trial.revision);
+    await replay.complete("update", 3, running.generation!, { confirmed: true });
+    const complete = new ExtensionApplication({ log: f.log, assertOwner() {} });
+    expect((await complete.get("app"))?.admission?.ready).toBe(true);
+    await complete.cancel("update", 4);
+    expect((await complete.get("app"))?.enabled).toBe(true);
+  });
+
   it("deduplicates preparation, retains original intent and restores the same pending candidate", async () => {
     const f = await fixture();
     const request = { action: "prepare" as const, id: "operation", instanceId: "account", source: { conversationId: "conversation", request: "连接 APP" } };

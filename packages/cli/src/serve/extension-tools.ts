@@ -1,5 +1,5 @@
-import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ToolDefinition } from "@zhixing/core";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { ExtensionManagementRequest, ExtensionSnapshot } from "@zhixing/core/extensions/contracts";
@@ -24,9 +24,9 @@ export function createExtensionManagementHandle() {
 export function createExtensionTools(transport: ExtensionManagementTransport): ToolDefinition[] {
   return [{
     name: "extension",
-    description: "准备外部 APP 接入、查询进度、取消接入或停用连接。先加载“外部能力接入”技能。准备仅接纳需求，不代表已可用；缺少本人操作时使用目标设备 /config 安全入口。",
+    description: "接入、更新、修复、查询、取消或停用外部连接。先加载“外部能力接入”技能。更新须来自用户要求；修复只恢复原有能力。",
     inputSchema: { type: "object", properties: {
-      action: { type: "string", enum: ["guide", "prepare", "status", "cancel", "disable"] },
+      action: { type: "string", enum: ["guide", "prepare", "update", "repair", "status", "cancel", "disable"] },
       instanceId: { type: "string", description: "新连接的稳定标识，或要停用的连接标识" },
       operationId: { type: "string" }, expectedRevision: { type: "integer" },
     }, required: ["action"], additionalProperties: false },
@@ -39,9 +39,9 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
         const run = runContextStorage.getStore();
         if (!run?.conversationId) throw new Error("需要在可恢复的对话中管理扩展");
         let request: ExtensionManagementRequest;
-        if (input.action === "prepare") {
+        if (input.action === "prepare" || input.action === "update" || input.action === "repair") {
           if (!context.turnId || !context.toolCallId || !context.userIntent || typeof input.instanceId !== "string") throw new Error("准备需要原始请求、稳定调用身份和连接标识");
-          request = { action: "prepare", id: `extension-${protocolDigest("ExtensionRequest", 1, { turn: context.turnId, call: context.toolCallId, lineage: run.lineage }).slice("sha256:".length)}`,
+          request = { action: input.action, id: `extension-${protocolDigest("ExtensionRequest", 1, { turn: context.turnId, call: context.toolCallId, lineage: run.lineage }).slice("sha256:".length)}`,
             instanceId: input.instanceId, source: { conversationId: run.conversationId, request: context.userIntent,
               // Preserve the wire representation; local optional fields can be
               // undefined, which are not canonical Authority values.
@@ -59,7 +59,7 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
     },
   }, {
     name: "extension_connect",
-    description: "提交已校验的固定版本候选包。确认后保存制品并等待安全配置、真实收发验证；不会把已安装当成可用。只接收无凭据的候选，不能覆盖现有连接。",
+    description: "为已接纳的接入、更新或修复操作提交固定版本候选。安全确认后由系统切换和验证；失败回退原绑定。不能直接覆盖生效文件。",
     inputSchema: { type: "object", properties: {
       operationId: { type: "string" }, expectedRevision: { type: "integer" },
       candidatePath: { type: "string", description: "当前工作目录内的 candidate.json" },
@@ -83,6 +83,29 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
         return { content: JSON.stringify(await transport.invoke({ action: "connect", id: input.operationId,
           expectedRevision: input.expectedRevision as number, candidate })) };
       } catch (error) { return { content: error instanceof Error ? error.message : "接入失败", isError: true }; }
+    },
+  }, {
+    name: "extension_source",
+    description: "把更新或修复操作的原版本源码与构建资料保存到工作目录内的新文件，供诊断和制作候选；不导出配置或凭据。",
+    inputSchema: { type: "object", properties: { operationId: { type: "string" }, path: { type: "string" } }, required: ["operationId", "path"], additionalProperties: false },
+    isReadOnly: false, isParallelSafe: false, permissionArgumentKey: "path",
+    boundaries: [{ boundaryType: "filesystem", access: "write", dynamic: false }],
+    async call(input, context) {
+      try {
+        if (!runContextStorage.getStore()?.conversationId || typeof input.operationId !== "string" || typeof input.path !== "string" ||
+            Object.keys(input).some(key => !["operationId", "path"].includes(key))) throw new Error("需要对话身份、操作标识及输出路径");
+        const root = await realpath(context.workingDirectory);
+        const output = resolve(root, input.path);
+        const parent = await realpath(dirname(output));
+        const within = relative(root, parent);
+        if (isAbsolute(within) || within.startsWith("..")) throw new Error("输出必须位于当前工作目录");
+        const result = await transport.invoke({ action: "candidate", id: input.operationId });
+        if (!result.snapshot.candidate) throw new Error("原版本源码不可用");
+        const candidate = validateExtensionCandidate(result.snapshot.candidate);
+        context.abortSignal?.throwIfAborted();
+        await writeFile(resolve(parent, basename(output)), JSON.stringify(candidate, null, 2), { flag: "wx", mode: 0o600 });
+        return { content: JSON.stringify({ path: output, digest: candidate.manifest.digest }) };
+      } catch (error) { return { content: error instanceof Error ? error.message : "源码导出失败", isError: true }; }
     },
   }];
 }

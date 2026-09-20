@@ -39,11 +39,14 @@ export interface ExtensionInstance {
   readonly configurationIssue?: string;
   /** New installations expose only type-owned verification until admission commits. */
   readonly admission?: { readonly operationId: string; readonly ready: boolean };
+  readonly recoveryExhausted?: boolean;
 }
 
 export interface ExtensionSnapshot {
   readonly instances: readonly ExtensionInstance[];
   readonly operations?: readonly ExtensionOperation[];
+  /** Only returned by an explicit source-export request, never by list/status. */
+  readonly candidate?: ExtensionCandidate;
 }
 
 export interface ExtensionOperation {
@@ -51,6 +54,10 @@ export interface ExtensionOperation {
   readonly instanceId: string;
   readonly revision: number;
   readonly source: { readonly conversationId: string; readonly request: string; readonly returnAddress?: unknown };
+  readonly purpose?: "update" | "repair";
+  /** Immutable rollback input; business facts are never rolled back. */
+  readonly previous?: { readonly binding: ExtensionBinding; readonly admission?: ExtensionInstance["admission"]; readonly intentRevision: number };
+  readonly switched?: boolean;
   readonly phase: "preparing" | "configuration" | "verifying" | "ready" | "blocked" | "cancelled";
   readonly candidate?: ExtensionManifest;
   /** Opaque type-owned verification checkpoint; no credentials. */
@@ -75,6 +82,8 @@ export interface ExtensionCandidate {
 
 export type ExtensionManagementRequest =
   | { readonly action: "prepare"; readonly id: string; readonly instanceId: string; readonly source: ExtensionOperation["source"] }
+  | { readonly action: "update" | "repair"; readonly id: string; readonly instanceId: string; readonly source: ExtensionOperation["source"] }
+  | { readonly action: "candidate"; readonly id: string }
   | { readonly action: "connect"; readonly id: string; readonly expectedRevision: number; readonly candidate: ExtensionCandidate }
   | { readonly action: "cancel"; readonly id: string; readonly expectedRevision: number }
   | { readonly action: "disable"; readonly instanceId: string }
@@ -118,7 +127,10 @@ export interface ExtensionTypeBinding {
   readonly type: string;
   readonly contract: number;
   validate(manifest: ExtensionManifest, projection: unknown): void;
+  /** Generation-bound transport for the trusted type's inbound/control bridge. */
+  bindTransport?(call: ExtensionProcess["call"]): void;
   receive(invocation: ExtensionInvocation): Promise<unknown>;
+  quiesce?(): void;
   close(): void;
 }
 
