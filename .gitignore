@@ -48,3 +48,6 @@ research/_private/
 
 # Local-only agent playbooks — 过程活文档（审核执行追踪等），不提交
 research/playbooks/local/
+
+# Cross-session agent collaboration runtime state — 登记、资源租约与线程产物，本地运行态不入库
+/collab/
