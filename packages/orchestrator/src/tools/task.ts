@@ -27,7 +27,9 @@
  *   - 三态结果都保留结构化 <usage> trailer，让主 LLM 和用量视图读取同一协议
  */
 
-import { type BoundaryCrossing, type SecurityPipeline } from "@zhixing/core/security";
+import { restrictToolExecution, type BoundaryCrossing, type SecurityPipeline } from "@zhixing/core/security";
+import { conversationLogScope, restrictLogQueryTools } from "@zhixing/core/logging/application";
+import { randomUUID } from "node:crypto";
 import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import {
   type JsonSchema,
@@ -117,7 +119,7 @@ export const TASK_ERROR_REASON_MAX_CHARS = 2_000;
 export const TASK_RESULT_TEXT_MAX_CHARS = 20_000;
 
 /**
- * Task 工具的 input schema —— 严格两字段,LLM 学习成本最低。
+ * Task 输入仅接收描述、任务和可选的日志权限收窄，不接受身份或范围自报。
  *
  * 不加 `subagent_type`:v1 单一子 role,无 researcher/critic 等具体角色,
  * 让 LLM 不必学习这字段;v2+ 引入 RoleTask 时再扩(`oneOf` 拆字段或 enum 加白名单)。
@@ -131,6 +133,7 @@ export const TASK_RESULT_TEXT_MAX_CHARS = 20_000;
 export const TASK_INPUT_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
+    logOnly: { type: "boolean", description: "仅查当前会话的运行日志；子任务不获得文件、代码或外部工具权限。需要真实会话上下文。" },
     description: {
       type: "string",
       description: "A short (3-5 word) summary of the task, shown in status bar.",
@@ -460,7 +463,8 @@ type ParseTaskInputResult =
   | { ok: false; message: string };
 
 function parseTaskInput(input: Record<string, unknown>): ParseTaskInputResult {
-  const allowed = new Set(["description", "prompt"]);
+  if (input.logOnly !== undefined && typeof input.logOnly !== "boolean") return { ok: false, message: "Task 的 logOnly 必须是布尔值" };
+  const allowed = new Set(["description", "prompt", "logOnly"]);
   const extra = Object.keys(input).filter((key) => !allowed.has(key));
   if (extra.length > 0) {
     return {
@@ -564,8 +568,25 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
 
       const { runCtx, abortSignal } = assertRunContract(parsed, ctx);
       const { description, prompt } = parsed;
-
-      const result = await runChildAgent({
+      let parentTools = env.parentTools;
+      let childContext = runCtx;
+      let childActive = true;
+      if (input.logOnly === true) {
+        if (!runCtx.conversationId || !ctx.toolCallId) return { isError: true, content: "仅查日志的委派需要当前会话和真实工具调用身份" };
+        try {
+          parentTools = restrictLogQueryTools(env.parentTools, {
+            scope: conversationLogScope(runCtx.conversationId),
+            subject: `log-task:${randomUUID()}`,
+            revision: "conversation-only-v1",
+            assertActive: () => {
+              abortSignal.throwIfAborted();
+              if (!childActive) throw Error("日志子任务已结束");
+            },
+          });
+          childContext = { ...runCtx, toolExecutionCeiling: restrictToolExecution(parentTools, runCtx.toolExecutionCeiling) };
+        } catch (error) { return { isError: true, content: error instanceof Error ? error.message : "日志委派不可用" }; }
+      }
+      const result = await runContextStorage.run(childContext, () => runChildAgent({
         provider: env.provider,
         model: env.model,
         loopThinking: env.loopThinking,
@@ -581,7 +602,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         parentBus: runCtx.bus,
         parentLineage: runCtx.lineage,
         parentBroker: env.parentBroker,
-        parentTools: env.parentTools,
+        parentTools,
         parentSignal: abortSignal,
         task: prompt,
         taskDescription: description,
@@ -592,7 +613,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         // 仍按顶层意图研判（子 agent 不能借助 task 文本伪装意图绕过管家）
         userIntent: ctx.userIntent,
         authorizeToolExecution: runCtx.authorizeToolExecution,
-      });
+      })).finally(() => { childActive = false; });
 
       return formatChildResultAsToolResult(result, description, ctx.toolCallId);
     },

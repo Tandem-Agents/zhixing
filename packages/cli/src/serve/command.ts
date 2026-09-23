@@ -15,6 +15,9 @@ import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
+import { createLogAccess } from "../logging/access.js";
+import { createRuntimeLogTools } from "../logging/tools.js";
+import { LOG_PRODUCT_API_EXACT_SET } from "@zhixing/core/logging/application";
 import { createExtensionContinuation, createExtensionNotificationHandle, createExtensionStatusObserver } from "./extension-continuation.js";
 import { createConversationCommunicationBinding, createLocalConversationCommunicationBinding, discoverConversations } from "./conversation-communication-binding.js";
 import { CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET, createConversationCommunicationProductApiContribution } from "@zhixing/core/conversation/application";
@@ -387,6 +390,9 @@ async function runServerProcess(
   const zhixingHome = bootstrap.zhixingHome;
   configureLlmChunkDump(false, zhixingHome);
   const deviceCapacity = bootstrap.deviceCapacity;
+  const logAccess = createLogAccess(zhixingHome, deviceCapacity.arbiter);
+  lifecycleContributions.acquire("logAccess.close", () => logAccess.close());
+  const logTools = createRuntimeLogTools(() => productApi);
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
   const processStartTime = await resolveProcessStartTime(process.pid);
@@ -708,6 +714,7 @@ async function runServerProcess(
   const extensionNotifications = createExtensionNotificationHandle();
   const extensionTools = createExtensionTools(extensionHandle.port);
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
+    logTools,
     extensionTools,
     communicationTools,
     mcpProductTools,
@@ -760,6 +767,7 @@ async function runServerProcess(
     remoteWorkspaceProbe,
   });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
+    logTools,
     extensionTools,
     communicationTools,
     mcpProductTools,
@@ -1127,13 +1135,13 @@ async function runServerProcess(
     lifecycleContributions,
   }, conversationLosslessDataPlane);
   conversationLosslessDataPlane.assertComplete();
-  if (localExecutor) {
-    await startExecutorJobOwner({
+  const recoverLocalJobsAfterBindings = localExecutor
+    ? await startExecutorJobOwner({
       executorJobOwnerAssembly: localExecutor.jobs,
       lifecycleContributions,
       startupLifecycle,
-    });
-  }
+    })
+    : undefined;
   await recoverChannelInteractions({
     channelMechanism,
     channelCoordinator: losslessDataPlane.coordinator,
@@ -2907,6 +2915,7 @@ async function runServerProcess(
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
+        ...LOG_PRODUCT_API_EXACT_SET.operations,
         ...CONVERSATION_COMMUNICATION_PRODUCT_API_EXACT_SET.operations,
         ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.operations,
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
@@ -2945,6 +2954,7 @@ async function runServerProcess(
       ],
     }),
     [
+      logAccess.contribution,
       createConversationCommunicationProductApiContribution(communicationHandle.port.invoke),
       createConversationDirectoryProductApiContribution(
         conversationApplication,
@@ -3003,6 +3013,7 @@ async function runServerProcess(
   }) };
   extensionHandle.bind(meshRuntime ? meshRuntime.extensionManagementForAnchor(localExtensionManagement) : localExtensionManagement);
   meshRuntime?.bindExtensionManagement(localExtensionManagement);
+  await recoverLocalJobsAfterBindings?.();
   await localExecutor?.owner.start(startupLifecycle
     ? { lifecycle: {
         operationId: startupLifecycle.delivery.operationId,

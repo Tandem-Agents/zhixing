@@ -33,7 +33,8 @@ function fixture(mcpTools = {
     serverIds: ["alpha", "beta"],
   }),
 } as never, communicationTools: readonly import("@zhixing/core").ToolDefinition[] = [],
-extensionTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
+extensionTools: readonly import("@zhixing/core").ToolDefinition[] = [],
+logTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
   const workscenes = {} as never;
   const extraTools = {
     taskListService: {},
@@ -43,6 +44,7 @@ extensionTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
     ],
   } as never;
   const capabilities = createAnchorRuntimeCapabilityCatalog({
+    logTools,
     extensionTools,
     communicationTools,
     extraTools,
@@ -56,6 +58,7 @@ extensionTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
     id: sceneId === undefined ? "guidance-main" : `guidance-scene:${sceneId}`,
   }));
   return createAnchorRuntimeProjectionAssembly({
+    logTools,
     extensionTools,
     communicationTools,
     agentIdentity: { displayName: "知行" },
@@ -74,6 +77,18 @@ extensionTools: readonly import("@zhixing/core").ToolDefinition[] = []) {
 }
 
 describe("Workscene product runtime projection", () => {
+  it("projects logs into applicable local/remote runtimes while respecting frozen job grants", () => {
+    const tools = ["log_search", "log_read"].map(name => ({ name }) as import("@zhixing/core").ToolDefinition);
+    const assembly = fixture(undefined, [], [], tools);
+    const manifest = assembly.jobCapabilities();
+    for (const projection of [assembly.main(), assembly.scene({ scene: scene().scene, absolutePath: null }), assembly.ephemeral(), assembly.job({ kind: "agent-turn", prompt: "trace" }, manifest)]) {
+      for (const tool of tools) expect(projection.runtimeTools.extraTools).toContainEqual(tool);
+    }
+    const denied = assembly.job({ kind: "agent-turn", prompt: "trace", tools: ["read"] }, { tools: ["read"], mcpServers: [] });
+    expect(denied.runtimeTools.extraTools).toEqual([]);
+    const names = tools.map(tool => tool.name);
+    expect(projectConversationCapabilitiesForDevice({ profile: { tools: names, mcpServers: [], providerIds: [] }, ownerDeviceId: "anchor", executorDeviceId: "executor", capabilities: { tools: names, mcpServers: [] } }).tools).toEqual([...names].sort());
+  });
   it("provides extension management in main/work and remote projections without widening frozen jobs", () => {
     const tools = ["extension", "extension_connect"].map(name => ({ name }) as import("@zhixing/core").ToolDefinition);
     const assembly = fixture(undefined, [], tools);

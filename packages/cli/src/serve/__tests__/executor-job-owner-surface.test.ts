@@ -18,9 +18,13 @@ describe("executor job owner production surface", () => {
     expect(assembly.owner).toBeDefined();
     expect(ctx.jobRelayObligations).toBeDefined();
     expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(false);
-    await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
+    const recoverAfterBindings = await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
     expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(true);
     expect(assembly.owner.ready).toBe(false);
+    expect(ledger.recoverableJobObligations).not.toHaveBeenCalled();
+    const pending = recoverAfterBindings();
+    expect(recoverAfterBindings()).toBe(pending);
+    await pending;
     expect(ledger.recoverableJobObligations).toHaveBeenCalledTimes(1);
     expect(ctx).not.toHaveProperty("executorJobOwner");
 
@@ -29,9 +33,10 @@ describe("executor job owner production surface", () => {
   });
 
   it("keeps fresh job recovery closed until the durable lifecycle artifact exists", async () => {
+    const ledger = recoveryLedger();
     const base = ownerContext(
       ["anchor", "executor"],
-      recoveryLedger(),
+      ledger,
       new StartupRollback(),
     );
     const startupLifecycle: StartupLifecycleRestoration = {
@@ -50,13 +55,15 @@ describe("executor job owner production surface", () => {
     const assembly = await createExecutorJobOwner(Object.freeze(ctx));
     const start = vi.spyOn(assembly, "start");
 
-    await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
+    const recoverAfterBindings = await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
+    await recoverAfterBindings();
 
     expect(start).toHaveBeenCalledWith({
       admissionClosed: true,
       recoverAcceptedWork: false,
     });
     expect(assembly.owner.ready).toBe(false);
+    expect(ledger.recoverableJobObligations).not.toHaveBeenCalled();
     await ctx.startupRollback.rollback();
   });
 
@@ -106,10 +113,11 @@ describe("executor job owner production surface", () => {
 
   it("registers rollback after transports so the started owner closes first", async () => {
     const order: string[] = [];
+    const ledger = recoveryLedger();
     const rollback = new StartupRollback();
     const ctx = ownerContext(
       ["anchor", "executor"],
-      recoveryLedger(),
+      ledger,
       rollback,
     );
     const assembly = await createExecutorJobOwner(Object.freeze(ctx));
@@ -122,10 +130,12 @@ describe("executor job owner production surface", () => {
       await close();
     });
 
-    await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
+    const recoverAfterBindings = await startExecutorJobOwner({ executorJobOwnerAssembly: assembly, lifecycleContributions: ctx.lifecycleContributions, startupLifecycle: ctx.startupLifecycle });
     await rollback.rollback();
+    await recoverAfterBindings();
 
     expect(order).toEqual(["owner", "transport"]);
+    expect(ledger.recoverableJobObligations).not.toHaveBeenCalled();
   });
 });
 

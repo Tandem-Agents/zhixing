@@ -1,4 +1,5 @@
 // Security — 安全系统模块的公开 API
+export { restrictToolExecution, type ToolExecutionCeiling } from "./tool-ceiling.js";
 
 // 类型导出
 export type {

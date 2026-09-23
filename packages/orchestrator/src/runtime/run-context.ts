@@ -49,6 +49,8 @@ export type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
  *     而触发不变量违反
  */
 export interface RunContext {
+  /** Trusted capability ceiling, inherited by descendants; normal approval cannot expand it. */
+  readonly toolExecutionCeiling?: import("@zhixing/core/security").ToolExecutionCeiling;
   bus: EventBus<AgentEventMap>;
   lineage: string;
   /**

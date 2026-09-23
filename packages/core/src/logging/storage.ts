@@ -1,3 +1,4 @@
+import { LogRequestError } from "./errors.js";
 import { createHash, randomUUID } from "node:crypto";
 import type {
   DeviceCapacityArbiterPort,
@@ -314,12 +315,13 @@ export class LocalLogStore implements LogSink {
     });
   }
 
-  async applyPolicy(desired: LogPolicy, expectedVersion: number): Promise<LogStatus> {
+  async applyPolicy(desired: LogPolicy, expectedVersion: number, assertAuthorized?: () => void): Promise<LogStatus> {
     const validated = validateLogPolicy(desired);
     return this.#step(true, async () => {
       const state = await this.#required(true);
-      if (state.policy.version !== expectedVersion) throw Error("日志策略已变化，请重新读取后提交");
-      if (state.policy.desired) throw Error("日志策略正在应用");
+      assertAuthorized?.();
+      if (state.policy.version !== expectedVersion) throw new LogRequestError("日志策略已变化，请重新读取后提交");
+      if (state.policy.desired) throw new LogRequestError("日志策略正在应用");
       state.policy = { ...state.policy, desired: validated };
       await this.#save(state);
       await this.#maintenance(state);

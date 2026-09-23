@@ -46,7 +46,7 @@ const MAIN_ENABLED_TOOLS = [
  *
  * 当前限定为只读探索类工具：read / glob / grep / web_fetch。
  */
-export const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep", "web_fetch"] as const;
+export const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep", "web_fetch", "log_search", "log_read"] as const;
 
 /**
  * 主 agent profile。name 来自本实例的已解析身份投影。

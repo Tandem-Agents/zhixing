@@ -1,3 +1,4 @@
+import { LogRequestError } from "./errors.js";
 import type {
   LogFilter,
   LogGap,
@@ -10,7 +11,7 @@ import type {
 } from "./contracts.js";
 import { validLogToken } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
-import { LocalLogStore, logDigest, indexName, type LogStoreSnapshot } from "./storage.js";
+import { LocalLogStore, logDigest, indexName, type LogStoreSnapshot, type LogRetirement } from "./storage.js";
 import { scopeLogQuery, type LogScanFiles, type LogVisibleRange } from "./query-scope.js";
 
 interface Cursor {
@@ -33,16 +34,16 @@ export function formatLogAddress(address: LogAddress): string {
   return `zxlog://${address.storeId}/${suffix}`;
 }
 export function parseLogAddress(value: string): LogAddress {
-  if (value.length > 512) throw Error("日志地址过长");
+  if (value.length > 512) throw new LogRequestError("日志地址过长");
   const match = /^zxlog:\/\/([a-f0-9-]{36})\/(record|operation)\/([^/]+)(?:\/([^/]+))?$/u.exec(
     value,
   );
-  if (!match) throw Error("日志地址无效");
+  if (!match) throw new LogRequestError("日志地址无效");
   const id = decodeURIComponent(match[3]!);
-  if (!validLogToken(id)) throw Error("日志地址身份无效");
+  if (!validLogToken(id)) throw new LogRequestError("日志地址身份无效");
   if (match[2] === "record" && !match[4]) return { storeId: match[1]!, kind: "record", id };
   const refId = decodeURIComponent(match[4] ?? "");
-  if (match[2] !== "operation" || !validLogToken(refId)) throw Error("日志操作地址无效");
+  if (match[2] !== "operation" || !validLogToken(refId)) throw new LogRequestError("日志操作地址无效");
   return {
     storeId: match[1]!,
     kind: "operation",
@@ -73,7 +74,8 @@ export class LogApplication {
   }
   async applyPolicy(policy: LogPolicy, expectedVersion: number): Promise<LogStatus> {
     const context = this.#manager();
-    const status = await this.#store.applyPolicy(policy, expectedVersion);
+    if (context.managePolicy === false) throw new LogRequestError("当前接入面不能修改日志策略，请使用本机配置入口");
+    const status = await this.#store.applyPolicy(policy, expectedVersion, () => this.#authorize(context));
     this.#authorize(context);
     return status;
   }
@@ -123,11 +125,11 @@ export class LogApplication {
         authorized();
         return {
           records: [],
-          gaps: context.manageStorage ? [{ kind: "unavailable", reason: "remote-store" }] : [],
-          coverage: { upper: 0, scannedBytes: 0, complete: true },
+          gaps: [{ kind: "unavailable", reason: "remote-store" }],
+          coverage: { upper: 0, scannedBytes: 0, complete: false },
         };
       }
-      if (decoded && decoded.storeId !== state.storeId) throw Error("日志游标不属于当前存储");
+      if (decoded && decoded.storeId !== state.storeId) throw new LogRequestError("日志游标不属于当前存储");
       const scoped = scopeLogQuery(state, files, context, decoded);
       if (
         decoded &&
@@ -136,7 +138,7 @@ export class LogApplication {
           (scoped.state.segments.find((segment) => segment.start === decoded.position)?.bytes ??
             decoded.offset) < decoded.offset)
       )
-        throw Error("日志游标范围无效");
+        throw new LogRequestError("日志游标范围无效");
       const page = await this.#scan(
         scoped.state,
         scoped.files,
@@ -190,7 +192,7 @@ export class LogApplication {
       const latest = await current();
       authorized();
       if (latest.storeId !== state.storeId || latest.policy.version !== state.policy.version)
-        throw Error("日志策略或存储已变化，请重新查询");
+        throw new LogRequestError("日志策略或存储已变化，请重新查询");
       const retained = new Set(latest.segments.flatMap((segment) => segment.recordIds));
       let records = page.records.filter((item) => retained.has(item.id));
       const visibleRetirement =
@@ -241,18 +243,18 @@ export class LogApplication {
         ];
       }
       if (Buffer.byteLength(JSON.stringify(result)) > policy.queryResultBytes)
-        throw Error("日志查询结果超过限额，请缩小筛选范围");
+        throw new LogRequestError("日志查询结果超过限额，请缩小筛选范围");
       return result;
     });
   }
 
   #authorize(context: LogReadContext): void {
     if (JSON.stringify(this.#context()) !== JSON.stringify(context))
-      throw Error("日志读取权限发生变化，请重新查询");
+      throw new LogRequestError("日志读取权限发生变化，请重新查询");
   }
   #manager(): LogReadContext {
     const context = structuredClone(this.#context());
-    if (!context.manageStorage) throw Error("需要本机日志存储管理授权");
+    if (!context.manageStorage) throw new LogRequestError("需要本机日志存储管理授权");
     return context;
   }
   async #scan(
@@ -275,6 +277,7 @@ export class LogApplication {
       resultBytes = 0;
     const records: LogRecord[] = [],
       gaps: LogGap[] = [];
+    const retirements = [...state.retired].sort((a, b) => a.start - b.start);
     const gap = (reason: string, kind: LogGap["kind"] = "insufficient"): void => {
       if (
         (context.manageStorage || range !== undefined) &&
@@ -289,7 +292,7 @@ export class LogApplication {
       if (segment.start > position) {
         gap(
           "records-not-retained",
-          state.retired.some((range) => range.start <= position && range.end >= segment.start - 1)
+          retirementCovers(retirements, position, segment.start - 1)
             ? "expired"
             : "insufficient",
         );
@@ -390,12 +393,13 @@ export class LogApplication {
             record = undefined;
             gap("record-corrupt");
           }
+          // Hidden references must not become an existence oracle through a filter or operation address.
+          if (record && !context.manageStorage) record = { ...record, refs: [] };
           if (record && allowed(record, context) && matches(record, filter)) {
             const known =
               record.schema === 1 && this.#sources.has(`${record.source}:${record.sourceVersion}`);
             let projected: LogRecord = {
               ...record,
-              refs: context.manageStorage ? record.refs : [],
               ...(known
                 ? {}
                 : {
@@ -445,7 +449,7 @@ export class LogApplication {
     if (!remaining && position <= upper) {
       gap(
         "records-not-retained",
-        state.retired.some((range) => range.start <= position && range.end >= upper)
+          retirementCovers(retirements, position, upper)
           ? "expired"
           : "insufficient",
       );
@@ -469,6 +473,22 @@ export class LogApplication {
       coverage: { upper, scannedBytes, complete },
     };
   }
+}
+
+export * from "./product-api.js";
+export * from "./tools.js";
+export { LogRequestError, publicLogErrorMessage } from "./errors.js";
+
+/** Sorted, bounded evidence may span several retired segments, but must not bridge a hole. */
+function retirementCovers(ranges: readonly LogRetirement[], start: number, end: number): boolean {
+  let next = start;
+  for (const range of ranges) {
+    if (range.end < next) continue;
+    if (range.start > next) return false;
+    if (range.end >= end) return true;
+    next = range.end + 1;
+  }
+  return false;
 }
 
 function allowed(record: LogRecord, context: LogReadContext): boolean {
@@ -502,10 +522,10 @@ function validateFilter(filter: LogFilter): void {
         (filter.ref.storeId !== undefined && !validLogToken(filter.ref.storeId)))) ||
     (filter.level !== undefined && !["debug", "info", "warn", "error"].includes(filter.level))
   )
-    throw Error("日志筛选条件无效");
+    throw new LogRequestError("日志筛选条件无效");
 }
 function decodeCursor(cursor: string, binding: string): Cursor {
-  if (cursor.length > 2048) throw Error("日志游标过长");
+  if (cursor.length > 2048) throw new LogRequestError("日志游标过长");
   const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Cursor;
   if (
     value.v !== 1 ||
@@ -522,7 +542,7 @@ function decodeCursor(cursor: string, binding: string): Cursor {
         !/^[a-f0-9-]{36}$/u.test(value.range.lastId) ||
         !/^[a-f0-9]{64}$/u.test(value.range.digest)))
   )
-    throw Error("日志游标已失效或权限发生变化");
+    throw new LogRequestError("日志游标已失效或权限发生变化");
   return value;
 }
 function parseRecord(line: string, limit: number, storeId: string): LogRecord {

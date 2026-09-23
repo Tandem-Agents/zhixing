@@ -385,6 +385,9 @@ async function runChildAgentInner(
         ...(parentContext?.conversationId
           ? { conversationId: parentContext.conversationId }
           : {}),
+        ...(parentContext?.toolExecutionCeiling
+          ? { toolExecutionCeiling: parentContext.toolExecutionCeiling }
+          : {}),
         ...(parentContext?.turnOrigin
           ? { turnOrigin: parentContext.turnOrigin }
           : {}),

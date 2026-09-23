@@ -17,6 +17,7 @@ function registry() {
 describe("typed pre-server lifecycle contributions", () => {
   it("freezes the production identity and owner exact-set", () => {
     expect(ASSEMBLY_LIFECYCLE_DESCRIPTORS).toEqual([
+      { owner: "anchor-host", role: "common", id: "logAccess.close", stage: "foundation" },
       { owner: "anchor-host", role: "common", id: "authorityRuntime.stopStorageMaintenance", stage: "foundation" },
       { owner: "anchor-local-executor", role: "common", id: "localWorkspaceHost.close", stage: "foundation" },
       { owner: "anchor-local-executor", role: "runtime", id: "localConversationOwner.close", stage: "foundation" },

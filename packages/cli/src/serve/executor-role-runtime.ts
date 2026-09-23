@@ -26,6 +26,8 @@ import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
+import { createLogAccess, createLocalLogProductApi } from "../logging/access.js";
+import { createRuntimeLogTools } from "../logging/tools.js";
 import { createExtensionStatusObserver } from "./extension-continuation.js";
 import { createLocalConversationCommunicationBinding } from "./conversation-communication-binding.js";
 import { McpManagementApplication } from "@zhixing/core/mcp-management";
@@ -207,6 +209,9 @@ export async function runExecutorRole(
   const localServerPort = options.port ?? homeToPort(zhixingHome);
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
+  const logAccess = createLogAccess(zhixingHome, deviceCapacity.arbiter);
+  const logApi = createLocalLogProductApi(logAccess);
+  executorRoleLifecycle.acquire("logAccess.close", () => logAccess.close());
   const executorInternalStopLifecycle = new ExecutorInternalStopLifecycle({
     notReadyMessage: "Executor Host admission changed before its stop port was ready",
   });
@@ -293,6 +298,7 @@ export async function runExecutorRole(
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
     const runtime = new ExecutorRuntimeSubstrate({
+      logTools: createRuntimeLogTools(() => logApi),
       extensionTools: createExtensionTools(extensionHandle.port),
       communicationTools: [createConversationTool(communicationHandle.port)],
       zhixingHome,
@@ -942,6 +948,7 @@ export async function runExecutorRole(
       }),
     });
     const serverContext = createServerContext({
+      productApi: logApi,
       config: {
         ...DEFAULT_SERVER_CONFIG,
         port: localServerPort,
@@ -1079,6 +1086,7 @@ export class ExecutorRuntimeSubstrate {
   constructor(private readonly options: {
     readonly communicationTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly extensionTools?: readonly import("@zhixing/core").ToolDefinition[];
+    readonly logTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly zhixingHome: string;
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
@@ -1156,6 +1164,7 @@ export class ExecutorRuntimeSubstrate {
         ...(workscene ? { resolveWorkspaceRoot: async () => runtimeEnvironment.workspace.path } : {}),
       })],
         extraTools: [
+          ...(this.options.logTools ?? []),
           ...(this.options.communicationTools ?? []),
           ...(this.options.extensionTools ?? []),
           ...(this.options.mcpProductTools ?? []),
@@ -1189,7 +1198,7 @@ export class ExecutorRuntimeSubstrate {
       instruction,
       capabilities,
       baseProfile,
-      extraTools: [...(this.options.mcpProductTools ?? []).filter((tool) => !["mcp_connect", "mcp_delegate"].includes(tool.name)), ...mcp.tools],
+      extraTools: [...(this.options.logTools ?? []), ...(this.options.mcpProductTools ?? []).filter((tool) => !["mcp_connect", "mcp_delegate"].includes(tool.name)), ...mcp.tools],
       executionMcpServers: mcp.serverIds,
       implementation: this.options.createToolImplementation(Object.freeze({
         kind: "assignment",
@@ -1229,6 +1238,7 @@ export class ExecutorRuntimeSubstrate {
     return {
       tools: [
         ...new Set([
+          ...(this.options.logTools ?? []).map(tool => tool.name),
           ...(this.options.communicationTools ?? []).map(tool => tool.name),
           ...(this.options.extensionTools ?? []).map(tool => tool.name),
           ...(this.options.mcpProductTools ?? []).map((tool) => tool.name),

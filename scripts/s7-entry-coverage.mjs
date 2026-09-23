@@ -162,6 +162,8 @@ const baseMappingTuples = [
   ),
   ["rpc:auth", { exclusion: "connection", reason: exclusions.connection }],
   ["rpc:health", { exclusion: "connection", reason: exclusions.connection }],
+  ...["logs.search", "logs.read", "logs.status"].map((name) => [`rpc:${name}`, { exclusion: "diagnostic", reason: exclusions.diagnostic }]),
+  ["rpc:logs.apply-policy", { exclusion: "logGovernance", reason: exclusions.logGovernance }],
   ["cli:zhixing", { exclusion: "composition", reason: exclusions.composition }],
   ["cli:zhixing app", { exclusion: "composition", reason: exclusions.composition }],
   [
@@ -8739,8 +8741,26 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     (count, record) => count + (record.text.split("new ProductApiDispatcher(").length - 1),
     0,
   );
-  if (productApiConstructions !== 1) {
-    failures.push("Persistent production Host must have exactly one Product API dispatcher construction");
+  const logComposition = records.find(record => record.relative === "packages/cli/src/logging/access.ts")?.text ?? "";
+  const offlineLogs = records.find(record => record.relative === "packages/cli/src/logging/command.ts")?.text ?? "";
+  const executorLogs = records.find(record => record.relative === "packages/cli/src/serve/executor-role-runtime.ts")?.text ?? "";
+  const localLogApiUses = records.reduce((count, record) => count + (record.text.match(/\bcreateLocalLogProductApi\s*\(/gu) ?? []).length, 0);
+  if (
+    productApiConstructions !== 2 ||
+    logComposition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
+    !logComposition.includes("export function createLocalLogProductApi(") ||
+    logComposition.includes("api: new ProductApiDispatcher") ||
+    localLogApiUses !== 3 ||
+    !offlineLogs.includes("const api = createLocalLogProductApi(access)") ||
+    !executorLogs.includes("const logApi = createLocalLogProductApi(logAccess)") ||
+    !executorLogs.includes("createRuntimeLogTools(() => logApi)") ||
+    !executorLogs.includes("productApi: logApi") ||
+    !composition.includes("createRuntimeLogTools(() => productApi)") ||
+    composition.indexOf("await recoverLocalJobsAfterBindings?.()") <= composition.indexOf("meshRuntime?.bindExtensionManagement(localExtensionManagement)") ||
+    composition.indexOf("await recoverLocalJobsAfterBindings?.()") >= composition.indexOf("await localExecutor?.owner.start(startupLifecycle") ||
+    composition.includes("createLocalLogProductApi(")
+  ) {
+    failures.push("Each Host must own one Product API catalog; local log catalogs are limited to Executor and offline composition roots");
   }
   if (
     !productApi.includes("export class ProductApiDispatcher") ||
@@ -9556,6 +9576,7 @@ export function inspectManagedHostAssembly(records) {
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
   const assemblyLifecycleIds = [
+    "logAccess.close",
     "authorityRuntime.stopStorageMaintenance",
     "localWorkspaceHost.close",
     "localConversationOwner.close",
@@ -9768,6 +9789,7 @@ export function inspectManagedHostAssembly(records) {
     "executorDataPlane.close",
     "authorityRuntime.stopStorageMaintenance",
     "mcpRuntime.close",
+    "logAccess.close",
   ];
   const executorLifecyclePositions = executorRoleLifecycleIds.map((identity) =>
     executorRoleLifecycle.indexOf(`{ owner: "executor-role", id: "${identity}" }`)
@@ -9806,7 +9828,7 @@ export function inspectManagedHostAssembly(records) {
     executorLifecyclePositions.some((position, index) =>
       index > 0 && position <= executorLifecyclePositions[index - 1]) ||
     count(executorRoot, "new ExecutorRoleLifecycle()") !== 1 ||
-    count(executorRoot, "executorRoleLifecycle.acquire(") !== 6 ||
+    count(executorRoot, "executorRoleLifecycle.acquire(") !== 7 ||
     executorRoleLifecycleIds
       .filter((identity) => identity !== "authorityRuntime.stopStorageMaintenance")
       .some((identity) => count(executorRoot, `"${identity}"`) !== 1) ||

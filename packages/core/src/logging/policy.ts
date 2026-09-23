@@ -1,8 +1,10 @@
+import { LogRequestError } from "./errors.js";
 import type { LogPolicy } from "./contracts.js";
 
 const MIB = 1024 * 1024;
 const DAY = 86_400_000;
 export const MAX_LOG_RECORD_BYTES = 256 * 1024;
+export const MAX_LOG_QUERY_RESULT_BYTES = 4 * MIB;
 export const DEFAULT_LOG_POLICY: Readonly<LogPolicy> = Object.freeze({
   maxBytes: 256 * MIB,
   maxFiles: 1024,
@@ -29,7 +31,7 @@ export function validateLogPolicy(input: LogPolicy): LogPolicy {
   for (const key of Object.keys(DEFAULT_LOG_POLICY) as (keyof LogPolicy)[]) {
     const value = input[key];
     if (!Number.isSafeInteger(value) || value <= 0)
-      throw new TypeError(`日志策略 ${key} 必须是正整数`);
+      throw new LogRequestError(`日志策略 ${key} 必须是正整数`);
     result[key] = value;
   }
   if (
@@ -53,14 +55,14 @@ export function validateLogPolicy(input: LogPolicy): LogPolicy {
     result.queryScanBytes < MAX_LOG_RECORD_BYTES ||
     result.queryScanBytes > 16 * MIB ||
     result.queryResultBytes < Math.max(result.recordBytes, 4096) ||
-    result.queryResultBytes > 4 * MIB ||
+    result.queryResultBytes > MAX_LOG_QUERY_RESULT_BYTES ||
     result.queryRecords > 1000 ||
     result.queryMs > 10_000 ||
     result.maintenanceMs > 2_147_483_647 ||
     result.detailTtlMs > result.criticalTtlMs ||
     result.attachmentTtlMs > result.criticalTtlMs
   ) {
-    throw new TypeError("日志策略限额或保留期限不一致");
+    throw new LogRequestError("日志策略限额或保留期限不一致");
   }
   return Object.freeze(result);
 }

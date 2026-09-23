@@ -400,7 +400,17 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     await expect(app.applyPolicy({ ...policy, queryRecords: 2 }, 1)).rejects.toThrow(
       "权限发生变化",
     );
-    // The authorized mutation committed; a later revocation only suppresses its private response.
+    // Revocation while loading the state precedes the policy admission fence: nothing commits.
+    expect((await h.store.status()).policy.effective.queryRecords).toBe(policy.queryRecords);
+    h.files.stat = actualStat;
+    context = { ...owner };
+    const actualWrite = h.files.write.bind(h.files);
+    h.files.write = async (name, bytes) => {
+      await actualWrite(name, bytes);
+      context = { ...owner, manageStorage: false, revision: "revoked-after-admission" };
+    };
+    await expect(app.applyPolicy({ ...policy, queryRecords: 2 }, 1)).rejects.toThrow("权限发生变化");
+    // After admission, completion remains durable; later revocation suppresses only the private response.
     expect((await h.store.status()).policy.effective.queryRecords).toBe(2);
   }, 20_000);
 
@@ -596,6 +606,54 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     expect(next.gaps.some((gap) => gap.kind === "expired")).toBe(true);
     expect((await h.store.status()).pendingReclaims).toBe(0);
   }, 20_000);
+  it.each([false, true])("recognizes adjacent retirement evidence with a retained tail=%s", async (keepTail) => {
+    const h = await setup();
+    await h.store.initialize();
+    await h.store.append([h.capture(), h.capture(), h.capture(), h.capture()]);
+    await h.store.append([h.capture(), h.capture()]);
+    h.advance(policy.criticalTtlMs - 1);
+    const tail = h.capture("retained-tail");
+    if (keepTail) await h.store.append([tail]);
+    const page = await h.app.search();
+    expect(page.cursor).toBeDefined();
+    h.advance(2);
+    await h.store.maintain();
+    const snapshot = await h.snapshot();
+    expect(snapshot.retired.map(({ start, end }) => [start, end])).toEqual([[1, 4], [5, 6]]);
+    // Capacity reclamation need not register ranges in ordinal order.
+    snapshot.retired.reverse();
+    await writeFile(
+      path.join(h.root, `state-${String(snapshot.generation).padStart(12, "0")}.json`),
+      JSON.stringify({ state: snapshot, digest: logDigest(JSON.stringify(snapshot)) }),
+    );
+    const next = await h.app.search({}, page.cursor);
+    expect(next.records.map((record) => record.id)).toEqual(keepTail ? [tail.record.id] : []);
+    expect(next.gaps).toEqual([{ kind: "expired", reason: "records-not-retained" }]);
+    expect(next.coverage.complete).toBe(true);
+  }, 20_000);
+
+  it("keeps insufficient when retirement evidence has a real internal hole", async () => {
+    const h = await setup();
+    await h.store.initialize();
+    await h.store.append([h.capture(), h.capture(), h.capture(), h.capture()]);
+    await h.store.append([h.capture(), h.capture()]);
+    await h.store.append([h.capture(), h.capture()]);
+    const page = await h.app.search();
+    h.advance(policy.criticalTtlMs + 1);
+    await h.store.maintain();
+    const snapshot = await h.snapshot();
+    expect(snapshot.retired).toHaveLength(3);
+    // Model bounded governance having forgotten one range; no record evidence is fabricated.
+    snapshot.retired.splice(1, 1);
+    await writeFile(
+      path.join(h.root, `state-${String(snapshot.generation).padStart(12, "0")}.json`),
+      JSON.stringify({ state: snapshot, digest: logDigest(JSON.stringify(snapshot)) }),
+    );
+    const next = await h.app.search({}, page.cursor);
+    expect(next.records).toHaveLength(0);
+    expect(next.gaps).toEqual([{ kind: "insufficient", reason: "records-not-retained" }]);
+  }, 20_000);
+
   it("publishes only after the snapshot barrier and recovers after namespace rollback", async () => {
     const h = await setup();
     const initial = await h.store.initialize();

@@ -27,6 +27,7 @@ interface AssemblyLifecycleDescriptor extends CleanupRegistrationDescriptor {
  * omit their contribution rather than manufacturing an empty cleanup.
  */
 export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
+  { owner: "anchor-host", role: "common", id: "logAccess.close", stage: "foundation" },
   {
     owner: "anchor-host",
     role: "common",

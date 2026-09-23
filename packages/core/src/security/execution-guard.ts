@@ -12,6 +12,7 @@
  */
 
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import { MAX_LOG_QUERY_RESULT_BYTES } from "../logging/policy.js";
 import type {
   SecurityDecision,
   SecurityMiddleware,
@@ -61,6 +62,9 @@ const DEFAULT_PROFILE: ToolExecutionProfile = {
  *   - 读类（read/glob/grep）：中等
  */
 const DEFAULT_TOOL_PROFILES: Record<string, ToolExecutionProfile> = {
+  // LogApplication paginates before this bound; slicing its JSON would lose cursors and gaps.
+  log_search: { timeoutMs: 60_000, maxOutputBytes: MAX_LOG_QUERY_RESULT_BYTES },
+  log_read: { timeoutMs: 60_000, maxOutputBytes: MAX_LOG_QUERY_RESULT_BYTES },
   bash: { timeoutMs: 120_000, maxOutputBytes: 10 * MB },
   shell: { timeoutMs: 120_000, maxOutputBytes: 10 * MB },
   read: { timeoutMs: 10_000, maxOutputBytes: 5 * MB },

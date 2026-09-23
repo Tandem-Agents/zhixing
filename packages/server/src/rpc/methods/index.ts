@@ -9,6 +9,7 @@
 import { HandlerRegistry } from "../handlers.js";
 import { buildMcpPendingMethod } from "./mcp.js";
 import { buildExtensionMethods } from "./extensions.js";
+import { buildLogMethods } from "./logs.js";
 import { buildAuthMethod } from "./auth.js";
 import { buildHealthMethod } from "./health.js";
 import { buildSessionStatusHistoryMethod } from "./conversation-status.js";
@@ -104,6 +105,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildHealthMethod(),
     buildMcpPendingMethod(),
     ...buildExtensionMethods(),
+    ...buildLogMethods(),
     // session.*
     buildSessionSendMethod(),
     buildSessionAdvancementConfirmMethod(),
@@ -190,6 +192,7 @@ export function captureBuiltinRegistryDescriptor(): readonly {
 }
 
 export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
+  "logs.search", "logs.read", "logs.status", "logs.apply-policy",
   "auth",
   "health",
   "mcp.pending",

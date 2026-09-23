@@ -1,4 +1,5 @@
 export * from "./connection.js";
+export { LogRpcClient } from "./log-client.js";
 export * from "./session-wire.js";
 export * from "./session-turn-stream.js";
 export {

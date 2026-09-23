@@ -16,6 +16,7 @@ import {
 } from "@zhixing/server";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
+import { LogRpcClient } from "@zhixing/rpc";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -165,6 +166,8 @@ export class RpcManagementFacade {
     const client = await this.link.getClient();
     return client.request("mcp.pending", { conversationId });
   }
+
+  logs(): LogRpcClient { return new LogRpcClient(this.link); }
 
   async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot> {
     const client = await this.link.getClient();

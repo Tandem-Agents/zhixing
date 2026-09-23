@@ -43,6 +43,7 @@ import { type IEventBus } from "@zhixing/core/events";
 import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-execution.js";
 import { AISecuritySteward } from "./ai-steward.js";
 import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
+import { runContextStorage } from "../runtime/run-context.js";
 
 // ─── 错误类型 ───
 
@@ -172,6 +173,11 @@ export function createSecureExecuteTool(
     opts.confirmationFallback ?? "deny";
 
   return async (tool, input, context) => {
+    const assertCapability = () => {
+      const ceiling = runContextStorage.getStore()?.toolExecutionCeiling;
+      if (ceiling && !ceiling.permits(tool)) throw new SecurityBlockError("此受限运行只能使用获准的日志查询能力", tool.name, "运行能力上限不允许此工具");
+    };
+    assertCapability();
     const permissionRules = await authorizeToolExecution?.({
       toolName: tool.name,
       toolInput: input,
@@ -306,6 +312,7 @@ export function createSecureExecuteTool(
       toolName: tool.name,
       toolInput: input,
     });
+    assertCapability();
     return runWithConstraints({
       tool,
       input,

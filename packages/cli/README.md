@@ -71,6 +71,12 @@ zz logs policy
 
 查询结果含记录、缺口、覆盖范围和续页 `cursor`；将其传给同一查询的 `--cursor` 继续读取。单条地址为 `zxlog://<storeId>/record/<id>`，`--view detail` 可读取仍保留的脱敏详情。修改策略使用 `zz logs policy --revision <当前版本> --set '<JSON 对象>'`；降额先回收，受阻时保留期望值并显示原因。
 
+对话中可用 `/config logs` 查看生效策略，再用 `/config logs <容量MiB> <关键记录天数> <当前版本>` 修改。例如 `/config logs 128 14 1` 将容量设为 128 MiB、关键记录保留 14 天；版本冲突时重新查看。修改走同一策略应用，不重启宿主，也不在 `config.jsonc` 另存一份策略。
+
+模型使用 `log_search` 和 `log_read` 查阅同一份证据。普通运行沿用本机所有者权限；`Task({description, prompt, logOnly: true})` 可委派只查当前会话日志的子任务，范围由真实会话身份派生，仅获得两个日志工具。它不能直接读文件、运行代码、调用 MCP 或再委派。所有者直接读文件时请按 `zz logs location` 的结构说明查阅；原始存储需要整库授权。
+
+RPC 提供 `logs.search`（`filter?、cursor?`）、`logs.read`（`address、view?、cursor?`）、`logs.status` 和 `logs.apply-policy`（`patch、expectedVersion`）。身份来自当前设备的连接认证，参数不能声明权限；远程认证接入可以读取，策略修改须由本机接入。游标绑定原查询与身份，续页重验权限；交给另一获准主体时传稳定地址。每次查询只覆盖该地址所属设备的本地保留证据，远端不可用、证据已淘汰或不足均明确返回缺口。
+
 文件位于 `<ZHIXING_HOME>/logs/runtime/`。`segment-*.jsonl` 每行一条观察记录；最高 `published-*.head` 指向已耐久的同代 `state-*.json`，登记保留段与耐久水位；`detail-*.json` 随所属段治理，`index-*.json` 可重建。文件管理权限允许直接用文本工具查阅；未发布或已登记淘汰的文件不能视为保留证据。当前采集覆盖入口与宿主启停，完整来源与旧日志迁移将在后续单元接通；过渡期后台旧日志仍用 `zz serve logs` 查询。
 
 ## 安装与配置

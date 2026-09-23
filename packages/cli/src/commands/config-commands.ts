@@ -21,6 +21,7 @@ import { handleSecurityCommand, handleTrustCommand } from "../security/index.js"
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
 import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
 import { chromeOnlyVisibility } from "./command-visibility.js";
+import { configureLogs } from "../logging/configuration.js";
 
 export interface ConfigCommandsDeps {
   readonly zhixingHome: string;
@@ -70,13 +71,19 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   registry.register({
     id: "config:repl",
     name: "config",
-    description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）",
+    description: "修改基础配置；/config logs 查看或调整日志容量与保留期限",
     category: "config",
     execution: "local",
     tag: "builtin",
     visibility: chromeOnlyVisibility,
   });
-  dispatcher.registerHandler("config:repl", async () => {
+  dispatcher.registerHandler("config:repl", async (ctx) => {
+    const args = typeof ctx.args._rest === "string" ? ctx.args._rest.trim() : "";
+    if (args === "logs" || args.startsWith("logs ")) {
+      await configureLogs(args.slice(4), deps.management.logs(), writer);
+      return {};
+    }
+    if (args) throw Error("用法：/config 或 /config logs");
     await handleConfigCommand(editorDeps());
     return {};
   });

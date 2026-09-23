@@ -113,6 +113,7 @@ export interface AnchorRuntimeCapabilityCatalog {
  * runtime projection, without manufacturing an unbound Workscene directory.
  */
 export function createAnchorRuntimeCapabilityCatalog(input: {
+  readonly logTools?: readonly ToolDefinition[];
   readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
@@ -125,6 +126,7 @@ export function createAnchorRuntimeCapabilityCatalog(input: {
     capabilityCatalog() {
       const mcp = input.mcpTools.snapshot();
       const tools = new Set<string>([
+        ...(input.logTools ?? []).map(tool => tool.name),
         ...(input.extensionTools ?? []).map(tool => tool.name),
         ...(input.communicationTools ?? []).map(tool => tool.name),
         ...(input.mcpProductTools ?? []).map((tool) => tool.name),
@@ -178,6 +180,7 @@ function sceneProductTools(
 
 /** Anchor product composition; RuntimeHost only sees the frozen output. */
 export function createAnchorRuntimeProjectionAssembly(input: {
+  readonly logTools?: readonly ToolDefinition[];
   readonly extensionTools?: readonly ToolDefinition[];
   readonly communicationTools?: readonly ToolDefinition[];
   readonly mcpProductTools?: readonly ToolDefinition[];
@@ -205,6 +208,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     return createRuntimeProductProjection({
       runtimeTools: createRuntimeToolProjection({
         extraTools: [
+          ...(input.logTools ?? []),
           ...(productTools.length > 0 ? input.extensionTools ?? [] : []),
           ...(productTools.length > 0 ? input.communicationTools ?? [] : []),
           ...(input.mcpProductTools ?? []).filter((tool) => tool.name !== "mcp_connect" || productTools.length > 0),

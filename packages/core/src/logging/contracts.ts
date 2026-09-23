@@ -142,6 +142,8 @@ export interface LogReadContext {
   readonly subject: string;
   readonly revision: string;
   readonly manageStorage: boolean;
+  /** Whole-store readers may be explicitly denied policy changes by their trusted surface. */
+  readonly managePolicy?: boolean;
   readonly scopes: readonly string[];
 }
 export interface LogPage {

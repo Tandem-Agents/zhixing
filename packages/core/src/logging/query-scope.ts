@@ -1,3 +1,4 @@
+import { LogRequestError } from "./errors.js";
 import type { LogReadContext } from "./contracts.js";
 import {
   logDigest,
@@ -20,11 +21,11 @@ export function scopeLogQuery(
   previous?: { upper: number; range?: LogVisibleRange },
 ): { state: LogStoreSnapshot; files: LogScanFiles; range?: LogVisibleRange } {
   if (context.manageStorage) {
-    if (previous?.range) throw Error("日志游标权限范围不一致");
+    if (previous?.range) throw new LogRequestError("日志游标权限范围不一致");
     return { state, files };
   }
   if (context.scopes.length && state.segments.some((segment) => !segment.access))
-    throw Error("日志访问投影尚未就绪，请在存储维护后重新查询");
+    throw new LogRequestError("日志访问投影尚未就绪，请在存储维护后重新查询");
   const scopes = new Set(context.scopes);
   const visible = state.segments.flatMap((segment) =>
     (segment.access ?? []).flatMap((access, index) =>
@@ -42,7 +43,7 @@ export function scopeLogQuery(
       }
     : undefined;
   if (previous && (!range || end !== previous.upper || range.digest !== previous.range?.digest))
-    throw Error("日志游标覆盖证据不足，原范围可能已淘汰，请重新查询");
+    throw new LogRequestError("日志游标覆盖证据不足，原范围可能已淘汰，请重新查询");
   const slices = new Map(selected.map((item) => [item.id, item]));
   const segments: LogSegment[] = selected.map((item, index) => ({
     ...item.segment,
@@ -59,7 +60,7 @@ export function scopeLogQuery(
     range,
     files: {
       stat: async () => {
-        throw Error("受限读取不访问物理索引");
+        throw new LogRequestError("受限读取不访问物理索引");
       },
       read: async (name, size, offset, limit) => {
         const slice = slices.get(name);
@@ -70,7 +71,7 @@ export function scopeLogQuery(
           limit < 0 ||
           offset + limit > size
         )
-          throw Error("日志读取范围不一致");
+          throw new LogRequestError("日志读取范围不一致");
         return files.read(
           slice.segment.name,
           slice.segment.bytes,

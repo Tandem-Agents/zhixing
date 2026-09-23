@@ -558,7 +558,7 @@ describe("production startup server ownership", () => {
     expect(source.indexOf("executorInternalStopLifecycle.install({"))
       .toBe(source.lastIndexOf("executorInternalStopLifecycle.install({"));
     expect(source.indexOf("await onTrustApplied();")).toBe(source.lastIndexOf("await onTrustApplied();"));
-    expect(source.match(/executorRoleLifecycle\.acquire\(/gu)).toHaveLength(6);
+    expect(source.match(/executorRoleLifecycle\.acquire\(/gu)).toHaveLength(7);
     expect(source.match(/executorRoleLifecycle\.authorityStartupRollback\(\)/gu))
       .toHaveLength(1);
     expect(source.match(/executorRoleLifecycle\.adoptAuthority\(/gu)).toHaveLength(1);

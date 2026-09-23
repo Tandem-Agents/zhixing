@@ -1143,9 +1143,8 @@ export async function createExecutorJobOwner(
 }
 
 /**
- * Starts durable recovery only after every enabled adapter has received the
- * stable owner reference. Keeping this as a core unit prevents any optional
- * transport from owning the job capability lifecycle.
+ * Registers the paused owner with the Host lifecycle and returns its once-only
+ * recovery step. The Host invokes it after the stable product bindings exist.
  */
 export interface StartExecutorJobOwnerInput {
   readonly executorJobOwnerAssembly: ExecutorJobOwnerAssembly;
@@ -1155,15 +1154,21 @@ export interface StartExecutorJobOwnerInput {
 
 export async function startExecutorJobOwner(
   input: StartExecutorJobOwnerInput,
-) {
+): Promise<() => Promise<void>> {
   const assembly = input.executorJobOwnerAssembly;
+  const recoverAcceptedWork = input.startupLifecycle?.recoverAcceptedWork ?? true;
   input.lifecycleContributions.acquire("executorJobOwner.close", () =>
     assembly.close()
   );
   await assembly.start({
     admissionClosed: true,
-    recoverAcceptedWork: input.startupLifecycle?.recoverAcceptedWork ?? true,
+    recoverAcceptedWork: false,
   });
+  // Recovery may execute tools immediately. The Host calls this once its product bindings exist.
+  let recovery: Promise<void> | undefined;
+  return () => recovery ??= (recoverAcceptedWork
+    ? assembly.owner.recoverAcceptedWorkForLifecycle()
+    : Promise.resolve());
 }
 
 const channelLogger = Object.freeze({
