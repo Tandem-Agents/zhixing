@@ -34,7 +34,7 @@ async function buildExtensionKit() {
 }
 
 export default defineConfig({
-  entry: { index: "src/index.ts" },
+  entry: { index: "src/index.ts", "logging-files-worker": "src/logging/logging-files-worker.ts" },
   format: ["esm"],
   dts: false,
   sourcemap: true,

@@ -5,6 +5,10 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./filesystem": {
+      "types": "./dist/checkpoint-child-bridge.d.ts",
+      "import": "./dist/checkpoint-child-bridge.js"
+    },
     "./checkpoint-bridge-artifact": {
       "types": "./dist/checkpoint-bridge-artifact.d.ts",
       "import": "./dist/checkpoint-bridge-artifact.js"

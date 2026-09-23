@@ -23,6 +23,7 @@
 - `zz status`：查看知行运行状态。
 - `zz stop`：停止知行；显式维护前使用 `zz stop --maintenance`。
 - `zz doctor`：只读检查本机运行、托管、配置和恢复状态。
+- `zz logs`：查看本机运行日志、占用与保留策略，支持离线查阅。
 - `zz app`：管理应用生命周期；`zz app remove` 安全停用并准备 npm 卸载，保留全部用户数据。
 - `zz pair`：与第二台设备配对；出码与加入都沿同一引导完成。
 - `zz device`：查看或永久移除已配对设备。
@@ -53,10 +54,24 @@
 - `zz`、`zz serve`、`zz serve logs --tail` 是长运行语义，smoke 不能按“必须立即退出”的基础命令处理。
 - `zz serve status` / `zz serve stop` 已从外部命令面清理；运行控制只保留 `zz status` / `zz stop`。
 - `zz serve --port` / `zz serve --host` 已从外部命令面清理；端口和监听地址不作为用户 CLI 参数承诺。
-- 未发现已实现的外部 `zz logs`、`zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
+- 未实现外部 `zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
 - REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入外部 `zz` 命令清单。
 
 ---
+
+## 本机运行日志
+
+`zz logs` 显示新日志存储的占用、生效策略与待回收状态；`zz logs location` 显示目录和格式。查询不依赖常驻服务，也不创建或修复日志文件：
+
+```text
+zz logs --offline search --source runtime
+zz logs read "zxlog://<storeId>/operation/operation/<id>" --view timeline
+zz logs policy
+```
+
+查询结果含记录、缺口、覆盖范围和续页 `cursor`；将其传给同一查询的 `--cursor` 继续读取。单条地址为 `zxlog://<storeId>/record/<id>`，`--view detail` 可读取仍保留的脱敏详情。修改策略使用 `zz logs policy --revision <当前版本> --set '<JSON 对象>'`；降额先回收，受阻时保留期望值并显示原因。
+
+文件位于 `<ZHIXING_HOME>/logs/runtime/`。`segment-*.jsonl` 每行一条观察记录；最高 `published-*.head` 指向已耐久的同代 `state-*.json`，登记保留段与耐久水位；`detail-*.json` 随所属段治理，`index-*.json` 可重建。文件管理权限允许直接用文本工具查阅；未发布或已登记淘汰的文件不能视为保留证据。当前采集覆盖入口与宿主启停，完整来源与旧日志迁移将在后续单元接通；过渡期后台旧日志仍用 `zz serve logs` 查询。
 
 ## 安装与配置
 

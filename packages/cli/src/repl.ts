@@ -458,7 +458,7 @@ function setupBracketedPasteMode(): void {
 
 // ─── 启动 REPL ───
 
-export async function startRepl(zhixingHome: string, configPath: string): Promise<void> {
+export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>): Promise<void> {
   // 在 ScreenController 接管 stdout 之前预热 chunk-dump singleton——若 --log 启用，
   // dump 创建时会经 stderr 写一行启用提示（"[zhixing] LLM raw chunk dump enabled →
   // <path>"）。chrome 接管后 stderr 写入会破坏 frame；提前到 chrome 启动前让提示落在
@@ -570,6 +570,7 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
     }))
   ) {
     renderScreen?.dispose();
+    await beforeExit?.(1);
     process.exit(1);
   }
 
@@ -1999,5 +2000,6 @@ export async function startRepl(zhixingHome: string, configPath: string): Promis
     }
     cliWriter.line(chalk.dim("\n再见 👋"));
   }
+  await beforeExit?.(0);
   process.exit(0);
 }

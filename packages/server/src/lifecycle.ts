@@ -69,6 +69,8 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
   skipProcessLock?: boolean;
   /** 跳过信号处理器注册（测试用——避免污染 vitest 进程信号处理器） */
   skipSignalHandlers?: boolean;
+  /** Persistent Host owns outer cleanup and final process exit after endpoint shutdown. */
+  exitOnSignal?: boolean;
   /**
    * 外部注入的 cleanup registry。
    * - 传入：lifecycle 注册 server.close，或把它移交给 lifecycleOwner；其他由调用方负责
@@ -248,7 +250,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     let sigintCount = 0;
     const onSigterm = () => {
       void prepareSignalShutdown("SIGTERM").then(
-        () => process.exit(0),
+        () => { if (opts.exitOnSignal !== false) process.exit(0); },
         (error) => logger.error(`SIGTERM shutdown is blocked: ${String(error)}`),
       );
     };
@@ -259,7 +261,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
         return;
       }
       void prepareSignalShutdown("SIGINT").then(
-        () => process.exit(0),
+        () => { if (opts.exitOnSignal !== false) process.exit(0); },
         (error) => logger.error(`SIGINT shutdown is blocked: ${String(error)}`),
       );
     };
@@ -271,7 +273,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     if (process.platform !== "win32") {
       process.once("SIGUSR1", () => {
         void prepareSignalShutdown("SIGUSR1-restart").then(
-          () => process.exit(0),
+          () => { if (opts.exitOnSignal !== false) process.exit(0); },
           (error) => logger.error(`SIGUSR1 shutdown is blocked: ${String(error)}`),
         );
       });

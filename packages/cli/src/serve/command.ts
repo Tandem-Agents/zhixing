@@ -3166,6 +3166,7 @@ async function runServerProcess(
     throw new Error("Managed host admission changed during startup");
   }
   runner = await runServer({
+    exitOnSignal: false,
     context: serverCtx,
     boundServer: serverBinding,
     config: { ...DEFAULT_SERVER_CONFIG, port, host },

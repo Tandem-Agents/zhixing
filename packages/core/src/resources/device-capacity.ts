@@ -772,6 +772,7 @@ export function createNodeDeviceCapacityProbe(
   options: {
     readonly now?: () => number;
     readonly readCpuTimes?: () => { readonly total: number; readonly idle: number };
+    readonly readFilesystem?: () => { readonly bavail: number; readonly bsize: number };
   } = {},
 ): () => DeviceCapacityPressure {
   const now = options.now ?? performance.now.bind(performance);
@@ -791,7 +792,7 @@ export function createNodeDeviceCapacityProbe(
       previousCpu = currentCpu;
       sampleStartedAt = sampledAt;
     }
-    const filesystem = statfsSync(temporaryRoot);
+    const filesystem = options.readFilesystem?.() ?? statfsSync(temporaryRoot);
     const temporaryBytesAvailable = toSafeInteger(
       Number(filesystem.bavail) * Number(filesystem.bsize),
     );

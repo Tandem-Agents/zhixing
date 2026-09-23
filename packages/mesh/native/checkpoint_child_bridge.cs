@@ -32,6 +32,8 @@ internal static class CheckpointChildBridge {
   static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool LockFileEx(IntPtr handle, uint flags, uint reserved, uint low, uint high, ref OVERLAPPED overlapped);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr handle, out BY_HANDLE_FILE_INFORMATION info);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandleEx(IntPtr handle, int cls, IntPtr info, uint size);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(IntPtr handle, int cls, IntPtr info, uint size);
@@ -64,7 +66,10 @@ internal static class CheckpointChildBridge {
 
   static object Dispatch(Dictionary<string, object> r) {
     var op = Text(r, "op");
-    if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create")));
+    if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create"), r.ContainsKey("readOnly") && Flag(r, "readOnly")));
+    if (op == "statFile") return StatFile(Get(r, "parent"), Text(r, "name"));
+    if (op == "truncateFile") { TruncateFile(Get(r, "parent"), Text(r, "name"), Text(r, "identity"), Number(r, "bytes")); return true; }
+    if (op == "tryLock") return TryLock(Get(r, "parent"), Text(r, "name"));
     if (op == "openDirectory") return Register(OpenRelative(Get(r, "parent"), Text(r, "name"), true, Flag(r, "create"), false));
     if (op == "identity") return Identity(Get(r, "handle"));
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
@@ -72,13 +77,13 @@ internal static class CheckpointChildBridge {
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
     if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")));
     if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName")); return true; }
-    if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory")); return true; }
+    if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory"), r.ContainsKey("retiredIdentity") ? Text(r, "retiredIdentity") : null); return true; }
     if (op == "sync") { if (!FlushFileBuffers(Get(r, "handle"))) throw Win32("Unable to flush checkpoint handle"); return true; }
     if (op == "close") { var id = Number(r, "handle"); var h = GetById(id); Handles.Remove(id); if (!CloseHandle(h)) throw Win32("Unable to close checkpoint handle"); return true; }
     throw new InvalidOperationException("Unsupported checkpoint bridge operation");
   }
 
-  static IntPtr OpenPath(string input, bool create) {
+  static IntPtr OpenPath(string input, bool create, bool readOnly) {
     var full = Path.GetFullPath(input);
     var root = Path.GetPathRoot(full);
     if (String.IsNullOrEmpty(root)) throw new InvalidOperationException("Checkpoint path is not absolute");
@@ -93,7 +98,7 @@ internal static class CheckpointChildBridge {
       for (var index = 0; index < parts.Length; index++) {
         var part = parts[index];
         ExactName(part);
-        var next = OpenRelative(current, part, true, create, false, index == parts.Length - 1);
+        var next = OpenRelative(current, part, true, create, false, !readOnly && index == parts.Length - 1);
         CloseHandle(current);
         current = next;
       }
@@ -138,7 +143,7 @@ internal static class CheckpointChildBridge {
 
   static byte[] ReadFile(IntPtr parent, string name, long declared, long offset, long limit) {
     if (offset < 0 || limit <= 0) throw new InvalidOperationException("Checkpoint file range is invalid");
-    var file = OpenRelative(parent, name, false, false, false);
+    var file = OpenRelative(parent, name, false, false, false, false);
     try {
       BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint file identity changed");
       var actual = Size(info); if ((declared >= 0 && actual != declared) || (declared < 0 && actual > limit) || offset > actual) throw new InvalidOperationException("Checkpoint file length changed");
@@ -151,6 +156,42 @@ internal static class CheckpointChildBridge {
       if (!GetFileInformationByHandle(file, out after) || after.NumberOfLinks != 1 || Size(after) != actual || Identity(after) != Identity(info)) throw new InvalidOperationException("Checkpoint file identity changed during read");
       return bytes;
     } finally { CloseHandle(file); }
+  }
+
+  static object StatFile(IntPtr parent, string name) {
+    var file = OpenRelative(parent, name, false, false, false, false);
+    try {
+      BY_HANDLE_FILE_INFORMATION info;
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Unsafe file identity");
+      return new Dictionary<string, object> { {"bytes", Size(info)}, {"identity", Identity(info)} };
+    } finally { CloseHandle(file); }
+  }
+
+  static void TruncateFile(IntPtr parent, string name, string identity, long bytes) {
+    if (bytes < 0) throw new InvalidOperationException("Invalid truncate size");
+    var file = OpenRelative(parent, name, false, false, false);
+    try {
+      BY_HANDLE_FILE_INFORMATION info;
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Identity(info) != identity || bytes > Size(info)) throw new InvalidOperationException("Retired file identity changed");
+      using (var safe = new SafeFileHandle(file, false))
+      using (var stream = new FileStream(safe, FileAccess.ReadWrite, 4096, false)) { stream.SetLength(bytes); stream.Flush(true); }
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Identity(info) != identity || Size(info) != bytes) throw new InvalidOperationException("Retired file reclaim unconfirmed");
+    } finally { CloseHandle(file); }
+  }
+
+  static long TryLock(IntPtr parent, string name) {
+    var file = OpenRelative(parent, name, false, true, false);
+    try {
+      BY_HANDLE_FILE_INFORMATION info;
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) != 0) throw new InvalidOperationException("Unsafe control lock");
+      var overlapped = new OVERLAPPED();
+      if (!LockFileEx(file, 3, 0, 1, 0, ref overlapped)) {
+        var error = Marshal.GetLastWin32Error();
+        if (error == 33) { CloseHandle(file); return 0; }
+        throw new System.ComponentModel.Win32Exception(error, "Unable to acquire control lock");
+      }
+      return Register(file);
+    } catch { CloseHandle(file); throw; }
   }
 
   static string[] ListEntries(IntPtr parent, long maximumEntries) {
@@ -233,11 +274,19 @@ internal static class CheckpointChildBridge {
     } finally { Marshal.FreeHGlobal(buffer); CloseHandle(entry); }
   }
 
-  static void Unlink(IntPtr parent, string name, bool directory) {
+  static void Unlink(IntPtr parent, string name, bool directory, string retiredIdentity) {
     var entry = OpenRelative(parent, name, directory, false, false); var size = Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO)); var buffer = Marshal.AllocHGlobal(size);
     try {
       BY_HANDLE_FILE_INFORMATION identity;
       if (!directory && (!GetFileInformationByHandle(entry, out identity) || identity.NumberOfLinks != 1)) throw new InvalidOperationException("Checkpoint file identity changed before delete");
+      if (retiredIdentity != null) {
+        if (directory || !GetFileInformationByHandle(entry, out identity) || identity.NumberOfLinks != 1 || Size(identity) != 0 || Identity(identity) != retiredIdentity) throw new InvalidOperationException("Retired file space is not confirmed");
+        // FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS. Truncation
+        // has already been synced; namespace removal cannot hide occupied data.
+        Marshal.WriteInt32(buffer, 3);
+        if (!SetFileInformationByHandle(entry, 21, buffer, 4)) throw Win32("Unable to remove retired file namespace");
+        return;
+      }
       Marshal.StructureToPtr(new FILE_DISPOSITION_INFO { DeleteFile = true }, buffer, false);
       if (!SetFileInformationByHandle(entry, FileDispositionInfo, buffer, (uint)size)) throw new InvalidOperationException("Unable to delete checkpoint entry '" + name + "' (directory=" + directory + ") by handle (Win32 " + Marshal.GetLastWin32Error() + ")");
     }

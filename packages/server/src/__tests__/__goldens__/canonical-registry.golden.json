@@ -1272,6 +1272,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1464,6 +1469,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1648,6 +1658,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1813,6 +1828,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1954,6 +1974,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2047,6 +2072,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2137,6 +2167,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2209,6 +2244,11 @@
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
           "cli:zhixing help",
+          "cli:zhixing logs",
+          "cli:zhixing logs location",
+          "cli:zhixing logs policy",
+          "cli:zhixing logs read",
+          "cli:zhixing logs search",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2817,6 +2857,61 @@
         "target": {
           "exclusion": "localRender",
           "reason": "纯本地展示，不产生权威事实"
+        }
+      },
+      {
+        "path": "zhixing logs",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing logs",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
+        "path": "zhixing logs location",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing logs location",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
+        "path": "zhixing logs policy",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing logs policy",
+        "category": "cli",
+        "target": {
+          "exclusion": "logGovernance",
+          "reason": "仅治理本机观察证据的存储策略，不写业务权威事实"
+        }
+      },
+      {
+        "path": "zhixing logs read",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing logs read",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
+        "path": "zhixing logs search",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing logs search",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
         }
       },
       {

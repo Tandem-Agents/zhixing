@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -267,12 +268,12 @@ NativeHandle OpenPath(const std::string& path, bool create) {
   }
 }
 
-NativeHandle OpenRelative(NativeHandle parent, const std::string& name, bool directory, bool create, bool exclusive = false) {
+NativeHandle OpenRelative(NativeHandle parent, const std::string& name, bool directory, bool create, bool exclusive = false, bool writable = true) {
   ExactName(name);
   if (directory && create && mkdirat(parent, name.c_str(), 0700) < 0 && errno != EEXIST) {
     throw std::runtime_error("Unable to create checkpoint directory");
   }
-  int flags = O_CLOEXEC | O_NOFOLLOW | (directory ? O_RDONLY | O_DIRECTORY : O_RDWR);
+  int flags = O_CLOEXEC | O_NOFOLLOW | (directory ? O_RDONLY | O_DIRECTORY : writable ? O_RDWR : O_RDONLY);
   if (!directory && create) flags |= O_CREAT | (exclusive ? O_EXCL : 0);
   int result = openat(parent, name.c_str(), flags, 0600);
   if (result < 0) {
@@ -477,7 +478,7 @@ napi_value ReadFileCall(napi_env env, napi_callback_info info) {
       CloseHandle(file);
     } catch (...) { CloseHandle(file); throw; }
 #else
-    int file = OpenRelative(Handle(U64(env, args[0])), name, false, false);
+    int file = OpenRelative(Handle(U64(env, args[0])), name, false, false, false, false);
     try {
       struct stat st{}; if (fstat(file, &st) < 0 || (declared >= 0 && st.st_size != declared) || (declared < 0 && st.st_size > limit) || offset > st.st_size || !S_ISREG(st.st_mode) || st.st_nlink != 1) throw std::runtime_error("Checkpoint file identity changed");
       const size_t length = static_cast<size_t>(std::min<int64_t>(limit, st.st_size - offset));
@@ -577,18 +578,28 @@ napi_value RenameCall(napi_env env, napi_callback_info info) {
 
 napi_value UnlinkCall(napi_env env, napi_callback_info info) {
   try {
-    size_t argc = 3; napi_value args[3]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    size_t argc = 4; napi_value args[4]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
     const auto name = Utf8(env, args[1]); ExactName(name); const bool directory = Bool(env, args[2]);
+    const std::string retiredIdentity = argc >= 4 ? Utf8(env, args[3]) : "";
+    if (directory && !retiredIdentity.empty()) throw std::runtime_error("Retired target must be a file");
 #ifdef _WIN32
     HANDLE child = OpenRelative(Handle(U64(env, args[0])), Wide(name), directory, false);
     if (!directory) { BY_HANDLE_FILE_INFORMATION info{}; if (!GetFileInformationByHandle(child, &info) || info.nNumberOfLinks != 1) { CloseHandle(child); throw std::runtime_error("Checkpoint file identity changed before delete"); } }
-    FILE_DISPOSITION_INFO disposition{}; disposition.DeleteFile = TRUE;
-    if (!SetFileInformationByHandle(child, FileDispositionInfo, &disposition, sizeof(disposition))) { CloseHandle(child); throw std::runtime_error("Unable to delete checkpoint entry by handle"); }
+    if (!retiredIdentity.empty()) {
+      BY_HANDLE_FILE_INFORMATION info{};
+      if (!GetFileInformationByHandle(child, &info) || info.nFileSizeHigh || info.nFileSizeLow || IdentityValue(child) != retiredIdentity) { CloseHandle(child); throw std::runtime_error("Retired file space is not confirmed"); }
+      DWORD flags = 3;
+      if (!SetFileInformationByHandle(child, static_cast<FILE_INFO_BY_HANDLE_CLASS>(21), &flags, sizeof(flags))) { CloseHandle(child); throw std::runtime_error("Unable to remove retired file namespace"); }
+    } else {
+      FILE_DISPOSITION_INFO disposition{}; disposition.DeleteFile = TRUE;
+      if (!SetFileInformationByHandle(child, FileDispositionInfo, &disposition, sizeof(disposition))) { CloseHandle(child); throw std::runtime_error("Unable to delete checkpoint entry by handle"); }
+    }
     CloseHandle(child);
 #else
     if (!directory) {
       int child = OpenRelative(Handle(U64(env, args[0])), name, false, false);
       struct stat st{}; if (fstat(child, &st) < 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) { close(child); throw std::runtime_error("Checkpoint file identity changed before delete"); }
+      if (!retiredIdentity.empty() && (st.st_size != 0 || IdentityValue(child) != retiredIdentity)) { close(child); throw std::runtime_error("Retired file space is not confirmed"); }
       close(child);
     }
     if (unlinkat(Handle(U64(env, args[0])), name.c_str(), directory ? AT_REMOVEDIR : 0) < 0) {
@@ -597,6 +608,95 @@ napi_value UnlinkCall(napi_env env, napi_callback_info info) {
     }
 #endif
     return nullptr;
+  } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+}
+
+// These narrow operations are also used by the runtime log Store. The log adapter
+// runs in a dedicated process, so OS locks/handles are released on process death.
+napi_value StatFileCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto name = Utf8(env, args[1]); ExactName(name);
+#ifdef _WIN32
+    HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, false);
+    try {
+      BY_HANDLE_FILE_INFORMATION stat{};
+      if (!GetFileInformationByHandle(file, &stat) || stat.nNumberOfLinks != 1) throw std::runtime_error("Unsafe file identity");
+      auto result = Object(env); Set(env, result, "bytes", Integer(env, (static_cast<int64_t>(stat.nFileSizeHigh) << 32) | stat.nFileSizeLow));
+      Set(env, result, "identity", String(env, IdentityValue(file))); CloseHandle(file); return result;
+    } catch (...) { CloseHandle(file); throw; }
+#else
+    int file = OpenRelative(Handle(U64(env, args[0])), name, false, false, false, false);
+    try {
+      struct stat stat{};
+      if (fstat(file, &stat) < 0 || !S_ISREG(stat.st_mode) || stat.st_nlink != 1) throw std::runtime_error("Unsafe file identity");
+      auto result = Object(env); Set(env, result, "bytes", Integer(env, stat.st_size));
+      Set(env, result, "identity", String(env, IdentityValue(file))); close(file); return result;
+    } catch (...) { close(file); throw; }
+#endif
+  } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+}
+
+napi_value TruncateFileCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 4; napi_value args[4]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto name = Utf8(env, args[1]); ExactName(name); const auto expected = Utf8(env, args[2]);
+    int64_t bytes = 0; Check(env, napi_get_value_int64(env, args[3], &bytes), "Invalid truncate size");
+    if (bytes < 0) throw std::runtime_error("Invalid truncate size");
+#ifdef _WIN32
+    HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, false);
+    try {
+      BY_HANDLE_FILE_INFORMATION stat{};
+      if (!GetFileInformationByHandle(file, &stat) || stat.nNumberOfLinks != 1 || IdentityValue(file) != expected || bytes > ((static_cast<int64_t>(stat.nFileSizeHigh) << 32) | stat.nFileSizeLow)) throw std::runtime_error("Retired file identity changed");
+      LARGE_INTEGER end{}; end.QuadPart = bytes;
+      if (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file) || !FlushFileBuffers(file)) throw std::runtime_error("Retired file reclaim unconfirmed");
+      CloseHandle(file);
+    } catch (...) { CloseHandle(file); throw; }
+#else
+    int file = OpenRelative(Handle(U64(env, args[0])), name, false, false);
+    try {
+      struct stat stat{};
+      if (fstat(file, &stat) < 0 || !S_ISREG(stat.st_mode) || stat.st_nlink != 1 || IdentityValue(file) != expected || bytes > stat.st_size) throw std::runtime_error("Retired file identity changed");
+      if (ftruncate(file, bytes) < 0) throw std::runtime_error("Unable to reclaim retired file");
+      Flush(file);
+      if (fstat(file, &stat) < 0 || stat.st_size != bytes || stat.st_nlink != 1 || IdentityValue(file) != expected) throw std::runtime_error("Retired file reclaim unconfirmed");
+      close(file);
+    } catch (...) { close(file); throw; }
+#endif
+    return nullptr;
+  } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+}
+
+napi_value TryLockCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto name = Utf8(env, args[1]); ExactName(name);
+#ifdef _WIN32
+    HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, true);
+    try {
+      BY_HANDLE_FILE_INFORMATION stat{};
+      if (!GetFileInformationByHandle(file, &stat) || stat.nNumberOfLinks != 1 || stat.nFileSizeHigh || stat.nFileSizeLow) throw std::runtime_error("Unsafe control lock");
+      OVERLAPPED overlapped{};
+      if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
+        const auto error = GetLastError();
+        if (error == ERROR_LOCK_VIOLATION) { CloseHandle(file); return BigInt(env, 0); }
+        throw std::runtime_error("Unable to acquire control lock");
+      }
+      return BigInt(env, HandleValue(file));
+    } catch (...) { CloseHandle(file); throw; }
+#else
+    int file = OpenRelative(Handle(U64(env, args[0])), name, false, true);
+    try {
+      struct stat stat{};
+      if (fstat(file, &stat) < 0 || !S_ISREG(stat.st_mode) || stat.st_nlink != 1 || stat.st_size != 0) throw std::runtime_error("Unsafe control lock");
+      if (flock(file, LOCK_EX | LOCK_NB) < 0) {
+        const auto error = errno;
+        if (error == EWOULDBLOCK || error == EAGAIN) { close(file); return BigInt(env, 0); }
+        throw std::runtime_error("Unable to acquire control lock");
+      }
+      return BigInt(env, HandleValue(file));
+    } catch (...) { close(file); throw; }
+#endif
   } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 }
 
@@ -619,6 +719,9 @@ napi_value CloseCall(napi_env env, napi_callback_info info) {
 
 napi_value Init(napi_env env, napi_value exports) {
   const napi_property_descriptor properties[] = {
+    {"statFile", nullptr, StatFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"truncateFile", nullptr, TruncateFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"tryLock", nullptr, TryLockCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openPath", nullptr, OpenPathCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openDirectory", nullptr, OpenDirectoryCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"identity", nullptr, IdentityCall, nullptr, nullptr, nullptr, napi_default, nullptr},

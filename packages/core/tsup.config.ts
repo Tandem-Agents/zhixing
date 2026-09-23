@@ -2,6 +2,9 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: [
+    "src/logging/index.ts",
+    "src/logging/storage.ts",
+    "src/logging/application.ts",
     "src/index.ts",
     "src/extensions/contracts.ts",
     "src/extensions/candidate.ts",

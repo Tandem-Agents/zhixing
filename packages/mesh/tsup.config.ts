@@ -2,6 +2,7 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: [
+    "src/checkpoint-child-bridge.ts",
     "src/checkpoint-bridge-artifact.ts",
     "src/blind-relay.ts",
     "src/blind-rendezvous.ts",

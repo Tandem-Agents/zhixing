@@ -23,6 +23,7 @@ import {
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { createPersistentApplicationHost } from "./application-host.js";
+import { beginRuntimeLogging } from "../logging/runtime.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -37,42 +38,54 @@ export async function runServeCommand(
   const zhixingHome = getZhixingHome();
   const processMode = resolveHostProcessMode(options.managed);
   const output = processMode === "managed" ? SILENT_WRITER : writer;
-  if (processMode === "managed") {
-    const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate", zhixingHome));
-    if (plan.mode !== "managed") {
-      await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
+  const logging = beginRuntimeLogging(zhixingHome, processMode, (message) => output.line(chalk.dim(message)));
+  let failed = false;
+  try {
+    if (processMode === "managed") {
+      const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate", zhixingHome));
+      if (plan.mode !== "managed") {
+        await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
+        return;
+      }
+      const retained = await waitForManagedHostTurn({ zhixingHome });
+      if (!retained) return;
+      const reconciled = await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
+      if (reconciled.plan.mode !== "managed") return;
+    }
+    const secretStore = createPlatformSecretStore({
+      homeDir: zhixingHome,
+      context: processMode === "managed" ? "managed" : "foreground",
+    });
+    const startup = await runStartupCheck({
+      homeDir: zhixingHome,
+      mode: "host",
+      secretStore,
+    });
+    if (startup.kind !== "ready") {
+      renderStartupFailure(startup, output);
+      await logging.finish(startup.kind === "cancelled" ? "cancelled" : "failure", startup.kind);
+      process.exit(startup.kind === "cancelled" ? 0 : 2);
       return;
     }
-    const retained = await waitForManagedHostTurn({ zhixingHome });
-    if (!retained) return;
-    const reconciled = await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
-    if (reconciled.plan.mode !== "managed") return;
+    const host = createPersistentApplicationHost({
+      zhixingHome,
+      processMode,
+      options,
+      startup,
+      secretStore,
+      deviceCapacity: logging.capacity,
+      logRecords: logging.records,
+      onRecoveryRootRequired: () => {
+        output.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
+      },
+    });
+    await host.run();
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    await logging.finish(failed ? "failure" : "success", failed ? "host-or-preflight-failed" : "completed");
   }
-  const secretStore = createPlatformSecretStore({
-    homeDir: zhixingHome,
-    context: processMode === "managed" ? "managed" : "foreground",
-  });
-  const startup = await runStartupCheck({
-    homeDir: zhixingHome,
-    mode: "host",
-    secretStore,
-  });
-  if (startup.kind !== "ready") {
-    renderStartupFailure(startup, output);
-    process.exit(startup.kind === "cancelled" ? 0 : 2);
-    return;
-  }
-  const host = createPersistentApplicationHost({
-    zhixingHome,
-    processMode,
-    options,
-    startup,
-    secretStore,
-    onRecoveryRootRequired: () => {
-      output.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
-    },
-  });
-  await host.run();
 }
 
 export async function waitForManagedHostTurn(input: {

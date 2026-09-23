@@ -7,6 +7,9 @@ const harness = vi.hoisted(() => ({
   startup: vi.fn(),
   hostInput: undefined as unknown,
   hostRun: vi.fn(),
+  logFinish: vi.fn(async () => undefined),
+  logRecord: vi.fn(),
+  capacity: { marker: "entry-capacity" },
   createHost: vi.fn(),
   writer: {
     line: vi.fn(),
@@ -29,6 +32,9 @@ vi.mock("../startup.js", () => ({
 vi.mock("./application-host.js", () => ({
   createPersistentApplicationHost: (...args: unknown[]) => harness.createHost(...args),
 }));
+vi.mock("../logging/runtime.js", () => ({
+  beginRuntimeLogging: () => ({ capacity: harness.capacity, records: { record: harness.logRecord }, finish: harness.logFinish }),
+}));
 
 import {
   runServeCommand,
@@ -41,6 +47,8 @@ describe("serve topology command", () => {
     harness.startup.mockReset();
     harness.hostInput = undefined;
     harness.hostRun.mockReset();
+    harness.logFinish.mockClear();
+    harness.logRecord.mockClear();
     harness.createHost.mockReset();
     harness.createHost.mockImplementation((input) => {
       harness.order.push("host-create");
@@ -88,7 +96,10 @@ describe("serve topology command", () => {
       options: {},
       secretStore: harness.secretStore,
       startup,
+      deviceCapacity: harness.capacity,
+      logRecords: expect.any(Object),
     }));
+    expect(harness.logFinish).toHaveBeenCalledWith("success", "completed");
   });
 
   it("leaves outer failure and cleanup ownership with the production Host", async () => {
@@ -107,6 +118,7 @@ describe("serve topology command", () => {
     harness.hostRun.mockRejectedValue(failure);
 
     await expect(runServeCommand({}, harness.writer)).rejects.toBe(failure);
+    expect(harness.logFinish).toHaveBeenCalledWith("failure", "host-or-preflight-failed");
     expect(harness.createHost).toHaveBeenCalledOnce();
     expect(harness.hostRun).toHaveBeenCalledOnce();
   });

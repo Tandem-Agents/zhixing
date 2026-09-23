@@ -20,6 +20,7 @@ import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js"
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
+import { beginRuntimeLogging } from "./logging/runtime.js";
 
 async function renderActionError(error: unknown): Promise<void> {
   if (
@@ -49,18 +50,18 @@ async function pruneRuntimeLogs(): Promise<void> {
  * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
  * ready / completed 状态下返回，让 caller 继续主流程。
  */
-function handleStartupResult(result: StartupCheckResult): void {
+function handleStartupResult(result: StartupCheckResult): number | undefined {
   if (result.kind === "ready") return;
 
   if (result.kind === "schema-error") {
     console.error(chalk.red(`[配置错误] ${result.message}`));
     console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
-    process.exit(2);
+    return 2;
   }
   if (result.kind === "secret-store-error") {
     console.error(chalk.red(`[秘密存储不可用] ${result.message}`));
     console.error(chalk.dim(`设备本地目录：${result.filePath}`));
-    process.exit(2);
+    return 2;
   }
   if (result.kind === "semantic-error") {
     console.error(
@@ -74,7 +75,7 @@ function handleStartupResult(result: StartupCheckResult): void {
       console.error("");
     }
     console.error(chalk.dim("修复后重新运行 `zhixing` 验证。"));
-    process.exit(2);
+    return 2;
   }
   if (result.kind === "non-tty") {
     console.error(chalk.red("缺少必要配置，且当前环境非交互终端。"));
@@ -82,11 +83,11 @@ function handleStartupResult(result: StartupCheckResult): void {
     for (const label of result.missingLabels) {
       console.error(chalk.dim(`  - ${label}`));
     }
-    process.exit(2);
+    return 2;
   }
   if (result.kind === "cancelled") {
     console.log(chalk.dim("已取消配置。"));
-    process.exit(0);
+    return 0;
   }
 }
 
@@ -223,6 +224,7 @@ program
   .action(async (options: {
     log?: boolean;
   }) => {
+    const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => createStdoutWriter().line(chalk.dim(message)));
     try {
       const zhixingHome = getZhixingHome();
       const configPath = getGlobalConfigPath(process.env, zhixingHome);
@@ -261,10 +263,17 @@ program
         configPath,
         mode: "repl",
       });
-      handleStartupResult(startupResult);
+      const startupExit = handleStartupResult(startupResult);
+      if (startupExit !== undefined) {
+        await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
+        process.exit(startupExit);
+        return;
+      }
 
-      await startRepl(zhixingHome, configPath);
+      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"));
+      await logging.finish("success", "completed");
     } catch (err) {
+      await logging.finish("failure", "foreground-failed");
       await renderActionError(err);
       process.exit(1);
     }
@@ -273,6 +282,49 @@ program
 program.hook("preAction", (_root, action) => {
   if (action.name() !== "help") assertSupportedRuntime();
 });
+
+const logsCmd = program.command("logs")
+  .description("查阅本机运行日志与保留策略")
+  .option("--offline", "离线只读查询，不启动服务")
+  .action(async () => { const { runLoggingCommand } = await import("./logging/command.js"); await runLoggingCommand({ action: "status" }); });
+logsCmd.command("location").description("显示日志目录、格式及覆盖范围").action(async () => {
+  const { runLoggingCommand } = await import("./logging/command.js"); await runLoggingCommand({ action: "location" });
+});
+logsCmd.command("search").description("查找记录（结果与扫描量有界，可按游标续页）")
+  .option("--source <name>", "来源名称")
+  .option("--level <level>", "debug、info、warn 或 error")
+  .option("--from <time>", "起始时间（ISO 日期）")
+  .option("--until <time>", "结束时间（ISO 日期）")
+  .option("--ref <kind:id>", "关联身份")
+  .option("--cursor <value>", "上一页返回的游标")
+  .action(async (options: { source?: string; level?: string; from?: string; until?: string; ref?: string; cursor?: string }) => {
+    const { runLoggingCommand } = await import("./logging/command.js");
+    const separator = options.ref?.indexOf(":") ?? -1;
+    if (options.ref && separator < 1) throw new InvalidArgumentError("关联身份格式为 kind:id");
+    await runLoggingCommand({ action: "search", filter: {
+      ...(options.source ? { source: options.source } : {}),
+      ...(options.level ? { level: options.level as import("@zhixing/core/logging").LogLevel } : {}),
+      ...(options.from ? { from: Date.parse(options.from) } : {}),
+      ...(options.until ? { until: Date.parse(options.until) } : {}),
+      ...(options.ref ? { ref: { kind: options.ref.slice(0, separator), id: options.ref.slice(separator + 1) } } : {}),
+    }, ...(options.cursor ? { cursor: options.cursor } : {}) });
+  });
+logsCmd.command("read <address>").description("按稳定地址读取概览、时间线或详情")
+  .option("--view <view>", "overview、timeline 或 detail", "overview")
+  .option("--cursor <value>", "上一页返回的游标")
+  .action(async (address: string, options: { view: string; cursor?: string }) => {
+    if (!["overview", "timeline", "detail"].includes(options.view)) throw new InvalidArgumentError("视图必须是 overview、timeline 或 detail");
+    const { runLoggingCommand } = await import("./logging/command.js");
+    await runLoggingCommand({ action: "read", address, view: options.view as "overview" | "timeline" | "detail", ...(options.cursor ? { cursor: options.cursor } : {}) });
+  });
+logsCmd.command("policy").description("查看策略；按当前版本应用本机策略变更")
+  .option("--set <json>", "需要修改的策略字段（JSON 对象）")
+  .option("--revision <n>", "当前策略版本", parseRevision)
+  .action(async (options: { set?: string; revision?: number }) => {
+    if (logsCmd.opts<{ offline?: boolean }>().offline && options.set) throw new InvalidArgumentError("离线查询不能修改日志策略");
+    const { runLoggingCommand } = await import("./logging/command.js");
+    await runLoggingCommand({ action: "policy", ...(options.set ? { patch: options.set } : {}), ...(options.revision !== undefined ? { revision: options.revision } : {}) });
+  });
 
 // ─── zhixing status / stop（用户运行控制入口） ───
 program

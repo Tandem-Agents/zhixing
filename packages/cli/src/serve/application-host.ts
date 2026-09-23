@@ -1,4 +1,5 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
+import type { LogRecordPort } from "@zhixing/core/logging";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
 import type { ServeOptions } from "./command.js";
 import type { StartupCheckResult } from "../startup.js";
@@ -73,6 +74,8 @@ export interface PersistentApplicationHostInput<Options> {
   readonly startup: ReadyStartup;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly onRecoveryRootRequired: () => void;
+  readonly deviceCapacity?: DeviceCapacityRuntime;
+  readonly logRecords?: LogRecordPort;
 }
 
 export interface PersistentApplicationHostDependencies<Options> {
@@ -140,6 +143,7 @@ export class PersistentApplicationHost<Options> {
   async run(): Promise<void> {
     if (this.#running) throw new Error("Persistent ApplicationHost can only run once");
     this.#running = true;
+    this.#input.logRecords?.record({ event: "hostStarted" });
 
     let failed = false;
     let failure: unknown;
@@ -151,6 +155,7 @@ export class PersistentApplicationHost<Options> {
     }
 
     const cleanupFailures = await this.#releaseOuterResources();
+    this.#input.logRecords?.record({ event: "hostStopped", result: failed || cleanupFailures.length ? "failure" : "success", data: { cleanupFailures: cleanupFailures.length } });
     if (failed) {
       if (cleanupFailures.length > 0) {
         throw new AggregateError(
@@ -170,7 +175,7 @@ export class PersistentApplicationHost<Options> {
   }
 
   async #runPersistentTopology(): Promise<void> {
-    const deviceCapacity = this.#dependencies.createDeviceCapacity(
+    const deviceCapacity = this.#input.deviceCapacity ?? this.#dependencies.createDeviceCapacity(
       `${this.#input.zhixingHome}/distributed-runtime/capacity`,
     );
     const plannedAnchorTransferStaging =

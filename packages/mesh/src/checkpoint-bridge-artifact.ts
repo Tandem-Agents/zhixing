@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import path from "node:path";
 
 /** Native delivery targets, not a restriction on the agent's domain model. */
@@ -46,14 +47,47 @@ export function verifyCheckpointBridgeArtifact(packageRoot: string, target: Chec
     const binary = readFileSync(file);
     const descriptor: unknown = JSON.parse(readFileSync(path.join(directory, "descriptor.json"), "utf8"));
     const manifest = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string };
-    if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) throw new Error("invalid descriptor");
-    const value = descriptor as Record<string, unknown>;
-    if (Object.keys(value).sort().join("\0") !== ["arch", "bytes", "file", "os", "packageVersion", "schemaVersion", "sha256"].sort().join("\0") ||
-      value.schemaVersion !== 1 || value.os !== target.os || value.arch !== target.arch ||
-      value.file !== target.file || value.packageVersion !== manifest.version || value.bytes !== binary.byteLength ||
-      value.sha256 !== createHash("sha256").update(binary).digest("hex")) throw new Error("invalid descriptor");
+    verifyArtifact(binary, descriptor, manifest.version, target);
   } catch (cause) {
     throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 @zhixing/cli`, { cause });
   }
   return file;
+}
+
+/** The asynchronous owner must not synchronously read its executable on the product loop. */
+export async function verifyCheckpointBridgeArtifactAsync(packageRoot: string, target: CheckpointBridgeTarget): Promise<string> {
+  const directory = checkpointBridgeArtifactDirectory(packageRoot, target), file = path.join(directory, target.file);
+  try {
+    const binary = await readBounded(file, 16 * 1024 * 1024);
+    const descriptor: unknown = JSON.parse((await readBounded(path.join(directory, "descriptor.json"), 64 * 1024)).toString("utf8"));
+    const manifest = JSON.parse((await readBounded(path.join(packageRoot, "package.json"), 64 * 1024)).toString("utf8")) as { version: string };
+    verifyArtifact(binary, descriptor, manifest.version, target);
+    return file;
+  } catch (cause) {
+    throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 @zhixing/cli`, { cause });
+  }
+}
+function verifyArtifact(binary: Buffer, descriptor: unknown, version: string, target: CheckpointBridgeTarget): void {
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) throw new Error("invalid descriptor");
+  const value = descriptor as Record<string, unknown>;
+  if (Object.keys(value).sort().join("\0") !== ["arch", "bytes", "file", "os", "packageVersion", "schemaVersion", "sha256"].sort().join("\0") ||
+    value.schemaVersion !== 1 || value.os !== target.os || value.arch !== target.arch ||
+    value.file !== target.file || value.packageVersion !== version || value.bytes !== binary.byteLength ||
+    value.sha256 !== createHash("sha256").update(binary).digest("hex")) throw new Error("invalid descriptor");
+}
+async function readBounded(file: string, limit: number): Promise<Buffer> {
+  const handle = await open(file, "r");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > limit) throw Error("artifact size exceeds limit");
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (read.bytesRead === 0) throw Error("artifact changed during read");
+      offset += read.bytesRead;
+    }
+    if ((await handle.stat()).size !== bytes.length) throw Error("artifact changed during read");
+    return bytes;
+  } finally { await handle.close(); }
 }

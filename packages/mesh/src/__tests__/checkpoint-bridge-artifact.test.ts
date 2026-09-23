@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { CHECKPOINT_BRIDGE_TARGETS, assertCheckpointBridgeHost, checkpointBridgeArtifactDirectory, checkpointBridgeTarget, verifyCheckpointBridgeArtifact } from "../checkpoint-bridge-artifact.js";
+import { CHECKPOINT_BRIDGE_TARGETS, assertCheckpointBridgeHost, checkpointBridgeArtifactDirectory, checkpointBridgeTarget, verifyCheckpointBridgeArtifact, verifyCheckpointBridgeArtifactAsync } from "../checkpoint-bridge-artifact.js";
 
 describe("checkpoint native delivery", () => {
   it.each(CHECKPOINT_BRIDGE_TARGETS)("verifies $id without loading a foreign binary", async (target) => {
@@ -20,15 +20,18 @@ describe("checkpoint native delivery", () => {
     const save = async (value: unknown) => writeFile(path.join(directory, "descriptor.json"), JSON.stringify(value));
     await save(descriptor);
     expect(verifyCheckpointBridgeArtifact(root, target)).toBe(path.join(directory, target.file));
+    await expect(verifyCheckpointBridgeArtifactAsync(root, target)).resolves.toBe(path.join(directory, target.file));
     for (const invalid of [null, [], {}, { ...descriptor, os: "other" }, { ...descriptor, arch: "other" },
       { ...descriptor, packageVersion: "0.0.0" }, { ...descriptor, file: "../other" },
       { ...descriptor, bytes: 0 }, { ...descriptor, sha256: "0".repeat(64) }, { ...descriptor, extra: true }]) {
       await save(invalid);
       expect(() => verifyCheckpointBridgeArtifact(root, target)).toThrow("与当前包不匹配");
+      await expect(verifyCheckpointBridgeArtifactAsync(root, target)).rejects.toThrow("与当前包不匹配");
     }
     await save(descriptor);
     await writeFile(path.join(directory, target.file), "tampered");
     expect(() => verifyCheckpointBridgeArtifact(root, target)).toThrow("与当前包不匹配");
+    await expect(verifyCheckpointBridgeArtifactAsync(root, target)).rejects.toThrow("与当前包不匹配");
   });
 
   it("rejects absent artifacts and undeclared targets", async () => {

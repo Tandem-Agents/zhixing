@@ -43,6 +43,7 @@ const exclusions = {
   connection: "连接握手或健康检查，不进入业务落点矩阵",
   composition: "产品组合根或命令分组，本身不执行领域操作",
   diagnostic: "只读取或渲染设备本地诊断信息，无权威写",
+  logGovernance: "仅治理本机观察证据的存储策略，不写业务权威事实",
   localRender: "纯本地展示，不产生权威事实",
 };
 
@@ -177,6 +178,8 @@ const baseMappingTuples = [
     { exclusion: "diagnostic", reason: exclusions.diagnostic },
   ],
   ["cli:zhixing doctor", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
+  ...["logs", "logs location", "logs search", "logs read"].map((name) => [`cli:zhixing ${name}`, { exclusion: "diagnostic", reason: exclusions.diagnostic }]),
+  ["cli:zhixing logs policy", { exclusion: "logGovernance", reason: exclusions.logGovernance }],
   ["cli:zhixing help", { exclusion: "localRender", reason: exclusions.localRender }],
   ["slash:help:repl", { exclusion: "localRender", reason: exclusions.localRender }],
   ["slash:model:repl", { exclusion: "localRender", reason: exclusions.localRender }],
