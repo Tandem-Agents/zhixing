@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import { ExtensionApplication } from "@zhixing/core/extensions/application";
+import type { ExtensionManifest } from "@zhixing/core/extensions/contracts";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
 import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { canonicalize } from "@zhixing/core/protocol";
@@ -18,6 +19,15 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
     const { instances, operations } = await application.list();
     const ready: { id: string; digest: string; configuration: string }[] = [];
     const candidates = new ExtensionCandidates(join(artifactDirectory, "..", "candidates"));
+    const ensureArtifact = async (manifest: ExtensionManifest) => {
+      try { await artifacts.resolve(manifest); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const seed = seeds.find(item => item.manifest.digest === manifest.digest);
+        if (!seed) throw new Error(`Extension artifact is not ready: ${manifest.id}`);
+        await artifacts.import(manifest, await readFile(join(seed.directory, seed.manifest.entry)));
+      }
+    };
     // A handover can still fail after duty transfer. Its pinned rollback input
     // must be available before the destination is allowed to become owner.
     for (const operation of operations ?? []) {
@@ -25,19 +35,14 @@ export function createChannelExtensionReadiness(configuration: ChannelConfigurat
       const instance = instances.find(item => item.id === operation.instanceId);
       if (!instance?.enabled) continue;
       if (!seeds.some(seed => seed.manifest.digest === operation.previous!.binding.manifest.digest)) await candidates.read(operation.previous.binding.manifest.digest);
-      await artifacts.resolve(operation.previous.binding.manifest);
+      await ensureArtifact(operation.previous.binding.manifest);
       await configuration.read({ ...instance, binding: operation.previous.binding });
       ready.push({ id: `${instance.id}:rollback`, digest: operation.previous.binding.manifest.digest, configuration: operation.previous.binding.configurationRevision });
     }
     for (const instance of instances) {
       if (!instance.enabled || instance.binding.manifest.type !== "channel") continue;
       if (!seeds.some(seed => seed.manifest.digest === instance.binding.manifest.digest)) await candidates.read(instance.binding.manifest.digest);
-      try { await artifacts.resolve(instance.binding.manifest); }
-      catch {
-        const seed = seeds.find(({ manifest }) => manifest.digest === instance.binding.manifest.digest);
-        if (!seed) throw new Error(`Extension artifact is not ready: ${instance.id}`);
-        await artifacts.import(seed.manifest, await readFile(join(seed.directory, seed.manifest.entry)));
-      }
+      await ensureArtifact(instance.binding.manifest);
       await configuration.read(instance);
       ready.push({ id: instance.id, digest: instance.binding.manifest.digest, configuration: instance.binding.configurationRevision });
     }

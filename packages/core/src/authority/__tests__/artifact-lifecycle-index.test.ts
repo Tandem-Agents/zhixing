@@ -1868,19 +1868,7 @@ describe("ArtifactLifecycleIndex", () => {
       const basePolicy = createDefaultDeviceCapacityPolicy();
       const delegate = new DefaultStorageMaintenanceGovernor({
         capacity: new DefaultDeviceCapacityArbiter({
-          policy: {
-            ...basePolicy,
-            quantum: {
-              readBytes: 1024 * 1024 * 1024,
-              writeBytes: 1024 * 1024 * 1024,
-              ioOperations: 1_000_000,
-            },
-            quantumRefillPerSecond: {
-              readBytes: 1024 * 1024 * 1024,
-              writeBytes: 1024 * 1024 * 1024,
-              ioOperations: 1_000_000,
-            },
-          },
+          policy: basePolicy,
           probe: () => ({
             cpuBusyRatio: 0,
             availableMemoryBytes: 1024 * 1024 * 1024,

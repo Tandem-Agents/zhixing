@@ -36,7 +36,7 @@ function buildGrepResultsPresentation(
     query: {
       pattern: result.query.pattern,
       searchPath: result.query.searchPath,
-      glob: result.query.glob,
+      ...(result.query.glob !== undefined ? { glob: result.query.glob } : {}),
       outputMode: result.query.outputMode,
       regexDialect: result.query.regexDialect,
       caseSensitivity: result.query.caseSensitivity,

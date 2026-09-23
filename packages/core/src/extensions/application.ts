@@ -13,6 +13,7 @@ import {
   type ExtensionBinding,
   type ExtensionInstance,
   type ExtensionSnapshot,
+  type ExtensionPublicSnapshot,
   type ExtensionOperation,
   type ExtensionManagementRequest,
   type ExtensionManifest,
@@ -41,7 +42,7 @@ function reduce(state: State, record: LogicalRecord<RecordBody>): State {
   throw new Error("Invalid extension authority record");
 }
 
-export const extensionList = defineProductApiQuery<"extensions.list", void, ExtensionSnapshot>("extensions.list");
+export const extensionList = defineProductApiQuery<"extensions.list", void, ExtensionPublicSnapshot>("extensions.list");
 export const extensionSetEnabled = defineProductApiCommand<
   "extensions.set-enabled", { id: string; enabled: boolean; expectedRevision: number }, ExtensionInstance, never
 >("extensions.set-enabled", []);
@@ -49,12 +50,21 @@ export const extensionRefresh = defineProductApiCommand<
   "extensions.refresh", { id: string; expectedRevision: number }, ExtensionInstance, never
 >("extensions.refresh", []);
 export const extensionApplyConfiguration = defineProductApiCommand<
-  "extensions.apply-configuration", { ids: readonly string[] }, ExtensionSnapshot, never
+  "extensions.apply-configuration", { ids: readonly string[] }, ExtensionPublicSnapshot, never
 >("extensions.apply-configuration", []);
-export const extensionManage = defineProductApiCommand<"extensions.manage", ExtensionManagementRequest, ExtensionSnapshot, never>("extensions.manage", []);
+export const extensionManage = defineProductApiCommand<"extensions.manage", ExtensionManagementRequest, ExtensionPublicSnapshot, never>("extensions.manage", []);
 export const extensionLocalSetup = defineProductApiQuery<"extensions.local-setup", void, Readonly<Record<string, string>>>("extensions.local-setup");
-export function extensionPublicSnapshot(snapshot: ExtensionSnapshot): ExtensionSnapshot {
-  return { ...snapshot, ...(snapshot.operations ? { operations: snapshot.operations.map(({ verification: _verification, continuation: _continuation, source: { returnAddress: _address, ...source }, ...operation }) => ({ ...operation, source })) } : {}) };
+export function extensionPublicSnapshot(snapshot: ExtensionSnapshot): ExtensionPublicSnapshot {
+  return {
+    instances: snapshot.instances,
+    ...(snapshot.candidate ? { candidate: snapshot.candidate } : {}),
+    ...(snapshot.operations ? { operations: snapshot.operations.map(operation => ({
+      id: operation.id, instanceId: operation.instanceId, revision: operation.revision, phase: operation.phase,
+      ...(operation.purpose ? { purpose: operation.purpose } : {}),
+      ...(operation.candidate ? { candidate: operation.candidate } : {}),
+      ...(operation.reason ? { reason: operation.reason } : {}),
+    })) } : {}),
+  };
 }
 export const EXTENSION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [extensionList, extensionSetEnabled, extensionRefresh, extensionApplyConfiguration, extensionManage, extensionLocalSetup], factEvents: [],
@@ -84,18 +94,32 @@ export class ExtensionApplication {
     return (await this.list()).operations?.find((entry) => entry.id === id);
   }
 
-  async prepare(id: string, instanceId: string, source: ExtensionOperation["source"], purpose?: "update" | "repair"): Promise<ExtensionOperation> {
+  async prepare(id: string, instanceId: string, source: NonNullable<ExtensionOperation["source"]>, purpose?: "update" | "repair"): Promise<ExtensionOperation> {
     if (![id, instanceId].every((value) => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)) ||
         !source || typeof source.conversationId !== "string" || !source.conversationId || source.conversationId.length > 256 ||
         typeof source.request !== "string" || !source.request.trim() || source.request.length > 16000) throw new TypeError("Invalid extension request");
     return this.decide((state) => {
       const previous = state.operations.get(id);
       if (previous) {
-        if (previous.instanceId !== instanceId || previous.source.conversationId !== source.conversationId || previous.source.request !== source.request || previous.purpose !== purpose) throw new Error("Extension request identity conflict");
+        if (previous.instanceId !== instanceId || previous.source?.conversationId !== source.conversationId || previous.source?.request !== source.request || previous.purpose !== purpose) throw new Error("Extension request identity conflict");
         return { value: previous, records: [] };
       }
       const instance = state.instances.get(instanceId);
       const active = [...state.operations.values()].find(op => op.instanceId === instanceId && extensionOperationActive(op));
+      // A failed first trial has no admitted version to roll back to. Repair
+      // continues that trial instead of creating a fictitious replacement.
+      if (purpose === "repair" && instance?.enabled && !instance.admission?.ready &&
+          active && instance.admission?.operationId === active.id && !active.previous) {
+        if (["preparing", "configuration"].includes(active.phase)) return { value: active, records: [] };
+        const operation: ExtensionOperation = { id, instanceId, source: structuredClone(source), purpose,
+          revision: 1, phase: "preparing", candidate: instance.binding.manifest };
+        return { value: operation, records: [
+          { kind: "extension-operation", operation: { ...active, revision: active.revision + 1, phase: "cancelled",
+            reason: "未验证候选的修正已由新的修复操作接续" } },
+          { kind: "extension-operation", operation },
+          { kind: "extension-instance", instance: { ...instance, revision: instance.revision + 1, admission: { operationId: id, ready: false } } },
+        ] };
+      }
       if (purpose === "repair" && active?.purpose === "repair" && active.phase !== "blocked") return { value: active, records: [] };
       // A new explicit request may replace a finished diagnosis; automatic fault
       // observation still coalesces against blocked operations and stable ids.
@@ -111,10 +135,16 @@ export class ExtensionApplication {
 
   async candidate(id: string, revision: number, manifest: ExtensionManifest): Promise<ExtensionOperation> {
     const candidate = validateExtensionManifest(manifest);
-    return this.changeOperation(id, revision, (current) => {
-      if (current.phase !== "preparing" && current.phase !== "blocked") throw new Error("Candidate is no longer accepted");
+    return this.decide((state) => {
+      const current = state.operations.get(id);
+      if (!current || current.revision !== revision) throw new ExtensionRevisionConflict();
+      const instance = state.instances.get(current.instanceId);
+      const correctingTrial = !current.previous && instance?.enabled && !instance.admission?.ready && instance.admission?.operationId === id;
+      if (!["preparing", "blocked"].includes(current.phase) && !(correctingTrial && current.phase === "verifying")) throw new Error("Candidate is no longer accepted");
+      if (instance && !current.previous && !correctingTrial) throw new ExtensionRevisionConflict();
       const { reason: _reason, verification: _verification, ...rest } = current;
-      return { ...rest, candidate, phase: "configuration" };
+      const operation: ExtensionOperation = { ...rest, revision: revision + 1, candidate, phase: "configuration" };
+      return { value: operation, records: [{ kind: "extension-operation", operation }] };
     });
   }
 
@@ -129,7 +159,9 @@ export class ExtensionApplication {
         if (!current?.enabled || current.intentRevision !== operation.previous.intentRevision ||
             current.binding.projectionRevision !== operation.previous.binding.projectionRevision ||
             current.binding.manifest.digest !== operation.previous.binding.manifest.digest) throw new ExtensionRevisionConflict();
-      } else if (current) throw new Error("Extension instance already exists");
+      } else if (current && (!current.enabled || current.admission?.ready || current.admission?.operationId !== id)) {
+        throw new ExtensionRevisionConflict();
+      }
       const instance: ExtensionInstance = { id: operation.instanceId, revision: (current?.revision ?? 0) + 1, enabled: true, intentRevision: current?.intentRevision ?? 1,
         binding: checked, generation: null, phase: "stopped", admission: { operationId: id, ready: false } };
       this.exclusive(state, instance);
@@ -343,17 +375,25 @@ export class ExtensionApplication {
           }
         }
         const admission = instance.admission;
-        const admittedBy = admission ? state.operations.get(admission.operationId) : undefined;
-        if (admission && admittedBy && current) {
+        const admittedBy = admission ? operations.get(admission.operationId) ?? state.operations.get(admission.operationId) : undefined;
+        if (current) {
           // Type-owned configuration identity is part of admission, unlike a
           // transient process generation or a secret rotation for the same account.
           const identityChanged = current.binding.configurationRevision !== instance.binding.configurationRevision;
-          const explicitlyRestarted = instance.enabled && !current.enabled && admittedBy.phase === "cancelled";
+          const explicitlyRestarted = instance.enabled && !current.enabled && admittedBy?.phase === "cancelled";
           if (identityChanged || explicitlyRestarted) {
-            instance = { ...instance, admission: { ...admission, ready: false } };
-            const { verification: _proof, reason: _reason, continuation: _continuation, ...previous } = admittedBy;
-            operations.set(admittedBy.id, { ...previous, revision: previous.revision + 1, phase: instance.enabled ? "verifying" : "cancelled" });
-          } else if (instance.enabled && !admission.ready && instance.phase === "starting" && admittedBy.phase === "blocked") {
+            // A configuration verification is a new operation, not a revival of
+            // the update that once installed this version. Legacy adopted
+            // instances need this admission too when their identity changes.
+            if (admittedBy && extensionOperationActive(admittedBy)) operations.set(admittedBy.id,
+              { ...admittedBy, revision: admittedBy.revision + 1, phase: "cancelled", switched: false,
+                reason: "配置或启用意图已变更，原验证已由新的验证操作接续" });
+            const verification: ExtensionOperation = { id: `verify-${randomUUID()}`, instanceId: id, revision: 1,
+              phase: instance.enabled ? "verifying" : "cancelled", candidate: instance.binding.manifest,
+              ...(admittedBy?.source ? { source: admittedBy.source } : {}) };
+            operations.set(verification.id, verification);
+            instance = { ...instance, admission: { operationId: verification.id, ready: false } };
+          } else if (instance.enabled && admission && !admission.ready && instance.phase === "starting" && admittedBy?.phase === "blocked") {
             const { reason: _reason, ...previous } = admittedBy;
             operations.set(previous.id, { ...previous, revision: previous.revision + 1, phase: "verifying" });
           }

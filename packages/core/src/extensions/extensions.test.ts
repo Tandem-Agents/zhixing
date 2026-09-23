@@ -25,7 +25,7 @@ async function fixture(mode = "normal", projection = async () => ({ mode })) {
   const bytes = await readFile(new URL("./__fixtures__/worker.mjs", import.meta.url));
   const manifest = validateExtensionManifest({ id: "fixture", version: "1.0.0", digest: createHash("sha256").update(bytes).digest("hex"),
     runtime: "node24", entry: "worker.mjs", protocol: 1, type: "fixture", contract: 1, declaration: {} });
-  const binding: ExtensionBinding = { manifest, configurationRevision: "configuration-1", secretRevision: "secrets-1", projectionRevision: "projection-1" };
+  const binding: ExtensionBinding = { manifest, configurationRevision: "configuration-1", projectionRevision: "projection-1" };
   const artifacts = new ExtensionArtifacts(join(root, "extensions"));
   await artifacts.import(manifest, bytes);
   const runtime = new ManagedExtensions({ application, artifacts, isOwner: () => true,

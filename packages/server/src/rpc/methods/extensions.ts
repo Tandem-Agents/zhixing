@@ -17,7 +17,8 @@ export function buildExtensionMethods(): MethodEntry[] {
     ...(["extensions.set-enabled", "extensions.refresh"] as const).map((name): MethodEntry => ({
       name, requiresAuth: true, async handler(params, ctx) {
         const api = ctx.server.productApi;
-        if (!api?.supports(extensionSetEnabled)) throw RpcErrors.invalidParams("扩展管理在当前宿主不可用");
+        const operation = name === "extensions.refresh" ? extensionRefresh : extensionSetEnabled;
+        if (!api?.supports(operation)) throw RpcErrors.invalidParams("扩展管理在当前宿主不可用");
         const input = params as { id?: unknown; enabled?: unknown; expectedRevision?: unknown };
         if (!input || typeof input.id !== "string" || !Number.isSafeInteger(input.expectedRevision) ||
             (name === "extensions.set-enabled" && typeof input.enabled !== "boolean")) throw RpcErrors.invalidParams("需要实例标识和当前修订");

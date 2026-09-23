@@ -733,9 +733,14 @@ export function createDefaultDeviceCapacityPolicy(): DeviceCapacityPolicy {
       temporarySafetyReserveBytes: 512 * 1024 * 1024,
     },
     quantum: {
-      readBytes: 256 * 1024 * 1024,
-      writeBytes: 256 * 1024 * 1024,
-      ioOperations: 16_384,
+      // 突发桶须容纳两个最大物理步骤，不能与单步 atomic 上界相等。
+      // 否则一个极小的前置读取消耗后，后续零等待步骤必须等桶完全补满；
+      // 锁外重试又执行同一前缀，空闲设备也会反复背压、无法推进。
+      // 这里只保留一个步骤的衔接余量；持续吞吐仍由下方 refill 限制，
+      // 每步用量及内存、临时空间和并发上限仍由各自 permit 约束。
+      readBytes: 512 * 1024 * 1024,
+      writeBytes: 512 * 1024 * 1024,
+      ioOperations: 32_768,
     },
     quantumRefillPerSecond: {
       readBytes: 64 * 1024 * 1024,

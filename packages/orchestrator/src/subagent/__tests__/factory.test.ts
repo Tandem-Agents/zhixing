@@ -193,6 +193,7 @@ describe("runChildAgent · assignment child resource boundary", () => {
         conversationId: "conversation-1",
         assignmentMutations,
         globalQuery,
+        assignmentIssuedAt: "2026-08-04T00:00:00.000Z",
         resourceReservation: {
           port: reservationPort,
           parentLease,
@@ -233,6 +234,7 @@ describe("runChildAgent · assignment child resource boundary", () => {
     expect(release).toHaveBeenCalledWith(childLease, expect.anything());
     expect(childContext?.assignmentMutations).toBe(assignmentMutations);
     expect(childContext?.globalQuery).toBe(globalQuery);
+    expect(childContext?.assignmentIssuedAt).toBe("2026-08-04T00:00:00.000Z");
     expect(childContext?.resourceReservation?.parentLease).toBe(childLease);
     expect(capacityAcquire).toHaveBeenCalledTimes(1);
     expect(capacityAcquire.mock.calls[0]?.[0]).toMatchObject({

@@ -2,7 +2,7 @@
 
 Feishu channel adapter for Zhixing. It maintains the Feishu connection and projects inbound and outbound messages, including card responses, into Zhixing's channel contracts.
 
-This is an optional implementation package consumed by the Zhixing host. It is not a standalone bot product or an independently versioned SDK.
+This package builds the pinned, self-contained Channel extension shipped with `@zhixing/cli` for existing Feishu connections. The host runs it in a managed child process through the Channel protocol. Its distribution contains the extension manifest and executable; it exposes no JavaScript library entry or standalone bot product.
 
 Architecture and current capability boundaries: [飞书通道架构](../../../docs/modules/feishu/architecture.md).
 

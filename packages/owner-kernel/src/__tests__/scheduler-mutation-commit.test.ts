@@ -20,6 +20,7 @@ import { SchedulerConversationMutationPublisher } from "../scheduler-conversatio
 import { SchedulerJobCommitParticipant } from "../scheduler-job-commit.js";
 import {
   GlobalMutationCommitCoordinator,
+  listScheduleTaskIds,
 } from "../global-mutation-commit-coordinator.js";
 import {
   planScheduleMutationCommit,
@@ -40,6 +41,23 @@ const SPEC = {
 };
 
 describe("scheduler mutation commit planning", () => {
+  it("keeps schedule materialization records out of recovered task journals", async () => {
+    const root = await createTempDir("schedule-stream-ownership");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts));
+    const plan = planScheduleMutationCommit({
+      records: [{ seq: 1, requestId: "startup-schedule", mutation: { kind: "schedule-create", spec: SPEC } }],
+      definitionFor: () => undefined,
+      source: {},
+    });
+    await log.append(plan.records);
+    await log.append([{
+      stream: "job:schedule-materialization",
+      body: { t: "schedule-materialized", taskId: plan.taskIds[0]!, targetRevision: 1 },
+    }]);
+    await expect(listScheduleTaskIds(log)).resolves.toEqual(plan.taskIds);
+  });
+
   it("binds trusted source and reserves same-batch revisions atomically", () => {
     const requestId = "schedule:assignment-1:create";
     const taskId = scheduleTaskIdForRequest(requestId);

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  claimDeviceCapacity,
+  createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   type DeviceCapacityBudget,
   type DeviceCapacityPolicy,
@@ -14,6 +16,7 @@ import {
   STORAGE_MAINTENANCE_TASK_OWNERS,
   StorageMaintenanceTaskRunner,
   storageMaintenanceWorkKey,
+  storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceObligationRequest,
   type StorageMaintenanceRequest,
@@ -586,6 +589,39 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
 });
 
 describe("runStorageMaintenanceStep", () => {
+  it("admits successive default lifecycle reads without requiring a completely full bucket", async () => {
+    let now = 0;
+    const policy = createDefaultDeviceCapacityPolicy();
+    const port = new DefaultStorageMaintenanceGovernor({
+      capacity: new DefaultDeviceCapacityArbiter({
+        policy,
+        now: () => now,
+        probe: () => ({
+          cpuBusyRatio: 0,
+          availableMemoryBytes: 1024 ** 3,
+          processRssBytes: 0,
+          temporaryBytesAvailable: 8 * 1024 ** 3,
+        }),
+      }),
+    });
+    const request = storageMaintenanceRequest(
+      "lifecycle-reconcile", "startup-index", "scan",
+      { obligation: "committed", maxWaitMs: 0 },
+    );
+    const scan = async (used: number) => runStorageMaintenanceStep(port, request, async () => {
+      claimDeviceCapacity("ioOperations", used);
+    });
+    // 冻结时钟，确保后续准入依靠真实衔接余量，而非测试执行恰好够慢。
+    await scan(6);
+    await expect(scan(6)).resolves.toBeUndefined();
+    await scan(request.atomic.quantum.ioOperations);
+    // 突发余量仍是有限预算；耗尽后必须背压，按原速率补充后才可继续。
+    await expect(scan(1)).rejects.toBeInstanceOf(StorageMaintenanceAdmissionError);
+    expect(port.snapshot().capacity.occupancyInUse.slots).toBe(0);
+    now += 25;
+    await expect(scan(6)).resolves.toBeUndefined();
+  });
+
   it("acquires, accounts and releases the permit around the step", async () => {
     const port = governor();
     const gate = deferred<void>();

@@ -394,6 +394,9 @@ async function runChildAgentInner(
         ...(parentContext?.globalQuery
           ? { globalQuery: parentContext.globalQuery }
           : {}),
+        ...(parentContext?.assignmentIssuedAt
+          ? { assignmentIssuedAt: parentContext.assignmentIssuedAt }
+          : {}),
         ...(childMetering ? { modelCallMetering: childMetering } : {}),
         ...(parentContext?.resourceReservation
           ? {

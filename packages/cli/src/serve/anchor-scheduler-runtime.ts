@@ -45,6 +45,7 @@ import {
 } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
 import {
   GlobalMutationCommitCoordinator,
+  listScheduleTaskIds,
 } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
 import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
 import {
@@ -1187,12 +1188,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
   }
 
   async #listTaskIds(): Promise<readonly string[]> {
-    const streams = (await this.#options.authority.authorityLog.readAll())
-      .flatMap((commit) => commit.entries)
-      .map((entry) => entry.stream)
-      .filter((stream) => stream.startsWith("job:"))
-      .map((stream) => stream.slice("job:".length));
-    return [...new Set(streams)].sort();
+    return listScheduleTaskIds(this.#options.authority.authorityLog);
   }
 }
 

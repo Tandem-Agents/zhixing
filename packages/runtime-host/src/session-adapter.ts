@@ -46,9 +46,17 @@ import {
 // ─── 适配器 ───
 
 type QueueItem =
-  | { readonly kind: "yield"; readonly value: AgentYield }
+  | { readonly kind: "yield"; value: AgentYield; acknowledge?: () => void }
   | { readonly kind: "done"; readonly result: RunResult }
   | { readonly kind: "error"; readonly error: unknown };
+
+const MAX_QUEUED_TEXT_CHARS = 4_096;
+const MAX_QUEUED_EVENTS = 16;
+
+function deltaLength(value: AgentYield): number {
+  return value.type === "text_delta" ? value.text.length
+    : value.type === "thinking_delta" ? value.thinking.length : 0;
+}
 
 function unhandledConversationKernelEvent(event: never): never {
   throw new TypeError(`Unhandled conversation Kernel event: ${String(event)}`);
@@ -187,6 +195,7 @@ export function createOwnerRuntimeAdapter(
   defaultDisposeReason: RuntimeDisposeReason = "session-dispose",
 ): SessionRuntime {
   let currentController: AbortController | null = null;
+  const activeRuns = new Set<() => Promise<void>>();
 
   return {
     sessionId,
@@ -213,6 +222,10 @@ export function createOwnerRuntimeAdapter(
       currentController = controller;
 
       const queue: QueueItem[] = [];
+      let queuedChars = 0;
+      let closed = false;
+      let settled = false;
+      let currentAcknowledgement: (() => void) | undefined;
       const waiters: Array<() => void> = [];
       const wakeOne = () => {
         const w = waiters.shift();
@@ -228,8 +241,7 @@ export function createOwnerRuntimeAdapter(
       // adapter 不在 controller.signal 上挂 abort listener 主动 push error 终结
       // consumer loop —— 那样会与主模块 cleanup 路径竞速,抢在 cleanup 完成前抛出,
       // 导致 partial 内容丢失 + abortReason 拿不到 channel 渲染层。
-      agentRuntime
-        .run({
+      const producer = Promise.resolve().then(() => agentRuntime.run({
           modelInput: { messages },
           identity: {
             turnIndex: options?.turnIndex ?? 0,
@@ -255,41 +267,93 @@ export function createOwnerRuntimeAdapter(
           },
           observation: {
             onEvent: (event) => {
-              queue.push({
-                kind: "yield",
-                value: projectKernelEventToConversationYield(event),
-              });
+              if (closed) return;
+              const value = projectKernelEventToConversationYield(event);
+              const previous = queue.at(-1);
+              let item: Extract<QueueItem, { kind: "yield" }>;
+              // Only queued, adjacent deltas may merge. A yielded object is
+              // already owned by the durable consumer and never changes.
+              if (previous?.kind === "yield" && previous.value.type === "text_delta" && value.type === "text_delta") {
+                previous.value = { type: "text_delta", text: previous.value.text + value.text };
+                item = previous;
+              } else if (previous?.kind === "yield" && previous.value.type === "thinking_delta" && value.type === "thinking_delta") {
+                previous.value = { type: "thinking_delta", thinking: previous.value.thinking + value.thinking };
+                item = previous;
+              } else {
+                item = { kind: "yield", value };
+                queue.push(item);
+              }
+              queuedChars += deltaLength(value);
               wakeOne();
+              if ((value.type !== "text_delta" && value.type !== "thinking_delta") ||
+                  queuedChars >= MAX_QUEUED_TEXT_CHARS || queue.length >= MAX_QUEUED_EVENTS) {
+                return new Promise<void>((resolve) => {
+                  const previousAcknowledgement = item.acknowledge;
+                  item.acknowledge = () => { previousAcknowledgement?.(); resolve(); };
+                });
+              }
             },
             onProtocolEvent: options?.onProtocolEvent,
           },
-        })
+        }))
         .then(
           (completion) => {
-            queue.push({
-              kind: "done",
-              result: projectKernelCompletionToConversationRunResult(completion, options?.turnContext?.turnOrigin?.worksceneContinuation),
-            });
+            settled = true;
+            try {
+              queue.push({
+                kind: "done",
+                result: projectKernelCompletionToConversationRunResult(completion, options?.turnContext?.turnOrigin?.worksceneContinuation),
+              });
+            } catch (error) { queue.push({ kind: "error", error }); }
             wakeOne();
           },
           // throw 分支兜底:provider 网络错 / 编程错等。abort 不走此分支 ——
           // run-agent.ts 把 abortSignal 触发统一包成 AgentResult.aborted with
           // abortReason 通过 .then(success) 返回。
           (err) => {
+            settled = true;
             queue.push({ kind: "error", error: err });
             wakeOne();
           },
         );
 
+      let closing: Promise<void> | undefined;
+      const closeRun = (): Promise<void> => {
+        if (closing) return closing;
+        closed = true;
+        if (!settled && !controller.signal.aborted) {
+          abortWithReason(controller, { kind: "external", origin: "session-runtime-consumer-closed" });
+        }
+        currentAcknowledgement?.();
+        for (const item of queue) if (item.kind === "yield") item.acknowledge?.();
+        // dispose may arrive after the producer settled but before its terminal
+        // was consumed. It will not enqueue another terminal to wake next().
+        const terminal = queue.find((item) => item.kind !== "yield");
+        queue.length = 0;
+        if (terminal) { queue.push(terminal); wakeOne(); }
+        queuedChars = 0;
+        closing = producer.finally(() => {
+          activeRuns.delete(closeRun);
+          if (currentController === controller) currentController = null;
+        });
+        return closing;
+      };
+      activeRuns.add(closeRun);
+
       try {
         // 消费循环：从队列拉事件并 yield/return/throw
         while (true) {
-          if (queue.length === 0) {
+          // A wake does not reserve an item: dispose can clear queued yields
+          // before this continuation runs. Wait again for the real terminal.
+          while (queue.length === 0) {
             await new Promise<void>((resolve) => waiters.push(resolve));
           }
           const item = queue.shift()!;
           if (item.kind === "yield") {
-            yield item.value;
+            queuedChars -= deltaLength(item.value);
+            currentAcknowledgement = item.acknowledge;
+            try { yield item.value; }
+            finally { currentAcknowledgement?.(); currentAcknowledgement = undefined; }
           } else if (item.kind === "done") {
             return item.result;
           } else {
@@ -297,9 +361,9 @@ export function createOwnerRuntimeAdapter(
           }
         }
       } finally {
-        // 仅清当前 turn 的 controller 引用 —— 防止后续重入(下一个 turn 已 set 新 ctrl)
-        // 误清掉新 controller。
-        if (currentController === controller) currentController = null;
+        // Closing the generator also closes the callback producer. Release
+        // consumer acknowledgements before joining its asynchronous cleanup.
+        await closeRun();
       }
     },
 
@@ -373,6 +437,7 @@ export function createOwnerRuntimeAdapter(
     async dispose(reason = defaultDisposeReason) {
       // 透传底层运行体末窗 onWindowClose —— 每个会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
+      await Promise.all([...activeRuns].map((close) => close()));
       await agentRuntime.dispose(reason);
     },
   };

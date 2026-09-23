@@ -1,6 +1,6 @@
 # 知行架构概述
 
-> 本文描述当前生产架构，不是路线图。架构权威是 [AE-001：伴身智能架构演进](./evolutions/AE-001-companion-intelligence.md)；迁移与验收状态以 [AE-001 迁移任务](../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md) 为准。
+> 本文描述当前生产架构，不是路线图。整体架构权威是 [AE-001：伴身智能架构演进](./evolutions/AE-001-companion-intelligence.md)；迁移状态见 [AE-001 迁移任务](../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md)。扩展管理与 Channel 受管运行的设计和验收边界见[外部 APP 自主接入](../../../docs/tasks/autonomous-channel-integration.md)。
 
 ## 产品与架构中心
 
@@ -19,10 +19,10 @@ flowchart TB
     Surface["产品表面\nCLI / REPL · Feishu Channel"]
     Binding["Surface / Transport Binding\n进程内 client · RPC / Event projection"]
     API["Product API Catalog / Dispatcher\n只组合领域拥有的 Query / Command / Event"]
-    Domain["产品领域\nConversation · Workscene · Schedule · Advancement · Delivery\nTrust · Skill · Device · Workspace · Backup/Recovery"]
+    Domain["产品领域\nConversation · Workscene · Schedule · Advancement · Delivery\nExtension Management · Trust · Skill · Device · Workspace · Backup/Recovery"]
     Kernel["Intelligence Kernel\nRun Envelope · Event · Terminal · Agent Loop"]
     Correctness["Correctness Substrate\nAuthority · Commit · Journal · Security · Confirmation\nResource · Assignment · Recovery"]
-    Edge["基础设施与拓扑适配\nProvider · Tool · MCP · Storage · Channel · Executor · Mesh"]
+    Edge["基础设施与拓扑适配\nProvider · Tool · MCP · Storage · Managed Extensions\nChannel 类型绑定 · 外部平台进程 · Executor · Mesh"]
     Host["PersistentApplicationHost\n唯一组合根：创建 · 连线 · 开放 · 排空 · 关闭"]
 
     Surface --> Binding --> API --> Domain
@@ -88,6 +88,14 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 - `@zhixing/runtime-host` 只消费已裁决、不可变的运行投影，装配模型、环境、工具实现、权限存储和 TurnContext providers；它不定义 Workscene、Schedule、TaskList 或 MCP 产品规则。
 - 本机与远端执行只在 Host/Infrastructure 的适配选择处分叉。领域与 Kernel 不以 Anchor、epoch、Mesh、本机或远端为产品判断条件。
 
+### 扩展管理与外部 APP
+
+- Extension Management 拥有实例、启用意图、固定版本绑定及接入／更新／修复操作，沿用 Authority 耐久提交。模型工具、RPC 与配置入口调用同一 Product API；公共状态不包含原始请求、回送地址或恢复检查点，原请求仅供内部接续使用。
+- `ManagedExtensions` 与制品、进程、协议组件执行已提交的决定，负责代际、资源释放及有限故障恢复。可执行适配是独立 Node 24 ESM 制品，经版本化 IPC 连接；进程隔离用于生命周期和故障管理，不是安全沙箱。
+- 核心固定装配管理应用、运行组件与有限的能力类型绑定，兼容的外部实现可以动态接入。当前类型为 Channel：CLI 中的类型绑定对接原有 Conversation、Delivery 与确认责任，不在通用扩展底座中加入渠道字段或平台分支。
+- 候选源码和构建资料按摘要归档；切换保留旧制品和完整配置投影，验证失败或取消时恢复旧绑定。值班迁移和灾备接管前检查生效及回滚材料，缺失的分发制品可从匹配摘要的本地 seed 回填，损坏或无法匹配则受阻。秘密仍由目标设备安全存储持有，不随 Authority 迁移。
+- 飞书包只生产独立扩展制品，CLI 随安装包携带固定迁移 seed 和通用 `extension-kit`；主产品不直接实例化 `FeishuAdapter`。新增兼容 APP 经统一候选、确认、配置与收发验证流程接入。
+
 ## 当前产品领域
 
 领域边界主要由 `@zhixing/core` 的窄 subpath 合同及其单一应用服务表达；耐久机制和物理适配可以位于其他包。包位置不改变事实所有权。
@@ -100,6 +108,7 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 | Schedule | `@zhixing/core/scheduler/application` | `@zhixing/owner-kernel` 的调度 Authority/Job 提交与 CLI runtime effect |
 | Advancement | `@zhixing/core/advancement/application` | `@zhixing/owner-services/advancement` 的 review、proxy、恢复与外部机制适配 |
 | Delivery | `@zhixing/core/delivery/application` | `@zhixing/owner-kernel/delivery` 与 Channel effect 适配；Delivery 拥有义务和终态 |
+| Extension Management | `@zhixing/core/extensions/application`、`extensions/contracts` | Core 的 `extensions/runtime`、`process`、`protocol`、`artifacts`、`onboarding` 执行受管生命周期；CLI `runtime/extensions` 与 `serve/channels.ts` 提供 Channel 类型及本机配置绑定 |
 | Trust Administration | `@zhixing/core/trust-administration` | Security/permission 机制执行已提交规则 |
 | Skill Catalog | `@zhixing/core/skills/catalog` | Authority/CAS 与 assignment Correctness；Kernel/Executor 只消费不可变投影 |
 | Device Administration | `@zhixing/core/device-administration/application` | CLI/Mesh 适配物理配对、移除和值班迁移效果 |
@@ -128,10 +137,10 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 | `@zhixing/mcp` | 外部 MCP server 连接与工具接入机制 |
 | `@zhixing/network` | SSRF 安全 fetch、URL/IP 防护与网络出口原语 |
 | `@zhixing/secrets` | 设备本地平台密钥保护与加密 SecretStore |
-| `@zhixing/channel-feishu` | 当前 Feishu/Lark 消息通道适配器、长连接和卡片/文本发送 |
+| `@zhixing/channel-feishu` | `packages/channels/feishu` 构建固定摘要的独立 Channel 扩展与 manifest，承接飞书／Lark 长连接和卡片／文本发送；无 JS 库入口，CLI 仅在构建期取用迁移制品 |
 | `@zhixing/test-utils` | private 的跨包测试基础设施；没有生产运行责任 |
 
-正式公共面以各包 `package.json#exports` 和 CLI `bin` 为准。源码内部路径、测试入口、旧 `dist` 或目录名称不能用来推导公开合同。
+正式库公共面以各包 `package.json#exports` 和 CLI `bin` 为准；飞书可执行制品的公共合同是扩展 manifest 和版本化协议。源码内部路径、测试入口、旧 `dist` 或目录名称不能用来推导公开合同。
 
 ## 生命周期、状态与拓扑约束
 
@@ -156,7 +165,7 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 - 领域拥有合同，而不是建立中央业务模型。
 - Product API 组合领域行为，但不重新定义它们；本机调用不为架构整洁强制经过网络。
 - Kernel 保持强智能、薄责任：开放式推理交给模型，事实、权限、资源、效果和终态保持系统刚性。
-- 采用静态、类型化、有限的生产图，不建设运行期万能插件系统、服务定位器或微服务拆分。
+- 核心采用静态、类型化、有限的生产图；外部实现仅在已支持的能力类型合同内动态接入，不取得 Product API 注册权或核心服务查找权。
 - 不把所有边缘统一成一个万能 Capability；不同端口允许复用实现，但责任保持分离。
 - 架构演进与能力增强分开；当前架构不承诺记忆、主动触达、自修改、插件市场或其他未来能力。
 
@@ -164,6 +173,7 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 
 - [AE-001：伴身智能架构演进](./evolutions/AE-001-companion-intelligence.md)：目标架构与不变量权威。
 - [AE-001 迁移任务](../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md)：阶段、证据、失效和最终验收状态权威。
+- [外部 APP 自主接入](../../../docs/tasks/autonomous-channel-integration.md)：扩展底座、Channel 首个类型及三单元实施／验收状态；[扩展编写指引](../../../docs/modules/extensions/authoring.md)是随产品交付的制作与使用合同。
 - [架构决策索引](./decisions/_index.md)：历史 ADR；若与当前生产或 AE-001 冲突，以后两者为准。
 - [功能规格索引](../specifications/README.md)：能力级规格；部分历史文件可能尚未同步现行物理落点。
 - [验证运行手册](../workbench/verification-runbook.md)：Windows 环境下的串行、fresh build 与失效闭包规则。

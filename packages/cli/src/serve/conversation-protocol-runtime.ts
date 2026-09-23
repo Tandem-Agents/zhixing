@@ -1415,7 +1415,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const controlHeartbeat = effect.startHeartbeat();
       let runResult: RunResult;
       let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
+      let releaseConfirmation: (() => void) | undefined;
       try {
+        releaseConfirmation = this.#requiredManager().bindExecutionConfirmation(input.conversationId, executionRuntime);
         inputPort = input.invocation.kind === "agent"
           ? await journal.openRunInput(runId, assignmentId)
           : undefined;
@@ -1433,6 +1435,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             );
           },
           toolSideEffectObserver: this.#interactions,
+          assignmentIssuedAt: dispatch.envelope.issuedAt,
           assignmentMutations: effect.assignmentMutations({
             execution: "conversation",
             anchorEpoch: this.#authority.ownerEpoch,
@@ -1483,18 +1486,24 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             },
           },
         });
-        while (true) {
-          const item = await interactionScope.run(() => generator.next());
-          if (item.done) {
-            runResult = item.value;
-            break;
+        try {
+          while (true) {
+            const item = await interactionScope.run(() => generator.next());
+            if (item.done) {
+              runResult = item.value;
+              break;
+            }
+            if (item.value.type === "tool_start") toolCalls += 1;
+            await appendObservedFrame(
+              { kind: "agent-yield", yield: item.value },
+              streamMeta,
+            );
+            yield item.value;
           }
-          if (item.value.type === "tool_start") toolCalls += 1;
-          await appendObservedFrame(
-            { kind: "agent-yield", yield: item.value },
-            streamMeta,
-          );
-          yield item.value;
+        } finally {
+          // A consumer can return while suspended at yield. Forward that close
+          // to the executor before its assignment identity is released.
+          await interactionScope.run(() => generator.return(undefined as never));
         }
       } catch (error) {
         await controlHeartbeat.stop();
@@ -1538,9 +1547,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         }
         throw error;
       } finally {
-        await inputPort?.close();
+        try { releaseConfirmation?.(); }
+        finally {
+          try { await controlHeartbeat.stop(); }
+          finally { await inputPort?.close(); }
+        }
       }
-      await controlHeartbeat.stop();
 
       if (runResult.agentResult.reason !== "completed") {
         const cancelled = await this.#terminalOperations.run(async () => {

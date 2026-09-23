@@ -27,10 +27,10 @@ export function createExtensionNotificationHandle() {
 export function extensionContinuationText(operation: ExtensionOperation, deviceId: string): string {
   const fact = JSON.stringify({ operationId: operation.id, instanceId: operation.instanceId, revision: operation.revision, phase: operation.phase,
     targetDeviceId: deviceId, ...(operation.reason ? { reason: operation.reason } : {}) });
-  if (operation.phase === "preparing") return `扩展${operation.purpose === "repair" ? "修复" : operation.purpose === "update" ? "更新" : "接入"}已耐久接纳：${fact}\n原请求：${operation.source.request}\n加载“外部能力接入”技能，读取 extension guide 返回的安装包资料，${operation.previous ? "用 extension_source 取得原版本源码和构建资料，结合 status 的脱敏故障证据诊断；" : ""}查证来源后准备独立候选，再用 extension_connect 提交。不要再创建请求。${operation.purpose === "repair" ? "只恢复原能力，不换账号、扩权、增功能或清历史；本轮不能完成则说明受阻，不循环创建修复。" : ""}`;
+  if (operation.phase === "preparing") return `扩展${operation.purpose === "repair" ? "修复" : operation.purpose === "update" ? "更新" : "接入"}已耐久接纳：${fact}\n原请求：${operation.source?.request ?? "准备连接"}\n加载“外部能力接入”技能，读取 extension guide 返回的安装包资料，${operation.previous || operation.candidate ? "用 extension_source 取得已有源码和构建资料，结合 status 的脱敏故障证据诊断；" : ""}查证来源后准备独立候选，再用 extension_connect 提交。不要再创建请求。${operation.purpose === "repair" ? "只恢复原能力，不换账号、扩权、增功能或清历史；本轮不能完成则说明受阻，不循环创建修复。" : ""}`;
   if (operation.phase === "configuration") return `扩展候选已准备：${fact}\n请告知用户在设备 ${deviceId} 打开 /config 的消息通道，填写 ${operation.instanceId} 的必要凭据、启用并保存，再按面板指令验证。不要在对话中索要凭据；等待期间结束本轮，不轮询。`;
-  if (operation.phase === "verifying") return `扩展换版等待收发确认：${fact}\n请在原 APP 回复验证消息；未收到时，在目标设备 /config 消息通道查看验证指令。可从其他知行入口查询或取消换版，原任务和历史保留。结束本轮，不轮询。`;
-  return `扩展操作结果：${fact}\n原请求：${operation.source.request}\n请如实告知结果。ready 表示本人、双向收发和文本确认已验证；其他状态不能宣告完成。换版受阻不代表原连接失效，以实例状态为准。`;
+  if (operation.phase === "verifying") return `扩展连接等待收发确认：${fact}\n${operation.previous ? "请在原 APP 回复验证消息；未收到时，" : "请"}在目标设备 /config 消息通道查看验证指令。可从其他知行入口查询或取消当前验证，原任务和历史保留。结束本轮，不轮询。`;
+  return `扩展操作结果：${fact}\n原请求：${operation.source?.request ?? "本机配置变更后的连接验证"}\n请如实告知结果。ready 表示本人、双向收发和文本确认已验证；其他状态不能宣告完成。换版受阻不代表原连接失效，以实例状态为准。受阻时说明原因和下一步；查证存在可行替代方式时说明条件并供用户选择，不擅自切换。`;
 }
 
 /** Existing Conversation admission owns execution, deduplication and result delivery. */
@@ -40,7 +40,8 @@ export function createExtensionContinuation(input: { manager: ConversationManage
   return { notify: async (operation: ExtensionOperation): Promise<unknown> => {
     const text = extensionContinuationText(operation, input.deviceId);
     const turnId = `extension:${operation.id}:${operation.revision}`;
-    const origin = operation.source.returnAddress as TurnOrigin | undefined;
+    const sourceConversation = operation.source?.conversationId;
+    const origin = operation.source?.returnAddress as TurnOrigin | undefined;
     const affectedOrigin = origin?.target?.channelId === operation.instanceId;
     const originReachable = origin ? await input.isReturnAddressReachable?.(origin) ?? true : true;
     const requiresRepairHandoff = operation.purpose === "repair" && affectedOrigin && !originReachable;
@@ -59,22 +60,22 @@ export function createExtensionContinuation(input: { manager: ConversationManage
     };
     let receipt;
     try {
-      if (requiresRepairHandoff) {
+      if (requiresRepairHandoff || !sourceConversation) {
         const alternate = await input.fallbackConversation?.();
-        if (!alternate || alternate === operation.source.conversationId) throw new Error("原连接不可达，尚无可用的修复确认入口");
+        if (!alternate || alternate === sourceConversation) throw new Error("原连接不可达，尚无可用的结果入口");
         receipt = await deliver(alternate, turnId, false);
       } else {
-        receipt = await deliver(operation.source.conversationId, turnId, true);
+        receipt = await deliver(sourceConversation, turnId, true);
       }
     }
     catch (error) {
       const alternate = await input.fallbackConversation?.();
-      if (!alternate || alternate === operation.source.conversationId) throw error;
+      if (!alternate || alternate === sourceConversation) throw error;
       return deliver(alternate, turnId, false);
     }
     if (affectedOrigin && !requiresRepairHandoff && operation.phase !== "preparing") {
       const alternate = await input.fallbackConversation?.();
-      if (alternate && alternate !== operation.source.conversationId) {
+      if (alternate && alternate !== sourceConversation) {
         await deliver(alternate, `${turnId}:notice`, false);
       }
     }
@@ -84,7 +85,8 @@ export function createExtensionContinuation(input: { manager: ConversationManage
     return conversationId ? { conversationId, request: "恢复已有连接" } : undefined;
   }, preparationClosed: async (operation: ExtensionOperation): Promise<boolean> => {
     const continuation = operation.continuation as { kind: string; turnId?: string; conversationId?: string; receipt?: { messageId: string } } | undefined;
-    const conversationId = continuation?.conversationId ?? operation.source.conversationId;
+    const conversationId = continuation?.conversationId ?? operation.source?.conversationId;
+    if (!conversationId) return false;
     if (continuation?.kind === "message" && continuation.receipt?.messageId) {
       const status = await input.communication.invoke(conversationId, { action: "observe", conversationId,
         messageId: continuation.receipt.messageId }) as { state?: string } | null;

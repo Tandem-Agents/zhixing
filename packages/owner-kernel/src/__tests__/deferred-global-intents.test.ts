@@ -160,6 +160,21 @@ async function journalHarness() {
 }
 
 describe("DeferredGlobalIntentRepository", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("replays a shared Authority containing other domains' intent streams without claiming or rewriting them", async () => {
+    const first = await harness();
+    const foreign = ["workscene-registry", "skill-authority", "scheduler-user-notice", "rubric-registry"].map(name => ({
+      stream: `intent:${name}`, body: { t: `${name}-fixture`, at: NOW },
+    }));
+    await first.log.append(foreign);
+    const recorded = await first.repository.record(CONVERSATION, mutation(), true, context("request-a"));
+    const restarted = await harness(first.directory);
+    await restarted.repository.rebuild();
+    expect(await restarted.repository.list(CONVERSATION, context("list-a"))).toEqual([
+      expect.objectContaining({ intentId: recorded.intentId, status: "pending" }),
+    ]);
+    expect((await restarted.log.readAll())[0]!.entries).toEqual(foreign);
+    await expect(restarted.log.append([{ stream: `intent:${CONVERSATION}`, body: { t: "malformed" } }])).rejects.toThrow("unknown or missing fields");
+  });
   it("records once, preserves the first envelope time and rebuilds ordered latest state", async () => {
     const first = await harness();
     const recorded = await first.repository.record(

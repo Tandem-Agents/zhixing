@@ -28,6 +28,11 @@ function pending(): DeferredGlobalIntent {
 }
 
 describe("deferred global intent contract", () => {
+  it.each(["rubric-registry", "workscene-registry", "skill-authority", "scheduler-user-notice"])("leaves the %s domain stream to its owner", name => {
+    expect(isDeferredIntentStream(`intent:${name}`)).toBe(false);
+    expect(() => deferredIntentStream(name)).toThrow("conflicts with a domain stream");
+    expect(isDeferredIntentStream(`intent:${name}:conversation`)).toBe(true);
+  });
   it("accepts the closed schedule/rubric union and binds records to the conversation stream", () => {
     const value = pending();
     expect(() => validateDeferredGlobalIntent(value)).not.toThrow();

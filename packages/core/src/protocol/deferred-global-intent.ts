@@ -12,11 +12,19 @@ import {
 } from "./validation.js";
 
 export const DEFERRED_INTENT_STREAM_PREFIX = "intent:";
-const NON_CONVERSATION_INTENT_STREAMS = new Set(["intent:rubric-registry"]);
+// These existing domain streams share the historic prefix, not this contract.
+const NON_CONVERSATION_INTENT_STREAMS = new Set([
+  "intent:rubric-registry",
+  "intent:workscene-registry",
+  "intent:skill-authority",
+  "intent:scheduler-user-notice",
+]);
 
 export function deferredIntentStream(conversationId: string): string {
   assertProtocolIdentifier(conversationId, "Deferred intent conversation id");
-  return `${DEFERRED_INTENT_STREAM_PREFIX}${conversationId}`;
+  const stream = `${DEFERRED_INTENT_STREAM_PREFIX}${conversationId}`;
+  if (NON_CONVERSATION_INTENT_STREAMS.has(stream)) throw new TypeError("Deferred intent conversation id conflicts with a domain stream");
+  return stream;
 }
 
 export function isDeferredIntentStream(stream: string): boolean {

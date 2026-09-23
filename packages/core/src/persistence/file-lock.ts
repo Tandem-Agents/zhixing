@@ -82,7 +82,11 @@ export async function acquireFileLock(
         await releaseLockFile(lockPath, token, resourceName);
       };
     }
-    await reclaimDeadLock(lockPath, options.staleMs, now, resourceName, resolver);
+    if (await reclaimDeadLock(lockPath, options.staleMs, now, resourceName, resolver)) {
+      // Recovery progress is not contention. This includes reclaiming a dead
+      // reclaimer left by a crash; a zero-wait caller must finish that recovery.
+      continue;
+    }
     if (performance.now() - startedAt >= options.waitMs) {
       throw new Error(`${resourceName} lock is busy`);
     }
@@ -96,12 +100,12 @@ async function reclaimDeadLock(
   now: () => number,
   resourceName: string,
   resolver: ProcessIdentityResolver,
-): Promise<void> {
+): Promise<boolean> {
   const age = await stat(lockPath)
     .then((value) => now() - value.mtimeMs)
     .catch(() => 0);
   const observedOwner = await readLockFile(lockPath);
-  if (!(await isReclaimable(observedOwner, age, staleMs, resolver))) return;
+  if (!(await isReclaimable(observedOwner, age, staleMs, resolver))) return false;
 
   const reclaimPath = `${lockPath}.reclaim`;
   const reclaimRecord: LockRecord = {
@@ -112,14 +116,10 @@ async function reclaimDeadLock(
     birth: (await requireCurrentIdentity(resolver, resourceName)).birth,
   };
   if (!(await tryCreateLockFile(reclaimPath, JSON.stringify(reclaimRecord)))) {
-    const reclaimAge = await stat(reclaimPath)
-      .then((value) => now() - value.mtimeMs)
-      .catch(() => 0);
-    const reclaimOwner = await readLockFile(reclaimPath);
-    if (await isReclaimable(reclaimOwner, reclaimAge, staleMs, resolver)) {
-      await rm(reclaimPath, { force: true });
-    }
-    return;
+    // A dead reclaimer is another lock, not an unowned file. Reclaim it under
+    // its own atomic guard and recheck its owner there. A stale observer must
+    // never unlink a successor's live guard and then delete its new main lock.
+    return reclaimDeadLock(reclaimPath, staleMs, now, resourceName, resolver);
   }
   activeTokens.add(reclaimRecord.token);
   const stopHeartbeat = startLockHeartbeat(reclaimPath, reclaimRecord.token, staleMs, now);
@@ -135,7 +135,9 @@ async function reclaimDeadLock(
       owner.pid === observedOwner.pid;
     if (sameOwner && await isReclaimable(owner, currentAge, staleMs, resolver)) {
       await rm(lockPath, { force: true });
+      return true;
     }
+    return false;
   } finally {
     stopHeartbeat();
     activeTokens.delete(reclaimRecord.token);

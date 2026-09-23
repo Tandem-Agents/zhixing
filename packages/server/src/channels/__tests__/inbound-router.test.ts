@@ -20,15 +20,10 @@ import {
   type ConfirmationRequest,
 } from "@zhixing/core/confirmation";
 import {
-  createEventBus,
-} from "@zhixing/core/events";
-import {
-  type ChannelEventMap,
   type ChannelAdapter,
   type ChannelLogger,
   type DeliveryResult,
   type InboundMessage,
-  ChannelRegistry,
 } from "@zhixing/core/channels";
 import {
   DEFAULT_CONVERSATION_ID,
@@ -108,13 +103,12 @@ function createMockAdapter(id = "test-ch"): ChannelAdapter {
   };
 }
 
-function createInboundPort(registry: ChannelRegistry): InboundChannelPort {
+function createInboundPort(adapter: ChannelAdapter): InboundChannelPort {
   return {
-    has: (channelId) => registry.get(channelId) !== undefined,
-    bindingPolicy: (channelId) => registry.get(channelId)?.bindingPolicy,
+    has: (channelId) => channelId === adapter.id,
+    bindingPolicy: (channelId) => channelId === adapter.id ? adapter.bindingPolicy : undefined,
     send: async (target, content) => {
-      const adapter = registry.get(target.channelId);
-      if (!adapter) throw new Error(`Channel adapter not found: ${target.channelId}`);
+      if (target.channelId !== adapter.id) throw new Error(`Channel adapter not found: ${target.channelId}`);
       return adapter.send(target, content);
     },
   };
@@ -275,11 +269,9 @@ function groupMessage(channelId = "test-ch", from = "user-1", groupId = "grp-1",
 
 describe("InboundRouter", () => {
   let logger: ChannelLogger;
-  let eventBus: ReturnType<typeof createEventBus<ChannelEventMap>>;
 
   beforeEach(() => {
     logger = createTestLogger();
-    eventBus = createEventBus<ChannelEventMap>();
   });
 
   function setup(options?: {
@@ -308,13 +300,7 @@ describe("InboundRouter", () => {
           }
         : undefined,
     );
-    const channels = new ChannelRegistry({
-      eventBus,
-      logger,
-      onMessage: () => {},
-    });
-    channels.register(adapter);
-    const inbound = createInboundPort(channels);
+    const inbound = createInboundPort(adapter);
     const deliveryOutbox =
       options?.deliveryOutbox ??
       new OutboxRegistry((target, content) => inbound.send(target, content));
@@ -330,7 +316,7 @@ describe("InboundRouter", () => {
       isCurrentOwner: options?.isCurrentOwner,
     });
 
-    return { adapter, factory, conversations, channels, router };
+    return { adapter, factory, conversations, router };
   }
 
   it("routes DM message to agent and sends reply", async () => {
@@ -891,13 +877,7 @@ describe("InboundRouter", () => {
         },
         { confirmationHub: hub },
       );
-      const channels = new ChannelRegistry({
-        eventBus,
-        logger,
-        onMessage: () => {},
-      });
-      channels.register(adapter);
-      const inbound = createInboundPort(channels);
+      const inbound = createInboundPort(adapter);
 
       const router = new InboundRouter({
         conversation: createTestConversationPort(conversations),
@@ -1361,13 +1341,7 @@ describe("InboundRouter", () => {
         idleTimeoutMs: 100_000,
         idleCheckIntervalMs: 100_000,
       });
-      const channels = new ChannelRegistry({
-        eventBus,
-        logger,
-        onMessage: () => {},
-      });
-      channels.register(adapter);
-      const inbound = createInboundPort(channels);
+      const inbound = createInboundPort(adapter);
       const router = new InboundRouter({
         conversation: createTestConversationPort(conversations),
         channels: inbound,

@@ -164,9 +164,11 @@ export class GrepResultCollector {
       diagnostics: {
         executor: this.diagnostics.executor,
         capabilityMode: this.diagnostics.capabilityMode,
-        scannedFileCount: this.scannedFileCount,
+        ...(this.scannedFileCount !== undefined
+          ? { scannedFileCount: this.scannedFileCount }
+          : {}),
         elapsedMs: Date.now() - this.startedAt,
-        notes: this.notes.length > 0 ? this.notes : undefined,
+        ...(this.notes.length > 0 ? { notes: [...this.notes] } : {}),
       },
     };
   }

@@ -1,4 +1,4 @@
-import type { ConfirmationRequest } from "@zhixing/core/confirmation";
+import { ConfirmationBroker, type ConfirmationRequest } from "@zhixing/core/confirmation";
 import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
@@ -55,6 +55,29 @@ describe("assignment worker remote obligations", () => {
 });
 
 describe("DurableJobInteractionCoordinator", () => {
+  it("keeps only the bound job broker pending and durably denies when no surface exists", async () => {
+    const finishInteraction = vi.fn(async () => undefined);
+    const ledger = { requestInteraction: async () => ({ accepted: true }), finishInteraction,
+      interactionStreamEvents: async () => [], jobInteractionOutcome: async () => undefined } as unknown as ConversationAssignmentLedger;
+    const coordinator = new DurableJobInteractionCoordinator(ledger);
+    const active = binding("job-delivery", ledger);
+    const lifecycleObserver = coordinator.lifecycleObserverFor(active);
+    const broker = new ConfirmationBroker({ lifecycleObserver });
+    active.broker = broker;
+    const child = new ConfirmationBroker({ parentBrokerId: broker.id, lifecycleObserver });
+    const request = { ...REQUEST, createdAt: Date.now(), expiresAt: Date.now() + 30000 };
+    const pending = broker.requestConfirmation(request);
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      expect((await child.requestConfirmation({ ...request, id: "child" })).kind).toBe("deny");
+      expect(broker.listPending()).toHaveLength(1);
+      await coordinator.resolveNoInteractiveSurface({ assignmentId: active.assignmentId, requestId: request.id });
+      expect((await pending).kind).toBe("deny");
+      expect(finishInteraction).toHaveBeenCalledTimes(2);
+      expect(broker.listPending()).toHaveLength(0);
+    } finally { broker.cancelAll("aborted"); child.cancelAll("aborted"); await pending; }
+  });
+
   it("scopes identical request ids by assignment", async () => {
     const requestInteraction = vi.fn(async () => ({
       accepted: true,

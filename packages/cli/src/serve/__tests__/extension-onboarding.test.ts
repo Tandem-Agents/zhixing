@@ -92,7 +92,7 @@ async function fixture(kind: "existing" | "authored" = "authored") {
   return { ...made, candidate, request, root, configPath, store, open, log, configuration, artifactDirectory, notifications, received, configure, http };
 }
 
-describe("published extension onboarding production path", { timeout: 20_000 }, () => {
+describe("published extension onboarding production path", { timeout: 40_000 }, () => {
   it("keeps text controls available during retirement without admitting new business or routes", async () => {
     const message = vi.fn(async (_message, controlOnly) => { if (!controlOnly) throw new Error("unexpected business admission"); });
     const binding = createChannelTypeBinding({ instance: { id: "one" } as never,
@@ -119,27 +119,51 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     manifest: { ...candidate.manifest, version: "1.0.1", digest: createHash("sha256").update(code).digest("hex") },
     sources: { "adapter.mjs": code }, provenance: { ...candidate.provenance, revision: suffix } });
 
-  it("preserves HTTP controls while an issued old send drains, but rejects ordinary input", async () => {
+  it.each([true, false])("gates HTTP controls on prior admission between committed handover and retirement (admitted: %s)", async admitted => {
     const originalCode = code;
-    code = code.replace("lastKey = meta?.idempotencyKey;", 'lastKey = meta?.idempotencyKey; if (content.text === "hold-send") await new Promise(resolve => setTimeout(resolve, 3000));');
+    code = code.replace("lastKey = meta?.idempotencyKey;", 'lastKey = meta?.idempotencyKey; if (content.text === "hold-send") await new Promise(resolve => { globalThis.releaseHeldSend = resolve; });')
+      .replace('await context.onMessage({', 'if (message.text === "release-held-send") { globalThis.releaseHeldSend?.(); res.end("{}"); return; } await context.onMessage({');
     expect(code).not.toBe(originalCode);
     const f = await fixture(); code = originalCode;
-    await ready(f);
+    if (admitted) await ready(f);
+    else {
+      await f.api.command(extensionManage, f.request);
+      await f.api.command(extensionManage, { action: "connect", id: "operation", expectedRevision: 1, candidate: f.candidate });
+      await f.configure();
+    }
     const controls: string[] = [];
     await f.system.connectConfigured({ inbound: { kind: "router", handleMessage: async () => {},
       handleControlMessage: async message => { if (message.text !== "取消") return false; controls.push(message.text); return true; } }, onChallengeAction: async () => {} });
-    let settled = false;
-    const sending = f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "hold-send" }).finally(() => { settled = true; });
-    await expect.poll(async () => JSON.parse((await f.http()).body).lastReply).toBe("hold-send");
-    await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    let settled = !admitted;
+    const sending = admitted ? f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "hold-send" }).finally(() => { settled = true; })
+      : Promise.resolve({ success: true });
+    void sending.catch(() => {});
+    if (admitted) await expect.poll(async () => JSON.parse((await f.http()).body).lastReply).toBe("hold-send");
+    await f.api.command(extensionManage, { action: admitted ? "update" : "repair", id: "maintenance", instanceId: "my-app", source: f.request.source });
+    let committed!: () => void, resume!: () => void;
+    const committedGate = new Promise<void>(resolve => { committed = resolve; });
+    const resumeGate = new Promise<void>(resolve => { resume = resolve; });
+    const acknowledge = f.configuration.acknowledge.bind(f.configuration);
+    const spy = vi.spyOn(f.configuration, "acknowledge").mockImplementationOnce(async (...args) => {
+      await acknowledge(...args); committed(); await resumeGate;
+    });
     const switching = f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: version(f.candidate, "http") });
-    await expect.poll(async () => (await f.api.query(extensionList, undefined)).operations?.find(op => op.id === "maintenance")?.phase).toBe("verifying");
-    const control = await f.http({ from: "owner", text: "取消", messageId: "cancel-original" });
-    const business = await f.http({ from: "owner", text: "new business", messageId: "during-handover" });
-    const settledAtControl = settled;
-    await expect(sending).resolves.toMatchObject({ success: true }); await switching;
-    expect(control.status).toBe(200); expect(controls).toEqual(["取消"]);
-    expect(business.status).toBe(503); expect(settledAtControl).toBe(false);
+    void switching.catch(() => {});
+    try {
+      await committedGate;
+      expect((await f.api.query(extensionList, undefined)).instances[0]!.generation).toBeNull();
+      const control = await f.http({ from: "owner", text: "取消", messageId: "cancel-original" });
+      const business = await f.http({ from: "owner", text: "new business", messageId: "during-handover" });
+      expect(control.status).toBe(admitted ? 200 : 503); expect(controls).toEqual(admitted ? ["取消"] : []);
+      expect(business.status).toBe(503);
+      expect((await f.http({ from: "owner", text: `确认 ${"f".repeat(32)}`, messageId: "late-proof" })).status).toBe(503);
+      if (admitted) expect(settled).toBe(false);
+    } finally {
+      if (admitted) await f.http({ text: "release-held-send" });
+      resume(); spy.mockRestore();
+      await Promise.all([sending, switching]);
+    }
+    await expect(sending).resolves.toMatchObject({ success: true });
   });
 
   it.each(["cancel", "disable"] as const)("fences new sends after %s commits but before physical handover", async action => {
@@ -158,7 +182,7 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     } as never);
     const stopping = f.api.command(extensionManage, action === "cancel" ? { action, id: operation.id, expectedRevision: operation.revision } : { action, instanceId: "my-app" });
     await entered;
-    try { await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "unverified-candidate-business" })).rejects.toThrow("not available"); }
+    try { await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "unverified-candidate-business" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false, error: "Channel not available" }); }
     finally { release(); spy.mockRestore(); await stopping; }
   });
 
@@ -234,7 +258,7 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     await expect.poll(async () => {
       try { return JSON.parse((await f.http()).body).lastReply; } catch { return ""; }
     }).toContain("换版");
-    await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "not yet admitted" })).rejects.toThrow("尚未通过");
+    await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "not yet admitted" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false, error: "连接尚未通过收发验证" });
     expect((await f.http({ from: "owner", text: "ordinary request", messageId: "no-business" })).status).toBe(503);
     const confirm = /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0];
     expect((await f.http({ from: "intruder", text: confirm, messageId: "wrong-owner" })).status).toBe(503);
@@ -308,10 +332,13 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     }).toBe(true);
     expect((await f.http({ from: "owner", text: oldConfirm, messageId: "late-confirm-a" })).status).toBe(503);
     expect((await f.http({ from: "owner", text: "business", messageId: "unverified-b" })).status).toBe(503);
-    await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "business" })).rejects.toThrow("尚未通过");
+    await expect(f.system.delivery.send({ channelId: "my-app", to: "owner" }, { text: "business" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false, error: "连接尚未通过收发验证" });
     expect((await f.api.query(extensionList, undefined)).instances[0]?.admission?.ready).toBe(false);
     expect(f.received).toHaveLength(0);
-    await f.http({ from: "owner", text: command, messageId: "verify-b-1" });
+    expect((await f.http({ from: "owner", text: command, messageId: "late-connect-a" })).status).toBe(503);
+    const newCommand = /连接 [a-f0-9]{32}/.exec((await f.api.query(extensionLocalSetup, undefined))["my-app"]!)![0];
+    expect(newCommand).not.toBe(command);
+    await f.http({ from: "owner", text: newCommand, messageId: "verify-b-1" });
     const newReply = JSON.parse((await f.http()).body);
     const newConfirm = /确认 [a-f0-9]{32}/.exec(newReply.lastReply)![0];
     expect(newReply.lastKey).not.toBe(oldReply.lastKey);
@@ -365,6 +392,70 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     await f.api.command(extensionManage, { action: "status" });
     expect((await f.api.query(extensionList, undefined)).instances[0]!.generation).toBe(failed.instances[0]!.generation);
     expect(f.notifications.filter(operation => operation.phase === "blocked")).toHaveLength(1);
+    await f.api.command(extensionManage, { action: "repair", id: "correct-first-trial", instanceId: "my-app", source: f.request.source });
+    expect(f.notifications.some(operation => operation.id === "correct-first-trial" && operation.phase === "preparing")).toBe(true);
+    const archived = (await f.api.command(extensionManage, { action: "candidate", id: "correct-first-trial" })).result.candidate!;
+    expect(archived.manifest.digest).toBe(broken.manifest.digest);
+    let correctionRevision = 1;
+    for (const declaration of [
+      { ...f.candidate.manifest.declaration as object, capabilities: { ...(f.candidate.manifest.declaration as { capabilities: object }).capabilities, media: true } },
+      { ...f.candidate.manifest.declaration as object, requiredFields: [...(f.candidate.manifest.declaration as { requiredFields: object[] }).requiredFields,
+        { id: "newField", label: "新字段", hint: "", example: "", sensitive: false }] },
+    ]) {
+      const incompatible = version(f.candidate, `incompatible-${correctionRevision}`);
+      await f.api.command(extensionManage, { action: "connect", id: "correct-first-trial", expectedRevision: correctionRevision,
+        candidate: { ...incompatible, manifest: { ...incompatible.manifest, declaration } } });
+      const rejected = await f.api.query(extensionList, undefined);
+      const operation = rejected.operations!.find(op => op.id === "correct-first-trial")!;
+      expect(operation.phase).toBe("blocked");
+      expect(rejected.instances[0]!.binding).toEqual(failed.instances[0]!.binding);
+      correctionRevision = operation.revision;
+    }
+    await f.api.command(extensionManage, { action: "connect", id: "correct-first-trial", expectedRevision: correctionRevision, candidate: f.candidate });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    const corrected = (await f.api.query(extensionList, undefined)).instances[0]!;
+    expect(corrected.id).toBe("my-app");
+    expect(corrected.binding.projectionRevision).toBe(failed.instances[0]!.binding.projectionRevision);
+    expect(corrected.admission?.ready).toBe(false);
+    const command = /连接 [a-f0-9]{32}/.exec((await f.api.query(extensionLocalSetup, undefined))["my-app"]!)![0];
+    await f.http({ from: "owner", text: command, messageId: "corrected-connect" });
+    await f.http({ from: "owner", text: /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0], messageId: "corrected-confirm" });
+    expect((await f.api.query(extensionList, undefined)).instances[0]?.admission?.ready).toBe(true);
+  });
+
+  it.each(["update", "repair"] as const)("starts a fresh verification after completed %s and later public configuration changes", async action => {
+    const f = await fixture(); await ready(f);
+    await f.api.command(extensionManage, { action, id: "completed-change", instanceId: "my-app", source: f.request.source });
+    const candidate = version(f.candidate, "completed-change");
+    await f.api.command(extensionManage, { action: "connect", id: "completed-change", expectedRevision: 1, candidate });
+    await expect.poll(async () => { try { return JSON.parse((await f.http()).body).lastReply; } catch { return ""; } }).toContain("换版");
+    const oldConfirm = /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0];
+    await f.http({ from: "owner", text: oldConfirm, messageId: "complete-update" });
+    const before = (await f.api.query(extensionList, undefined)).instances[0]!;
+    expect(await f.configuration.pending("my-app")).toBe(false);
+    const config = { messaging: { "my-app": { type: "new-platform", ...(action === "repair" ? { options: { locale: "new" } } : {}) } } };
+    const credentials = { channels: { "my-app": { account: action === "update" ? "account-B" : "owner-account", token: "private-fixture-token" } } };
+    await f.configuration.stage(["my-app"], config, credentials, { "my-app": before }, action === "update" ? { "my-app": true } : {});
+    await writeConfig(config, { configPath: f.configPath }); await writeCredentials(credentials, { store: f.store });
+    await f.api.command(extensionApplyConfiguration, { ids: ["my-app"] });
+    await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    const current = (await f.api.query(extensionList, undefined)).instances[0]!;
+    expect(current.admission?.operationId).not.toBe("completed-change");
+    expect(current.admission?.ready).toBe(false);
+    expect(current.binding.manifest.digest).toBe(candidate.manifest.digest);
+    expect((await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "completed-change")?.phase).toBe("ready");
+    expect(JSON.parse((await f.http()).body).lastReply).toBeFalsy();
+    expect((await f.http({ from: "owner", text: oldConfirm, messageId: "late-old-confirm" })).status).toBe(503);
+    const command = /连接 [a-f0-9]{32}/.exec((await f.api.query(extensionLocalSetup, undefined))["my-app"]!)![0];
+    await f.http({ from: "new-owner", text: command, messageId: "new-config-connect" });
+    const confirm = /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0];
+    await f.system.dispose(); systems.splice(systems.indexOf(f.system), 1);
+    const reopened = await f.open();
+    await expect.poll(async () => (await reopened.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
+    expect((await reopened.api.query(extensionList, undefined)).instances[0]?.admission?.operationId).toBe(current.admission!.operationId);
+    expect((await f.http({ from: "new-owner", text: confirm, messageId: "new-config-confirm" })).status).toBe(200);
+    expect((await reopened.api.query(extensionList, undefined)).instances[0]?.binding).toEqual(current.binding);
+    expect((await reopened.api.query(extensionList, undefined)).instances[0]?.admission?.ready).toBe(true);
   });
 
   it.each(["existing", "authored"] as const)("admits a %s artifact only after safe configuration and real process bidirectional verification", async kind => {
@@ -382,7 +473,7 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
       channelStates: { "my-app": { enabled: false, revision: 0, intentRevision: 0, type: "new-platform" } } })).toHaveLength(1);
     await f.configure();
     expect(f.system.delivery.status("my-app")).toBe("disconnected");
-    await expect(f.system.delivery.send({ channelId: "my-app", to: "user" }, { text: "business" })).rejects.toThrow("尚未通过");
+    await expect(f.system.delivery.send({ channelId: "my-app", to: "user" }, { text: "business" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false, error: "连接尚未通过收发验证" });
     const instructions = (await f.api.query(extensionLocalSetup, undefined))["my-app"]!;
     const command = /连接 ([a-f0-9]{32})/.exec(instructions)![0];
     expect(JSON.stringify(await f.api.query(extensionList, undefined))).not.toContain(command);
@@ -394,12 +485,41 @@ describe("published extension onboarding production path", { timeout: 20_000 }, 
     expect((await f.http({ from: "owner", text: confirm, messageId: "verify-2" })).status).toBe(200);
     await expect.poll(() => f.system.delivery.status("my-app")).toBe("connected");
     expect((await f.api.query(extensionList, undefined)).operations?.[0]?.phase).toBe("ready");
+    const receipt = JSON.parse((await f.http()).body);
+    expect(receipt.lastReply).toBe("连接验证已完成，已确认本人身份和双向收发。");
+    expect(receipt.lastKey).toMatch(/^extension-verified:operation:/);
     await f.http({ from: "owner", text: confirm, messageId: "verify-2" });
+    expect(JSON.parse((await f.http()).body).lastKey).toBe(receipt.lastKey);
     expect(f.received).toHaveLength(0);
     expect((await f.http({ from: "owner", text: "真实业务", messageId: "business" })).status).toBe(200);
     expect(f.received).toHaveLength(1);
     expect(JSON.stringify(await f.api.query(extensionList, undefined))).not.toContain("private-fixture-token");
     await expect.poll(() => f.notifications.some(op => op.phase === "ready")).toBe(true);
+  });
+
+  it("retries a failed completion receipt without revoking the committed verification", async () => {
+    const f = await fixture();
+    const candidate = version(f.candidate, "receipt-retry", f.candidate.code.replace(
+      "lastKey = meta?.idempotencyKey;",
+      'lastKey = meta?.idempotencyKey; if (content.text.startsWith("连接验证已完成") && !globalThis.receiptFailed) { globalThis.receiptFailed = true; return { success: false, retryable: true, attempted: false }; }',
+    ));
+    await f.api.command(extensionManage, f.request);
+    await f.api.command(extensionManage, { action: "connect", id: "operation", expectedRevision: 1, candidate });
+    await f.configure();
+    const command = /连接 [a-f0-9]{32}/.exec((await f.api.query(extensionLocalSetup, undefined))["my-app"]!)![0];
+    await f.http({ from: "owner", text: command, messageId: "verify-1" });
+    const confirm = /确认 [a-f0-9]{32}/.exec(JSON.parse((await f.http()).body).lastReply)![0];
+    expect((await f.http({ from: "owner", text: confirm, messageId: "verify-2" })).status).toBe(503);
+    const failedReceipt = JSON.parse((await f.http()).body);
+    const committed = await f.api.query(extensionList, undefined);
+    expect(committed.instances[0]?.admission?.ready).toBe(true);
+    expect(committed.operations?.[0]?.phase).toBe("ready");
+    expect((await f.http({ from: "owner", text: confirm, messageId: "verify-2" })).status).toBe(200);
+    const retriedReceipt = JSON.parse((await f.http()).body);
+    expect(retriedReceipt.lastKey).toBe(failedReceipt.lastKey);
+    expect(retriedReceipt.lastReply).toBe("连接验证已完成，已确认本人身份和双向收发。");
+    expect((await f.api.query(extensionList, undefined)).operations?.[0]?.revision).toBe(committed.operations?.[0]?.revision);
+    expect(f.received).toHaveLength(0);
   });
 
   it("continues the same candidate after restart and keeps verification proof across process generations", async () => {

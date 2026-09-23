@@ -3,6 +3,7 @@ import { readFile, link, rm, open } from "node:fs/promises";
 import { join } from "node:path";
 import { isBuiltin } from "node:module";
 import { randomUUID } from "node:crypto";
+import { parse, type AnyNode } from "acorn";
 import { ensureDurableDirectory, syncDirectory } from "../persistence/index.js";
 import { validateExtensionManifest, type ExtensionCandidate } from "./contracts.js";
 
@@ -32,12 +33,27 @@ export function validateExtensionCandidate(value: unknown): ExtensionCandidate {
     if (Object.values(dependencies).some(v => typeof v !== "string" || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(v)) ||
         (Object.keys(dependencies).length && !["package-lock.json", "pnpm-lock.yaml", "yarn.lock"].some(name => candidate.sources[name]))) throw new TypeError("依赖须使用准确版本并保留锁文件");
   }
-  // Obvious unresolved module imports are rejected before trial; the protocol
-  // handshake remains the runtime check. This is not a JavaScript sandbox.
-  for (const match of candidate.code.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["']([^"']+)["']/g)) {
-    if (!isBuiltin(match[1]!)) throw new TypeError("入口须为仅依赖 Node 内置模块的独立打包制品");
-  }
+  validateBundledModule(candidate.code);
   return structuredClone({ ...candidate, manifest });
+}
+
+/** Inspect syntax, never comments/strings or executed code. This is not a sandbox. */
+function validateBundledModule(code: string): void {
+  const visit = (node: AnyNode): void => {
+    const source = node.type === "ImportDeclaration" || node.type === "ExportNamedDeclaration" ||
+      node.type === "ExportAllDeclaration" || node.type === "ImportExpression" ? node.source
+      : node.type === "CallExpression" && node.callee.type === "Identifier" &&
+        ["require", "__require"].includes(node.callee.name) ? node.arguments[0] : undefined;
+    if (source?.type === "Literal" && typeof source.value === "string" && !isBuiltin(source.value)) {
+      throw new TypeError("入口须为仅依赖 Node 内置模块的独立打包制品");
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const child of value) if (child && typeof child.type === "string") visit(child);
+      } else if (value && typeof value === "object" && typeof value.type === "string") visit(value);
+    }
+  };
+  visit(parse(code, { ecmaVersion: "latest", sourceType: "module" }));
 }
 
 /** Immutable archive: exact code, source, provenance and build recipe survive restart. */

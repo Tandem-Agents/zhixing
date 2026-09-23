@@ -21,6 +21,7 @@
 - **请求**携带操作、展示摘要、上下文、选项、期限与回程来源；展示预览与真实执行输入分离。Bash 预览剥离 CSI 与控制字符，但不能据此宣称所有展示字段均已全面脱敏，或文件快照校验已经实现。
 - **Broker**拥有本地排队与等待 Promise，不拥有跨设备的最终事实。子 Agent 使用派生 Broker，血缘用于追溯；每 Broker 串行不等于所有子任务共享一个全局展示锁，详见[子 Agent 架构](../subagents/architecture.md)。
 - **[ConfirmationHub](../../../packages/owner-kernel/src/confirmation-hub.ts)**聚合请求、查询和应答，不取代 Broker 或权威日志；Server 经[有限 binding](../../../packages/cli/src/serve/server-product-bindings.ts)接入，不能从旧 ServerContext 直取业务所有者。
+- 本机 Assignment 使用独立运行体时，由 ConversationManager 在执行作用域内将会话的 Hub 槽绑定到实际执行 Broker；结束、取消或异常后释放，并恢复仍有效的管理投影。RPC 查询、应答与渠道文本确认共用该唯一索引。
 - **耐久交互**由宿主接线：对话见[durable-conversation-interactions](../../../packages/cli/src/serve/durable-conversation-interactions.ts)，Job 见[durable-job-interactions](../../../packages/cli/src/serve/durable-job-interactions.ts)。请求先登记 assignment interaction；终结经提交与镜像，再释放等待。对话归对话权威链，Job 归 JobJournal，不以无身份 ephemeral Broker 替代。
 - **表面**只投影与提交决定。旁观可见不等于可应答，本机 RPC 与渠道应答分别校验自己的身份和执行绑定。
 
@@ -28,7 +29,9 @@
 
 当前 Broker 默认最大 pending 深度 32；队满立即产生 `cancelled(backpressure)`，不是旧设计中的十条上限或 BackpressureError。队首展示，排队请求也从既定 `expiresAt` 计时；请求构造器默认期限为 30 分钟。已解决记录默认留存 15 秒，仅用于本地重复 ID 检查和查询，不是跨重启账本。
 
-终态分为允许、拒绝、过期和取消。无监听器立即使用默认 `fail-to-deny` resolver；已有监听器但消息未送达时不能据此认定请求自动被拒绝，应由期限与生命周期收敛。关停须处理 queued、showing 及 resolving，不能只取消屏幕上正在显示的一条。
+终态分为允许、拒绝、过期和取消。没有本地监听器，也没有耐久交互 owner 明确承接时，使用默认 `fail-to-deny` resolver。耐久承接须在请求登记成功后声明，并匹配实际请求 Broker 的身份；远端经已有 stream／ticket 呈现和应答，明确无可达表面、期限与取消仍沿原终态路径收束。子 Agent 继承耐久 hook 不等于继承父 Broker 的展示消费者，默认拒绝策略保持不变。
+
+关停须处理登记中、queued、showing 及 resolving 的请求。耐久登记期间到达的取消先记录；接纳成功后耐久提交取消结果，不再展示或进入等待。请求 ID 持续占用至该终态提交完成，不能在异步边界丢失取消或重复接纳。
 
 未接耐久 observer 时，Broker 的同步 `resolve` 完成本地决定；接入后其 `true` 只代表受理，不能作为耐久成功证明。生产 binding 使用 `resolveDurably`：相同在途决定等待同一提交，冲突决定不覆盖；提交失败可重新排队，取消／过期与在途用户决定的竞争也须走终结处理。释放 Promise、发已解决通知与继续执行不能早于相应耐久边界。
 

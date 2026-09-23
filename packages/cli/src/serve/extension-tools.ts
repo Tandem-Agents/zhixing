@@ -2,13 +2,13 @@ import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ToolDefinition } from "@zhixing/core";
 import { protocolDigest } from "@zhixing/core/protocol";
-import type { ExtensionManagementRequest, ExtensionSnapshot } from "@zhixing/core/extensions/contracts";
+import type { ExtensionManagementRequest, ExtensionPublicSnapshot } from "@zhixing/core/extensions/contracts";
 import { validateExtensionCandidate } from "@zhixing/core/extensions/candidate";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { extensionKitDirectory } from "../runtime/extensions/catalog.js";
 
 export interface ExtensionManagementTransport {
-  invoke(request: ExtensionManagementRequest): Promise<{ snapshot: ExtensionSnapshot; targetDeviceId: string }>;
+  invoke(request: ExtensionManagementRequest): Promise<{ snapshot: ExtensionPublicSnapshot; targetDeviceId: string }>;
 }
 export function createExtensionManagementHandle() {
   let target: ExtensionManagementTransport | undefined;
@@ -86,7 +86,7 @@ export function createExtensionTools(transport: ExtensionManagementTransport): T
     },
   }, {
     name: "extension_source",
-    description: "把更新或修复操作的原版本源码与构建资料保存到工作目录内的新文件，供诊断和制作候选；不导出配置或凭据。",
+    description: "把操作的原版本或未验证候选源码与构建资料保存到工作目录内的新文件，供诊断和修正；不导出配置或凭据。",
     inputSchema: { type: "object", properties: { operationId: { type: "string" }, path: { type: "string" } }, required: ["operationId", "path"], additionalProperties: false },
     isReadOnly: false, isParallelSafe: false, permissionArgumentKey: "path",
     boundaries: [{ boundaryType: "filesystem", access: "write", dynamic: false }],

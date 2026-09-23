@@ -127,7 +127,7 @@ export class DurableJobInteractionCoordinator
     binding: DurableJobInteractionBinding,
   ): ConfirmationLifecycleObserver {
     return {
-      beforeRequest: (request) => this.#beforeRequest(binding, request),
+      beforeRequest: (request, requester) => this.#beforeRequest(binding, request, requester),
       afterResolved: (request, decision, source) =>
         this.#afterResolved(binding, request, decision, source),
     };
@@ -143,6 +143,7 @@ export class DurableJobInteractionCoordinator
   async #beforeRequest(
     active: DurableJobInteractionBinding,
     request: ConfirmationRequest,
+    requester?: { readonly brokerId: string },
   ): Promise<ConfirmationAdmissionDisposition> {
     const key = interactionKey(active.assignmentId, request.id);
     if (this.#requests.has(key)) {
@@ -174,7 +175,8 @@ export class DurableJobInteractionCoordinator
     }
     this.#requests.set(key, active);
     this.wakeConvergence(active.assignmentId, active);
-    return { accepted: true };
+    return { accepted: true, ...(active.broker && requester?.brokerId === active.broker.id
+      ? { delivery: "durable" as const } : {}) };
   }
 
   async #afterResolved(

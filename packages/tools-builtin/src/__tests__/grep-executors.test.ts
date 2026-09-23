@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StreamDigestChain } from "@zhixing/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   createGrepSearchPlan,
@@ -19,6 +20,28 @@ import {
 } from "../grep/core.js";
 
 describe("grep search executors", () => {
+  it.each([nodeGrepSearchExecutor, ripgrepSearchExecutor])(
+    "$name emits durable tool results for empty searches and explicit glob filters",
+    async (executor) => {
+      if (executor.name === "ripgrep" && !(await isRipgrepAvailable())) return;
+      await withWorkspace(async (workspace) => {
+        const empty = await expectOk(await executeWithExecutor(executor, baseQuery(workspace)));
+        const emptyPresentation = formatGrepToolResult(empty).presentation;
+        expect(emptyPresentation).toMatchObject({ kind: "grep-results", matchedFileCount: 0 });
+        expect(Object.hasOwn(empty.diagnostics, "notes")).toBe(false);
+        if (executor.name === "ripgrep") {
+          expect(Object.hasOwn(empty.diagnostics, "scannedFileCount")).toBe(false);
+        }
+
+        await writeFile(workspace, "found.txt", "foo\n");
+        const filtered = await expectOk(await executeWithExecutor(executor, baseQuery(workspace, { glob: "*.txt" })));
+        expect(formatGrepToolResult(filtered).presentation).toMatchObject({
+          kind: "grep-results", query: { glob: "*.txt" }, matchedFileCount: 1,
+        });
+      });
+    },
+  );
+
   it("normalizes CRLF lines and context in the Node executor", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(workspace, "src/app.txt", "before\r\nfoo\r\nafter\r\n");
@@ -333,6 +356,10 @@ async function expectOk(
 ): Promise<GrepSearchResult> {
   expect(execution.ok).toBe(true);
   if (!execution.ok) throw new Error(execution.error.message);
+  new StreamDigestChain("grep-executor-test").append({
+    kind: "agent-yield",
+    yield: { type: "tool_end", id: "grep", name: "grep", duration: 1, result: formatGrepToolResult(execution.result) },
+  });
   return execution.result;
 }
 

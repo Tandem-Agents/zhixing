@@ -72,8 +72,10 @@ export class ChannelVerification {
     const matches = (proof: Verification) => message.from === proof.from && target.to === proof.target.to && target.threadId === proof.target.threadId;
     if (instance.admission.ready) {
       const proof = operation?.verification as Verification | undefined;
-      return Boolean(proof && matches(proof) && ([proof.inboundId, proof.confirmedId].includes(message.messageId) ||
+      const verificationMessage = Boolean(proof && matches(proof) && ([proof.inboundId, proof.confirmedId].includes(message.messageId) ||
         message.text.trim() === `确认 ${proof.challenge}` || (/^连接 [a-f0-9]{32}$/.test(message.text.trim()) && message.text.trim() === `连接 ${await this.code(operation!)}`)));
+      if (verificationMessage && proof?.confirmedId) await this.acknowledge(instance, operation!, proof);
+      return verificationMessage;
     }
     if (!operation || operation.phase !== "verifying" || !instance.enabled || !message.messageId) throw new Error("连接尚未通过本人收发验证");
     let proof = operation.verification as Verification | undefined;
@@ -88,6 +90,7 @@ export class ChannelVerification {
     } else if (matches(proof) && message.text.trim() === `确认 ${proof.challenge}`) {
       await this.application.complete(operation.id, operation.revision, process.generation, { ...proof, confirmedId: message.messageId });
       this.changed();
+      await this.acknowledge(instance, operation, { ...proof, confirmedId: message.messageId });
       return true;
     } else if (!matches(proof) || (message.messageId !== proof.inboundId && message.text.trim() !== `连接 ${await this.code(operation)}`)) {
       throw new Error("请由验证发起人回复连接确认指令");
@@ -101,5 +104,19 @@ export class ChannelVerification {
       content: { text: `知行已收到验证消息。请回复：确认 ${proof.challenge}` }, meta: { idempotencyKey: `extension-verify:${operation.id}:${proof.challenge}` } }));
     if (!result.success) throw new Error("验证回复尚未送达；请重发原验证消息");
     return true;
+  }
+
+  /** Confirmation commits first. Receipt retries must never roll back admission or invoke a model. */
+  private async acknowledge(instance: ExtensionInstance, operation: ExtensionOperation, proof: Verification): Promise<void> {
+    const current = await this.application.get(instance.id);
+    const process = this.process(instance.id);
+    if (!current?.enabled || !current.admission?.ready || current.admission.operationId !== operation.id ||
+        !process || current.generation !== process.generation || instance.generation !== process.generation) {
+      throw new Error("连接状态已变化，请查询当前状态");
+    }
+    const result = channelDeliveryResult(await process.call("channel.send", { target: proof.target,
+      content: { text: "连接验证已完成，已确认本人身份和双向收发。" },
+      meta: { idempotencyKey: `extension-verified:${operation.id}:${proof.challenge}` } }));
+    if (!result.success) throw new Error("连接验证已完成，但完成回执尚未送达；可重发确认指令查看结果");
   }
 }

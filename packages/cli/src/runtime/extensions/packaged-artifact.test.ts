@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { packagedExtensions } from "./catalog.js";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
+import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { ExtensionPeer } from "@zhixing/core/extensions/protocol";
 import { channelDeclaration } from "@zhixing/core/channels/extension";
 
@@ -17,7 +18,14 @@ describe("packaged migration artifact", () => {
     expect(seed).toBeDefined();
     expect(channelDeclaration(seed!.manifest).identityFields).toEqual(["appId"]);
     const root = await mkdtemp(join(tmpdir(), "zhixing-packaged-extension-")); roots.push(root);
-    const entry = await new ExtensionArtifacts(root).import(seed!.manifest, await readFile(join(seed!.directory, seed!.manifest.entry)));
+    const bytes = await readFile(join(seed!.directory, seed!.manifest.entry));
+    const code = bytes.toString("utf8");
+    const candidates = new ExtensionCandidates(join(root, "candidates"));
+    await candidates.save({ manifest: seed!.manifest, code,
+      provenance: { kind: "existing", url: "https://github.com/Tandem-Agents/zhixing", revision: seed!.manifest.digest },
+      sources: { [seed!.manifest.entry]: code }, build: "Fixed distribution seed, Node 24" });
+    expect((await candidates.read(seed!.manifest.digest)).code).toBe(code);
+    const entry = await new ExtensionArtifacts(root).import(seed!.manifest, bytes);
     const child = fork(entry, [], Object.assign({ cwd: root, execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"],
       env: { SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP }, serialization: "advanced" } as ForkOptions, { windowsHide: true }));
     const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));

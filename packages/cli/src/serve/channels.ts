@@ -168,15 +168,22 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
         return {
           message: async (message, controlOnly) => {
             const current = await application.get(instance.id);
-            if (controlOnly) {
+            const operation = current?.admission && !current.admission.ready
+              ? await application.operation(current.admission.operationId) : undefined;
+            const previouslyAdmitted = current && (!current.admission || current.admission.ready || operation?.previous);
+            // A committed handover revokes the generation before the physical
+            // process quiesces. Keep only existing controls in that gap; an
+            // unverified first trial has never earned this control admission.
+            if (controlOnly || current?.generation !== instance.generation) {
               if (current?.enabled && current.binding.configurationRevision === instance.binding.configurationRevision &&
+                  previouslyAdmitted &&
                   !/^(连接|确认) [a-f0-9]{32}$/.test(message.text.trim()) && selected.inbound.kind === "router" &&
                   await selected.inbound.handleControlMessage?.(message)) return;
               throw new Error("连接交接期间只接纳既有确认与取消");
             }
             if (!current || !current.enabled || current.generation !== instance.generation) throw new Error("连接代际已失效");
             if (current.admission && !current.admission.ready && !/^(连接|确认) [a-f0-9]{32}$/.test(message.text.trim()) &&
-                (await application.operation(current.admission.operationId))?.previous && selected.inbound.kind === "router" &&
+                operation?.previous && selected.inbound.kind === "router" &&
                 await selected.inbound.handleControlMessage?.(message)) return;
             if (await verification.accept(current, message)) return;
             const admitted = await application.get(instance.id);
@@ -318,6 +325,13 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
         if (!current) throw new Error("原连接不存在");
         return options.configuration.replacement(current, operation.candidate!);
       }
+      const trial = await application.get(operation.instanceId);
+      if (trial) {
+        if (!trial.enabled || trial.admission?.ready || trial.admission?.operationId !== operation.id) throw new ExtensionRevisionConflict();
+        const binding = await options.configuration.replacement(trial, operation.candidate!);
+        validateChannelReplacement(trial.binding, binding, "repair");
+        return binding;
+      }
       if (!options.configuration.entries()[operation.instanceId]) return undefined;
       const publication = await options.configuration.publication(operation.instanceId);
       if (!publication) throw new Error("候选配置必须经安全入口完整保存");
@@ -331,7 +345,12 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       validateChannelReplacement(operation.previous!.binding, binding, operation.purpose!);
     },
     discard: (id, binding) => options.configuration.discard(id, binding),
-    changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); },
+    changed: async (instance) => {
+      // Trial admission has durably consumed this exact publication. Retaining
+      // its initial enable intent would contaminate a later configuration edit.
+      await options.configuration.acknowledge(instance.id, instance.binding.sourceRevision);
+      await runtime.reconcile(instance); await snapshot();
+    },
     notify: async (operation) => {
       if (!options.notifyOperation) throw new Error("原请求结果入口尚未就绪");
       return options.notifyOperation(operation);

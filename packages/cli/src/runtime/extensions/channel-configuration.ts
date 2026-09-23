@@ -32,9 +32,11 @@ export class ChannelConfiguration {
       for (const id of ids) {
         const encoded = await this.secrets.get({ kind: "channel", bindingId: `extension-edits/${id}` });
         const previous = encoded ? JSON.parse(encoded) as ConfigurationPublication : undefined;
+        const inheritedIntent = previous?.intent?.expectedIntentRevision === (states[id]?.intentRevision ?? 0)
+          ? previous.intent : undefined;
         const publication: ConfigurationPublication = { revision: randomUUID(), entry: config.messaging?.[id] ?? null,
           credentials: credentials.channels?.[id] ?? {},
-          ...(intents[id] === undefined ? (previous?.intent ? { intent: previous.intent } : {})
+          ...(intents[id] === undefined ? (inheritedIntent ? { intent: inheritedIntent } : {})
             : { intent: { enabled: intents[id]!, expectedIntentRevision: states[id]?.intentRevision ?? 0 } }) };
         await this.secrets.put({ kind: "channel", bindingId: `extension-edits/${id}` }, JSON.stringify(publication));
       }
@@ -102,7 +104,7 @@ export class ChannelConfiguration {
     return { manifest, configurationRevision: createHash("sha256").update(canonicalize({ entry: before, publicFields })).digest("hex"),
       exclusiveKey: createHash("sha256").update(canonicalize({ type: manifest.type, adapter: manifest.id,
         identity: Object.fromEntries(declaration.identityFields.map((field) => [field, projected[field]])) })).digest("hex"),
-      secretRevision: snapshot.generation ?? "empty", projectionRevision,
+      projectionRevision,
       ...(publication ? { sourceRevision: publication.revision } : {}) };
   }
 

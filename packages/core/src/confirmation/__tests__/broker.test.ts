@@ -152,6 +152,67 @@ describe("ConfirmationBroker — 基本 request/resolve", () => {
 });
 
 describe("ConfirmationBroker — 耐久交互边界", () => {
+  it.each(["cancel", "cancelAll"] as const)("retains %s during durable admission until the cancellation commits", async action => {
+    let admit!: () => void;
+    let commit!: () => void;
+    const admission = new Promise<void>(resolve => { admit = resolve; });
+    const terminal = new Promise<void>(resolve => { commit = resolve; });
+    const afterResolved = vi.fn(() => terminal);
+    const broker = new ConfirmationBroker({ lifecycleObserver: {
+      beforeRequest: async () => { await admission; return { accepted: true, delivery: "durable" }; }, afterResolved,
+    } });
+    const shown = vi.fn(); broker.onRequest(shown);
+    const request = makeRequest();
+    const pending = broker.requestConfirmation(request);
+    let settled = false; void pending.then(() => { settled = true; });
+    try {
+      await expect(broker.requestConfirmation(request)).rejects.toThrow("duplicate");
+      expect(action === "cancel" ? broker.cancel(request.id, "aborted") : broker.cancelAll("aborted")).toBe(action === "cancel" ? true : 1);
+      admit(); await tick();
+      expect(afterResolved).toHaveBeenCalledWith(request, { kind: "cancelled", cause: "aborted" }, { kind: "cancel", cause: "aborted" });
+      await expect(broker.requestConfirmation(request)).rejects.toThrow("duplicate");
+      broker.cancelAll("aborted");
+      expect(settled).toBe(false);
+      expect(shown).not.toHaveBeenCalled();
+      expect(broker.listPending()).toHaveLength(0);
+      commit();
+      await expect(pending).resolves.toEqual({ kind: "cancelled", cause: "aborted" });
+      expect(afterResolved).toHaveBeenCalledTimes(1);
+      expect(broker.cancel(request.id, "aborted")).toBe(false);
+    } finally { admit(); commit(); broker.cancelAll("aborted"); await pending; }
+  });
+
+  it("releases an admission identity when the durable hook fails", async () => {
+    const beforeRequest = vi.fn().mockRejectedValueOnce(new Error("durable request failed")).mockResolvedValue(undefined);
+    const afterResolved = vi.fn(async () => {});
+    const broker = new ConfirmationBroker({ lifecycleObserver: { beforeRequest, afterResolved } });
+    const request = makeRequest();
+    await expect(broker.requestConfirmation(request)).rejects.toThrow("durable request failed");
+    expect(broker.cancelAll("aborted")).toBe(0);
+    expect(afterResolved).not.toHaveBeenCalled();
+    expect((await broker.requestConfirmation(request)).kind).toBe("deny");
+  });
+
+  it.each(["answer", "no-surface", "cancel", "expire"] as const)("keeps an explicitly delivered durable request pending until %s", async ending => {
+    const afterResolved = vi.fn(async () => {});
+    const beforeRequest = vi.fn(async () => ({ accepted: true as const, delivery: "durable" as const }));
+    const broker = new ConfirmationBroker({ lifecycleObserver: { beforeRequest, afterResolved } });
+    const request = makeRequest({ expiresAt: Date.now() + (ending === "expire" ? 60 : 30000) });
+    const pending = broker.requestConfirmation(request);
+    try {
+      await tick();
+      expect(beforeRequest).toHaveBeenCalledWith(request, { brokerId: broker.id });
+      expect(broker.listPending()).toHaveLength(1);
+      expect(afterResolved).not.toHaveBeenCalled();
+      if (ending === "answer") await broker.resolveDurably(request.id, { kind: "allow-once" });
+      if (ending === "no-surface") await broker.resolveNonInteractiveDurably(request.id);
+      if (ending === "cancel") broker.cancelAll("aborted");
+      expect((await pending).kind).toBe({ answer: "allow-once", "no-surface": "deny", cancel: "cancelled", expire: "expired" }[ending]);
+      expect(afterResolved).toHaveBeenCalledTimes(1);
+      expect(broker.listPending()).toHaveLength(0);
+    } finally { broker.cancelAll("aborted"); await pending; }
+  });
+
   it("耐久 request 写入完成前不向 surface 展示", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

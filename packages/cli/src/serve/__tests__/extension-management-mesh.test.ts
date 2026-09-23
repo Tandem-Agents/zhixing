@@ -56,7 +56,7 @@ describe("extension candidate mesh transport", { timeout: 20_000 }, () => {
     const f = await fixture();
     await f.archive.save(f.candidate);
     await f.application.cancel("op", 1);
-    await f.application.adopt("installed", { manifest: f.candidate.manifest, configurationRevision: "configuration", secretRevision: "local", projectionRevision: "local" });
+    await f.application.adopt("installed", { manifest: f.candidate.manifest, configurationRevision: "configuration", projectionRevision: "local" });
     await f.remote.invoke({ action: "repair", id: "repair", instanceId: "installed", source: { conversationId: "scene", request: "修复" } });
     const exported = await f.remote.invoke({ action: "candidate", id: "repair" });
     expect(exported.snapshot.candidate).toEqual(f.candidate);

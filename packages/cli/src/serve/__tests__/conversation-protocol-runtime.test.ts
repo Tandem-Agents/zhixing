@@ -20,6 +20,7 @@ import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createConversationTool } from "../conversation-tools.js";
 import { createConversationCommunicationBinding } from "../conversation-communication-binding.js";
 import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
+import { createAssignmentSkillPorts } from "../../runtime/assignment-skill-adapter.js";
 import { skillNameToId } from "@zhixing/core/skills/id";
 import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
 import { type PermissionRule } from "@zhixing/core/security";
@@ -335,6 +336,106 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it.each(["allow-once", "deny", "cancel", "failure"] as const)("routes %s confirmations to the issued runtime and releases its binding", async ending => {
+    const home = await createTempDir("execution-confirmation");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const interactions = new DurableConversationInteractionObserver();
+    const hub = new ConfirmationHub();
+    const projectionBroker = new ConfirmationBroker();
+    const executionBroker = new ConfirmationBroker({ lifecycleObserver: interactions });
+    let decision: unknown;
+    const projection: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "confirmation",
+      confirmationBroker: projectionBroker, async *run() { throw new Error("projection must not execute"); }, abort: () => false, async dispose() {} };
+    const execution: SessionRuntime = { ...projection, confirmationBroker: executionBroker,
+      async *run(messages, options) {
+        const now = Date.now();
+        decision = await executionBroker.requestConfirmation({ id: "candidate-confirmation", tool: "extension_connect", toolInput: { candidatePath: "candidate.json" }, workingDirectory: home,
+          display: { title: "接入候选", body: { kind: "generic", summary: "执行固定摘要候选" }, cwd: home },
+          options: [{ kind: "allow-once", label: "允许一次" }, { kind: "deny", label: "拒绝" }], sessionType: "ci", contextId: { kind: "main" },
+          createdAt: now, expiresAt: now + 30000, turnOrigin: options?.turnContext?.turnOrigin });
+        if (ending === "failure") throw new Error("candidate execution failed");
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "settled" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage }, newMessages: [assistant], durationMs: 1 };
+      },
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions,
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => execution } } });
+    manager = new ConversationManager({ create: async () => projection }, undefined,
+      { confirmationHub: hub, durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const connection = { id: 1, authenticated: true, loopback: true, closed: false, surfacePrincipal: "rpc:owner", notify: vi.fn() };
+    const server = { confirmation: createServerConfirmationBinding(hub), conversation: createServerConversationBinding(manager) };
+    let running: ReturnType<typeof projectSessionTurn> | undefined;
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, "confirmation");
+      manager.addObserver("confirmation", "1");
+      running = projectSessionTurn({ manager, managed, text: "提交适配", turnId: "candidate", notify: () => {},
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "candidate", turnOrigin: { channel: "rpc", triggeredBy: "1" } } } });
+      await vi.waitFor(() => expect(hub.findEntry("candidate-confirmation")).toBeDefined(), { timeout: 10000 });
+      expect(decision).toBeUndefined();
+      expect(hub.findBrokerByConversation("confirmation")).toBe(executionBroker);
+      expect(projectionBroker.listPending()).toHaveLength(0);
+      const context = { server, connection } as never;
+      expect(await buildConfirmationListMethod().handler({ conversationId: "confirmation" }, context)).toMatchObject({ items: [{ requestId: "candidate-confirmation" }] });
+      expect(await buildConfirmationListMethod().handler({ conversationId: "confirmation" }, { server, connection: { ...connection, id: 2 } } as never)).toEqual({ items: [] });
+      if (ending === "cancel") hub.findBrokerByConversation("confirmation")!.cancelAll("aborted");
+      else await expect(buildConfirmationResolveMethod().handler({ conversationId: "confirmation", requestId: "candidate-confirmation", decision: { kind: ending === "deny" ? "deny" : "allow-once" } }, context)).resolves.toEqual({ ok: true });
+      const outcome = await running;
+      if (ending === "failure") expect(outcome.kind).toBe("error");
+      else expectSettled(outcome);
+      expect(decision).toMatchObject({ kind: ending === "cancel" ? "cancelled" : ending === "deny" ? "deny" : "allow-once" });
+      expect(hub.findBrokerByConversation("confirmation")).toBe(projectionBroker);
+      expect(hub.listAllPending()).toHaveLength(0);
+      expect(executionBroker.listPending()).toHaveLength(0);
+    } finally {
+      executionBroker.cancelAll("aborted");
+      await running;
+      await protocol.stopRecoveryLoop(); await manager.disposeAll();
+    }
+  }, 30000);
+
+  it("loads the extension skill with the durable local assignment context", async () => {
+    const home = await createTempDir("extension-skill-context");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const skills = createAssignmentSkillPorts(authority.artifacts, { admissionLlm: async () => { throw new Error("no admission model needed"); } });
+    let issuedAt: string | undefined;
+    let loaded: string | undefined;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "extension-skill",
+      async *run(messages, options) {
+        issuedAt = options?.assignmentIssuedAt;
+        const result = await runContextStorage.run({
+          bus: createEventBus(), lineage: "main", assignmentMutations: options?.assignmentMutations,
+          globalQuery: options?.globalQuery, assignmentIssuedAt: options?.assignmentIssuedAt,
+        }, () => skills.loadApplication.load({ id: skillNameToId("外部能力接入"), operationId: "load-extension" }));
+        loaded = result.body;
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "loaded" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage },
+          newMessages: [assistant], durationMs: 1 };
+      }, abort: () => false, async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, "extension-skill");
+      expectSettled(await projectSessionTurn({ manager, managed, text: "接入外部 APP", turnId: "load-extension", notify: () => {},
+        runOptions: { source: "interactive", assignmentIssuedAt: "2000-01-01T00:00:00.000Z" } }));
+      expect(loaded).toContain("extension");
+      const assigned = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; dispatchRef: Parameters<typeof authority.artifacts.get>[0] })
+        .find(record => record.t === "assigned")!;
+      const envelope = JSON.parse(Buffer.from(await authority.artifacts.get(assigned.dispatchRef)).toString("utf8"));
+      expect(issuedAt).toBe(envelope.issuedAt);
+      expect(issuedAt).not.toBe("2000-01-01T00:00:00.000Z");
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, 30000);
+
   it.each(["preparing", "ready"] as const)("retains the original APP identity and return target for %s maintenance", async phase => {
     const home = await createTempDir("extension-return");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
@@ -2163,6 +2264,8 @@ describe("ConversationProtocolRuntime", () => {
       durableTurnExecutor: restartedProtocol,
       onTurnCommitted: () => {},
     });
+    // Match Host startup: resource evidence is restored before journal replay.
+    await restartedAuthority.resourceGovernor.snapshot();
     await restartedProtocol.recover();
     const restartedManaged = await restartedManager.getOrCreate("conversation-1");
     const restartedReplay = await projectSessionTurn({
@@ -2372,6 +2475,47 @@ describe("ConversationProtocolRuntime", () => {
       ).resolves.toBeUndefined();
     } finally {
       responseLoss.mockRestore();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("closes the executor iterator and control heartbeat before releasing a returned run", async () => {
+    const home = await createTempDir("conversation-protocol-return-cleanup");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let closed = false;
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-return-cleanup",
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        try {
+          yield { type: "text_delta", text: "in-flight" };
+          throw new Error("returned execution must not continue");
+        } finally { closed = true; }
+      },
+      abort: () => false,
+      async dispose() { expect(closed).toBe(true); },
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+    });
+    await getOrCreateActiveConversation(authority, manager, "conversation-return-cleanup");
+    const intervals = vi.spyOn(globalThis, "setInterval");
+    const cleared = vi.spyOn(globalThis, "clearInterval");
+    const generator = protocol.run({ conversationId: "conversation-return-cleanup", input: "check", messages: [], baseRevision: 0,
+      runtime, invocation: { kind: "agent", source: "interactive" },
+      options: { turnContext: { turnId: "rpc:return-cleanup" }, source: "interactive" } });
+    try {
+      expect((await generator.next()).done).toBe(false);
+      const timers = intervals.mock.results.filter(result => result.type === "return").map(result => result.value);
+      expect(timers.length).toBeGreaterThan(0);
+      await generator.return(undefined as never);
+      expect(closed).toBe(true);
+      for (const timer of timers) expect(cleared).toHaveBeenCalledWith(timer);
+    } finally {
+      await generator.return(undefined as never).catch(() => undefined);
+      for (const result of intervals.mock.results) if (result.type === "return") clearInterval(result.value);
+      intervals.mockRestore(); cleared.mockRestore();
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 

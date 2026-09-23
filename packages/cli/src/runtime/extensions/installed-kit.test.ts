@@ -52,7 +52,7 @@ serveChannelExtension(id => ({ id, capabilities: { chatTypes: ["dm"], media: fal
     await application.prepare("install", "instance", { conversationId: "fixture", request: "接入" });
     await archive.save(candidate); await artifacts.import(candidate.manifest, Buffer.from(code));
     await application.candidate("install", 1, candidate.manifest);
-    await application.trial("install", 2, { manifest: candidate.manifest, configurationRevision: "one", secretRevision: "none", projectionRevision: "fixture" });
+    await application.trial("install", 2, { manifest: candidate.manifest, configurationRevision: "one", projectionRevision: "fixture" });
     const runtime = new ManagedExtensions({ application, artifacts, isOwner: () => true,
       projection: async () => ({ id: "instance", config: { type: "installed-kit", enabled: true, credentials: { account: "fixture" } } }),
       binding: () => ({ type: "channel", contract: 1, validate() {}, receive: async () => null, close() {} }) });

@@ -71,7 +71,7 @@ describe("file lock atomic publication", () => {
   it.each([
     [{ kind: "absent" } as const, "owner disappeared"],
     [{ kind: "present", birth: "successor" } as const, "PID was reused"],
-  ])("reclaims only when the recorded process is proven replaced: %s", async (owner) => {
+  ])("reclaims without waiting only when the recorded process is proven replaced: %s", async (owner) => {
     const directory = await createTempDir("file-lock-reclaim");
     const lockPath = path.join(directory, "resource.lock");
     const staleToken = "d".repeat(32);
@@ -80,7 +80,7 @@ describe("file lock atomic publication", () => {
     await utimes(lockPath, stale, stale);
     const release = await acquireFileLock(lockPath, {
       staleMs: 100,
-      waitMs: 500,
+      waitMs: 0,
       retryMs: 5,
       processIdentityResolver: fixedResolver(owner),
     });
@@ -104,6 +104,100 @@ describe("file lock atomic publication", () => {
       processIdentityResolver: fixedResolver({ kind: "unknown" }),
     })).rejects.toThrow(/busy/u);
   });
+
+  it.each([
+    ["dead", "acquired"],
+    ["alive", "busy"],
+    ["unknown", "busy"],
+  ] as const)("recovers a dead owner with a %s reclaimer without waiting", async (reclaimer, outcome) => {
+    const directory = await createTempDir("file-lock-reclaimer");
+    const lockPath = path.join(directory, "resource.lock");
+    await writeFile(lockPath, versionedLockRecord("a".repeat(32), "old-owner", 424_242));
+    await writeFile(`${lockPath}.reclaim`, versionedLockRecord("b".repeat(32), "reclaimer", 424_243));
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lockPath, stale, stale);
+    await utimes(`${lockPath}.reclaim`, stale, stale);
+    const acquire = acquireFileLock(lockPath, {
+      staleMs: 100, waitMs: 0,
+      processIdentityResolver: { read: async pid => pid === process.pid
+        ? { kind: "present", birth: "current" }
+        : pid === 424_242 || reclaimer === "dead" ? { kind: "absent" }
+        : reclaimer === "alive" ? { kind: "present", birth: "reclaimer" } : { kind: "unknown" } },
+    });
+    if (outcome === "acquired") {
+      const release = await acquire;
+      expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
+      await expect(stat(`${lockPath}.reclaim`)).rejects.toMatchObject({ code: "ENOENT" });
+      await release();
+    } else {
+      await expect(acquire).rejects.toThrow(/busy/u);
+      expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(424_242);
+      expect(JSON.parse(await readFile(`${lockPath}.reclaim`, "utf8")).pid).toBe(424_243);
+    }
+  });
+
+  it.each([1, 2])("preserves exclusion when two contenders saw a dead guard (%s dead guard levels)", async depth => {
+    const directory = await createTempDir("file-lock-reclaim-race");
+    const lockPath = path.join(directory, "resource.lock");
+    const stale = new Date(Date.now() - 60_000);
+    for (let level = 0; level <= depth; level++) {
+      const file = lockPath + ".reclaim".repeat(level);
+      await writeFile(file, versionedLockRecord(String.fromCharCode(97 + level).repeat(32), "dead", 424_242 + level));
+      await utimes(file, stale, stale);
+    }
+    const gate = () => {
+      let resolve!: () => void;
+      return { promise: new Promise<void>(done => { resolve = done; }), open: () => resolve() };
+    };
+    const bSawDeadGuard = gate(), resumeBStaleRead = gate(), aInsideGuard = gate(), resumeA = gate();
+    const bInsideGuard = gate(), resumeBDeletion = gate();
+    const resolver = (name: "A" | "B"): ProcessIdentityResolver => {
+      let heldGuardOnce = false, guardReadOnce = false;
+      return { read: async pid => {
+        if (pid === process.pid) return { kind: "present", birth: "current" };
+        if (pid === 424_243 && name === "B" && !guardReadOnce) {
+          guardReadOnce = true; bSawDeadGuard.open(); await resumeBStaleRead.promise;
+        }
+        if (pid === 424_242 && !heldGuardOnce) {
+          const guard = await readFile(`${lockPath}.reclaim`, "utf8").then(JSON.parse).catch(() => undefined);
+          if (guard?.pid === process.pid) {
+            heldGuardOnce = true;
+            if (name === "A") { aInsideGuard.open(); await resumeA.promise; }
+            else { bInsideGuard.open(); await resumeBDeletion.promise; }
+          }
+        }
+        return { kind: "absent" };
+      } };
+    };
+    const acquire = (name: "A" | "B") => acquireFileLock(lockPath, {
+      staleMs: 100, waitMs: 0, processIdentityResolver: resolver(name),
+    }).then(release => ({ kind: "acquired" as const, release }), error => ({ kind: "busy" as const, error }));
+    const second = acquire("B");
+    await bSawDeadGuard.promise;
+    const first = acquire("A");
+    try {
+      await aInsideGuard.promise;
+      // B's read predates A's live guard. It must not delete that successor.
+      resumeBStaleRead.open();
+      const next = await Promise.race([second.then(() => "settled"), bInsideGuard.promise.then(() => "entered")]);
+      resumeA.open();
+      const a = await first;
+      // Under the old implementation B reached deletion and acquired before
+      // A released. Let that trace finish so the assertion catches the breach.
+      if (next === "entered") resumeBDeletion.open();
+      const b = await second;
+      expect(a.kind).toBe("acquired");
+      expect(b.kind).toBe("busy");
+      if (b.kind === "busy") expect(b.error.message).toMatch(/busy/u);
+      if (a.kind === "acquired") await a.release();
+      const retry = await acquire("B");
+      expect(retry.kind).toBe("acquired");
+      if (retry.kind === "acquired") await retry.release();
+    } finally {
+      resumeA.open(); resumeBStaleRead.open(); resumeBDeletion.open();
+      for (const result of await Promise.all([first, second])) if (result.kind === "acquired") await result.release();
+    }
+  }, 20_000);
 
   it("keeps a paused-style stale child lock busy, then reclaims it after the child crashes", async () => {
     const directory = await createTempDir("file-lock-real-child");

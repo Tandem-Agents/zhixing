@@ -17,7 +17,6 @@ export interface ExtensionBinding {
   readonly manifest: ExtensionManifest;
   /** Opaque Configuration / Secret Provider revision; never contains credentials. */
   readonly configurationRevision: string;
-  readonly secretRevision: string;
   readonly projectionRevision: string;
   /** Last complete local configuration publication consumed by this binding. */
   readonly sourceRevision?: string;
@@ -49,11 +48,20 @@ export interface ExtensionSnapshot {
   readonly candidate?: ExtensionCandidate;
 }
 
+/** Management status, without request text, reply routes or recovery internals. */
+export type ExtensionPublicOperation = Pick<ExtensionOperation,
+  "id" | "instanceId" | "revision" | "purpose" | "phase" | "candidate" | "reason">;
+
+export interface ExtensionPublicSnapshot extends Omit<ExtensionSnapshot, "operations"> {
+  readonly operations?: readonly ExtensionPublicOperation[];
+}
+
 export interface ExtensionOperation {
   readonly id: string;
   readonly instanceId: string;
   readonly revision: number;
-  readonly source: { readonly conversationId: string; readonly request: string; readonly returnAddress?: unknown };
+  /** Local configuration verification can exist before there is a conversation. */
+  readonly source?: { readonly conversationId: string; readonly request: string; readonly returnAddress?: unknown };
   readonly purpose?: "update" | "repair";
   /** Immutable rollback input; business facts are never rolled back. */
   readonly previous?: { readonly binding: ExtensionBinding; readonly admission?: ExtensionInstance["admission"]; readonly intentRevision: number };
@@ -81,8 +89,8 @@ export interface ExtensionCandidate {
 }
 
 export type ExtensionManagementRequest =
-  | { readonly action: "prepare"; readonly id: string; readonly instanceId: string; readonly source: ExtensionOperation["source"] }
-  | { readonly action: "update" | "repair"; readonly id: string; readonly instanceId: string; readonly source: ExtensionOperation["source"] }
+  | { readonly action: "prepare"; readonly id: string; readonly instanceId: string; readonly source: NonNullable<ExtensionOperation["source"]> }
+  | { readonly action: "update" | "repair"; readonly id: string; readonly instanceId: string; readonly source: NonNullable<ExtensionOperation["source"]> }
   | { readonly action: "candidate"; readonly id: string }
   | { readonly action: "connect"; readonly id: string; readonly expectedRevision: number; readonly candidate: ExtensionCandidate }
   | { readonly action: "cancel"; readonly id: string; readonly expectedRevision: number }
@@ -109,7 +117,7 @@ export function validateExtensionManifest(value: unknown): ExtensionManifest {
 export function validateExtensionBinding(binding: ExtensionBinding): ExtensionBinding {
   validateExtensionManifest(binding.manifest);
   if (binding.exclusiveKey !== undefined && !/^[a-f0-9]{64}$/.test(binding.exclusiveKey)) throw new TypeError("Invalid extension exclusive identity");
-  for (const revision of [binding.configurationRevision, binding.secretRevision, binding.projectionRevision, ...(binding.sourceRevision === undefined ? [] : [binding.sourceRevision])]) {
+  for (const revision of [binding.configurationRevision, binding.projectionRevision, ...(binding.sourceRevision === undefined ? [] : [binding.sourceRevision])]) {
     if (typeof revision !== "string" || revision.length === 0 || revision.length > 256) {
       throw new TypeError("Extension binding requires complete source revisions");
     }

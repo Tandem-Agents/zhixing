@@ -985,21 +985,25 @@ function startControlHeartbeat(
   contexts: InProcessDispatchContextFactory,
 ): { stop(): Promise<void> } {
   let inFlight: Promise<void> | undefined;
+  let stopped = false;
   const timer = setInterval(() => {
-    if (inFlight) return;
-    inFlight = executor.queryLedger(
+    if (stopped || inFlight) return;
+    // Context construction and topology lookup can also fail synchronously.
+    // Keep the entire renewal inside the same bounded failure boundary.
+    inFlight = Promise.resolve().then(() => executor.queryLedger(
       assignmentId,
       contexts.create(assignmentId, "executor.queryLedger", {
         requestId: `ledger:${assignmentId}:snapshot`,
         body: { range: null },
       }),
-    ).then(() => undefined).catch(() => undefined).finally(() => {
+    )).then(() => undefined).catch(() => undefined).finally(() => {
       inFlight = undefined;
     });
   }, CONTROL_RENEWAL_INTERVAL_MS);
   timer.unref?.();
   return {
     async stop() {
+      stopped = true;
       clearInterval(timer);
       await inFlight;
     },

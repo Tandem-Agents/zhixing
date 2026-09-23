@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileAuthorityCommitLog, FileArtifactStore } from "@zhixing/core/authority";
-import { ExtensionApplication } from "@zhixing/core/extensions/application";
+import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { createExtensionTools } from "../extension-tools.js";
 import { createExtensionContinuation } from "../extension-continuation.js";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
@@ -12,6 +13,20 @@ import type { ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import { buildExtensionMethods } from "../../../../server/src/rpc/methods/extensions.js";
 
 describe("extension product bindings", { timeout: 20_000 }, () => {
+  it("keeps local configuration results pending until a real conversation can receive them", async () => {
+    let target: string | undefined;
+    const admit = vi.fn(async () => ({ shouldEnqueue: false }));
+    const continuation = createExtensionContinuation({ manager: { admitDurableTurn: admit } as never,
+      communication: { invoke: vi.fn() }, deviceId: "device", fallbackConversation: async () => target });
+    const operation: ExtensionOperation = { id: "local-verify", instanceId: "legacy", revision: 1, phase: "verifying" };
+    await expect(continuation.notify(operation)).rejects.toThrow("结果入口");
+    expect(admit).not.toHaveBeenCalled();
+    target = "existing-conversation";
+    const receipt = await continuation.notify(operation);
+    expect(receipt).toMatchObject({ conversationId: target, kind: "turn" });
+    expect(admit.mock.calls[0]?.[0]).toMatchObject({ conversationId: target, options: { turnContext: { turnId: "extension:local-verify:1" } } });
+    expect((admit.mock.calls[0] as unknown[])[0]).not.toHaveProperty("source");
+  });
   it("writes archived source to a new workspace file, without overwriting or exposing credentials", async () => {
     const root = await mkdtemp(join(tmpdir(), "extension-source-"));
     const code = "export const version = 1;";
@@ -68,17 +83,30 @@ describe("extension product bindings", { timeout: 20_000 }, () => {
     const root = await mkdtemp(join(tmpdir(), "extension-tool-"));
     try {
       const application = new ExtensionApplication({ log: () => new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "facts"))), assertOwner() {} });
-      const [tool] = createExtensionTools({ invoke: async request => {
-        if (request.action !== "prepare") throw new Error("unexpected command");
-        await application.prepare(request.id, request.instanceId, request.source);
-        return { snapshot: await application.list(), targetDeviceId: "local" };
-      } });
+      await application.prepare("other", "other-app", { conversationId: "other-scene", request: "other-private-request" });
+      const api = new ProductApiDispatcher(EXTENSION_PRODUCT_API_EXACT_SET, [application.contribution({
+        changed: async () => {}, refresh: async id => (await application.get(id))!, applyConfiguration: async () => application.list(),
+        manage: async request => {
+          if (request.action === "prepare") await application.prepare(request.id, request.instanceId, request.source);
+          else if (request.action !== "status") throw new Error("unexpected command");
+          return application.list();
+        },
+      })]);
+      const [tool] = createExtensionTools({ invoke: async request => ({ snapshot: (await api.command(extensionManage, request)).result, targetDeviceId: "local" }) });
       await runContextStorage.run({ conversationId: "scene", lineage: "main" } as never, async () => {
         const result = await tool!.call({ action: "prepare", instanceId: "my-app" }, { workingDirectory: root, turnId: "turn", toolCallId: "call", userIntent: "接入 APP",
           turnOrigin: { channel: "original", triggeredBy: "owner", target: { channelId: "original", to: "owner", threadId: undefined } } });
         expect(result.isError).not.toBe(true);
-        expect(JSON.parse(result.content)).toMatchObject({ snapshot: { operations: [{ phase: "preparing", source: { request: "接入 APP" } }] } });
-        expect((await application.list()).operations![0]!.source.returnAddress).toEqual({ channel: "original", triggeredBy: "owner", target: { channelId: "original", to: "owner" } });
+        const operations = JSON.parse(result.content).snapshot.operations;
+        expect(operations).toHaveLength(2);
+        expect(operations.find((operation: ExtensionOperation) => operation.instanceId === "my-app")).toMatchObject({ phase: "preparing" });
+        for (const operation of operations) expect(operation).not.toHaveProperty("source");
+        const status = await tool!.call({ action: "status" }, { workingDirectory: root });
+        expect(status.isError).not.toBe(true);
+        expect(status.content).not.toMatch(/other-private-request|接入 APP|other-scene/);
+        expect((await application.list()).operations!.find(operation => operation.instanceId === "my-app")!.source).toEqual({
+          conversationId: "scene", request: "接入 APP", returnAddress: { channel: "original", triggeredBy: "owner", target: { channelId: "original", to: "owner" } },
+        });
       });
     } finally { await rm(root, { recursive: true, force: true }); }
   });

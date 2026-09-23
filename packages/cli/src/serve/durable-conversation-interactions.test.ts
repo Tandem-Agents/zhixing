@@ -1,10 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
+import { ConfirmationBroker, type ConfirmationRequest } from "@zhixing/core/confirmation";
 import {
   DurableConversationInteractionObserver,
   type DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
 
 describe("DurableConversationInteractionObserver", () => {
+  it("delivers only the bound broker, denies an inherited child, and closes through the durable answer path", async () => {
+    const observer = new DurableConversationInteractionObserver();
+    const broker = new ConfirmationBroker({ lifecycleObserver: observer });
+    const child = new ConfirmationBroker({ parentBrokerId: broker.id, lifecycleObserver: observer });
+    const finishAndMirror = vi.fn(async () => undefined);
+    const binding = {
+      assignmentId: "assignment-delivery", surfacePrincipal: "surface:origin", broker,
+      ledger: { requestInteraction: async () => ({ accepted: true }), interactionStreamEvents: async () => [] },
+      submission: { finishAndMirror }, context: {}, stream: { append: vi.fn() }, streamMeta: {},
+    } as unknown as DurableInteractionBinding;
+    const request: ConfirmationRequest = { id: "parent", tool: "extension_connect", toolInput: {}, workingDirectory: "",
+      display: { title: "接入", body: { kind: "generic", summary: "接入候选" }, cwd: "" }, options: [{ kind: "allow-once", label: "允许" }],
+      sessionType: "ci", contextId: { kind: "main" }, createdAt: Date.now(), expiresAt: Date.now() + 30000 };
+    const pending = observer.withBinding(binding, () => broker.requestConfirmation(request));
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const denied = await observer.withBinding(binding, () => child.requestConfirmation({ ...request, id: "child" }));
+      expect(denied.kind).toBe("deny");
+      expect(finishAndMirror).toHaveBeenCalledWith(binding.assignmentId, "child", expect.objectContaining({ t: "auto-resolved", reason: "no-interactive-surface" }), binding.context);
+      expect(broker.listPending()).toHaveLength(1);
+      await expect(observer.resolveWithSurfaceTicket(broker, { assignmentId: binding.assignmentId, requestId: "parent", ticketId: "ticket", surfacePrincipal: binding.surfacePrincipal, decision: { kind: "allow-once" } })).resolves.toBe(true);
+      expect((await pending).kind).toBe("allow-once");
+      const unavailable = observer.withBinding(binding, () => broker.requestConfirmation({ ...request, id: "no-surface" }));
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      await observer.resolveNoInteractiveSurface({ assignmentId: binding.assignmentId, requestId: "no-surface" });
+      expect((await unavailable).kind).toBe("deny");
+    } finally { broker.cancelAll("aborted"); child.cancelAll("aborted"); await pending; }
+  });
+
   it("retries the durable interaction projection from the first unconfirmed record", async () => {
     const requested = {
       kind: "interaction" as const,

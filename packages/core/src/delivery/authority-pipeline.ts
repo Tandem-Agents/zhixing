@@ -59,7 +59,7 @@ const PRIORITY_ORDER: Record<AuthorityDeliveryItem["priority"], number> = {
 };
 const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 
-type PipelineState = "unstarted" | "prepared" | "running" | "quiesced" | "stopped";
+type PipelineState = "unstarted" | "prepared" | "prepared-paused" | "running" | "quiesced" | "stopped";
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
@@ -106,6 +106,10 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   }
 
   activate(): void {
+    if (this.#state === "prepared-paused") {
+      this.#state = "quiesced";
+      return;
+    }
     if (this.#state !== "prepared") {
       throw new Error(`Pipeline.activate: illegal transition from state="${this.#state}"`);
     }
@@ -120,7 +124,11 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
 
   /** Effect only: stop new transport attempts without deciding lifecycle policy. */
   closeAdmission(): void {
-    if (this.#state === "quiesced") return;
+    if (this.#state === "quiesced" || this.#state === "prepared-paused") return;
+    if (this.#state === "prepared") {
+      this.#state = "prepared-paused";
+      return;
+    }
     if (this.#state !== "running") {
       throw new Error(`Pipeline.closeAdmission: illegal transition from state="${this.#state}"`);
     }
@@ -143,7 +151,7 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
 
   async waitForQuiescedEffects(): Promise<void> {
     if (this.#state === "running") this.closeAdmission();
-    if (this.#state !== "quiesced") {
+    if (this.#state !== "quiesced" && this.#state !== "prepared-paused") {
       throw new Error(
         `Pipeline.waitForQuiescedEffects: illegal transition from state="${this.#state}"`,
       );
@@ -152,16 +160,17 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   }
 
   async flushQuiescedOnce(): Promise<void> {
-    if (this.#state !== "quiesced") {
+    if (this.#state !== "quiesced" && this.#state !== "prepared-paused") {
       throw new Error(
         `Pipeline.flushQuiescedOnce: illegal transition from state="${this.#state}"`,
       );
     }
+    const pausedState = this.#state;
     this.#state = "running";
     try {
       await this.flush();
     } finally {
-      this.#state = "quiesced";
+      this.#state = pausedState;
       if (this.#flushTimer) clearInterval(this.#flushTimer);
       this.#flushTimer = undefined;
     }
@@ -173,6 +182,12 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
 
   async resume(): Promise<void> {
     if (this.#state === "running") return;
+    // Host may reopen admission while its activation gate is still closed.
+    // Preserve preparation: only activate() may start automatic effects.
+    if (this.#state === "prepared-paused") {
+      this.#state = "prepared";
+      return;
+    }
     if (this.#state !== "quiesced") {
       throw new Error(`Pipeline.resume: illegal transition from state="${this.#state}"`);
     }
@@ -186,6 +201,7 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
     if (
       this.#state !== "running" &&
       this.#state !== "prepared" &&
+      this.#state !== "prepared-paused" &&
       this.#state !== "quiesced"
     ) {
       throw new Error(`Pipeline.stop: illegal transition from state="${this.#state}"`);

@@ -118,8 +118,11 @@ export class FeishuAdapter implements ChannelAdapter {
     // The pinned SDK returns from start() before connection. Its logger is the
     // public connection-state hook; never forward its credential-bearing data.
     const observe = (...values: unknown[]) => {
-      if (values.includes("ws connect success")) { this.connected = true; connected(); }
-      if (values.some((value) => ["ws connect failed", "connect failed", "ws error", "client closed"].includes(String(value)))) {
+      // LoggerProxy passes its argument list as one array to custom loggers.
+      // Inspect only known literal signals; SDK diagnostics can contain secrets.
+      const messages = values.flat(1);
+      if (messages.includes("ws connect success")) { this.connected = true; connected(); }
+      if (messages.some((value) => ["ws connect failed", "connect failed", "ws error", "client closed"].includes(value as string))) {
         this.connected = false;
         failed(new Error("Feishu transport unavailable"));
       }

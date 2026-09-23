@@ -970,6 +970,32 @@ export class ConversationManager implements ConversationCommitProjection {
 
   // ─── ConfirmationHub 接入 ───
 
+  private readonly executionConfirmationBindings = new Map<string, symbol>();
+
+  /** The issued runtime owns this turn's confirmations; the idle runtime remains a projection. */
+  bindExecutionConfirmation(conversationId: string, runtime: SessionRuntime): () => void {
+    const managed = this.sessions.get(conversationId);
+    if (!managed) throw new Error("Execution confirmation requires an active conversation");
+    if (!this.confirmationHub || !runtime.confirmationBroker ||
+        runtime.confirmationBroker === managed.runtime.confirmationBroker) return () => {};
+    if (this.executionConfirmationBindings.has(conversationId)) {
+      throw new Error("Conversation already has an execution confirmation binding");
+    }
+    const token = Symbol(conversationId);
+    this.detachFromHub(conversationId);
+    try { this.attachToHub(conversationId, runtime); }
+    catch (error) { this.attachToHub(conversationId, managed.runtime); throw error; }
+    this.executionConfirmationBindings.set(conversationId, token);
+    return () => {
+      if (this.executionConfirmationBindings.get(conversationId) !== token) return;
+      this.executionConfirmationBindings.delete(conversationId);
+      this.detachFromHub(conversationId);
+      if (this.sessions.get(conversationId) === managed) {
+        this.attachToHub(conversationId, managed.runtime);
+      }
+    };
+  }
+
   /** 把会话的 broker 接到 hub（幂等）；未配置 hub 或 runtime 无 broker 时 no-op */
   private attachToHub(conversationId: string, runtime: SessionRuntime): void {
     if (!this.confirmationHub) return;

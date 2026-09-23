@@ -126,6 +126,7 @@ export interface ConfirmationBrokerOptions {
 
 export class ConfirmationBroker implements IConfirmationBroker {
   private readonly pending = new Map<ConfirmationRequestId, PendingEntry>();
+  private readonly admitting = new Map<ConfirmationRequestId, { cause?: CancelCause }>();
   /**
    * 队列——按插入顺序存放 id。队首 id 对应的 entry 就是 "showing" 状态。
    * 用数组而非双端队列：队列深度受 maxQueueDepth 限制，O(N) 操作可接受。
@@ -170,27 +171,43 @@ export class ConfirmationBroker implements IConfirmationBroker {
     request: ConfirmationRequest,
   ): Promise<ConfirmationDecision> {
     // 1. id 合法性检查：重复 id 直接拒绝
-    if (this.pending.has(request.id) || this.resolvedRecent.has(request.id)) {
+    if (this.admitting.has(request.id) || this.pending.has(request.id) || this.resolvedRecent.has(request.id)) {
       throw new Error(
         `ConfirmationBroker: duplicate request id "${request.id}"`,
       );
     }
+    let durableDelivery = false;
     if (this.lifecycleObserver) {
-      const disposition = await this.lifecycleObserver.beforeRequest(request);
-      if (disposition?.accepted === false) {
-        this.markResolved(request.id, disposition.decision);
-        this.emitEvent("confirmation:cancelled", {
-          requestId: request.id,
-          tool: request.tool,
-          cause: disposition.decision.cause,
-          timestamp: this.now(),
-        });
-        return disposition.decision;
+      const admission: { cause?: CancelCause } = {};
+      this.admitting.set(request.id, admission);
+      try {
+        const disposition = await this.lifecycleObserver.beforeRequest(request, { brokerId: this.id });
+        if (disposition?.accepted === false) {
+          this.markResolved(request.id, disposition.decision);
+          this.emitEvent("confirmation:cancelled", {
+            requestId: request.id, tool: request.tool,
+            cause: disposition.decision.cause, timestamp: this.now(),
+          });
+          return disposition.decision;
+        }
+        if (admission.cause) {
+          const decision = { kind: "cancelled" as const, cause: admission.cause };
+          await this.lifecycleObserver.afterResolved(request, decision, { kind: "cancel", cause: admission.cause });
+          this.markResolved(request.id, decision);
+          this.emitEvent("confirmation:cancelled", {
+            requestId: request.id, tool: request.tool,
+            cause: decision.cause, timestamp: this.now(),
+          });
+          return decision;
+        }
+        durableDelivery = disposition?.accepted === true && disposition.delivery === "durable";
+      } finally {
+        this.admitting.delete(request.id);
       }
     }
 
-    // 2. 无监听器 → 立即走非交互兜底
-    if (this.requestListeners.length === 0) {
+    // 2. 无本地或耐久交互消费者 → 立即走非交互兜底
+    if (this.requestListeners.length === 0 && !durableDelivery) {
       const decision = this.resolver.resolve(request);
       await this.lifecycleObserver?.afterResolved(request, decision, {
         kind: "non-interactive",
@@ -382,6 +399,11 @@ export class ConfirmationBroker implements IConfirmationBroker {
   }
 
   cancel(requestId: ConfirmationRequestId, cause: CancelCause): boolean {
+    const admission = this.admitting.get(requestId);
+    if (admission) {
+      admission.cause ??= cause;
+      return admission.cause === cause;
+    }
     const entry = this.pending.get(requestId);
     if (!entry) return false;
 
@@ -417,8 +439,8 @@ export class ConfirmationBroker implements IConfirmationBroker {
   }
 
   cancelAll(cause: CancelCause): number {
-    // pending 包含 queued/showing/resolving；关停不能漏掉正在耐久终结的请求。
-    const ids = [...this.pending.keys()];
+    // 登记和终结中的请求同样属于本轮，取消不能落在两个耐久边界的空档。
+    const ids = [...this.admitting.keys(), ...this.pending.keys()];
     let cancelled = 0;
     for (const id of ids) {
       if (this.cancel(id, cause)) cancelled++;

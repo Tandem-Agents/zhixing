@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -207,7 +207,7 @@ describe("managed Channel production composition", () => {
   it("fences owner loss and rejects reopen after close", async () => {
     const f = await fixture(); await connect(f);
     f.setOwner(false);
-    await expect(f.system.delivery.send({ channelId: "one", to: "user" }, { text: "no" })).rejects.toThrow();
+    await expect(f.system.delivery.send({ channelId: "one", to: "user" }, { text: "no" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false });
     await expect(f.api.command(extensionSetEnabled, { id: "one", expectedRevision: (await f.current()).revision, enabled: false })).rejects.toThrow("current owner");
     await f.system.suspendConfigured(); await f.system.dispose();
     await expect(f.system.resumeConfigured(outbound)).rejects.toThrow("closed");
@@ -232,6 +232,33 @@ describe("managed Channel production composition", () => {
     await f.configuration.discard("one", current.binding);
     await writeCredentials({ channels: { one: { account: "different-account", token: "fixture-other-secret" } } }, { store: f.store });
     await expect(readiness(f.log)).rejects.toThrow("does not match");
+  });
+
+  it.each(["update", "repair"] as const)("restores a missing distributed rollback artifact before %s duty readiness", async purpose => {
+    const f = await fixture(); await connect(f);
+    await f.system.dispose();
+    const application = new ExtensionApplication({ log: () => f.log, assertOwner() {} });
+    await application.prepare("change", "one", { conversationId: "scene", request: "更新连接" }, purpose);
+    const before = await application.list();
+    const entry = join(f.artifactDirectory, f.manifest.digest, f.manifest.entry);
+    await rm(entry);
+    const readiness = createChannelExtensionReadiness(f.configuration, f.artifactDirectory);
+    const ready = await readiness(f.log);
+    expect(ready.channels).toEqual(["one"]);
+    expect(await readFile(entry)).toEqual(Buffer.from(bytes));
+    expect(await readiness(f.log)).toEqual(ready);
+    expect(await application.list()).toEqual(before);
+  });
+
+  it("rejects a corrupt distributed rollback artifact without replacing it", async () => {
+    const f = await fixture(); await connect(f);
+    await f.system.dispose();
+    const application = new ExtensionApplication({ log: () => f.log, assertOwner() {} });
+    await application.prepare("change", "one", { conversationId: "scene", request: "更新连接" }, "update");
+    const entry = join(f.artifactDirectory, f.manifest.digest, f.manifest.entry);
+    await writeFile(entry, "corrupt fixture");
+    await expect(createChannelExtensionReadiness(f.configuration, f.artifactDirectory)(f.log)).rejects.toThrow("corrupt");
+    expect(await readFile(entry, "utf8")).toBe("corrupt fixture");
   });
 
   it("keeps management disable authoritative through editing and restarts; explicit enable resumes", async () => {
@@ -306,8 +333,12 @@ describe("managed Channel production composition", () => {
     await partial.system.dispose();
     await writeCredentials(credentials, { store: f.store });
     const complete = await f.make(); await complete.system.connectConfigured(outbound); await complete.system.activate();
-    await expect.poll(() => complete.system.delivery.status("one")).toBe("connected");
+    await expect.poll(async () => (await complete.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
     const committed = (await complete.api.query(extensionList, undefined)).instances[0]!;
+    // This migrated instance changed public usage configuration. Recovery must
+    // restore the new pair but cannot bypass its newly required verification.
+    expect(committed.admission?.ready).toBe(false);
+    expect(complete.system.delivery.status("one")).toBe("disconnected");
     expect((await f.configuration.read(committed)).config.credentials.token).toBe("fixture-v2");
     expect(committed.configurationIssue).toBeUndefined();
     await complete.system.dispose();
@@ -358,7 +389,7 @@ describe("managed Channel production composition", () => {
     const attempt = { idempotencyKey: "draining-item", deliveryAttempt: { itemId: "draining-item", attempt: 1 } };
     const pending = f.system.delivery.send({ channelId: "one", to: "user" }, { text: "held" }, attempt);
     await gate; await f.system.suspendConfigured();
-    await expect(f.system.delivery.send({ channelId: "one", to: "user" }, { text: "new" })).rejects.toThrow("admission is paused");
+    await expect(f.system.delivery.send({ channelId: "one", to: "user" }, { text: "new" })).resolves.toMatchObject({ success: false, retryable: true, attempted: false, error: "Channel admission is paused" });
     const result = await pending;
     expect(result!.messageId).toBe("draining-item:one");
     expect(JSON.parse(Buffer.from(result!.receiptBytes!).toString())).toEqual(attempt.deliveryAttempt);
@@ -421,6 +452,27 @@ describe("managed Channel production composition", () => {
     expect((await f.current()).enabled).toBe(!newerStop);
     expect(await f.configuration.publication("one")).toBeUndefined();
     expect(deps.requestHostReload).not.toHaveBeenCalled();
+  });
+
+  it("does not carry a consumed enable into an edit staged before the old publication is acknowledged", async () => {
+    const f = await fixture(); await connect(f);
+    const current = await f.current();
+    // The old publication was consumed by the durable decision. Its cleanup
+    // can lag behind a fresh editor snapshot and a newly staged publication.
+    await f.configuration.stage(["one"], f.config, f.credentials,
+      { one: { intentRevision: current.intentRevision - 1 } }, { one: true });
+    const old = (await f.configuration.publication("one"))!;
+    const credentials = { channels: { one: { account: "one", token: "fresh-fixture-token" } } };
+    await f.configuration.stage(["one"], f.config, credentials, { one: current });
+    await writeCredentials(credentials, { store: f.store });
+    const fresh = (await f.configuration.publication("one"))!;
+    expect(fresh.intent).toBeUndefined();
+    await f.configuration.acknowledge("one", old.revision);
+    expect((await f.configuration.publication("one"))?.revision).toBe(fresh.revision);
+    await f.api.command(extensionApplyConfiguration, { ids: ["one"] });
+    expect((await f.current()).enabled).toBe(current.enabled);
+    expect((await f.configuration.read(await f.current())).config.credentials.token).toBe("fresh-fixture-token");
+    expect(await f.configuration.pending("one")).toBe(false);
   });
 
   it.each([false, true])("CAS conflict cleans only a new candidate, never the committed projection (invalid: %s)", async (invalid) => {

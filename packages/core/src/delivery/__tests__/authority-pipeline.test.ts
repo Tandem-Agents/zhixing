@@ -28,6 +28,7 @@ async function createPipeline(
     readonly now?: () => Date;
     readonly materializeContent?: NonNullable<AuthorityDeliveryPipelineDeps["materializeContent"]>;
     readonly logger?: AuthorityDeliveryPipelineDeps["logger"];
+    readonly preparedOnly?: boolean;
   } = {},
 ) {
   const fixture = await createDeliveryTestHarness();
@@ -50,7 +51,8 @@ async function createPipeline(
       : {}),
     ...(options.logger ? { logger: options.logger } : {}),
   });
-  await pipeline.start();
+  if (options.preparedOnly) await pipeline.prepare();
+  else await pipeline.start();
   return { ...fixture, pipeline, lifecycle: lifecycle.application, eventBus };
 }
 
@@ -72,6 +74,52 @@ function transport(
 }
 
 describe("AuthorityDeliveryPipeline", () => {
+  it("closes and reopens admission during Host preparation without starting effects before activation", async () => {
+    const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const fixture = await createPipeline(transport(send), { preparedOnly: true });
+    try {
+      const created = await fixture.enqueue();
+      if (!created.accepted) throw new Error("fixture enqueue failed");
+      fixture.lifecycle.closeAdmission(fixture.pipeline);
+      fixture.lifecycle.closeAdmission(fixture.pipeline);
+      await fixture.lifecycle.resume(fixture.pipeline);
+      expect(send).not.toHaveBeenCalled();
+      await expect(fixture.pipeline.flush()).rejects.toThrow();
+      fixture.pipeline.activate();
+      await fixture.pipeline.flush();
+      expect(send).toHaveBeenCalledOnce();
+      expect(await fixture.authority.get(created.items[0]!.itemId)).toMatchObject({ state: "sent" });
+    } finally { await fixture.pipeline.stop(); }
+  });
+
+  it("preserves restored lifecycle admission across activation and permits only explicit frozen-work settlement", async () => {
+    const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const fixture = await createPipeline(transport(send), { preparedOnly: true });
+    try {
+      const created = await fixture.enqueue();
+      if (!created.accepted) throw new Error("fixture enqueue failed");
+      fixture.lifecycle.closeAdmission(fixture.pipeline);
+      await fixture.lifecycle.installAdmission({ operationId: "startup-stop", sources: [], deliveries: fixture.lifecycle.captureAcceptedWork() });
+      await fixture.lifecycle.settleAcceptedWork({ operationId: "startup-stop", strategy: "drain", timeoutMs: 1_000, effects: fixture.pipeline });
+      expect(send).toHaveBeenCalledOnce();
+      fixture.pipeline.activate();
+      await expect(fixture.pipeline.flush()).rejects.toThrow();
+      expect(fixture.lifecycle.captureAcceptedWork()).toEqual([]);
+      await fixture.lifecycle.releaseAdmission("startup-stop");
+      await fixture.lifecycle.resume(fixture.pipeline);
+      await fixture.pipeline.flush();
+      expect(send).toHaveBeenCalledOnce();
+    } finally { await fixture.pipeline.stop(); }
+  });
+
+  it("can release a paused prepared pipeline after startup failure without activation", async () => {
+    const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const fixture = await createPipeline(transport(send), { preparedOnly: true });
+    fixture.lifecycle.closeAdmission(fixture.pipeline);
+    await fixture.pipeline.stop();
+    await fixture.pipeline.stop();
+    expect(send).not.toHaveBeenCalled();
+  });
   it.each(["drain", "cancel"] as const)(
     "drives already-enqueued delivery to its existing terminal for lifecycle %s",
     async (strategy) => {

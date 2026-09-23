@@ -1,6 +1,6 @@
 import { channelDeclaration, type ChannelField } from "@zhixing/core/channels/extension";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
-import type { ExtensionSnapshot, ExtensionManifest } from "@zhixing/core/extensions/contracts";
+import type { ExtensionPublicSnapshot, ExtensionManifest } from "@zhixing/core/extensions/contracts";
 
 export type ChannelFieldSpec = ChannelField;
 export interface SupportedChannel {
@@ -12,7 +12,7 @@ export interface SupportedChannel {
 }
 
 /** UI fields are a projection of validated type declarations, not a platform registry. */
-export function listSupportedChannels(snapshot?: ExtensionSnapshot): readonly SupportedChannel[] {
+export function listSupportedChannels(snapshot?: ExtensionPublicSnapshot): readonly SupportedChannel[] {
   const definitions: { manifest: ExtensionManifest; instanceId?: string }[] = packagedExtensions().map(({ manifest }) => ({ manifest }));
   const bound = new Map((snapshot?.instances ?? []).map(instance => [instance.id, instance.binding.manifest]));
   for (const operation of snapshot?.operations ?? []) {

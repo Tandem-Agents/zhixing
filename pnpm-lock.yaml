@@ -124,6 +124,9 @@ importers:
 
   packages/core:
     dependencies:
+      acorn:
+        specifier: 8.16.0
+        version: 8.16.0
       cron-parser:
         specifier: 5.5.0
         version: 5.5.0

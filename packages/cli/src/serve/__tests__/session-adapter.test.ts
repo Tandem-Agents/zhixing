@@ -11,7 +11,7 @@
  * 此 mock 同模式,避免测试和实现脱节。
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { AgentError, type AgentEventMap, type Message } from "@zhixing/core";
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { getAbortReason, type AbortReason } from "@zhixing/core/interrupt";
@@ -130,7 +130,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
             getAbortReason(envelope.control.abortSignal) ?? undefined;
           return buildAbortedResult(envelope, abortReason);
         }
-        envelope.observation.onEvent?.(y);
+        await envelope.observation.onEvent?.(y);
         if (behavior.yieldDelayMs && behavior.yieldDelayMs > 0) {
           await sleepWithAbort(
             behavior.yieldDelayMs,
@@ -586,6 +586,186 @@ describe("createOwnerRuntimeAdapter", () => {
       contextId: { kind: "main" },
       workspacePath: null,
     });
+  });
+
+  it("bounds slow-consumer text and preserves semantic barriers without losing or mutating deltas", async () => {
+    const agent = createMockAgentRuntime();
+    let produced = 0;
+    let toolStarted = false;
+    const chunk = "x".repeat(512);
+    agent.run = async envelope => {
+      for (let i = 0; i < 40; i++) {
+        produced++;
+        await envelope.observation.onEvent?.({ type: "text_delta", text: chunk });
+      }
+      await envelope.observation.onEvent?.({ type: "tool_start", id: "t", name: "work", input: {} });
+      toolStarted = true;
+      return buildResultByReason(envelope, "completed");
+    };
+    const run = createOwnerRuntimeAdapter("slow-consumer", agent).run([um("go")]);
+    const first = await run.next();
+    expect(first).toMatchObject({ done: false, value: { type: "text_delta", text: chunk } });
+    await vi.waitFor(() => expect(produced).toBeGreaterThan(1));
+    expect(produced).toBeLessThanOrEqual(9);
+    expect(first.value).toEqual({ type: "text_delta", text: chunk });
+    let text = chunk;
+    let chunks = 1;
+    while (true) {
+      const next = await run.next();
+      if (next.done) break;
+      if (next.value.type === "text_delta") { text += next.value.text; chunks++; }
+      if (next.value.type === "tool_start") expect(toolStarted).toBe(false);
+    }
+    expect(text).toBe(chunk.repeat(40));
+    expect(chunks).toBeLessThan(40);
+    expect(toolStarted).toBe(true);
+  });
+
+  it("preserves text/thinking boundaries and a single oversized delta", async () => {
+    const yields: AgentYield[] = [
+      { type: "text_delta", text: "before" },
+      { type: "thinking_block_start" },
+      { type: "thinking_delta", thinking: "a" },
+      { type: "thinking_delta", thinking: "b" },
+      { type: "thinking_block_end" },
+      { type: "text_delta", text: "z".repeat(10_000) },
+    ];
+    const run = createOwnerRuntimeAdapter("boundaries", createMockAgentRuntime({ yields })).run([um("go")]);
+    const values: AgentYield[] = [];
+    while (true) { const next = await run.next(); if (next.done) break; values.push(next.value); }
+    expect(values.filter(x => x.type === "text_delta").map(x => x.text).join("")).toBe("before" + "z".repeat(10_000));
+    expect(values.filter(x => x.type === "thinking_delta").map(x => x.thinking).join("")).toBe("ab");
+    expect(values[1]?.type).toBe("thinking_block_start");
+    expect(values.at(-2)?.type).toBe("thinking_block_end");
+  });
+
+  it("delivers coalesced output and finality through the real durable stream spool", async () => {
+    const { join } = await import("node:path");
+    const { createTempDir } = await import("@zhixing/test-utils");
+    const { FileArtifactStore } = await import("@zhixing/core/authority");
+    const { createGrepTool } = await import("@zhixing/tools-builtin");
+    const { writeFile } = await import("node:fs/promises");
+    const { AssignmentStreamSpool, AssignmentStreamWriter } = await import("@zhixing/executor/assignment-stream-spool");
+    const root = await createTempDir("adapter-stream");
+    const spool = new AssignmentStreamSpool(join(root, "streams"), new FileArtifactStore(join(root, "artifacts")));
+    const writer = await AssignmentStreamWriter.open(spool, "adapter-assignment", { execution: "conversation", conversationId: "adapter-conversation", runId: "adapter-run", ownerEpoch: 1 });
+    const text = "some incremental output ";
+    await writeFile(join(root, "fixture.txt"), "durable grep result\n");
+    const grepResult = await createGrepTool().call({ pattern: "durable", path: "fixture.txt" }, { workingDirectory: root });
+    const yields: AgentYield[] = [
+      ...Array.from({ length: 20 }, (): AgentYield => ({ type: "text_delta", text })),
+      { type: "tool_end", id: "grep", name: "grep", duration: 1, result: grepResult },
+      { type: "turn_complete", turnCount: 1, usage: { inputTokens: 0, outputTokens: 0 } },
+    ];
+    const run = createOwnerRuntimeAdapter("adapter-conversation", createMockAgentRuntime({ yields })).run([um("go")]);
+    const persisted: AgentYield[] = [];
+    const start = performance.now();
+    try {
+      while (true) {
+        const next = await run.next();
+        if (next.done) break;
+        const frame = await writer.append({ kind: "agent-yield", yield: next.value });
+        if (frame.payload.kind === "agent-yield") persisted.push(frame.payload.yield);
+      }
+      const final = await writer.final();
+      await writer.markTerminal();
+      expect(persisted.filter(x => x.type === "text_delta").map(x => x.text).join("")).toBe(text.repeat(20));
+      expect(persisted.at(-1)?.type).toBe("turn_complete");
+      expect(persisted.find(x => x.type === "tool_end")).toEqual({ type: "tool_end", id: "grep", name: "grep", duration: 1, result: grepResult });
+      expect(final.finalSeq).toBeLessThanOrEqual(5);
+      expect((await spool.snapshot("adapter-assignment")).finalSeq).toBe(final.finalSeq);
+      console.info("durable adapter sample", { chunks: 20, frames: final.finalSeq, elapsedMs: Math.round(performance.now() - start) });
+    } finally {
+      await run.return(undefined as never);
+      await spool.closeAssignmentScan();
+      await spool.stopStorageMaintenance();
+    }
+  }, 30_000);
+
+  it.each(["return", "throw", "dispose"] as const)("%s cancels and joins a producer waiting on consumer acknowledgement", async ending => {
+    const agent = createMockAgentRuntime();
+    let signal!: AbortSignal;
+    let cleanupStarted = false;
+    let settled = false;
+    let disposed = false;
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    agent.run = async envelope => {
+      signal = envelope.control.abortSignal!;
+      try {
+        await envelope.observation.onEvent?.({ type: "tool_start", id: "t", name: "work", input: {} });
+        expect(signal.aborted).toBe(true);
+        // Cleanup may still report partial output; a closed consumer must not
+        // leave this callback waiting on an acknowledgement nobody can give.
+        await envelope.observation.onEvent?.({ type: "turn_complete", turnCount: 1, usage: { inputTokens: 0, outputTokens: 0 } });
+        return buildAbortedResult(envelope, getAbortReason(signal) ?? undefined);
+      } finally { cleanupStarted = true; await cleanup; settled = true; }
+    };
+    agent.dispose = async () => { expect(settled).toBe(true); disposed = true; };
+    const runtime = createOwnerRuntimeAdapter("close-consumer", agent);
+    const run = runtime.run([um("go")]);
+    await run.next();
+    const sinkError = new Error("durable sink failed");
+    let closed = false;
+    const close = (ending === "return" ? run.return(undefined as never)
+      : ending === "throw" ? run.throw(sinkError) : runtime.dispose()).then(
+      () => { closed = true; }, error => { expect(ending).toBe("throw"); expect(error).toBe(sinkError); closed = true; },
+    );
+    await vi.waitFor(() => expect(cleanupStarted).toBe(true));
+    expect(signal.aborted).toBe(true);
+    expect(closed).toBe(false);
+    expect(disposed).toBe(false);
+    releaseCleanup();
+    await close;
+    expect(settled).toBe(true);
+    expect(runtime.abort()).toBe(false);
+    if (ending === "dispose") { expect(disposed).toBe(true); await run.return(undefined as never); }
+  });
+
+  it.each(["completed", "error"] as const)("dispose preserves an already queued %s terminal", async ending => {
+    const agent = createMockAgentRuntime();
+    const failure = new Error("producer failed after text");
+    agent.run = async envelope => {
+      await envelope.observation.onEvent?.({ type: "text_delta", text: "partial" });
+      if (ending === "error") throw failure;
+      return buildResultByReason(envelope, "completed");
+    };
+    const runtime = createOwnerRuntimeAdapter("queued-terminal", agent);
+    const run = runtime.run([um("go")]);
+    expect(await run.next()).toMatchObject({ done: false, value: { type: "text_delta" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await runtime.dispose();
+    if (ending === "error") await expect(run.next()).rejects.toBe(failure);
+    else expect(await run.next()).toMatchObject({ done: true, value: { agentResult: { reason: "completed" } } });
+  });
+
+  it.each(["aborted", "error"] as const)("dispose between wake and dequeue preserves the producer's %s terminal", async ending => {
+    const agent = createMockAgentRuntime();
+    const failure = new Error("producer failed during cancellation");
+    let settled = false;
+    agent.run = async envelope => {
+      try {
+        await envelope.observation.onEvent?.({ type: "tool_start", id: "t", name: "work", input: {} });
+        const signal = envelope.control.abortSignal!;
+        expect(signal.aborted).toBe(true);
+        if (ending === "error") throw failure;
+        return buildAbortedResult(envelope, getAbortReason(signal) ?? undefined);
+      } finally { settled = true; }
+    };
+    agent.dispose = vi.fn(async () => { expect(settled).toBe(true); });
+    const runtime = createOwnerRuntimeAdapter("wake-before-dequeue", agent);
+    const run = runtime.run([um("go")]);
+    const pending = run.next();
+    let disposing!: Promise<void>;
+    // The producer runs first and wakes next(); dispose then clears the yield
+    // before the consumer continuation can dequeue it or a terminal is queued.
+    queueMicrotask(() => { disposing = runtime.dispose(); });
+    try {
+      if (ending === "error") await expect(pending).rejects.toBe(failure);
+      else await expect(pending).resolves.toMatchObject({ done: true, value: { agentResult: { reason: "aborted" } } });
+    } finally { await disposing; }
+    expect(agent.dispose).toHaveBeenCalledOnce();
+    expect(runtime.abort()).toBe(false);
   });
 
   // ─── abort(reason?):fire current controller / 单维度返 boolean ───

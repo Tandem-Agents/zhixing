@@ -166,12 +166,12 @@ export class RpcManagementFacade {
     return client.request("mcp.pending", { conversationId });
   }
 
-  async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot> {
+  async applyExtensionConfiguration(ids: readonly string[]): Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot> {
     const client = await this.link.getClient();
     return client.request("extensions.apply-configuration", { ids });
   }
 
-  async extensions(): Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot> {
+  async extensions(): Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot> {
     const client = await this.link.getClient();
     return client.request("extensions.list");
   }

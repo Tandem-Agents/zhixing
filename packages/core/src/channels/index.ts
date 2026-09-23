@@ -41,5 +41,3 @@ export {
   isTyping,
   isChallengeChannel,
 } from "./capabilities.js";
-
-export { ChannelRegistry, type ChannelRegistryOptions } from "./registry.js";

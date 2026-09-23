@@ -43,6 +43,8 @@ Outbox 是消息投递的进程内顺序层：同一目标的多个生产者共�
 | Outbox | 队列、Slot、一次发送尝试及事件；不做业务过滤或内部重试 |
 | InboundRouter | 渠道输入开始执行时开 Slot；权威非空回复交由 Delivery 发出，明确空完成才直接填空 Slot |
 
+Host 准备期间可以关闭／恢复投递准入，但此时不启动自动发送。管线区分 `prepared` 与 `prepared-paused`：恢复准入只回到 prepared，正式 activation 才启动；若仍暂停，activation 后保持 quiesced。启动恢复可经领域的冻结工作集显式结算已接纳义务，不因此开启新工作或后台发送；启动失败可直接释放这两个准备状态。
+
 Registry 的 key 为 `(channelId, to)`，`threadId` 不入键，同一接收目标的不同 thread 共用队列。不同目标不需要全局全序；共享上游资源仍可能影响整体并发，不能承诺“零开销”。
 
 CLI Host 的 `setup-delivery.ts` 装配共享效果与 Registry，渠道接入面消费同一实例。共享原语不等于所有产品表面都要包装成 Channel：终端渲染与会话协议投影保留各自职责。权限确认是解除运行阻塞的控制流，不能排在它正在阻塞的 Slot 后；确认与普通消息的不同出口是有意的边界，而不是宣称所有发送一律经过 Outbox。

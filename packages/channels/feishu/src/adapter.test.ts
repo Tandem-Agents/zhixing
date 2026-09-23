@@ -25,7 +25,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
     register: mockRegister.mockReturnThis(),
   })),
   WSClient: vi.fn().mockImplementation(({ logger }) => ({
-    start: async (options: unknown) => { await mockStart(options); logger.debug("[ws]", "ws connect success"); },
+    start: async (options: unknown) => { await mockStart(options); logger.debug(["[ws]", "ws connect success"]); },
     close: mockClose,
   })),
   Domain: { Feishu: 0, Lark: 1 },
@@ -127,7 +127,7 @@ describe("FeishuAdapter", () => {
     expect(adapter.health()).toBe("ready");
     const options = vi.mocked(WSClient).mock.calls[0]![0];
     expect(options.autoReconnect).toBe(false);
-    options.logger!.debug("[ws]", "client closed");
+    options.logger!.debug(["[ws]", "client closed"]);
     expect(adapter.health()).toBe("unavailable");
   });
 

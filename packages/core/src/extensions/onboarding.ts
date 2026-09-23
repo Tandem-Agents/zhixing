@@ -31,13 +31,17 @@ export class ExtensionOnboarding {
       case "update": case "repair": await this.application.prepare(request.id, request.instanceId, request.source, request.action); break;
       case "candidate": {
         const operation = await this.application.operation(request.id);
-        if (!operation?.previous) throw new Error("此操作没有原版本源码");
-        return { ...await this.application.list(), candidate: await this.candidates.read(operation.previous.binding.manifest.digest) };
+        const manifest = operation?.previous?.binding.manifest ?? operation?.candidate;
+        if (!manifest) throw new Error("此操作尚无可导出的候选源码");
+        return { ...await this.application.list(), candidate: await this.candidates.read(manifest.digest) };
       }
       case "connect": {
         const current = await this.application.operation(request.id);
-        if (!current || current.revision !== request.expectedRevision || !["preparing", "blocked"].includes(current.phase)) throw new ExtensionRevisionConflict();
-        if (!current.previous && await this.application.get(current.instanceId)) throw new Error("已有试运行实例，不能覆盖；请查询并取消原操作");
+        const instance = current && await this.application.get(current.instanceId);
+        const correctingTrial = current && !current.previous && instance?.enabled && !instance.admission?.ready && instance.admission?.operationId === current.id;
+        if (!current || current.revision !== request.expectedRevision ||
+            (!["preparing", "blocked"].includes(current.phase) && !(correctingTrial && current.phase === "verifying"))) throw new ExtensionRevisionConflict();
+        if (!current.previous && instance && !correctingTrial) throw new Error("该试运行已失效，请查询当前操作与启用状态");
         if (current.switched) throw new Error("原候选尚未回退，不能覆盖");
         const candidate = validateExtensionCandidate(request.candidate);
         this.ports.validate(candidate.manifest);
@@ -84,6 +88,7 @@ export class ExtensionOnboarding {
           if (!this.ports.isActive()) return;
           let operation = previous;
           let restoringArtifact = false;
+          let configuringExisting = false;
           try {
             if (operation.phase === "preparing" && operation.notifiedRevision === operation.revision &&
                 await this.ports.preparationClosed?.(operation)) {
@@ -94,6 +99,8 @@ export class ExtensionOnboarding {
               const saved = await this.candidates.read(operation.candidate!.digest);
               await this.artifacts.import(saved.manifest, Buffer.from(saved.code));
               restoringArtifact = false;
+              const configuredInstance = await this.application.get(operation.instanceId);
+              configuringExisting = Boolean(configuredInstance);
               const binding = await this.ports.configuration(operation);
               if (binding) {
                 try {
@@ -101,7 +108,11 @@ export class ExtensionOnboarding {
                   const instance = await this.application.trial(operation.id, operation.revision, binding);
                   await this.ports.changed(instance);
                 } catch (error) {
-                  if (error instanceof ExtensionRevisionConflict && binding.projectionRevision !== operation.previous?.binding.projectionRevision) await this.ports.discard(operation.instanceId, binding);
+                  // Existing instances borrow a committed immutable projection,
+                  // including failed first trials. Only initial preparation owns
+                  // an uncommitted projection that can be discarded on conflict.
+                  if (error instanceof ExtensionRevisionConflict && !configuredInstance && !operation.previous &&
+                      !(await this.application.get(operation.instanceId))) await this.ports.discard(operation.instanceId, binding);
                   throw error;
                 }
               }
@@ -113,7 +124,7 @@ export class ExtensionOnboarding {
           } catch (error) {
             if (!(error instanceof ExtensionRevisionConflict)) {
               const current = await this.application.operation(operation.id);
-              if (current && extensionOperationActive(current) && (restoringArtifact || current.phase !== "configuration" || current.previous)) {
+              if (current && extensionOperationActive(current) && (restoringArtifact || configuringExisting || current.phase !== "configuration" || current.previous)) {
                 await this.application.block(current.id, current.revision, restoringArtifact ? "本机候选制品缺失或校验失败，需要重新准备；未开放正常使用" : "接入执行受阻，请查询操作并检查候选合同；未开放正常使用").catch(() => undefined);
               } else if (current?.phase === "configuration") {
                 await this.application.waiting(current.id, current.revision, "请在目标设备的 /config 消息通道中补全并保存配置；候选尚未开放使用").catch(() => undefined);
@@ -125,7 +136,7 @@ export class ExtensionOnboarding {
           operation = (await this.application.operation(operation.id))!;
           // Verification is type-owned and can advance several checkpoints. Do
           // not wake a model on every network event; only user-action/results.
-          if ((operation.phase !== "verifying" || (operation.previous && !operation.verification)) && operation.notifiedRevision !== operation.revision && this.ports.isActive()) {
+          if ((operation.phase !== "verifying" || !operation.verification) && operation.notifiedRevision !== operation.revision && this.ports.isActive()) {
             try {
               const continuation = await this.ports.notify(operation);
               await this.application.notified(operation.id, operation.revision, continuation);

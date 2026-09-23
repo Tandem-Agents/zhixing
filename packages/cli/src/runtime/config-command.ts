@@ -49,9 +49,9 @@ import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
 
 export interface ConfigCommandDeps {
-  readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
+  readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly readExtensionLocalSetup?: () => Promise<Readonly<Record<string, string>>>;
-  readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing/core/extensions/contracts").ExtensionSnapshot>;
+  readonly applyExtensionConfiguration?: (ids: readonly string[]) => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly zhixingHome: string;
   readonly configPath: string;
   rl: readline.Interface;

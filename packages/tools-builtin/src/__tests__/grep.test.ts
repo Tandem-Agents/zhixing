@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
+import { StreamDigestChain } from "@zhixing/core/protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import { isRipgrepAvailable } from "../grep/core.js";
@@ -30,6 +31,10 @@ describe("Grep Tool", () => {
   }
 
   function expectGrepPresentation(result: ToolResult): GrepResultsPresentationArtifact {
+    new StreamDigestChain("grep-tool-test").append({
+      kind: "agent-yield",
+      yield: { type: "tool_end", id: "grep", name: "grep", duration: 1, result },
+    });
     expect(result.presentation?.kind).toBe("grep-results");
     if (result.presentation?.kind !== "grep-results") {
       throw new Error("Expected grep-results presentation");

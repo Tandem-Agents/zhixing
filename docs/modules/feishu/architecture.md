@@ -23,6 +23,10 @@
 
 [独立扩展制品](../../../packages/channels/feishu/extension.json)由通用宿主通过[Channel 类型绑定](../../../packages/cli/src/serve/channels.ts)装配。宿主只持有实例、代际、准入、投递和 HTTP 路由责任；`FeishuAdapter` 在受管扩展进程中提供入站、投递与 challenge 端口。渠道凭据来自设备本地秘密存储，公开配置仅控制启用与选项；主产品不直接创建平台适配器，也不保留内置／外置双主链。
 
+平台包只构建 `dist/extension/extension.mjs` 与固定摘要的 manifest，不公开 `FeishuAdapter` 的 JavaScript 库入口。CLI 的开发依赖用于按构建顺序携带已有连接的迁移 seed；运行时按通用扩展协议启动制品，既有身份与配置由扩展管理承接。
+
+构建时移除 `ws` 的可选原生加速依赖，使用 JavaScript／Node 内置路径。适配器等待真实连接成功信号才完成 `connect`；固定 SDK 的 `LoggerProxy` 将参数作为数组传入，适配器只识别已知状态文字，不转发可能含凭据的 SDK 诊断。`WSClient.start()` 返回本身不代表已连接。
+
 入站：SDK `WSClient` → `im.message.receive_v1` → 消息规范化 → 宿主 owner admission → 成功后确认消息 ID 并更新进程内去重集合 → 宿主渠道消费链与 [InboundRouter](../../../packages/server/src/channels/inbound-router.ts) → Conversation 产品端口接受执行。拒绝或抛错的消息不会进入去重集合，耐久接受、重启恢复和回复义务仍由核心责任者处理。路由器通过 Delivery Outbox 管理回复位置和内容，不直接调用运行循环。
 
 出站：宿主投递端口 → `adapter.send` → Markdown 降级 → 回复卡片 → `client.im.message.create`。目标以 `oc_` 前缀区分 `chat_id`，其他按 `open_id`；不能据此推断任意平台标识都可发送。

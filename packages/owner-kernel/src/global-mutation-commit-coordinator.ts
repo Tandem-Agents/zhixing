@@ -33,6 +33,14 @@ const SCHEDULE_DEFINITION_PREFIX = "definition:";
 const SCHEDULE_PENDING_PREFIX = "pending:";
 const SCHEDULE_MATERIALIZATION_STREAM = "job:schedule-materialization";
 
+/** Enumerate task journals without treating the schedule coordinator's own stream as a task. */
+export async function listScheduleTaskIds(log: AuthorityCommitLog): Promise<readonly string[]> {
+  const streams = (await log.readAll()).flatMap((commit) => commit.entries)
+    .map((entry) => entry.stream)
+    .filter((stream) => stream.startsWith("job:") && stream.length > 4 && stream !== SCHEDULE_MATERIALIZATION_STREAM);
+  return [...new Set(streams.map((stream) => stream.slice(4)))].sort();
+}
+
 type CoordinatorOutcome = GlobalMutationPublishOutcome | SchedulePublishOutcome;
 
 export interface GlobalMutationCommitCoordinatorOptions {

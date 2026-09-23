@@ -98,6 +98,7 @@ export class DurableConversationInteractionObserver
 
   async beforeRequest(
     request: ConfirmationRequest,
+    requester?: { readonly brokerId: string },
   ): Promise<ConfirmationAdmissionDisposition> {
     const active = this.#requireActive();
     if (this.#requests.has(request.id)) {
@@ -135,7 +136,8 @@ export class DurableConversationInteractionObserver
     }
     await this.drainAssignment(active);
     this.#requests.set(request.id, active);
-    return { accepted: true };
+    return { accepted: true, ...(active.broker && requester?.brokerId === active.broker.id
+      ? { delivery: "durable" as const } : {}) };
   }
 
   async afterResolved(

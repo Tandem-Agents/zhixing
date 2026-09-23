@@ -446,7 +446,11 @@ export interface ConfirmationRendererPort {
 
 /** Durable interaction hook: request is stored before visibility and outcome before execution resumes. */
 export type ConfirmationAdmissionDisposition =
-  | { readonly accepted: true }
+  | {
+      readonly accepted: true;
+      /** The durable interaction owner can route an answer to this exact broker. */
+      readonly delivery?: "durable";
+    }
   | {
       readonly accepted: false;
       readonly decision: Extract<ConfirmationDecision, { kind: "cancelled" }>;
@@ -455,6 +459,7 @@ export type ConfirmationAdmissionDisposition =
 export interface ConfirmationLifecycleObserver {
   beforeRequest(
     request: ConfirmationRequest,
+    requester?: { readonly brokerId: string },
   ): Promise<void | ConfirmationAdmissionDisposition>;
   afterResolved(
     request: ConfirmationRequest,
@@ -496,7 +501,7 @@ export interface IConfirmationBroker extends ConfirmationRendererPort {
    *   - 队首 resolve/cancel/expire 后，队列前进并通知下一个
    *
    * 非交互降级：
-   *   - 如果调用时没有任何 onRequest 监听器 → 立即应用 nonInteractiveResolver
+   *   - 没有 onRequest 监听器且耐久 owner 未承接该 broker 的交互 → nonInteractiveResolver
    */
   requestConfirmation(
     request: ConfirmationRequest,
