@@ -26,7 +26,7 @@ import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   loadConfig,
-  loadCredentialSnapshot,
+  loadConfigurationSnapshot,
   type CredentialStoreCoordinator,
 } from "@zhixing/providers";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
@@ -721,7 +721,7 @@ function productionRecoveryReadiness(context: RecoveryContext) {
     if (!context.configuration?.enabledRoles.includes("anchor")) {
       throw new Error("恢复目标没有启用真实值班角色配置");
     }
-    const credentials = await loadCredentialSnapshot({ store: context.secretStore });
+    const credentials = await loadConfigurationSnapshot({ configPath: path.join(context.home, "config.jsonc"), store: context.secretStore });
     const verifier = createTrustedDeviceProtocolVerifier(
       context.trust.members.map((member) => member.device),
     );
@@ -742,7 +742,7 @@ function productionRecoveryReadiness(context: RecoveryContext) {
     )(context.store.authorityLog());
     const ready = createProductionAnchorReadySnapshot({
       configurationSnapshot: {
-        config: context.config,
+        config: credentials.config,
         executableVersion: ZHIXING_CLI_VERSION,
         credentialGeneration: credentials.generation,
       },

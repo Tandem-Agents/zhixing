@@ -690,7 +690,7 @@ async function runServerProcess(
   const mcpManagement = createMcpManagementAdapter({ proxy: mcpConfiguration.network?.proxy, readStatusWire: async () => mcpRuntime.status.snapshot() });
   // Match the explicit home-bound startup input; do not re-resolve process environment here.
   const mcpConfigPath = getGlobalConfigPath({}, zhixingHome);
-  const mcpConnection = createMcpConnectionAdapter({ configPath: mcpConfigPath, deviceId: bootstrap.mesh.deviceKey.deviceId, credentialGeneration: bootstrap.credentialGeneration, credentials: mcpCredentials, configuredServers: mcpConfiguration.mcp?.servers ?? {}, secretStore: bootstrap.secretStore, runtime: mcpRuntime });
+  const mcpConnection = createMcpConnectionAdapter({ configPath: mcpConfigPath, deviceId: bootstrap.mesh.deviceKey.deviceId, credentials: mcpCredentials, configuredServers: mcpConfiguration.mcp?.servers ?? {}, secretStore: bootstrap.secretStore, runtime: mcpRuntime });
   const mcpApplication = new McpManagementApplication({ discovery: mcpManagement, connection: mcpConnection });
   const mcpProductTools = createMcpManagementTools(mcpApplication, { deviceId: bootstrap.mesh.deviceKey.deviceId, revision: () => mcpConfigurationRevision({ configPath: mcpConfigPath }) });
 

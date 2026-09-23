@@ -14,7 +14,7 @@ import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { ExtensionApplication, EXTENSION_PRODUCT_API_EXACT_SET, extensionApplyConfiguration, extensionList, extensionRefresh, extensionSetEnabled } from "@zhixing/core/extensions/application";
 import { validateExtensionManifest } from "@zhixing/core/extensions/contracts";
 import { EncryptedVaultSecretStore } from "@zhixing/secrets";
-import { writeConfig, writeCredentials } from "@zhixing/providers";
+import { editConfiguration, loadConfigurationSnapshot, writeConfig, writeCredentials } from "@zhixing/providers";
 import { setupChannels, type SetupChannelsResult, type ConfiguredChannelConsumers } from "../channels.js";
 import { ChannelConfiguration } from "../../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../../runtime/extensions/channel-readiness.js";
@@ -425,6 +425,43 @@ describe("managed Channel production composition", () => {
     await writeCredentials(f.credentials, { store: f.store });
     await reopened.api.command(extensionApplyConfiguration, { ids: ["one"] });
     expect((await reopened.api.query(extensionList, undefined)).instances[0]!.enabled).toBe(false);
+  });
+
+  it.each([false, true])("stopping from an old editor uses the merged Channel credential (retry: %s)", async (retry) => {
+    const f = await fixture(); await connect(f); editor.store = f.store;
+    const options = { configPath: f.configPath, store: f.store };
+    const writer = { line: vi.fn() };
+    editor.run.mockImplementation(async (context) => {
+      const baseline = await loadConfigurationSnapshot(options), rotated = structuredClone(baseline);
+      rotated.credentials.channels!.one!.token = "concurrent-renewed-token";
+      await editConfiguration(baseline, rotated, { ...options,
+        prepare: store => f.configuration.preparePublications(store, ["one"], rotated.config, rotated.credentials,
+          { one: { intentRevision: context.channelStates.one.intentRevision } }),
+      });
+      await f.api.command(extensionApplyConfiguration, { ids: ["one"] });
+      return { kind: "completed", config: context.initialConfig, credentials: context.initialCredentials, channelIntents: { one: false } };
+    });
+    const apply = vi.fn(async (ids) => {
+      if (retry && apply.mock.calls.length === 1) throw new Error("fixture apply interrupted");
+      return f.api.command(extensionApplyConfiguration, { ids });
+    });
+    const deps = { zhixingHome: f.root, configPath: f.configPath,
+      rl: { pause() {}, resume() {} } as never, renderer: { stop() {} }, writer: writer as never,
+      screen: { reassertCursorHidden() {} } as never, state: { activeTurnPromise: null },
+      requestHostReload: vi.fn(), readExtensions: () => f.api.query(extensionList, undefined), applyExtensionConfiguration: apply };
+    await handleConfigCommand(deps);
+    if (retry) {
+      const ref = { kind: "channel" as const, bindingId: "extension-edits/one" };
+      const pending = JSON.parse((await f.store.get(ref))!);
+      // Reproduce a mismatched publication left by an earlier version.
+      await f.store.put(ref, JSON.stringify({ ...pending, credentials: f.credentials.channels.one }));
+      editor.run.mockImplementation(async context => ({ kind: "completed", config: context.initialConfig, credentials: context.initialCredentials }));
+      await handleConfigCommand(deps);
+    }
+    expect((await f.current()).enabled).toBe(false);
+    expect((await loadConfigurationSnapshot(options)).credentials.channels!.one!.token).toBe("concurrent-renewed-token");
+    expect(await f.configuration.pending("one")).toBe(false);
+    expect(deps.requestHostReload).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("reopening unchanged pending config retries its original intent (newer stop: %s)", async (newerStop) => {

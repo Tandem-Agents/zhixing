@@ -19,14 +19,9 @@ import * as readline from "node:readline/promises";
 import chalk from "chalk";
 import type { ChannelStatus } from "@zhixing/core/channels";
 import {
-
   loadConfig,
-  loadCredentialSnapshot,
-
-  writeConfig,
-  writeCredentials,
-  editMcpServerConfiguration,
-  writeMcpCredentials,
+  loadConfigurationSnapshot,
+  editConfiguration,
 } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
@@ -220,8 +215,7 @@ async function runEditorCommand(
     const secretStore = createPlatformSecretStore({ homeDir });
 
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
-    const config = loadConfig({ configPath });
-    const { credentials } = await loadCredentialSnapshot({ store: secretStore });
+    const { config, credentials } = await loadConfigurationSnapshot({ configPath, store: secretStore });
     const managed = opts.sections.includes("messaging") && deps.readExtensions ? await deps.readExtensions() : undefined;
     const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
     const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
@@ -263,19 +257,18 @@ async function runEditorCommand(
         secretStoreLabel: "设备本地 SecretStore",
       },
       writers: {
-        prepare: async (result) => {
-          if (opts.mcpApplication || !channelStates) return;
+        save: async (result) => {
+          if (opts.mcpApplication) return;
           const ids = changedChannels(result.config, result.credentials, result.channelIntents);
           // Reopening an unchanged pending edit retries its original fenced intent.
-          const newIds = ids.filter((id) => !pendingIds.has(id) || result.channelIntents?.[id] !== undefined ||
-            canonicalize(config.messaging?.[id] ?? null) !== canonicalize(result.config.messaging?.[id] ?? null) ||
-            canonicalize(credentials.channels?.[id] ?? null) !== canonicalize(result.credentials.channels?.[id] ?? null));
-          await configuration.stage(newIds, result.config, { channels: result.credentials.channels }, channelStates, result.channelIntents);
+          const retryIds = ids.filter((id) => pendingIds.has(id) && result.channelIntents?.[id] === undefined &&
+            canonicalize(config.messaging?.[id] ?? null) === canonicalize(result.config.messaging?.[id] ?? null) &&
+            canonicalize(credentials.channels?.[id] ?? null) === canonicalize(result.credentials.channels?.[id] ?? null));
+          await editConfiguration({ config, credentials }, result, { configPath, store: secretStore,
+            prepare: channelStates ? (store, source) => configuration.preparePublications(store, ids,
+              source.config, { channels: source.credentials.channels }, channelStates, result.channelIntents, retryIds) : undefined,
+          });
         },
-        // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
-        // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
-        writeConfig: (next) => opts.mcpApplication ? Promise.resolve() : writeConfig(next, { configPath, expected: config }),
-        writeCredentials: (next) => opts.mcpApplication ? Promise.resolve() : writeCredentials(next, { store: secretStore }),
       },
       stdin: process.stdin,
       stdout: process.stdout,
@@ -287,10 +280,9 @@ async function runEditorCommand(
         if (opts.mcpApplication) {
           const application = opts.mcpApplication({
             save: async (edit) => {
-              await editMcpServerConfiguration(config.mcp?.servers ?? {}, edit.servers, {
-                configPath,
-                saveCredentials: () => writeMcpCredentials(credentials.mcp ?? {}, edit.credentials, { store: secretStore }),
-              });
+              await editConfiguration({ config, credentials },
+                { config: { mcp: { servers: edit.servers } }, credentials: { mcp: edit.credentials } },
+                { configPath, store: secretStore, scope: "mcp" });
             },
             activate: async () => {
               if (state.activeTurnPromise) await state.activeTurnPromise.catch(() => {});

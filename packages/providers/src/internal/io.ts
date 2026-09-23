@@ -12,9 +12,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { ensureDurableDirectory, syncDirectory } from "@zhixing/core/persistence";
 
 /**
- * 原子写 JSON：写到同目录唯一临时文件后 rename。
+ * 耐久原子写 JSON：同步临时文件，再 rename 并同步目录。
  *
  * 三层防护：
  *   1. **唯一 tmp 命名**：`crypto.randomBytes(8)` 64-bit entropy 让并发 caller
@@ -32,20 +33,21 @@ export async function writeJsonAtomic(
   data: unknown,
 ): Promise<void> {
   const dir = path.dirname(filePath);
-  await fs.promises.mkdir(dir, { recursive: true });
+  await ensureDurableDirectory(dir);
 
   const suffix = crypto.randomBytes(8).toString("hex");
   const tmp = `${filePath}.${suffix}.tmp`;
 
   let renamed = false;
   try {
-    await fs.promises.writeFile(
-      tmp,
-      JSON.stringify(data, null, 2) + "\n",
-      { encoding: "utf-8", flag: "wx" },
-    );
+    const handle = await fs.promises.open(tmp, "wx", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(data, null, 2) + "\n", "utf8");
+      await handle.sync();
+    } finally { await handle.close(); }
     await fs.promises.rename(tmp, filePath);
     renamed = true;
+    await syncDirectory(dir);
   } finally {
     if (!renamed) {
       try {

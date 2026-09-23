@@ -19,6 +19,7 @@ const legacyPlaintextMigrationOwner =
 const legacyPlaintextConsumers = [];
 const fullCredentialProjectionAllowed = new Set([
   "packages/providers/src/credentials-loader.ts",
+  "packages/providers/src/configuration-edit.ts",
   "packages/providers/src/index.ts",
   "packages/providers/src/types.ts",
   "packages/cli/src/startup.ts",

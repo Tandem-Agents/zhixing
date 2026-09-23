@@ -26,11 +26,10 @@ import {
   CredentialsSchemaError,
   getGlobalConfigPath,
   loadConfig,
-  loadCredentialSnapshot,
+  loadConfigurationSnapshot,
 
   validateConfigSemantics,
-  writeConfig,
-  writeCredentials,
+  editConfiguration,
   type CredentialStoreCoordinator,
   type ConfigSemanticIssue,
   type ZhixingConfig,
@@ -122,13 +121,9 @@ export async function runStartupCheck(
       message: err instanceof Error ? err.message : "配置文件不可用",
     };
   }
-  const semanticIssues = [
-    ...validateConfigSemantics(config),
-    ...validateMeshConfiguration(config),
-  ];
-  if (semanticIssues.length > 0) {
-    return { kind: "semantic-error", filePath: configPath, issues: semanticIssues };
-  }
+
+  const initialIssues = [...validateConfigSemantics(config), ...validateMeshConfiguration(config)];
+  if (initialIssues.length > 0) return { kind: "semantic-error", filePath: configPath, issues: initialIssues };
 
   let secretStore: SecretStorePort & CredentialStoreCoordinator;
   try {
@@ -147,7 +142,8 @@ export async function runStartupCheck(
       credentialsHomeDir,
       secretStore,
     );
-    const preparedCredentials = await loadCredentialSnapshot({
+    const preparedCredentials = await loadConfigurationSnapshot({
+      configPath,
       store: secretStore,
       legacyHomeDir: credentialsHomeDir,
       ...(credentialReadGuard
@@ -155,6 +151,7 @@ export async function runStartupCheck(
         : {}),
     });
     credentials = preparedCredentials.credentials;
+    config = preparedCredentials.config;
     credentialGeneration = preparedCredentials.generation;
   } catch (err) {
     if (err instanceof CredentialsSchemaError) {
@@ -166,6 +163,9 @@ export async function runStartupCheck(
       message: err instanceof Error ? err.message : "SecretStore 不可用",
     };
   }
+
+  const semanticIssues = [...validateConfigSemantics(config), ...validateMeshConfiguration(config)];
+  if (semanticIssues.length > 0) return { kind: "semantic-error", filePath: configPath, issues: semanticIssues };
 
   // 2. 必要字段检测——按 mode 决定 sections
   const missingSections: SectionId[] = [];
@@ -199,9 +199,7 @@ export async function runStartupCheck(
     initialConfig: config,
     initialCredentials: credentials,
     writers: {
-      writeConfig: (next) => writeConfig(next, { configPath, env }),
-      writeCredentials: (next) =>
-        writeCredentials(next, { store: secretStore }),
+      save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore }),
     },
     sections: missingSections,
     title,
@@ -218,15 +216,12 @@ export async function runStartupCheck(
 
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
-    const updatedConfig = loadConfig({
-      configPath,
-      env,
-    });
     const updatedCredentialReadGuard = await createCredentialReadGuard(
       credentialsHomeDir,
       secretStore,
     );
-    const updatedCredentialSnapshot = await loadCredentialSnapshot({
+    const updatedCredentialSnapshot = await loadConfigurationSnapshot({
+      configPath,
       store: secretStore,
       legacyHomeDir: credentialsHomeDir,
       ...(updatedCredentialReadGuard
@@ -235,7 +230,7 @@ export async function runStartupCheck(
     });
     return {
       kind: "ready",
-      runtimeConfiguration: createRuntimeConfigurationSnapshot(updatedConfig),
+      runtimeConfiguration: createRuntimeConfigurationSnapshot(updatedCredentialSnapshot.config),
       ...projectRuntimeSecrets(updatedCredentialSnapshot.credentials),
       credentialGeneration: updatedCredentialSnapshot.generation,
       secretStore,

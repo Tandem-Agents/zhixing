@@ -569,7 +569,7 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
         : {}),
       ...(relay ? { relayRegistration: relay } : {}),
     };
-    await writeConfig({ ...config, mesh: meshConfiguration }, { homeDir: input.zhixingHome });
+    await writeConfig({ ...config, mesh: meshConfiguration }, { homeDir: input.zhixingHome, expected: config });
 
     const endpoints = await input.bootstrapProjection.endpoints.loadEndpoints();
     const currentEndpoint = endpoints.get(identity.deviceId);
@@ -1251,7 +1251,7 @@ async function completeJoinerBootstrap(input: {
       executorAutoStart,
       ...reachability,
     },
-  }, { homeDir: input.input.zhixingHome });
+  }, { homeDir: input.input.zhixingHome, expected: config });
   await completePairingDeviceConfiguration(input.input);
   await reconcileAfterPairing(input.input, "pairing-joiner-committed");
   await input.input.bootstrapProjection.completions.markBootstrapComplete(

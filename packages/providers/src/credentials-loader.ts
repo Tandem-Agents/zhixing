@@ -14,6 +14,11 @@ const MANIFEST_REF: SecretRef = {
   bindingId: `${CREDENTIAL_NAMESPACE}manifest`,
 };
 const CREDENTIAL_KINDS = ["provider", "channel", "mcp"] as const;
+/** Encrypted recovery material for the single local configuration save in progress. */
+export const CONFIGURATION_EDIT_REF: SecretRef = { kind: "provider", bindingId: "configuration/edit-v1" };
+export async function assertNoConfigurationEdit(store: SecretStorePort): Promise<void> {
+  if (await store.get(CONFIGURATION_EDIT_REF)) throw new Error("配置保存尚未收束，请重新打开配置入口完成恢复");
+}
 const PROVIDER_FIELDS = new Set([
   "apiKey",
   "baseUrl",
@@ -136,7 +141,12 @@ export async function loadCredentials(
 export async function loadCredentialSnapshot(
   options: CredentialSnapshotOptions,
 ): Promise<{ readonly credentials: ZhixingCredentials; readonly generation: string | null }> {
-  return mutationCoordinator(options).runExclusive(async () => {
+  return mutationCoordinator(options).runExclusive(() => loadCredentialSnapshotUnlocked(options));
+}
+
+/** Internal: caller holds the credential mutation lock. */
+export async function loadCredentialSnapshotUnlocked(options: CredentialSnapshotOptions): Promise<{ credentials: ZhixingCredentials; generation: string | null }> {
+    await assertNoConfigurationEdit(options.store);
     if (options.legacyHomeDir !== undefined) {
       await migrateLegacyCredentialFile(options.store, options.legacyHomeDir);
     }
@@ -144,7 +154,6 @@ export async function loadCredentialSnapshot(
       credentials: await loadCredentialsUnlocked(options),
       generation: await readActiveGeneration(options.store),
     };
-  });
 }
 
 async function migrateLegacyCredentialFile(
@@ -281,9 +290,11 @@ async function retireLegacySource(
   await unlink(filePath);
 }
 
-async function loadCredentialsUnlocked(
+export async function loadCredentialsUnlocked(
   options: CredentialStoreOptions,
+  recoveringConfiguration = false,
 ): Promise<ZhixingCredentials> {
+  if (!recoveringConfiguration) await assertNoConfigurationEdit(options.store);
   const credentials: ZhixingCredentials = {};
   const encodedManifest = await options.store.get(MANIFEST_REF);
   if (encodedManifest === null) {
@@ -332,20 +343,57 @@ export async function writeCredentials(
   });
 }
 
-/** Local MCP management cannot overwrite other credential domains or a newer edit. */
-export async function writeMcpCredentials(expected: NonNullable<ZhixingCredentials["mcp"]>, next: NonNullable<ZhixingCredentials["mcp"]>, options: CredentialMutationOptions): Promise<void> {
-  await mutationCoordinator(options).runExclusive(async () => {
-    const current = await loadCredentialsUnlocked(options);
-    if (canonicalize(current.mcp ?? {}) !== canonicalize(expected)) throw new Error("MCP 凭据在编辑期间已变更，未覆盖");
-    const updated = { ...current, mcp: next };
-    validateCredentials(updated, "SecretStore input");
-    await replaceCredentialSet(options.store, credentialEntries(updated), updated.version);
-  });
+/** Internal: compute editor changes without replacing unread or unedited bindings. */
+export function applyCredentialEdits(current: ZhixingCredentials, expected: ZhixingCredentials, next: ZhixingCredentials): ZhixingCredentials {
+  validateCredentials(expected, "Credential edit baseline");
+  validateCredentials(next, "Credential edit input");
+    const merged: ZhixingCredentials = { ...current };
+    const providers = mergeCredentialEdits(current.providers, expected.providers, next.providers);
+    const channels = mergeCredentialEdits(current.channels, expected.channels, next.channels);
+    const mcp = mergeCredentialEdits(current.mcp, expected.mcp, next.mcp);
+    if (providers) merged.providers = providers;
+    if (channels) merged.channels = channels;
+    if (mcp) merged.mcp = mcp;
+    if (expected.version !== next.version) {
+      if (current.version !== expected.version) throw credentialEditConflict();
+      if (next.version === undefined) delete merged.version;
+      else merged.version = next.version;
+    }
+    validateCredentials(merged, "Credential edit result");
+    return merged;
+}
+
+/** Internal: the configuration owner already holds the mutation lock. */
+export async function commitCredentialsUnlocked(store: SecretStorePort, credentials: ZhixingCredentials): Promise<void> {
+  validateCredentials(credentials, "Configuration credentials");
+  const current = await loadCredentialsUnlocked({ store }, true);
+  if (canonicalize(current) !== canonicalize(credentials)) await replaceCredentialSet(store, credentialEntries(credentials), credentials.version);
+}
+
+function credentialEditConflict(): Error {
+  return new Error("凭据在编辑期间已变更，未覆盖；请重新打开配置面板");
+}
+
+function mergeCredentialEdits<T>(current: Record<string, T> | undefined,
+  expected: Record<string, T> | undefined, next: Record<string, T> | undefined): Record<string, T> | undefined {
+  const merged = { ...current };
+  let changed = false;
+  for (const id of new Set([...Object.keys(expected ?? {}), ...Object.keys(next ?? {})])) {
+    const before = expected?.[id];
+    const after = next?.[id];
+    if (canonicalize(before ?? null) === canonicalize(after ?? null)) continue;
+    if (canonicalize(current?.[id] ?? null) !== canonicalize(before ?? null)) throw credentialEditConflict();
+    if (after === undefined) delete merged[id];
+    else merged[id] = after;
+    changed = true;
+  }
+  return changed ? merged : current;
 }
 
 /** Non-secret binding metadata for configuration CAS; never reads credential payloads. */
 export async function readCredentialBindingState(options: CredentialMutationOptions): Promise<{ generation: string | null; mcpIds: readonly string[] }> {
   return mutationCoordinator(options).runExclusive(async () => {
+    await assertNoConfigurationEdit(options.store);
     const encoded = await options.store.get(MANIFEST_REF);
     if (encoded === null) return { generation: null, mcpIds: [] };
     const manifest = parseManifest(encoded);
@@ -353,7 +401,18 @@ export async function readCredentialBindingState(options: CredentialMutationOpti
   });
 }
 
-function mutationCoordinator(options: CredentialMutationOptions): CredentialStoreCoordinator {
+/** Compare only the target MCP material inside Secret Provider; never return secret payloads. */
+export async function inspectMcpCredentialBinding(id: string, expected: Readonly<Record<string, string>> | undefined,
+  options: CredentialMutationOptions): Promise<{ exists: boolean; matches: boolean }> {
+  return mutationCoordinator(options).runExclusive(async () => {
+    const current = await loadCredentialsUnlocked({ ...options, authorizeCredentialRead: async (binding) =>
+      binding.kind === "mcp" && binding.id === id });
+    const actual = current.mcp?.[id];
+    return { exists: actual !== undefined, matches: canonicalize(actual ?? {}) === canonicalize(expected ?? {}) };
+  });
+}
+
+export function mutationCoordinator(options: CredentialMutationOptions): CredentialStoreCoordinator {
   return "coordinator" in options && options.coordinator
     ? options.coordinator
     : options.store;

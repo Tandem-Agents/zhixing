@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { addMcpServerConfiguration, editMcpServerConfiguration, loadConfig, mcpConfigurationRevision, writeConfig } from "../config-loader.js";
+import { addMcpServerConfiguration, loadConfig, mcpConfigurationRevision, writeConfig } from "../config-loader.js";
 
 const entry = { type: "stdio" as const, command: "node", args: ["fixture.js"] };
 async function fixture() {
@@ -22,21 +22,9 @@ describe("MCP configuration ownership", () => {
     const options = await fixture();
     const expectedRevision = mcpConfigurationRevision(options);
     await addMcpServerConfiguration("demo", entry, options);
-    await editMcpServerConfiguration({ demo: entry }, {}, { ...options, saveCredentials: async () => {} });
+    const current = loadConfig(options);
+    await writeConfig({ ...current, mcp: { servers: {} } }, { ...options, expected: current });
     expect(await addMcpServerConfiguration("demo", entry, { ...options, expectedRevision })).toBe("conflict");
-  });
-  it("an open editor cannot overwrite a newly connected service or change credentials on conflict", async () => {
-    const options = await fixture();
-    await addMcpServerConfiguration("demo", entry, options);
-    const saveCredentials = vi.fn();
-    await expect(editMcpServerConfiguration({}, {}, { ...options, saveCredentials })).rejects.toThrow("编辑期间");
-    expect(saveCredentials).not.toHaveBeenCalled();
-    expect(loadConfig(options).mcp?.servers).toEqual({ demo: entry });
-  });
-  it("a failed credential commit cannot publish the proposed configuration", async () => {
-    const options = await fixture();
-    await expect(editMcpServerConfiguration({}, { demo: entry }, { ...options, saveCredentials: async () => { throw new Error("store unavailable"); } })).rejects.toThrow();
-    expect(loadConfig(options).mcp?.servers).toEqual({});
   });
   it("a stale generic editor cannot erase an autonomous addition", async () => {
     const options = await fixture();

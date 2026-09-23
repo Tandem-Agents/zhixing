@@ -5,7 +5,7 @@ const calls = vi.hoisted(() => ({
   load: vi.fn(),
   write: vi.fn(async () => undefined),
   store: vi.fn(() => ({ marker: "selected-store" })),
-  snapshot: vi.fn(async () => ({ credentials: {} })),
+  snapshot: vi.fn(async () => ({ config: {}, credentials: {} })),
   writeCredentials: vi.fn(async () => undefined),
   editor: vi.fn(),
   reconcile: vi.fn(async () => undefined),
@@ -13,9 +13,8 @@ const calls = vi.hoisted(() => ({
 vi.mock("@zhixing/providers", async (original) => ({
   ...await original<typeof import("@zhixing/providers")>(),
   loadConfig: calls.load,
-  writeConfig: calls.write,
-  loadCredentialSnapshot: calls.snapshot,
-  writeCredentials: calls.writeCredentials,
+  editConfiguration: calls.write,
+  loadConfigurationSnapshot: calls.snapshot,
 }));
 vi.mock("@zhixing/secrets", () => ({ createPlatformSecretStore: calls.store }));
 vi.mock("../../commands/command-visibility.js", () => ({ requireChrome: () => true }));
@@ -38,14 +37,13 @@ describe("REPL config command home binding", () => {
     const configPath = path.resolve("config-files-b/custom.jsonc");
     const current = { mesh: { enabledRoles: ["executor"], executorAutoStart: false } };
     const updated = { mesh: { enabledRoles: ["executor"], executorAutoStart: true } };
-    calls.load.mockReturnValue(current);
+    calls.snapshot.mockResolvedValue({ config: current, credentials: {} });
     calls.editor.mockImplementation(async (input) => {
       expect(input.initialConfig).toBe(current);
       expect(input.header.configPath).toBe(configPath);
       vi.stubEnv("ZHIXING_HOME", path.resolve("unrelated-data"));
       vi.stubEnv("ZHIXING_CONFIG_PATH", path.resolve("unrelated.jsonc"));
-      await input.writers.writeConfig(updated);
-      await input.writers.writeCredentials({});
+      await input.writers.save({ kind: "completed", config: updated, credentials: {} });
       return { kind: "completed", config: updated, credentials: {} };
     });
     const reload = vi.fn(async () => undefined);
@@ -60,10 +58,10 @@ describe("REPL config command home binding", () => {
       state: { activeTurnPromise: null },
       requestHostReload: reload,
     });
-    expect(calls.load).toHaveBeenCalledWith({ configPath });
-    expect(calls.write).toHaveBeenCalledWith(updated, { configPath, expected: current });
+    expect(calls.snapshot).toHaveBeenCalledWith({ configPath, store: { marker: "selected-store" } });
+    expect(calls.write).toHaveBeenCalledWith({ config: current, credentials: {} }, { kind: "completed", config: updated, credentials: {} },
+      { configPath, store: { marker: "selected-store" }, prepare: undefined });
     expect(calls.store).toHaveBeenCalledWith({ homeDir: home });
-    expect(calls.writeCredentials).toHaveBeenCalledWith({}, { store: { marker: "selected-store" } });
     expect(reload).toHaveBeenCalledOnce();
     expect(calls.reconcile).toHaveBeenCalledWith("local-role-config-committed", undefined, home);
   });

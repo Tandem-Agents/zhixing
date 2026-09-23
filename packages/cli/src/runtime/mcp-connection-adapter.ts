@@ -7,7 +7,7 @@ import type { SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   loadConfig,
-  readCredentialBindingState,
+  inspectMcpCredentialBinding,
   addMcpServerConfiguration,
   mcpConfigurationRevision,
   type CredentialStoreCoordinator,
@@ -20,7 +20,6 @@ import type { HostMcpRuntimePorts } from "./mcp-runtime-ports.js";
 export function createMcpConnectionAdapter(options: {
   configPath: string;
   deviceId: string;
-  credentialGeneration: string | null;
   credentials: McpCredentialProjection;
   configuredServers: Readonly<Record<string, McpServerConfigEntry>>;
   secretStore: SecretStorePort & CredentialStoreCoordinator;
@@ -62,13 +61,12 @@ export function createMcpConnectionAdapter(options: {
           configured: false,
         };
       const existing = loadConfig({ configPath }).mcp?.servers?.[candidate.serverId];
-      const binding = await readCredentialBindingState({
+      const binding = await inspectMcpCredentialBinding(candidate.serverId, options.credentials.mcp?.[candidate.serverId], {
         store: options.secretStore,
       });
-      if (binding.generation !== options.credentialGeneration)
-        throw new Error("凭据代际已变化，须由宿主生命周期重新装配");
+      if (!binding.matches) throw new Error("该 MCP 的凭据已变化，须由宿主生命周期重新装配");
       const credentialConflict =
-        binding.mcpIds.includes(candidate.serverId) &&
+        binding.exists &&
         canonicalize(options.configuredServers[candidate.serverId] ?? null) !==
           canonicalize(candidate.entry);
       const secrets = await credentialsFor(candidate);
@@ -105,10 +103,10 @@ export function createMcpConnectionAdapter(options: {
       }),
     async activate(candidate) {
       if (!options.runtime.lifecycle.add) return false;
-      const binding = await readCredentialBindingState({
+      const binding = await inspectMcpCredentialBinding(candidate.serverId, options.credentials.mcp?.[candidate.serverId], {
         store: options.secretStore,
       });
-      if (binding.generation !== options.credentialGeneration) return false;
+      if (!binding.matches) return false;
       const existing = loadConfig({ configPath }).mcp?.servers?.[candidate.serverId];
       if (!existing || canonicalize(existing) !== canonicalize(candidate.entry)) return false;
       const secrets = await credentialsFor(candidate);

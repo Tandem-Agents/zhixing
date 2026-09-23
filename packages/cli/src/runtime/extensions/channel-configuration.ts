@@ -4,7 +4,7 @@ import type { ExtensionBinding, ExtensionInstance, ExtensionManifest } from "@zh
 import type { ChannelConfig } from "@zhixing/core/channels";
 import { channelDeclaration, validateChannelCredentials } from "@zhixing/core/channels/extension";
 import { canonicalize } from "@zhixing/core/protocol";
-import { loadConfig, loadCredentialSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing/providers";
+import { loadConfig, loadConfigurationSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing/providers";
 
 export interface ChannelProjection { readonly id: string; readonly config: ChannelConfig }
 interface ConfigurationPublication {
@@ -29,26 +29,43 @@ export class ChannelConfiguration {
   async stage(ids: readonly string[], config: ZhixingConfig, credentials: ChannelCredentialProjection,
     states: Readonly<Record<string, { intentRevision: number }>>, intents: Readonly<Record<string, boolean>> = {}): Promise<void> {
     await this.secrets.runExclusive(async () => {
+      for (const update of await this.preparePublications(this.secrets, ids, config, credentials, states, intents)) {
+        await this.secrets.put(update.ref, update.value);
+      }
+    });
+  }
+
+  /** Prepare records without publishing; the configuration owner commits and recovers them with both sources. */
+  async preparePublications(store: SecretStorePort, ids: readonly string[], config: ZhixingConfig, credentials: ChannelCredentialProjection,
+    states: Readonly<Record<string, { intentRevision: number }>>, intents: Readonly<Record<string, boolean>> = {}, retryIds: readonly string[] = []) {
+      const updates = [];
       for (const id of ids) {
-        const encoded = await this.secrets.get({ kind: "channel", bindingId: `extension-edits/${id}` });
+        const encoded = await store.get({ kind: "channel", bindingId: `extension-edits/${id}` });
         const previous = encoded ? JSON.parse(encoded) as ConfigurationPublication : undefined;
+        if (retryIds.includes(id)) {
+          // Repair the source pair without issuing a new intent or reviving a
+          // publication that another consumer has already acknowledged.
+          if (previous) updates.push({ ref: { kind: "channel" as const, bindingId: `extension-edits/${id}` },
+            value: JSON.stringify({ ...previous, entry: config.messaging?.[id] ?? null, credentials: credentials.channels?.[id] ?? {} }) });
+          continue;
+        }
         const inheritedIntent = previous?.intent?.expectedIntentRevision === (states[id]?.intentRevision ?? 0)
           ? previous.intent : undefined;
         const publication: ConfigurationPublication = { revision: randomUUID(), entry: config.messaging?.[id] ?? null,
           credentials: credentials.channels?.[id] ?? {},
           ...(intents[id] === undefined ? (inheritedIntent ? { intent: inheritedIntent } : {})
             : { intent: { enabled: intents[id]!, expectedIntentRevision: states[id]?.intentRevision ?? 0 } }) };
-        await this.secrets.put({ kind: "channel", bindingId: `extension-edits/${id}` }, JSON.stringify(publication));
+        updates.push({ ref: { kind: "channel" as const, bindingId: `extension-edits/${id}` }, value: JSON.stringify(publication) });
       }
-    });
+      return updates;
   }
 
   async publication(id: string): Promise<ConfigurationPublication | undefined> {
     const encoded = await this.secrets.get({ kind: "channel", bindingId: `extension-edits/${id}` });
     if (!encoded) return undefined;
     const publication = JSON.parse(encoded) as ConfigurationPublication;
-    const snapshot = await loadCredentialSnapshot({ store: this.secrets });
-    if (canonicalize(this.entries()[id] ?? null) !== canonicalize(publication.entry) ||
+    const snapshot = await loadConfigurationSnapshot({ configPath: this.configPath, store: this.secrets });
+    if (canonicalize(snapshot.config.messaging?.[id] ?? null) !== canonicalize(publication.entry) ||
         canonicalize(snapshot.credentials.channels?.[id] ?? {}) !== canonicalize(publication.credentials)) {
       throw new Error("配置与凭据尚未完整保存，旧连接绑定保持不变");
     }
@@ -77,9 +94,9 @@ export class ChannelConfiguration {
 
   async prepare(id: string, manifest: ExtensionManifest, current?: ExtensionInstance, requirePublication = false): Promise<ExtensionBinding> {
     const publication = await this.publication(id);
-    const before = this.entries()[id];
+    const snapshot = await loadConfigurationSnapshot({ configPath: this.configPath, store: this.secrets });
+    const before = snapshot.config.messaging?.[id];
     if (!before || (before.type ?? id) !== manifest.id) throw new Error("Channel configuration does not match artifact");
-    const snapshot = await loadCredentialSnapshot({ store: this.secrets });
     if (canonicalize(before) !== canonicalize(this.entries()[id] ?? null)) throw new Error("Channel configuration changed while reading credentials");
     const credentials = snapshot.credentials.channels?.[id] ?? {};
     if (publication && (canonicalize(before) !== canonicalize(publication.entry) || canonicalize(credentials) !== canonicalize(publication.credentials))) {

@@ -76,8 +76,7 @@ function makeContext(stdout: FakeStdout): ConfigEditorContext {
     initialConfig: {} as ZhixingConfig,
     initialCredentials: {} as ZhixingCredentials,
     writers: {
-      writeConfig: async () => {},
-      writeCredentials: async () => {},
+      save: async () => {},
     },
     sections: ["model", "messaging"],
     title: "初始配置",

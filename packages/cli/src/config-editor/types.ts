@@ -336,9 +336,7 @@ export interface ConfigEditorContext {
 }
 
 export interface ConfigEditorWriters {
-  prepare?: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
-  writeConfig: (config: ZhixingConfig) => Promise<void>;
-  writeCredentials: (credentials: ZhixingCredentials) => Promise<void>;
+  save: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
 }
 
 export type ConfigEditorResult =

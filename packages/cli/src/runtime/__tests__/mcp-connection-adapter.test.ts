@@ -11,7 +11,7 @@ vi.mock("@zhixing/providers", () => ({
   getGlobalConfigPath: () => "fixture-config",
   loadConfig: () => ({ mcp: { servers: state.servers } }),
   mcpConfigurationRevision: () => state.revision,
-  readCredentialBindingState: async () => ({ generation: state.generation, mcpIds: state.credentialIds }),
+  inspectMcpCredentialBinding: async (id: string) => ({ matches: state.generation === "g1", exists: state.credentialIds.includes(id) }),
   addMcpServerConfiguration: async (id: string, entry: unknown) => { state.commit(); state.servers[id] = entry; return "added"; },
 }));
 const candidate: McpSetupCandidate = { serverId: "demo", source: "inferred", entry: { type: "stdio", command: "node", args: ["server.js"] }, secretFields: [] };
@@ -20,7 +20,7 @@ function fixture(configured = false) {
   let active = false;
   const add = vi.fn(async () => { active = true; });
   const app = createMcpConnectionAdapter({
-    configPath: "fixture-config", deviceId: "device", credentialGeneration: "g1", secretStore: {} as never,
+    configPath: "fixture-config", deviceId: "device", secretStore: {} as never,
     configuredServers: configured ? { demo: candidate.entry } : {}, credentials: { mcp: state.secrets },
     runtime: { lifecycle: { add, connect: vi.fn(), close: vi.fn() }, tools: { snapshot: vi.fn() }, status: { snapshot: () => active ? [{ serverId: "demo", status: "connected", transport: "stdio", toolCount: 1 }] : [] } },
   });

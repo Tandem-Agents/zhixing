@@ -5,7 +5,6 @@ import {
   loadCredentialSnapshot,
   loadCredentials,
   writeCredentials,
-  writeMcpCredentials,
   readCredentialBindingState,
 } from "../credentials-loader.js";
 
@@ -59,16 +58,8 @@ describe("SecretStore credentials repository", () => {
     const state = await readCredentialBindingState({ store });
     expect(state.mcpIds).toEqual(["demo"]);
     expect(state.generation).toBeTruthy();
-    expect(read.mock.calls.map(([ref]) => ref.bindingId)).toEqual(["credentials/v1/manifest"]);
+    expect(read.mock.calls.map(([ref]) => ref.bindingId)).toEqual(["configuration/edit-v1", "credentials/v1/manifest"]);
     expect(JSON.stringify(state)).not.toContain("fixture-token");
-  });
-  it("edits only MCP bindings and rejects stale changes before overwriting secrets", async () => {
-    const store = new MemorySecretStore();
-    const providers = { main: { apiKey: "fixture-provider" } };
-    await writeCredentials({ providers, mcp: {} }, { store });
-    await writeMcpCredentials({}, { demo: { TOKEN: "fixture-token" } }, { store });
-    await expect(writeMcpCredentials({}, {}, { store })).rejects.toThrow();
-    expect(await loadCredentials({ store })).toEqual({ providers, mcp: { demo: { TOKEN: "fixture-token" } } });
   });
   it("loads credentials and their opaque generation from one coordinated snapshot", async () => {
     const store = new MemorySecretStore();

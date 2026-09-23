@@ -3,7 +3,7 @@
  *
  * 与初始配置 / 服务模式启动 / REPL `/config` 命令解耦——caller 按需求传 sections + title。
  *
- * 完成时由组合根分别提交非秘密配置与 SecretStore 凭据投影。
+ * 完成时由配置 owner 统一检查基线并提交可恢复的配置与秘密编辑。
  * 取消 / Ctrl+C 时不写盘，所有改动丢弃。
  */
 
@@ -19,9 +19,7 @@ export async function runConfigEditor(
   const result = await runEventLoop(ctx);
 
   if (result.kind === "completed") {
-    await ctx.writers.prepare?.(result);
-    await ctx.writers.writeConfig(result.config);
-    await ctx.writers.writeCredentials(result.credentials);
+    await ctx.writers.save(result);
   }
 
   return result;
