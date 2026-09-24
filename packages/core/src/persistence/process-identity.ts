@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 export type ProcessIdentityReading =
@@ -14,16 +14,27 @@ export interface ProcessIdentityResolver {
 export interface ProcessIdentityResolverDeps {
   readonly platform?: NodeJS.Platform;
   readonly readFile?: typeof readFile;
-  readonly execFileSync?: typeof execFileSync;
+  readonly execute?: ProcessIdentityCommand;
   readonly probe?: (pid: number) => "present" | "absent" | "unknown";
 }
+
+type ProcessIdentityCommand = (
+  command: string,
+  args: readonly string[],
+  options: ExecFileOptionsWithStringEncoding,
+) => Promise<string>;
+
+const execute: ProcessIdentityCommand = (command, args, options) =>
+  new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
 
 export function createProcessIdentityResolver(
   deps: ProcessIdentityResolverDeps = {},
 ): ProcessIdentityResolver {
   const platform = deps.platform ?? process.platform;
   const read = deps.readFile ?? readFile;
-  const exec = deps.execFileSync ?? execFileSync;
+  const exec = deps.execute ?? execute;
   const probe = deps.probe ?? probeProcess;
   let current: Promise<ProcessIdentityReading> | undefined;
 
@@ -35,9 +46,9 @@ export function createProcessIdentityResolver(
       const birth = platform === "linux"
         ? await linuxBirth(pid, read)
         : platform === "darwin"
-          ? macosBirth(pid, exec)
+          ? await macosBirth(pid, exec)
           : platform === "win32"
-            ? windowsBirth(pid, exec)
+            ? await windowsBirth(pid, exec)
             : undefined;
       return birth === undefined ? afterReadFailure(pid, probe) : { kind: "present", birth };
     } catch {
@@ -90,18 +101,18 @@ async function linuxBirth(pid: number, read: typeof readFile): Promise<string | 
   return `linux:${bootId}:${startTicks}`;
 }
 
-function macosBirth(pid: number, exec: typeof execFileSync): string | undefined {
-  const output = exec("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+async function macosBirth(pid: number, exec: ProcessIdentityCommand): Promise<string | undefined> {
+  const output = (await exec("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
     encoding: "utf8",
     timeout: 5_000,
     windowsHide: true,
     env: { ...process.env, LANG: "C", LC_ALL: "C", TZ: "UTC" },
-  }).trim().replace(/\s+/gu, " ");
+  })).trim().replace(/\s+/gu, " ");
   return output ? `darwin:${output}` : undefined;
 }
 
-function windowsBirth(pid: number, exec: typeof execFileSync): string | undefined {
-  const output = exec(
+async function windowsBirth(pid: number, exec: ProcessIdentityCommand): Promise<string | undefined> {
+  const output = (await exec(
     "powershell.exe",
     [
       "-NoProfile",
@@ -110,6 +121,6 @@ function windowsBirth(pid: number, exec: typeof execFileSync): string | undefine
       `[Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().Ticks`,
     ],
     { encoding: "utf8", timeout: 10_000, windowsHide: true, maxBuffer: 64 * 1024 },
-  ).trim();
+  )).trim();
   return /^[0-9]+$/u.test(output) ? `win32:${output}` : undefined;
 }

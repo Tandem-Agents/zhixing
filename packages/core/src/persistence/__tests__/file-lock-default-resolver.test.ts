@@ -2,7 +2,7 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const execFileSync = vi.hoisted(() => vi.fn());
+const execute = vi.hoisted(() => vi.fn());
 
 vi.mock("../process-identity.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../process-identity.js")>();
@@ -10,7 +10,7 @@ vi.mock("../process-identity.js", async (importOriginal) => {
     ...actual,
     createProcessIdentityResolver: () => actual.createProcessIdentityResolver({
       platform: "win32",
-      execFileSync,
+      execute,
       probe: () => "present",
     }),
   };
@@ -19,11 +19,11 @@ vi.mock("../process-identity.js", async (importOriginal) => {
 describe("FileLock default process identity resolver", () => {
   beforeEach(() => {
     vi.resetModules();
-    execFileSync.mockReset();
+    execute.mockReset();
   });
 
   it("reads the successful self birth once across independent acquisitions", async () => {
-    execFileSync.mockReturnValue("638907060300000000");
+    execute.mockResolvedValue("638907060300000000");
     const { acquireFileLock } = await import("../file-lock.js");
     const root = await createTempDir("file-lock-default-resolver");
 
@@ -38,15 +38,13 @@ describe("FileLock default process identity resolver", () => {
     });
     await releaseSecond();
 
-    expect(execFileSync).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it("does not cache an unavailable self birth", async () => {
-    execFileSync
-      .mockImplementationOnce(() => {
-        throw new Error("identity unavailable");
-      })
-      .mockReturnValue("638907060300000001");
+    execute
+      .mockRejectedValueOnce(new Error("identity unavailable"))
+      .mockResolvedValue("638907060300000001");
     const { acquireFileLock } = await import("../file-lock.js");
     const root = await createTempDir("file-lock-default-retry");
 
@@ -60,6 +58,6 @@ describe("FileLock default process identity resolver", () => {
     });
     await release();
 
-    expect(execFileSync).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 });

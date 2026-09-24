@@ -261,7 +261,7 @@ describe("platform process identity projection", () => {
     const resolver = createProcessIdentityResolver({
       platform,
       probe: () => "present",
-      execFileSync: (() => output) as never,
+      execute: async () => output,
     });
     await expect(resolver.read(42)).resolves.toEqual({ kind: "present", birth });
   });
@@ -278,6 +278,25 @@ describe("platform process identity projection", () => {
       readFile: (async () => { throw new Error("denied"); }) as never,
     });
     await expect(unknown.read(42)).resolves.toEqual({ kind: "unknown" });
+  });
+
+  it("shares an in-flight self probe while timers and unrelated work keep progressing", async () => {
+    let finish!: (output: string) => void;
+    let calls = 0;
+    const resolver = createProcessIdentityResolver({
+      platform: "win32",
+      probe: () => "present",
+      execute: () => { calls++; return new Promise(resolve => { finish = resolve; }); },
+    });
+    let settled = false;
+    const first = resolver.read(process.pid).then(value => { settled = true; return value; });
+    const second = resolver.read(process.pid);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(calls).toBe(1);
+    finish("638907060300000001");
+    expect(await first).toEqual({ kind: "present", birth: "win32:638907060300000001" });
+    expect(await second).toEqual(await first);
   });
 });
 
