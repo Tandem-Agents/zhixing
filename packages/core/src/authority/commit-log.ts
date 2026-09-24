@@ -79,13 +79,13 @@ import type {
 } from "./interfaces.js";
 import {
   AUTHORITY_WAL_FILE_HEADER_BYTES,
-  type AuthorityWalReader,
   decodeAuthorityWalFileHeader,
   encodeAuthorityWalFileHeader,
   encodeAuthorityWalFrame,
   scanAuthorityWalFrames,
   verifyAuthorityWalFrameBoundary,
 } from "./wal-frame.js";
+import { fileReader } from "./wal-file-reader.js";
 
 export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -582,7 +582,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const afterLsn = options.afterLsn ?? 0;
     assertReplayLsn(afterLsn);
     return this.#withLogLock(async () => {
-      const lastLsn = await this.#readAndRecover();
+      // Reuse only the existing identity/size/time-verified prefix. Changed files
+      // still take full recovery before any reducer is called.
+      const lastLsn = await this.#loadLastLsn();
       if (afterLsn > lastLsn) {
         throw new AuthorityStorageError(
           "commit-log-corrupt",
@@ -1350,20 +1352,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         metadata,
       )
     ) {
-      const scanned = await this.#scanLogFrom(
-        cursor.byteOffset,
-        cursor.lsn,
-        cursor.prefixDigest,
-        visit,
-      );
-      if (scanned.incompleteTail) {
-        await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
-      }
-      await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
-      return {
-        lastLsn: scanned.lastLsn,
-        cursor: this.#projectionCursor(scanned.lastLsn),
-      };
+      // This cursor covers the entire unchanged file, not merely a prefix.
+      // The lock and identity/size/mtime/ctime check above establish an empty
+      // tail. Any append, replacement or corruption takes the full scan below.
+      return { lastLsn: cursor.lsn, cursor };
     }
 
     const logId = this.#requireLogId();
@@ -2467,31 +2459,6 @@ function projectionTransactionContext(
         );
       }
       return projection;
-    },
-  };
-}
-
-function fileReader(
-  handle: FileHandle,
-  size: number,
-  baseOffset = 0,
-): AuthorityWalReader {
-  return {
-    size,
-    async read(offset, length) {
-      const buffer = Buffer.allocUnsafe(length);
-      let total = 0;
-      while (total < length) {
-        const { bytesRead } = await handle.read(
-          buffer,
-          total,
-          length - total,
-          baseOffset + offset + total,
-        );
-        if (bytesRead === 0) break;
-        total += bytesRead;
-      }
-      return buffer.subarray(0, total);
     },
   };
 }

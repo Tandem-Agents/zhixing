@@ -39,6 +39,39 @@ async function fixture(mode = "normal", projection = async () => ({ mode }), rec
 }
 
 describe("managed extensions", () => {
+  it("reads through a verified cursor while observing peer decisions and isolating returned state", async () => {
+    const f = await fixture();
+    await f.application.adopt("one", f.binding);
+    const read = vi.spyOn(f.log, "transactProjection");
+    const initial = await f.application.list();
+    const firstCursor = (await read.mock.results[0]!.value).cursor;
+    Object.assign(initial.instances[0]!.binding, { projectionRevision: "caller-mutation" });
+    const peer = new ExtensionApplication({ log: () => new FileAuthorityCommitLog(f.root, new FileArtifactStore(join(f.root, "authority-artifacts"))), assertOwner() {} });
+    await peer.setEnabled("one", false, 1);
+    const results = await Promise.all([f.application.list(), f.application.list()]);
+    expect(read.mock.calls[1]![3]?.cursor).toBe(firstCursor);
+    for (const result of results) {
+      expect(result.instances[0]!.enabled).toBe(false);
+      expect(result.instances[0]!.binding.projectionRevision).toBe(f.binding.projectionRevision);
+    }
+  });
+
+  it("drops failed projections and never reuses a cursor across Authority owners", async () => {
+    const f = await fixture();
+    const other = await fixture();
+    await f.application.adopt("one", f.binding);
+    let selected = f.log;
+    const application = new ExtensionApplication({ log: () => selected, assertOwner() {} });
+    await application.list();
+    const read = vi.spyOn(f.log, "transactProjection");
+    read.mockRejectedValueOnce(new Error("read failed"));
+    await expect(application.list()).rejects.toThrow("read failed");
+    expect((await application.list()).instances).toHaveLength(1);
+    expect(read.mock.calls[1]![3]?.cursor).toBeUndefined();
+    selected = other.log;
+    expect((await application.list()).instances).toHaveLength(0);
+  });
+
   it("final host close settles an unresponsive effect as unknown without another request deadline", async () => {
     const f = await fixture();
     await f.application.adopt("one", f.binding);

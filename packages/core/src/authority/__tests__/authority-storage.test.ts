@@ -861,6 +861,25 @@ describe("FileAuthorityCommitLog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     expect(new Set(envelopes.map((envelope) => JSON.stringify(envelope.entries[0]?.body))).size).toBe(12);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
+  it("rechecks a warm projection prefix after peer append, torn tail and corruption", async () => {
+    const { log, artifacts } = await createStores();
+    const peer = new FileAuthorityCommitLog(log.rootDir, artifacts);
+    await log.append([{ stream: "control", body: { t: "one" } }]);
+    const project = () => log.rebuildProjection<string[]>([], (state, record) => [...state, record.body.t]);
+    expect(await project()).toEqual(["one"]);
+    await peer.append([{ stream: "control", body: { t: "two" } }]);
+    expect(await project()).toEqual(["one", "two"]);
+    await appendFile(log.logPath, Buffer.from([1, 2, 3]));
+    expect(await project()).toEqual(["one", "two"]);
+    await corruptFrame(log.logPath, 1);
+    const observed: string[] = [];
+    await expect(log.rebuildProjection(observed, (state) => {
+      state.push("must not run before validation");
+      return state;
+    })).rejects.toMatchObject({ code: "invalid-authority-record" });
+    expect(observed).toEqual([]);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("atomically rebuilds a projection, decides, and appends across peer instances", async () => {
     const { artifacts, log } = await createStores();
     const peer = new FileAuthorityCommitLog(log.rootDir, artifacts, {
@@ -969,6 +988,21 @@ describe("FileAuthorityCommitLog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     expect(resumed.value).toEqual([1]);
     expect(resumed.lastLsn).toBe(2);
     expect(resumed.cursor.lsn).toBe(2);
+  });
+
+  it("reuses an unchanged complete cursor and still validates a subsequent damaged file", async () => {
+    const { log } = await createStores();
+    await log.append([{ stream: "control", body: { t: "first" } }]);
+    const first = await log.transactProjection(0, (count) => count + 1,
+      (value) => ({ kind: "return", value }), { stream: "control" });
+    const unchanged = await log.transactProjection(first.state, () => { throw new Error("unexpected replay"); },
+      (value) => ({ kind: "return", value }), { stream: "control", cursor: first.cursor });
+    expect(unchanged.cursor).toBe(first.cursor);
+    expect(unchanged.value).toBe(1);
+    await corruptFrame(log.logPath, 0);
+    await expect(log.transactProjection(unchanged.state, (state) => state,
+      (value) => ({ kind: "return", value }), { stream: "control", cursor: unchanged.cursor }))
+      .rejects.toBeInstanceOf(AuthorityStorageError);
   });
 
   it("reuses a projection after file replacement only when its logical prefix matches", async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthorityCommitLog } from "../authority/interfaces.js";
+import type { AuthorityCommitLog, ProjectionCursor } from "../authority/interfaces.js";
 import type { LogicalRecord } from "../contracts/index.js";
 import {
   bindProductApiOperation,
@@ -72,6 +72,8 @@ export const EXTENSION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
 
 /** All durable decisions are short Authority transactions, never transport waits. */
 export class ExtensionApplication {
+  private projection?: { log: AuthorityCommitLog; state: State; cursor: ProjectionCursor };
+
   constructor(private readonly ports: {
     readonly log: () => AuthorityCommitLog;
     readonly assertOwner: () => void;
@@ -79,11 +81,24 @@ export class ExtensionApplication {
   }) {}
 
   async list(): Promise<ExtensionSnapshot> {
-    const state = await this.ports.log().rebuildProjection<State, RecordBody>(empty(), reduce, {
-      stream: EXTENSION_AUTHORITY_STREAM,
-    });
-    return { instances: [...state.instances.values()].map((entry) => structuredClone({ ...entry, intentRevision: entry.intentRevision ?? 1 })),
-      ...(state.operations.size ? { operations: structuredClone([...state.operations.values()]) } : {}) };
+    const log = this.ports.log();
+    const cached = this.projection?.log === log ? this.projection : undefined;
+    try {
+      // Authority validates the cursor on every read, including external writes
+      // and prefix replacement. The reducer is immutable, so concurrent reads
+      // can share the prefix without an outer lock that prevents recovery retry.
+      const result = await log.transactProjection<State, RecordBody, void>(
+        cached?.state ?? empty(), reduce, () => ({ kind: "return", value: undefined }),
+        { stream: EXTENSION_AUTHORITY_STREAM, ...(cached ? { cursor: cached.cursor } : {}) },
+      );
+      this.projection = { log, state: result.state, cursor: result.cursor };
+      const state = result.state;
+      return { instances: [...state.instances.values()].map((entry) => structuredClone({ ...entry, intentRevision: entry.intentRevision ?? 1 })),
+        ...(state.operations.size ? { operations: structuredClone([...state.operations.values()]) } : {}) };
+    } catch (error) {
+      this.projection = undefined;
+      throw error;
+    }
   }
 
   async get(id: string): Promise<ExtensionInstance | undefined> {
