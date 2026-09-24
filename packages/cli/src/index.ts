@@ -21,7 +21,7 @@ import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
-import { beginRuntimeLogging, type RuntimeLogging } from "./logging/runtime.js";
+import { beginRuntimeLogging, recordRuntimeFailure, recordStartupFailure, type RuntimeLogging } from "./logging/runtime.js";
 import { INPUT_LOG_SOURCE } from "./logging/input.js";
 
 let commandLogging: RuntimeLogging | undefined;
@@ -31,7 +31,7 @@ async function exitCommand(code: number): Promise<never> {
 }
 
 async function renderActionError(error: unknown): Promise<void> {
-  commandLogging?.records.record(() => ({ event: "failed", result: "failure", data: { error: error instanceof Error ? error.message : "命令未完成" } }));
+  recordRuntimeFailure(commandLogging?.records, error, "command-failed");
   if (
     error instanceof Error &&
     "deliveryConfirmed" in error &&
@@ -242,14 +242,16 @@ program
       });
       const startupExit = handleStartupResult(startupResult);
       if (startupExit !== undefined) {
+        if (startupResult.kind !== "ready") recordStartupFailure(logging.records, startupResult);
         await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
         await exitCommand(startupExit);
         return;
       }
 
-      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }));
+      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records);
       await logging.finish("success", "completed");
     } catch (err) {
+      recordRuntimeFailure(logging.records, err, "foreground-failed");
       await logging.finish("failure", "foreground-failed");
       await renderActionError(err);
       await exitCommand(1);

@@ -242,9 +242,6 @@ export class ProductApiDispatcher {
     input: OperationInput<Descriptor>,
   ): Promise<OperationResult<Descriptor>> {
     const invocation = await this.#invoke(descriptor, input);
-    if (invocation.facts.length !== 0) {
-      throw new TypeError(`Product API query emitted a fact event: ${descriptor.identity}`);
-    }
     return invocation.result as OperationResult<Descriptor>;
   }
 
@@ -257,6 +254,19 @@ export class ProductApiDispatcher {
     input: OperationInput<Descriptor>,
   ): Promise<ProductApiCommandDispatch<OperationResult<Descriptor>, OperationFact<Descriptor>>> {
     const invocation = await this.#invoke(descriptor, input);
+    return Object.freeze({
+      result: invocation.result as OperationResult<Descriptor>,
+      facts: Object.freeze([...invocation.facts]) as readonly OperationFact<Descriptor>[],
+    });
+  }
+
+  #validateInvocation(descriptor: ProductApiOperationDescriptor, invocation: ProductApiInvocation): void {
+    if (descriptor.kind === "query") {
+      if (invocation.facts.length !== 0) {
+        throw new TypeError(`Product API query emitted a fact event: ${descriptor.identity}`);
+      }
+      return;
+    }
     const allowedFacts = new Set(descriptor.factEvents);
     for (const fact of invocation.facts) {
       if (
@@ -274,10 +284,6 @@ export class ProductApiDispatcher {
     ) {
       throw new TypeError(`Product API command fact set mismatch: ${descriptor.identity}`);
     }
-    return Object.freeze({
-      result: invocation.result as OperationResult<Descriptor>,
-      facts: Object.freeze([...invocation.facts]) as readonly OperationFact<Descriptor>[],
-    });
   }
 
   async #invoke(
@@ -301,6 +307,7 @@ export class ProductApiDispatcher {
     records?.record(() => ({ event: "requested", refs: [...refs, ...productObservationRefs(input)], data: { action: descriptor.identity, kind: descriptor.kind } }));
     try {
       const invocation = await operation.invoke(input);
+      this.#validateInvocation(descriptor, invocation);
       records?.record(() => ({ event: "returned", refs: [...refs, ...productObservationRefs(input), ...productObservationRefs(invocation.result)].filter((ref, index, all) => all.findIndex((item) => item.kind === ref.kind && item.id === ref.id) === index).slice(0, 12), result: "success", data: {
         action: descriptor.identity, duration: performance.now() - started,
         facts: invocation.facts.slice(0, 32).map((fact) => fact.kind),

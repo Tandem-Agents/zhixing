@@ -16,6 +16,7 @@ import {
 import { LogFilesProcess } from "./files-process.js";
 import { observeBackgroundOutput, STDIO_LOG_SOURCE } from "./stdio.js";
 import { createLogWriterProbe } from "./writers.js";
+import type { StartupCheckResult } from "../startup.js";
 
 export const RUNTIME_LOG_SOURCE: LogSource = {
   id: "runtime",
@@ -45,9 +46,31 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
       tier: "critical",
       fields: { reason: "text" },
     },
-    failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: { reason: "text", error: "text" } },
+    hostConnected: { message: "前台已连接宿主", level: "info", tier: "critical", fields: { attempt: "number" } },
+    failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: {
+      reason: "text", error: "text", attempt: "number",
+      issues: { items: { fields: { field: "text", reason: "text" } }, maxItems: 16 },
+      missing: { items: "text", maxItems: 32 },
+    } },
   },
 };
+
+/** Preserve the observed cause before entry drain, without copying configuration or credentials. */
+export function recordRuntimeFailure(records: LogRecordPort | undefined, error: unknown, reason: string, attempt?: number): void {
+  records?.record(() => ({ event: "failed", result: "failure", data: {
+    reason, attempt, error: error instanceof Error ? error.message : typeof error === "string" ? error : "运行入口抛出非标准错误",
+  } }));
+}
+
+export function recordStartupFailure(records: LogRecordPort, result: Exclude<StartupCheckResult, { kind: "ready" }>): void {
+  if (result.kind === "cancelled") return;
+  records.record(() => ({ event: "failed", result: "failure", data: {
+    reason: result.kind,
+    error: "message" in result ? result.message : undefined,
+    issues: result.kind === "semantic-error" ? result.issues.slice(0, 17).map(({ field, reason }) => ({ field, reason })) : undefined,
+    missing: result.kind === "non-tty" ? result.missingLabels.slice(0, 33) : undefined,
+  } }));
+}
 
 export function createLocalLogStore(home: string): {
   store: LocalLogStore;

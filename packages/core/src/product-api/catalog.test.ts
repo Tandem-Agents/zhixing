@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { recordingFixture } from "../logging/__tests__/recording.js";
+import { PRODUCT_API_LOG_SOURCE } from "./logging.js";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_ARCHIVE_COMMAND,
@@ -158,6 +160,26 @@ describe("ProductApiDispatcher", () => {
 
     await expect(dispatcher.command(optionalWrite, { value: "unchanged" }))
       .resolves.toEqual({ result: { ok: false }, facts: [] });
+  });
+
+  it.each(["query-fact", "unknown-fact", "missing-fact", "duplicate-fact"])("records dispatcher validation failure instead of success: %s", async (failure) => {
+    const logs = recordingFixture();
+    const fact = { kind: "example-changed" as const, revision: 2 };
+    const dispatcher = new ProductApiDispatcher(exactSet, [defineProductApiContribution({
+      factEvents: [changed],
+      operations: [
+        bindProductApiOperation(read, async () => ({ result: "local", facts: [fact] as never })),
+        bindProductApiOperation(write, async () => ({ result: { ok: true }, facts:
+          failure === "unknown-fact" ? [{ kind: "other", revision: 2 } as never] :
+            failure === "duplicate-fact" ? [fact, fact] : [],
+        })),
+      ],
+    })], logs.bind(PRODUCT_API_LOG_SOURCE, { scope: "storage" }));
+    const invoked = failure === "query-fact" ? dispatcher.query(read, { id: "local" }) : dispatcher.command(write, { value: "value" });
+    await expect(invoked).rejects.toThrow(failure === "query-fact" ? "query emitted a fact" : failure === "unknown-fact" ? "unknown fact" : "fact set mismatch");
+    await logs.finish();
+    expect(logs.records().map(record => record.event)).toEqual(["requested", "failed"]);
+    expect(logs.records()[1]).toMatchObject({ result: "failure", data: { error: expect.stringContaining("Product API") } });
   });
 
   it("uses the Skill-owned contribution as the single application call and fact source", async () => {

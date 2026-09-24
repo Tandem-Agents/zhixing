@@ -271,28 +271,32 @@ export class LogRecorder {
       };
       bytes = size(capture);
     }
-    if (
-      healthThrough === undefined &&
-      (bytes > sourceLimit ||
-        sameSource().length >= this.#policy.sourceQueueRecords ||
-        sameSource().reduce((sum, entry) => sum + entry.bytes, bytes) > sourceLimit)
-    ) {
+    if (healthThrough === undefined && bytes > sourceLimit) {
       this.#lose();
       return;
     }
+    // A source's quota cannot be borrowed, but its low-value queued evidence can
+    // make room for its own critical evidence just as it can under global pressure.
+    while (healthThrough === undefined) {
+      const own = sameSource();
+      const overBytes = own.reduce((sum, entry) => sum + entry.bytes, bytes) > sourceLimit;
+      if (!overBytes && own.length < this.#policy.sourceQueueRecords) break;
+      if (overBytes && own.some((entry) => !entry.sealed && this.#dropDetail(entry))) continue;
+      const victim = capture.record.tier === "critical"
+        ? own.find((entry) => entry.capture.record.tier === "detail" && !entry.sealed)
+        : undefined;
+      if (!victim) {
+        this.#lose();
+        return;
+      }
+      this.#remove(victim);
+      this.#lose();
+    }
     while (this.#bytes + bytes > limitBytes || this.#queue.length >= limitCount) {
-      const expendable = this.#queue.find((entry) => entry.capture.detail && !entry.sealed);
-      if (expendable && this.#bytes + bytes > limitBytes) {
-        const reduced: LogCapture = {
-          record: {
-            ...expendable.capture.record,
-            truncated: true,
-            gaps: [{ kind: "not-collected", reason: "detail-pressure" }],
-          },
-        };
-        this.#bytes += size(reduced) - expendable.bytes;
-        expendable.capture = reduced;
-        expendable.bytes = size(reduced);
+      if (
+        this.#bytes + bytes > limitBytes &&
+        this.#queue.some((entry) => !entry.sealed && this.#dropDetail(entry))
+      ) {
         continue;
       }
       const index =
@@ -318,6 +322,24 @@ export class LogRecorder {
     });
     this.#bytes += bytes;
     this.#schedule(10);
+  }
+  #dropDetail(entry: Entry): boolean {
+    if (!entry.capture.detail) return false;
+    const capture: LogCapture = {
+      record: {
+        ...entry.capture.record,
+        truncated: true,
+        gaps: [{ kind: "not-collected", reason: "detail-pressure" }],
+      },
+    };
+    const bytes = size(capture);
+    // The gap marker can cost more than a tiny attachment. A pressure reduction
+    // must never enlarge an already admitted entry, even if admission later fails.
+    if (bytes >= entry.bytes) return false;
+    this.#bytes += bytes - entry.bytes;
+    entry.capture = capture;
+    entry.bytes = bytes;
+    return true;
   }
   #remove(entry: Entry): void {
     const index = this.#queue.indexOf(entry);
@@ -489,9 +511,15 @@ export class LogRecorder {
               }
               this.#remove(entry);
               if (entry.healthThrough === undefined) this.#unconfirmed++;
-              else this.#acknowledgeHealth(entry);
+              // An unknown health write is not a durable report. Keep its watermark
+              // pending so a fresh summary can follow the same bounded retry, without
+              // replaying business records or counting the notification as another loss.
             }
             this.#lostSince ||= Date.now();
+          } else {
+            // A known pre-write refusal ended this attempt. These entries can
+            // again merge or yield to critical evidence while waiting to retry.
+            for (const entry of batch) entry.sealed = false;
           }
           throw error;
         }

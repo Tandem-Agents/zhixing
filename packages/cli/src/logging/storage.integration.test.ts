@@ -53,7 +53,7 @@ const stores: LocalLogStore[] = [];
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
 });
-async function setup() {
+async function setup(overrides: Partial<typeof policy> = {}) {
   const home = await createTempDir("runtime-log");
   let time = Date.now(),
     seq = 0;
@@ -65,7 +65,7 @@ async function setup() {
   const store = new LocalLogStore({
     files,
     capacity: capacity.arbiter,
-    initialPolicy: policy,
+    initialPolicy: { ...policy, ...overrides },
     now: () => time,
   });
   stores.push(store);
@@ -79,7 +79,7 @@ async function setup() {
         data: { number: ++seq, text },
         refs: [{ kind: "run", id: "run-1" }],
       },
-      policy,
+      { ...policy, ...overrides },
       processId,
       seq,
     );
@@ -114,6 +114,114 @@ async function listing(root: string): Promise<unknown> {
 }
 
 describe("runtime log Store using real isolated processes and filesystem", () => {
+  it.each([false, true])("reports a known gap after the health write is unconfirmed (published=%s)", async (published) => {
+    const h = await setup();
+    await h.store.initialize();
+    const write = h.files.write.bind(h.files), sync = h.files.sync.bind(h.files);
+    let segmentAttempts = 0, failPublishedBarrier = false;
+    h.files.write = async (name, bytes) => {
+      if (name.startsWith("segment-")) {
+        segmentAttempts++;
+        if (segmentAttempts === 1 || (segmentAttempts === 2 && !published))
+          throw Error("injected unavailable segment write");
+      }
+      await write(name, bytes);
+      if (published && segmentAttempts === 2 && name.startsWith("published-"))
+        failPublishedBarrier = true;
+    };
+    h.files.sync = async () => {
+      await sync();
+      if (failPublishedBarrier) {
+        failPublishedBarrier = false;
+        throw Error("injected lost publication acknowledgement");
+      }
+    };
+    const recorder = new LogRecorder(h.store, { policy });
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "event", data: { number: 1 } });
+      await recorder.flush(5000);
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0, unconfirmed: 1 });
+      expect(segmentAttempts).toBe(3);
+    } finally {
+      await recorder.close(1000);
+    }
+    // Read from a new physical owner after the recording process lifetime ends.
+    const reader = new LocalLogStore({ files: new LogFilesProcess(h.home), capacity: createDeviceCapacityRuntime(h.home).arbiter });
+    stores.push(reader);
+    const app = new LogApplication(reader, () => owner, ["logging:1", "fixture:1"]);
+    const page = await app.search();
+    expect(page.records).toHaveLength(published ? 2 : 1);
+    expect(page.records.every(record => record.source === "logging" && record.data.unconfirmed === 1)).toBe(true);
+    expect(new Set(page.records.map(record => record.id)).size).toBe(page.records.length);
+    expect(page.coverage.complete).toBe(true);
+  }, 15000);
+
+  it("keeps a sequence lower bound inside one segment across query pages", async () => {
+    const h = await setup({ segmentBytes: 16384 });
+    await h.store.initialize();
+    await h.store.append(Array.from({ length: 8 }, () => h.capture()));
+    expect((await h.snapshot()).segments).toHaveLength(1);
+    const first = await h.app.search({ afterSequence: 4 });
+    expect(first.records.map(record => record.data.number)).toEqual([5, 6, 7]);
+    expect(first.cursor).toBeTruthy();
+    const second = await h.app.search({ afterSequence: 4 }, first.cursor);
+    expect(second.records.map(record => record.data.number)).toEqual([8]);
+    expect(second.coverage.complete).toBe(true);
+    expect((await h.app.search({ afterSequence: 8 })).records).toHaveLength(0);
+    expect((await h.app.search({ afterSequence: 0 })).records.map(record => record.data.number)).toEqual([1, 2, 3]);
+  }, 20000);
+
+  it("completes maintenance and append for a legal large published inventory within the normal I/O quantum", async () => {
+    const h = await setup({ maxFiles: 4096, governanceBytes: 12 * 1024 * 1024, maxBytes: 256 * 1024 * 1024 });
+    const status = await h.store.initialize();
+    await h.store.close();
+    const state = await h.snapshot(), count = 3000, now = Date.now();
+    // A valid historical layout fixture, not a benchmark of thousands of appends.
+    for (let first = 0; first < count; first += 100) {
+      const writes: Promise<void>[] = [];
+      for (let i = first; i < first + 100; i++) {
+        const record = { ...h.capture().record, storeId: status.storeId, receivedAt: now };
+        const bytes = Buffer.from(`${JSON.stringify(record)}\n`), name = `segment-${randomUUID()}.jsonl`;
+        state.segments.push({ name, bytes: bytes.length, start: i + 1, end: i + 1, receivedAt: now, tier: "critical", recordIds: [record.id], access: [{ scope: "storage", offset: 0, bytes: bytes.length }], attachments: [] });
+        writes.push(writeFile(path.join(h.root, name), bytes));
+      }
+      await Promise.all(writes);
+    }
+    state.upper = count;
+    const stateName = (await readdir(h.root)).filter(name => /^published-\d{12}\.head$/u.test(name)).sort().at(-1)!.replace("published-", "state-").replace(/head$/u, "json");
+    await writeFile(path.join(h.root, stateName), JSON.stringify({ digest: logDigest(JSON.stringify(state)), state }) + "\n");
+    const self = { pid: process.pid, birth: "inventory-fixture" };
+    const store = new LocalLogStore({ files: new LogFilesProcess(h.home), capacity: createDeviceCapacityRuntime(h.home).arbiter,
+      observeWriters: async () => ({ complete: true, at: Date.now(), self, candidates: [self] }) });
+    stores.push(store);
+    expect((await store.maintain()).upper).toBe(count);
+    await store.append([h.capture()]);
+    const current = await store.maintain();
+    expect(current.upper).toBe(count + 1);
+    expect(current.files).toBeLessThanOrEqual(4096);
+    expect(current.bytes).toBeLessThanOrEqual(256 * 1024 * 1024);
+  }, 60000);
+
+  it("accounts for a detail write that changes disk before rejecting and recovers on the next step", async () => {
+    const h = await setup();
+    await h.store.initialize();
+    const write = h.files.write.bind(h.files);
+    let failed = false;
+    h.files.write = async (name, bytes) => {
+      await write(name, bytes);
+      if (!failed && name.startsWith("detail-")) { failed = true; throw Error("partial detail write"); }
+    };
+    await h.store.append([h.capture("detail evidence ".repeat(600))]);
+    expect(failed).toBe(true);
+    const current = await h.store.status();
+    const actual = await Promise.all((await readdir(h.root)).map(async name => (await stat(path.join(h.root, name))).size));
+    expect(current.bytes).toBe(actual.reduce((sum, bytes) => sum + bytes, 0));
+    expect(current.bytes).toBeLessThanOrEqual(policy.maxBytes);
+    expect((await h.app.search()).records).toHaveLength(1);
+    await h.store.maintain();
+    expect((await readdir(h.root)).some(name => name.startsWith("detail-"))).toBe(false);
+  }, 20000);
+
   it("persists, pages at a fixed upper bound, reads detail and resumes the same Store", async () => {
     const h = await setup();
     const initialized = await h.store.initialize();

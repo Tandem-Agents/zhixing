@@ -30,6 +30,76 @@ async function setup(text: string, observation: () => LogWriterObservation = pro
 }
 
 describe("legacy log adoption on native files", () => {
+  it("advances a legal high legacy inventory with both unknown and compatible writers", async () => {
+    const home = await createTempDir("legacy-large-inventory"), directory = path.join(home, "logs", "llm-error");
+    await mkdir(directory, { recursive: true });
+    for (let first = 0; first < 4000; first += 100) await Promise.all(Array.from({ length: 100 }, (_, index) => writeFile(path.join(directory, `llm-error-${first + index + 1}-2026-09-24T01-00-00-000Z.log`), "legacy evidence\n")));
+    const initialPolicy = { ...DEFAULT_LOG_POLICY, maxFiles: 4096, governanceBytes: 12 * 1024 * 1024 };
+    let previousCount = 0;
+    for (const complete of [false, true]) {
+      const store = new LocalLogStore({ files: new LogFilesProcess(home), capacity: createDeviceCapacityRuntime(home).arbiter,
+        initialPolicy, observeWriters: async () => ({ ...proof(), complete }) });
+      stores.push(store);
+      const initialized = await store.initialize();
+      expect(initialized.migration?.state).toBe(complete ? "pending" : "blocked");
+      expect(initialized.migration!.legacyFiles).toBeGreaterThan(previousCount);
+      const maintained = await store.maintain();
+      expect(maintained.migration!.legacyFiles).toBeGreaterThan(initialized.migration!.legacyFiles);
+      expect(maintained.files).toBeLessThanOrEqual(initialPolicy.maxFiles);
+      expect(maintained.bytes).toBeLessThanOrEqual(initialPolicy.maxBytes);
+      previousCount = maintained.migration!.legacyFiles;
+      await store.close();
+    }
+    expect(await readdir(directory)).toHaveLength(4000);
+  }, 60000);
+  it.each(["retirement", "retirement-pending", "replacement", "policy"] as const)("rechecks %s after legacy content has been read", async (change) => {
+    const home = await createTempDir("legacy-read-race");
+    const file = path.join(home, "server.log");
+    await writeFile(file, "Legacy evidence from previous version\n");
+    let now = Date.now();
+    const initialPolicy = { ...policy, detailTtlMs: 1000 };
+    const writerFiles = new LogFilesProcess(home);
+    const writer = new LocalLogStore({ files: writerFiles, capacity: createDeviceCapacityRuntime(home).arbiter, initialPolicy, now: () => now, observeWriters: async () => proof() });
+    stores.push(writer);
+    const initial = await writer.initialize();
+    const writerApp = new LogApplication(writer, () => owner);
+    const catalog = await writerApp.read(initial.migration!.catalog);
+    const address = (catalog.detail as { entries: { address: string }[] }).entries[0]!.address;
+    const files = new LogFilesProcess(home), read = files.read.bind(files);
+    let changed = false;
+    files.read = async (...args) => {
+      const bytes = await read(...args);
+      if (!changed && args[0].startsWith("legacy-")) {
+        changed = true;
+        if (change === "retirement") { now += 2000; await writer.maintain(); }
+        else if (change === "retirement-pending") {
+          const truncate = writerFiles.truncate.bind(writerFiles);
+          writerFiles.truncate = async (...values) => { if (values[0].startsWith("legacy-")) throw Error("held legacy file"); await truncate(...values); };
+          now += 2000;
+          await expect(writer.maintain()).rejects.toThrow("held legacy file");
+        }
+        else if (change === "replacement") { await rename(file, `${file}.previous`); await writeFile(file, "Replacement legacy evidence\n"); await writer.maintain(); }
+        else await writer.applyPolicy({ ...initialPolicy, queryResultBytes: 4096 }, 1);
+      }
+      return bytes;
+    };
+    const reader = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(home).arbiter });
+    stores.push(reader);
+    const reading = new LogApplication(reader, () => owner).read(address, "detail");
+    if (change === "policy") await expect(reading).rejects.toThrow("策略已变化");
+    else {
+      const page = await reading;
+      expect(page.detail).toBeUndefined();
+      expect(page.cursor).toBeUndefined();
+      expect(page.gaps).toContainEqual(change === "retirement-pending"
+        ? { kind: "expired", reason: "legacy-retired-during-query" }
+        : { kind: "insufficient", reason: "legacy-not-retained-or-changed" });
+      expect(page.coverage.complete).toBe(false);
+      if (change === "retirement") await expect(stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+      else expect((await stat(file)).size).toBeGreaterThan(0);
+    }
+    expect(changed).toBe(true);
+  }, 30000);
   it("reads unregistered files through the same app without creating a runtime directory", async () => {
     const { home, store, app } = await setup(Array.from({ length: 1800 }, (_, i) => `failure row ${i}\n`).join(""));
     const catalog = await app.read("zxlog-local:legacy/catalog");

@@ -17,6 +17,7 @@ import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js
 import { LogFilesProcess } from "./files-process.js";
 import { SHIPPED_LOG_SOURCES, LOCAL_LOG_OWNER } from "./access.js";
 import { observeBackgroundOutput, STDIO_LOG_SOURCE } from "./stdio.js";
+import { recordRuntimeFailure, recordStartupFailure, RUNTIME_LOG_SOURCE } from "./runtime.js";
 
 const close: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const action of close.splice(0).reverse()) await action(); });
@@ -37,6 +38,24 @@ async function drain(generator: AsyncGenerator<any, any>) { const output = []; f
 async function records(f: Awaited<ReturnType<typeof fixture>>): Promise<readonly LogRecord[]> { await f.recorder.flush(5000); expect(f.recorder.health().captureFailures).toBe(0); return (await f.app.search({ ref: { kind: "run", id: "run-one" } })).records; }
 
 describe("production boundaries through Recorder, native Store and public reader", () => {
+  it("keeps finite startup causes and retry errors without copying configuration or losing redaction", async () => {
+    const logs = recordingFixture(), port = logs.bind(RUNTIME_LOG_SOURCE, { scope: "storage" });
+    recordStartupFailure(port, { kind: "semantic-error", filePath: "not-retained", issues: [{ field: "model", reason: "invalid selection" }] } as never);
+    recordStartupFailure(port, { kind: "non-tty", missingLabels: ["模型提供商"] });
+    recordStartupFailure(port, { kind: "cancelled" });
+    recordRuntimeFailure(port, Error("connect failed; token=private-value"), "host-connection-failed", 2);
+    port.record({ event: "hostConnected", data: { attempt: 3 } });
+    const hostile = new Error("original");
+    Object.defineProperty(hostile, "message", { get() { throw Error("hostile getter"); } });
+    expect(() => recordRuntimeFailure(port, hostile, "host-connection-failed", 4)).not.toThrow();
+    await logs.finish();
+    expect(logs.records().filter(record => record.event === "failed")).toHaveLength(3);
+    expect(logs.records()).toContainEqual(expect.objectContaining({ data: { reason: "semantic-error", issues: [{ field: "model", reason: "invalid selection" }] } }));
+    expect(logs.records()).toContainEqual(expect.objectContaining({ data: { reason: "non-tty", missing: ["模型提供商"] } }));
+    expect(logs.records()).toContainEqual(expect.objectContaining({ event: "hostConnected", data: { attempt: 3 } }));
+    expect(logs.recorder.health().captureFailures).toBe(1);
+    expect(JSON.stringify(logs.records())).not.toMatch(/private-value|not-retained/);
+  });
   it("retains scheduler refusal and in-flight unknown outcomes without duplicating model results", async () => {
     const f = await fixture();
     const task = { ...tool("Task", async () => ({ content: "ok" })), maxCallsPerTurn: 1 };

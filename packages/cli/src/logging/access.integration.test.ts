@@ -189,6 +189,20 @@ function wire(
 }
 
 describe("unified native log access", () => {
+  it("accepts every recordable identity through public search and encoded addresses", async () => {
+    const f = await fixture({ queryRecords: 16 });
+    const ref = { kind: ":".repeat(160), id: ":".repeat(160) };
+    const capture = f.capture("storage");
+    await f.store.append([{ ...capture, record: { ...capture.record, refs: [ref] } }]);
+    const request = { context: () => LOCAL_LOG_OWNER, request: { filter: { ref } } };
+    const found = await f.access.api.query(LOG_SEARCH, request);
+    expect(found.records.map(record => record.id)).toEqual([capture.record.id]);
+    const address = formatLogAddress({ storeId: f.status.storeId, kind: "operation", ref });
+    expect(address.length).toBeGreaterThan(512);
+    const located = await f.access.api.query(LOG_READ, { context: () => LOCAL_LOG_OWNER, request: { address, view: "timeline" } });
+    expect(located.records.map(record => record.id)).toEqual([capture.record.id]);
+    await expect(f.access.api.query(LOG_SEARCH, { ...request, request: { filter: { ref: { ...ref, id: "x".repeat(161) } } } })).rejects.toThrow();
+  }, 30000);
   it("closes a blocked inventory after a finite drain and joins the physical owner and resource release", async () => {
     const f = await fixture(),
       native = new LogFilesProcess(f.home);

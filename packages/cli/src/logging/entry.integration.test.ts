@@ -120,6 +120,7 @@ describe("built CLI log entry and exit chain", () => {
     const result = await run(home, ["logs", "--offline", "search"]);
     expect(result.code).toBe(0);
     const page = JSON.parse(result.stdout);
+    expect(page.records).toContainEqual(expect.objectContaining({ event: "failed", result: "failure", data: expect.objectContaining({ reason: "schema-error", error: expect.stringContaining("JSONC") }) }));
     expect(page.records.some((record: { event: string }) => record.event === "started")).toBe(true);
     expect(
       page.records.some(

@@ -17,6 +17,7 @@
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
 import { loadConfig } from "@zhixing/providers";
+import { recordRuntimeFailure } from "./logging/runtime.js";
 import { createRuntimeConfigurationProvider } from "./runtime/runtime-configuration-provider.js";
 import {
   CommandProvider,
@@ -378,18 +379,23 @@ async function ensureCoreHostWithReadOnlyFallback(
   opts: {
     readonly storage: ReturnType<typeof createReadOnlyConversationStorage>;
     onAttemptFailed?: () => void;
+    records?: import("@zhixing/core/logging").LogRecordPort;
   },
 ): Promise<boolean> {
   let lastError: unknown;
+  let attempt = 0;
   while (true) {
+    attempt++;
     try {
       await coreHost.ensure();
+      opts.records?.record({ event: "hostConnected", result: "success", data: { attempt } });
       if (lastError !== undefined) {
         writer.line(chalk.green(`${layout.contentPrefix}知行已恢复，继续进入对话。`));
       }
       return true;
     } catch (err) {
       lastError = err;
+      recordRuntimeFailure(opts.records, err, "host-connection-failed", attempt);
       opts.onAttemptFailed?.();
       await renderReadOnlyConversationBrowser({
         writer,
@@ -458,7 +464,7 @@ function setupBracketedPasteMode(): void {
 
 // ─── 启动 REPL ───
 
-export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>, inputRecords?: import("@zhixing/core/logging").LogRecordPort, configurationRecords?: import("@zhixing/core/logging").LogRecordPort): Promise<void> {
+export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>, inputRecords?: import("@zhixing/core/logging").LogRecordPort, configurationRecords?: import("@zhixing/core/logging").LogRecordPort, runtimeRecords?: import("@zhixing/core/logging").LogRecordPort): Promise<void> {
   // 启用 bracketed paste mode + 初始化 paste detector：
   //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
   //   播按 listener 注册顺序执行，detector 先 setInPasteMode，下游 onKeypress 才能
@@ -557,6 +563,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     !(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter, {
       storage: createReadOnlyConversationStorage(zhixingHome),
       onAttemptFailed: () => startupProgress?.stop(),
+      records: runtimeRecords,
     }))
   ) {
     renderScreen?.dispose();

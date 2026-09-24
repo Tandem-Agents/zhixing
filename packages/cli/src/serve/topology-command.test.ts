@@ -32,8 +32,9 @@ vi.mock("../startup.js", () => ({
 vi.mock("./application-host.js", () => ({
   createPersistentApplicationHost: (...args: unknown[]) => harness.createHost(...args),
 }));
-vi.mock("../logging/runtime.js", () => ({
-  beginRuntimeLogging: () => ({ capacity: harness.capacity, records: { record: harness.logRecord }, finish: harness.logFinish }),
+vi.mock("../logging/runtime.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../logging/runtime.js")>(),
+  beginRuntimeLogging: () => ({ capacity: harness.capacity, bind: () => ({ record: harness.logRecord }), records: { record: harness.logRecord }, finish: harness.logFinish }),
 }));
 
 import {

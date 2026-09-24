@@ -310,6 +310,121 @@ describe("runtime log capture and lifecycle", () => {
     expect(recorder.health().state).toBe("closed");
   });
 
+  it("lets critical evidence replace detail after a known pre-write refusal", async () => {
+    const policy = validateLogPolicy({ ...DEFAULT_LOG_POLICY, queueRecords: 4, sourceQueueRecords: 3, queueBytes: 8192, recordBytes: 2048 });
+    const target = sink(policy), append = target.append.bind(target);
+    target.append = vi.fn().mockRejectedValueOnce(Error("lock busy before writing")).mockImplementation(append);
+    const recorder = new LogRecorder(target, { policy }),
+      detail = recorder.bind(source, { scope: "storage" }),
+      critical = recorder.bind({ ...source, id: "critical-source" }, { scope: "storage" });
+    try {
+      for (let n = 0; n < 3; n++) detail.record({ event: "detail", data: { n } });
+      await recorder.start();
+      critical.record({ event: "error", data: { n: 99 } });
+      await recorder.flush(1000);
+      expect(target.stored.filter(entry => entry.record.tier === "detail")).toHaveLength(2);
+      expect(target.stored).toContainEqual(expect.objectContaining({ record: expect.objectContaining({ source: "critical-source", data: { n: 99 } }) }));
+      expect(recorder.health()).toMatchObject({ queued: 0, lost: 1, unconfirmed: 0 });
+    } finally { await recorder.close(); }
+  });
+
+  it("merges a repeat again after a known pre-write refusal", async () => {
+    const target = sink(), append = target.append.bind(target);
+    target.append = vi.fn().mockRejectedValueOnce(Error("capacity refused before writing")).mockImplementation(append);
+    const recorder = new LogRecorder(target), port = recorder.bind(source, { scope: "storage" });
+    try {
+      port.record({ event: "detail", data: { n: 1 } });
+      await recorder.start();
+      port.record({ event: "detail", data: { n: 1 } });
+      expect(recorder.health().queued).toBe(1);
+      await recorder.flush(1000);
+      expect(target.stored).toHaveLength(1);
+      expect(target.stored[0]?.record.repeat?.count).toBe(2);
+      expect(recorder.health()).toMatchObject({ lost: 0, unconfirmed: 0 });
+    } finally { await recorder.close(); }
+  });
+
+  it.each(["count", "bytes"])("preserves critical evidence within the same source's %s quota", async (dimension) => {
+    const policy = validateLogPolicy({ ...DEFAULT_LOG_POLICY, recordBytes: 8192, queueRecords: 32, queueBytes: 16384, sourceQueueRecords: dimension === "count" ? 2 : 16 });
+    const target = sink(policy), recorder = new LogRecorder(target, { policy }), port = recorder.bind(source, { scope: "storage" });
+    const text = dimension === "bytes" ? "x".repeat(3000) : "short";
+    try {
+      for (let n = 0; n < 2; n++) port.record({ event: "detail", data: { n, text } });
+      expect(recorder.health()).toMatchObject({ queued: 2, lost: 0 });
+      port.record({ event: "error", data: { n: 99, text } });
+      expect(recorder.health().queued).toBe(2);
+      expect(recorder.health().queuedBytes).toBeLessThanOrEqual(policy.queueBytes / 2);
+      await recorder.flush();
+      expect(target.stored.filter(entry => entry.record.tier === "detail")).toHaveLength(1);
+      expect(target.stored).toContainEqual(expect.objectContaining({ record: expect.objectContaining({ source: "test", tier: "critical", data: { n: 99, text } }) }));
+      expect(recorder.health()).toMatchObject({ lost: 1, unconfirmed: 0 });
+    } finally { await recorder.close(); }
+  });
+
+  it("drops a same-source attachment before an entire observation under byte pressure", async () => {
+    const policy = validateLogPolicy({ ...DEFAULT_LOG_POLICY, recordBytes: 2048, queueBytes: 8192 });
+    const target = sink(policy), recorder = new LogRecorder(target, { policy }), port = recorder.bind(source, { scope: "storage" });
+    try {
+      port.record({ event: "detail", data: { n: 1, text: "x".repeat(2800) } });
+      port.record({ event: "error", data: { n: 2, text: "y".repeat(1000) } });
+      await recorder.flush();
+      expect(target.stored.filter(entry => entry.record.source === "test")).toHaveLength(2);
+      expect(target.stored.find(entry => entry.record.tier === "detail")).toMatchObject({
+        record: { gaps: [{ kind: "not-collected", reason: "detail-pressure" }] },
+      });
+      expect(target.stored.some(entry => entry.detail)).toBe(false);
+      expect(recorder.health()).toMatchObject({ lost: 0, unconfirmed: 0 });
+    } finally { await recorder.close(); }
+  });
+
+  it.each(["source", "global"])("never grows admitted entries when tiny detail cannot relieve %s pressure", async (mode) => {
+    const policy = validateLogPolicy({ ...DEFAULT_LOG_POLICY, recordBytes: 2048, queueBytes: mode === "source" ? 8192 : 16384 });
+    const target = sink(policy), recorder = new LogRecorder(target, { policy });
+    const ports = Array.from({ length: mode === "source" ? 1 : 3 }, (_, index) =>
+      recorder.bind({ ...source, id: `source-${index}` }, { scope: "storage" }));
+    let rejected = 0;
+    try {
+      for (let n = 0; n < 24; n++) {
+        const before = recorder.health();
+        // A large legal envelope creates a small attachment even with empty data.
+        ports[n % ports.length]!.record({
+          event: "detail",
+          refs: Array.from({ length: 16 }, (_, index) => ({ kind: "operation", id: `op-${n}-${index}-${"r".repeat(120)}` })),
+        });
+        const after = recorder.health();
+        expect(after.queuedBytes).toBeLessThanOrEqual(policy.queueBytes - 4096);
+        if (after.lost > before.lost) {
+          rejected++;
+          expect(after.queued).toBe(before.queued);
+          expect(after.queuedBytes).toBeLessThanOrEqual(before.queuedBytes);
+        }
+      }
+      expect(rejected).toBeGreaterThan(0);
+      await recorder.flush();
+      expect(target.stored.some(entry => entry.detail === "{}")).toBe(true);
+      for (const portIndex of ports.keys()) {
+        const captures = target.stored.filter(entry => entry.record.source === `source-${portIndex}`);
+        expect(captures.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0)).toBeLessThanOrEqual(policy.queueBytes / 2);
+      }
+    } finally { await recorder.close(); }
+  });
+
+  it.each(["inflight", "critical-only"])("does not bypass source quotas or evict protected %s evidence", async (mode) => {
+    const policy = validateLogPolicy({ ...DEFAULT_LOG_POLICY, sourceQueueRecords: 2 });
+    const target = sink(policy), gate = pause(), started = pause(), append = target.append.bind(target);
+    if (mode === "inflight") target.append = async (records) => { started.resolve(); await gate.promise; return append(records); };
+    const recorder = new LogRecorder(target, { policy }), port = recorder.bind(source, { scope: "storage" });
+    try {
+      for (let n = 0; n < 2; n++) port.record({ event: mode === "inflight" ? "detail" : "error", data: { n } });
+      if (mode === "inflight") { void recorder.start(0); await started.promise; }
+      port.record({ event: "error", data: { n: 99 } });
+      expect(recorder.health()).toMatchObject({ queued: 2, lost: 1 });
+      gate.resolve();
+      await recorder.flush();
+      expect(target.stored.filter(entry => entry.record.source === "test").map(entry => entry.record.data.n)).toEqual([0, 1]);
+    } finally { gate.resolve(); await recorder.close(); }
+  });
+
   it("flushes its entire starting queue, aggregates storms and applies policy shrink", async () => {
     const small: LogPolicy = {
       ...DEFAULT_LOG_POLICY,
@@ -408,24 +523,115 @@ describe("runtime log capture and lifecycle", () => {
     await recorder.close();
   });
 
-  it("does not recursively report failure of a health report", async () => {
+  it.each([
+    { gap: "lost", published: false },
+    { gap: "lost", published: true },
+    { gap: "unconfirmed", published: false },
+    { gap: "unconfirmed", published: true },
+  ])("reports $gap after an unknown health write (published=$published) without new business input", async ({ gap, published }) => {
+    vi.useFakeTimers();
     const target = sink();
-    let calls = 0;
-    target.append = async () => {
-      calls++;
-      throw new LogAppendIndeterminateError();
+    const attempts: LogCapture[][] = [];
+    let healthAttempts = 0;
+    target.append = async (records) => {
+      attempts.push(structuredClone([...records]));
+      if (records.some(entry => entry.record.source === "test"))
+        throw new LogAppendIndeterminateError();
+      if (++healthAttempts === 1) {
+        if (published) target.stored.push(...records);
+        throw new LogAppendIndeterminateError();
+      }
+      target.stored.push(...records);
+      return status();
     };
     const recorder = new LogRecorder(target),
       port = recorder.bind(source, { scope: "storage" });
-    port.record({ event: "error" });
-    await recorder.flush();
-    await recorder.flush();
-    await recorder.flush();
-    await recorder.flush();
-    expect(calls).toBe(2);
-    expect(recorder.health().unconfirmed).toBe(1);
-    expect(recorder.health().queued).toBe(0);
-    await recorder.close();
+    try {
+      port.record({ event: gap === "lost" ? "unknown-event" : "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(700);
+      expect(recorder.health()).toMatchObject({
+        state: "ready", queued: 0, lost: gap === "lost" ? 1 : 0,
+        unconfirmed: gap === "unconfirmed" ? 1 : 0,
+      });
+      expect(attempts.flat().filter(entry => entry.record.source === "test")).toHaveLength(gap === "lost" ? 0 : 1);
+      const notices = attempts.flat().filter(entry => entry.record.source === "logging");
+      expect(notices).toHaveLength(2);
+      expect(new Set(notices.map(entry => entry.record.id)).size).toBe(2);
+      expect(target.stored).toHaveLength(published ? 2 : 1);
+      for (const entry of target.stored) expect(entry.record.data).toMatchObject({
+        lost: gap === "lost" ? 1 : 0, unconfirmed: gap === "unconfirmed" ? 1 : 0,
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_LOG_POLICY.maintenanceMs * 2);
+      expect(healthAttempts).toBe(2);
+    } finally {
+      const closing = recorder.close(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await closing;
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves both old and new gaps when a health notice shares an unknown business batch", async () => {
+    vi.useFakeTimers();
+    const target = sink();
+    const attempts: LogCapture[][] = [];
+    target.append = async (records) => {
+      attempts.push(structuredClone([...records]));
+      if (attempts.length === 1) throw new LogAppendIndeterminateError();
+      target.stored.push(...records);
+      return status();
+    };
+    const recorder = new LogRecorder(target), port = recorder.bind(source, { scope: "storage" });
+    try {
+      port.record({ event: "unknown-event" });
+      port.record({ event: "error", data: { n: 1 } });
+      await recorder.start();
+      port.record({ event: "unknown-event" });
+      port.record({ event: "error", data: { n: 2 } });
+      await vi.advanceTimersByTimeAsync(250);
+      expect(attempts[0]?.map(entry => entry.record.source)).toEqual(["test", "logging"]);
+      expect(target.stored.filter(entry => entry.record.source === "test").map(entry => entry.record.data.n)).toEqual([2]);
+      expect(target.stored.find(entry => entry.record.source === "logging")?.record.data).toMatchObject({ lost: 2, unconfirmed: 1 });
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 2, unconfirmed: 1 });
+    } finally {
+      const closing = recorder.close(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await closing;
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds repeated health failures and shutdown without recursively counting notifications", async () => {
+    vi.useFakeTimers();
+    const target = sink(), attemptedAt: number[] = [], notices: LogCapture[] = [];
+    target.append = async (records) => {
+      attemptedAt.push(Date.now());
+      notices.push(...records.filter(entry => entry.record.source === "logging"));
+      throw new LogAppendIndeterminateError();
+    };
+    const recorder = new LogRecorder(target);
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(attemptedAt.length).toBeGreaterThan(2);
+      expect(attemptedAt.length).toBeLessThanOrEqual(10);
+      expect(attemptedAt.slice(1).every((time, index) => time - attemptedAt[index]! >= 200)).toBe(true);
+      expect(recorder.health()).toMatchObject({ state: "degraded", lost: 0, unconfirmed: 1, queued: 0 });
+      expect(notices.every(entry => entry.record.data.unconfirmed === 1)).toBe(true);
+      const before = attemptedAt.length, closing = recorder.close(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await closing;
+      expect(recorder.health()).toMatchObject({ state: "closed", lost: 0, unconfirmed: 1, queued: 0 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(attemptedAt).toHaveLength(before);
+    } finally {
+      const closing = recorder.close(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      vi.useRealTimers();
+    }
   });
 
   it("counts an in-flight shutdown as uncertain and incorporates its late durable receipt", async () => {
@@ -446,6 +652,27 @@ describe("runtime log capture and lifecycle", () => {
     gate.resolve();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(recorder.health()).toMatchObject({ lost: 0, unconfirmed: 0, state: "closed" });
+  });
+
+  it.each([false, true])("does not revive a closed recorder after a late health outcome (confirmed=%s)", async (confirmed) => {
+    const target = sink(), gate = pause(), started = pause();
+    target.append = vi.fn(async (records) => {
+      started.resolve();
+      await gate.promise;
+      if (!confirmed) throw new LogAppendIndeterminateError();
+      target.stored.push(...records);
+      return status();
+    });
+    const recorder = new LogRecorder(target);
+    recorder.bind(source, { scope: "storage" }).record({ event: "unknown-event" });
+    void recorder.start(0);
+    await started.promise;
+    await recorder.close(1);
+    gate.resolve();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(recorder.health()).toMatchObject({ state: "closed", queued: 0, lost: 1, unconfirmed: 0 });
+    expect(target.append).toHaveBeenCalledOnce();
+    expect(target.stored).toHaveLength(confirmed ? 1 : 0);
   });
 
   it("aggregates equal large details and truncates messages on UTF-8 boundaries", async () => {

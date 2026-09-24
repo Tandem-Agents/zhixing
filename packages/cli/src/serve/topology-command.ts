@@ -24,7 +24,7 @@ import {
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { createPersistentApplicationHost } from "./application-host.js";
-import { beginRuntimeLogging } from "../logging/runtime.js";
+import { beginRuntimeLogging, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -64,7 +64,7 @@ export async function runServeCommand(
       secretStore,
     });
     if (startup.kind !== "ready") {
-      logging.records.record(() => ({ event: "failed", result: startup.kind === "cancelled" ? "cancelled" : "failure", data: { reason: startup.kind, error: "message" in startup ? startup.message : undefined } }));
+      recordStartupFailure(logging.records, startup);
       renderStartupFailure(startup, output);
       await logging.finish(startup.kind === "cancelled" ? "cancelled" : "failure", startup.kind);
       process.exit(startup.kind === "cancelled" ? 0 : 2);
@@ -86,7 +86,7 @@ export async function runServeCommand(
     await host.run();
   } catch (error) {
     failed = true;
-    logging.records.record(() => ({ event: "failed", result: "failure", data: { error: error instanceof Error ? error.message : "宿主装配未完成" } }));
+    recordRuntimeFailure(logging.records, error, "host-or-preflight-failed");
     throw error;
   } finally {
     await logging.finish(failed ? "failure" : "success", failed ? "host-or-preflight-failed" : "completed");

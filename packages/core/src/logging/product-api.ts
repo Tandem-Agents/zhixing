@@ -1,4 +1,5 @@
 import { LogRequestError } from "./errors.js";
+import { MAX_LOG_TOKEN_LENGTH } from "./capture.js";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -6,7 +7,7 @@ import {
   defineProductApiExactSet,
   defineProductApiQuery,
 } from "../product-api/catalog.js";
-import type { LogApplication } from "./application.js";
+import { MAX_LOG_ADDRESS_LENGTH, type LogApplication } from "./application.js";
 import type {
   LogFilter,
   LogPage,
@@ -134,16 +135,16 @@ export function parseLogSearchRequest(input: unknown): LogSearchRequest {
     )
       throw new LogRequestError("日志时间应为毫秒时间戳");
   for (const key of ["source", "id"] as const)
-    if (filter[key] !== undefined) boundedText(filter[key], 128);
+    if (filter[key] !== undefined) boundedText(filter[key], MAX_LOG_TOKEN_LENGTH);
   if (
     filter.level !== undefined &&
     !["debug", "info", "warn", "error"].includes(filter.level as string)
   )
     throw new LogRequestError("日志级别无效");
   if (ref) {
-    boundedText(ref.kind, 128);
-    boundedText(ref.id, 128);
-    if (ref.storeId !== undefined) boundedText(ref.storeId, 128);
+    boundedText(ref.kind, MAX_LOG_TOKEN_LENGTH);
+    boundedText(ref.id, MAX_LOG_TOKEN_LENGTH);
+    if (ref.storeId !== undefined) boundedText(ref.storeId, MAX_LOG_TOKEN_LENGTH);
   }
   return {
     filter: structuredClone(filter) as LogFilter,
@@ -160,7 +161,7 @@ export function parseLogReadRequest(input: unknown): LogReadRequest {
   )
     throw new LogRequestError("日志视图无效");
   return {
-    address: boundedText(value.address, 512),
+    address: boundedText(value.address, MAX_LOG_ADDRESS_LENGTH),
     ...(value.view === undefined
       ? {}
       : { view: value.view as LogReadRequest["view"] }),

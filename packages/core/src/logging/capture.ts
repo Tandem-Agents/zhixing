@@ -14,7 +14,8 @@ import type {
 
 const SECRET_KEY =
   /(?:secret|passw(?:or)?d|passwd|pwd|credential|authorization|cookie|private.?key|token|api.?key|headers|environment|full.?config)/iu;
-const TOKEN = /^[a-zA-Z0-9_.:-]{1,160}$/u;
+export const MAX_LOG_TOKEN_LENGTH = 160;
+const TOKEN = new RegExp(`^[a-zA-Z0-9_.:-]{1,${MAX_LOG_TOKEN_LENGTH}}$`, "u");
 const RESULTS = new Set(["success", "failure", "unknown", "refused", "cancelled"]);
 export function validLogToken(value: unknown): value is string {
   return typeof value === "string" && TOKEN.test(value) && scrubSecrets(value).scrubbed === value;

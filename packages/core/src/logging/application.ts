@@ -9,7 +9,7 @@ import type {
   LogRef,
   LogStatus,
 } from "./contracts.js";
-import { validLogToken } from "./capture.js";
+import { MAX_LOG_TOKEN_LENGTH, validLogToken } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
 import { LocalLogStore, logDigest, indexName, type LogStoreSnapshot, type LogRetirement } from "./storage.js";
 import { scopeLogQuery, type LogScanFiles, type LogVisibleRange } from "./query-scope.js";
@@ -28,6 +28,8 @@ export type LogAddress =
   | { storeId: string; kind: "record"; id: string }
   | { storeId: string; kind: "legacy"; id: string }
   | { storeId: string; kind: "operation"; ref: LogRef };
+// Each accepted token can expand threefold under percent encoding.
+export const MAX_LOG_ADDRESS_LENGTH = "zxlog://".length + 36 + "/operation/".length + MAX_LOG_TOKEN_LENGTH * 6 + 1;
 export function formatLogAddress(address: LogAddress): string {
   const suffix =
     address.kind === "record" || address.kind === "legacy"
@@ -36,7 +38,7 @@ export function formatLogAddress(address: LogAddress): string {
   return `zxlog://${address.storeId}/${suffix}`;
 }
 export function parseLogAddress(value: string): LogAddress {
-  if (value.length > 512) throw new LogRequestError("日志地址过长");
+  if (value.length > MAX_LOG_ADDRESS_LENGTH) throw new LogRequestError("日志地址过长");
   const match = /^zxlog:\/\/([a-f0-9-]{36})\/(record|operation|legacy)\/([^/]+)(?:\/([^/]+))?$/u.exec(
     value,
   );
@@ -398,9 +400,10 @@ export class LogApplication {
         for (const line of bytes.subarray(0, lastNewline).toString("utf8").split("\n")) {
           const length = Buffer.byteLength(line) + 1;
           let record: LogRecord | undefined;
+          let ordinal = -1;
           try {
             record = parseRecord(line, MAX_LOG_RECORD_BYTES, state.storeId);
-            const ordinal = segment.recordIds.indexOf(record.id);
+            ordinal = segment.recordIds.indexOf(record.id);
             if (
               ordinal < 0 ||
               (segment.access && segment.access[ordinal]?.scope !== record.access.scope)
@@ -420,7 +423,8 @@ export class LogApplication {
               context.scopes.includes(`conversation:${ref.id}`),
             ) };
           }
-          if (record && allowed(record, context) && matches(record, filter)) {
+          if (record && segment.start + ordinal > (filter.afterSequence ?? 0) &&
+            segment.start + ordinal <= upper && allowed(record, context) && matches(record, filter)) {
             const known =
               record.schema === 1 && this.#sources.has(`${record.source}:${record.sourceVersion}`);
             let projected: LogRecord = {

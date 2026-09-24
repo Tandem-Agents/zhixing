@@ -113,6 +113,9 @@ export class LocalLogStore implements LogSink {
   #idle: Promise<void> | undefined;
   #closed = false;
   #permit: DeviceCapacityStepPermit | undefined;
+  #inventoryLocked = false;
+  #inventoryCache: Map<string, LogFileInfo> | undefined;
+  readonly #inventoryDirty = new Set<string>();
   readonly #observeWriters: ((signal: AbortSignal) => Promise<LogWriterObservation>) | undefined;
   #writersObserved: LogWriterObservation | undefined;
 
@@ -126,7 +129,7 @@ export class LocalLogStore implements LogSink {
     this.files = meteredFiles(options.files, (dimension, amount) => {
       if (!this.#permit) throw Error("日志物理操作缺少资源许可");
       this.#permit.claim(dimension, amount);
-    });
+    }, (...names) => { for (const name of names) this.#inventoryDirty.add(name); });
     this.#capacity = options.capacity;
     this.#initial = validateLogPolicy(options.initialPolicy ?? DEFAULT_LOG_POLICY);
     this.#now = options.now ?? Date.now;
@@ -360,13 +363,22 @@ export class LocalLogStore implements LogSink {
   }
 
   /** Local legacy discovery has no fabricated Store identity or effective policy. */
-  async inspectLegacy<T>(work: (state: LogStoreSnapshot | undefined, files: LogFileSystem, unregistered: readonly string[]) => Promise<T>): Promise<T> {
+  async inspectLegacy<T>(work: (
+    state: LogStoreSnapshot | undefined,
+    files: LogFileSystem,
+    unregistered: readonly string[],
+    current: () => Promise<{ state: LogStoreSnapshot | undefined; names: readonly string[] }>,
+  ) => Promise<T>): Promise<T> {
     return this.#step(false, async () => {
-      const state = await this.#load();
-      if (state) return work(state, this.files, []);
-      const names = await this.files.list(4096);
-      if (names.some((name) => !isLegacyFile(name) && name !== "writer.lock")) throw new LogRequestError("日志存在未完成的初始化状态，请启动产品接续；离线读取未改动文件");
-      return work(undefined, this.files, names.filter(isLegacyFile).sort());
+      const current = async () => {
+        const state = await this.#load();
+        if (state) return { state, names: [] };
+        const names = await this.files.list(4096);
+        if (names.some((name) => !isLegacyFile(name) && name !== "writer.lock")) throw new LogRequestError("日志存在未完成的初始化状态，请启动产品接续；离线读取未改动文件");
+        return { state, names: names.filter(isLegacyFile).sort() };
+      };
+      const { state, names } = await current();
+      return work(state, this.files, names, current);
     });
   }
 
@@ -441,9 +453,13 @@ export class LocalLogStore implements LogSink {
           if (this.#closed) throw Error("日志存储已关闭");
           releaseLock = await this.files.tryLock();
           if (!releaseLock) throw Error("日志存储正在维护");
+          this.#inventoryLocked = true;
         }
         return await work();
       } finally {
+        this.#inventoryLocked = false;
+        this.#inventoryCache = undefined;
+        this.#inventoryDirty.clear();
         try {
           if (releaseLock) await this.files.unlock();
         } finally {
@@ -650,14 +666,22 @@ export class LocalLogStore implements LogSink {
     await this.files.sync();
   }
 
-  async #inventory(): Promise<Map<string, LogFileInfo>> {
+  async #inventory(refreshLegacy = false): Promise<Map<string, LogFileInfo>> {
     const result = new Map<string, LogFileInfo>();
+    // Only one physical writer can change managed files while this mutex is held.
+    // Relist every time; restat every changed/new file, including rejected partial writes.
+    const cached = this.#inventoryLocked ? this.#inventoryCache : undefined;
     for (const name of await this.files.list(4096)) {
       if (name !== "writer.lock" && !OWNED.test(name) && !isLegacyFile(name))
         throw Error("日志根含未登记文件，已停止写入");
-      result.set(name, await this.files.stat(name));
+      const prior = cached?.get(name);
+      result.set(name, prior && !(refreshLegacy && isLegacyFile(name)) && !this.#inventoryDirty.has(name) ? prior : await this.files.stat(name));
     }
-    return result;
+    if (this.#inventoryLocked) {
+      this.#inventoryCache = result;
+      this.#inventoryDirty.clear();
+    }
+    return new Map(result);
   }
   async #erase(name: string): Promise<void> {
     const info = await this.files.stat(name);
@@ -666,7 +690,8 @@ export class LocalLogStore implements LogSink {
     await this.files.sync();
   }
   async #refreshMigration(state: LogStoreSnapshot): Promise<void> {
-    const inventory = await this.#inventory();
+    // Legacy may still have an incompatible writer; registration always observes it afresh.
+    const inventory = await this.#inventory(true);
     const historical = [...inventory].filter(([name]) => isLegacyFile(name));
     if (!this.#observeWriters && !historical.length && !state.migration) return;
     const proof = this.#writersObserved;
@@ -900,7 +925,7 @@ export class LocalLogStore implements LogSink {
     }
   }
   async #status(state: LogStoreSnapshot): Promise<LogStatus> {
-    const inventory = await this.#inventory();
+    const inventory = await this.#inventory(true);
     const bytes = [...inventory.values()].reduce((sum, item) => sum + item.bytes, 0);
     const changedLegacy = [...inventory].some(([name, info]) => isLegacyFile(name) && !state.legacy?.some((entry) => entry.name === name && entry.identity === info.identity && entry.bytes === info.bytes));
     const migration = state.migration?.state === "confirmed" && (changedLegacy || bytes > state.policy.effective.maxBytes || inventory.size > state.policy.effective.maxFiles)
@@ -949,6 +974,7 @@ export function indexName(segment: string): string {
 function meteredFiles(
   files: LogFileSystem,
   claim: (dimension: "readBytes" | "writeBytes" | "ioOperations", amount: number) => void,
+  changed: (...names: string[]) => void,
 ): LogFileSystem {
   const io = (count = 1): void => claim("ioOperations", count);
   return {
@@ -972,18 +998,22 @@ function meteredFiles(
     write: async (name, bytes) => {
       io();
       claim("writeBytes", bytes.byteLength);
+      changed(name);
       await files.write(name, bytes);
     },
     rename: async (from, to) => {
       io();
+      changed(from, to);
       await files.rename(from, to);
     },
     truncate: async (name, identity, bytes) => {
       io();
+      changed(name);
       await files.truncate(name, identity, bytes);
     },
     remove: async (name, identity) => {
       io();
+      changed(name);
       await files.remove(name, identity);
     },
     sync: async () => {
