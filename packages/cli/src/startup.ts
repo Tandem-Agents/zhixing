@@ -82,6 +82,7 @@ export type StartupCheckResult =
   | { kind: "non-tty"; missingLabels: string[] };
 
 export interface RunStartupCheckOptions {
+  records?: import("@zhixing/core/logging").LogRecordPort;
   /** 入口固定的数据根；配置文件可单独指定。 */
   homeDir?: string;
   configPath?: string;
@@ -145,6 +146,7 @@ export async function runStartupCheck(
     const preparedCredentials = await loadConfigurationSnapshot({
       configPath,
       store: secretStore,
+      records: options.records,
       legacyHomeDir: credentialsHomeDir,
       ...(credentialReadGuard
         ? { authorizeCredentialRead: credentialReadGuard }
@@ -199,7 +201,7 @@ export async function runStartupCheck(
     initialConfig: config,
     initialCredentials: credentials,
     writers: {
-      save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore }),
+      save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore, records: options.records }),
     },
     sections: missingSections,
     title,
@@ -223,6 +225,7 @@ export async function runStartupCheck(
     const updatedCredentialSnapshot = await loadConfigurationSnapshot({
       configPath,
       store: secretStore,
+      records: options.records,
       legacyHomeDir: credentialsHomeDir,
       ...(updatedCredentialReadGuard
         ? { authorizeCredentialRead: updatedCredentialReadGuard }

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion, verifyCheckpointBridgeArtifact, verifyCheckpointBridgeArtifactAsync } from "./checkpoint-bridge-artifact.js";
 
 interface NativeCheckpointChildBridge {
+  processBirth(pid: number): string;
   openPath(path: string, create: boolean, readOnly: boolean): bigint;
   statFile(parent: bigint, name: string): { bytes: number; identity: string };
   truncateFile(parent: bigint, name: string, identity: string, bytes: number): void;
@@ -12,7 +13,7 @@ interface NativeCheckpointChildBridge {
   openDirectory(parent: bigint, name: string, create: boolean): bigint;
   identity(handle: bigint): string;
   writeFile(parent: bigint, name: string, bytes: Buffer): void;
-  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number): Buffer;
+  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Buffer;
   listEntries(parent: bigint, maximumEntries: number): string[];
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): number;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): void;
@@ -29,7 +30,7 @@ interface BridgeApi {
   openDirectory(parent: bigint, name: string, create: boolean): Promise<bigint>;
   identity(handle: bigint): Promise<string>;
   writeFile(parent: bigint, name: string, bytes: Buffer): Promise<void>;
-  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number): Promise<Buffer>;
+  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Promise<Buffer>;
   listEntries(parent: bigint, maximumEntries: number): Promise<readonly string[]>;
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): Promise<number>;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): Promise<void>;
@@ -106,9 +107,9 @@ export class CheckpointDirectoryHandle {
     return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
   }
 
-  async readFile(name: string, declaredBytes: number, offset: number, limit: number): Promise<Buffer> {
+  async readFile(name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Promise<Buffer> {
     await this.#assertOpen();
-    return this.#bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit);
+    return this.#bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit, identity ?? "");
   }
 
   async listEntries(maximumEntries: number): Promise<readonly string[]> {
@@ -169,17 +170,26 @@ export class CheckpointDirectoryHandle {
   }
 }
 
-function nativeBridge(): BridgeApi {
-  let loaded: NativeCheckpointChildBridge | undefined;
-  const native = (): NativeCheckpointChildBridge => {
+let loadedNative: NativeCheckpointChildBridge | undefined;
+function native(): NativeCheckpointChildBridge {
+    let loaded = loadedNative;
     if (loaded) return loaded;
     const target = checkpointBridgeTarget();
     assertCheckpointBridgeHost(target, currentGlibcVersion());
     loaded = createRequire(import.meta.url)(verifyCheckpointBridgeArtifact(
       fileURLToPath(new URL("../", import.meta.url)), target,
     )) as NativeCheckpointChildBridge;
+    loadedNative = loaded;
     return loaded;
-  };
+}
+
+/** OS incarnation, not a PID-liveness or second-resolution timestamp substitute. */
+export function readDarwinProcessBirth(pid: number): string {
+  if (process.platform !== "darwin") throw Error("Darwin process identity required");
+  return native().processBirth(pid);
+}
+
+function nativeBridge(): BridgeApi {
   return {
     openPath: async (...args) => native().openPath(...args),
     statFile: async (...args) => native().statFile(...args),
@@ -334,8 +344,8 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     openDirectory: async (parent, name, create) => BigInt(await request<number>("openDirectory", { parent: id(parent), name, create })),
     identity: (value) => request<string>("identity", { handle: id(value) }),
     writeFile: (parent, name, bytes) => request<void>("writeFile", { parent: id(parent), name, data: bytes.toString("base64") }),
-    readFile: async (parent, name, declaredBytes, offset, limit) => Buffer.from(
-      await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit }),
+    readFile: async (parent, name, declaredBytes, offset, limit, identity) => Buffer.from(
+      await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit, ...(identity ? { identity } : {}) }),
       "base64",
     ),
     listEntries: (parent, maximumEntries) => request<readonly string[]>("listEntries", {

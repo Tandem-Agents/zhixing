@@ -2,6 +2,7 @@ import { ExtensionRevisionConflict, type ExtensionApplication } from "./applicat
 import type { ExtensionArtifacts } from "./artifacts.js";
 import type { ExtensionInstance, ExtensionProcess, ExtensionTypeBinding } from "./contracts.js";
 import { startExtensionProcess } from "./process.js";
+export { EXTENSION_LOG_SOURCE } from "./logging.js";
 
 interface Slot {
   readonly generation: string;
@@ -21,6 +22,7 @@ export class ManagedExtensions {
   private paused = false;
   private closed = false;
   constructor(private readonly ports: {
+    readonly recordsFor?: (instance: ExtensionInstance, generation: string) => import("../logging/contracts.js").LogRecordPort | undefined;
     readonly application: ExtensionApplication;
     readonly artifacts: ExtensionArtifacts;
     readonly projection: (instance: ExtensionInstance) => Promise<unknown>;
@@ -117,12 +119,17 @@ export class ManagedExtensions {
       stopped: new Promise<void>((resolve) => { stopped = resolve; }) };
     this.slots.set(instance.id, slot);
     const launch = async (): Promise<void> => {
+      let records: import("../logging/contracts.js").LogRecordPort | undefined;
+      // Observation setup must not acquire the business slot's settlement obligation.
+      try { records = this.ports.recordsFor?.(starting, slot.generation); } catch { /* optional observer */ }
+      records?.record({ event: "starting", data: { attempt: attempts } });
       let process: ExtensionProcess | undefined;
       try {
         const projection = await this.ports.projection(starting);
         const entry = await this.ports.artifacts.resolve(starting.binding.manifest);
         controller.signal.throwIfAborted();
         process = await startExtensionProcess({ entry, manifest: starting.binding.manifest,
+          records,
           generation: slot.generation, projection, signal: controller.signal,
           binding: this.ports.binding(starting, slot.generation),
           isCurrent: () => this.slots.get(instance.id) === slot && !slot.retired && this.allowed && this.ports.isOwner(),
@@ -137,7 +144,8 @@ export class ManagedExtensions {
           if (controller.signal.aborted) resolve();
           else controller.signal.addEventListener("abort", () => resolve(), { once: true });
         });
-      } catch {
+      } catch (error) {
+        records?.record(() => ({ event: "failed", result: controller.signal.aborted ? "cancelled" : "failure", data: { error: error instanceof Error ? error.message : "扩展启动未完成" } }));
         if (!controller.signal.aborted) {
           await this.ports.application.observe(instance.id, slot.generation, "blocked", "启动失败：请检查本机制品、配置及连接状态").catch(() => undefined);
         }
@@ -149,6 +157,7 @@ export class ManagedExtensions {
         if (this.slots.get(instance.id) === slot && !slot.retired && this.allowed && !this.paused && !this.closed && this.ports.isOwner()) {
           await this.ports.application.observe(instance.id, slot.generation, "blocked", "连接中断", attempts >= 3).catch(() => undefined);
           if (attempts < 3 && this.slots.get(instance.id) === slot && !slot.retired && this.allowed && !this.paused && !this.closed && this.ports.isOwner()) {
+            records?.record({ event: "retry", data: { attempt: attempts + 1 } });
             slot.timer = setTimeout(() => {
               if (this.slots.get(instance.id) !== slot) return;
               this.slots.delete(instance.id);

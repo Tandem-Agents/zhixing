@@ -220,6 +220,12 @@ export type AgentEventMap = {
     input: Record<string, unknown>;
   };
 
+  /** Scheduler observation only; never creates a model tool_result or UI completion. */
+  "tool:execution_observed": {
+    id: string; name: string; result: "success" | "failure" | "refused" | "cancelled" | "unknown";
+    duration: number; resultSize: number; error?: unknown;
+  };
+
   "tool:call_end": {
     id: string;
     name: string;

@@ -7,6 +7,7 @@ import type {
   LogHealth,
   LogPolicy,
   LogRecordPort,
+  LogRef,
   LogSink,
   LogSource,
 } from "./contracts.js";
@@ -87,9 +88,14 @@ export class LogRecorder {
     this.#policy = validateLogPolicy(options.policy ?? DEFAULT_LOG_POLICY);
     this.#notify = options.onHealth;
   }
-  bind(source: LogSource, access: LogAccess): LogRecordPort {
+  bind(source: LogSource, access: LogAccess, refs: readonly LogRef[] = [], admission?: { readonly maxPerSecond: number }): LogRecordPort {
+    try {
+    if (admission && (!Number.isSafeInteger(admission.maxPerSecond) || admission.maxPerSecond < 1 || admission.maxPerSecond > 128))
+      throw Error("日志来源准入限额无效");
+    let windowStart = performance.now(), count = 0;
     const boundSource = bindLogSource(source),
-      boundAccess = { ...access };
+      boundAccess = { ...access },
+      boundRefs = refs.map((ref) => ({ ...ref }));
     if (!this.#sources.has(source.id)) {
       if (this.#sources.size >= 64) throw Error("日志来源数量超限");
       this.#sources.add(source.id);
@@ -98,8 +104,14 @@ export class LogRecorder {
       record: (draft) => {
         if (this.#closing) return;
         try {
+          if (admission) {
+            const now = performance.now();
+            if (now - windowStart >= 1000) { windowStart = now; count = 0; }
+            if (++count > admission.maxPerSecond) { this.#lose(); this.#kick(); return; }
+          }
+          const projected = typeof draft === "function" ? draft() : draft;
           this.#enqueue(
-            captureLog(boundSource, boundAccess, draft, this.#policy, this.#process, ++this.#seq),
+            captureLog(boundSource, boundAccess, projected, this.#policy, this.#process, ++this.#seq, boundRefs),
           );
         } catch {
           this.#failures++;
@@ -108,6 +120,12 @@ export class LogRecorder {
         }
       },
     } satisfies LogRecordPort);
+    } catch {
+      this.#failures++;
+      this.#lose();
+      this.#degrade("binding-failed");
+      return Object.freeze({ record: () => undefined });
+    }
   }
   health(): LogHealth {
     return {

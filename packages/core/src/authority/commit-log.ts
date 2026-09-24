@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import type { LogRecordPort } from "../logging/contracts.js";
+import { authorityObservationRefs } from "./logging.js";
 import {
   link,
   open,
@@ -99,6 +101,7 @@ const RETAINED_ROOT_PREFIX = "retention/root/";
 const RETAINED_SCAN_PAGE_SIZE = 256;
 
 export interface FileAuthorityCommitLogOptions {
+  readonly records?: LogRecordPort;
   readonly clock?: () => IsoTime;
   readonly lockStaleMs?: number;
   readonly lockWaitMs?: number;
@@ -160,6 +163,7 @@ interface RegisteredDurableProjection {
 }
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
+  readonly #records: LogRecordPort | undefined;
   readonly rootDir: string;
   readonly logPath: string;
   readonly identityPath: string;
@@ -184,6 +188,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     artifactStore: FileArtifactStore,
     options: FileAuthorityCommitLogOptions = {},
   ) {
+    this.#records = options.records;
     this.rootDir = path.resolve(rootDir);
     this.logPath = path.join(this.rootDir, "authority.log");
     this.identityPath = path.join(this.rootDir, "authority.log.identity");
@@ -1221,10 +1226,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await handle.writeFile(frame);
       await handle.sync();
       committed = true;
+      this.#records?.record(() => ({ event: "committed", result: "success",
+        refs: [{ kind: "authority", id: checkpoint.logId }, ...authorityObservationRefs(entries)],
+        data: { lsn, count: entries.length, streams: entries.slice(0, 32).map((entry) => entry.stream) },
+      }));
       this.#verifiedTail = nextTail;
       for (const { projection, prepared, checkpoints } of preparedProjections) {
         projection.state.publish(prepared, checkpoints);
       }
+    } catch (error) {
+      if (!committed) this.#records?.record(() => ({ event: "uncertain", result: "unknown",
+        refs: [{ kind: "authority", id: checkpoint.logId }, ...authorityObservationRefs(entries)],
+        data: { lsn, error: error instanceof Error ? error.message : "权威追加异常" },
+      }));
+      throw error;
     } finally {
       if (committed) {
         await handle.close().catch(() => undefined);
@@ -1294,11 +1309,13 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       checkpoint: DurableLogCheckpoint,
     ) => void | Promise<void> = () => undefined,
   ): Promise<number> {
+    const firstRecovery = this.#verifiedTail === undefined;
     const scanned = await this.#scanLog(visit);
     if (scanned.incompleteTail) {
       await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
     }
     await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+    if (firstRecovery || scanned.incompleteTail) this.#records?.record({ event: "recovered", result: "success", refs: [{ kind: "authority", id: this.#requireLogId() }], data: { lsn: scanned.lastLsn, incompleteTail: !!scanned.incompleteTail } });
     return scanned.lastLsn;
   }
 

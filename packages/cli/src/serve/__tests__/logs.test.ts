@@ -1,209 +1,56 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
-import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import type { LogPage, LogRecord } from "@zhixing/core/logging";
 import { runLogsCommand } from "../logs.js";
 
-const ORIGINAL_ZHIXING_HOME = process.env.ZHIXING_HOME;
+const record = (seq: number): LogRecord => ({ storeId: "store-a", id: `record-${seq}`, seq, message: `记录 ${seq}` }) as LogRecord;
+const page = (records: LogRecord[], upper = records.length, cursor?: string): LogPage => ({ records, gaps: [], coverage: { upper, complete: !cursor }, ...(cursor ? { cursor } : {}) }) as LogPage;
+const output = () => ({ log: vi.fn(), error: vi.fn() });
 
-afterEach(() => {
-  if (ORIGINAL_ZHIXING_HOME === undefined) delete process.env.ZHIXING_HOME;
-  else process.env.ZHIXING_HOME = ORIGINAL_ZHIXING_HOME;
-});
-
-describe("runLogsCommand — default mode", () => {
-  it("reads the governed active server log path by default", async () => {
-    process.env.ZHIXING_HOME = join("tmp", "zhixing-home");
-    const readFile = vi.fn(async () => "line");
-
-    await runLogsCommand({
-      deps: {
-        readFileFn: readFile,
-        console: { log: vi.fn(), error: vi.fn() },
-      },
-    });
-
-    expect(readFile).toHaveBeenCalledWith(
-      join("tmp", "zhixing-home", "logs", "server", "server.log"),
-      "utf-8",
-    );
+describe("serve logs compatibility through the unified reader", () => {
+  it("keeps the last N records across bounded query pages", async () => {
+    const con = output();
+    const query = vi.fn().mockResolvedValueOnce(page([record(1), record(2)], 4, "next")).mockResolvedValueOnce(page([record(3), record(4)], 4));
+    await runLogsCommand({ home: "isolated", lines: 2, deps: { query, console: con } });
+    expect(query.mock.calls).toEqual([["isolated", {}, undefined], ["isolated", {}, "next"]]);
+    expect(con.log.mock.calls.map(([line]) => JSON.parse(line).seq)).toEqual([3, 4]);
   });
-
-  it("prints last N lines of log file", async () => {
-    const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
-    const log = vi.fn();
-    await runLogsCommand({
-      lines: 10,
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => content),
-        console: { log, error: vi.fn() },
-      },
-    });
-    // 期望最后 10 行 (line 91..100)
-    expect(log).toHaveBeenCalledTimes(10);
-    expect(log).toHaveBeenNthCalledWith(1, "line 91");
-    expect(log).toHaveBeenNthCalledWith(10, "line 100");
+  it("follows the publication watermark, including late records with old wall time", async () => {
+    const con = output();
+    const query = vi.fn().mockResolvedValueOnce(page([record(1)], 1)).mockResolvedValueOnce(page([{ ...record(2), occurredAt: 0 }], 2));
+    await runLogsCommand({ home: "isolated", tail: true, stopCondition: () => query.mock.calls.length === 2, deps: { query, sleep: async () => {}, console: con } });
+    expect(query.mock.calls[1]).toEqual(["isolated", { afterSequence: 1 }, undefined]);
+    expect(con.log.mock.calls.map(([line]) => JSON.parse(line).seq)).toEqual([1, 2]);
   });
-
-  it("handles file shorter than N lines", async () => {
-    const content = "only-line-1\nonly-line-2";
-    const log = vi.fn();
-    await runLogsCommand({
-      lines: 10,
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => content),
-        console: { log, error: vi.fn() },
-      },
-    });
-    expect(log).toHaveBeenCalledTimes(2);
+  it("reports query failure, retention gaps and identity changes honestly", async () => {
+    const con = output();
+    const query = vi.fn().mockResolvedValueOnce({ ...page([record(1)], 1), gaps: [{ kind: "expired", reason: "retained-prefix" }] }).mockResolvedValueOnce(page([{ ...record(2), storeId: "replacement" }], 2));
+    await runLogsCommand({ tail: true, deps: { query, sleep: async () => {}, console: con } });
+    expect(con.error.mock.calls.flat().join(" ")).toMatch(/expired.*身份/s);
+    const error = output();
+    await runLogsCommand({ deps: { query: async () => { throw Error("denied"); }, console: error } });
+    expect(error.error).toHaveBeenCalledWith("denied");
+    expect(error.log).not.toHaveBeenCalled();
   });
-
-  it("handles empty file", async () => {
-    const log = vi.fn();
-    await runLogsCommand({
-      lines: 10,
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => ""),
-        console: { log, error: vi.fn() },
-      },
-    });
-    expect(log).not.toHaveBeenCalled();
+  it("stops scanning at the page budget and exposes a continuation", async () => {
+    const query = vi.fn(async () => page([record(1)], 99, "next"));
+    const con = output();
+    await runLogsCommand({ deps: { query, console: con } });
+    expect(query).toHaveBeenCalledTimes(16);
+    expect(con.error).toHaveBeenCalledWith(expect.stringContaining("--cursor next"));
   });
-
-  it("strips trailing empty line after final \\n", async () => {
-    const log = vi.fn();
-    await runLogsCommand({
-      lines: 5,
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => "a\nb\n"),
-        console: { log, error: vi.fn() },
-      },
-    });
-    expect(log).toHaveBeenCalledTimes(2);
-    expect(log).toHaveBeenNthCalledWith(1, "a");
-    expect(log).toHaveBeenNthCalledWith(2, "b");
+  it("keeps pre-migration legacy evidence explicitly local and read-only", async () => {
+    const con = output();
+    const query = vi.fn(async () => ({ ...page([]), detail: { address: "zxlog-local:legacy/catalog" } }));
+    await runLogsCommand({ tail: true, deps: { query, console: con } });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(con.log).toHaveBeenCalledWith(expect.stringContaining("zxlog-local:legacy/catalog"));
+    expect(con.error).toHaveBeenCalledWith(expect.stringContaining("尚未登记"));
   });
-
-  it("prints error when file read fails", async () => {
-    const error = vi.fn();
-    await runLogsCommand({
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => {
-          throw new Error("ENOENT");
-        }),
-        console: { log: vi.fn(), error },
-      },
-    });
-    expect(error).toHaveBeenCalledWith(expect.stringMatching(/Failed to read/));
-  });
-
-  it("handles UTF-8 Chinese content correctly", async () => {
-    const content = "启动完成\n服务监听中\n收到消息";
-    const log = vi.fn();
-    await runLogsCommand({
-      lines: 10,
-      logPath: "/tmp/log",
-      deps: {
-        readFileFn: vi.fn(async () => content),
-        console: { log, error: vi.fn() },
-      },
-    });
-    expect(log).toHaveBeenCalledWith("启动完成");
-    expect(log).toHaveBeenCalledWith("服务监听中");
-    expect(log).toHaveBeenCalledWith("收到消息");
-  });
-
-  it("rejects invalid line counts before reading the log", async () => {
-    for (const lines of [0, -1, 1.5, 5001, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const readFile = vi.fn(async () => "line");
-
-      await expect(
-        runLogsCommand({
-          lines,
-          logPath: "/tmp/log",
-          deps: {
-            readFileFn: readFile,
-            console: { log: vi.fn(), error: vi.fn() },
-          },
-        }),
-      ).rejects.toThrow(/--lines/);
-      expect(readFile).not.toHaveBeenCalled();
+  it("validates the requested line count before invoking the reader", async () => {
+    for (const lines of [0, -1, 1.5, 5001, NaN, Infinity]) {
+      const query = vi.fn();
+      await expect(runLogsCommand({ lines, deps: { query, console: output() } })).rejects.toThrow(/--lines/);
+      expect(query).not.toHaveBeenCalled();
     }
-  });
-});
-
-describe("runLogsCommand — tail mode", () => {
-  it("reads initial tail, then polls and outputs new content on size growth", async () => {
-    let currentSize = 10; // 初始 file = "1234567890"
-    let fileContent = "1234567890";
-    const log = vi.fn();
-
-    let pollCount = 0;
-    const stat = vi.fn(async () => ({ size: currentSize }));
-    const readRange = vi.fn(async (_p: string, from: number, to: number) => {
-      return fileContent.slice(from, to);
-    });
-    const readFile = vi.fn(async () => fileContent);
-    const sleep = vi.fn(async () => {
-      pollCount += 1;
-      if (pollCount === 1) {
-        // 第一轮 poll 后：append 5 字节
-        fileContent += "ABCDE";
-        currentSize = fileContent.length;
-      }
-      // pollCount >= 2 → stopCondition 返回 true
-    });
-
-    await runLogsCommand({
-      tail: true,
-      lines: 5,
-      pollMs: 10,
-      logPath: "/tmp/log",
-      stopCondition: () => pollCount >= 2,
-      deps: {
-        statFn: stat,
-        readFileFn: readFile,
-        readRangeFn: readRange,
-        sleep,
-        console: { log, error: vi.fn() },
-      },
-    });
-
-    // 读到了新内容
-    expect(readRange).toHaveBeenCalledWith("/tmp/log", 10, 15);
-    // 输出中包含 "ABCDE"
-    const allOutput = log.mock.calls.map((c) => c[0]).join("\n");
-    expect(allOutput).toContain("ABCDE");
-  });
-
-  it("handles file truncation (size shrinks) by resetting offset", async () => {
-    let currentSize = 100;
-    const log = vi.fn();
-    let pollCount = 0;
-
-    await runLogsCommand({
-      tail: true,
-      lines: 5,
-      pollMs: 10,
-      logPath: "/tmp/log",
-      stopCondition: () => pollCount >= 2,
-      deps: {
-        statFn: vi.fn(async () => ({ size: currentSize })),
-        readFileFn: vi.fn(async () => "x"),
-        readRangeFn: vi.fn(async () => "new-content"),
-        sleep: vi.fn(async () => {
-          pollCount += 1;
-          if (pollCount === 1) currentSize = 50; // 变小（truncation）
-          if (pollCount === 2) currentSize = 70; // 重新增长
-        }),
-        console: { log, error: vi.fn() },
-      },
-    });
-
-    // 不应该报错，应该正常处理 truncation
-    expect(log.mock.calls.some((c) => String(c[0]).includes("new-content"))).toBe(true);
   });
 });

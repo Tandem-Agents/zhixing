@@ -1,3 +1,5 @@
+import { recordingFixture } from "../../../../core/src/logging/__tests__/recording.js";
+import type { BindLogSource } from "@zhixing/core/logging";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,7 +51,7 @@ afterEach(async () => {
   editor.run.mockReset(); editor.store = undefined;
 });
 
-async function fixture(ids = ["one"], options: Record<string, unknown> = {}) {
+async function fixture(ids = ["one"], options: Record<string, unknown> = {}, bindLogs?: BindLogSource) {
   const root = await mkdtemp(join(tmpdir(), "zhixing-channel-extension-")); roots.push(root);
   const configPath = join(root, "config.jsonc");
   const manifest = validateExtensionManifest({ id: "fixture", version: "1.0.0",
@@ -75,7 +77,7 @@ async function fixture(ids = ["one"], options: Record<string, unknown> = {}) {
   let owner = true;
   const routes = new Map();
   const make = async () => {
-    const system = await setupChannels({ authorityLog: () => log, configuration, artifactDirectory,
+    const system = await setupChannels({ bindLogs, authorityLog: () => log, configuration, artifactDirectory,
       isCurrentOwner: () => owner, httpRoutes: routes, logger });
     systems.push(system);
     return { system, api: new ProductApiDispatcher(EXTENSION_PRODUCT_API_EXACT_SET, [system.productApi]) };
@@ -595,5 +597,27 @@ describe("managed Channel production composition", () => {
     expect(f.system.statusSnapshot()[0]?.state).toBe("disconnected");
     expect(f.routes.size).toBe(0);
     expect((await f.current()).enabled).toBe(true);
+  });
+});
+
+
+describe("production channel observation", () => {
+  it("correlates actual IPC delivery, malformed evidence and admission refusal", async () => {
+    const logs = recordingFixture();
+    const f = await fixture(["one"], {}, logs.bind);
+    await f.system.delivery.send({ channelId: "one", to: "user" }, { text: "private-before-start" });
+    await connect(f);
+    const delivered = await f.system.delivery.send({ channelId: "one", to: "user" }, { text: "private-body" }, { idempotencyKey: "item-one", deliveryAttempt: { itemId: "item-one", attempt: 1 } });
+    expect(delivered.success).toBe(true);
+    await expect(f.system.delivery.send({ channelId: "one", to: "user" }, { text: "malformed" })).rejects.toThrow("Invalid Channel delivery evidence");
+    await f.system.dispose(); await logs.finish();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    const all = logs.records();
+    expect(all).toContainEqual(expect.objectContaining({ source: "channel", event: "delivered", result: "refused", data: expect.objectContaining({ attempted: false }) }));
+    const success = all.find(record => record.source === "channel" && record.event === "delivered" && record.result === "success")!;
+    expect(success.refs).toEqual(expect.arrayContaining([{ kind: "delivery", id: "item-one" }, { kind: "deliveryAttempt", id: "item-one:1" }]));
+    expect(all).toContainEqual(expect.objectContaining({ source: "extension", event: "requested", refs: expect.arrayContaining([{ kind: "deliveryAttempt", id: "item-one:1" }]) }));
+    expect(all).toContainEqual(expect.objectContaining({ source: "channel", event: "delivered", result: "unknown" }));
+    expect(JSON.stringify(all)).not.toMatch(/private-body|private-before-start|fixture-only-secret/);
   });
 });

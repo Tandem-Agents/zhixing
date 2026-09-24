@@ -3,6 +3,7 @@ import type { ExtensionManifest, ExtensionProcess, ExtensionTypeBinding } from "
 import { ExtensionPeer } from "./protocol.js";
 
 export async function startExtensionProcess(options: {
+  readonly records?: import("../logging/contracts.js").LogRecordPort;
   readonly entry: string;
   readonly manifest: ExtensionManifest;
   readonly generation: string;
@@ -35,10 +36,10 @@ export async function startExtensionProcess(options: {
   const peer = new ExtensionPeer((frame) => {
     if (!child.connected) throw new Error("Extension disconnected");
     child.send(frame, (error) => { if (error) fault(); });
-  }, async (method, payload) => {
+  }, async (method, payload, requestId) => {
     if (closing || (!retiring && !options.isCurrent())) throw new Error("Expired extension generation");
-    return options.binding.receive({ method, payload });
-  });
+    return options.binding.receive({ method, payload, requestId });
+  }, options.records);
   const terminate = () => {
     if (closing) return;
     closing = true;
@@ -55,7 +56,8 @@ export async function startExtensionProcess(options: {
   const fault = () => { if (!closing) { options.onFault(); terminate(); } };
   child.on("message", (frame) => peer.accept(frame));
   child.on("error", fault);
-  child.once("close", () => {
+  child.once("close", (code, signal) => {
+    options.records?.record(() => ({ event: "stopped", data: { code: code ?? undefined, signal: signal ?? undefined } }));
     exited = true;
     if (heartbeat) clearInterval(heartbeat);
     if (killTimer) clearTimeout(killTimer);
@@ -67,9 +69,9 @@ export async function startExtensionProcess(options: {
   });
   options.signal.addEventListener("abort", terminate, { once: true });
   if (options.signal.aborted) terminate();
-  const call = (method: string, payload: unknown): Promise<unknown> => {
+  const call: ExtensionProcess["call"] = (method, payload, refs): Promise<unknown> => {
     if (closing || (!retiring && !options.isCurrent())) return Promise.reject(new Error("Extension is not available"));
-    const request = peer.call(method, payload);
+    const request = peer.call(method, payload, undefined, refs);
     accepted.add(request);
     void request.finally(() => accepted.delete(request)).catch(() => undefined);
     return request;
@@ -84,6 +86,7 @@ export async function startExtensionProcess(options: {
       throw new Error("Extension handshake mismatch");
     }
     if (closing || !options.isCurrent()) throw new Error("Extension activation superseded");
+    options.records?.record({ event: "ready", result: "success" });
     heartbeat = setInterval(() => {
       if (healthPending || closing) return;
       healthPending = true;
@@ -93,9 +96,9 @@ export async function startExtensionProcess(options: {
     }, 30_000);
     heartbeat.unref();
     return { generation: options.generation,
-      call: (method, payload) => {
+      call: (method, payload, refs) => {
         if (closing || retiring || !options.isCurrent()) return Promise.reject(new Error("Extension is not available"));
-        return call(method, payload);
+        return call(method, payload, refs);
       },
       stop: () => {
         if (stopping) return stopping;

@@ -1,3 +1,5 @@
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { createServer } from "node:net";
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
@@ -48,6 +50,7 @@ describe("paired recovery backup setup", () => {
     "establishes the first recovery root from a %s package over the restricted production transport",
     async (version) => {
       const fixture = await pairedHomeWithoutRecoveryRoot(version);
+      const logs = recordingFixture();
       const runtime = createRecoveryRootEstablishmentRuntime({
         zhixingHome: fixture.targetHome,
         mesh: fixture.targetBootstrap,
@@ -61,6 +64,7 @@ describe("paired recovery backup setup", () => {
           { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
+            logging: { bind: logs.bind, capacity: createDeviceCapacityRuntime(fixture.sourceHome) },
             secretStore: fixture.sourceSecrets,
             storageMaintenance: fixture.sourceStorage,
             writeLine: (line) => {

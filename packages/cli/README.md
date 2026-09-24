@@ -77,7 +77,11 @@ zz logs policy
 
 RPC 提供 `logs.search`（`filter?、cursor?`）、`logs.read`（`address、view?、cursor?`）、`logs.status` 和 `logs.apply-policy`（`patch、expectedVersion`）。身份来自当前设备的连接认证，参数不能声明权限；远程认证接入可以读取，策略修改须由本机接入。游标绑定原查询与身份，续页重验权限；交给另一获准主体时传稳定地址。每次查询只覆盖该地址所属设备的本地保留证据，远端不可用、证据已淘汰或不足均明确返回缺口。
 
-文件位于 `<ZHIXING_HOME>/logs/runtime/`。`segment-*.jsonl` 每行一条观察记录；最高 `published-*.head` 指向已耐久的同代 `state-*.json`，登记保留段与耐久水位；`detail-*.json` 随所属段治理，`index-*.json` 可重建。文件管理权限允许直接用文本工具查阅；未发布或已登记淘汰的文件不能视为保留证据。当前采集覆盖入口与宿主启停，完整来源与旧日志迁移将在后续单元接通；过渡期后台旧日志仍用 `zz serve logs` 查询。
+文件位于 `<ZHIXING_HOME>/logs/runtime/`。`segment-*.jsonl` 每行一条观察记录；最高 `published-*.head` 指向已耐久的同代 `state-*.json`，登记保留段与耐久水位；`detail-*.json` 随所属段治理，`index-*.json` 可重建。文件管理权限允许直接用文本工具查阅；未发布或已登记淘汰的文件不能视为保留证据。默认采集入口／宿主、产品调用与耐久提交、Kernel／模型尝试／工具与 MCP、渠道与扩展进程、设备交接及配置生效。记录使用请求、会话、Run、任务、工具调用、投递尝试和代际等真实身份关联；错误与未知结果保留，晚到回执追加记录。模型请求正文、凭据和逐 token 文本不转录；工具成功结果只留安全摘要与长度，失败内容经限长脱敏保存，可能包含错误相关的输入输出片段。后台未分类 stdout/stderr 只记录流名及大小。
+
+`zz serve logs` 转接同一日志应用；`--tail` 按存储顺序跟随，输出受页数和字节限制。旧日志不转写为新事件：`zz logs read zxlog-local:legacy/catalog` 可查本机遗留目录，登记后使用返回的 `zxlog://<storeId>/legacy/<id>` 稳定地址。旧正文仅向整库管理者提供有界脱敏读取；未采集、已淘汰和证据不足会明确标记。
+
+`zz logs` 的迁移状态同时核对存活写者和实际遗留占用。旧写者仍在运行、进程归属无法确认或空间未释放时，不宣称设备整体预算已生效；按正常停止／升级流程处理后自动续接。预算只接管已知历史日志，不清理业务权威、恢复材料或其他用户文件。
 
 ## 安装与配置
 
@@ -262,7 +266,7 @@ WebSocket:    ws://127.0.0.1:<实际端口>/ws  ← JSON-RPC 2.0
 
 ### 查看后台宿主日志
 
-`zz serve logs` 是当前仍可调用的后台宿主日志查看入口。
+`zz serve logs` 是统一运行日志的兼容查看入口，前后台共用同一存储和保留策略。
 
 ```bash
 zz serve logs

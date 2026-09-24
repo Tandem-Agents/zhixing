@@ -9931,10 +9931,9 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/cli/src/serve/executor-server-lifecycle.ts",
     "packages/server/src/server-state.ts",
     "packages/server/src/process-lock.ts",
-    "packages/server/src/server-log-lifecycle.ts",
     "packages/cli/src/serve/managed-service.ts",
-    "packages/cli/src/output/llm-chunk-dump.ts",
-    "packages/cli/src/security/keypress-dump.ts",
+    "packages/cli/src/logging/runtime.ts",
+    "packages/core/src/logging/storage.ts",
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/cli/src/runtime/workspace-command.ts",
@@ -10064,7 +10063,14 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
       "packages/cli/src/serve/status.ts",
       (text) => `${text}\nconst duplicateLogRoot = path.join(home, "logs", "llm-error");`,
     )).join("\n"),
-    /P15 llm-error path writer production multiplicity/,
+    /P15 retired private log writer returned/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text + '\nimport { LocalLogStore } from "@zhixing/core/logging/storage";',
+    )).join("\n"),
+    /P15 producer depends on a log reader or store/,
   );
   assert.match(
     inspectStorageRemainderBoundary(mutate(
@@ -10150,4 +10156,15 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
     )).join("\n"),
     /exact cleanup ownership drifted/,
   );
+});
+
+test("runtime logging P15 rejects reverse reader dependencies and private writers", async () => {
+  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts"];
+  const records = await Promise.all(paths.map(async relative => ({ relative, text: await readFile(relative, "utf8") })));
+  const inspect = (input) => inspectStorageRemainderBoundary(input).filter(failure => failure.includes("P15"));
+  assert.deepEqual(inspect(records), []);
+  const append = text => records.map(record => record.relative === paths[2] ? { ...record, text: record.text + text } : record);
+  assert.match(inspect(append('\nimport { LocalLogStore } from "@zhixing/core/logging/storage";')).join("\n"), /producer depends on a log reader or store/);
+  assert.match(inspect(append('\nconst privateRoot = path.join(home, "logs", "llm-error");')).join("\n"), /retired private log writer returned/);
+  assert.match(inspect(append('\nnew LogRecorder(store, {});')).join("\n"), /production recorder.*multiplicity/);
 });

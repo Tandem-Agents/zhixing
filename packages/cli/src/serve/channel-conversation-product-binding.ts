@@ -1,3 +1,5 @@
+import type { BindLogSource, LogDraft } from "@zhixing/core/logging";
+import { CHANNEL_LOG_SOURCE } from "../runtime/extensions/channel-logging.js";
 import { userTurnInputFromText, type TurnContext } from "@zhixing/core";
 import {
   CONVERSATION_ABORT_COMMAND,
@@ -30,7 +32,7 @@ export class ChannelConversationProductBinding
   #productApi: ProductApiDispatcher | undefined;
   #closed = false;
 
-  constructor(manager: ConversationManager) {
+  constructor(manager: ConversationManager, private readonly bindLogs?: BindLogSource) {
     this.#manager = manager;
     this.#delivery = manager.usesDurableTurnProtocol()
       ? "authoritative"
@@ -86,7 +88,15 @@ export class ChannelConversationProductBinding
         caller: channelCaller(input.channelId, input.platformSubject),
       },
     );
+    this.#record(undefined, () => ({ event: "prepared", result: "success", refs: [
+      { kind: "turn", id: dispatch.result.turnId }, ...(input.messageId ? [{ kind: "message", id: input.messageId }] : []),
+    ] }));
     return dispatch.result;
+  }
+
+  #record(conversationId: string | undefined, draft: () => LogDraft): void {
+    try { this.bindLogs?.(CHANNEL_LOG_SOURCE, { scope: conversationId ? "conversation:" + conversationId : "storage" }).record(draft); }
+    catch { /* A failing optional observation factory cannot alter admission. */ }
   }
 
   async admitAgentTurn(
@@ -110,12 +120,18 @@ export class ChannelConversationProductBinding
           execution,
         },
       );
+      this.#record(dispatch.result.conversationId, () => ({ event: "admitted", result: "success", refs: [
+        { kind: "turn", id: dispatch.result.turnId }, { kind: "conversation", id: dispatch.result.conversationId },
+      ], data: { status: dispatch.result.status } }));
       return Object.freeze({
         status: dispatch.result.status,
         conversationId: dispatch.result.conversationId,
         turnId: dispatch.result.turnId,
       });
     } catch (error) {
+      this.#record(input.conversationId, () => ({ event: "admitted", result: error instanceof ConversationApplicationError ? "refused" : "unknown", refs: [
+        { kind: "turn", id: input.turnIdentity.turnId }, { kind: "conversation", id: input.conversationId },
+      ], data: { error: error instanceof ConversationApplicationError ? error.reason : "接纳结果尚未确认" } }));
       if (error instanceof ConversationApplicationError) {
         if (error.reason === "turn-conversation-not-found") {
           return frozenAdmissionFailure("not-found", input);

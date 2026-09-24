@@ -166,11 +166,13 @@ async function* runSerialBatch(
     // 比"工具未找到"分支早，保证已 aborted 时不再消耗任何工具。
     // 不记 abortedDuringToolAt —— loopFrameworkDelay 全归 loop 框架。
     if (abortSignal?.aborted) {
+      for (const skipped of toolCalls.slice(i)) await observeToolOutcome(eventBus, skipped, "cancelled", "未开始：运行已取消");
       abortedAtIndex = i;
       break;
     }
 
     if (planned.kind === "reject") {
+      await observeToolOutcome(eventBus, call, "refused", planned.result.content);
       results.push({
         type: "tool_result",
         toolUseId: call.id,
@@ -213,6 +215,8 @@ async function* runSerialBatch(
       });
 
       const result = { content: errorContent, isError: true };
+
+      await observeToolOutcome(eventBus, call, tool ? "failure" : "refused", errorContent, duration, errorContent.length);
 
       yield { type: "tool_end", id: call.id, name: call.name, result, duration };
 
@@ -264,6 +268,8 @@ async function* runSerialBatch(
         isError: toolResult.isError,
       });
 
+      await observeToolOutcome(eventBus, call, toolResult.isError ? "failure" : "success", toolResult.isError ? toolResult.content : undefined, duration, toolResult.content.length);
+
       yield { type: "tool_end", id: call.id, name: call.name, result: toolResult, duration };
 
       await eventBus?.emit("tool:call_end", {
@@ -277,6 +283,7 @@ async function* runSerialBatch(
       if (abortSignal?.aborted) {
         // 工具响应 abort 后正常 return (可能 partial output)；当前工具的合规 result 已 push,
         // unexecutedToolUses 从下一个开始
+        for (const skipped of toolCalls.slice(i + 1)) await observeToolOutcome(eventBus, skipped, "cancelled", "未开始：运行已取消");
         abortedDuringToolAt = performance.now();
         abortedAtIndex = i + 1;
         break;
@@ -290,6 +297,8 @@ async function* runSerialBatch(
         // **不在此 yield/emit tool_end** —— 否则与 cleanup placeholder 重复，
         // 同一 tool_use 会有两个 tool_result 进 user message，违反 messages 协议
         // (Anthropic API 报 400)。单一事实源:abort 触发的所有 placeholder 由 cleanup 出。
+        await observeToolOutcome(eventBus, call, "unknown", err, duration);
+        for (const skipped of toolCalls.slice(i + 1)) await observeToolOutcome(eventBus, skipped, "cancelled", "未开始：运行已取消");
         abortedDuringToolAt = performance.now();
         abortedAtIndex = i;
         break;
@@ -317,6 +326,8 @@ async function* runSerialBatch(
       });
 
       const result = { content: errorContent, isError: true };
+
+      await observeToolOutcome(eventBus, call, tool ? "failure" : "refused", errorContent, duration, errorContent.length);
 
       yield { type: "tool_end", id: call.id, name: call.name, result, duration };
 
@@ -395,6 +406,7 @@ async function* runParallelBatch(
   // 入口 abort guard:与串行循环顶 guard 等价,但批次粒度
   // (并发模式不存在"前 K 个完成 + 后续未启动"边界,所以入口 check 一次即可)
   if (abortSignal?.aborted) {
+    for (const skipped of toolCalls) await observeToolOutcome(eventBus, skipped, "cancelled", "未开始：运行已取消");
     return {
       completedResults: [],
       unexecutedToolUses: [...toolCalls],
@@ -418,7 +430,7 @@ async function* runParallelBatch(
 
   const startTime = Date.now();
   const settled = await Promise.allSettled(
-    runnable.map(({ call, tool }) => {
+    runnable.map(async ({ call, tool }) => {
       const ctx: ToolExecutionContext = {
         workingDirectory,
         abortSignal,
@@ -426,7 +438,14 @@ async function* runParallelBatch(
         llm: llmRoles,
         roleThinking,
       };
-      return executeObservedTool(deps, tool!, call.input, ctx, params.sideEffects);
+      try {
+        const result = await executeObservedTool(deps, tool!, call.input, ctx, params.sideEffects);
+        await observeToolOutcome(eventBus, call, result.isError ? "failure" : "success", result.isError ? result.content : undefined, Date.now() - startTime, result.content.length);
+        return result;
+      } catch (error) {
+        await observeToolOutcome(eventBus, call, abortSignal?.aborted ? "unknown" : "failure", error, Date.now() - startTime);
+        throw error;
+      }
     }),
   );
   const settledAt = performance.now();
@@ -442,6 +461,7 @@ async function* runParallelBatch(
     const call = planned.call;
 
     if (planned.kind === "reject") {
+      await observeToolOutcome(eventBus, call, "refused", planned.result.content);
       results.push({
         type: "tool_result",
         toolUseId: call.id,
@@ -635,4 +655,8 @@ function applyMaxResultChars(
     ...result,
     content: `${truncated}\n\n[truncated: showing first ${maxChars.toLocaleString()} of ${result.content.length.toLocaleString()} chars, ${omitted.toLocaleString()} chars omitted]`,
   };
+}
+
+async function observeToolOutcome(bus: IEventBus<AgentEventMap> | undefined, call: ToolUseBlock, result: AgentEventMap["tool:execution_observed"]["result"], error?: unknown, duration = 0, resultSize = 0): Promise<void> {
+  await bus?.emit("tool:execution_observed", { id: call.id, name: call.name, result, error, duration, resultSize });
 }

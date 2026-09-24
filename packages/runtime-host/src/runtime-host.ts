@@ -58,6 +58,7 @@ export interface JobAgentRuntimeOptions {
 }
 
 export interface RuntimeHostOptions {
+  readonly createLogRecords?: CreateAgentRuntimeOptions["createLogRecords"];
   /** Host-owned concrete Provider adapter; RuntimeHost only requests a finite binding. */
   readonly modelProvider: KernelModelProviderFactory;
   /** Host-owned configuration/workspace projection; no source object enters the Kernel. */
@@ -168,6 +169,7 @@ export class RuntimeHost {
     });
     const turnContextProviders = this.opts.turnContextProviders?.();
     return createAgentRuntime({
+      createLogRecords: this.opts.createLogRecords,
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
       ...(this.opts.deviceCapacity
         ? { orchestrationCapacity: this.opts.deviceCapacity.orchestration }

@@ -1,6 +1,8 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
 import type { LogRecordPort } from "@zhixing/core/logging";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
+import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers";
 import type { ServeOptions } from "./command.js";
 import type { StartupCheckResult } from "../startup.js";
 import {
@@ -76,6 +78,7 @@ export interface PersistentApplicationHostInput<Options> {
   readonly onRecoveryRootRequired: () => void;
   readonly deviceCapacity?: DeviceCapacityRuntime;
   readonly logRecords?: LogRecordPort;
+  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
 }
 
 export interface PersistentApplicationHostDependencies<Options> {
@@ -182,6 +185,7 @@ export class PersistentApplicationHost<Options> {
       this.#dependencies.createPlannedAnchorTransferStaging({
         zhixingHome: this.#input.zhixingHome,
         storageMaintenance: deviceCapacity.storage,
+        records: this.#input.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       });
     this.#plannedAnchorTransferStaging = own(
       plannedAnchorTransferStaging,
@@ -190,6 +194,7 @@ export class PersistentApplicationHost<Options> {
     const disasterRecoveryStaging = this.#dependencies.createDisasterRecoveryStaging({
       zhixingHome: this.#input.zhixingHome,
       storageMaintenance: deviceCapacity.storage,
+      records: this.#input.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     });
     this.#disasterRecoveryStaging = own(
       disasterRecoveryStaging,
@@ -242,6 +247,7 @@ export class PersistentApplicationHost<Options> {
     const bootstrap = Object.freeze({
       zhixingHome: this.#input.zhixingHome,
       mesh,
+      bindLogs: this.#input.bindLogs ? ((source, access, refs = [], admission) => this.#input.bindLogs!(source, access, [{ kind: "device", id: mesh.deviceKey.deviceId }, ...refs], admission)) as import("@zhixing/core/logging").BindLogSource : undefined,
       deviceCapacity,
       secretStore: this.#input.secretStore,
       modelConfiguration: this.#configuration.model,
@@ -254,6 +260,7 @@ export class PersistentApplicationHost<Options> {
       createToolImplementation: this.#dependencies.createToolImplementation,
     }) satisfies ServeBootstrapContext;
 
+    bootstrap.bindLogs?.(CONFIGURATION_LOG_SOURCE, { scope: "storage" }).record(() => { const context = runtimeConfigurationObservation(this.#input.startup.runtimeConfiguration); return { event: "effective", result: "success", refs: [{ kind: "configuration", id: context.selectionDigest }], data: { mode: this.#input.processMode, roles, ...context } }; });
     await this.#runRoleComponents(plan, bootstrap);
   }
 
@@ -315,6 +322,7 @@ export class PersistentApplicationHost<Options> {
     disasterRecoveryStaging: DisasterRecoveryStagingArea,
   ): Promise<MeshRuntimeBootstrap> {
     const mesh = await this.#dependencies.prepareMesh({
+      records: this.#input.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
@@ -324,6 +332,7 @@ export class PersistentApplicationHost<Options> {
         ? { configuration: this.#configuration.topology.mesh }
         : {}),
     });
+
     this.#mesh = own(mesh, () => mesh.bootstrapStore.stopStorageMaintenance());
     return mesh;
   }

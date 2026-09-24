@@ -17,6 +17,10 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#endif
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -459,7 +463,8 @@ napi_value WriteFileCall(napi_env env, napi_callback_info info) {
 
 napi_value ReadFileCall(napi_env env, napi_callback_info info) {
   try {
-    size_t argc = 5; napi_value args[5]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    size_t argc = 6; napi_value args[6]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto expected = argc >= 6 ? Utf8(env, args[5]) : "";
     const auto name = Utf8(env, args[1]); ExactName(name);
     int64_t declared = 0, offset = 0, limit = 0;
     Check(env, napi_get_value_int64(env, args[2], &declared), "Invalid declared length");
@@ -470,6 +475,7 @@ napi_value ReadFileCall(napi_env env, napi_callback_info info) {
 #ifdef _WIN32
     HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, false);
     try {
+      if (!expected.empty() && IdentityValue(file) != expected) throw std::runtime_error("Checkpoint read identity changed");
       LARGE_INTEGER size{}; if (!GetFileSizeEx(file, &size) || (declared >= 0 && size.QuadPart != declared) || (declared < 0 && size.QuadPart > limit) || offset > size.QuadPart) throw std::runtime_error("Checkpoint file length changed");
       const size_t length = static_cast<size_t>(std::min<int64_t>(limit, size.QuadPart - offset));
       void* data = nullptr; Check(env, napi_create_buffer(env, length, &data, &buffer), "Unable to allocate checkpoint range");
@@ -480,6 +486,7 @@ napi_value ReadFileCall(napi_env env, napi_callback_info info) {
 #else
     int file = OpenRelative(Handle(U64(env, args[0])), name, false, false, false, false);
     try {
+      if (!expected.empty() && IdentityValue(file) != expected) throw std::runtime_error("Checkpoint read identity changed");
       struct stat st{}; if (fstat(file, &st) < 0 || (declared >= 0 && st.st_size != declared) || (declared < 0 && st.st_size > limit) || offset > st.st_size || !S_ISREG(st.st_mode) || st.st_nlink != 1) throw std::runtime_error("Checkpoint file identity changed");
       const size_t length = static_cast<size_t>(std::min<int64_t>(limit, st.st_size - offset));
       void* data = nullptr; Check(env, napi_create_buffer(env, length, &data, &buffer), "Unable to allocate checkpoint range");
@@ -717,8 +724,25 @@ napi_value CloseCall(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 }
 
+napi_value ProcessBirthCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 1; napi_value args[1]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    int32_t pid = 0; Check(env, napi_get_value_int32(env, args[0], &pid), "Invalid process id");
+    if (pid <= 0) throw std::runtime_error("Invalid process id");
+#if defined(__APPLE__)
+    int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc process{}; size_t size = sizeof(process);
+    if (sysctl(mib, 4, &process, &size, nullptr, 0) < 0 || size != sizeof(process)) throw std::runtime_error("Process identity unavailable");
+    return String(env, std::to_string(process.kp_proc.p_starttime.tv_sec) + ":" + std::to_string(process.kp_proc.p_starttime.tv_usec));
+#else
+    throw std::runtime_error("Darwin process identity required");
+#endif
+  } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   const napi_property_descriptor properties[] = {
+    {"processBirth", nullptr, ProcessBirthCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"statFile", nullptr, StatFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"truncateFile", nullptr, TruncateFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryLock", nullptr, TryLockCall, nullptr, nullptr, nullptr, napi_default, nullptr},

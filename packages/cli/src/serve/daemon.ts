@@ -3,18 +3,18 @@
  *
  * 流程（对应 daemon-level-1-execution.md §3.1 父进程拓扑）：
  * 1. resolveSelfExec 拿 { command, args, env }
- * 2. 打开日志文件 fd（append）
- * 3. spawn + detach + unref + 父进程立即 close(fd)
+ * 2. 由 child 在固定 home 后装配统一 Recorder
+ * 3. spawn + detach + unref（stdio 不连接文件）
  * 4. startupHandshake 轮询：PID 文件 + .ready marker + /api/health 200（三项皆需）
  * 5. 成功 → 打印横幅
- *    失败 → 打印日志尾部 20 行 → 调用方 exit(1)
+ *    失败 → 统一日志应用查询本次启动证据
  *
  * 所有外部依赖通过 deps 注入，便于单测 mock 而不触发真实 spawn / 网络。
  */
 
 import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process";
-import { open, mkdir, readFile, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { stat } from "node:fs/promises";
+import { queryLocalLogs } from "../logging/local-query.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
 import chalk from "chalk";
@@ -24,10 +24,7 @@ import {
   getDefaultLogPath,
   getDefaultPidPath,
   getDefaultPortPath,
-  getDefaultServerLogPaths,
   getDefaultReadyMarkerPath,
-  prepareServerLogForWrite,
-  SERVER_LOG_ACTIVE_OPEN_FLAGS,
   type PidFileContents,
 } from "@zhixing/server";
 import {
@@ -41,8 +38,6 @@ export interface SpawnDaemonOptions {
   zhixingHome?: string;
   /** 传给后台 child 的 CLI 参数；应含 "serve" 及其子选项。 */
   forwardedArgs: string[];
-  /** 日志文件路径覆盖 */
-  logPath?: string;
   /** handshake 上限，默认 5000ms */
   handshakeTimeoutMs?: number;
   /** 轮询间隔，默认 200ms */
@@ -57,14 +52,10 @@ export interface SpawnDaemonDeps {
   isProcessAliveFn?: typeof isProcessAlive;
   httpGetFn?: (url: string, timeoutMs: number) => Promise<number>;
   checkReadyMarkerFn?: () => Promise<boolean>;
-  readFileFn?: (path: string, encoding: BufferEncoding) => Promise<string>;
+  readLogsFn?: (home: string, since: number) => Promise<unknown>;
   clock?: () => number;
   sleep?: (ms: number) => Promise<void>;
   console?: Pick<Console, "log" | "error">;
-  /** 覆盖 open/mkdir（测试用）*/
-  openFn?: (path: string, flags: string) => Promise<{ fd: number; close: () => Promise<void> }>;
-  mkdirFn?: (path: string, opts: { recursive: true }) => Promise<string | undefined>;
-  prepareServerLogForWriteFn?: typeof prepareServerLogForWrite;
   /** .ready marker 路径覆盖（测试用；默认 ~/.zhixing/server.ready）*/
   readyMarkerPath?: string;
 }
@@ -97,7 +88,8 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const zhixingHome = opts.zhixingHome ?? getZhixingHome();
   const lockPaths = { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) };
   const readyMarkerPath = deps.readyMarkerPath ?? getDefaultReadyMarkerPath(zhixingHome);
-  let logPath = opts.logPath ?? getDefaultLogPath(zhixingHome);
+  const logPath = getDefaultLogPath(zhixingHome);
+  const startedAt = Date.now();
   const handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const con = deps.console ?? console;
@@ -116,22 +108,8 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
     throw err;
   }
 
-  // 2. 打开日志文件 fd
-  const mkdirFn = deps.mkdirFn ?? mkdir;
-  const openFn = deps.openFn ?? (async (p, flags) => {
-    const h = await open(p, flags);
-    return { fd: h.fd, close: () => h.close() };
-  });
-  if (!opts.logPath) {
-    const prepareLogPath = deps.prepareServerLogForWriteFn ?? prepareServerLogForWrite;
-    logPath = (await prepareLogPath({ paths: getDefaultServerLogPaths(zhixingHome) })).logPath;
-  }
-  await mkdirFn(dirname(logPath), { recursive: true });
-  const logHandle = await openFn(logPath, SERVER_LOG_ACTIVE_OPEN_FLAGS);
-  const logFd = logHandle.fd;
-
-  // 3. spawn + detach + unref + close fd
-  const spawnOpts = buildDaemonSpawnOptions(logFd, execArgs.env);
+  // The child owns its recorder; no append fd survives the parent.
+  const spawnOpts = buildDaemonSpawnOptions(execArgs.env);
   const spawnFn = deps.spawnFn ?? spawn;
   const child = spawnFn(execArgs.command, execArgs.args, spawnOpts);
   let childExit: ChildExit | null = null;
@@ -146,8 +124,6 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   } catch {
     /* child 已死或 mock 场景 */
   }
-  // 父进程立刻关闭 fd（fd 已被复制给子进程）
-  await logHandle.close();
 
   // 4. handshake
   const handshake = await startupHandshake({
@@ -169,7 +145,10 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
 
   // 5. 失败路径
   con.error(chalk.red(`知行服务启动未完成: ${handshake.reason ?? "unknown"}`));
-  await printLogTail(logPath, 20, { readFileFn: deps.readFileFn, console: con });
+  try {
+    const evidence = await (deps.readLogsFn ?? ((home, from) => queryLocalLogs(home, { source: "runtime", from })))(zhixingHome, startedAt);
+    con.error(JSON.stringify(evidence));
+  } catch { con.error("启动日志暂不可用；可稍后运行 zz logs search --source runtime 查阅。"); }
   return { ok: false, status: handshake.status ?? "failed", reason: handshake.reason, logPath };
 }
 
@@ -369,25 +348,4 @@ function printSuccessBanner(
   con.log(chalk.dim(`  Log:   ${logPath}`));
   con.log(chalk.dim(`  Stop:  zhixing stop`));
   con.log();
-}
-
-async function printLogTail(
-  logPath: string,
-  n: number,
-  opts: {
-    readFileFn?: (path: string, encoding: BufferEncoding) => Promise<string>;
-    console?: Pick<Console, "log" | "error">;
-  },
-): Promise<void> {
-  const readFn = opts.readFileFn ?? ((p, e) => readFile(p, e));
-  const con = opts.console ?? console;
-  try {
-    const content = await readFn(logPath, "utf-8");
-    const lines = String(content).split("\n").filter((l) => l.length > 0);
-    const tail = lines.slice(-n);
-    con.error(chalk.dim(`\n--- Last ${tail.length} lines of ${logPath} ---`));
-    for (const line of tail) con.error(chalk.dim(line));
-  } catch {
-    con.error(chalk.dim(`(no log found at ${logPath})`));
-  }
 }

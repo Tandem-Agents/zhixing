@@ -30,6 +30,7 @@ export function channelDeliveryResult(value: unknown): DeliveryResult {
 }
 
 export function createChannelTypeBinding(options: {
+  records?: import("@zhixing/core/logging").LogRecordPort;
   instance: ExtensionInstance;
   consumers: () => ChannelConsumerBinding;
   routes: Map<string, HttpHandler>;
@@ -47,7 +48,7 @@ export function createChannelTypeBinding(options: {
       if (projection.id !== options.instance.id) throw new Error("Channel instance mismatch");
       validateChannelCredentials(channelDeclaration(manifest), projection.config.credentials);
     },
-    async receive({ method, payload }) {
+    async receive({ method, payload, requestId }) {
       if (closed) throw new Error("Channel generation expired");
       if (quiescing && method !== "channel.challenge-action" && method !== "channel.message") throw new Error("Channel generation is handing over");
       if (method === "channel.message") {
@@ -56,7 +57,15 @@ export function createChannelTypeBinding(options: {
             typeof message.from !== "string" || typeof message.text !== "string" || !["dm", "group", "thread"].includes(message.chatType)) {
           throw new Error("Invalid Channel message identity");
         }
-        await options.consumers().message(message, quiescing);
+        const refs = [{ kind: "message", id: message.messageId }, ...(requestId ? [{ kind: "extensionRequest", id: requestId }] : [])];
+        options.records?.record(() => ({ event: "received", refs, data: { inputChars: message.text.length, chatType: message.chatType } }));
+        try {
+          await options.consumers().message(message, quiescing);
+          options.records?.record({ event: "handled", refs, result: "success" });
+        } catch (error) {
+          options.records?.record(() => ({ event: "handled", refs, result: "failure", data: { error: error instanceof Error ? error.message : "渠道处理失败" } }));
+          throw error;
+        }
         return null;
       }
       if (method === "channel.challenge-action") {

@@ -28,6 +28,7 @@
  * 同步标注公共 API 契约。
  */
 
+export { createKernelLogFactory, type KernelLogFactory } from "./logging.js";
 export {
   buildSystemPrompt,
   CACHE_BOUNDARY,

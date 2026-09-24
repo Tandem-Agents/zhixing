@@ -1,3 +1,8 @@
+import type { RuntimeLogContext } from "../logging/runtime.js";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
+import { MCP_LOG_SOURCE } from "./mcp-runtime-adapter.js";
+import { createKernelLogFactory } from "@zhixing/orchestrator/runtime";
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core/paths";
 import { protocolDigest } from "@zhixing/core/protocol";
@@ -87,6 +92,7 @@ interface LocalWorkspaceDelivery<T, R> {
 
 export async function runWorkspaceCommand(
   operation: (workspace: LocalWorkspaceClient) => Promise<unknown>,
+  logging?: RuntimeLogContext,
 ): Promise<void> {
   const zhixingHome = getZhixingHome();
   const writer = createStdoutWriter();
@@ -103,7 +109,7 @@ export async function runWorkspaceCommand(
       writer.line(JSON.stringify({ recoveredOperations: operations }, null, 2));
     },
     failure: (error) => renderLocalWorkspaceFailure(error, writer),
-  }, zhixingHome);
+  }, zhixingHome, logging);
 }
 
 /**
@@ -113,6 +119,7 @@ export async function runWorkspaceCommand(
 export async function runWorkspaceSceneCreateCommand(
   sceneName: string,
   absolutePath: string,
+  logging?: RuntimeLogContext,
 ): Promise<void> {
   const writer = createStdoutWriter();
   const zhixingHome = getZhixingHome();
@@ -155,6 +162,7 @@ export async function runWorkspaceSceneCreateCommand(
         failure: (error) => renderLocalWorkspaceFailure(error, writer),
       },
       zhixingHome,
+      logging,
     );
     writer.line(
       JSON.stringify({
@@ -213,6 +221,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
   operation: (workspace: LocalWorkspaceClient) => Promise<T>,
   delivery: LocalWorkspaceDelivery<T, R>,
   zhixingHome: string,
+  logging?: RuntimeLogContext,
 ): Promise<R> {
   const existing = createLocalWorkspaceClient(zhixingHome);
   if (await localWorkspaceHostIsReachable(zhixingHome)) {
@@ -232,6 +241,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
     const startup = await runStartupCheck({
       homeDir: zhixingHome,
       mode: "host",
+      records: logging?.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
       secretStore,
     });
     if (startup.kind !== "ready") {
@@ -240,18 +250,21 @@ export async function withLocalWorkspaceClient<T, R = T>(
     const configuration = projectRuntimeConfiguration(
       startup.runtimeConfiguration,
     );
-    const capacity = createDeviceCapacityRuntime(
+    const capacity = logging?.capacity ?? createDeviceCapacityRuntime(
       path.join(zhixingHome, "distributed-runtime", "capacity"),
     );
     disasterRecoveryStaging = createDisasterRecoveryStagingInfrastructure({
+      records: logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome,
       storageMaintenance: capacity.storage,
     });
     mesh = await prepareMeshRuntimeBootstrap({
+      records: logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome,
       secretStore,
       storageMaintenance: capacity.storage,
       plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+        records: logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
         zhixingHome,
         storageMaintenance: capacity.storage,
       }),
@@ -282,10 +295,11 @@ export async function withLocalWorkspaceClient<T, R = T>(
         configuration.mcp.mcp,
         startup.mcpCredentials.mcp,
       ),
-      { networkProxy: configuration.mcp.network?.proxy },
+      { networkProxy: configuration.mcp.network?.proxy, records: logging?.bind(MCP_LOG_SOURCE, { scope: "storage" }) },
     );
     await mcpRuntime.lifecycle.connect();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
+      createLogRecords: logging ? createKernelLogFactory(logging.bind, MCP_LOG_SOURCE) : undefined,
       zhixingHome,
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
@@ -307,6 +321,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       },
     });
     runtime = await setupAuthorityRuntime({
+      records: logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome,
       secretStore,
       deviceKey: mesh.deviceKey,

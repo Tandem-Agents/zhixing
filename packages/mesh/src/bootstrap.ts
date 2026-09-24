@@ -424,6 +424,7 @@ export interface MeshConnectionProjectionPort {
 }
 
 export interface MeshConnectionRegistryOptions {
+  readonly logging?: import("./request-channel.js").MeshRequestChannelOptions;
   readonly projection?: MeshConnectionProjectionPort;
   readonly onProjectionError?: (error: Error) => void;
 }
@@ -444,7 +445,7 @@ export class MeshConnectionRegistry {
     services: MeshServiceRegistry,
     options: { readonly diagnosable?: boolean } = {},
   ): MeshRequestChannel {
-    const channel = new MeshRequestChannel(connection, services);
+    const channel = new MeshRequestChannel(connection, services, this.options.logging);
     const deviceId = connection.peer.deviceId;
     const previous = this.#channels.get(deviceId);
     this.#channels.set(deviceId, {

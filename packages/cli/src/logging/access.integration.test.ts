@@ -589,6 +589,40 @@ describe("unified native log access", () => {
     });
   }, 30_000);
 
+  it("scoped readers can follow their local conversation without exposing other relations", async () => {
+    const f = await fixture({ queryRecords: 16 });
+    const captured = f.capture("conversation:a"), remote = randomUUID();
+    const localRefs = [
+      { kind: "conversation", id: "a" },
+      { kind: "conversation", id: "a", storeId: f.status.storeId },
+    ];
+    await f.store.append([{ ...captured, record: { ...captured.record, refs: [
+      ...localRefs,
+      { kind: "conversation", id: "a", storeId: remote },
+      { kind: "conversation", id: "b" },
+      { kind: "run", id: "private-run" },
+    ] } }]);
+    const ref = { kind: "conversation", id: "a" };
+    const search = (value: typeof ref & { storeId?: string }) => f.access.api.query(LOG_SEARCH, {
+      context: f.scoped, request: { filter: { ref: value } },
+    });
+    const page = await search(ref);
+    expect(page.records.map((record) => record.id)).toEqual([captured.record.id]);
+    expect(page.records[0]!.refs).toEqual(localRefs);
+    const timeline = await f.access.api.query(LOG_READ, {
+      context: f.scoped,
+      request: { address: formatLogAddress({ storeId: f.status.storeId, kind: "operation", ref }), view: "timeline" },
+    });
+    expect(timeline.records).toEqual(page.records);
+    expect(await search({ kind: "conversation", id: "b" })).toEqual(await search({ kind: "conversation", id: "absent" }));
+    expect(await search({ ...ref, storeId: remote })).toEqual(await search({ kind: "conversation", id: "absent", storeId: remote }));
+    expect((await search({ kind: "run", id: "private-run" })).records).toEqual([]);
+    const revoked = await f.access.api.query(LOG_SEARCH, {
+      context: () => ({ ...f.scoped(), revision: "2", scopes: [] }), request: { filter: { ref } },
+    });
+    expect(revoked.records).toEqual([]);
+  }, 30_000);
+
   it("hidden references cannot be probed by filters, combined ids or operation addresses", async () => {
     const f = await fixture();
     const inspect = async (id: string, foreign?: string) => {

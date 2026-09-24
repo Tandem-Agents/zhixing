@@ -1,3 +1,4 @@
+import { withLogRefs, type LogRecordPort } from "@zhixing/core/logging";
 import type { Dirent } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
@@ -33,6 +34,7 @@ interface Closeable {
 export function createPlannedAnchorTransferStagingInfrastructure(options: Readonly<{
   zhixingHome: string;
   storageMaintenance?: StorageMaintenanceGovernorPort;
+  records?: LogRecordPort;
 }>): PlannedAnchorTransferStagingArea {
   const root = path.resolve(
     options.zhixingHome,
@@ -60,7 +62,7 @@ export function createPlannedAnchorTransferStagingInfrastructure(options: Readon
     const journalLog = new FileAuthorityCommitLog(
       journalRoot,
       privateArtifacts,
-      { storageMaintenance: options.storageMaintenance },
+      { storageMaintenance: options.storageMaintenance, records: withLogRefs(options.records, [{ kind: "transfer", id: input.transferId }]) },
     );
     const journal = new PlannedAnchorTransferJournal(journalLog, input.verifier);
     const receiver = new FileResumableArtifactReceiver(
@@ -118,7 +120,7 @@ export function createPlannedAnchorTransferStagingInfrastructure(options: Readon
       const candidateLog = new FileAuthorityCommitLog(
         path.join(root, "candidate-claims"),
         artifacts,
-        { storageMaintenance: options.storageMaintenance },
+        { storageMaintenance: options.storageMaintenance, records: options.records },
       );
       const candidateJournal = new PlannedAnchorCandidateJournal(
         candidateLog,

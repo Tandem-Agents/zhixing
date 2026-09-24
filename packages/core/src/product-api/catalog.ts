@@ -1,3 +1,8 @@
+import { randomUUID } from "node:crypto";
+import type { LogRecordPort } from "../logging/contracts.js";
+import { productObservationRefs } from "./logging.js";
+export { PRODUCT_API_LOG_SOURCE } from "./logging.js";
+
 const INPUT_TYPE: unique symbol = Symbol("product-api-input");
 const RESULT_TYPE: unique symbol = Symbol("product-api-result");
 const FACT_TYPE: unique symbol = Symbol("product-api-fact");
@@ -151,7 +156,7 @@ export class ProductApiDispatcher {
   readonly #operations: ReadonlyMap<string, ProductApiOperationContribution>;
   readonly #factEvents: ReadonlySet<string>;
 
-  constructor(exactSet: ProductApiExactSet, contributions: readonly ProductApiContribution[]) {
+  constructor(exactSet: ProductApiExactSet, contributions: readonly ProductApiContribution[], private readonly records?: LogRecordPort) {
     const expectedOperations = uniqueDescriptors(exactSet.operations, "expected operation");
     const expectedFacts = uniqueDescriptors(exactSet.factEvents, "expected fact event");
     const operations = new Map<string, ProductApiOperationContribution>();
@@ -289,7 +294,25 @@ export class ProductApiDispatcher {
     if (operation.descriptor !== descriptor) {
       throw new TypeError(`Product API operation descriptor mismatch: ${descriptor.identity}`);
     }
-    return await operation.invoke(input);
+    // Querying evidence does not create more evidence and cannot feed itself.
+    const records = descriptor.identity.startsWith("logs.") && descriptor.kind === "query" ? undefined : this.records;
+    const refs = [{ kind: "productInvocation", id: randomUUID() }];
+    const started = performance.now();
+    records?.record(() => ({ event: "requested", refs: [...refs, ...productObservationRefs(input)], data: { action: descriptor.identity, kind: descriptor.kind } }));
+    try {
+      const invocation = await operation.invoke(input);
+      records?.record(() => ({ event: "returned", refs: [...refs, ...productObservationRefs(input), ...productObservationRefs(invocation.result)].filter((ref, index, all) => all.findIndex((item) => item.kind === ref.kind && item.id === ref.id) === index).slice(0, 12), result: "success", data: {
+        action: descriptor.identity, duration: performance.now() - started,
+        facts: invocation.facts.slice(0, 32).map((fact) => fact.kind),
+      } }));
+      return invocation;
+    } catch (error) {
+      records?.record(() => ({ event: "failed", refs: [...refs, ...productObservationRefs(input)], result: "failure", data: {
+        action: descriptor.identity, duration: performance.now() - started,
+        error: error instanceof Error ? error.message : "应用抛出非标准错误",
+      } }));
+      throw error;
+    }
   }
 }
 

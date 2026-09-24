@@ -17,7 +17,6 @@ import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owne
 import type { StartupCleanupHandle, StartupRollback } from "./startup-rollback.js";
 
 export const ANCHOR_HOST_SHELL_RESOURCE_DESCRIPTORS = [
-  { owner: "anchor-host", id: "serverLogLifecycle.stop" },
   { owner: "anchor-host", id: "endpoint.close" },
   { owner: "anchor-host", id: "authorityCheckpointOwner.stop" },
   { owner: "anchor-host", id: "serverState.lifecycle" },
@@ -41,7 +40,6 @@ type StateLifecycle = Pick<
   ServerStateFile,
   "cleanup" | "heartbeat" | "markReady" | "markRunning" | "markStopped" | "markStopping"
 >;
-type ServerLogLifecycle = Readonly<{ stop(): void }>;
 type CheckpointLifecycle = Pick<AuthorityCheckpointOwnerPort, "stop">;
 
 type EndpointOwnership =
@@ -79,7 +77,6 @@ export class AnchorHostShellLifecycle implements ServerLifecycleOwner {
   readonly #dependencies: AnchorHostShellDependencies;
   #endpoint: EndpointOwnership = { kind: "none" };
   #stateFile: StateLifecycle | undefined;
-  #serverLog: ServerLogLifecycle | undefined;
   #checkpointOwner: CheckpointLifecycle | undefined;
   #heartbeatTimer: NodeJS.Timeout | undefined;
   #idleTimer: NodeJS.Timeout | undefined;
@@ -103,12 +100,6 @@ export class AnchorHostShellLifecycle implements ServerLifecycleOwner {
       ANCHOR_HOST_SHELL_CLEANUP_DESCRIPTOR.id,
       () => this.#stopOnce(),
     );
-  }
-
-  acquireServerLog(serverLog: ServerLogLifecycle): void {
-    this.#assertCanAcquire("Server log");
-    if (this.#serverLog) throw new Error("Anchor Host shell already owns the Server log");
-    this.#serverLog = serverLog;
   }
 
   acquireBinding(binding: BoundEndpoint): void {
@@ -239,14 +230,10 @@ export class AnchorHostShellLifecycle implements ServerLifecycleOwner {
   }
 
   assertActivationOwnership(input: {
-    readonly serverLog: boolean;
     readonly checkpointOwner: boolean;
   }): void {
     this.#assertNormalOwner();
     if (!this.#stateFile) throw new Error("Anchor Host shell state owner is missing");
-    if (!!this.#serverLog !== input.serverLog) {
-      throw new Error("Anchor Host shell Server log exact-set mismatch");
-    }
     if (!!this.#checkpointOwner !== input.checkpointOwner) {
       throw new Error("Anchor Host shell checkpoint exact-set mismatch");
     }
@@ -300,7 +287,6 @@ export class AnchorHostShellLifecycle implements ServerLifecycleOwner {
       await attempt(() => this.#restoreOwnedDiscovery(ownedEndpoint), failures);
     }
     await attempt(() => this.#checkpointOwner?.stop(), failures);
-    await attempt(() => this.#serverLog?.stop(), failures);
 
     if (failures.length > 0) {
       throw new AggregateError(failures, "Anchor Host shell cleanup failed");

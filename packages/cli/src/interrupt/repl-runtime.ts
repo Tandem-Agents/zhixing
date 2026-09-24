@@ -38,6 +38,7 @@ export interface ReplInterruptRuntime {
 }
 
 export interface CreateReplInterruptRuntimeOptions {
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
   /**
    * 双击 Ctrl+C callback —— REPL 决定 exit 语义 (典型: abort 当前 turn + 等 turn 退出 +
    * 走 /exit 路径清理 scheduler.stop 等)。
@@ -60,6 +61,7 @@ export function createReplInterruptRuntime(
   const controller = createInterruptController();
 
   const keyboard = attachKeyboardSource({
+    records: opts.records,
     controller,
     onDoublePress: opts.onDoublePress,
     stdin: opts.stdin,

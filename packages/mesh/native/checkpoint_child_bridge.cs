@@ -73,7 +73,7 @@ internal static class CheckpointChildBridge {
     if (op == "openDirectory") return Register(OpenRelative(Get(r, "parent"), Text(r, "name"), true, Flag(r, "create"), false));
     if (op == "identity") return Identity(Get(r, "handle"));
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
-    if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit")));
+    if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null));
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
     if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")));
     if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName")); return true; }
@@ -141,11 +141,12 @@ internal static class CheckpointChildBridge {
     } finally { Array.Clear(bytes, 0, bytes.Length); CloseHandle(file); }
   }
 
-  static byte[] ReadFile(IntPtr parent, string name, long declared, long offset, long limit) {
+  static byte[] ReadFile(IntPtr parent, string name, long declared, long offset, long limit, string expected) {
     if (offset < 0 || limit <= 0) throw new InvalidOperationException("Checkpoint file range is invalid");
     var file = OpenRelative(parent, name, false, false, false, false);
     try {
       BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint file identity changed");
+      if (expected != null && Identity(info) != expected) throw new InvalidOperationException("Checkpoint read identity changed");
       var actual = Size(info); if ((declared >= 0 && actual != declared) || (declared < 0 && actual > limit) || offset > actual) throw new InvalidOperationException("Checkpoint file length changed");
       var length = checked((int)Math.Min(limit, actual - offset)); var bytes = new byte[length];
       using (var safe = new SafeFileHandle(file, false))

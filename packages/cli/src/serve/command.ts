@@ -9,6 +9,8 @@
  */
 
 import path from "node:path";
+import { handoffLogging } from "../logging/handoff.js";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
@@ -16,6 +18,8 @@ import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
 import { createLogAccess } from "../logging/access.js";
+import { createKernelLogFactory } from "@zhixing/orchestrator/runtime";
+import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
 import { createRuntimeLogTools } from "../logging/tools.js";
 import { LOG_PRODUCT_API_EXACT_SET } from "@zhixing/core/logging/application";
 import { createExtensionContinuation, createExtensionNotificationHandle, createExtensionStatusObserver } from "./extension-continuation.js";
@@ -81,6 +85,7 @@ import {
 import {
   defineProductApiExactSet,
   ProductApiDispatcher,
+  PRODUCT_API_LOG_SOURCE,
 } from "@zhixing/core/product-api";
 import { EXTENSION_PRODUCT_API_EXACT_SET, extensionManage } from "@zhixing/core/extensions/application";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
@@ -107,7 +112,6 @@ import {
   buildBuiltinRegistry,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
-  ServerLogLifecycle,
   CleanupRegistry,
   getDefaultLogPath,
   getDefaultPidPath,
@@ -115,7 +119,6 @@ import {
   getDefaultStatePath,
   getDefaultReadyMarkerPath,
   getDefaultTokenPath,
-  getDefaultServerLogPaths,
   resolveProcessStartTime,
   type RunningServer,
   type ServerContext,
@@ -129,7 +132,6 @@ import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-m
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
 import { loadCredentials, resolveModelCapability, mcpConfigurationRevision, getGlobalConfigPath } from "@zhixing/providers";
 import chalk from "chalk";
-import { configureLlmChunkDump } from "../output/llm-chunk-dump.js";
 import { ExecutionStatusHub, FirstPartyFinalitySession } from "./first-party-finality-session.js";
 import { isProcessAlive } from "@zhixing/server";
 import { RuntimeHost } from "@zhixing/runtime-host";
@@ -388,7 +390,6 @@ async function runServerProcess(
   try {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = bootstrap.zhixingHome;
-  configureLlmChunkDump(false, zhixingHome);
   const deviceCapacity = bootstrap.deviceCapacity;
   const logAccess = createLogAccess(zhixingHome, deviceCapacity.arbiter);
   lifecycleContributions.acquire("logAccess.close", () => logAccess.close());
@@ -418,18 +419,6 @@ async function runServerProcess(
       startedAt: processStartedAt,
     },
   });
-  const serverLogLifecycle = isBackground
-    ? new ServerLogLifecycle({
-        paths: getDefaultServerLogPaths(zhixingHome),
-        logger: {
-          info: (msg) => console.log(chalk.dim(`[server-log] ${msg}`)),
-          error: (msg, err) =>
-            console.error(chalk.red(`[server-log] ${msg}`), err instanceof Error ? err.message : err),
-        },
-      })
-    : undefined;
-  if (serverLogLifecycle) hostShellLifecycle.acquireServerLog(serverLogLifecycle);
-  await serverLogLifecycle?.start();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
   // 不同 home 不同端口 → 多实例并行不撞）。受控内部入口仍可显式传入端口。
   const port = opts.port ?? homeToPort(zhixingHome);
@@ -579,6 +568,7 @@ async function runServerProcess(
     : undefined;
   const meshConnections = bootstrap.mesh.mode === "trusted-home"
     ? new MeshConnectionRegistry({
+        logging: handoffLogging(bootstrap.bindLogs),
         projection: meshConnectionProjection,
         onProjectionError: (error) =>
           console.warn(chalk.yellow(`[mesh] ${error.message}`)),
@@ -687,7 +677,7 @@ async function runServerProcess(
   //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
   const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, mcpCredentials.mcp),
-    { networkProxy: mcpConfiguration.network?.proxy },
+    { networkProxy: mcpConfiguration.network?.proxy, records: bootstrap.bindLogs?.(MCP_LOG_SOURCE, { scope: "storage" }) },
   );
   lifecycleContributions.acquire("mcpRuntime.close", () =>
     mcpRuntime.lifecycle.close(),
@@ -728,6 +718,7 @@ async function runServerProcess(
     credentialGeneration,
   });
   const authorityRuntime = await setupAuthorityRuntime({
+    records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     extensionReadiness: createChannelExtensionReadiness(
       new ChannelConfiguration(getGlobalConfigPath({}, zhixingHome), bootstrap.secretStore),
       path.join(zhixingHome, "extensions", "artifacts"),
@@ -1000,6 +991,7 @@ async function runServerProcess(
   // Runtime factories are dormant during Conversation construction. Close the
   // one RuntimeHost/Advancement cycle before any owner starts executing work.
   const runtimeHost = new RuntimeHost({
+    createLogRecords: bootstrap.bindLogs ? createKernelLogFactory(bootstrap.bindLogs, MCP_LOG_SOURCE) : undefined,
     modelProvider: createHostKernelModelProviderFactory({
       configuration: modelConfiguration,
       credentials: providerCredentials,
@@ -1103,6 +1095,7 @@ async function runServerProcess(
   });
   const channelMechanism: PreparedChannelMechanism = enabledSurfaces.has("channel")
     ? await prepareChannel({
+        bindLogs: bootstrap.bindLogs,
         notifyOperation: extensionNotifications.notify,
         preparationClosed: extensionNotifications.preparationClosed,
         repairSource: extensionNotifications.repairSource,
@@ -2981,6 +2974,7 @@ async function runServerProcess(
       ...(deliveryProductApi ? [deliveryProductApi] : []),
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
     ],
+    bootstrap.bindLogs?.(PRODUCT_API_LOG_SOURCE, { scope: "storage" }),
   );
   const conversationCommunication = createConversationCommunicationBinding({
     directory: conversationApplication,
@@ -3192,7 +3186,6 @@ async function runServerProcess(
     },
     beforeActivate: async (openingRunner) => {
       hostShellLifecycle.assertActivationOwnership({
-        serverLog: !!serverLogLifecycle,
         checkpointOwner: !!authorityCheckpointOwner,
       });
       // Server 内部设施已准备、公开入口仍为 inactive 503；同一 provenance

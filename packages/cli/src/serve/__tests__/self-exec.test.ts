@@ -127,12 +127,12 @@ describe("filterDaemonChildEnv", () => {
 });
 
 describe("buildDaemonSpawnOptions", () => {
-  it("returns detached=true, windowsHide=true, stdio with logFd", () => {
+  it("returns detached=true, windowsHide=true, stdio ignored; child owns its recorder", () => {
     const env = { NO_COLOR: "1" };
-    const opts = buildDaemonSpawnOptions(42, env);
+    const opts = buildDaemonSpawnOptions(env);
     expect(opts.detached).toBe(true);
     expect(opts.windowsHide).toBe(true);
-    expect(opts.stdio).toEqual(["ignore", 42, 42]);
+    expect(opts.stdio).toBe("ignore");
     expect(opts.env).toBe(env);
   });
 });

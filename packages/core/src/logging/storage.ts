@@ -1,4 +1,4 @@
-import { LogRequestError } from "./errors.js";
+import { LogRequestError, LogStoreNotInitializedError } from "./errors.js";
 import { createHash, randomUUID } from "node:crypto";
 import type {
   DeviceCapacityArbiterPort,
@@ -19,8 +19,11 @@ import type {
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
 import { fitLogCapture } from "./limits.js";
 import { projectLogAccess, validLogAccess, type LogRecordAccess } from "./access-projection.js";
+import { isLegacyFile, validateWriterObservation, type LegacyLogEntry, type LogMigration, type LogWriterIdentity, type LogWriterObservation } from "./legacy.js";
+export type { LegacyLogEntry, LogMigration, LogWriterIdentity, LogWriterObservation } from "./legacy.js";
 
 export interface LogFileInfo {
+  readonly legacyPath?: string;
   readonly bytes: number;
   readonly identity: string;
 }
@@ -29,11 +32,11 @@ export interface LogFileSystem {
   open(readOnly: boolean): Promise<void>;
   list(limit: number): Promise<readonly string[]>;
   stat(name: string): Promise<LogFileInfo>;
-  read(name: string, size: number, offset: number, limit: number): Promise<Uint8Array>;
+  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array>;
   write(name: string, bytes: Uint8Array): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   truncate(name: string, identity: string, bytes: number): Promise<void>;
-  remove(name: string): Promise<void>;
+  remove(name: string, identity?: string): Promise<void>;
   sync(): Promise<void>;
   tryLock(): Promise<boolean>;
   unlock(): Promise<void>;
@@ -72,6 +75,10 @@ export interface LogStoreSnapshot {
   retired: LogRetirement[];
   pending: RetiredFile[];
   gaps: number;
+  legacy?: LegacyLogEntry[];
+  writers?: (LogWriterIdentity & { protocol: 1 })[];
+  migration?: LogMigration;
+  legacyRetired?: number;
 }
 const STATE = /^state-(\d{12})\.json$/u;
 const HEAD = /^published-(\d{12})\.head$/u;
@@ -103,14 +110,18 @@ export class LocalLogStore implements LogSink {
   readonly #now: () => number;
   readonly #abort = new AbortController();
   #busy = false;
+  #idle: Promise<void> | undefined;
   #closed = false;
   #permit: DeviceCapacityStepPermit | undefined;
+  readonly #observeWriters: ((signal: AbortSignal) => Promise<LogWriterObservation>) | undefined;
+  #writersObserved: LogWriterObservation | undefined;
 
   constructor(options: {
     files: LogFileSystem;
     capacity: DeviceCapacityArbiterPort;
     initialPolicy?: LogPolicy;
     now?: () => number;
+    observeWriters?: (signal: AbortSignal) => Promise<LogWriterObservation>;
   }) {
     this.files = meteredFiles(options.files, (dimension, amount) => {
       if (!this.#permit) throw Error("日志物理操作缺少资源许可");
@@ -119,6 +130,7 @@ export class LocalLogStore implements LogSink {
     this.#capacity = options.capacity;
     this.#initial = validateLogPolicy(options.initialPolicy ?? DEFAULT_LOG_POLICY);
     this.#now = options.now ?? Date.now;
+    this.#observeWriters = options.observeWriters;
   }
 
   async initialize(): Promise<LogStatus> {
@@ -126,7 +138,7 @@ export class LocalLogStore implements LogSink {
       let state = await this.#load(true);
       if (!state) {
         const names = await this.files.list(4096);
-        if (names.some((name) => name !== "writer.lock"))
+        if (names.some((name) => name !== "writer.lock" && !isLegacyFile(name)))
           throw Error("日志存储缺少可信元信息，未重置目录");
         state = {
           layout: "zxlog/1",
@@ -141,6 +153,7 @@ export class LocalLogStore implements LogSink {
         };
         await this.#save(state);
       }
+      await this.#refreshMigration(state);
       await this.#recover(state);
       await this.#maintenance(state);
       return this.#status(state);
@@ -156,6 +169,7 @@ export class LocalLogStore implements LogSink {
         const state = await this.#required(true);
         await this.#recover(state);
         await this.#maintenance(state);
+        if (state.migration && state.migration.state !== "confirmed") throw Error("旧日志切换尚未完成，已暂停新增日志");
         const policy = state.policy.effective;
         const published = new Set(state.segments.flatMap((segment) => segment.recordIds));
         const accepted = input
@@ -345,11 +359,23 @@ export class LocalLogStore implements LogSink {
     return this.read((state) => this.#status(state));
   }
 
+  /** Local legacy discovery has no fabricated Store identity or effective policy. */
+  async inspectLegacy<T>(work: (state: LogStoreSnapshot | undefined, files: LogFileSystem, unregistered: readonly string[]) => Promise<T>): Promise<T> {
+    return this.#step(false, async () => {
+      const state = await this.#load();
+      if (state) return work(state, this.files, []);
+      const names = await this.files.list(4096);
+      if (names.some((name) => !isLegacyFile(name) && name !== "writer.lock")) throw new LogRequestError("日志存在未完成的初始化状态，请启动产品接续；离线读取未改动文件");
+      return work(undefined, this.files, names.filter(isLegacyFile).sort());
+    });
+  }
+
   async rebuildIndex(): Promise<boolean> {
     return this.#step(true, async () => {
       const state = await this.#required(true),
         names = new Set(await this.files.list(4096));
       const segment = state.segments.find((item) => !names.has(indexName(item.name)));
+      if (state.migration && state.migration.state !== "confirmed") return false;
       if (!segment) return false;
       const bytes = await this.files.read(segment.name, segment.bytes, 0, segment.bytes);
       const offsets: number[] = [];
@@ -373,26 +399,29 @@ export class LocalLogStore implements LogSink {
   async close(): Promise<void> {
     this.#closed = true;
     this.#abort.abort();
-    await this.files.close();
+    await Promise.all([this.files.close(), this.#idle]);
   }
 
   async #step<T>(write: boolean, work: () => Promise<T>): Promise<T> {
     if (this.#closed || this.#busy) throw Error("日志存储暂不可用");
     this.#busy = true;
+    let settle!: () => void;
+    this.#idle = new Promise<void>((resolve) => { settle = resolve; });
     let releaseLock = false;
+    const budget = this.#observeWriters && write ? { ...STEP, occupancy: { ...STEP.occupancy, memoryReservationBytes: 96 * 1024 * 1024 } } : STEP;
     try {
       const admission = await this.#capacity.acquire(
         {
           admissionId: `logging:${randomUUID()}`,
           serviceClass: "storage-background",
-          atomic: STEP,
-          preferred: STEP,
+          atomic: budget,
+          preferred: budget,
           maxWaitMs: 250,
         },
         this.#abort.signal,
       );
       if (admission.kind !== "granted") throw Error("日志存储资源暂不可用");
-      const step = admission.permit.tryBegin(STEP);
+      const step = admission.permit.tryBegin(budget);
       if (!step) {
         admission.permit.release();
         throw Error("日志存储步骤受阻");
@@ -402,6 +431,14 @@ export class LocalLogStore implements LogSink {
         this.#permit = step;
         await this.files.open(!write);
         if (write) {
+          this.#writersObserved = undefined;
+          if (this.#observeWriters) {
+            try {
+              const value = await this.#observeWriters(this.#abort.signal);
+              if (validateWriterObservation(value)) this.#writersObserved = value;
+            } catch { /* Missing proof blocks migration, never becomes an empty process list. */ }
+          }
+          if (this.#closed) throw Error("日志存储已关闭");
           releaseLock = await this.files.tryLock();
           if (!releaseLock) throw Error("日志存储正在维护");
         }
@@ -417,6 +454,8 @@ export class LocalLogStore implements LogSink {
       }
     } finally {
       this.#busy = false;
+      settle();
+      this.#idle = undefined;
     }
   }
 
@@ -428,7 +467,8 @@ export class LocalLogStore implements LogSink {
   }
   async #required(recover = false): Promise<LogStoreSnapshot> {
     const state = await this.#load(recover);
-    if (!state) throw Error("日志存储尚未初始化");
+    if (!state) throw new LogStoreNotInitializedError();
+    if (recover) await this.#refreshMigration(state);
     return state;
   }
   async #recoverPublication(): Promise<void> {
@@ -449,7 +489,7 @@ export class LocalLogStore implements LogSink {
       } catch (error) {
         const initialTorn =
           name === "state-000000000001.new" &&
-          names.every((entry) => entry === name || entry === "writer.lock");
+          names.every((entry) => entry === name || entry === "writer.lock" || isLegacyFile(entry));
         if (initialTorn || (published > 0 && name.endsWith(".new"))) {
           await this.#erase(name);
           continue;
@@ -552,7 +592,7 @@ export class LocalLogStore implements LogSink {
     }
     for (const item of state.pending)
       if (
-        !OWNED.test(item.name) ||
+        (!OWNED.test(item.name) && !isLegacyFile(item.name)) ||
         !Number.isSafeInteger(item.bytes) ||
         item.bytes < 0 ||
         typeof item.identity !== "string" ||
@@ -560,6 +600,12 @@ export class LocalLogStore implements LogSink {
         typeof item.reclaimed !== "boolean"
       )
         throw Error("日志回收状态损坏");
+    if (state.legacy !== undefined && (!Array.isArray(state.legacy) || state.legacy.length > 4096 || state.legacy.some((entry) =>
+      !isLegacyFile(entry.name) || !/^[a-f0-9]{64}$/u.test(entry.id) || typeof entry.identity !== "string" || entry.identity.length > 128 ||
+      !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw Error("旧日志登记损坏");
+    if (state.writers !== undefined && (!Array.isArray(state.writers) || state.writers.length > 256 || state.writers.some((entry) =>
+      entry.protocol !== 1 || !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw Error("日志写者登记损坏");
+    if (state.migration !== undefined && (!["pending", "blocked", "confirmed"].includes(state.migration.state) || !Number.isSafeInteger(state.migration.checkedAt))) throw Error("日志切换状态损坏");
     return state;
   }
   async #save(state: LogStoreSnapshot): Promise<void> {
@@ -586,10 +632,13 @@ export class LocalLogStore implements LogSink {
       throw Error("日志治理预留不足");
     const stem = `state-${String(state.generation).padStart(12, "0")}`;
     const inventory = await this.#inventory();
+    // Adoption may start above the new limit. Only bounded governance can grow then;
+    // ordinary records remain fenced until all historical bytes fit the same policy.
+    const budgetInventory = [...inventory].filter(([name]) => state.migration?.state === "confirmed" || !isLegacyFile(name));
     if (
-      [...inventory.values()].reduce((sum, item) => sum + item.bytes, content.length) >
+      budgetInventory.reduce((sum, [, item]) => sum + item.bytes, content.length) >
         state.policy.effective.maxBytes ||
-      inventory.size + 2 > state.policy.effective.maxFiles
+      budgetInventory.length + 2 > state.policy.effective.maxFiles
     )
       throw Error("日志治理发布缺少预算");
     await this.files.write(`${stem}.new`, content);
@@ -604,7 +653,7 @@ export class LocalLogStore implements LogSink {
   async #inventory(): Promise<Map<string, LogFileInfo>> {
     const result = new Map<string, LogFileInfo>();
     for (const name of await this.files.list(4096)) {
-      if (name !== "writer.lock" && !OWNED.test(name))
+      if (name !== "writer.lock" && !OWNED.test(name) && !isLegacyFile(name))
         throw Error("日志根含未登记文件，已停止写入");
       result.set(name, await this.files.stat(name));
     }
@@ -613,8 +662,42 @@ export class LocalLogStore implements LogSink {
   async #erase(name: string): Promise<void> {
     const info = await this.files.stat(name);
     await this.files.truncate(name, info.identity, 0);
-    await this.files.remove(name);
+    await this.files.remove(name, info.identity);
     await this.files.sync();
+  }
+  async #refreshMigration(state: LogStoreSnapshot): Promise<void> {
+    const inventory = await this.#inventory();
+    const historical = [...inventory].filter(([name]) => isLegacyFile(name));
+    if (!this.#observeWriters && !historical.length && !state.migration) return;
+    const proof = this.#writersObserved;
+    const complete = proof?.complete === true && proof.self !== undefined &&
+      proof.candidates.some((entry) => entry.pid === proof.self!.pid && entry.birth === proof.self!.birth);
+    // Register before judging other writers, so simultaneous new processes can converge.
+    let writers = state.writers ?? [];
+    if (complete) writers = writers.filter((writer) => proof.candidates.some((entry) => entry.pid === writer.pid && entry.birth === writer.birth));
+    if (proof?.self && !writers.some((entry) => entry.pid === proof.self!.pid && entry.birth === proof.self!.birth) && writers.length < 256)
+      writers.push({ ...proof.self, protocol: 1 });
+    state.writers = writers;
+    const compatible = complete && proof.candidates.every((entry) => writers.some((writer) => writer.protocol === 1 && writer.pid === entry.pid && writer.birth === entry.birth));
+    state.migration = { state: compatible ? "pending" : "blocked", checkedAt: proof?.at ?? this.#now(), ...(compatible ? {} : { reason: complete ? "old-or-unknown-writer" : "writer-inventory-unavailable" }) };
+    const prior = state.legacy ?? [];
+    state.legacy = prior.filter((entry) => inventory.get(entry.name)?.identity === entry.identity)
+      .map((entry) => ({ ...entry, bytes: inventory.get(entry.name)!.bytes }));
+    const known = new Set([...state.legacy.map((entry) => entry.name), ...state.pending.map((entry) => entry.name)]);
+    for (const [name, info] of historical.filter(([name]) => !known.has(name)).slice(0, 8)) {
+      state.legacy.push({ name, ...info, id: logDigest(`${name}:${info.identity}`), registeredAt: this.#now(), generation: state.generation + 1 });
+    }
+    await this.#save(state);
+  }
+  async #retireLegacy(state: LogStoreSnapshot, entry: LegacyLogEntry): Promise<void> {
+    if (state.migration?.state === "blocked") throw Error("旧日志写者尚未退出");
+    const actual = await this.files.stat(entry.name);
+    if (actual.identity !== entry.identity || actual.bytes !== entry.bytes) throw Error("旧日志在切换期间发生变化");
+    state.pending.push({ name: entry.name, ...actual, reclaimed: false });
+    state.legacy = state.legacy!.filter((item) => item !== entry);
+    state.legacyRetired = Math.min(Number.MAX_SAFE_INTEGER, (state.legacyRetired ?? 0) + 1);
+    await this.#save(state);
+    await this.#reclaimPending(state);
   }
   async #recover(state: LogStoreSnapshot): Promise<void> {
     await this.#reclaimPending(state);
@@ -636,7 +719,7 @@ export class LocalLogStore implements LogSink {
       }
     const orphans = [...inventory].filter(
       ([name]) =>
-        name !== "writer.lock" && !STATE.test(name) && !HEAD.test(name) && !known.has(name),
+        name !== "writer.lock" && !STATE.test(name) && !HEAD.test(name) && !isLegacyFile(name) && !known.has(name),
     );
     for (const [name, info] of orphans.slice(0, 8)) {
       state.pending.push({ name, ...info, reclaimed: false });
@@ -649,6 +732,7 @@ export class LocalLogStore implements LogSink {
   }
   async #reclaimPending(state: LogStoreSnapshot): Promise<void> {
     for (const item of [...state.pending].slice(0, 16)) {
+      if (isLegacyFile(item.name) && state.migration?.state === "blocked") continue;
       if (!item.reclaimed) {
         const actual = await this.files.stat(item.name);
         if (actual.identity !== item.identity) throw Error("待回收日志文件已替换");
@@ -662,7 +746,7 @@ export class LocalLogStore implements LogSink {
         const actual = await this.files.stat(item.name);
         if (actual.identity !== item.identity || actual.bytes !== 0)
           throw Error("待回收日志空间未确认");
-        await this.files.remove(item.name);
+        await this.files.remove(item.name, item.identity);
         await this.files.sync();
       }
       state.pending = state.pending.filter((entry) => entry !== item);
@@ -704,6 +788,7 @@ export class LocalLogStore implements LogSink {
       access?: { name: string; value: readonly LogRecordAccess[] };
     } = {},
   ): Promise<boolean> {
+    if (state.migration?.state === "blocked") throw Error("旧日志写者尚未完成切换");
     for (let attempt = 0; attempt < 8; attempt++) {
       const inventory = await this.#inventory();
       const payload = [...inventory].filter(
@@ -735,6 +820,8 @@ export class LocalLogStore implements LogSink {
         await this.#retireDetails(state, withDetails);
         continue;
       }
+      const historical = state.legacy?.[0];
+      if (historical) { await this.#retireLegacy(state, historical); continue; }
       const next = [...state.segments].sort(
         (a, b) =>
           (a.tier === b.tier ? 0 : a.tier === "detail" ? -1 : 1) || a.receivedAt - b.receivedAt,
@@ -745,8 +832,14 @@ export class LocalLogStore implements LogSink {
     throw Error("日志回收仍在进行");
   }
   async #maintenance(state: LogStoreSnapshot): Promise<void> {
+    if (state.migration?.state === "blocked") {
+      if (state.policy.desired) { state.policy = { ...state.policy, blocked: state.migration.reason ?? "writer-unknown" }; await this.#save(state); }
+      return;
+    }
     const now = this.#now(),
       policy = state.policy.desired ?? state.policy.effective;
+    for (const entry of [...(state.legacy ?? [])].filter((entry) => now - entry.registeredAt >= policy.detailTtlMs).slice(0, 4))
+      await this.#retireLegacy(state, entry);
     for (const segment of [...state.segments]
       .filter(
         (item) =>
@@ -795,14 +888,28 @@ export class LocalLogStore implements LogSink {
         await this.#save(state);
       }
     }
+    if (state.migration) {
+      try {
+        await this.#makeRoom(state, 0, 0);
+        const inventory = await this.#inventory();
+        const registered = new Set([...(state.legacy ?? []).map((entry) => entry.name), ...state.pending.map((entry) => entry.name)]);
+        const allRegistered = [...inventory.keys()].filter(isLegacyFile).every((name) => registered.has(name));
+        state.migration = { state: allRegistered && !state.pending.some((entry) => isLegacyFile(entry.name)) ? "confirmed" : "pending", checkedAt: state.migration.checkedAt, ...(allRegistered ? {} : { reason: "inventory-pending" }) };
+      } catch { state.migration = { state: "pending", checkedAt: state.migration.checkedAt, reason: "reclaim-pending" }; }
+      await this.#save(state);
+    }
   }
   async #status(state: LogStoreSnapshot): Promise<LogStatus> {
     const inventory = await this.#inventory();
+    const bytes = [...inventory.values()].reduce((sum, item) => sum + item.bytes, 0);
+    const changedLegacy = [...inventory].some(([name, info]) => isLegacyFile(name) && !state.legacy?.some((entry) => entry.name === name && entry.identity === info.identity && entry.bytes === info.bytes));
+    const migration = state.migration?.state === "confirmed" && (changedLegacy || bytes > state.policy.effective.maxBytes || inventory.size > state.policy.effective.maxFiles)
+      ? { ...state.migration, state: "pending" as const, reason: "inventory-changed" } : state.migration;
     return {
       storeId: state.storeId,
       layout: "zxlog/1",
       policy: state.policy,
-      bytes: [...inventory.values()].reduce((sum, item) => sum + item.bytes, 0),
+      bytes,
       files: inventory.size,
       retainedSegments: state.segments.length,
       pendingReclaims: state.pending.length,
@@ -814,6 +921,7 @@ export class LocalLogStore implements LogSink {
             : state.policy.effective.detailTtlMs),
       ),
       upper: state.upper,
+      ...(migration ? { migration: { ...migration, legacyFiles: state.legacy?.length ?? 0, catalog: `zxlog://${state.storeId}/legacy/catalog`, lastObserved: true as const } } : {}),
     };
   }
 
@@ -856,10 +964,10 @@ function meteredFiles(
       io();
       return files.stat(name);
     },
-    read: async (name, size, offset, limit) => {
+    read: async (name, size, offset, limit, identity) => {
       io();
       claim("readBytes", limit);
-      return files.read(name, size, offset, limit);
+      return files.read(name, size, offset, limit, identity);
     },
     write: async (name, bytes) => {
       io();
@@ -874,9 +982,9 @@ function meteredFiles(
       io();
       await files.truncate(name, identity, bytes);
     },
-    remove: async (name) => {
+    remove: async (name, identity) => {
       io();
-      await files.remove(name);
+      await files.remove(name, identity);
     },
     sync: async () => {
       io();

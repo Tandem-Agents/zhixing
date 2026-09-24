@@ -30,7 +30,7 @@
 
 import { abortWithReason } from "@zhixing/core/interrupt";
 import { acquireStdinOwnership, type StdinOwnershipHandle } from "../tui/_internal/stdin-ownership.js";
-import { recordStdinSnapshot } from "../security/keypress-dump.js";
+import { recordInputState } from "../logging/input.js";
 
 export interface KeyboardSourceHandle {
   /**
@@ -46,6 +46,7 @@ export interface KeyboardSourceHandle {
 }
 
 export interface AttachKeyboardSourceOptions {
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
   /** abort 触发目标 controller (loop 共享同一 controller，KeyboardSource 只触发不监听) */
   controller: AbortController;
   /**
@@ -63,6 +64,7 @@ export interface AttachKeyboardSourceOptions {
 }
 
 export function attachKeyboardSource(opts: AttachKeyboardSourceOptions): KeyboardSourceHandle {
+  const recordStdinSnapshot = (stage: string, stream: NodeJS.ReadStream, extra?: Record<string, unknown>) => recordInputState(opts.records, stage, stream, extra);
   const stdin = opts.stdin ?? process.stdin;
   const now = opts.now ?? Date.now;
   const doublePressMs = opts.doublePressMs ?? 800;

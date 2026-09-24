@@ -1,3 +1,4 @@
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
 import type { ServeOptions } from "./command.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import { createPlatformSecretStore } from "@zhixing/secrets";
@@ -59,9 +60,11 @@ export async function runServeCommand(
     const startup = await runStartupCheck({
       homeDir: zhixingHome,
       mode: "host",
+      records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
       secretStore,
     });
     if (startup.kind !== "ready") {
+      logging.records.record(() => ({ event: "failed", result: startup.kind === "cancelled" ? "cancelled" : "failure", data: { reason: startup.kind, error: "message" in startup ? startup.message : undefined } }));
       renderStartupFailure(startup, output);
       await logging.finish(startup.kind === "cancelled" ? "cancelled" : "failure", startup.kind);
       process.exit(startup.kind === "cancelled" ? 0 : 2);
@@ -75,6 +78,7 @@ export async function runServeCommand(
       secretStore,
       deviceCapacity: logging.capacity,
       logRecords: logging.records,
+      bindLogs: logging.bind,
       onRecoveryRootRequired: () => {
         output.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
       },
@@ -82,6 +86,7 @@ export async function runServeCommand(
     await host.run();
   } catch (error) {
     failed = true;
+    logging.records.record(() => ({ event: "failed", result: "failure", data: { error: error instanceof Error ? error.message : "宿主装配未完成" } }));
     throw error;
   } finally {
     await logging.finish(failed ? "failure" : "success", failed ? "host-or-preflight-failed" : "completed");

@@ -66,6 +66,8 @@ export interface JobAcceptedWorkItem {
 }
 
 export interface JobRuntimeRunOptions {
+  readonly runId?: string;
+  readonly assignmentId?: string;
   readonly abortSignal: AbortSignal;
   readonly onProtocolEvent: (
     event: SessionEventProjection,
@@ -471,6 +473,8 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
         },
       });
       const generator = runtime.run(envelope.work.instruction, {
+        runId: envelope.work.jobRunId,
+        assignmentId: envelope.assignmentId,
         abortSignal,
         onProtocolEvent: async (event) => {
           protocolEventOrdinal += 1;

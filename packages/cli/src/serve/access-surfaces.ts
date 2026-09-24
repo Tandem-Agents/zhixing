@@ -1196,6 +1196,7 @@ function channelOwnership(
 
 /** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 export interface PrepareChannelInput {
+  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
   readonly notifyOperation?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<unknown>;
   readonly preparationClosed?: (operation: import("@zhixing/core/extensions/contracts").ExtensionOperation) => Promise<boolean>;
   readonly repairSource?: (instance: import("@zhixing/core/extensions/contracts").ExtensionInstance) => Promise<import("@zhixing/core/extensions/contracts").ExtensionOperation["source"] | undefined>;
@@ -1225,9 +1226,10 @@ export async function prepareChannel(
   }
   try {
     const conversationProduct = new ChannelConversationProductBinding(
-      conversations,
+      conversations, input.bindLogs,
     );
     const result = await setupChannels({
+      bindLogs: input.bindLogs,
       authorityLog: () => input.authorityRuntime.authorityLog,
       commitDecision: input.authorityRuntime.commitExtensionDecision,
       isCurrentOwner: input.isCurrentOwner,

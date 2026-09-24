@@ -381,6 +381,8 @@ async function runChildAgentInner(
       {
         bus: childBus,
         lineage: childLineage,
+        childTaskId: subAgentId,
+        logPorts: parentContext?.logPorts,
         authorizeToolExecution: opts.authorizeToolExecution,
         ...(parentContext?.conversationId
           ? { conversationId: parentContext.conversationId }

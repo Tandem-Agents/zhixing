@@ -44,7 +44,6 @@ import { emptyUsage } from "../types/llm.js";
 import type { ContentBlock, Message } from "../types/messages.js";
 import type { ToolSpec } from "../types/tools.js";
 import type { AgentLoopDeps, AgentYield, LLMCallResult } from "./types.js";
-import { logDiagnostic } from "../diagnostics.js";
 
 interface StreamLLMCallParams {
   deps: AgentLoopDeps;
@@ -90,10 +89,6 @@ export async function* streamLLMCall(
     thinking,
     abortSignal: controller.signal,
   };
-
-  logDiagnostic(
-    `[llm] 请求 model=${model} msgs=${messages.length} tools=${toolSpecs.length > 0 ? toolSpecs.map((t) => t.name).join(",") : "无"}`,
-  );
 
   await eventBus?.emit("llm:request_start", {
     model,

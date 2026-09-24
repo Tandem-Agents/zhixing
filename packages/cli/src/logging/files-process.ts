@@ -42,8 +42,8 @@ class NodeFilesProcess implements LogFileSystem {
   stat(name: string): Promise<LogFileInfo> {
     return this.#call("stat", [name]);
   }
-  read(name: string, size: number, offset: number, limit: number): Promise<Uint8Array> {
-    return this.#call("read", [name, size, offset, limit]);
+  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
+    return this.#call("read", [name, size, offset, limit, identity]);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
     return this.#call("write", [name, bytes]);
@@ -54,8 +54,8 @@ class NodeFilesProcess implements LogFileSystem {
   truncate(name: string, identity: string, bytes: number): Promise<void> {
     return this.#call("truncate", [name, identity, bytes]);
   }
-  remove(name: string): Promise<void> {
-    return this.#call("remove", [name]);
+  remove(name: string, identity?: string): Promise<void> {
+    return this.#call("remove", [name, identity]);
   }
   sync(): Promise<void> {
     return this.#call("sync", []);
@@ -207,8 +207,8 @@ export class LogFilesProcess implements LogFileSystem {
   stat(name: string): Promise<LogFileInfo> {
     return this.#files.stat(name);
   }
-  read(name: string, size: number, offset: number, limit: number): Promise<Uint8Array> {
-    return this.#files.read(name, size, offset, limit);
+  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
+    return this.#files.read(name, size, offset, limit, identity);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
     return this.#files.write(name, bytes);
@@ -219,8 +219,8 @@ export class LogFilesProcess implements LogFileSystem {
   truncate(name: string, identity: string, bytes: number): Promise<void> {
     return this.#files.truncate(name, identity, bytes);
   }
-  remove(name: string): Promise<void> {
-    return this.#files.remove(name);
+  remove(name: string, identity?: string): Promise<void> {
+    return this.#files.remove(name, identity);
   }
   sync(): Promise<void> {
     return this.#files.sync();

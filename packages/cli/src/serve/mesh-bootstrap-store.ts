@@ -90,6 +90,7 @@ interface PersistedTransportTrust {
 }
 
 export interface FileMeshBootstrapStoreOptions {
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
 }
 
@@ -125,7 +126,7 @@ export class FileMeshBootstrapStore
     this.#log = new FileAuthorityCommitLog(
       path.join(distributedRoot, "authority"),
       this.#artifacts,
-      { storageMaintenance: options.storageMaintenance },
+      { storageMaintenance: options.storageMaintenance, records: options.records },
     );
     const staging = createSurfaceAssetStagingInfrastructure({
       distributedRoot,

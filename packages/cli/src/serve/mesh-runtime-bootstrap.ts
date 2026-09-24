@@ -75,6 +75,7 @@ export type MeshRuntimeBootstrap =
 
 /** Resolves durable trust before loading any role-specific production listener. */
 export async function prepareMeshRuntimeBootstrap(input: {
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
@@ -88,7 +89,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
   const bootstrapStore = new FileMeshBootstrapStore(
     input.zhixingHome,
     undefined,
-    { storageMaintenance: input.storageMaintenance },
+    { storageMaintenance: input.storageMaintenance, records: input.records },
   );
   const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
   const trustEvents = await bootstrapStore.loadTrustEvents();
@@ -117,7 +118,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
   const executorLog = new FileAuthorityCommitLog(
     path.join(path.resolve(input.zhixingHome), "distributed-runtime", "executor-authority"),
     bootstrapStore.artifactStore(),
-    { storageMaintenance: input.storageMaintenance },
+    { storageMaintenance: input.storageMaintenance, records: input.records },
   );
   const [authorityOperations, executorOperations, existingDeviceKey] = await Promise.all([
     new DeviceLifecycleJournal(bootstrapStore.authorityLog(), verifier).operations(),

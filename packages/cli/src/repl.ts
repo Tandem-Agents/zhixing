@@ -51,7 +51,7 @@ import { prepareUserTurnInput } from "./user-turn-input.js";
 import { createLifecycleWarningDeduper } from "./lifecycle-diagnostics-presentation.js";
 import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
-import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
+import { createOutputRenderer } from "./output/index.js";
 import {
   createScreenController,
   createScreenWriter,
@@ -458,17 +458,7 @@ function setupBracketedPasteMode(): void {
 
 // ─── 启动 REPL ───
 
-export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>): Promise<void> {
-  // 在 ScreenController 接管 stdout 之前预热 chunk-dump singleton——若 --log 启用，
-  // dump 创建时会经 stderr 写一行启用提示（"[zhixing] LLM raw chunk dump enabled →
-  // <path>"）。chrome 接管后 stderr 写入会破坏 frame；提前到 chrome 启动前让提示落在
-  // 终端的启动期 banner 阶段，与 shell prompt 自然衔接。后续 attachChunkDumpToBus 内的
-  // getLlmChunkDump() 复用 cached handle，不再触发 stderr。
-  //
-  // 启用状态由 index.ts action 入口 `configureLlmChunkDump(options.log)` 设置，
-  // 此处仅触发 cached 实例化（NOOP / 真实由 configure 决定）。
-  getLlmChunkDump();
-
+export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>, inputRecords?: import("@zhixing/core/logging").LogRecordPort, configurationRecords?: import("@zhixing/core/logging").LogRecordPort): Promise<void> {
   // 启用 bracketed paste mode + 初始化 paste detector：
   //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
   //   播按 listener 注册顺序执行，detector 先 setInPasteMode，下游 onKeypress 才能
@@ -493,7 +483,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     // scheduler 通知 / retry-compact-interrupt 等）必须经此协调，让输入区 chrome
     // 永驻屏底不被推走。在 typeahead 模式下绑定 input controller；其他模式下
     // 仅协调 status / scroll。
-    renderScreen = createScreenController({ capability: capability.capability });
+    renderScreen = createScreenController({ capability: capability.capability, inputRecords });
     cliWriter = createScreenWriter({ screen: renderScreen });
 
     // 异常退出兜底：SIGTERM / 父进程 kill / 未捕获异常等不走 main loop 的退出
@@ -1261,6 +1251,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   // config 域命令（config/mcp/trust/security）—— 编辑器留本地 TTY,落盘后经
   // 宿主换代生效;/trust 经管理面 RPC。
   registerConfigCommands({
+    configurationRecords,
     zhixingHome,
     configPath,
     registry: tRegistry,
@@ -1603,6 +1594,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
                   let lastAssistProgress = "";
                   const assistController = new AbortController();
                   const assistKeyboard = attachKeyboardSource({
+                    records: inputRecords,
                     controller: assistController,
                     onDoublePress: () => {},
                   });
@@ -1850,6 +1842,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     // detach 后再 rl.close——避免杀掉宿主侧 cleanup 回执的接收。
     let exitRequested = false;
     const interruptRuntime = createReplInterruptRuntime({
+      records: inputRecords,
       onDoublePress: () => {
         exitRequested = true;
       },

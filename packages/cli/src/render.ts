@@ -34,7 +34,7 @@ import {
   createStatusBar,
   type StatusBarHandle,
 } from "./status-bar/index.js";
-import { ANCHOR_SUB_AGENT, attachChunkDumpToBus } from "./output/index.js";
+import { ANCHOR_SUB_AGENT } from "./output/index.js";
 import { renderAuditEvent } from "./security/terminal-renderer.js";
 import {
   createContextIndicator,
@@ -633,17 +633,11 @@ export function createRenderSubscribers(
       contextIndicator = createContextIndicator({ screen, eventBus: bus });
     }
 
-    // chunk-dump 诊断旁路——`--log` 启用时把 LLM stream 完整事件流（含
-    // tool_call_delta 等）写日志，默认 noop 零开销。在 EventBus 订阅装载点接入
-    // 而非 output-renderer，覆盖范围与 status-bar 同源（StreamEvent）
-    const detachChunkDump = attachChunkDumpToBus(bus);
-
     return () => {
       for (const u of unsubs) u();
       interruptHandle.dispose();
       statusBar?.dispose();
       contextIndicator?.dispose();
-      detachChunkDump();
     };
   };
 }

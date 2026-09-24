@@ -1,3 +1,5 @@
+import { recordingFixture } from "../logging/__tests__/recording.js";
+import { EXTENSION_LOG_SOURCE } from "./logging.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,7 +20,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture(mode = "normal", projection = async () => ({ mode })) {
+async function fixture(mode = "normal", projection = async () => ({ mode }), recordsFor?: ConstructorParameters<typeof ManagedExtensions>[0]["recordsFor"]) {
   const root = await mkdtemp(join(tmpdir(), "zhixing-extensions-")); roots.push(root);
   const log = new FileAuthorityCommitLog(root, new FileArtifactStore(join(root, "authority-artifacts")));
   const application = new ExtensionApplication({ log: () => log, assertOwner() {} });
@@ -29,7 +31,7 @@ async function fixture(mode = "normal", projection = async () => ({ mode })) {
   const artifacts = new ExtensionArtifacts(join(root, "extensions"));
   await artifacts.import(manifest, bytes);
   const runtime = new ManagedExtensions({ application, artifacts, isOwner: () => true,
-    projection,
+    projection, recordsFor,
     binding: () => ({ type: "fixture", contract: 1, validate(m) { if (m.type !== "fixture") throw new Error("wrong type"); }, receive: async () => null, close() {} }),
   });
   runtimes.push(runtime);
@@ -230,5 +232,40 @@ describe("managed extensions", () => {
     expect(accepted).toBe(false);
     admit(); await pending;
     a.close(); b.close();
+  });
+});
+
+describe("extension observation through the actual recorder", () => {
+  it("records actual child exit and survives a failed per-generation observation factory", async () => {
+    const logs = recordingFixture();
+    const f = await fixture("normal", undefined, (instance, generation) => logs.bind(EXTENSION_LOG_SOURCE, { scope: "storage" }, [{ kind: "extension", id: instance.id }, { kind: "generation", id: generation }]));
+    await f.application.adopt("one", f.binding); await f.runtime.resume();
+    await expect.poll(() => Boolean(f.runtime.current("one"))).toBe(true);
+    await f.runtime.close(); await logs.finish();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    const stopped = logs.records().find(record => record.event === "stopped");
+    expect(stopped).toBeDefined();
+    expect(typeof stopped!.data.code === "number" || typeof stopped!.data.signal === "string").toBe(true);
+    expect(Object.values(stopped!.data)).not.toContain(null);
+    const failed = await fixture("normal", undefined, () => { throw Error("observer failed"); });
+    await failed.application.adopt("one", failed.binding); await failed.runtime.resume();
+    await expect.poll(() => Boolean(failed.runtime.current("one"))).toBe(true);
+    await failed.runtime.close();
+    expect(failed.runtime.state("one")).toBe("stopped");
+  });
+  it("does not trust malformed receipts and associates late evidence with the timed-out request", async () => {
+    const logs = recordingFixture();
+    let sent: { id: string } | undefined;
+    const peer = new ExtensionPeer((frame) => { sent = frame; }, async () => null, logs.bind(EXTENSION_LOG_SOURCE, { scope: "storage" }));
+    const request = peer.call("effect", { token: "never-stored" }, 20, [{ kind: "delivery", id: "delivery-one" }]);
+    const rejected = expect(request).rejects.toThrow("outcome may be unknown");
+    peer.accept({ v: 1, kind: "response", id: sent!.id, ok: "false" });
+    await rejected;
+    peer.accept({ v: 1, kind: "response", id: sent!.id, ok: true });
+    peer.close(); await logs.finish();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    expect(logs.records().some((record) => record.result === "success")).toBe(false);
+    expect(logs.records()).toContainEqual(expect.objectContaining({ event: "unmatched", result: "unknown", refs: expect.arrayContaining([{ kind: "extensionRequest", id: sent!.id }]) }));
+    expect(JSON.stringify(logs.records())).not.toContain("never-stored");
   });
 });

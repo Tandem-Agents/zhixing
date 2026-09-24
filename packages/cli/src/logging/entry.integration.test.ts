@@ -1,3 +1,4 @@
+import { acquireLocalWorkspaceOwner, LocalWorkspaceTransportServer } from "../runtime/local-workspace-owner.js";
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { writeFile, readdir, stat, mkdir, rmdir } from "node:fs/promises";
@@ -51,10 +52,8 @@ describe("built CLI log entry and exit chain", () => {
     ]) {
       const result = await run(home, args);
       expect(result.code).toBe(1);
-      expect(result.stdout).toContain(
-        process.platform === "win32" ? "日志目录尚不存在" : "日志存储当前不可读取",
-      );
-      expect(result.stdout).toContain("zz logs location");
+      expect(result.stdout).toContain("日志存储尚未初始化");
+      expect(result.stdout).toContain("zz logs read zxlog-local:legacy/catalog");
       expect(result.stdout + result.stderr).not.toContain("checkpoint-child-missing");
       expect(await readdir(home)).toEqual([]);
     }
@@ -181,3 +180,52 @@ describe("built CLI log entry and exit chain", () => {
     }
   }, 20_000);
 });
+
+
+describe("independent CLI logging owner", () => {
+  it.each([["backup", "setup"], ["workspace", "status"]])("drains failure from actual command %j without spawning a replacement owner", async (...args) => {
+    const home = await createTempDir("logging-command-entry");
+    // No production settings or secrets: workspace preflight fails deterministically.
+    await writeFile(getGlobalConfigPath({ ZHIXING_HOME: home }, home), "{broken", "utf8");
+    const failed = await run(home, args);
+    expect(failed.code).toBe(1);
+    const result = await run(home, ["logs", "--offline", "search"]);
+    expect(result.code).toBe(0);
+    const records = JSON.parse(result.stdout).records;
+    expect(records.filter((record: any) => record.event === "started")).toHaveLength(1);
+    expect(records).toEqual(expect.arrayContaining([expect.objectContaining({ event: "failed", result: "failure" }), expect.objectContaining({ event: "stopped", result: "failure" })]));
+  }, 20000);
+});
+
+
+it.each([false, true])("drains the standalone owner and preserves workspace JSON when logs unavailable=%s", async (unavailable) => {
+  const home = await createTempDir("logging-natural-command");
+  if (unavailable) {
+    await mkdir(path.join(home, "logs"));
+    await writeFile(path.join(home, "logs", "runtime"), "not-a-log-directory");
+  }
+  const lease = await acquireLocalWorkspaceOwner(home);
+  // A local authenticated transport fixture supplies the existing Host contract.
+  const host = new LocalWorkspaceTransportServer(lease, async body => {
+    const kind = (body as { kind: string }).kind;
+    if (kind === "host-status") return { state: "ready" };
+    if (kind === "pending") return { outboxId: "outbox-" + "a".repeat(32), operations: [], confirmation: { throughSeq: 0, prefixDigest: "sha256:" + "0".repeat(64) } };
+    if (kind === "list") return [];
+    throw Error("unexpected fixture call " + kind);
+  });
+  await host.start();
+  try {
+    const result = await run(home, ["workspace", "list"]);
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([]);
+    if (unavailable) {
+      expect(result.stderr).toContain("日志");
+      expect(Buffer.byteLength(result.stderr)).toBeLessThan(4096);
+      expect((await stat(path.join(home, "logs", "runtime"))).size).toBe(19);
+    }
+  } finally { await host.close(); await lease.release(); }
+  if (unavailable) return;
+  const page = await run(home, ["logs", "--offline", "search"]);
+  expect(page.code).toBe(0);
+  expect(JSON.parse(page.stdout).records).toContainEqual(expect.objectContaining({ event: "stopped", result: "success" }));
+}, 20000);

@@ -4,6 +4,7 @@ import {
   type CheckpointFilesystemSession,
 } from "@zhixing/mesh/filesystem";
 import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
+import { LegacyLogFiles, isLegacyLogFile } from "./legacy-files.js";
 
 /** The parent directly owns the asynchronous native process and its OS lock. */
 export class WindowsLogFiles implements LogFileSystem {
@@ -14,6 +15,7 @@ export class WindowsLogFiles implements LogFileSystem {
   #release: (() => Promise<void>) | undefined;
   #readOnly = true;
   #closed = false;
+  #legacy: LegacyLogFiles | undefined;
   constructor(home: string, timeout: number) {
     this.#home = home;
     this.#timeout = timeout;
@@ -25,6 +27,7 @@ export class WindowsLogFiles implements LogFileSystem {
       this.#session = undefined;
       this.#directory = undefined;
       this.#release = undefined;
+      this.#legacy = undefined;
     }
     if (this.#closed) throw Error("日志文件进程已关闭");
     this.#session ??= CheckpointDirectoryHandle.createWindowsSession(this.#timeout);
@@ -34,16 +37,20 @@ export class WindowsLogFiles implements LogFileSystem {
     }
     await this.#release?.();
     this.#release = undefined;
+    await this.#legacy?.close();
+    this.#legacy = undefined;
     await this.#directory?.close();
     this.#directory = undefined;
     this.#readOnly = readOnly;
+    this.#legacy = new LegacyLogFiles(this.#home, (root, create, ro) => this.#session!.openPath(root, create, ro), readOnly);
     if (!path.isAbsolute(this.#home)) throw Error("日志数据根必须为绝对路径");
-    if (readOnly)
-      this.#directory = await this.#session.openPath(
+    if (readOnly) {
+      try { this.#directory = await this.#session.openPath(
         path.join(this.#home, "logs", "runtime"),
         false,
         true,
-      );
+      ); } catch (error) { if (!(error instanceof Error) || error.message !== "checkpoint-child-missing") throw error; }
+    }
     else {
       const root = await this.#session.openPath(this.#home, false);
       let logs: CheckpointDirectoryHandle | undefined;
@@ -64,32 +71,52 @@ export class WindowsLogFiles implements LogFileSystem {
       throw Error("日志文件存储暂不可用");
     return this.#directory;
   }
-  list(limit: number): Promise<readonly string[]> {
-    return this.#root().listEntries(limit);
+  async list(limit: number): Promise<readonly string[]> {
+    const own = this.#directory ? await this.#root().listEntries(limit) : [];
+    if (own.some(isLegacyLogFile)) throw Error("日志根含保留的旧日志名称");
+    const names = [...own, ...await this.#legacy!.list(limit)];
+    if (names.length > limit) throw Error("日志文件清点超限");
+    return names;
   }
-  stat(name: string): Promise<LogFileInfo> {
+  async stat(name: string): Promise<LogFileInfo> {
+    if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return { ...await entry.directory.statFile(entry.name), legacyPath: entry.relativePath }; }
     return this.#root().statFile(name);
   }
-  read(name: string, size: number, offset: number, limit: number): Promise<Uint8Array> {
-    return this.#root().readFile(name, size, offset, limit);
+  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
+    if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return entry.directory.readFile(entry.name, size, offset, limit, identity); }
+    return this.#root().readFile(name, size, offset, limit, identity);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
+    if (isLegacyLogFile(name)) throw Error("不能改写旧日志");
     return this.#root(true).writeFile(name, bytes);
   }
   rename(from: string, to: string): Promise<void> {
+    if (isLegacyLogFile(from) || isLegacyLogFile(to)) throw Error("不能迁移旧日志");
     const root = this.#root(true);
     return root.renameTo(from, root, to);
   }
   truncate(name: string, identity: string, bytes: number): Promise<void> {
+    if (isLegacyLogFile(name)) {
+      this.#root(true);
+      if (bytes !== 0) throw Error("旧日志仅允许整文件回收");
+      const entry = this.#legacy!.resolve(name); return entry.directory.truncateFile(entry.name, identity, 0);
+    }
     return this.#root(true).truncateFile(name, identity, bytes);
   }
-  async remove(name: string): Promise<void> {
+  async remove(name: string, identity?: string): Promise<void> {
+    if (isLegacyLogFile(name)) {
+      this.#root(true);
+      if (!identity) throw Error("回收旧日志必须提供登记身份");
+      const entry = this.#legacy!.resolve(name);
+      await entry.directory.removeRetired(entry.name, identity); await entry.directory.sync(); return;
+    }
     const root = this.#root(true),
       info = await root.statFile(name);
-    await root.removeRetired(name, info.identity);
+    await root.removeRetired(name, identity ?? info.identity);
   }
-  sync(): Promise<void> {
-    return this.#root(true).sync();
+  async sync(): Promise<void> {
+    await this.#root(true).sync();
+    await this.#legacy?.sync();
   }
   async tryLock(): Promise<boolean> {
     if (this.#release) throw Error("日志互斥不可重入");

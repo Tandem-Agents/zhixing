@@ -37,7 +37,8 @@ export async function runLoggingCommand(
   if (command.action === "location") {
     writer.line(path.join(home, "logs", "runtime"));
     writer.line(LOG_FORMAT_DESCRIPTION);
-    writer.line("当前覆盖运行入口与宿主启停链；旧后台日志仍使用 zz serve logs。");
+    writer.line("zz logs 与 zz serve logs 使用同一运行日志；历史文件以 legacy 原格式纳管，登记与预算状态见 zz logs。");
+    writer.line("升级前历史日志：zz logs read zxlog-local:legacy/catalog；这是当前本机的临时定位，不是跨设备稳定地址。");
     return;
   }
   const capacity = createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false });

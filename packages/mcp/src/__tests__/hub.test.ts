@@ -1,3 +1,5 @@
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { MCP_LOG_SOURCE } from "../logging.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -524,5 +526,26 @@ describe("McpHub — 后台断线重连", () => {
       vi.useRealTimers();
     }
     await hub.dispose();
+  });
+});
+
+
+describe("MCP production observation", () => {
+  it("records actual SDK calls and uncertain cleanup without retaining arguments or output", async () => {
+    const logs = recordingFixture();
+    const transport = await startTestServer([{ name: "echo", inputSchema: { type: "object" } }]);
+    const records = logs.bind(MCP_LOG_SOURCE, { scope: "conversation:one" }, [{ kind: "run", id: "run-one" }]);
+    const hub = createMcpHub([spec("demo")], { records, createTransport: () => ({ transport, dispose: async () => { throw Error("cleanup incomplete"); } }) });
+    try {
+      await hub.connectAll();
+      expect((await hub.callTool("demo", "echo", { secret: "never-log-this" }, { toolCallId: "call-one" })).isError).not.toBe(true);
+    } finally { await hub.dispose(); await logs.finish(); }
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    const all = logs.records();
+    const requested = all.find(item => item.event === "requested")!;
+    expect(requested.refs).toEqual(expect.arrayContaining([{ kind: "toolCall", id: "call-one" }]));
+    expect(all).toContainEqual(expect.objectContaining({ event: "returned", result: "success", refs: requested.refs }));
+    expect(all).toContainEqual(expect.objectContaining({ event: "closed", result: "unknown" }));
+    expect(JSON.stringify(all)).not.toContain("never-log-this");
   });
 });

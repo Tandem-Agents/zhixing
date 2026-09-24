@@ -148,16 +148,15 @@ export function filterDaemonChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
  * 构造 daemon spawn 选项。
  *
  * - detached: true —— 所有平台脱离父进程组
- * - stdio: ["ignore", logFd, logFd] —— stdin 关，stdout/stderr 合并到日志文件
+ * - stdio: ignore —— 子进程自行通过唯一 Recorder 记录，父进程不持日志文件
  * - windowsHide: true —— 防 Windows 弹出新 console 窗口（POSIX 无效）
  */
 export function buildDaemonSpawnOptions(
-  logFd: number,
   env: NodeJS.ProcessEnv,
 ): DaemonSpawnOptions {
   return {
     detached: true,
-    stdio: ["ignore", logFd, logFd],
+    stdio: "ignore",
     windowsHide: true,
     env,
   };

@@ -30,6 +30,8 @@ export interface KernelRunEnvelope {
     readonly messages: readonly Message[];
   };
   readonly identity: {
+    readonly runId?: string;
+    readonly assignmentId?: string;
     readonly turnIndex: number;
     readonly conversationId?: string;
     readonly source?: TurnSource;
@@ -110,6 +112,8 @@ export function captureKernelRunEnvelope(
       ),
     }),
     identity: Object.freeze({
+      runId: input.identity.runId,
+      assignmentId: input.identity.assignmentId,
       turnIndex: input.identity.turnIndex,
       conversationId: input.identity.conversationId,
       source: input.identity.source,

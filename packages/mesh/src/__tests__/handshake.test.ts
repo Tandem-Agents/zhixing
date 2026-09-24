@@ -1,3 +1,5 @@
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { MeshRequestChannel, HANDOFF_LOG_SOURCE } from "../request-channel.js";
 import { constants } from "node:crypto";
 import { once } from "node:events";
 import { connect as connectNet } from "node:net";
@@ -649,3 +651,45 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+
+describe("production log handoff on authenticated local TLS", () => {
+  it("correlates receipt, cancellation and late evidence by the actual wire request identity", async () => {
+    const devices = await createDevices();
+    const accepted = deferred<SecureMeshConnection>();
+    const server = await startServer(devices.responder, [devices.initiator.peer], { onConnection: accepted.resolve });
+    const connection = await connectClient(devices.initiator, devices.responder.peer, server.port);
+    const inbound = await accepted.promise;
+    const logs = recordingFixture();
+    await logs.recorder.start();
+    const registry = new MeshServiceRegistry();
+    const release = deferred<void>(), entered = deferred<void>();
+    registry.register("assignment.probe", { access: "write", availability: "negotiated-version", handler: async bytes => bytes });
+    registry.register("assignment.slow", { access: "write", availability: "negotiated-version", handler: async bytes => { entered.resolve(); await release.promise; return bytes; } });
+    const bind = () => ({ records: logs.bind(HANDOFF_LOG_SOURCE, { scope: "storage" }), observationRefs: () => [{ kind: "assignment", id: "assignment-one" }] });
+    const left = new MeshRequestChannel(connection, new MeshServiceRegistry(), { ...bind(), requestTimeoutMs: 5000 });
+    const right = new MeshRequestChannel(inbound, registry, bind());
+    try {
+      expect(Buffer.from(await left.request("assignment.probe", Buffer.from("private-payload"))).toString()).toBe("private-payload");
+      const abort = new AbortController();
+      const pending = left.request("assignment.slow", Buffer.from("private-payload"), abort.signal);
+      const rejected = expect(pending).rejects.toThrow();
+      await entered.promise;
+      abort.abort();
+      await rejected;
+      release.resolve();
+      await expect.poll(async () => { await logs.recorder.flush(); return logs.records().some(record => record.event === "late"); }).toBe(true);
+    } finally { release.resolve(); await left.close(); await right.close(); await logs.finish(); }
+    const all = logs.records();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    const requested = all.filter(record => record.event === "requested");
+    expect(requested).toHaveLength(4);
+    const ids = [...new Set(requested.flatMap(record => record.refs.filter(ref => ref.kind === "meshRequest").map(ref => ref.id)))];
+    expect(ids).toHaveLength(2);
+    for (const id of ids) expect(requested.filter(record => record.refs.some(ref => ref.id === id))).toHaveLength(2);
+    const unknown = all.find(record => record.event === "uncertain")!;
+    expect(unknown.result).toBe("unknown");
+    expect(all).toContainEqual(expect.objectContaining({ event: "late", result: "unknown", refs: unknown.refs }));
+    expect(JSON.stringify(all)).not.toContain("private-payload");
+  }, 15000);
+});

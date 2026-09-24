@@ -33,24 +33,9 @@ export function getDefaultReadyMarkerPath(zhixingHome: string = getZhixingHome()
   return join(zhixingHome, "server.ready");
 }
 
-/** ~/.zhixing/logs/server —— 受生命周期治理的后台宿主日志目录 */
-export function getDefaultServerLogDirPath(zhixingHome: string = getZhixingHome()): string {
-  return join(zhixingHome, "logs", "server");
-}
-
-/** ~/.zhixing/logs/server/server.log —— 受生命周期治理的后台宿主活跃日志 */
-export function getDefaultServerActiveLogPath(zhixingHome: string = getZhixingHome()): string {
-  return join(getDefaultServerLogDirPath(zhixingHome), "server.log");
-}
-
-/** ~/.zhixing/server.log —— 旧版 daemon 日志；只作为迁移 / 兼容来源 */
-export function getLegacyServerLogPath(zhixingHome: string = getZhixingHome()): string {
-  return join(zhixingHome, "server.log");
-}
-
-/** ~/.zhixing/logs/server/server.log —— daemon child stdout/stderr 重定向目标 */
+/** Unified runtime log root, shared by foreground and background owners. */
 export function getDefaultLogPath(zhixingHome: string = getZhixingHome()): string {
-  return join(zhixingHome, "logs", "server", "server.log");
+  return join(zhixingHome, "logs", "runtime");
 }
 
 /** ~/.zhixing/server.token —— RPC 客户端认证用共享 token */

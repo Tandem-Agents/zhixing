@@ -1,3 +1,6 @@
+import type { RuntimeLogContext } from "../logging/runtime.js";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { handoffLogging } from "../logging/handoff.js";
 import { hostname, platform } from "node:os";
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core/paths";
@@ -80,6 +83,7 @@ import type {
 } from "./published-checkpoint-target.js";
 
 export interface BackupCommandOptions {
+  readonly logging?: RuntimeLogContext;
   readonly zhixingHome?: string;
   readonly secretStore?: SecretStorePort;
   readonly writeLine?: (line: string) => void;
@@ -170,7 +174,7 @@ async function openResetApprovalContext(options: BackupCommandOptions): Promise<
   const deviceId = refs[0]!.bindingId.slice("device/v1/".length);
   const key = await loadDeviceKey(secretStore, deviceId);
   if (!key) throw new Error("当前设备身份不可用");
-  const store = new FileMeshBootstrapStore(home, key);
+  const store = new FileMeshBootstrapStore(home, key, { records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }), storageMaintenance: options.storageMaintenance ?? options.logging?.capacity.storage });
   const [projection, record] = await Promise.all([
     store.loadTrustProjection(),
     store.loadTrustRecord(),
@@ -224,6 +228,7 @@ export async function runBackupStatusCommand(options: BackupCommandOptions = {})
 }
 
 interface BackupContext {
+  readonly logging?: RuntimeLogContext;
   readonly home: string;
   readonly secretStore: SecretStorePort;
   readonly meshConfiguration?: MeshRoleBootConfig;
@@ -718,8 +723,8 @@ async function openContext(
   const key = await loadOrCreateDeviceKey(secretStore);
   const capacity = options.storageMaintenance
     ? { storage: options.storageMaintenance }
-    : createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity"));
-  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance: capacity.storage });
+    : options.logging?.capacity ?? createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity"));
+  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance: capacity.storage, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
   let projection = await store.loadTrustProjection();
   let trust = await store.loadTrustRecord();
   let identity: DeviceIdentity;
@@ -763,6 +768,7 @@ async function openContext(
   store.bindIssuerKey(issuerKey);
   return {
     home,
+    logging: options.logging,
     secretStore,
     ...(config.mesh ? { meshConfiguration: config.mesh } : {}),
     key,
@@ -906,16 +912,19 @@ async function connectPairedTarget(
   }
   if (!recipientKeyId) throw new Error("恢复备份目标缺少候选恢复根身份");
   const disasterRecoveryStaging = createDisasterRecoveryStagingInfrastructure({
+    records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     zhixingHome: context.home,
     storageMaintenance: context.capacity.storage,
   });
   let control: ProductionMeshControlPlane | undefined;
   try {
     const bootstrap = await prepareMeshRuntimeBootstrap({
+      records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: context.home,
       secretStore: context.secretStore,
       storageMaintenance: context.capacity.storage,
       plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+        records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
         zhixingHome: context.home,
         storageMaintenance: context.capacity.storage,
       }),
@@ -926,6 +935,7 @@ async function connectPairedTarget(
       throw new Error("只有当前主设备可以连接配对设备核对恢复备份");
     }
     const activeControl = new ProductionMeshControlPlane({
+    logging: handoffLogging(context.logging?.bind),
       localIdentity: bootstrap.deviceKey,
       trust: bootstrap.trust,
       configuration: bootstrap.configuration,

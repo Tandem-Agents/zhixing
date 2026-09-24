@@ -129,3 +129,6 @@ export type {
   ProviderRolesOptions,
   ProviderRolesResult,
 } from "./create-provider.js";
+export { CONFIGURATION_LOG_SOURCE } from "./configuration-edit.js";
+
+export { runtimeConfigurationObservation } from "./configuration-logging.js";

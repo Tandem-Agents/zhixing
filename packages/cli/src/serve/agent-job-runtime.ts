@@ -167,7 +167,7 @@ export function createAgentJobRuntimePort(
                 modelInput: {
                   messages: [userMessage(instruction.prompt)],
                 },
-                identity: { turnIndex: 0, source: "scheduler" },
+                identity: { turnIndex: 0, source: "scheduler", runId: options.runId, assignmentId: options.assignmentId },
                 control: {
                   abortSignal: stop.signal,
                   modelCallResourceMeter: options.modelCallResourceMeter,

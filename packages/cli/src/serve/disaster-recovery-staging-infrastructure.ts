@@ -1,3 +1,4 @@
+import { withLogRefs, type LogRecordPort } from "@zhixing/core/logging";
 import type { Dir } from "node:fs";
 import { lstat, opendir, rm, rmdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -40,6 +41,7 @@ interface Closeable {
 export function createDisasterRecoveryStagingInfrastructure(options: Readonly<{
   zhixingHome: string;
   storageMaintenance?: StorageMaintenanceGovernorPort;
+  records?: LogRecordPort;
 }>): DisasterRecoveryStagingArea {
   const root = path.resolve(
     options.zhixingHome,
@@ -63,7 +65,7 @@ export function createDisasterRecoveryStagingInfrastructure(options: Readonly<{
     const journalRoot = transferPath(root, "journals", input.transferId);
     const artifacts = new FileArtifactStore(path.join(transferRoot, "artifacts"));
     const log = new FileAuthorityCommitLog(journalRoot, artifacts, {
-      storageMaintenance: options.storageMaintenance,
+      storageMaintenance: options.storageMaintenance, records: withLogRefs(options.records, [{ kind: "transfer", id: input.transferId }]),
     });
     let closing: Promise<void> | undefined;
     let session: DisasterRecoveryTransferStagingSession | undefined;
@@ -168,7 +170,7 @@ export function createDisasterRecoveryStagingInfrastructure(options: Readonly<{
             new FileAuthorityCommitLog(
               path.join(root, "candidate-claims"),
               sharedArtifacts,
-              { storageMaintenance: options.storageMaintenance },
+              { storageMaintenance: options.storageMaintenance, records: options.records },
             ),
             rootPublicKey,
           );

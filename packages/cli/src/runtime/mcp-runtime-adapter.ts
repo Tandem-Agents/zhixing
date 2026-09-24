@@ -1,3 +1,5 @@
+// Source schema is projected at the same infrastructure edge as the MCP runtime.
+export { MCP_LOG_SOURCE } from "@zhixing/mcp";
 import {
   createMcpHub,
   mapServerTools,

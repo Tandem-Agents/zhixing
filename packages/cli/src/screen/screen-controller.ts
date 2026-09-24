@@ -177,6 +177,7 @@ export interface ReplaceableSegmentHandle {
 }
 
 export interface ScreenController {
+  readonly inputRecords?: import("@zhixing/core/logging").LogRecordPort;
   /** 注册唯一活跃输入区。重复 attach 会替换旧的并立刻重画。 */
   attachInput(region: InputRegion): void;
   /** 卸载输入区——擦除状态条 + 输入区屏幕痕迹，状态条状态也清空。 */
@@ -364,6 +365,7 @@ export interface ScreenController {
 }
 
 interface ScreenControllerOptions {
+  readonly inputRecords?: import("@zhixing/core/logging").LogRecordPort;
   /** 终端能力探测结果——caller 在构造前调用 detectTerminalCapability 获得 */
   readonly capability: TerminalCapability;
   /** stdout 注入——测试时可注入 mock；默认 process.stdout */
@@ -431,6 +433,7 @@ const ANSI_FIRSTATTACH_SEQUENCE = "\x1b[2J\x1b[3J\x1b[1;1H";
 const ANSI_DISPOSE_SEQUENCE = "\x1b[r\x1b[2J\x1b[1;1H";
 
 class ScreenControllerImpl implements ScreenController {
+  readonly inputRecords: import("@zhixing/core/logging").LogRecordPort | undefined;
   private readonly stdout: NodeJS.WriteStream;
   private readonly capability: TerminalCapability;
   private readonly scrollRegion: ScrollRegion;
@@ -523,6 +526,7 @@ class ScreenControllerImpl implements ScreenController {
   private resizeEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ScreenControllerOptions) {
+    this.inputRecords = options.inputRecords;
     this.capability = options.capability;
     this.stdout = options.stdout ?? process.stdout;
     this.viewportRows = this.capability.viewport.rows;

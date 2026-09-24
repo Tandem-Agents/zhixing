@@ -44,6 +44,7 @@ import type { KernelSecurityApprovalPort } from "../runtime/kernel-security-exec
 import { AISecuritySteward } from "./ai-steward.js";
 import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
 import { runContextStorage } from "../runtime/run-context.js";
+import { withLogRefs } from "@zhixing/core/logging";
 
 // ─── 错误类型 ───
 
@@ -173,6 +174,14 @@ export function createSecureExecuteTool(
     opts.confirmationFallback ?? "deny";
 
   return async (tool, input, context) => {
+    const observation = runContextStorage.getStore();
+    const refs = [
+      ...(context.toolCallId ? [{ kind: "toolCall", id: context.toolCallId }] : []),
+      ...(observation?.childTaskId ? [{ kind: "task", id: observation.childTaskId }] : []),
+    ];
+    const records = withLogRefs(observation?.logPorts?.kernel, refs);
+    let confirmation: string | undefined;
+    try {
     const assertCapability = () => {
       const ceiling = runContextStorage.getStore()?.toolExecutionCeiling;
       if (ceiling && !ceiling.permits(tool)) throw new SecurityBlockError("此受限运行只能使用获准的日志查询能力", tool.name, "运行能力上限不允许此工具");
@@ -198,6 +207,8 @@ export function createSecureExecuteTool(
     // 字段都需要在此处补一行透传,极易遗漏导致工具收到的 ctx 字段悄悄丢失。
     const augmentedContext: ToolExecutionContext = {
       ...context,
+      processRecords: withLogRefs(observation?.logPorts?.process, refs),
+      mcpRecords: withLogRefs(observation?.logPorts?.mcp, refs),
       turnId: turnContext?.turnId ?? context.turnId,
       emissionTarget: turnContext?.emissionTarget ?? context.emissionTarget,
       commitToUser: turnContext?.commitToUser
@@ -274,6 +285,7 @@ export function createSecureExecuteTool(
       if (verdict?.decision !== "safe") {
         // needs-confirm / 未触发管家 → broker（非交互由其 fail-to-deny 兜底）
         await handleBrokerPath({
+          observeDecision: (kind) => { confirmation = kind; },
           agentIdentity: opts.agentIdentity,
           broker,
           securityApproval,
@@ -313,6 +325,7 @@ export function createSecureExecuteTool(
       toolInput: input,
     });
     assertCapability();
+    records?.record(() => ({ event: "permission", result: "success", data: { tool: tool.name, phase: "admitted", decision: confirmation ?? "policy" } }));
     return runWithConstraints({
       tool,
       input,
@@ -320,6 +333,10 @@ export function createSecureExecuteTool(
       constraints: result.executionConstraints,
       originalExecute,
     });
+    } catch (error) {
+      records?.record(() => ({ event: "permission", result: confirmation === "cancelled" || context.abortSignal?.aborted ? "cancelled" : "refused", data: { tool: tool.name, phase: "not-admitted", decision: confirmation, error: error instanceof Error ? error.message : "权限准入未完成" } }));
+      throw error;
+    }
   };
 }
 
@@ -361,6 +378,7 @@ async function consultSteward(params: {
 // ─── Broker 路径 ───
 
 async function handleBrokerPath(params: {
+  readonly observeDecision?: (kind: string) => void;
   readonly agentIdentity?: AgentIdentity;
   broker: IConfirmationBroker;
   securityApproval: KernelSecurityApprovalPort;
@@ -417,6 +435,7 @@ async function handleBrokerPath(params: {
     request,
     context.abortSignal,
   );
+  params.observeDecision?.(decision.kind);
 
   switch (decision.kind) {
     case "deny": {

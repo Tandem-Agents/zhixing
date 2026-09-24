@@ -126,6 +126,7 @@ export function validateExtensionBinding(binding: ExtensionBinding): ExtensionBi
 }
 
 export interface ExtensionInvocation {
+  readonly requestId?: string;
   readonly method: string;
   readonly payload: unknown;
 }
@@ -144,6 +145,6 @@ export interface ExtensionTypeBinding {
 
 export interface ExtensionProcess {
   readonly generation: string;
-  call(method: string, payload: unknown): Promise<unknown>;
+  call(method: string, payload: unknown, refs?: readonly import("../logging/contracts.js").LogRef[]): Promise<unknown>;
   stop(): Promise<void>;
 }

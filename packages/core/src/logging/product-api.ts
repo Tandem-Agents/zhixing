@@ -115,6 +115,7 @@ export function createLogProductApiContribution(host: LogApplicationHost) {
 export function parseLogSearchRequest(input: unknown): LogSearchRequest {
   const value = object(input ?? {}, ["filter", "cursor"]);
   const filter = object(value.filter ?? {}, [
+    "afterSequence",
     "from",
     "until",
     "source",
@@ -126,7 +127,7 @@ export function parseLogSearchRequest(input: unknown): LogSearchRequest {
     filter.ref === undefined
       ? undefined
       : object(filter.ref, ["kind", "id", "storeId"]);
-  for (const key of ["from", "until"] as const)
+  for (const key of ["from", "until", "afterSequence"] as const)
     if (
       filter[key] !== undefined &&
       (!Number.isSafeInteger(filter[key]) || (filter[key] as number) < 0)

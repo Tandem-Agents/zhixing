@@ -30,9 +30,8 @@ describe("AnchorHostShellLifecycle", () => {
     vi.useRealTimers();
   });
 
-  it("freezes the seven Host shell resource identities", () => {
+  it("freezes the six Host shell resource identities", () => {
     expect(ANCHOR_HOST_SHELL_RESOURCE_DESCRIPTORS).toEqual([
-      { owner: "anchor-host", id: "serverLogLifecycle.stop" },
       { owner: "anchor-host", id: "endpoint.close" },
       { owner: "anchor-host", id: "authorityCheckpointOwner.stop" },
       { owner: "anchor-host", id: "serverState.lifecycle" },
@@ -54,9 +53,9 @@ describe("AnchorHostShellLifecycle", () => {
 
     const server = serverFor(acquiredBinding, []);
     lifecycle.transferPreparedServer(server, registry);
-    expect(() => lifecycle.acquireServerLog({ stop() {} })).toThrow("after Host shell transfer");
+    expect(() => lifecycle.acquireCheckpointOwner({ async stop() {} })).toThrow("after Host shell transfer");
     expect(() => lifecycle.assertActivationOwnership({
-      serverLog: false,
+
       checkpointOwner: true,
     })).toThrow("checkpoint exact-set mismatch");
     expect(() => lifecycle.transferPreparedServer(server, registry))
@@ -67,7 +66,6 @@ describe("AnchorHostShellLifecycle", () => {
     const order: string[] = [];
     const rollback = new StartupRollback();
     const { lifecycle, binding, registry } = fixture({ rollback, order });
-    lifecycle.acquireServerLog({ stop: () => order.push("log.stop") });
     lifecycle.acquireBinding(binding);
     lifecycle.acquireStateFile(stateFile(order));
     lifecycle.acquireCheckpointOwner({
@@ -76,7 +74,7 @@ describe("AnchorHostShellLifecycle", () => {
       },
     });
     lifecycle.transferPreparedServer(serverFor(binding, order), registry);
-    lifecycle.assertActivationOwnership({ serverLog: true, checkpointOwner: true });
+    lifecycle.assertActivationOwnership({ checkpointOwner: true });
 
     await registry.runAll("SIGTERM");
     await rollback.rollback();
@@ -88,7 +86,6 @@ describe("AnchorHostShellLifecycle", () => {
       "state.markStopped",
       "state.cleanup",
       "checkpoint.stop",
-      "log.stop",
     ]);
   });
 
@@ -144,7 +141,6 @@ describe("AnchorHostShellLifecycle", () => {
       readLock: read,
       releaseLock: release,
     });
-    lifecycle.acquireServerLog({ stop: () => order.push("log.stop") });
     lifecycle.acquireBinding(binding);
     lifecycle.acquireStateFile(stateFile(order));
     lifecycle.acquireCheckpointOwner({
@@ -166,7 +162,6 @@ describe("AnchorHostShellLifecycle", () => {
       "discovery.release",
       "server.close",
       "checkpoint.stop",
-      "log.stop",
     ]);
     expect(read).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledTimes(1);
@@ -183,12 +178,6 @@ describe("AnchorHostShellLifecycle", () => {
       order,
       readLock: vi.fn(async () => ownLock()),
       releaseLock: release,
-    });
-    lifecycle.acquireServerLog({
-      stop: () => {
-        order.push("log.stop");
-        throw new Error("log failed");
-      },
     });
     lifecycle.acquireBinding(binding);
     lifecycle.acquireStateFile(stateFile(order, { markStopping: new Error("stopping failed") }));
@@ -208,7 +197,6 @@ describe("AnchorHostShellLifecycle", () => {
       expect.objectContaining({ message: "stopping failed" }),
       expect.objectContaining({ message: "release failed" }),
       expect.objectContaining({ message: "checkpoint failed" }),
-      expect.objectContaining({ message: "log failed" }),
     ]);
     expect(order).toEqual([
       "state.markStopping:error",
@@ -217,7 +205,6 @@ describe("AnchorHostShellLifecycle", () => {
       "state.markStopped",
       "state.cleanup",
       "checkpoint.stop",
-      "log.stop",
     ]);
   });
 
@@ -398,7 +385,7 @@ describe("AnchorHostShellLifecycle", () => {
         skipSignalHandlers: true,
         logger: { info() {}, warn() {}, error() {} },
         beforeActivate: async () => {
-          lifecycle.assertActivationOwnership({ serverLog: false, checkpointOwner: false });
+          lifecycle.assertActivationOwnership({ checkpointOwner: false });
           rollback.commit();
         },
         beforePublish: async (server) => {

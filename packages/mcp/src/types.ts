@@ -74,5 +74,5 @@ export type McpCallFn = (
   serverId: string,
   toolName: string,
   input: Record<string, unknown>,
-  options: { signal?: AbortSignal },
+  options: { signal?: AbortSignal; records?: import("@zhixing/core/logging").LogRecordPort; toolCallId?: string },
 ) => Promise<ToolResult>;

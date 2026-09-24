@@ -24,6 +24,7 @@ import { chromeOnlyVisibility } from "./command-visibility.js";
 import { configureLogs } from "../logging/configuration.js";
 
 export interface ConfigCommandsDeps {
+  readonly configurationRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly zhixingHome: string;
   readonly configPath: string;
   readonly registry: ICommandRegistry;
@@ -50,6 +51,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   // config/mcp handler 需要的 ConfigCommandDeps —— state.activeTurnPromise 以 getter-属性
   // 注入，handleConfigCommand 在编辑屏退出后读取当时最新值。
   const editorDeps = () => ({
+    configurationRecords: deps.configurationRecords,
     zhixingHome: deps.zhixingHome,
     configPath: deps.configPath,
     rl: deps.rl,

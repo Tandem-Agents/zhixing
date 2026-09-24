@@ -323,6 +323,8 @@ export class ConversationAssignmentWorker {
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       inputPort = await this.options.inputFor?.(envelope);
       const generator = runtime.run(messages, {
+        runId: envelope.work.runId,
+        assignmentId: envelope.assignmentId,
         ...(inputPort ? { inputPort } : {}),
         abortSignal,
         turnIndex: envelope.work.baseRevision,

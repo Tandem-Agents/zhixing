@@ -1,4 +1,14 @@
 import { Buffer } from "node:buffer";
+import type { LogRecordPort, LogRef, LogSource } from "@zhixing/core/logging";
+
+export const HANDOFF_LOG_SOURCE: LogSource = {
+  id: "handoff", version: 1, events: {
+    requested: { message: "设备请求已进入传输边界", level: "info", tier: "critical", fields: { service: "text", direction: "text", bytes: "number" } },
+    returned: { message: "设备请求处理回执已确认", level: "info", tier: "critical", fields: { direction: "text", code: "text", bytes: "number" } },
+    uncertain: { message: "设备请求结果未确认", level: "warn", tier: "critical", fields: { direction: "text", error: "text" } },
+    late: { message: "收到未匹配的设备请求回执", level: "warn", tier: "critical", fields: { reportedOk: "boolean" } },
+  },
+};
 import { randomUUID } from "node:crypto";
 import { canonicalize } from "./canonical.js";
 import {
@@ -22,6 +32,9 @@ export interface MeshServiceClient {
 }
 
 export interface MeshRequestChannelOptions {
+  readonly records?: LogRecordPort;
+  /** Trusted host projection; invoked only inside the recorder failure boundary. */
+  readonly observationRefs?: (service: string, payload: Uint8Array) => readonly LogRef[];
   readonly maxPayloadBytes?: number;
   readonly maxInboundRequests?: number;
   readonly maxOutboundRequests?: number;
@@ -32,7 +45,7 @@ export interface MeshRequestChannelOptions {
 
 type PendingRequest = {
   readonly resolve: (payload: Uint8Array) => void;
-  readonly reject: (error: Error) => void;
+  readonly reject: (error: Error, confirmed?: boolean) => void;
   readonly cleanup: () => void;
 };
 
@@ -78,6 +91,8 @@ export class MeshRequestChannel implements MeshServiceClient {
   readonly #requestTimeoutMs: number;
   readonly #handlerTimeoutMs: number;
   readonly #requestId: () => string;
+  readonly #records?: LogRecordPort;
+  readonly #observationRefs?: MeshRequestChannelOptions["observationRefs"];
   readonly #closed: Promise<void>;
   #inboundRequests = 0;
   #stopped = false;
@@ -88,6 +103,8 @@ export class MeshRequestChannel implements MeshServiceClient {
     options: MeshRequestChannelOptions = {},
   ) {
     assertSecureMeshConnection(connection);
+    this.#records = options.records;
+    this.#observationRefs = options.observationRefs;
     this.#maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
     this.#maxInboundRequests =
       options.maxInboundRequests ?? DEFAULT_MAX_INBOUND_REQUESTS;
@@ -132,6 +149,7 @@ export class MeshRequestChannel implements MeshServiceClient {
     if (this.#pending.has(requestId)) {
       throw new TypeError("Mesh request ids must be unique while in flight");
     }
+    this.#records?.record(() => ({ event: "requested", refs: [...this.#refs(requestId), ...(this.#observationRefs?.(serviceId, payload) ?? [])], data: { service: serviceId, direction: "outbound", bytes: payload.byteLength } }));
     let sendSettled = false;
     const response = new Promise<Uint8Array>((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -141,7 +159,7 @@ export class MeshRequestChannel implements MeshServiceClient {
         this.#pending.delete(requestId);
         pending.cleanup();
         const error = abortedError();
-        reject(error);
+        pending.reject(error);
         if (!sendSettled) this.#stopAfterTransportFailure(error);
       };
       const onTimeout = () => {
@@ -150,14 +168,17 @@ export class MeshRequestChannel implements MeshServiceClient {
         this.#pending.delete(requestId);
         pending.cleanup();
         const error = timeoutError();
-        reject(error);
+        pending.reject(error);
         this.#stopAfterTransportFailure(error);
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       timeout = setTimeout(onTimeout, this.#requestTimeoutMs);
       this.#pending.set(requestId, {
         resolve,
-        reject,
+        reject: (error, confirmed) => {
+          if (!confirmed) this.#records?.record(() => ({ event: "uncertain", refs: this.#refs(requestId), result: "unknown", data: { direction: "outbound", error: error.message } }));
+          reject(error);
+        },
         cleanup: () => {
           if (timeout !== undefined) clearTimeout(timeout);
           signal?.removeEventListener("abort", onAbort);
@@ -231,17 +252,22 @@ export class MeshRequestChannel implements MeshServiceClient {
 
   #acceptResponse(frame: ResponseFrame): void {
     const pending = this.#pending.get(frame.requestId);
-    if (!pending) return;
+    if (!pending) {
+      this.#records?.record(() => ({ event: "late", refs: this.#refs(frame.requestId), result: "unknown", data: { reportedOk: frame.ok } }));
+      return;
+    }
     this.#pending.delete(frame.requestId);
     pending.cleanup();
+    this.#records?.record(() => ({ event: "returned", refs: this.#refs(frame.requestId), result: frame.ok ? "success" : "refused", data: { direction: "outbound", code: frame.ok ? undefined : frame.error.code } }));
     if (frame.ok) {
       pending.resolve(decodePayload(frame.payload, this.#maxPayloadBytes));
     } else {
-      pending.reject(new MeshProtocolError(frame.error.code, frame.error.message));
+      pending.reject(new MeshProtocolError(frame.error.code, frame.error.message), true);
     }
   }
 
   async #acceptRequest(frame: RequestFrame): Promise<void> {
+    this.#records?.record(() => ({ event: "requested", refs: [...this.#refs(frame.requestId), ...(this.#observationRefs?.(frame.serviceId, decodePayload(frame.payload, this.#maxPayloadBytes)) ?? [])], data: { service: frame.serviceId, direction: "inbound" } }));
     this.#inboundRequests += 1;
     const controller = new AbortController();
     const onChannelAbort = () => controller.abort(abortedError());
@@ -278,6 +304,10 @@ export class MeshRequestChannel implements MeshServiceClient {
         this.connection.send(encodeFrame(responseFrame)),
         controller.signal,
       );
+      this.#records?.record(() => ({ event: "returned", refs: this.#refs(frame.requestId), result: responseFrame.ok ? "success" : "refused", data: { direction: "inbound", code: responseFrame.ok ? undefined : responseFrame.error.code } }));
+    } catch (error) {
+      this.#records?.record(() => ({ event: "uncertain", refs: this.#refs(frame.requestId), result: "unknown", data: { direction: "inbound", error: error instanceof Error ? error.message : "设备交接中断" } }));
+      throw error;
     } finally {
       clearTimeout(timeout);
       this.#abort.signal.removeEventListener("abort", onChannelAbort);
@@ -291,6 +321,8 @@ export class MeshRequestChannel implements MeshServiceClient {
     this.#abort.abort(failure);
     void this.connection.close(failure).catch(() => undefined);
   }
+
+  #refs(id: string): LogRef[] { return [{ kind: "meshRequest", id }, { kind: "peerDevice", id: this.connection.peer.deviceId }]; }
 }
 
 function failureFrame(requestId: string, error: unknown): ResponseFrame {

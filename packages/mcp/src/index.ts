@@ -1,4 +1,5 @@
 export { createMcpHub } from "./hub.js";
+export { MCP_LOG_SOURCE } from "./logging.js";
 export type {
   McpHub,
   McpHubOptions,

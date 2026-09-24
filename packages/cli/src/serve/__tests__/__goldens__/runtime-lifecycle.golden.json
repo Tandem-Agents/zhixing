@@ -7,8 +7,7 @@
     "server.close",
     "stateFile.markStopped",
     "stateFile.cleanup",
-    "authorityCheckpointOwner.stop",
-    "serverLogLifecycle.stop"
+    "authorityCheckpointOwner.stop"
   ],
   "registered": [
     "hostShell.stop",

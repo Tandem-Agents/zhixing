@@ -64,10 +64,7 @@ import type {
   InputRegion,
   ScreenController,
 } from "../screen/index.js";
-import {
-  isKeypressDumpEnabled,
-  recordKeypressEvent,
-} from "./keypress-dump.js";
+import { recordInputEvent } from "../logging/input.js";
 
 export interface SelectOperationRegionOptions {
   /** 面板标题——caller 自带格式（譬如 "需要授权 · Bash 命令"），SelectOperationRegion 仅加 ▎ 锚 + bold */
@@ -124,10 +121,6 @@ export class SelectOperationRegion implements InputRegion {
   private rawModeLease: RawModeLease | null = null;
   private stdinOwnership: StdinOwnershipHandle | null = null;
   private batcher: ReturnType<typeof wrapKeypressHandler> | null = null;
-  /** Debug：原始 keypress listener（在 batcher 之前 observe，仅 ZHIXING_KEYPRESS_DUMP=1 时挂载） */
-  private debugRawListener:
-    | ((str: string, key: readline.Key | undefined) => void)
-    | null = null;
 
   private readonly stdin: NodeJS.ReadStream;
   private readonly screen: ScreenController;
@@ -171,30 +164,17 @@ export class SelectOperationRegion implements InputRegion {
       this.stdinOwnership = acquireStdinOwnership(this.stdin);
       this.rawModeLease = rawModeController.acquire(this.stdin);
 
-      // Debug raw listener：在 batcher 之前 observe 每个 stdin keypress 原始
-      // event，让我们看到 batcher 入口数据。仅 ZHIXING_KEYPRESS_DUMP=1 时挂载。
-      if (isKeypressDumpEnabled()) {
-        this.debugRawListener = (str, key) => {
-          recordKeypressEvent("stdin.keypress-raw", {
-            str: str ?? "",
-            key: key ?? null,
-            inputMode: this.state.inputMode,
-            selected: this.state.selected,
-          });
-        };
-        this.stdin.on("keypress", this.debugRawListener);
-      }
 
       this.batcher = wrapKeypressHandler({
         onSingle: (str, key) => {
-          recordKeypressEvent("batcher.onSingle", {
+          recordInputEvent(this.opts.screen.inputRecords, "batcher.onSingle", {
             str: str ?? "",
             key: key ?? null,
           });
           this.handleKeypress(str, key);
         },
         onPaste: (content) => {
-          recordKeypressEvent("batcher.onPaste", {
+          recordInputEvent(this.opts.screen.inputRecords, "batcher.onPaste", {
             content,
             length: content.length,
             finished: this.finished,
@@ -211,7 +191,7 @@ export class SelectOperationRegion implements InputRegion {
       }
 
       this.screen.attachInput(this);
-      recordKeypressEvent("region.run-complete", {
+      recordInputEvent(this.opts.screen.inputRecords, "region.run-complete", {
         title: this.opts.title,
         optionsCount: this.opts.options.length,
       });
@@ -350,23 +330,23 @@ export class SelectOperationRegion implements InputRegion {
     key: readline.Key | undefined,
   ): void {
     if (this.finished) {
-      recordKeypressEvent("handleKeypress.early-return", { reason: "finished" });
+      recordInputEvent(this.opts.screen.inputRecords, "handleKeypress.early-return", { reason: "finished" });
       return;
     }
 
     if (key?.ctrl && key.name === "c") {
-      recordKeypressEvent("handleKeypress.ctrl-c", {});
+      recordInputEvent(this.opts.screen.inputRecords, "handleKeypress.ctrl-c", {});
       this.finish({ kind: "cancelled", cause: "ctrl-c" });
       return;
     }
     if (key?.ctrl && key.name === "d") {
-      recordKeypressEvent("handleKeypress.ctrl-d", {});
+      recordInputEvent(this.opts.screen.inputRecords, "handleKeypress.ctrl-d", {});
       this.finish({ kind: "cancelled", cause: "ctrl-d" });
       return;
     }
 
     const action = this.translateKey(str, key);
-    recordKeypressEvent("translateKey.result", {
+    recordInputEvent(this.opts.screen.inputRecords, "translateKey.result", {
       str: str ?? "",
       keyName: key?.name ?? null,
       inputMode: this.state.inputMode,
@@ -381,7 +361,7 @@ export class SelectOperationRegion implements InputRegion {
       action,
       this.opts.options,
     );
-    recordKeypressEvent("reduceSelect.result", {
+    recordInputEvent(this.opts.screen.inputRecords, "reduceSelect.result", {
       bufferBefore,
       bufferAfter: newState.inputBuffer,
       selectedBefore,
@@ -400,7 +380,7 @@ export class SelectOperationRegion implements InputRegion {
       this.state = newState;
       this.computeLines();
       this.screen.requestInputRepaint();
-      recordKeypressEvent("repaint.triggered", {
+      recordInputEvent(this.opts.screen.inputRecords, "repaint.triggered", {
         cachedLinesCount: this.cachedLines.length,
         inputMode: this.state.inputMode,
         inputBuffer: this.state.inputBuffer,
@@ -495,12 +475,8 @@ export class SelectOperationRegion implements InputRegion {
   private finish(result: SelectResult): void {
     if (this.finished) return;
     this.finished = true;
-    recordKeypressEvent("finish", { result });
+    recordInputEvent(this.opts.screen.inputRecords, "finish", { result });
 
-    if (this.debugRawListener) {
-      this.stdin.off("keypress", this.debugRawListener);
-      this.debugRawListener = null;
-    }
 
     if (this.batcher) {
       this.stdin.off("keypress", this.batcher.handler);

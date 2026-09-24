@@ -29,6 +29,7 @@ export { wrapStreamWithAbortRace } from "./stream-race.js";
 export { wrapStreamWithWatchdog } from "./watchdog.js";
 
 export { gracefulKill } from "./graceful-kill.js";
+export { PROCESS_LOG_SOURCE } from "./logging.js";
 export type { GracefulKillOptions } from "./graceful-kill.js";
 
 export { assemblePartialMessage, assembleSafeMessage } from "./assemble.js";

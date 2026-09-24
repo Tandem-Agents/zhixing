@@ -1,6 +1,6 @@
 # 知行架构概述
 
-> 本文描述当前生产架构，不是路线图。整体架构权威是 [AE-001：伴身智能架构演进](./evolutions/AE-001-companion-intelligence.md)；迁移状态见 [AE-001 迁移任务](../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md)。扩展管理与 Channel 受管运行的设计和验收边界见[外部 APP 自主接入](../../../docs/tasks/autonomous-channel-integration.md)。
+> 本文描述当前生产架构，不是路线图。整体架构权威是 [AE-001：伴身智能架构演进](./evolutions/AE-001-companion-intelligence.md)；迁移状态见 [AE-001 迁移任务](../../../docs/tasks/ae-001-companion-intelligence-architecture-migration.md)。扩展管理与 Channel 受管运行的设计和验收边界见[外部 APP 自主接入](../../../docs/tasks/autonomous-channel-integration.md)。运行观察合同、治理及验收边界见[运行日志与问题追溯](../../../docs/tasks/runtime-logging-and-diagnostics.md)。
 
 ## 产品与架构中心
 
@@ -23,12 +23,17 @@ flowchart TB
     Kernel["Intelligence Kernel\nRun Envelope · Event · Terminal · Agent Loop"]
     Correctness["Correctness Substrate\nAuthority · Commit · Journal · Security · Confirmation\nResource · Assignment · Recovery"]
     Edge["基础设施与拓扑适配\nProvider · Tool · MCP · Storage · Managed Extensions\nChannel 类型绑定 · 外部平台进程 · Executor · Mesh"]
+    Logs["Log Infrastructure\n只写 Recorder → 独立 Store → 授权 LogApplication"]
     Host["PersistentApplicationHost\n唯一组合根：创建 · 连线 · 开放 · 排空 · 关闭"]
 
     Surface --> Binding --> API --> Domain
     Domain -->|已裁决的运行投影| Kernel
     Domain -->|有限正确性端口| Correctness
     Kernel -->|受控效果端口| Correctness
+    Domain -.观察端口.-> Logs
+    Kernel -.观察端口.-> Logs
+    Edge -.观察端口.-> Logs
+    API -->|日志查询与策略| Logs
     Kernel --> Edge
     Correctness --> Edge
     Host -.只负责装配与生命周期.-> Binding
@@ -50,7 +55,7 @@ Host 被刻意画在产品调用主链之外：它可以看见具体实现并完
 | Intelligence Kernel | 通过有限的 Run Envelope、Run Event、Terminal/Completion 驱动模型、工具、子 Agent、上下文和本次运行资源 | Conversation、Workscene、Schedule 等产品事实；Host、Surface 或拓扑对象 |
 | Correctness Substrate | 提供单写权威、耐久提交/重放、安全、确认、资源、Assignment、效果结算和恢复机制 | 领域状态分支、用户文案和产品流程 |
 | Surface / Binding | 认证、连接、wire 编解码、订阅、输入、呈现和表面交互；事件缺口后重查权威 Query | 应用状态机、直接写 Authority、从瞬时事件重建事实 |
-| Infrastructure / Topology | 实现 Provider、Tool、MCP、Storage、Channel、Executor、Mesh 等需求方端口 | 产品决定、第二事实源和跨层万能 Capability |
+| Infrastructure / Topology | 实现 Provider、Tool、MCP、Storage、Channel、Executor、Mesh 等需求方端口；独立 Log Infrastructure 管理运行观察证据 | 产品决定、第二事实源和跨层万能 Capability |
 
 具有外部后果的动作遵循同一条责任链：
 
@@ -74,6 +79,14 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 2. 持久服务入口 `packages/cli/src/serve/topology-command.ts` 解析进程模式，取得 home、启动检查和秘密投影，然后只创建一个 `PersistentApplicationHost`。
 3. `PersistentApplicationHost` 完成 Mesh/bootstrap maintenance、恢复根前置、容量与本机 workspace lease，再用 `planServeTopology` 选择 `anchor-host`、`executor-host` 或 disabled；Anchor+Executor 仍是同一个 Host 中的两项角色贡献，不是第二组合根。
 4. Host 在任何角色副作用前装入所需模块。Anchor-only 不装入 Executor，Executor-only 不装入 Anchor；角色正常返回或失败后，外层资源都由同一个 Host 终止路径释放。
+
+### 运行日志
+
+`@zhixing/core/logging` 分为来源只写端口、Recorder、有界独立 Store 和授权 LogApplication；记录不是业务事实，生产方不能反向读取日志恢复状态。CLI 进程入口先创建 Recorder 与容量端口，Host 沿用并在业务清理后排空；备份／恢复、配对及离线工作区命令显式传递同一进程 owner，纯日志查询不启动写者。
+
+每个来源在实际边界投影安全字段和既有身份，共用有界队列；Authority 在持久提交完成后观察，Kernel 使用明确事件绑定及 Provider 实际调用，扩展经宿主 IPC 校验和实例限流。领域事件与直接采集不重复订阅。未知效果保留原判断，后续证据追加关联。
+
+Store 使用独立 `logs/runtime/` 根，跨进程互斥发布、耐久水位和可重建索引；资源步骤经设备容量许可，持久预算由 Store 自身计量。CLI、RPC 与模型日志工具沿同一应用授权读取；旧日志保留原格式并统一计量，只有存活写者兼容、遗留占用受控才确认整体预算生效。旧私有 dump、按键文件和后台文件写者已经退役。
 
 ### 产品调用
 

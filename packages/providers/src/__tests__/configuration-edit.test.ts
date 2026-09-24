@@ -1,3 +1,6 @@
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
+import { CONFIGURATION_LOG_SOURCE } from "../configuration-edit.js";
+import { runtimeConfigurationObservation } from "../configuration-logging.js";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -225,5 +228,30 @@ describe("configuration and credential save", () => {
     expect(recovered.credentials).toEqual(expected.credentials);
     expect(await options.store.get(CONFIGURATION_EDIT_REF)).toBeNull();
     expect(fs.existsSync(marker)).toBe(false);
+  });
+});
+
+
+describe("configuration observation", () => {
+  it("links recovered publication to the same effective selection without logging private configuration", async () => {
+    const { options, baseline, next } = await fixture();
+    const logs = recordingFixture();
+    const records = logs.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" });
+    const original = fs.promises.rename.bind(fs.promises);
+    let once = true;
+    vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+      if (once && to === options.configPath) { once = false; throw Error("interrupted config publication"); }
+      return original(from, to);
+    });
+    await expect(editConfiguration(baseline, next, { ...options, records })).rejects.toThrow("收尾");
+    const recovered = await loadConfigurationSnapshot({ ...options, records });
+    const context = runtimeConfigurationObservation(recovered.config);
+    records.record({ event: "effective", refs: [{ kind: "configuration", id: context.selectionDigest }], data: context });
+    await logs.finish();
+    const all = logs.records();
+    expect(all).toContainEqual(expect.objectContaining({ event: "recovered", result: "success", data: context, refs: expect.arrayContaining([{ kind: "configuration", id: context.selectionDigest }]) }));
+    expect(all.filter(item => item.event === "saved")).toHaveLength(0);
+    expect(JSON.stringify(all)).not.toMatch(/new-token|model-original|new.invalid|old.invalid/);
+    expect(logs.recorder.health().captureFailures).toBe(0);
   });
 });

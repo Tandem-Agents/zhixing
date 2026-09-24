@@ -84,6 +84,8 @@ function mapOne(
         // 转发用 MCP 原始工具名（descriptor.name），而非消毒后的知行名。
         return await callTool(server.serverId, descriptor.name, input, {
           signal: context.abortSignal,
+          records: context.mcpRecords,
+          toolCallId: context.toolCallId,
         });
       } catch (err) {
         // abort 不是工具错误：让它冒泡，由 tool-executor 的 cleanup 注入与内置工具

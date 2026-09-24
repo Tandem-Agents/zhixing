@@ -21,9 +21,10 @@
 
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { logDiagnostic } from "../diagnostics.js";
+import type { LogRecordPort } from "../logging/contracts.js";
 
 export interface GracefulKillOptions {
+  readonly records?: LogRecordPort;
   /**
    * SIGTERM 后等待 SIGKILL 的时间(ms)。默认 1000。
    * `<= 0` 时跳过 grace 期, 直接发 SIGKILL —— 调用方显式选择"不等清理"。
@@ -64,15 +65,14 @@ export async function gracefulKill(
       try {
         await (opts.killWindowsProcessTree ?? killWindowsProcessTree)(child.pid);
       } catch (err) {
-        logDiagnostic(
-          `[gracefulKill] Windows process tree kill failed for pid ${child.pid}; falling back to direct child.kill(): ${formatKillError(err)}`,
-        );
+        opts.records?.record(() => ({ event: "fallback", data: { pid: child.pid, error: formatKillError(err) } }));
         swallow(() => child.kill());
       }
     } else {
       swallow(() => child.kill());
     }
     await waitForExit(child);
+    opts.records?.record({ event: "stopped", result: "success", data: { pid: child.pid } });
     return;
   }
 
@@ -82,11 +82,15 @@ export async function gracefulKill(
 
   if (graceMs > 0) {
     const exited = await raceExitWithGrace(child, graceMs);
-    if (exited) return;
+    if (exited) {
+      opts.records?.record({ event: "stopped", result: "success", data: { pid: child.pid } });
+      return;
+    }
   }
 
   sendSignal(child, "SIGKILL");
   await waitForExit(child);
+  opts.records?.record({ event: "stopped", result: "success", data: { pid: child.pid } });
 }
 
 // ─── 内部 helper ───

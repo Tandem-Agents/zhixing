@@ -251,6 +251,8 @@ export function createOwnerRuntimeAdapter(
             // sessionId 即 conversationId（ConversationManager 中是同一标识），
             // 透传到 RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
             conversationId: sessionId,
+            runId: options?.runId,
+            assignmentId: options?.assignmentId,
           },
           control: {
             abortSignal: controller.signal,
@@ -392,6 +394,10 @@ export function createOwnerRuntimeAdapter(
 
     onAttentionWindowChange(reason) {
       return agentRuntime.onAttentionWindowChange(reason);
+    },
+
+    withRunObservation(identity, work) {
+      return agentRuntime.withRunObservation ? agentRuntime.withRunObservation(identity, work) : work();
     },
 
     callText(prompt, role, opts) {

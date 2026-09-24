@@ -73,6 +73,7 @@ export interface ExecutorRoleModule {
 }
 
 export interface ServeBootstrapContext {
+  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
   readonly zhixingHome: string;
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;

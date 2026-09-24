@@ -31,6 +31,9 @@ export type { TurnContext };
 
 /** SessionRuntime.run 的 per-turn 选项 */
 export interface RunTurnOptions {
+  /** Existing owner run identity, carried unchanged through local/remote execution. */
+  readonly runId?: string;
+  readonly assignmentId?: string;
   inputPort?: import("@zhixing/core/loop").RunInputPort;
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
@@ -86,6 +89,8 @@ export type RuntimeDisposeReason =
   | "assembly-rollback";
 
 export interface SessionRuntime {
+  /** Trusted owner identity for auxiliary execution that bypasses the main loop. */
+  withRunObservation?<T>(identity: { readonly conversationId?: string; readonly refs?: readonly import("@zhixing/core/logging").LogRef[] }, work: () => Promise<T>): Promise<T>;
   readonly sessionId: string;
   /**
    * 执行一轮对话——纯执行体:输入消息由调用方构造(窗口事实 + 本轮用户消息),

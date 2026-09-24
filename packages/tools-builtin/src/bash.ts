@@ -75,6 +75,7 @@ export function createBashTool(): ToolDefinition {
           cwd: context.workingDirectory,
           timeout,
           signal: context.abortSignal,
+          records: context.processRecords,
         });
 
         const parts: string[] = [];
@@ -119,6 +120,7 @@ export function createBashTool(): ToolDefinition {
 // ─── 内部实现 ───
 
 interface ExecOptions {
+  records?: import("@zhixing/core/logging").LogRecordPort;
   cwd: string;
   timeout: number;
   signal?: AbortSignal;
@@ -179,7 +181,7 @@ function execCommand(command: string, options: ExecOptions): Promise<ExecResult>
       terminating = true;
       cleanup();
       void (async () => {
-        await gracefulKill(child);
+        await gracefulKill(child, { records: options.records });
         settle(() => reject(new Error(message)));
       })();
     };

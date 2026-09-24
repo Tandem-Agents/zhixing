@@ -1,5 +1,6 @@
 import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
 import path from "node:path";
+import { LegacyLogFiles, isLegacyLogFile } from "./legacy-files.js";
 
 // A dedicated process owns every native handle. It never loads product configuration,
 // records arbitrary stderr, or shares the checkpoint helper with business operations.
@@ -7,6 +8,7 @@ let directory: CheckpointDirectoryHandle | undefined;
 let release: (() => Promise<void>) | undefined;
 let readOnly = true;
 let active = false;
+let legacy: LegacyLogFiles | undefined;
 interface Request {
   id: number;
   op: string;
@@ -47,15 +49,17 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
     await release?.();
     release = undefined;
     await directory?.close();
+    await legacy?.close();
     directory = undefined;
     readOnly = requestedReadOnly;
+    legacy = new LegacyLogFiles(home, (root, create, ro) => CheckpointDirectoryHandle.openPath(root, create, ro), readOnly);
     if (!path.isAbsolute(home)) throw Error("absolute-home-required");
     if (readOnly) {
-      directory = await CheckpointDirectoryHandle.openPath(
+      try { directory = await CheckpointDirectoryHandle.openPath(
         path.join(home, "logs", "runtime"),
         false,
         true,
-      );
+      ); } catch (error) { if (!(error instanceof Error) || error.message !== "checkpoint-child-missing") throw error; }
     } else {
       // The existing product home is the ownership boundary. If it does not yet
       // exist, logging retries after normal product initialization creates it.
@@ -74,8 +78,27 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
     }
     return;
   }
+  if (op === "list") {
+    const limit = args[0] as number, own = directory ? await directory.listEntries(limit) : [];
+    if (own.some(isLegacyLogFile)) throw Error("reserved-legacy-name");
+    const all = [...own, ...await legacy!.list(limit)];
+    if (all.length > limit) throw Error("log-inventory-limit");
+    return all;
+  }
+  if (!directory && !(typeof args[0] === "string" && isLegacyLogFile(args[0]))) throw Error("filesystem-not-open");
+  if (typeof args[0] === "string" && isLegacyLogFile(args[0])) {
+    const entry = legacy!.resolve(args[0]);
+    if (op === "stat") return { ...await entry.directory.statFile(entry.name), legacyPath: entry.relativePath };
+    if (op === "read") return entry.directory.readFile(entry.name, args[1] as number, args[2] as number, args[3] as number, args[4] as string | undefined);
+    if (readOnly) throw Error("filesystem-read-only");
+    if (op === "truncate" && args[2] === 0) return entry.directory.truncateFile(entry.name, args[1] as string, 0);
+    if (op === "remove") {
+      if (typeof args[1] !== "string") throw Error("legacy-identity-required");
+      await entry.directory.removeRetired(entry.name, args[1]); await entry.directory.sync(); return;
+    }
+    throw Error("legacy-read-only");
+  }
   if (!directory) throw Error("filesystem-not-open");
-  if (op === "list") return directory.listEntries(args[0] as number);
   if (op === "stat") return directory.statFile(args[0] as string);
   if (op === "read")
     return directory.readFile(
@@ -83,18 +106,22 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
       args[1] as number,
       args[2] as number,
       args[3] as number,
+      args[4] as string | undefined,
     );
   if (readOnly) throw Error("filesystem-read-only");
   if (op === "write") return directory.writeFile(args[0] as string, args[1] as Uint8Array);
-  if (op === "rename") return directory.renameTo(args[0] as string, directory, args[1] as string);
+  if (op === "rename") {
+    if (isLegacyLogFile(args[1] as string)) throw Error("reserved-legacy-name");
+    return directory.renameTo(args[0] as string, directory, args[1] as string);
+  }
   if (op === "truncate")
     return directory.truncateFile(args[0] as string, args[1] as string, args[2] as number);
   if (op === "remove") {
     const name = args[0] as string,
       info = await directory.statFile(name);
-    return directory.removeRetired(name, info.identity);
+    return directory.removeRetired(name, args[1] as string | undefined ?? info.identity);
   }
-  if (op === "sync") return directory.sync();
+  if (op === "sync") { await directory.sync(); await legacy?.sync(); return; }
   if (op === "tryLock") {
     if (release) throw Error("nested-lock");
     release = await directory.tryLock("writer.lock");

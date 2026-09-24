@@ -53,7 +53,8 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "runtime/device-removal-command.ts", reason: "设备移除独立维护子命令——不建立持久 chrome，命令结束即退出" },
   { file: "runtime/duty-migration-command.ts", reason: "值班迁移独立维护子命令——不建立持久 chrome，命令结束即退出" },
   { file: "runtime/kernel-runtime-bindings.ts", reason: "serve Kernel 装配模型降级诊断——由 command.ts 抽出的无 chrome 后台路径" },
-  { file: "security/keypress-dump.ts", reason: "诊断通道——`--log` flag 启用时 stderr 提示日志路径；与 llm-chunk-dump 同模式，仅诊断不影响生产路径" },
+  { file: "logging/logging-writers-worker.ts", reason: "隔离系统进程观察器仅向父进程输出有界协议 JSON" },
+  { file: "runtime/extensions/validate-candidate-entry.ts", reason: "独立候选校验子进程的结果协议 stdout 与错误 stderr，不接入交互屏幕" },
 ];
 
 const ALLOWED_DIR_PREFIXES: readonly string[] = [

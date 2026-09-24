@@ -1439,6 +1439,8 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   const expectedPartitions = {
     modelInput: ["messages"],
     identity: [
+      "runId",
+      "assignmentId",
       "turnIndex",
       "conversationId",
       "source",
@@ -2180,6 +2182,7 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
 
   const expectedMembers = [
     "run",
+    "withRunObservation",
     "estimateConversationRequestBudget",
     "estimateMessagesTokens",
     "forceCompact",
@@ -2229,7 +2232,7 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
     declarations.length !== 1 ||
     declaration?.relative !== runtimePath ||
     memberNames.some((name) => !name) ||
-    declaration?.statement.members.some((member) => member.questionToken) ||
+    declaration?.statement.members.some((member) => member.questionToken && propertyNameText(member.name) !== "withRunObservation") ||
     JSON.stringify([...memberNames].sort()) !==
       JSON.stringify([...expectedMembers].sort())
   ) {
@@ -4871,10 +4874,9 @@ export function inspectStorageRemainderBoundary(records) {
   );
   const serverState = required("packages/server/src/server-state.ts");
   const processLock = required("packages/server/src/process-lock.ts");
-  const serverLog = required("packages/server/src/server-log-lifecycle.ts");
   const managedService = required("packages/cli/src/serve/managed-service.ts");
-  const diagnostics = required("packages/cli/src/output/llm-chunk-dump.ts");
-  const keypress = required("packages/cli/src/security/keypress-dump.ts");
+  const logRuntime = required("packages/cli/src/logging/runtime.ts");
+  const logStore = required("packages/core/src/logging/storage.ts");
 
   if (
     !config.includes("export function loadConfig(") ||
@@ -5010,8 +5012,7 @@ export function inspectStorageRemainderBoundary(records) {
     !anchorShell.includes("implements ServerLifecycleOwner") ||
     !executorShell.includes("export class ExecutorServerLifecycle") ||
     !processLock.includes("export async function acquireLock(") ||
-    !processLock.includes("export async function releaseLock(") ||
-    !serverLog.includes("export class ServerLogLifecycle")
+    !processLock.includes("export async function releaseLock(")
   ) {
     failures.push("P13 discovery/auth/state/log ownership or read-only demand boundary drifted");
   }
@@ -5044,30 +5045,23 @@ export function inspectStorageRemainderBoundary(records) {
     "P14 NodeManagedServiceAdapter constructor",
   );
 
-  if (
-    !diagnostics.includes('"logs", "llm-raw"') ||
-    !diagnostics.includes('"logs", "llm-error"') ||
-    !diagnostics.includes("export function pruneAllLogs()") ||
-    !keypress.includes("export function recordKeypressEvent(") ||
-    !keypress.includes('`keypress-${process.pid}-${ts}.log`')
-  ) {
-    failures.push("P15 diagnostic writer/retention exact-set drifted");
+  if (!logRuntime.includes("new LogRecorder(store,") || !logStore.includes("export class LocalLogStore")) {
+    failures.push("P15 unique runtime log owner is missing");
   }
-  requireMultiplicity(
-    '"logs", "llm-raw"',
-    [["packages/cli/src/output/llm-chunk-dump.ts", 1]],
-    "P15 llm-raw path writer",
-  );
-  requireMultiplicity(
-    '"logs", "llm-error"',
-    [["packages/cli/src/output/llm-chunk-dump.ts", 1]],
-    "P15 llm-error path writer",
-  );
-  requireMultiplicity(
-    '`keypress-${process.pid}-${ts}.log`',
-    [["packages/cli/src/security/keypress-dump.ts", 1]],
-    "P15 keypress path writer",
-  );
+  requireMultiplicity("new LogRecorder(", [["packages/cli/src/logging/runtime.ts", 1]], "P15 production recorder");
+  const readerSurfaces = new Set([
+    "packages/orchestrator/src/tools/task.ts", "packages/rpc/src/log-client.ts",
+    "packages/server/src/rpc/methods/logs.ts", "packages/cli/src/serve/command.ts",
+  ]);
+  for (const record of records) {
+    const loggingOwner = record.relative.startsWith("packages/core/src/logging/") || record.relative.startsWith("packages/cli/src/logging/");
+    if (!loggingOwner && !readerSurfaces.has(record.relative) && /from\s+["'][^"']*(?:logging\/(?:application|storage)|logging\/(?:application|storage)\.js)["']/u.test(record.text)) {
+      failures.push(record.relative + ": P15 producer depends on a log reader or store");
+    }
+    if (!loggingOwner && /(?:llm-(?:raw|error)|keypress-)\$?\{|["']logs["'],\s*["'](?:llm-raw|llm-error|server)["']|pruneAllLogs|recordKeypressEvent|ServerLogLifecycle/u.test(record.text)) {
+      failures.push(record.relative + ": P15 retired private log writer returned");
+    }
+  }
 
   const forbiddenDemandPrefixes = [
     "packages/core/src/conversation/",
@@ -8743,6 +8737,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const logComposition = records.find(record => record.relative === "packages/cli/src/logging/access.ts")?.text ?? "";
   const offlineLogs = records.find(record => record.relative === "packages/cli/src/logging/command.ts")?.text ?? "";
+  const localQueryLogs = records.find(record => record.relative === "packages/cli/src/logging/local-query.ts")?.text ?? "";
   const executorLogs = records.find(record => record.relative === "packages/cli/src/serve/executor-role-runtime.ts")?.text ?? "";
   const localLogApiUses = records.reduce((count, record) => count + (record.text.match(/\bcreateLocalLogProductApi\s*\(/gu) ?? []).length, 0);
   if (
@@ -8750,8 +8745,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     logComposition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
     !logComposition.includes("export function createLocalLogProductApi(") ||
     logComposition.includes("api: new ProductApiDispatcher") ||
-    localLogApiUses !== 3 ||
+    localLogApiUses !== 4 ||
     !offlineLogs.includes("const api = createLocalLogProductApi(access)") ||
+    !localQueryLogs.includes("const api = createLocalLogProductApi(access)") ||
     !executorLogs.includes("const logApi = createLocalLogProductApi(logAccess)") ||
     !executorLogs.includes("createRuntimeLogTools(() => logApi)") ||
     !executorLogs.includes("productApi: logApi") ||
@@ -10235,7 +10231,6 @@ export function inspectManagedHostAssembly(records) {
     count(command, "beforeActivate: async (openingRunner) =>") !== 1 ||
     count(command, "publishReady: async (openingRunner) =>") !== 1 ||
     count(command, "lifecycleOwner: hostShellLifecycle") !== 1 ||
-    count(command, "hostShellLifecycle.acquireServerLog(") !== 1 ||
     count(command, "hostShellLifecycle.acquireBinding(") !== 1 ||
     count(command, "hostShellLifecycle.acquireStateFile(") !== 1 ||
     count(command, "hostShellLifecycle.acquireCheckpointOwner(") !== 1 ||
@@ -10281,7 +10276,6 @@ export function inspectManagedHostAssembly(records) {
     serverActivate < serverGate
   ) failures.push("managed host entry-last activation or publication order drifted");
   const anchorHostShellResourceIds = [
-    "serverLogLifecycle.stop",
     "endpoint.close",
     "authorityCheckpointOwner.stop",
     "serverState.lifecycle",

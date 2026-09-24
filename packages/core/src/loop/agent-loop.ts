@@ -57,7 +57,6 @@ import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
 import { runTurnBegin, runTurnEnd } from "./turn-end.js";
-import { logDiagnostic } from "../diagnostics.js";
 import type {
   AgentLoopDeps,
   AgentLoopParams,
@@ -451,11 +450,6 @@ export async function* runAgentLoop(
 
       // ── 无工具调用 → 正常完成 ──
       const toolCalls = extractToolCalls(llmResult.message);
-      if (toolCalls.length > 0) {
-        logDiagnostic(
-          `[llm] 工具调用: ${toolCalls.map((tc) => tc.name).join(", ")}`,
-        );
-      }
       if (toolCalls.length === 0) {
         // ── Turn 结束钩子 —— 纯文本路径 ──
         //

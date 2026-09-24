@@ -6,6 +6,10 @@ export class LogRequestError extends Error {
   }
 }
 
+export class LogStoreNotInitializedError extends LogRequestError {
+  constructor() { super("日志存储尚未初始化；历史日志可用 zz logs read zxlog-local:legacy/catalog 查看"); }
+}
+
 export function publicLogErrorMessage(error: unknown): string {
   if (error instanceof LogRequestError) return error.message;
   if (error instanceof Error && error.name === "AbortError")

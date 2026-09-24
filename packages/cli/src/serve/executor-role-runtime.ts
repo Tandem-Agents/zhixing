@@ -1,10 +1,11 @@
 
-import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
+import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
-import { configureLlmChunkDump } from "../output/llm-chunk-dump.js";
+import { handoffLogging } from "../logging/handoff.js";
 import {
   createAgentRuntime,
+  createKernelLogFactory,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
   type KernelModelProviderFactory,
@@ -22,6 +23,7 @@ import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { mcpConfigurationRevision } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
+import { MCP_LOG_SOURCE } from "../runtime/mcp-runtime-adapter.js";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
@@ -169,7 +171,6 @@ export async function runExecutorRole(
     throw new Error("Executor-only host received an incompatible role projection");
   }
   const zhixingHome = bootstrap.zhixingHome;
-  configureLlmChunkDump(false, zhixingHome);
   const deviceCapacity = bootstrap.deviceCapacity;
   const modelConfiguration = bootstrap.modelConfiguration;
   const kernelEnvironmentConfiguration =
@@ -222,7 +223,7 @@ export async function runExecutorRole(
   const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome });
   const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, bootstrap.mcpCredentials.mcp),
-    { networkProxy: mcpConfiguration.network?.proxy },
+    { networkProxy: mcpConfiguration.network?.proxy, records: bootstrap.bindLogs?.(MCP_LOG_SOURCE, { scope: "storage" }) },
   );
   executorRoleLifecycle.acquire("mcpRuntime.close", () => mcpRuntime.lifecycle.close());
 
@@ -298,6 +299,7 @@ export async function runExecutorRole(
     const communicationHandle = createConversationCommunicationAssemblyHandle();
     const extensionHandle = createExtensionManagementHandle();
     const runtime = new ExecutorRuntimeSubstrate({
+      createLogRecords: bootstrap.bindLogs ? createKernelLogFactory(bootstrap.bindLogs, MCP_LOG_SOURCE) : undefined,
       logTools: createRuntimeLogTools(() => logApi),
       extensionTools: createExtensionTools(extensionHandle.port),
       communicationTools: [createConversationTool(communicationHandle.port)],
@@ -322,6 +324,7 @@ export async function runExecutorRole(
       },
     });
     authority = await setupAuthorityRuntime({
+      records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome,
       secretStore: bootstrap.secretStore,
       deviceKey: bootstrap.mesh.deviceKey,
@@ -687,6 +690,7 @@ export async function runExecutorRole(
       executorTopologyDirectory: NO_REMOTE_CONVERSATION_EXECUTORS,
       executorTopologyTrust: executorMeshTrust,
       connections: new MeshConnectionRegistry({
+        logging: handoffLogging(bootstrap.bindLogs),
         ...(meshConnectionProjection
           ? { projection: meshConnectionProjection }
           : {}),
@@ -1084,6 +1088,7 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
+    readonly createLogRecords?: import("@zhixing/orchestrator/runtime").KernelLogFactory;
     readonly communicationTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly extensionTools?: readonly import("@zhixing/core").ToolDefinition[];
     readonly logTools?: readonly import("@zhixing/core").ToolDefinition[];
@@ -1141,6 +1146,7 @@ export class ExecutorRuntimeSubstrate {
     const profile = workscene?.profile ?? zhixingProfile({ agentIdentity: runtimeEnvironment.agentIdentity, hasWorkspace: workspaceRoot !== null });
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.interactive,
+      createLogRecords: this.options.createLogRecords,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({ primaryRole }),
       runtimeEnvironment,
@@ -1208,6 +1214,7 @@ export class ExecutorRuntimeSubstrate {
     });
     return createAgentRuntime({
       deviceCapacity: this.options.deviceCapacity.scheduler,
+      createLogRecords: this.options.createLogRecords,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({
         primaryRole: "main",

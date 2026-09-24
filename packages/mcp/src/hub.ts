@@ -14,6 +14,8 @@
  */
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { randomUUID } from "node:crypto";
+import type { LogRecordPort, LogResult } from "@zhixing/core/logging";
 import type { NetworkPolicy } from "@zhixing/network";
 import {
   connectAndListTools,
@@ -78,6 +80,7 @@ export interface McpHub {
 }
 
 export interface McpHubOptions {
+  records?: LogRecordPort;
   /** 单 server 连接 + 首次 tools/list 的超时（毫秒）。 */
   connectTimeoutMs?: number;
   /** 网络代理配置 —— 透传给 http transport 的 SSRF-safe fetch（继承 network.proxy）。 */
@@ -112,6 +115,7 @@ export function createMcpHub(
   // 建链复用 connect 原语（与一次性探测同一套安全连接路径）；失败由调用方决定落
   // connected 还是排后台重试。
   function establish(spec: McpServerSpec): Promise<ConnectedClient> {
+    options.records?.record(() => ({ event: "connecting", data: { server: spec.serverId, transport: spec.transport } }));
     return connectAndListTools(spec, {
       createTransport,
       proxy: networkProxy,
@@ -139,6 +143,7 @@ export function createMcpHub(
       status: "connected",
       disposeTransport: est.disposeTransport,
     });
+    options.records?.record(() => ({ event: "connected", result: "success", data: { server: spec.serverId, toolCount: est.tools.length } }));
   }
 
   /**
@@ -152,6 +157,7 @@ export function createMcpHub(
     error: string | undefined,
     attempt: number,
   ): void {
+    options.records?.record(() => ({ event: "retry", result: "unknown", data: { server: spec.serverId, error, attempt } }));
     connections.set(spec.serverId, {
       context,
       tools: [],
@@ -253,17 +259,19 @@ export function createMcpHub(
   }
 
   async function disconnectOne(serverId: string): Promise<void> {
+    let confirmed = true;
     cancelReconnect(serverId);
     const conn = connections.get(serverId);
     if (conn?.client) {
       // 主动 close 前先解绑 onclose —— 否则 close 触发 onclose 会误排重连（删了又连回来）。
       conn.client.onclose = undefined;
-      await conn.client.close().catch(() => {});
+      await conn.client.close().catch(() => { confirmed = false; });
     }
     if (conn?.disposeTransport) {
-      await conn.disposeTransport().catch(() => {});
+      await conn.disposeTransport().catch(() => { confirmed = false; });
     }
     connections.delete(serverId);
+    options.records?.record({ event: "closed", result: confirmed ? "success" : "unknown", data: { server: serverId } });
   }
 
   return {
@@ -319,24 +327,36 @@ export function createMcpHub(
     },
 
     callTool: async (serverId, toolName, input, callOptions) => {
+      const records = callOptions.records ?? options.records;
+      const refs = [{ kind: "mcpAttempt", id: randomUUID() }, ...(callOptions.toolCallId ? [{ kind: "toolCall", id: callOptions.toolCallId }] : [])];
+      const started = performance.now();
+      let result: LogResult = "unknown", error: string | undefined, outputChars: number | undefined;
       const conn = connections.get(serverId);
       if (!conn || conn.status !== "connected" || !conn.client) {
+        records?.record(() => ({ event: "returned", refs, result: "refused", data: { server: serverId, tool: toolName, error: "MCP 连接尚未就绪" } }));
         return { content: `MCP server "${serverId}" 当前不可用`, isError: true };
       }
+      records?.record(() => ({ event: "requested", refs, data: { server: serverId, tool: toolName } }));
       try {
         const outcome = await conn.client.callTool(
           { name: toolName, arguments: input },
           undefined,
           { signal: callOptions.signal },
         );
-        return toToolResult(outcome);
+        const returned = toToolResult(outcome);
+        result = returned.isError ? "failure" : "success";
+        outputChars = returned.content.length;
+        return returned;
       } catch (err) {
+        error = err instanceof Error ? err.message : "MCP 协议调用未确认";
         // abort 让异常冒泡，交 tool-executor 统一中断；其余协议 / 连接错误转 isError。
         if (callOptions.signal?.aborted) throw err;
         return {
           content: `MCP 工具 "${toolName}"（${serverId}）调用失败：${errMsg(err)}`,
           isError: true,
         };
+      } finally {
+        records?.record(() => ({ event: "returned", refs, result, data: { server: serverId, tool: toolName, error, outputChars, duration: performance.now() - started } }));
       }
     },
 
@@ -344,7 +364,7 @@ export function createMcpHub(
       for (const id of [...reconnectTimers.keys()]) cancelReconnect(id);
       // 清空期望规格集 —— 在途的重连建链复查时即判为孤儿丢弃，不会在关停后又连回来。
       currentSpecs = [];
-      await Promise.allSettled(
+      const closed = await Promise.allSettled(
         [...connections.values()].flatMap((conn) => {
           if (conn.client) {
             // 解绑后再关 —— 否则 close 触发 onclose 会在退出途中误排重连。
@@ -354,6 +374,7 @@ export function createMcpHub(
         }),
       );
       connections.clear();
+      options.records?.record({ event: "closed", result: closed.every((entry) => entry.status === "fulfilled") ? "success" : "unknown", data: { server: "all" } });
     },
   };
 }

@@ -17,12 +17,21 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
-import { beginRuntimeLogging } from "./logging/runtime.js";
+import { beginRuntimeLogging, type RuntimeLogging } from "./logging/runtime.js";
+import { INPUT_LOG_SOURCE } from "./logging/input.js";
+
+let commandLogging: RuntimeLogging | undefined;
+async function exitCommand(code: number): Promise<never> {
+  await commandLogging?.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "command-failed");
+  process.exit(code);
+}
 
 async function renderActionError(error: unknown): Promise<void> {
+  commandLogging?.records.record(() => ({ event: "failed", result: "failure", data: { error: error instanceof Error ? error.message : "命令未完成" } }));
   if (
     error instanceof Error &&
     "deliveryConfirmed" in error &&
@@ -41,10 +50,6 @@ async function renderActionError(error: unknown): Promise<void> {
   }
 }
 
-async function pruneRuntimeLogs(): Promise<void> {
-  const { pruneAllLogs } = await import("./output/llm-chunk-dump.js");
-  pruneAllLogs(getZhixingHome());
-}
 
 /**
  * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
@@ -144,7 +149,7 @@ function rejectUnknownCommandPath(argv: string[], command: Command): void {
 
 async function handleStopAction(options: { maintenance?: boolean } = {}): Promise<void> {
   try {
-    await pruneRuntimeLogs();
+
     const result = options.maintenance
       ? await (await import("./maintenance/stop.js")).runMaintenanceStop()
       : await (await import("./serve/stop.js")).runStopCommand();
@@ -153,16 +158,16 @@ async function handleStopAction(options: { maintenance?: boolean } = {}): Promis
     }
     const exitCode =
       result.status === "error" || result.status === "refused" ? 1 : 0;
-    process.exit(exitCode);
+    await exitCommand(exitCode);
   } catch (err) {
     await renderActionError(err);
-    process.exit(1);
+    await exitCommand(1);
   }
 }
 
 async function handleStatusAction(): Promise<void> {
   try {
-    await pruneRuntimeLogs();
+
     const { runStatusCommand } = await import("./serve/status.js");
     const report = await runStatusCommand();
     // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
@@ -174,10 +179,10 @@ async function handleStatusAction(): Promise<void> {
           : report.status === "stopped"
             ? 2
             : 3;
-    process.exit(exitCode);
+    await exitCommand(exitCode);
   } catch (err) {
     await renderActionError(err);
-    process.exit(1);
+    await exitCommand(1);
   }
 }
 
@@ -215,72 +220,58 @@ program
     commandUsage: (command) => localizeHelpSyntax(COMMANDER_HELP.commandUsage(command)),
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
   })
-  .addOption(
-    new Option(
-      "--log",
-      "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用",
-    ).hideHelp(),
-  )
-  .action(async (options: {
-    log?: boolean;
-  }) => {
+  .action(async () => {
     const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => createStdoutWriter().line(chalk.dim(message)));
     try {
       const zhixingHome = getZhixingHome();
       const configPath = getGlobalConfigPath(process.env, zhixingHome);
       const [
-        { setDiagnosticLogger },
-        { configureLlmChunkDump, pruneAllLogs },
-        { configureKeypressDump },
         { runStartupCheck },
         { startRepl },
       ] = await Promise.all([
-        import("@zhixing/core"),
-        import("./output/llm-chunk-dump.js"),
-        import("./security/keypress-dump.js"),
         import("./startup.js"),
         import("./repl.js"),
       ]);
 
-      pruneAllLogs(zhixingHome);
-      // cli 交互模式（REPL）静默 core 诊断 log（[llm] 请求 / 工具调用等），
-      // 避免污染对话 UI；serve 及其子命令各自独立 action 不受影响，
-      // 保持默认 console.log 输出供运维与调试观察
-      setDiagnosticLogger(() => {});
-      // 诊断 dump 启用配置 —— 必须在 startRepl 触发 dump 预热之前调用，
-      // 否则 singleton cached 为 NOOP 后续无法激活。--log 是唯一开关（无 ENV 兜底）：
-      //   - llm-chunk-dump：LLM stream 完整事件流（含 codepoint hex）
-      //   - keypress-dump：SelectOperationRegion keypress 路径每节点（confirmation
-      //     panel 字符输入异常调查用）
-      // 两个 dump 写到不同文件，互不干扰；--log 单一开关统一启用，避免多 flag
-      // 心智负担与 PowerShell env var 持久化陷阱。
-      const dumpEnabled = options.log === true;
-      configureLlmChunkDump(dumpEnabled, zhixingHome);
-      configureKeypressDump(dumpEnabled, zhixingHome);
       // 启动期检查——先确保必要字段就绪
       const startupResult = await runStartupCheck({
         homeDir: zhixingHome,
         configPath,
         mode: "repl",
+        records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
       });
       const startupExit = handleStartupResult(startupResult);
       if (startupExit !== undefined) {
         await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
-        process.exit(startupExit);
+        await exitCommand(startupExit);
         return;
       }
 
-      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"));
+      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }));
       await logging.finish("success", "completed");
     } catch (err) {
       await logging.finish("failure", "foreground-failed");
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
 program.hook("preAction", (_root, action) => {
   if (action.name() !== "help") assertSupportedRuntime();
+  let top = action;
+  while (top.parent && top.parent !== program) top = top.parent;
+  if (["backup", "workspace", "pair"].includes(top.name())) {
+    commandLogging = beginRuntimeLogging(
+      getZhixingHome(),
+      [top.name(), ...(top === action ? [] : [action.name()])].join("."),
+      (message) => createStdoutWriter({ stdout: process.stderr }).line(message),
+    );
+  }
+});
+
+program.hook("postAction", async () => {
+  await commandLogging?.finish("success", "completed");
+  commandLogging = undefined;
 });
 
 const logsCmd = program.command("logs")
@@ -345,10 +336,10 @@ program
     try {
       const { inspectDefaultLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
       printDoctorReport(await inspectDefaultLocalHealth());
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -363,10 +354,10 @@ appCmd
       await prepareApplicationUninstall();
       console.log("已停止且不再自动启动，程序尚未卸载");
       console.log("下一步：运行 npm uninstall -g @zhixing/cli");
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -394,6 +385,7 @@ program
     try {
       const { runPairCommand } = await import("./serve/mesh-pair-command.js");
       await runPairCommand({
+        logging: commandLogging,
         ...(invitation ? { invitation } : {}),
         ...(options.listen ? { listen: options.listen } : {}),
         ...(options.advertise ? { advertise: options.advertise } : {}),
@@ -403,11 +395,11 @@ program
           ? { executorAutoStart: options.executorAutoStart }
           : {}),
       });
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       const { pairingPublicError } = await import("./serve/mesh-pair-command.js");
       await renderActionError(pairingPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -435,10 +427,10 @@ deviceCmd
     try {
       const { listRemovableDevices } = await import("./runtime/device-removal-command.js");
       await listRemovableDevices();
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -471,7 +463,7 @@ deviceCmd
           ...(options.recoveryBackup ? { recoveryBackup: true } : {}),
           ...(options.confirm ? { confirmed: true } : {}),
         });
-        process.exit(0);
+        await exitCommand(0);
       }
       if (options.dutyDevice || options.recoveryBackup) {
         throw new TypeError("--duty-device 和 --recovery-backup 只可与 --current 同时使用");
@@ -484,10 +476,10 @@ deviceCmd
         ...(options.mode ? { mode: options.mode } : {}),
         ...(options.confirm ? { confirmed: true } : {}),
       });
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -508,10 +500,10 @@ deviceCmd
         mode: options.mode,
         ...(options.confirm ? { confirmed: true } : {}),
       });
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -523,10 +515,10 @@ deviceCmd
     try {
       const { showDeviceRemovalStatus } = await import("./runtime/device-removal-command.js");
       await showDeviceRemovalStatus(targetName);
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -541,10 +533,10 @@ dutyCmd
     try {
       const { listDutyMigrationTargets } = await import("./runtime/duty-migration-command.js");
       await listDutyMigrationTargets();
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -557,10 +549,10 @@ dutyCmd
     try {
       const { prepareDutyMigration } = await import("./runtime/duty-migration-command.js");
       await prepareDutyMigration(deviceName, options.prepareOnly !== true);
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -572,10 +564,10 @@ dutyCmd
     try {
       const { continueDutyMigration } = await import("./runtime/duty-migration-command.js");
       await continueDutyMigration(transferId);
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -587,10 +579,10 @@ dutyCmd
     try {
       const { cancelDutyMigration } = await import("./runtime/duty-migration-command.js");
       await cancelDutyMigration(transferId);
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -609,11 +601,11 @@ backupCmd
       await runBackupSetupCommand({
         ...(options.directory ? { directory: options.directory } : {}),
         ...(options.device ? { pairedDeviceName: options.device } : {}),
-      });
-      process.exit(0);
+      }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -623,11 +615,11 @@ backupCmd
   .action(async () => {
     try {
       const { runBackupVerifyCommand } = await import("./serve/backup-command.js");
-      await runBackupVerifyCommand();
-      process.exit(0);
+      await runBackupVerifyCommand({ logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -637,11 +629,11 @@ backupCmd
   .action(async () => {
     try {
       const { runBackupStatusCommand } = await import("./serve/backup-command.js");
-      await runBackupStatusCommand();
-      process.exit(0);
+      await runBackupStatusCommand({ logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -663,14 +655,14 @@ backupCmd
         ...(options.directory ? { directory: options.directory } : {}),
         ...(options.device ? { pairedDeviceName: options.device } : {}),
         ...(backupNumber !== undefined ? { backupNumber } : {}),
-      });
-      process.exit(0);
+      }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { disasterRecoveryPublicError } = await import(
         "./serve/disaster-recovery-command.js"
       );
       await renderActionError(disasterRecoveryPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -685,14 +677,14 @@ backupCmd
       );
       await runDisasterRecoveryFinishCommand({
         userConfirmedOldDeviceIsolated: options.confirmOldDeviceIsolated === true,
-      });
-      process.exit(0);
+      }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { disasterRecoveryPublicError } = await import(
         "./serve/disaster-recovery-command.js"
       );
       await renderActionError(disasterRecoveryPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -709,12 +701,12 @@ recoveryRootCmd
       const { runRecoveryRootRotateCommand } = await import("./serve/backup-command.js");
       await runRecoveryRootRotateCommand({
         userConfirmed: options.confirmSaveNewCode === true,
-      });
-      process.exit(0);
+      }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -725,12 +717,12 @@ recoveryRootCmd
   .action(async (options: { confirmDisable?: boolean }) => {
     try {
       const { runRecoveryRootInvalidateCommand } = await import("./serve/backup-command.js");
-      await runRecoveryRootInvalidateCommand({ userConfirmed: options.confirmDisable === true });
-      process.exit(0);
+      await runRecoveryRootInvalidateCommand({ userConfirmed: options.confirmDisable === true }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -741,12 +733,12 @@ recoveryRootCmd
   .action(async (options: { confirmReset?: boolean }) => {
     try {
       const { runRecoveryRootApproveResetCommand } = await import("./serve/backup-command.js");
-      await runRecoveryRootApproveResetCommand({ userConfirmed: options.confirmReset === true });
-      process.exit(0);
+      await runRecoveryRootApproveResetCommand({ userConfirmed: options.confirmReset === true }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -761,12 +753,12 @@ recoveryRootCmd
       await runRecoveryRootResetCommand({
         approval: options.approval,
         userConfirmed: options.confirmSaveNewCode === true,
-      });
-      process.exit(0);
+      }, { logging: commandLogging });
+      await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -781,7 +773,7 @@ workspaceCmd
     const { runWorkspaceCommand } = await import(
       "./runtime/workspace-command.js"
     );
-    await runWorkspaceCommand((workspace) => workspace.status());
+    await runWorkspaceCommand((workspace) => workspace.status(), commandLogging);
   });
 
 workspaceCmd
@@ -791,7 +783,7 @@ workspaceCmd
     const { runWorkspaceCommand } = await import(
       "./runtime/workspace-command.js"
     );
-    await runWorkspaceCommand((workspace) => workspace.list());
+    await runWorkspaceCommand((workspace) => workspace.list(), commandLogging);
   });
 
 workspaceCmd
@@ -805,7 +797,7 @@ workspaceCmd
     );
     await runWorkspaceCommand((workspace) =>
       workspace.create(name, targetPath),
-    );
+     commandLogging);
   });
 
 workspaceCmd
@@ -817,7 +809,7 @@ workspaceCmd
     const { runWorkspaceSceneCreateCommand } = await import(
       "./runtime/workspace-command.js"
     );
-    await runWorkspaceSceneCreateCommand(name, targetPath);
+    await runWorkspaceSceneCreateCommand(name, targetPath, commandLogging);
   });
 
 workspaceCmd
@@ -837,7 +829,7 @@ workspaceCmd
       );
       await runWorkspaceCommand((workspace) =>
         workspace.rename(currentName, name, options.revision),
-      );
+       commandLogging);
     },
   );
 
@@ -858,7 +850,7 @@ workspaceCmd
       );
       await runWorkspaceCommand((workspace) =>
         workspace.repath(name, targetPath, options.revision),
-      );
+       commandLogging);
     },
   );
 
@@ -874,7 +866,7 @@ workspaceCmd
     await runWorkspaceCommand(async (workspace) => {
       await workspace.remove(name, options.revision);
       return { removed: name };
-    });
+    }, commandLogging);
   });
 
 workspaceCmd
@@ -896,7 +888,7 @@ workspaceCmd
           expiresAt: preview.expiresAt,
           confirmation: encodeLocalWorkspaceResetPreview(preview),
         };
-      });
+      }, commandLogging);
       return;
     }
     const preview = decodeLocalWorkspaceResetPreview(options.confirm);
@@ -905,7 +897,7 @@ workspaceCmd
     }
     await runWorkspaceCommand((workspace) =>
       workspace.confirmReset(preview, preview.impact),
-    );
+     commandLogging);
   });
 
 // ─── zhixing serve（常驻服务模式） ───
@@ -929,15 +921,15 @@ const serveCmd = program
           ? { backend: options.managedSecretBackend }
           : {}),
       });
-      await pruneRuntimeLogs();
+
       const {
         runServeCommand,
       } = await import("./serve/topology-command.js");
       await runServeCommand({ ...(options.managed ? { managed: true } : {}) });
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -954,13 +946,13 @@ serveCmd
   .option("--lines <n>", "显示行数（默认 50）", parseLogLineCount)
   .action(async (options: { tail?: boolean; lines?: number }) => {
     try {
-      await pruneRuntimeLogs();
+
       const { runLogsCommand } = await import("./serve/logs.js");
       await runLogsCommand({ tail: options.tail, lines: options.lines });
-      process.exit(0);
+      await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      process.exit(1);
+      await exitCommand(1);
     }
   });
 
@@ -986,6 +978,6 @@ if (isExecutedAsMain(import.meta.url, process.argv[1])) {
 
   program.parseAsync(argv).catch(async (err: unknown) => {
     await renderActionError(err);
-    process.exit(1);
+    await exitCommand(1);
   });
 }

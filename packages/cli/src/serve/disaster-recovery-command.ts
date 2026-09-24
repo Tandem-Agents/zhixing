@@ -1,3 +1,6 @@
+import type { RuntimeLogContext } from "../logging/runtime.js";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { handoffLogging } from "../logging/handoff.js";
 import path from "node:path";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { createChannelExtensionReadiness } from "../runtime/extensions/channel-readiness.js";
@@ -68,6 +71,7 @@ import type {
 } from "./published-checkpoint-target.js";
 
 export interface DisasterRecoveryCommandOptions {
+  readonly logging?: RuntimeLogContext;
   readonly zhixingHome?: string;
   readonly secretStore?: SecretStorePort & CredentialStoreCoordinator;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
@@ -482,6 +486,7 @@ export function disasterRecoveryPublicError(_error: unknown): Error {
 }
 
 interface RecoveryContext {
+  readonly logging?: RuntimeLogContext;
   readonly home: string;
   readonly backupTargets: BackupTargetConfigurationRepository;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
@@ -507,9 +512,9 @@ async function openRecoveryContext(
     throw new Error("设备秘密存储解锁后才能恢复");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
-  const storageMaintenance = options.storageMaintenance ??
+  const storageMaintenance = options.storageMaintenance ?? options.logging?.capacity.storage ??
     createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity")).storage;
-  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance });
+  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
   const trust = await store.loadTrustRecord();
   if (!trust) throw new Error("本机没有可验证的 home 信任记录");
   const member = trust.members.find((candidate) =>
@@ -523,6 +528,7 @@ async function openRecoveryContext(
   const config = loadConfig({ homeDir: home });
   return {
     home,
+    logging: options.logging,
     backupTargets: createBackupTargetConfigurationInfrastructure(home),
     secretStore,
     key,
@@ -535,6 +541,7 @@ async function openRecoveryContext(
     disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({
       zhixingHome: home,
       storageMaintenance,
+      records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     }),
     publishedDirectoryInventoryTargets: createPublishedCheckpointTargetInfrastructure({
       zhixingHome: home,
@@ -557,11 +564,13 @@ async function openRecoveryEvidenceMesh(
     return { peerIds: [], close: async () => undefined };
   }
   const bootstrap = await prepareMeshRuntimeBootstrap({
+    records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     zhixingHome: context.home,
     secretStore: context.secretStore,
     storageMaintenance: context.storageMaintenance,
     configuration: context.configuration,
     plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: context.home,
       storageMaintenance: context.storageMaintenance,
     }),
@@ -578,6 +587,7 @@ async function openRecoveryEvidenceMesh(
     return { peerIds, close: async () => undefined };
   }
   const control = new ProductionMeshControlPlane({
+    logging: handoffLogging(context.logging?.bind),
     localIdentity: bootstrap.deviceKey,
     trust: bootstrap.trust,
     configuration: bootstrap.configuration,
@@ -639,10 +649,12 @@ async function openInventoryTargets(
     };
   }
   const bootstrap = await prepareMeshRuntimeBootstrap({
+    records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     zhixingHome: context.home,
     secretStore: context.secretStore,
     storageMaintenance: context.storageMaintenance,
     plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      records: context.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: context.home,
       storageMaintenance: context.storageMaintenance,
     }),
@@ -652,6 +664,7 @@ async function openInventoryTargets(
   signal.throwIfAborted();
   if (bootstrap.mode !== "trusted-home") throw new Error("认证设备网络尚未建立");
   const control = new ProductionMeshControlPlane({
+    logging: handoffLogging(context.logging?.bind),
     localIdentity: bootstrap.deviceKey,
     trust: bootstrap.trust,
     configuration: bootstrap.configuration,

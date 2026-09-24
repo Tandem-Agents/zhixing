@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   type ChannelAdapter,
   type ChannelLogger,
@@ -18,13 +19,14 @@ import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
 import { channelDeclaration, validateChannelReplacement } from "@zhixing/core/channels/extension";
 import { ChannelVerification } from "../runtime/extensions/channel-verification.js";
-import { ManagedExtensions } from "@zhixing/core/extensions/runtime";
+import { EXTENSION_LOG_SOURCE, ManagedExtensions } from "@zhixing/core/extensions/runtime";
 import type { ExtensionBinding, ExtensionInstance, ExtensionOperation } from "@zhixing/core/extensions/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
 import type { ProductApiContribution } from "@zhixing/core/product-api";
 import { packagedExtensions } from "../runtime/extensions/catalog.js";
 import { ChannelConfiguration } from "../runtime/extensions/channel-configuration.js";
 import { channelDeliveryResult, createChannelTypeBinding } from "../runtime/extensions/channel-binding.js";
+import { CHANNEL_LOG_SOURCE } from "../runtime/extensions/channel-logging.js";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import {
   APPROVE_KEYWORDS,
@@ -46,6 +48,7 @@ import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime
 // ─── Channel Setup ───
 
 export interface SetupChannelsOptions {
+  readonly bindLogs?: import("@zhixing/core/logging").BindLogSource;
   readonly authorityLog: () => AuthorityCommitLog;
   readonly commitDecision?: <T>(operation: () => Promise<T>) => Promise<T>;
   readonly isCurrentOwner: () => boolean;
@@ -128,6 +131,7 @@ export function createInboundChannelRouter(
 }
 
 export async function setupChannels(options: SetupChannelsOptions): Promise<SetupChannelsResult> {
+  const deliveryRecords = options.bindLogs?.(CHANNEL_LOG_SOURCE, { scope: "storage" }, [], { maxPerSecond: 32 });
   const application = new ExtensionApplication({
     log: options.authorityLog,
     commitDecision: options.commitDecision,
@@ -158,9 +162,14 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   };
   const verification = new ChannelVerification(application, options.configuration.secretPort(), (id) => runtime.current(id), changedOperation);
   const runtime: ManagedExtensions = new ManagedExtensions({
+    recordsFor: (instance, generation) => options.bindLogs?.(EXTENSION_LOG_SOURCE, { scope: "storage" }, [
+      { kind: "extension", id: instance.id }, { kind: "generation", id: generation },
+      ...(instance.admission ? [{ kind: "operation", id: instance.admission.operationId }] : []),
+    ], { maxPerSecond: 32 }),
     application, artifacts, isOwner: options.isCurrentOwner,
     projection: (instance) => options.configuration.read(instance),
     binding: (instance) => createChannelTypeBinding({
+      records: options.bindLogs?.(CHANNEL_LOG_SOURCE, { scope: "storage" }, [{ kind: "extension", id: instance.id }, ...(instance.generation ? [{ kind: "generation", id: instance.generation }] : [])], { maxPerSecond: 32 }),
       instance, routes: options.httpRoutes,
       consumers: () => {
         if (!consumers) throw new Error("Channel consumers unavailable");
@@ -374,13 +383,32 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   const send = async (
     target: DeliveryTarget, content: OutboundContent, meta?: Parameters<ChannelAdapter["send"]>[2],
   ): Promise<DeliveryResult> => {
+    const refs = [
+      { kind: "extension", id: target.channelId },
+      ...(meta?.deliveryAttempt ? [{ kind: "delivery", id: meta.deliveryAttempt.itemId }] : []),
+      { kind: "deliveryAttempt", id: meta?.deliveryAttempt ? meta.deliveryAttempt.itemId + ":" + meta.deliveryAttempt.attempt : randomUUID() },
+    ];
+    const records = deliveryRecords;
+    const refuse = (error: string): DeliveryResult => {
+      records?.record({ event: "delivered", refs, result: "refused", data: { attempted: false, retryable: true, error } });
+      return { success: false, error, retryable: true, attempted: false };
+    };
     // Delivery's already-admitted attempts settle under its own drain boundary.
-    if (admissionPaused && !meta?.deliveryAttempt) return { success: false, error: "Channel admission is paused", retryable: true, attempted: false };
+    if (admissionPaused && !meta?.deliveryAttempt) return refuse("Channel admission is paused");
     const instance = await application.get(target.channelId);
-    if (instance?.admission && !instance.admission.ready) return { success: false, error: "连接尚未通过收发验证", retryable: true, attempted: false };
+    if (instance?.generation) refs.push({ kind: "generation", id: instance.generation });
+    if (instance?.admission && !instance.admission.ready) return refuse("连接尚未通过收发验证");
     const process = runtime.current(target.channelId);
-    if (!instance?.enabled || !process || instance.generation !== process.generation) return { success: false, error: "Channel not available", retryable: true, attempted: false };
-    return channelDeliveryResult(await process.call("channel.send", { target, content, ...(meta ? { meta } : {}) }));
+    if (!instance?.enabled || !process || instance.generation !== process.generation) return refuse("Channel not available");
+    records?.record(() => ({ event: "sending", refs, data: { attempt: meta?.deliveryAttempt?.attempt } }));
+    try {
+      const result = channelDeliveryResult(await process.call("channel.send", { target, content, ...(meta ? { meta } : {}) }, refs));
+      records?.record(() => ({ event: "delivered", refs: [...refs, ...(result.messageId ? [{ kind: "message", id: result.messageId }] : [])], result: result.success ? "success" : result.attempted === false ? "refused" : "unknown", data: { attempted: result.attempted, retryable: result.retryable, error: result.error } }));
+      return result;
+    } catch (error) {
+      records?.record(() => ({ event: "delivered", refs, result: "unknown", data: { error: error instanceof Error ? error.message : "渠道未确认投递结果" } }));
+      throw error;
+    }
   };
   const startIfReady = async () => {
     const revision = connectionRevision;

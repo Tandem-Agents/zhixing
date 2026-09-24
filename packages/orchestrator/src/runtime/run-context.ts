@@ -49,6 +49,9 @@ export type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
  *     而触发不变量违反
  */
 export interface RunContext {
+  /** Issued child identity, never inferred from arbitrary lineage labels. */
+  childTaskId?: string;
+  readonly logPorts?: import("./logging.js").KernelLogPorts;
   /** Trusted capability ceiling, inherited by descendants; normal approval cannot expand it. */
   readonly toolExecutionCeiling?: import("@zhixing/core/security").ToolExecutionCeiling;
   bus: EventBus<AgentEventMap>;

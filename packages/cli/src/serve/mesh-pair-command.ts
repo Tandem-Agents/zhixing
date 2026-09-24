@@ -1,3 +1,5 @@
+import type { RuntimeLogContext } from "../logging/runtime.js";
+import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -111,6 +113,7 @@ class PairingPublicFacingError extends Error {
 }
 
 export interface PairCommandOptions {
+  readonly logging?: RuntimeLogContext;
   readonly invitation?: string;
   readonly listen?: string;
   readonly advertise?: string;
@@ -230,10 +233,11 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     throw new Error("Device SecretStore must be unlocked before pairing");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
-  const deviceCapacity = createDeviceCapacityRuntime(
+  const deviceCapacity = options.logging?.capacity ?? createDeviceCapacityRuntime(
     `${zhixingHome}/distributed-runtime/capacity`,
   );
   const store = new FileMeshBootstrapStore(zhixingHome, key, {
+    records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     storageMaintenance: deviceCapacity.storage,
   });
   const bootstrapProjection = createMeshBootstrapProjectionPorts(store);

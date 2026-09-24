@@ -38,10 +38,7 @@ import {
   createSystemClipboardProvider,
   type ClipboardTextProvider,
 } from "./clipboard-provider.js";
-import {
-  recordKeypressEvent,
-  recordStdinSnapshot,
-} from "./security/keypress-dump.js";
+import { recordInputEvent, recordInputState } from "./logging/input.js";
 import { type PasteRegistry } from "./paste-registry.js";
 import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { expandPastes, PasteReferenceIndex } from "./paste-expand.js";
@@ -353,13 +350,13 @@ export class InputController implements InputRegion {
   }
 
   suspend(): void {
-    recordStdinSnapshot("typeahead.suspend.entry", this.stdin, {
+    recordInputState(this.options.screen?.inputRecords, "typeahead.suspend.entry", this.stdin, {
       stateBefore: this.state,
       hasBatcher: !!this.batcher,
       hasBuffer: !!this.buffer,
     });
     if (this.state !== "active") {
-      recordKeypressEvent("typeahead.suspend.skip-not-active", {
+      recordInputEvent(this.options.screen?.inputRecords, "typeahead.suspend.skip-not-active", {
         state: this.state,
       });
       return;
@@ -384,7 +381,7 @@ export class InputController implements InputRegion {
     // attachInput(newRegion) 直接替换。
     this.screen.requestInputRepaint();
     this.state = "suspended";
-    recordStdinSnapshot("typeahead.suspend.exit", this.stdin, {
+    recordInputState(this.options.screen?.inputRecords, "typeahead.suspend.exit", this.stdin, {
       stateAfter: this.state,
       hasBatcher: !!this.batcher,
       hasBuffer: !!this.buffer,
@@ -392,13 +389,13 @@ export class InputController implements InputRegion {
   }
 
   resume(): void {
-    recordStdinSnapshot("typeahead.resume.entry", this.stdin, {
+    recordInputState(this.options.screen?.inputRecords, "typeahead.resume.entry", this.stdin, {
       stateBefore: this.state,
       hasBatcher: !!this.batcher,
       hasBuffer: !!this.buffer,
     });
     if (this.state !== "suspended") {
-      recordKeypressEvent("typeahead.resume.skip-not-suspended", {
+      recordInputEvent(this.options.screen?.inputRecords, "typeahead.resume.skip-not-suspended", {
         state: this.state,
       });
       return;
@@ -421,7 +418,7 @@ export class InputController implements InputRegion {
     // 在 paintVisualCursor 引入 state 依赖前隐患不可见，现在显式拉齐。
     this.state = "active";
     this.screen.attachInput(this);
-    recordStdinSnapshot("typeahead.resume.exit", this.stdin, {
+    recordInputState(this.options.screen?.inputRecords, "typeahead.resume.exit", this.stdin, {
       stateAfter: this.state,
       hasBatcher: !!this.batcher,
       hasBuffer: !!this.buffer,
@@ -768,7 +765,7 @@ export class InputController implements InputRegion {
     str: string,
     key: readline.Key | undefined,
   ): void {
-    recordKeypressEvent("typeahead.handleKeypress.entry", {
+    recordInputEvent(this.options.screen?.inputRecords, "typeahead.handleKeypress.entry", {
       str: str ?? "",
       keyName: key?.name ?? null,
       ctrl: key?.ctrl ?? null,
@@ -983,7 +980,7 @@ export class InputController implements InputRegion {
   }
 
   private handleMouseEvent(event: KeypressMouseEvent): void {
-    recordKeypressEvent("typeahead.mouse", {
+    recordInputEvent(this.options.screen?.inputRecords, "typeahead.mouse", {
       action: event.action,
       button: event.button,
       x: event.x,
@@ -1010,7 +1007,7 @@ export class InputController implements InputRegion {
       if (!content || this.state !== "active" || !this.buffer) return;
       this.finalizePaste(content);
     } catch (err) {
-      recordKeypressEvent("typeahead.mousePaste.failed", {
+      recordInputEvent(this.options.screen?.inputRecords, "typeahead.mousePaste.failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     } finally {

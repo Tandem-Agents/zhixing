@@ -49,9 +49,6 @@ describe("runtime lifecycle migration golden", () => {
         executed.push("authorityCheckpointOwner.stop");
       },
     });
-    shell.acquireServerLog({
-      stop: () => executed.push("serverLogLifecycle.stop"),
-    });
     shell.transferPreparedServer(endpoint as never, registry);
     lifecycleContributions.acquire("mcpRuntime.close", async () => {
       executed.push("mcpRuntime.close");

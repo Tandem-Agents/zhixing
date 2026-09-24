@@ -63,8 +63,16 @@ export interface LogDraft {
   readonly result?: LogResult;
 }
 export interface LogRecordPort {
-  record(draft: LogDraft): void;
+  /** A lazy projection executes inside the recorder's failure boundary. */
+  record(draft: LogDraft | (() => LogDraft)): void;
 }
+/** Trusted composition only; producers receive the returned write-only port. */
+export type BindLogSource = (
+  source: LogSource,
+  access: LogAccess,
+  refs?: readonly LogRef[],
+  admission?: { readonly maxPerSecond: number },
+) => LogRecordPort;
 export type LogField =
   | "text"
   | "number"
@@ -120,6 +128,7 @@ export interface LogPolicyState {
   readonly blocked?: string;
 }
 export interface LogStatus {
+  readonly migration?: import("./legacy.js").LogMigration & { readonly legacyFiles: number; readonly catalog: string; readonly lastObserved: true };
   readonly storeId: string;
   readonly layout: "zxlog/1";
   readonly policy: LogPolicyState;
@@ -131,6 +140,8 @@ export interface LogStatus {
   readonly upper: number;
 }
 export interface LogFilter {
+  /** Store sequence lower bound for a storage manager following published records. */
+  readonly afterSequence?: number;
   readonly from?: number;
   readonly until?: number;
   readonly source?: string;

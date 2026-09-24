@@ -483,6 +483,7 @@ export interface ExecutorReadiness {
 }
 
 export interface SetupAuthorityRuntimeOptions {
+  readonly records?: import("@zhixing/core/logging").LogRecordPort;
   readonly extensionReadiness?: (log: FileAuthorityCommitLog) => Promise<{ channels: readonly string[]; revision: string }>;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
@@ -570,6 +571,7 @@ export async function setupAuthorityRuntime(
           artifacts,
           {
             storageMaintenance: options.storageMaintenance,
+            records: options.records,
             // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
             // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
             ...(options.clock ? { clock: options.clock } : {}),
@@ -595,6 +597,7 @@ export async function setupAuthorityRuntime(
           artifacts,
           {
             storageMaintenance: options.storageMaintenance,
+            records: options.records,
             ...(options.clock ? { clock: options.clock } : {}),
           },
         )
@@ -964,6 +967,7 @@ export async function setupAuthorityRuntime(
               bindingArtifacts,
               {
                 storageMaintenance: options.storageMaintenance,
+                records: options.records,
                 clock,
               },
             );

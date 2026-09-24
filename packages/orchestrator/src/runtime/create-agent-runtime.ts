@@ -8,7 +8,8 @@
  * 都通过依赖注入(decorateRunBus / onSecurityBlocked / onUserDenied)从外部接入。
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { observeKernelRun, observeProviderCall, optionalKernelLogs } from "./logging.js";
 import {
   type AgentEventMap,
   type Message,
@@ -321,6 +322,7 @@ export interface RunBusContext {
 export type DecorateRunBusFn = (ctx: RunBusContext) => () => void;
 
 export interface AgentRuntime {
+  withRunObservation?<T>(identity: import("./logging.js").KernelLogIdentity, work: () => Promise<T>): Promise<T>;
   run: (envelope: KernelRunEnvelope) => Promise<KernelRunCompletion>;
   /**
    * 估算当前窗口下一次主对话 provider 请求的上下文预算状态。
@@ -465,6 +467,7 @@ export class LifecycleHookError extends Error {
 }
 
 export interface CreateAgentRuntimeOptions {
+  readonly createLogRecords?: import("./logging.js").KernelLogFactory;
   /**
    * 设备容量绑定。给出时工具执行经设备唯一容量裁决器准入;LLM 网络等待不占
    * 容量,故只接在工具执行注入点上。
@@ -595,7 +598,9 @@ export async function createAgentRuntime(
   // （callText main→main / callText 默认档+段切换→light）不跟随、
   // roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
-  const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens);
+  const runtimeId = randomUUID();
+  const runtimeLogs = optionalKernelLogs(options.createLogRecords, { refs: [{ kind: "runtime", id: runtimeId }] });
+  const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens, runtimeLogs?.provider);
 
   const cwd = process.cwd();
 
@@ -779,7 +784,6 @@ export async function createAgentRuntime(
   // builtin 索引是包内只读常量；用户目录只在注意力窗口首次 run 或窗口换代时
   // 经 assignment GlobalQuery 刷新。窗口内的后续 run 不重读目录，保持 prompt
   // byte-equal。
-  const runtimeId = randomUUID();
   const lifecycle: readonly AgentRuntimeLifecycle[] = [
     ...(options.lifecycle ?? []),
   ];
@@ -1065,6 +1069,15 @@ export async function createAgentRuntime(
     };
   };
 
+  const recordConfiguration = (logPorts: ReturnType<typeof optionalKernelLogs>, turnIndex?: number): void => {
+    logPorts?.kernel.record(() => ({ event: "configured", data: {
+        toolSetVersion: createHash("sha256").update(JSON.stringify(tools.map((tool) => tool.name).sort())).digest("hex"),
+        provider: roles[primaryRole].provider.id, model: roles[primaryRole].model,
+        toolCount: tools.length, tools: tools.slice(0, 32).map((tool) => tool.name), toolNamesOmitted: Math.max(0, tools.length - 32), turnIndex: turnIndex,
+        primaryRole, sessionType, thinking: primaryThinking?.mode, contextUnits: primaryModelRuntime.budget.contextWindow, maxOutputUnits: defaultMaxOutputTokens[primaryRole],
+      } }));
+  };
+
   return {
     confirmationBroker,
 
@@ -1164,16 +1177,17 @@ export async function createAgentRuntime(
         });
       // 独立编排入口不经主 run loop——metering 经 runContext 注入，节点执行器与
       // 其子 agent 沿既有继承链自动消费同一序列
-      return params.modelCallMetering
-        ? runContextStorage.run(
+      const logPorts = runContextStorage.getStore()?.logPorts ?? runtimeLogs;
+      const disposeLogging = logPorts ? observeKernelRun(params.eventBus, logPorts.kernel) : undefined;
+      try { return await runContextStorage.run(
             {
               bus: params.eventBus,
               lineage: params.parentLineage ?? "orchestration",
               modelCallMetering: params.modelCallMetering,
+              logPorts,
             },
             execute,
-          )
-        : execute();
+          ); } finally { disposeLogging?.(); }
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
@@ -1254,8 +1268,26 @@ export async function createAgentRuntime(
       };
     },
 
+    async withRunObservation<T>(identity: import("./logging.js").KernelLogIdentity, work: () => Promise<T>): Promise<T> {
+      const parent = runContextStorage.getStore();
+      const logPorts = optionalKernelLogs(options.createLogRecords, { ...identity, refs: [{ kind: "runtime", id: runtimeId }, ...(identity.refs ?? [])] });
+      recordConfiguration(logPorts);
+      try { return await runContextStorage.run({ ...parent, bus: parent?.bus ?? createEventBus<AgentEventMap>(), lineage: parent?.lineage ?? "observed", logPorts }, work); }
+      finally { logPorts?.kernel.record({ event: "released" }); }
+    },
+
     async run(input: KernelRunEnvelope): Promise<KernelRunCompletion> {
       const envelope = captureKernelRunEnvelope(input);
+      const logPorts = optionalKernelLogs(options.createLogRecords, {
+        conversationId: envelope.identity.conversationId,
+        refs: [
+          { kind: "runtime", id: runtimeId },
+          { kind: "run", id: envelope.identity.runId ?? randomUUID() },
+          ...(envelope.identity.assignmentId ? [{ kind: "assignment", id: envelope.identity.assignmentId }] : []),
+          ...(envelope.identity.turnContext?.turnId ? [{ kind: "turn", id: envelope.identity.turnContext.turnId }] : []),
+        ],
+      });
+      recordConfiguration(logPorts, envelope.identity.turnIndex);
       // 主 agent 的 root EventBus 显式标记 lineage="main",建立父子事件契约的根:
       //   - 主 run 事件 meta.lineage === "main" (订阅方可按 lineage 过滤/路由)
       //   - 子 agent EventBus 通过 createEventBus({ parent, lineage: "main/<id>" })
@@ -1284,6 +1316,7 @@ export async function createAgentRuntime(
             }
           })
         : undefined;
+      const disposeLogging = logPorts ? observeKernelRun(eventBus, logPorts.kernel) : undefined;
       const startTime = Date.now();
 
       // 收集本轮产生的新消息，用于 REPL 对话历史
@@ -1383,6 +1416,8 @@ export async function createAgentRuntime(
           postTurnControlAccumulator.dispose(),
         );
         safeDispose("run.decorate", () => disposeRender?.());
+        safeDispose("run.logging", () => disposeLogging?.());
+        logPorts?.kernel.record({ event: "released" });
       };
 
       // ─── 本 run 局部 prompt + 注意力窗口换代回调 ───
@@ -1609,6 +1644,7 @@ export async function createAgentRuntime(
           {
             bus: eventBus,
             lineage: "main",
+            logPorts,
             conversationId: envelope.identity.conversationId,
             turnOrigin: envelope.identity.turnContext?.turnOrigin,
             worksceneTasks: envelope.identity.turnContext?.worksceneTasks,
@@ -1830,6 +1866,7 @@ export async function createAgentRuntime(
 function resourceAwareRoles(
   roles: LLMRoles,
   defaultMaxOutputTokens: Readonly<Record<keyof LLMRoles, number>>,
+  records?: import("@zhixing/core/logging").LogRecordPort,
 ): LLMRoles {
   const wrap = (role: LLMRole, fallback: number): LLMRole => {
     const provider: LLMProvider = {
@@ -1837,9 +1874,12 @@ function resourceAwareRoles(
       models: role.provider.models,
       chat(request) {
         const metering = runContextStorage.getStore()?.modelCallMetering;
-        if (!metering) return role.provider.chat(request);
+        const call = (providerRequest: ChatRequest) => observeProviderCall(
+          (next) => role.provider.chat(next), providerRequest, role.provider.id, records,
+        );
+        if (!metering) return call(request);
         return meteredProviderCall({
-          call: (providerRequest) => role.provider.chat(providerRequest),
+          call,
           meter: metering.meter,
           nextCallIndex: metering.nextCallIndex,
           defaultMaxOutputTokens: fallback,
@@ -1887,6 +1927,7 @@ function runMeteredTextCall<Value>(
     {
       bus: createEventBus<AgentEventMap>(),
       lineage: "text-call",
+      logPorts: runContextStorage.getStore()?.logPorts,
       modelCallMetering: metering,
     },
     execute,

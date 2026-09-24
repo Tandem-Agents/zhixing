@@ -1,3 +1,4 @@
+import type { MeshRequestChannelOptions } from "@zhixing/mesh/request-channel";
 import { once } from "node:events";
 import {
   connect as connectNet,
@@ -46,6 +47,7 @@ export interface MeshControlPlaneTrustProjectionPort {
 }
 
 export interface ProductionMeshControlPlaneOptions {
+  readonly logging?: MeshRequestChannelOptions;
   readonly localIdentity: DeviceKey;
   readonly trust: HomeTrustRecord;
   readonly configuration: MeshRoleBootConfig;
@@ -94,7 +96,7 @@ export class ProductionMeshControlPlane {
   #started = false;
 
   constructor(private readonly options: ProductionMeshControlPlaneOptions) {
-    this.connections = options.connections ?? new MeshConnectionRegistry();
+    this.connections = options.connections ?? new MeshConnectionRegistry({ logging: options.logging });
     this.#trust = options.trust;
     for (const peer of options.transportPeers) {
       this.#peers.set(peer.identity.deviceId, peer);

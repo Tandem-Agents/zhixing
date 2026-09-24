@@ -1,3 +1,5 @@
+import { recordingFixture } from "../../../../core/src/logging/__tests__/recording.js";
+import { createKernelLogFactory } from "../logging.js";
 /**
  * createAgentRuntime / runtime.run() 契约级集成测试
  *
@@ -3108,5 +3110,41 @@ describe("Host-bound Security execution", () => {
         status: "succeeded",
       },
     ]);
+  });
+});
+
+describe("production Kernel observation", () => {
+  it("records an actual failing tool followed by a successful run, with durable identities and safe errors", async () => {
+    const logs = recordingFixture();
+    providerRef.current = new MockLLMProvider([{ toolCalls: [{ id: "broken-call", name: "broken", input: { privateBody: "unlogged-body" } }] }, { text: "recovered" }, { text: "auxiliary" }]);
+    const runtime = await createAgentRuntime({ createLogRecords: createKernelLogFactory(logs.bind), extraTools: [{ name: "broken", description: "fixture", inputSchema: { type: "object" }, isReadOnly: true, needsPermission: false, call: async () => ({ isError: true, content: "ENOENT; token=hidden-test-secret" }) }] });
+    runtime.confirmationBroker.onRequest(request => runtime.confirmationBroker.resolve(request.id, { kind: "allow-once" }));
+    try {
+      const result = await runtime.run({ modelInput: { messages: [userMessage("private-prompt")] }, identity: { conversationId: "conversation-one", runId: "run-one", assignmentId: "assignment-one", turnIndex: 0 }, control: {}, observation: {}, correctness: {} });
+      expect(result.terminal.reason).toBe("completed");
+      await runtime.withRunObservation!({ conversationId: "perspective-conversation", refs: [{ kind: "run", id: "perspective-run" }] }, () => runtime.callText("light", "bounded probe"));
+    } finally { await runtime.dispose(); await logs.finish(); }
+    const records = logs.records();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    expect(records).toContainEqual(expect.objectContaining({ source: "kernel", event: "toolFinished", result: "failure", data: expect.objectContaining({ error: expect.stringContaining("ENOENT") }), refs: expect.arrayContaining([{ kind: "toolCall", id: "broken-call" }]) }));
+    const provider = records.filter((record) => record.source === "provider" && record.refs.some(ref => ref.id === "run-one"));
+    expect(provider.length).toBeGreaterThanOrEqual(4);
+    expect(records).toContainEqual(expect.objectContaining({ event: "configured", refs: expect.arrayContaining([{ kind: "run", id: "perspective-run" }]), data: expect.objectContaining({ toolSetVersion: expect.any(String) }) }));
+    for (const record of provider) expect(record.refs).toEqual(expect.arrayContaining([{ kind: "conversation", id: "conversation-one" }, { kind: "run", id: "run-one" }, { kind: "assignment", id: "assignment-one" }]));
+    expect(provider.find((record) => record.event === "returned")?.data).toHaveProperty("inputUnits");
+    expect(JSON.stringify(records)).not.toMatch(/hidden-test-secret|unlogged-body|private-prompt/);
+    expect(records.find((record) => record.event === "configured")?.data).toMatchObject({ model: "mock-model", toolSetVersion: expect.any(String), contextUnits: 128000 });
+  });
+  it("does not let a failed observation factory interrupt a run or auxiliary work", async () => {
+    const runtime = await createAgentRuntime({ createLogRecords: () => { throw Error("observer failure"); } });
+    try {
+      let called = 0;
+      expect(await runtime.withRunObservation!({}, async () => { called++; return "ok"; })).toBe("ok");
+      expect(called).toBe(1);
+      const result = await runtime.run({ modelInput: { messages: [userMessage("hello")] }, identity: { turnIndex: 0 }, control: {}, observation: {}, correctness: {} });
+      expect(result.terminal.reason).toBe("completed");
+      const original = new Error("original");
+      await expect(runtime.withRunObservation!({}, async () => { throw original; })).rejects.toBe(original);
+    } finally { await runtime.dispose(); }
   });
 });

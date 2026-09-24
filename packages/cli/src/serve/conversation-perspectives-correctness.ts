@@ -39,7 +39,9 @@ export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
 export function projectConversationPerspectivesRuntime(
   managed: ManagedSession,
   runtime: SessionRuntime = managed.runtime,
+  identity: Parameters<NonNullable<SessionRuntime["withRunObservation"]>>[0] = { conversationId: managed.conversationId },
 ): ConversationPerspectivesRuntimePort {
+  const observe = <T>(work: () => Promise<T>): Promise<T> => runtime.withRunObservation ? runtime.withRunObservation(identity, work) : work();
   const projection: ConversationPerspectivesRuntimePort = {
     conversationId: managed.conversationId,
     windowMessages: () => managed.window.getMessages(),
@@ -54,16 +56,16 @@ export function projectConversationPerspectivesRuntime(
           : {}),
       };
       if (runtime.callTextWithUsage) {
-        return runtime.callTextWithUsage(prompt, role, runtimeOptions);
+        return observe(() => runtime.callTextWithUsage!(prompt, role, runtimeOptions));
       }
-      if (runtime.callText) return runtime.callText(prompt, role, runtimeOptions);
+      if (runtime.callText) return observe(() => runtime.callText!(prompt, role, runtimeOptions));
       throw new Error("perspective allocation requires runtime text call support.");
     },
     runOrchestration: (request) => {
       if (!runtime.runOrchestrationV1) {
         throw new Error("session runtime does not support orchestration execution.");
       }
-      return runtime.runOrchestrationV1({
+      return observe(() => runtime.runOrchestrationV1!({
         executable: request.executable,
         runInput: request.runInput,
         contextSnapshot: request.contextSnapshot,
@@ -76,7 +78,7 @@ export function projectConversationPerspectivesRuntime(
         ...(request.modelCallMetering
           ? { modelCallMetering: request.modelCallMetering }
           : {}),
-      });
+      }));
     },
   };
   return Object.freeze(projection);
@@ -103,7 +105,10 @@ async function runDurablePerspective(
       const meter = options?.modelCallResourceMeter;
       let callIndex = 0;
       const execution = await input.execute(
-        projectConversationPerspectivesRuntime(managed, baseRuntime),
+        projectConversationPerspectivesRuntime(managed, baseRuntime, {
+          conversationId: input.conversationId,
+          refs: [...(options?.runId ? [{ kind: "run", id: options.runId }] : []), ...(options?.assignmentId ? [{ kind: "assignment", id: options.assignmentId }] : []), ...(options?.turnContext?.turnId ? [{ kind: "turn", id: options.turnContext.turnId }] : [])],
+        }),
         {
           ...(options?.authorizeToolExecution
             ? { authorizeToolExecution: options.authorizeToolExecution }

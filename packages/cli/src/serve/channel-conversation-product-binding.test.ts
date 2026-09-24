@@ -1,3 +1,4 @@
+import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
 import { describe, expect, it, vi } from "vitest";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import { type Message } from "@zhixing/core";
@@ -20,9 +21,10 @@ import { createAnchorConversationRunControlPort } from "./conversation-run-contr
 
 describe("ChannelConversationProductBinding", () => {
   it("requires binding before consumption and uses the one sealed Product API dispatcher", async () => {
+    const logs = recordingFixture();
     const manager = managerWithResult("channel answer");
     const admitTurn = vi.spyOn(manager, "admitTurn");
-    const binding = new ChannelConversationProductBinding(manager);
+    const binding = new ChannelConversationProductBinding(manager, logs.bind);
     expect(() => binding.assertBound()).toThrow("not bound");
     await expect(binding.prepareAgentTurn({
       channelId: "feishu",
@@ -33,7 +35,7 @@ describe("ChannelConversationProductBinding", () => {
     expect(() => binding.bind(conversationProductApi(manager))).toThrow("already bound");
     const turnIdentity = await binding.prepareAgentTurn({
       channelId: "feishu",
-      platformSubject: "user-1",
+      platformSubject: "user-1", messageId: "message-1",
     });
     const outcomes: unknown[] = [];
     const started = vi.fn();
@@ -72,6 +74,10 @@ describe("ChannelConversationProductBinding", () => {
       },
     ]);
     expect(manager.getSession(result.conversationId)?.busy).toBe(false);
+    await logs.finish();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    expect(logs.records()).toContainEqual(expect.objectContaining({ event: "prepared", refs: expect.arrayContaining([{ kind: "message", id: "message-1" }, { kind: "turn", id: turnIdentity.turnId }]) }));
+    expect(logs.records()).toContainEqual(expect.objectContaining({ event: "admitted", access: { scope: `conversation:${result.conversationId}` }, refs: expect.arrayContaining([{ kind: "conversation", id: result.conversationId }, { kind: "turn", id: turnIdentity.turnId }]) }));
   });
 
   it("routes stable Channel cancellation through Product API and preserves authoritative response ownership", async () => {

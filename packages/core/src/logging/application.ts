@@ -13,6 +13,7 @@ import { validLogToken } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
 import { LocalLogStore, logDigest, indexName, type LogStoreSnapshot, type LogRetirement } from "./storage.js";
 import { scopeLogQuery, type LogScanFiles, type LogVisibleRange } from "./query-scope.js";
+import { readLegacyLogs } from "./legacy-reader.js";
 
 interface Cursor {
   v: 1;
@@ -25,22 +26,24 @@ interface Cursor {
 }
 export type LogAddress =
   | { storeId: string; kind: "record"; id: string }
+  | { storeId: string; kind: "legacy"; id: string }
   | { storeId: string; kind: "operation"; ref: LogRef };
 export function formatLogAddress(address: LogAddress): string {
   const suffix =
-    address.kind === "record"
-      ? `record/${encodeURIComponent(address.id)}`
+    address.kind === "record" || address.kind === "legacy"
+      ? `${address.kind}/${encodeURIComponent(address.id)}`
       : `operation/${encodeURIComponent(address.ref.kind)}/${encodeURIComponent(address.ref.id)}`;
   return `zxlog://${address.storeId}/${suffix}`;
 }
 export function parseLogAddress(value: string): LogAddress {
   if (value.length > 512) throw new LogRequestError("日志地址过长");
-  const match = /^zxlog:\/\/([a-f0-9-]{36})\/(record|operation)\/([^/]+)(?:\/([^/]+))?$/u.exec(
+  const match = /^zxlog:\/\/([a-f0-9-]{36})\/(record|operation|legacy)\/([^/]+)(?:\/([^/]+))?$/u.exec(
     value,
   );
   if (!match) throw new LogRequestError("日志地址无效");
   const id = decodeURIComponent(match[3]!);
   if (!validLogToken(id)) throw new LogRequestError("日志地址身份无效");
+  if (match[2] === "legacy" && !match[4] && (id === "catalog" || /^[a-f0-9]{64}$/u.test(id))) return { storeId: match[1]!, kind: "legacy", id };
   if (match[2] === "record" && !match[4]) return { storeId: match[1]!, kind: "record", id };
   const refId = decodeURIComponent(match[4] ?? "");
   if (match[2] !== "operation" || !validLogToken(refId)) throw new LogRequestError("日志操作地址无效");
@@ -81,6 +84,7 @@ export class LogApplication {
   }
 
   async search(filter: LogFilter = {}, cursor?: string): Promise<LogPage> {
+    if (filter.afterSequence !== undefined) this.#manager();
     return this.#query(filter, cursor);
   }
   async read(
@@ -88,7 +92,20 @@ export class LogApplication {
     view: "overview" | "timeline" | "detail" = "overview",
     cursor?: string,
   ): Promise<LogPage & { readonly detail?: unknown }> {
+    const local = /^zxlog-local:legacy\/(catalog|legacy-[a-f0-9]{64}\.log)$/u.exec(address);
+    if (local) {
+      const context = this.#manager();
+      const result = await readLegacyLogs(this.#store, { id: local[1]! }, view, cursor, context);
+      this.#authorize(context);
+      return result;
+    }
     const parsed = parseLogAddress(address);
+    if (parsed.kind === "legacy") {
+      const context = this.#manager();
+      const result = await readLegacyLogs(this.#store, parsed, view, cursor, context);
+      this.#authorize(context);
+      return result;
+    }
     return this.#query(
       parsed.kind === "record" ? { id: parsed.id } : { ref: parsed.ref },
       cursor,
@@ -271,7 +288,7 @@ export class LogApplication {
       upper = cursor?.upper ?? state.upper;
     const resultLimit =
       policy.queryResultBytes - Math.min(4096, Math.floor(policy.queryResultBytes / 2));
-    let position = cursor?.position ?? 1,
+    let position = cursor?.position ?? (filter.afterSequence === undefined ? 1 : filter.afterSequence + 1),
       offset = cursor?.offset ?? 0,
       scannedBytes = 0,
       resultBytes = 0;
@@ -393,8 +410,16 @@ export class LogApplication {
             record = undefined;
             gap("record-corrupt");
           }
-          // Hidden references must not become an existence oracle through a filter or operation address.
-          if (record && !context.manageStorage) record = { ...record, refs: [] };
+          // Filter and return the same authorized view. A conversation grant proves only
+          // its local conversation identity, not every relation on an accessible record.
+          if (record && !context.manageStorage) {
+            const storeId = record.storeId;
+            record = { ...record, refs: record.refs.filter((ref) =>
+              ref.kind === "conversation" &&
+              (ref.storeId === undefined || ref.storeId === storeId) &&
+              context.scopes.includes(`conversation:${ref.id}`),
+            ) };
+          }
           if (record && allowed(record, context) && matches(record, filter)) {
             const known =
               record.schema === 1 && this.#sources.has(`${record.source}:${record.sourceVersion}`);
@@ -477,7 +502,7 @@ export class LogApplication {
 
 export * from "./product-api.js";
 export * from "./tools.js";
-export { LogRequestError, publicLogErrorMessage } from "./errors.js";
+export { LogRequestError, LogStoreNotInitializedError, publicLogErrorMessage } from "./errors.js";
 
 /** Sorted, bounded evidence may span several retired segments, but must not bridge a hole. */
 function retirementCovers(ranges: readonly LogRetirement[], start: number, end: number): boolean {
@@ -512,6 +537,7 @@ function matches(record: LogRecord, filter: LogFilter): boolean {
 }
 function validateFilter(filter: LogFilter): void {
   if (
+    (filter.afterSequence !== undefined && (!Number.isSafeInteger(filter.afterSequence) || filter.afterSequence < 0 || filter.afterSequence >= Number.MAX_SAFE_INTEGER)) ||
     (filter.from !== undefined && !Number.isSafeInteger(filter.from)) ||
     (filter.until !== undefined && !Number.isSafeInteger(filter.until)) ||
     (filter.id !== undefined && !validLogToken(filter.id)) ||

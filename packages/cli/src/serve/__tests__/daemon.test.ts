@@ -1,8 +1,8 @@
 /**
  * Daemon spawn + startup handshake 单测。
  *
- * 全量 mock：spawnFn / readLockFn / isProcessAliveFn / httpGetFn / openFn / mkdirFn /
- * clock / sleep / console / readFileFn。不真的 spawn 子进程、不真的写磁盘、不打真网络。
+ * 全量 mock：spawnFn / readLockFn / isProcessAliveFn / httpGetFn /
+ * clock / sleep / console / readLogsFn。不真的 spawn 子进程、不真的写磁盘、不打真网络。
  *
  * 覆盖路径：
  * 1. Happy path：spawn 成功 + PID 立即出现 + health 200 → ok:true
@@ -14,7 +14,6 @@
 
 import { describe, it, expect, vi } from "vitest";
 import path from "node:path";
-import { SERVER_LOG_ACTIVE_OPEN_FLAGS } from "@zhixing/server";
 import { spawnDaemon } from "../daemon.js";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
@@ -39,12 +38,10 @@ function makeFakeChild(pid = 99999) {
 function makeDeps(overrides: Partial<Parameters<typeof spawnDaemon>[0]["deps"]> = {}) {
   return {
     spawnFn: vi.fn(() => makeFakeChild()),
-    mkdirFn: vi.fn(async () => undefined),
-    openFn: vi.fn(async () => ({ fd: 42, close: vi.fn(async () => {}) })),
     clock: mkFakeClock(),
     sleep: vi.fn(async () => {}),
     console: { log: vi.fn(), error: vi.fn() },
-    readFileFn: vi.fn(async () => ""),
+    readLogsFn: vi.fn(async () => ({ records: [] })),
     checkReadyMarkerFn: vi.fn(async () => true), // 默认认为 ready marker 存在
     ...overrides,
   };
@@ -69,10 +66,7 @@ describe("spawnDaemon", () => {
     const home = path.resolve("daemon-home-a");
     const other = path.resolve("daemon-home-b");
     const deps = makeDeps({
-      prepareServerLogForWriteFn: vi.fn(async (options) => {
-        vi.stubEnv("ZHIXING_HOME", other);
-        return { logPath: options!.paths!.activeLogPath } as never;
-      }),
+      spawnFn: vi.fn(() => { vi.stubEnv("ZHIXING_HOME", other); return makeFakeChild(); }),
       readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
       isProcessAliveFn: vi.fn(() => true),
       httpGetFn: vi.fn(async () => 200),
@@ -80,11 +74,7 @@ describe("spawnDaemon", () => {
     try {
       const result = await spawnDaemon({ zhixingHome: home, forwardedArgs: ["serve"], deps });
       expect(result.ok).toBe(true);
-      expect(deps.prepareServerLogForWriteFn).toHaveBeenCalledWith({ paths: {
-        dirPath: path.join(home, "logs", "server"),
-        activeLogPath: path.join(home, "logs", "server", "server.log"),
-        legacyLogPath: path.join(home, "server.log"),
-      } });
+      expect(result.logPath).toBe(path.join(home, "logs", "runtime"));
       expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.any(Array),
         expect.objectContaining({ env: expect.objectContaining({ ZHIXING_HOME: home }) }));
       expect(deps.readLockFn).toHaveBeenCalledWith({
@@ -108,7 +98,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 5000,
       pollIntervalMs: 200,
       deps,
@@ -118,48 +107,14 @@ describe("spawnDaemon", () => {
     expect(r.pid).toBe(12345);
     expect(r.port).toBe(18900);
     expect(deps.spawnFn).toHaveBeenCalledOnce();
-    expect(deps.openFn).toHaveBeenCalledOnce();
   });
 
-  it("prepares and opens the governed default log path for daemon stdio", async () => {
-    const clock = mkFakeClock();
-    const deps = makeDeps({
-      clock,
-      sleep: vi.fn(async () => clock.advance(200)),
-      prepareServerLogForWriteFn: vi.fn(async () => ({
-        logPath: "/home/zx/logs/server/server.log",
-        migratedLegacy: false,
-        removedLegacy: false,
-        transition: {
-          kind: "initialize-active",
-          paths: {
-            dirPath: "/home/zx/logs/server",
-            activeLogPath: "/home/zx/logs/server/server.log",
-            legacyLogPath: "/home/zx/server.log",
-          },
-          readPath: "/home/zx/logs/server/server.log",
-          writePath: "/home/zx/logs/server/server.log",
-        },
-      })),
-      readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
-      isProcessAliveFn: vi.fn(() => true),
-      httpGetFn: vi.fn(async () => 200),
-    });
-
-    const result = await spawnDaemon({
-      forwardedArgs: ["serve"],
-      handshakeTimeoutMs: 1000,
-      pollIntervalMs: 200,
-      deps,
-    });
-
+  it("keeps daemon stdio out of private files", async () => {
+    const deps = makeDeps({ readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })), isProcessAliveFn: vi.fn(() => true), httpGetFn: vi.fn(async () => 200) });
+    const result = await spawnDaemon({ zhixingHome: path.resolve("isolated-home"), forwardedArgs: ["serve"], deps });
     expect(result.ok).toBe(true);
-    expect(result.logPath).toBe("/home/zx/logs/server/server.log");
-    expect(deps.prepareServerLogForWriteFn).toHaveBeenCalledOnce();
-    expect(deps.openFn).toHaveBeenCalledWith(
-      "/home/zx/logs/server/server.log",
-      SERVER_LOG_ACTIVE_OPEN_FLAGS,
-    );
+    expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.objectContaining({ stdio: "ignore" }));
+    expect(result.logPath).toBe(path.resolve("isolated-home/logs/runtime"));
   });
 
   it("times out when PID never appears", async () => {
@@ -174,7 +129,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
@@ -199,7 +153,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
@@ -224,7 +177,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
@@ -253,7 +205,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 2000,
       pollIntervalMs: 200,
       deps,
@@ -278,7 +229,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
@@ -301,7 +251,6 @@ describe("spawnDaemon", () => {
 
     const r = await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
@@ -326,36 +275,12 @@ describe("spawnDaemon", () => {
 
     await spawnDaemon({
       forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
       handshakeTimeoutMs: 1000,
       pollIntervalMs: 200,
       deps,
     });
 
     expect(child.unref).toHaveBeenCalledOnce();
-  });
-
-  it("closes log fd after spawn (so fd doesn't leak in parent)", async () => {
-    const closeFn = vi.fn(async () => {});
-    const clock = mkFakeClock();
-    const deps = makeDeps({
-      clock,
-      sleep: vi.fn(async () => clock.advance(200)),
-      openFn: vi.fn(async () => ({ fd: 42, close: closeFn })),
-      readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
-      isProcessAliveFn: vi.fn(() => true),
-      httpGetFn: vi.fn(async () => 200),
-    });
-
-    await spawnDaemon({
-      forwardedArgs: ["serve"],
-      logPath: "/tmp/server.log",
-      handshakeTimeoutMs: 1000,
-      pollIntervalMs: 200,
-      deps,
-    });
-
-    expect(closeFn).toHaveBeenCalledOnce();
   });
 
   it("does NOT spawn when resolveSelfExec fails (bundled binary scenario)", async () => {
@@ -366,7 +291,6 @@ describe("spawnDaemon", () => {
       const deps = makeDeps();
       const r = await spawnDaemon({
         forwardedArgs: ["serve"],
-        logPath: "/tmp/server.log",
         handshakeTimeoutMs: 100,
         pollIntervalMs: 50,
         deps,
@@ -375,7 +299,6 @@ describe("spawnDaemon", () => {
       expect(r.ok).toBe(false);
       expect(r.reason).toMatch(/not a JavaScript file/);
       expect(deps.spawnFn).not.toHaveBeenCalled();
-      expect(deps.openFn).not.toHaveBeenCalled();
     } finally {
       process.argv = origArgv;
     }

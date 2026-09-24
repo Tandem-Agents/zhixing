@@ -160,6 +160,8 @@ export interface JsonSchema {
  * - 工具若依赖这些字段，必须同时支持"无上下文"路径（降级为 LLM 叙述）
  */
 export interface ToolExecutionContext {
+  readonly processRecords?: import("../logging/contracts.js").LogRecordPort;
+  readonly mcpRecords?: import("../logging/contracts.js").LogRecordPort;
   /** 当前工作目录 */
   workingDirectory: string;
   /** 中止信号，用于取消长时间运行的工具 */

@@ -36,7 +36,7 @@ function field(value: unknown, name: string): unknown {
   if (descriptor && !Object.hasOwn(descriptor, "value")) throw Error("log-accessor");
   return descriptor?.value;
 }
-function safeText(
+export function safeText(
   value: string,
   maxBytes: number,
 ): { text: string; redacted: boolean; truncated: boolean } {
@@ -108,6 +108,7 @@ export function captureLog(
   policy: LogPolicy,
   processId: string,
   seq: number,
+  boundRefs: readonly LogRef[] = [],
 ): LogCapture {
   if (!validLogToken(access.scope)) throw Error("invalid-log-access");
   const event = field(draft, "event");
@@ -173,13 +174,15 @@ export function captureLog(
     return result;
   };
   const data = object(field(draft, "data") ?? {}, definition.fields);
-  const refs: LogRef[] = [],
-    sourceRefs = field(draft, "refs");
-  if (sourceRefs !== undefined) {
+  const refs: LogRef[] = [];
+  let refCount = 0;
+  for (const sourceRefs of [boundRefs, field(draft, "refs")]) {
+    if (sourceRefs === undefined) continue;
     plain(sourceRefs);
     if (!Array.isArray(sourceRefs)) throw Error("invalid-log-refs");
     const count = field(sourceRefs, "length") as number;
-    if (count > 16) throw Error("too-many-log-refs");
+    refCount += count;
+    if (refCount > 16) throw Error("too-many-log-refs");
     for (let index = 0; index < count; index++) {
       const ref = field(sourceRefs, String(index));
       const kind = field(ref, "kind"),

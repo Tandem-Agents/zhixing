@@ -1,3 +1,4 @@
+import { runtimeConfigurationObservation } from "./configuration-logging.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,11 +10,19 @@ import { applyCredentialEdits, assertNoConfigurationEdit, commitCredentialsUnloc
   loadCredentialsUnlocked, loadCredentialSnapshotUnlocked, mutationCoordinator, type CredentialSnapshotOptions } from "./credentials-loader.js";
 import { writeJsonAtomic } from "./internal/io.js";
 import type { ZhixingConfig, ZhixingCredentials } from "./types.js";
+import type { LogRecordPort, LogSource } from "@zhixing/core/logging";
+
+export const CONFIGURATION_LOG_SOURCE: LogSource = { id: "configuration", version: 1, events: {
+  saved: { message: "配置保存已完成", level: "info", tier: "critical", fields: { scope: "text", selectionVersion: "text", selectionDigest: "text", omitted: "text" } },
+  uncertain: { message: "配置保存尚未确认完成", level: "warn", tier: "critical", fields: { error: "text" } },
+  recovered: { message: "配置保存恢复已完成", level: "info", tier: "critical", fields: { selectionVersion: "text", selectionDigest: "text", omitted: "text" } },
+  effective: { message: "宿主已接纳运行配置", level: "info", tier: "critical", fields: { mode: "text", roles: { items: "text", maxItems: 8 }, selectionVersion: "text", selectionDigest: "text", omitted: "text" } },
+} };
 import { validateConfigSemantics } from "./config-validator.js";
 
 type Snapshot = { config: ZhixingConfig; credentials: ZhixingCredentials };
 type SecretUpdate = { readonly ref: SecretRef; readonly value: string };
-type Options = CredentialSnapshotOptions & { readonly configPath: string };
+type Options = CredentialSnapshotOptions & { readonly configPath: string; readonly records?: LogRecordPort };
 interface SavedEdit extends Snapshot {
   readonly v: 1;
   readonly id: string;
@@ -51,9 +60,16 @@ export async function editConfiguration(expected: Snapshot, next: Snapshot, opti
       await options.store.put(CONFIGURATION_EDIT_REF, JSON.stringify(edit));
       // This marker is the durable acceptance point. No source has changed before it.
       try { await writeJsonAtomic(markerPath(configPath), { id: edit.id }); }
-      catch (cause) { throw new Error("配置接纳结果尚未确认；重新打开配置入口将核对保存状态，未逆向覆盖", { cause }); }
+      catch (cause) {
+        options.records?.record({ event: "uncertain", refs: [{ kind: "configurationEdit", id: edit.id }], result: "unknown", data: { error: "配置接纳未确认" } });
+        throw new Error("配置接纳结果尚未确认；重新打开配置入口将核对保存状态，未逆向覆盖", { cause });
+      }
       try { await applySavedEdit(edit, options.store); }
-      catch (cause) { throw new Error("配置修改已接纳，保存收尾尚未完成；重新打开配置入口或重启将继续恢复", { cause }); }
+      catch (cause) {
+        options.records?.record({ event: "uncertain", refs: [{ kind: "configurationEdit", id: edit.id }], result: "unknown", data: { error: "配置已接纳，保存收尾未确认" } });
+        throw new Error("配置修改已接纳，保存收尾尚未完成；重新打开配置入口或重启将继续恢复", { cause });
+      }
+      options.records?.record(() => { const context = runtimeConfigurationObservation(edit.config); return { event: "saved", refs: [{ kind: "configurationEdit", id: edit.id }, { kind: "configuration", id: context.selectionDigest }], result: "success", data: { scope: options.scope ?? "configuration", ...context } }; });
     });
   } finally { await release(); }
 }
@@ -90,6 +106,7 @@ async function recoverConfigurationEdit(options: Options): Promise<void> {
       // A marker rename can be visible even when its original directory sync failed.
       await syncDirectory(path.dirname(edit.configPath));
       await applySavedEdit(edit, options.store);
+      options.records?.record(() => { const context = runtimeConfigurationObservation(edit.config); return { event: "recovered", refs: [{ kind: "configurationEdit", id: edit.id }, { kind: "configuration", id: context.selectionDigest }], result: "success", data: context }; });
     });
   } finally { await release(); }
 }
