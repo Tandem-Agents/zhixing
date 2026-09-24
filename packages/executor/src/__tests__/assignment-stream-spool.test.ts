@@ -255,6 +255,10 @@ describe(
       restartedSpool(fixture).snapshot("assignment-fixed"),
     ).rejects.toThrow(/permanently reclaimed/);
 
+    await expect(restartedSpool(fixture).revokeConsumer({
+      assignmentId: "assignment-fixed", consumer: surface,
+    })).resolves.toBeUndefined();
+
     await rawSpoolLog(fixture, "assignment-fixed").append([
       {
         stream: "assignment:stream",
@@ -1163,7 +1167,7 @@ describe(
       assignmentId: "assignment-fixed",
       consumer: surface,
     });
-    expect(revoked.prunedThrough).toBe(final.seq);
+    expect(revoked?.prunedThrough).toBe(final.seq);
     expect(frame.seq).toBeLessThan(final.seq);
   });
 

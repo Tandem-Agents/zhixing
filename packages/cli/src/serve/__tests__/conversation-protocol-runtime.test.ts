@@ -52,7 +52,7 @@ import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
 import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
 import { createExtensionContinuation, createExtensionStatusObserver, extensionContinuationText } from "../extension-continuation.js";
 import { resolve } from "node:path";
-import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   setupAuthorityRuntime as setupAuthorityRuntimeProduction,
@@ -2264,8 +2264,8 @@ describe("ConversationProtocolRuntime", () => {
       durableTurnExecutor: restartedProtocol,
       onTurnCommitted: () => {},
     });
-    // Match Host startup: resource evidence is restored before journal replay.
-    await restartedAuthority.resourceGovernor.snapshot();
+    // A cold Host must restore resource evidence through the journal's own
+    // replay contract; callers must not prewarm a projection to make it valid.
     await restartedProtocol.recover();
     const restartedManaged = await restartedManager.getOrCreate("conversation-1");
     const restartedReplay = await projectSessionTurn({
@@ -2278,6 +2278,39 @@ describe("ConversationProtocolRuntime", () => {
     });
     expectSettled(restartedReplay);
     expect(executions).toBe(1);
+
+    // Input admission is also a full journal replay entry, independently of
+    // startup recovery. Give it a fresh resource owner over the same history.
+    const inputAuthority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    const inputJournal = new ConversationRunJournal({
+      conversationId: "conversation-1", ownerEpoch: inputAuthority.anchorEpoch,
+      log: inputAuthority.authorityLog, artifacts: inputAuthority.artifacts,
+      signer: inputAuthority.signer, verifier: inputAuthority.verifier,
+      submission: { authenticate() {}, authorize() {} },
+      authority: { decideAtPrefix() { throw new Error("admission must not commit a turn"); } },
+      projection: { async project() { throw new Error("admission must not project a turn"); } },
+      resources: inputAuthority.resourceGovernor,
+    });
+    const at = new Date().toISOString();
+    const source = {
+      principal: { surfacePrincipal: "rpc:owner", deviceId: inputAuthority.deviceId, connectionId: "cold-input" },
+      ingress: { kind: "first-party" as const, surfacePrincipal: "rpc:owner", deviceId: inputAuthority.deviceId, ingressId: "cold-input", receivedAt: at, turnOrigin: { channel: "rpc", triggeredBy: "cold-input" } },
+    };
+    const input = { admission: inputAuthority.controlAdmission, source, runId: "cold-input-run",
+      envelope: createInitialControlEnvelope({ requestId: "cold-input", source, at, body: {
+        t: "input", conversationId: "conversation-1", ingress: { ingressId: "cold-input", source: "first-party" },
+        input: { parts: [{ type: "text", text: "next" }] }, invocation: { kind: "agent", source: "interactive" }, ownerEpoch: inputAuthority.anchorEpoch,
+      } }),
+    };
+    await expect(inputJournal.applyInputControl(input)).resolves.toMatchObject({ result: { status: "ok" } });
+    await expect(inputJournal.currentState("cold-input-run")).resolves.toBe("queued");
+    await expect(inputJournal.applyInputControl(input)).resolves.toMatchObject({ kind: "replayed" });
+    expect(executions).toBe(1);
+    await inputAuthority.startupCleanup.run();
+    await restartedProtocol.stopRecoveryLoop(); await restartedManager.disposeAll();
+    await restartedAuthority.startupCleanup.run();
+    await protocol.stopRecoveryLoop(); await manager.disposeAll();
+    await authority.startupCleanup.run();
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("applies one interaction backlog across parent and child brokers", async () => {

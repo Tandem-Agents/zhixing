@@ -622,12 +622,15 @@ export class AssignmentStreamSpool {
   async revokeConsumer(input: {
     readonly assignmentId: string;
     readonly consumer: StreamConsumerAuth;
-  }): Promise<StreamSpoolSnapshot> {
+  }): Promise<StreamSpoolSnapshot | undefined> {
     const handle = this.#handle(input.assignmentId);
     return handle.queue.run(async () => {
-      await this.#assertNotReclaimed(handle);
+      // Permanent reclamation already removed every consumer. Retirement replay
+      // must remain idempotent, without recreating the spool or its index.
+      if (await this.#isTombstoned(handle)) return undefined;
       const key = streamConsumerKey(input.consumer);
       const before = await this.#select(handle);
+      if (before.reclaimed) return undefined;
       const current = before.consumers.get(key);
       if (!current?.qualified) return snapshotOf(before);
       const projected = cloneProjection(before);

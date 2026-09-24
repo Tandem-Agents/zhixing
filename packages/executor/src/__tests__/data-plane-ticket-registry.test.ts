@@ -58,7 +58,7 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     const spool = new AssignmentStreamSpool(
       path.join(root, "spool"),
       artifacts,
-      { clock },
+      { clock, reclaimDelayMs: 1_000 },
     );
     await spool.open("assignment-fixed", ref);
     const options = {
@@ -194,6 +194,23 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
         abort.surfacePrincipal,
       ),
     ).rejects.toThrow(/retired/);
+
+    // Consumer retirement outlives the transient stream. Cold recovery and
+    // repeated revocation must not reopen an already reclaimed spool.
+    const final = await spool.finalize({ assignmentId: ticket.assignmentId, ref });
+    await spool.markTerminal(ticket.assignmentId, final.seq);
+    now = "2026-07-23T00:06:02.000Z";
+    monotonic += 2_000;
+    expect(await spool.reclaimDue(ticket.assignmentId)).toBe(true);
+    const coldSpool = new AssignmentStreamSpool(path.join(root, "spool"), artifacts, { clock });
+    const cold = new DataPlaneTicketRegistry({ ...options, spool: coldSpool });
+    await expect(cold.recover()).resolves.toBeUndefined();
+    await expect(cold.revoke({ assignmentId: ticket.assignmentId, ticketId: ticket.ticketId })).resolves.toBe(false);
+    await expect(cold.authorizeSurface(ticket.ticketId, "observe", ticket.assignmentId, ticket.surfacePrincipal)).rejects.toThrow(/retired/);
+    await expect(coldSpool.open(ticket.assignmentId, ref)).rejects.toThrow(/permanently reclaimed/);
+    await coldSpool.stopStorageMaintenance();
+    await spool.stopStorageMaintenance();
+    await log.stopStorageMaintenance();
   });
 
   it("skips historical expiry, binds the active owner, and fails closed on rollback", async () => {

@@ -1378,7 +1378,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async primeRecoverySnapshot(
     snapshot: AuthorityLogSnapshot<unknown>,
   ): Promise<void> {
-    await this.#operations.run(async () => {
+    const replay = async () => {
       let run = emptyProjection(this.#conversationId);
       let submission = emptySubmissionGuardProjection();
       let publish = emptyPublishProjection();
@@ -1438,7 +1438,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       };
       this.#publishProjection = { state: publish, cursor: snapshot.cursor };
       this.#finalProjection = { state: final, cursor: snapshot.cursor };
-    });
+    };
+    await this.#operations.run(() =>
+      this.#resources ? this.#resources.coordinate(replay) : replay(),
+    );
   }
 
   async authorityState(): Promise<{
@@ -2034,7 +2037,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
       },
     });
-    return this.#delivery ? this.#delivery.coordinate(apply) : apply();
+    const transact = () => this.#delivery ? this.#delivery.coordinate(apply) : apply();
+    return this.#resources ? this.#resources.coordinate(transact) : transact();
   }
 
   /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
