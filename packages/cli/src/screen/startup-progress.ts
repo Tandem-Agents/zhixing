@@ -22,8 +22,10 @@ const DEFAULT_LONG_DELAY_MS = 4_000;
 export class StartupProgressPresenter {
   private delayTimer: ReturnType<typeof setTimeout> | null = null;
   private longDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  private elapsedTimer: ReturnType<typeof setInterval> | null = null;
   private visible = false;
   private disabled = false;
+  private currentText = "";
 
   private readonly delayMs: number;
   private readonly longDelayMs: number;
@@ -42,19 +44,24 @@ export class StartupProgressPresenter {
   begin(): void {
     if (this.disabled) return;
     this.stop();
+    const started = performance.now();
     this.delayTimer = setTimeout(() => {
       this.delayTimer = null;
       this.render(this.text);
     }, this.delayMs);
     this.longDelayTimer = setTimeout(() => {
       this.longDelayTimer = null;
-      this.render(this.longText);
+      const update = () => this.render(`${this.longText} ${chalk.dim(`已等待 ${Math.floor((performance.now() - started) / 1000)} 秒`)}`);
+      update();
+      this.elapsedTimer = setInterval(update, 1000);
     }, Math.max(this.delayMs, this.longDelayMs));
   }
 
   stop(): void {
     this.clearTimer("delayTimer");
     this.clearTimer("longDelayTimer");
+    if (this.elapsedTimer) clearInterval(this.elapsedTimer);
+    this.elapsedTimer = null;
     if (this.visible) {
       this.opts.stdout.write("\r\x1b[2K");
       this.visible = false;
@@ -66,6 +73,14 @@ export class StartupProgressPresenter {
     this.disabled = true;
   }
 
+  /** Release the temporary line for a durable notice, then restore only that line. */
+  notify(message: string): void {
+    const restore = this.visible;
+    if (restore) this.opts.stdout.write("\r\x1b[2K");
+    this.opts.stdout.write(message.endsWith("\n") ? message : `${message}\n`);
+    if (restore) this.render(this.currentText);
+  }
+
   acceptsStartupNotices(): boolean {
     return !this.disabled;
   }
@@ -73,6 +88,7 @@ export class StartupProgressPresenter {
   private render(text: string): void {
     if (this.disabled) return;
     this.opts.stdout.write(`\r\x1b[2K${text}`);
+    this.currentText = text;
     this.visible = true;
   }
 

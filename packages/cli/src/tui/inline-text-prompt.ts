@@ -55,8 +55,6 @@ export interface InlineTextPromptOptions {
   readonly signal?: AbortSignal;
   /** 覆盖终端宽度 —— 测试用 */
   readonly columns?: number;
-  /** 输入框最小宽度（极窄终端兜底）；缺省 40，与候选面板同款 */
-  readonly minWidth?: number;
 }
 
 export class InlineTextPromptRegion implements InputRegion {
@@ -153,8 +151,7 @@ export class InlineTextPromptRegion implements InputRegion {
       cursor: this.buffer.cursor,
       placeholder: this.opts.placeholder,
       hint: "Enter 提交 · Esc 取消",
-      width: this.getColumns(),
-      minWidth: this.opts.minWidth ?? 40,
+      width: this.getColumns() - 1,
     });
     this.cachedLines = box.lines;
     this.cachedCursor = box.cursor;

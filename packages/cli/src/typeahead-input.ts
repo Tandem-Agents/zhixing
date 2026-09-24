@@ -632,9 +632,8 @@ export class InputController implements InputRegion {
   }
 
   private computeRenderOptions(): RenderOptions {
-    const columns = this.getColumns();
-    const frameWidth = Math.max(40, columns);
-    const innerWidth = Math.max(10, frameWidth - 2);
+    const frameWidth = this.getFrameWidth();
+    const innerWidth = Math.max(1, frameWidth - 2);
     return {
       theme: defaultTypeaheadTheme,
       frameWidth,
@@ -672,8 +671,8 @@ export class InputController implements InputRegion {
       suffix = `${ANSI.dim}${this.lastSessionState.ghostText.suffix}${ANSI.reset}`;
     }
 
-    const frameWidth = Math.max(40, this.getColumns());
-    const contentBudget = Math.max(1, frameWidth - 4);
+    const frameWidth = this.getFrameWidth();
+    const contentBudget = Math.max(1, frameWidth - 5);
     // paintVisualCursor 的不变量谓词 = "input 资源 alive"，即 this.buffer !== null。
     // 选 buffer 存在性而非 this.state === "active" 的理由：
     //   - buffer 是 input 生命周期的真实物理资源 —— attachResources 同步创建、
@@ -1063,8 +1062,10 @@ export class InputController implements InputRegion {
   private finalizePaste(content: string): void {
     if (!this.buffer || this.state !== "active") return;
 
+    const commandPaste = this.buffer.isEmpty && !/[\r\n]/u.test(content.trim()) &&
+      this.options.dispatcher.recognizes(normalizeLeadingSlashAlias(content.trim()));
     const materialIngest =
-      this.options.materialRegistry && this.options.workspaceRoot
+      !commandPaste && this.options.materialRegistry && this.options.workspaceRoot
         ? ingestPastedMaterials(content, this.options.materialRegistry, {
             workspaceRoot: this.options.workspaceRoot,
             tokenMaxWidth: this.getInputDraftLineWidth(),
@@ -1332,10 +1333,14 @@ export class InputController implements InputRegion {
   }
 
   private getInputDraftLineWidth(): number {
-    const frameWidth = Math.max(40, this.getColumns());
-    const contentBudget = Math.max(1, frameWidth - 4);
+    const frameWidth = this.getFrameWidth();
+    const contentBudget = Math.max(1, frameWidth - 5);
     const promptVisibleWidth = stringWidth(stripAnsi(this.promptPrefix));
     return Math.max(1, contentBudget - promptVisibleWidth - 1);
+  }
+
+  private getFrameWidth(): number {
+    return Math.max(4, this.getColumns() - 1);
   }
 }
 

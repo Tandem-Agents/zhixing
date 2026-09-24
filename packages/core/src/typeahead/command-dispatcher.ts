@@ -79,6 +79,12 @@ export class CommandDispatcher {
     return this.handlers.size;
   }
 
+  /** Recognize command syntax without executing it (for input/paste precedence). */
+  recognizes(rawDraft: string): boolean {
+    if (!rawDraft.trimStart().startsWith("/")) return false;
+    return findCommandDef(this.registry, parseCommandInvocation(rawDraft).name) !== null;
+  }
+
   /**
    * 主入口：分派一条 raw draft（含前导 `/`）。
    *

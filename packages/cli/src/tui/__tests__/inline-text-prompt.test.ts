@@ -12,6 +12,7 @@ import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { stripAnsi } from "../ansi.js";
+import { stringWidth } from "../line-width.js";
 import { _resetRawModeRefcountForTests } from "../_internal/raw-mode.js";
 import { InlineTextPromptRegion } from "../inline-text-prompt.js";
 import type { InputRegion, ScreenController } from "../../screen/index.js";
@@ -56,6 +57,14 @@ async function sendChar(stdin: NodeJS.ReadStream, ch: string): Promise<void> {
 }
 
 describe("InlineTextPromptRegion", () => {
+  it.each([24, 30, 40, 80, 120])("全部行与光标遵守 %i 列视口", columns => {
+    const region = new InlineTextPromptRegion({
+      prompt: "长标题".repeat(40), prefill: "中文 abc 🙂 ".repeat(30),
+      columns, screen: makeScreen().screen, stdin: makeStdin(),
+    });
+    expect(region.renderLines().every(line => stringWidth(line) <= columns - 1)).toBe(true);
+    expect(region.cursorPosition().col).toBeLessThan(columns - 1);
+  });
   beforeEach(() => {
     _resetRawModeRefcountForTests();
   });

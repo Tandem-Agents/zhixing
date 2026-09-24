@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { serverShutdownRequest } from "../server-shutdown-request.js";
 import {
   CoreHostConnection,
   CoreHostUnavailableError,
@@ -13,7 +14,7 @@ const endpoint: ServerEndpoint = {
   url: "ws://127.0.0.1:18900/ws",
   httpBase: "http://127.0.0.1:18900",
   token: "tok",
-  pid: { pidFileVersion: 2, pid: 1, port: 18900, startTime: null, startedAt: "" },
+  pid: { pidFileVersion: 2, pid: 1, port: 18900, startTime: null, startedAt: "2026-01-01T00:00:00.000Z" },
 };
 
 const nextEndpoint: ServerEndpoint = {
@@ -78,6 +79,41 @@ type FakeClient = ReturnType<typeof makeFakeClient>;
 const asClient = (c: FakeClient) => c as unknown as RpcClient;
 
 describe("CoreHostConnection", () => {
+  it("allows ready callbacks to reenter during manual reconnect, never exposing the old client", async () => {
+    const authenticated = Promise.withResolvers<void>();
+    const authenticating = Promise.withResolvers<void>();
+    const c1 = makeFakeClient();
+    const c2 = makeFakeClient({ authenticate: async () => {
+      authenticating.resolve();
+      await authenticated.promise;
+      return { protocol: 1, server: { version: "0.1.0" }, capabilities: [] };
+    } });
+    let currentEndpoint = endpoint;
+    const seen: RpcClient[] = [];
+    const conn = new CoreHostConnection({
+      discover: async () => currentEndpoint,
+      spawn: async () => ({ ok: true }),
+      createClient: url => asClient(url === endpoint.url ? c1 : c2),
+      sleep: async () => { currentEndpoint = nextEndpoint; },
+    });
+    await conn.getClient();
+    conn.onLifecycleNotice(async notice => {
+      if (notice.kind === "reconnected") seen.push(await conn.getClient());
+    });
+    const reconnect = conn.reconnect();
+    await authenticating.promise;
+    let delivered = false;
+    const waiting = conn.getClient().then(client => { delivered = true; return client; });
+    await Promise.resolve();
+    expect(delivered).toBe(false);
+    expect(c1.close).toHaveBeenCalledOnce();
+    authenticated.resolve();
+    await reconnect;
+    expect(await waiting).toBe(asClient(c2));
+    expect(seen).toEqual([asClient(c2)]);
+    await conn.dispose();
+  });
+
   it("发现成功即连接并认证", async () => {
     const client = makeFakeClient();
     const spawn = vi.fn(async () => ({ ok: true }));
@@ -217,9 +253,9 @@ describe("CoreHostConnection", () => {
     const got = await conn.getClient();
 
     expect(got).toBe(asClient(c2));
-    expect(c1.request).toHaveBeenCalledWith("server.shutdown", {
+    expect(c1.request).toHaveBeenCalledWith("server.shutdown", serverShutdownRequest(endpoint.pid, {
       reason: "client-version-change",
-    });
+    }));
     expect(c1.close).toHaveBeenCalled();
     expect(spawn).toHaveBeenCalledOnce();
     expect(sleep).toHaveBeenCalledWith(100);
@@ -497,9 +533,9 @@ describe("CoreHostConnection", () => {
         });
       });
 
-      expect(c1.request).toHaveBeenCalledWith("server.shutdown", {
+      expect(c1.request).toHaveBeenCalledWith("server.shutdown", serverShutdownRequest(endpoint.pid, {
         reason: "client-version-change",
-      });
+      }));
       expect(c1.close).toHaveBeenCalled();
       expect(spawn).toHaveBeenCalledOnce();
       expect(notices).toContainEqual({

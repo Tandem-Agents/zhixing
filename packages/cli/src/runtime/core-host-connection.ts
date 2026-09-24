@@ -35,12 +35,15 @@ import { runStopCommand } from "../serve/stop.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
+import { serverShutdownRequest } from "./server-shutdown-request.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { observeStartupPhase } from "../logging/runtime.js";
 import type { LogRecordPort } from "@zhixing/core/logging";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
-const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 30_000;
+// One deadline covers OS admission, process launch and durable recovery. Child
+// failure still short-circuits this budget; no phase or retry renews it.
+const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 60_000;
 const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
@@ -303,6 +306,11 @@ export class CoreHostConnection implements CoreHostRpcLink {
 
   /** 返回可用的已认证 client；无则发现 / 拉起并连上。并发调用共享同一次建立。 */
   async getClient(): Promise<RpcClient> {
+    // Ready notifications may make RPCs before reconnect() has returned. Only
+    // an authenticated, installed client is visible here; turnover removes the
+    // old one synchronously before its first await.
+    const ready = this.getConnectedClient();
+    if (ready) return ready;
     if (this.reconnecting) await this.reconnecting;
     return this.getClientNow();
   }
@@ -547,9 +555,9 @@ export class CoreHostConnection implements CoreHostRpcLink {
     endpoint: ServerEndpoint,
     oldVersion: string,
   ): Promise<EstablishedClient> {
-    await client.request("server.shutdown", {
+    await client.request("server.shutdown", serverShutdownRequest(endpoint.pid, {
       reason: "client-version-change",
-    });
+    }));
     await client.close().catch(() => {});
     await this.waitForEndpointTurnover(endpoint, {});
 

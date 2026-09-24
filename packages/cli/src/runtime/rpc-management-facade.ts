@@ -13,12 +13,14 @@ import type { TrustAdministrationRule } from "@zhixing/core/trust-administration
 import {
   RPC_ERROR_CODES,
   RpcClientError,
+  type ServerShutdownParams,
 } from "@zhixing/server";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 import { LogRpcClient } from "@zhixing/rpc";
+import { serverShutdownRequest } from "./server-shutdown-request.js";
 
-export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
+export type { ServerShutdownStrategy } from "@zhixing/server";
 
 export interface RuntimeControlWorkItem {
   id: string;
@@ -68,11 +70,7 @@ export interface ServerInfoResult {
   [key: string]: unknown;
 }
 
-export interface ServerShutdownRequest {
-  reason?: string;
-  timeoutMs?: number;
-  strategy?: ServerShutdownStrategy;
-}
+export type ServerShutdownRequest = Omit<ServerShutdownParams, "requestId">;
 
 export interface DutyMigrationTarget {
   deviceId: string;
@@ -324,11 +322,12 @@ export class RpcManagementFacade {
   /** 请求宿主优雅退出(flush 落盘)——/config 热重载与运行控制共用通道。 */
   async serverShutdown(request?: string | ServerShutdownRequest): Promise<void> {
     const client = await this.link.getClient();
-    const params =
+    const input =
       typeof request === "string" || request === undefined
         ? { reason: request }
         : request;
-    await client.request("server.shutdown", params);
+    const target = await client.request<ServerInfoResult>("server.info");
+    await client.request("server.shutdown", serverShutdownRequest(target, input));
   }
 
   // ─── llm(可信面轻推理通道) ───

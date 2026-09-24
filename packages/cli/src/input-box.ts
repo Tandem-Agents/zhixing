@@ -29,6 +29,7 @@
 import { renderChrome, tone, icon, ANSI, renderHintBar, type KeyHint } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
 import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
+import { clampLine } from "./tui/line-width.js";
 
 export interface InputBoxOptions {
   /** 框上方标题（本函数加 bold）。 */
@@ -48,10 +49,8 @@ export interface InputBoxOptions {
    * 渲染（不额外 dim、样式自带）。优先于 `hint`；两者皆省略则不画提示行。
    */
   readonly hintBar?: { hints: readonly KeyHint[]; rightHints?: readonly KeyHint[] };
-  /** 框宽（含左右边框）；与 minWidth 取大。 */
+  /** 可用框宽（含左右边框）；调用者为终端末列预留空间。 */
   readonly width: number;
-  /** 框最小宽度（极窄终端兜底）；缺省 40，与候选面板同款。 */
-  readonly minWidth?: number;
 }
 
 export interface InputBoxResult {
@@ -65,7 +64,7 @@ export interface InputBoxResult {
 }
 
 export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
-  const frameWidth = Math.max(opts.minWidth ?? 40, opts.width);
+  const frameWidth = Math.max(5, opts.width);
   const contentBudget = Math.max(1, frameWidth - 4);
   const suffix =
     opts.draft.length === 0 && opts.placeholder
@@ -111,7 +110,7 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
   // 标题(1) + box 顶边(1) → cursor 落在第 2 + layout.cursorRow 行；
   // 列 = 左 │(1) + indent(1) + layout.cursorCol。
   return {
-    lines,
+    lines: lines.map(line => clampLine(line, frameWidth)),
     cursor: { row: 2 + layout.cursorRow, col: 2 + layout.cursorCol },
   };
 }

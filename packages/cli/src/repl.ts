@@ -262,6 +262,13 @@ export function renderCoreHostPersistentLifecycleNotice(
 
 type ReplLifecycleRenderPhase = "initial" | "running";
 
+export function shouldRefreshReplAfterHostNotice(notice: CoreHostLifecycleNotice): boolean {
+  // Progress is emitted before a connection exists. Manual reload explicitly
+  // refreshes the surface after reconnect; the other ready events refresh here.
+  return notice.kind === "host-replaced" ||
+    (notice.kind === "reconnected" && notice.reason === "connection-closed");
+}
+
 export function renderCoreHostLifecycleNotice(opts: {
   writer: CliWriter;
   phase: ReplLifecycleRenderPhase;
@@ -470,6 +477,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   connection: CoreHostConnection;
   initialFailure?: { error: unknown };
   notices: readonly CoreHostLifecycleNotice[];
+  setLogNoticeHandler?: (handler: ((message: string) => void) | undefined) => void;
 }): Promise<void> {
   // 启用 bracketed paste mode + 初始化 paste detector：
   //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
@@ -531,6 +539,11 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     Exclude<CoreHostLifecycleNotice, { kind: "starting" }>
   > = [];
   let lifecycleRenderPhase: ReplLifecycleRenderPhase = "initial";
+  startup?.setLogNoticeHandler?.(message => {
+    const text = chalk.dim(message);
+    if (lifecycleRenderPhase === "initial" && startupProgress) startupProgress.notify(text);
+    else cliWriter.notify(text);
+  });
   const flushDeferredStartupNotices = (): void => {
     const notices = deferredStartupNotices.splice(0);
     for (const notice of notices) {
@@ -573,6 +586,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
       initialFailure: startup?.initialFailure,
     }))
   ) {
+    startup?.setLogNoticeHandler?.(undefined);
     renderScreen?.dispose();
     await beforeExit?.(1);
     process.exit(1);
@@ -858,8 +872,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     taskTail?.refresh();
   };
   coreHost.onLifecycleNotice(async (notice) => {
-    if (notice.kind === "version-pending") return;
-    if (notice.kind === "reconnected" && notice.reason === "manual-reconnect") return;
+    if (!shouldRefreshReplAfterHostNotice(notice)) return;
     await controller.reattachActiveObserver();
     await syncCurrentTaskListView();
     await rpcConfirmationBroker.refresh().catch(() => {});
@@ -1997,6 +2010,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     cliWriter.line(`[coreHost.dispose] ${err instanceof Error ? err.message : String(err)}`),
   );
 
+  startup?.setLogNoticeHandler?.(undefined);
   renderScreen?.dispose();
 
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持

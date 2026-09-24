@@ -277,6 +277,32 @@ afterEach(() => {
 // ─── 端到端场景 ───
 
 describe("readInputLine — 正常对话", () => {
+  it.each([30, 40, 80, 120])("输入与候选行保留 %i 列视口的末列", async columns => {
+    const { stdin, stdout } = makeStreams(), { broker, dispatcher } = makeHarness();
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime, stdout, stdin, columns, placeholder: "输入消息或 / 查看命令" });
+    try {
+      controller.start();
+      for (const text of ["", "/", "help"]) {
+        if (text) await typeChars(stdin, text);
+        expect(controller.renderLines().every(line => stringWidth(line) <= columns - 1)).toBe(true);
+        expect(controller.cursorPosition().col).toBeLessThan(columns - 1);
+      }
+    } finally { controller.stop(); }
+  });
+
+  it.each(["/help", "/new", "/reset", "、help"])("粘贴已注册命令 %s 优先于文件材料识别", async text => {
+    const { stdin, stdout } = makeStreams(), { broker, dispatcher } = makeHarness();
+    const diagnostics = vi.fn();
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime, stdout, stdin, columns: 80,
+      materialRegistry: new InputMaterialRegistry(), workspaceRoot: os.tmpdir(), onMaterialIngestDiagnostics: diagnostics });
+    try {
+      controller.start();
+      await pasteText(stdin, text);
+      expect(diagnostics).not.toHaveBeenCalled();
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(text);
+    } finally { controller.stop(); }
+  });
+
   it("普通文本 Enter 提交 → kind=text", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();

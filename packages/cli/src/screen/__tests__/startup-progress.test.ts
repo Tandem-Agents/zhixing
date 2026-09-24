@@ -14,6 +14,33 @@ afterEach(() => {
 });
 
 describe("StartupProgressPresenter", () => {
+  it("writes asynchronous notices on their own line and preserves the progress line until stop", () => {
+    vi.useFakeTimers();
+    const out = new FakeStdout();
+    const progress = createStartupProgressPresenter({ stdout: out, delayMs: 10, text: "opening" });
+    progress.begin();
+    vi.advanceTimersByTime(10);
+    progress.notify("logging unavailable");
+    progress.notify("logging recovered");
+    progress.stop();
+    expect(out.buffer).toBe("\r\x1b[2Kopening\r\x1b[2Klogging unavailable\n\r\x1b[2Kopening\r\x1b[2Klogging recovered\n\r\x1b[2Kopening\r\x1b[2K");
+    progress.notify("after stop");
+    expect(out.buffer.endsWith("\r\x1b[2Kafter stop\n")).toBe(true);
+  });
+
+  it("prints notices before progress without control bytes or resetting its timers", () => {
+    vi.useFakeTimers();
+    const out = new FakeStdout();
+    const progress = createStartupProgressPresenter({ stdout: out, delayMs: 10, text: "opening" });
+    progress.begin();
+    progress.notify("early notice\n");
+    expect(out.buffer).toBe("early notice\n");
+    vi.advanceTimersByTime(10);
+    expect(out.buffer).toBe("early notice\n\r\x1b[2Kopening");
+    progress.disable();
+    progress.notify("late notice");
+    expect(out.buffer.endsWith("\r\x1b[2Klate notice\n")).toBe(true);
+  });
   it("快速启动不输出任何提示", () => {
     vi.useFakeTimers();
     const out = new FakeStdout();
@@ -76,8 +103,15 @@ describe("StartupProgressPresenter", () => {
     vi.advanceTimersByTime(1_000);
 
     expect(out.buffer).toBe(
-      "\r\x1b[2Kopening\r\x1b[2Kstill opening",
+      "\r\x1b[2Kopening\r\x1b[2Kstill opening 已等待 1 秒",
     );
+    vi.advanceTimersByTime(2_000);
+    expect(out.buffer.endsWith("still opening 已等待 3 秒")).toBe(true);
+    progress.stop();
+    const stopped = out.buffer;
+    vi.advanceTimersByTime(5_000);
+    expect(out.buffer).toBe(stopped);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("禁用后后续 begin 不再输出", () => {

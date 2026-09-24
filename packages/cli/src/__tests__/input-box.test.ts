@@ -114,24 +114,20 @@ describe("renderInputBox", () => {
     expect(stripAnsi(r.lines.join("\n"))).toContain("中文输入");
   });
 
-  it("minWidth 兜底:width < minWidth 时框宽用 minWidth", () => {
+  it("窄视口不被最小框宽扩大", () => {
     const narrow = renderInputBox({
       title: "x",
       draft: "",
       cursor: 0,
       width: 10,
-      minWidth: 40,
     });
     const atMin = renderInputBox({
       title: "x",
       draft: "",
       cursor: 0,
       width: 40,
-      minWidth: 40,
     });
-    // 两者框宽都 = 40，顶边可见宽度一致
-    expect(stripAnsi(narrow.lines[1]!).length).toBe(
-      stripAnsi(atMin.lines[1]!).length,
-    );
+    expect(stripAnsi(narrow.lines[1]!).length).toBe(10);
+    expect(stripAnsi(atMin.lines[1]!).length).toBe(40);
   });
 });

@@ -225,7 +225,9 @@ program
       { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
       import("@zhixing/core/paths"), import("@zhixing/providers"), import("./logging/runtime.js"), import("./logging/input.js"),
     ]);
-    const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => createStdoutWriter().line(chalk.dim(message)));
+    const plainNotice = (message: string): void => createStdoutWriter().notify(chalk.dim(message));
+    let logNotice = plainNotice;
+    const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => logNotice(message));
     let connection: import("./runtime/core-host-connection.js").CoreHostConnection | undefined;
     try {
       const zhixingHome = getZhixingHome();
@@ -248,14 +250,24 @@ program
       const notices: import("./runtime/core-host-connection.js").CoreHostLifecycleNotice[] = [];
       const stopNotices = connection.onLifecycleNotice(notice => { if (notice.kind !== "starting") notices.push(notice); });
       const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout }) : undefined;
+      const startupNotice = progress ? (message: string) => progress.notify(chalk.dim(message)) : plainNotice;
+      logNotice = startupNotice;
       const prepared = await connectReplHost({
         connection,
         starting: () => progress?.begin(),
         settled: () => progress?.stop(),
-        checkConfiguration: () => observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
-          homeDir: zhixingHome, configPath, mode: "repl",
-          records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
-        })),
+        checkConfiguration: async () => {
+          // The setup editor owns stdout until it closes. Keep a bounded set of
+          // notices, then present them before startup or the REPL takes ownership.
+          const pending = new Set<string>();
+          logNotice = message => { pending.add(message); if (pending.size > 4) pending.delete(pending.values().next().value!); };
+          try {
+            return await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
+              homeDir: zhixingHome, configPath, mode: "repl",
+              records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
+            }));
+          } finally { logNotice = startupNotice; for (const message of pending) startupNotice(message); }
+        },
       });
       stopNotices();
       if (prepared.kind === "configuration") {
@@ -270,10 +282,12 @@ program
 
       await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records, {
         connection, notices,
+        setLogNoticeHandler: handler => { logNotice = handler ?? plainNotice; },
         ...(prepared.kind === "unavailable" ? { initialFailure: { error: prepared.error } } : {}),
       });
       await logging.finish("success", "completed");
     } catch (err) {
+      logNotice = plainNotice;
       await connection?.dispose().catch(cleanup => recordRuntimeFailure(logging.records, cleanup, "foreground-cleanup-failed"));
       recordRuntimeFailure(logging.records, err, "foreground-failed");
       await logging.finish("failure", "foreground-failed");

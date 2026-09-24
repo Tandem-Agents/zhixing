@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   renderCoreHostLifecycleNotice,
   renderCoreHostPersistentLifecycleNotice,
+  shouldRefreshReplAfterHostNotice,
 } from "../repl.js";
 import type { CoreHostLifecycleNotice } from "../runtime/core-host-connection.js";
 import type { CliWriter, StartupProgressPresenter } from "../screen/index.js";
@@ -51,6 +52,13 @@ function asStartupProgress(
 }
 
 describe("REPL startup lifecycle notice rendering", () => {
+  it("refreshes RPC subscriptions only after an automatic connection is ready", () => {
+    expect(shouldRefreshReplAfterHostNotice({ kind: "starting" })).toBe(false);
+    expect(shouldRefreshReplAfterHostNotice({ kind: "reconnected", reason: "manual-reconnect" })).toBe(false);
+    expect(shouldRefreshReplAfterHostNotice({ kind: "reconnected", reason: "connection-closed" })).toBe(true);
+    expect(shouldRefreshReplAfterHostNotice({ kind: "host-replaced", reason: "version-mismatch" })).toBe(true);
+    expect(shouldRefreshReplAfterHostNotice({ kind: "version-pending", clientVersion: "2", serverVersion: "1" })).toBe(false);
+  });
   it("starting 只启动 transient presenter，不写持久输出", () => {
     const writer = new FakeWriter();
     const progress = new FakeStartupProgress();

@@ -10,6 +10,7 @@ export * from "./rpc/surface-identity.js";
 export * from "./rpc/dispatcher.js";
 export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";
+export type { ServerShutdownParams, ServerShutdownResult } from "./rpc/methods/server.js";
 export * from "./system-handlers.js";
 export * from "./paths.js";
 export * from "./process-lock.js";
