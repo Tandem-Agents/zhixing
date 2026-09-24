@@ -71,6 +71,8 @@ export type StartupMode = "repl" | "host" | "pairing";
 export type StartupCheckResult =
   | ({
       kind: "ready";
+      /** This call completed the interactive setup and published its configuration. */
+      configurationCompleted?: true;
       runtimeConfiguration: RuntimeConfigurationSnapshot;
       credentialGeneration: string | null;
       secretStore: SecretStorePort & CredentialStoreCoordinator;
@@ -233,6 +235,7 @@ export async function runStartupCheck(
     });
     return {
       kind: "ready",
+      configurationCompleted: true,
       runtimeConfiguration: createRuntimeConfigurationSnapshot(updatedCredentialSnapshot.config),
       ...projectRuntimeSecrets(updatedCredentialSnapshot.credentials),
       credentialGeneration: updatedCredentialSnapshot.generation,

@@ -21,7 +21,7 @@ import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
-import { beginRuntimeLogging, recordRuntimeFailure, recordStartupFailure, type RuntimeLogging } from "./logging/runtime.js";
+import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure, type RuntimeLogging } from "./logging/runtime.js";
 import { INPUT_LOG_SOURCE } from "./logging/input.js";
 
 let commandLogging: RuntimeLogging | undefined;
@@ -222,35 +222,55 @@ program
   })
   .action(async () => {
     const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => createStdoutWriter().line(chalk.dim(message)));
+    let connection: import("./runtime/core-host-connection.js").CoreHostConnection | undefined;
     try {
       const zhixingHome = getZhixingHome();
       const configPath = getGlobalConfigPath(process.env, zhixingHome);
       const [
         { runStartupCheck },
         { startRepl },
-      ] = await Promise.all([
+        { CoreHostConnection, defaultCoreHostConnectionDeps },
+        { connectReplHost },
+        { createStartupProgressPresenter },
+      ] = await observeStartupPhase(logging.records, "load-interface", () => Promise.all([
         import("./startup.js"),
         import("./repl.js"),
-      ]);
+        import("./runtime/core-host-connection.js"),
+        import("./runtime/repl-host-startup.js"),
+        import("./screen/startup-progress.js"),
+      ]));
 
-      // 启动期检查——先确保必要字段就绪
-      const startupResult = await runStartupCheck({
-        homeDir: zhixingHome,
-        configPath,
-        mode: "repl",
-        records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
+      connection = new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome, logging.records));
+      const notices: import("./runtime/core-host-connection.js").CoreHostLifecycleNotice[] = [];
+      const stopNotices = connection.onLifecycleNotice(notice => { if (notice.kind !== "starting") notices.push(notice); });
+      const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout }) : undefined;
+      const prepared = await connectReplHost({
+        connection,
+        starting: () => progress?.begin(),
+        settled: () => progress?.stop(),
+        checkConfiguration: () => observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
+          homeDir: zhixingHome, configPath, mode: "repl",
+          records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
+        })),
       });
-      const startupExit = handleStartupResult(startupResult);
-      if (startupExit !== undefined) {
-        if (startupResult.kind !== "ready") recordStartupFailure(logging.records, startupResult);
+      stopNotices();
+      if (prepared.kind === "configuration") {
+        const startupResult = prepared.result;
+        const startupExit = handleStartupResult(startupResult) ?? 2;
+        recordStartupFailure(logging.records, startupResult);
+        await connection.dispose();
         await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
         await exitCommand(startupExit);
         return;
       }
 
-      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records);
+      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records, {
+        connection, notices,
+        ...(prepared.kind === "unavailable" ? { initialFailure: { error: prepared.error } } : {}),
+      });
       await logging.finish("success", "completed");
     } catch (err) {
+      await connection?.dispose().catch(cleanup => recordRuntimeFailure(logging.records, cleanup, "foreground-cleanup-failed"));
       recordRuntimeFailure(logging.records, err, "foreground-failed");
       await logging.finish("failure", "foreground-failed");
       await renderActionError(err);

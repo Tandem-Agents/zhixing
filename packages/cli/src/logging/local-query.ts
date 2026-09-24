@@ -20,5 +20,5 @@ export async function queryLocalLogs(home: string, filter: LogFilter, cursor?: s
       const legacy = await api.query(LOG_READ, { context, request: { address: entries[0]!.address, view: "detail" } });
       return { ...legacy, detail: { catalog: catalog.detail, evidence: legacy.detail, address: entries[0]!.address } };
     }
-  } finally { await access.close(); }
+  } finally { try { await access.close(); } finally { capacity.close(); } }
 }

@@ -55,6 +55,7 @@ vi.mock("./mesh-device-key.js", () => ({
 
 vi.mock("./mesh-bootstrap-store.js", () => ({
   FileMeshBootstrapStore: class {
+    async stopStorageMaintenance() {}
     async loadTrustRecord() {
       return {
         homeId: "home-1",

@@ -37,34 +37,38 @@ export function createDeviceCapacityRuntime(
   options: { createDirectory?: boolean } = {},
 ) {
   if (options.createDirectory !== false) mkdirSync(temporaryRoot, { recursive: true });
-  const filesystem =
-    options.createDirectory === false ? asyncFilesystemPressure(temporaryRoot) : undefined;
+  const stopped = new AbortController();
+  const filesystem = asyncFilesystemPressure(temporaryRoot);
   const underlying = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: createNodeDeviceCapacityProbe(
       temporaryRoot,
-      filesystem ? { readFilesystem: filesystem.read } : {},
+      { readFilesystem: filesystem.read },
     ),
   });
-  const arbiter: DeviceCapacityArbiterPort = filesystem
-    ? {
-        snapshot: () => underlying.snapshot(),
-        acquire: async (request, abort) => {
-          const started = Date.now();
-          await filesystem.prepare(request.maxWaitMs, abort);
-          return underlying.acquire(
-            { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - (Date.now() - started)) },
-            abort,
-          );
-        },
-      }
-    : underlying;
+  const arbiter: DeviceCapacityArbiterPort = {
+    snapshot: () => underlying.snapshot(),
+    acquire: async (request, abort) => {
+      const signal = AbortSignal.any([abort, stopped.signal]);
+      if (signal.aborted) return { kind: "cancelled" };
+      const started = Date.now();
+      await filesystem.prepare(request.maxWaitMs, signal);
+      return underlying.acquire(
+        { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - (Date.now() - started)) },
+        signal,
+      );
+    },
+  };
   const storage = new DefaultStorageMaintenanceGovernor({
     capacity: arbiter,
   });
   return {
     arbiter,
     storage,
+    close(): void {
+      stopped.abort();
+      filesystem.close();
+    },
     workload(
       serviceClass: Extract<DeviceCapacityClass, `workload-${string}`>,
     ): AgentRuntimeCapacityBinding {
@@ -83,38 +87,54 @@ export type DeviceCapacityRuntime = ReturnType<typeof createDeviceCapacityRuntim
 
 /** A single asynchronous disk sample feeds the existing synchronous arbiter contract. */
 function asyncFilesystemPressure(root: string) {
+  const maxAgeMs = 250, refreshMs = 100;
+  let closed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let sampled: { bavail: number; bsize: number } | undefined,
     sampledAt = 0;
   let flight: Promise<void> | undefined;
-  const fresh = (): boolean => sampled !== undefined && Date.now() - sampledAt < 250;
+  const fresh = (): boolean => !closed && sampled !== undefined && performance.now() - sampledAt < maxAgeMs;
+  const schedule = (): void => {
+    if (closed || timer) return;
+    timer = setTimeout(() => { timer = undefined; void refresh(); }, refreshMs);
+    timer.unref();
+  };
   const refresh = (): Promise<void> =>
-    (flight ??= (async () => {
+    closed ? Promise.resolve() : (flight ??= (async () => {
       let current = path.resolve(root);
       for (;;) {
         try {
-          sampled = await statfs(current);
-          sampledAt = Date.now();
+          const value = await statfs(current);
+          if (closed) return;
+          sampled = value;
+          sampledAt = performance.now();
           return;
         } catch (error) {
+          if (closed) return;
           const parent = path.dirname(current);
           if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === current) throw error;
           current = parent;
         }
       }
-    })().finally(() => {
+    })().catch(() => { sampled = undefined; }).finally(() => {
       flight = undefined;
+      schedule();
     }));
+  // Probe progress belongs to this runtime's lifetime, not to a rejected leaf
+  // request. Slow recovery prefixes must not repeatedly outlive a one-shot sample.
+  void refresh();
   return {
+    close: (): void => { closed = true; clearTimeout(timer); timer = undefined; sampled = undefined; },
     read: () => {
       if (!fresh()) {
-        void refresh().catch(() => undefined);
+        void refresh();
         throw Error("设备磁盘探测尚未就绪");
       }
       return sampled!;
     },
     prepare: async (maxWaitMs: number, abort: AbortSignal): Promise<void> => {
-      if (fresh() || abort.aborted) return;
-      const pending = refresh().catch(() => undefined);
+      if (fresh() || abort.aborted || closed) return;
+      const pending = refresh();
       if (maxWaitMs === 0) return;
       let timer: ReturnType<typeof setTimeout> | undefined, cancelled: (() => void) | undefined;
       try {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createLogWriterProbe } from "./writers.js";
 import { readdir, readFile, stat, rm, open, writeFile, link, rename } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import path from "node:path";
@@ -13,7 +14,7 @@ import { LogApplication, formatLogAddress } from "../../../core/src/logging/appl
 import { bindLogSource, captureLog } from "../../../core/src/logging/capture.js";
 import { DEFAULT_LOG_POLICY } from "../../../core/src/logging/policy.js";
 import type { LogCapture, LogReadContext } from "../../../core/src/logging/contracts.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
 
 const policy = {
@@ -114,6 +115,24 @@ async function listing(root: string): Promise<unknown> {
 }
 
 describe("runtime log Store using real isolated processes and filesystem", () => {
+  it("converges two native writers on one root without reporting normal lock contention as unavailable", async () => {
+    const home = await createTempDir("logging-shared-writers");
+    const notices: string[] = [];
+    const writers = [1, 2].map(number => {
+      const store = new LocalLogStore({ files: new LogFilesProcess(home), capacity: createDeviceCapacityRuntime(home).arbiter, observeWriters: createLogWriterProbe(home) });
+      const recorder = new LogRecorder(store, { onHealth: health => { if (health.state === "degraded") notices.push(health.lastFailure!); } });
+      recorder.bind({ id: `writer-${number}`, version: 1, events: { observed: { message: "shared native writer", tier: "critical", level: "info", fields: {} } } }, { scope: "storage" }).record({ event: "observed" });
+      return { store, recorder };
+    });
+    try {
+      await Promise.all(writers.map(({ recorder }) => recorder.flush(15000)));
+      for (const { recorder } of writers) expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0, unconfirmed: 0 });
+      expect(notices).toEqual([]);
+      const app = new LogApplication(writers[0]!.store, () => owner, []);
+      for (const number of [1, 2]) expect((await app.search({ source: `writer-${number}` })).records).toHaveLength(1);
+    } finally { await Promise.all(writers.map(({ recorder }) => recorder.close(5000))); }
+  }, 25_000);
+
   it.each([false, true])("reports a known gap after the health write is unconfirmed (published=%s)", async (published) => {
     const h = await setup();
     await h.store.initialize();
@@ -141,7 +160,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
       recorder.bind(source, { scope: "storage" }).record({ event: "event", data: { number: 1 } });
       await recorder.flush(5000);
       expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0, unconfirmed: 1 });
-      expect(segmentAttempts).toBe(3);
+      expect(segmentAttempts).toBe(4); // Includes the separate confirmed recovery record.
     } finally {
       await recorder.close(1000);
     }
@@ -150,8 +169,10 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     stores.push(reader);
     const app = new LogApplication(reader, () => owner, ["logging:1", "fixture:1"]);
     const page = await app.search();
-    expect(page.records).toHaveLength(published ? 2 : 1);
-    expect(page.records.every(record => record.source === "logging" && record.data.unconfirmed === 1)).toBe(true);
+    expect(page.records).toHaveLength(published ? 3 : 2);
+    expect(page.records.every(record => record.source === "logging")).toBe(true);
+    expect(page.records.filter(record => record.event === "degraded").every(record => record.data.unconfirmed === 1)).toBe(true);
+    expect(page.records.filter(record => record.event === "recovered")).toHaveLength(1);
     expect(new Set(page.records.map(record => record.id)).size).toBe(page.records.length);
     expect(page.coverage.complete).toBe(true);
   }, 15000);

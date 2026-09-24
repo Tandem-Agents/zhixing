@@ -574,7 +574,7 @@ export async function runStorageMaintenanceStep<T>(
     throw new StorageMaintenanceCancelledError();
   }
   if (admission.kind !== "granted") {
-    throw new StorageMaintenanceAdmissionError(admission);
+    throw new StorageMaintenanceAdmissionError(admission, request.kind);
   }
   try {
     throwIfMaintenanceCancelled(abort);
@@ -613,10 +613,11 @@ export function storageMaintenanceWorkKey(
 }
 
 export class StorageMaintenanceAdmissionError extends Error {
-  constructor(readonly admission: Exclude<DeviceCapacityAdmission, { kind: "granted" }>) {
+  constructor(readonly admission: Exclude<DeviceCapacityAdmission, { kind: "granted" }>, readonly maintenanceKind?: StorageMaintenanceKind) {
     super(
       `Storage maintenance was not admitted: ${admission.kind}` +
-        ("blockedBy" in admission ? `:${admission.blockedBy}` : ""),
+        ("blockedBy" in admission ? `:${admission.blockedBy}` : "") +
+        (maintenanceKind ? ` (${maintenanceKind})` : ""),
     );
     this.name = "StorageMaintenanceAdmissionError";
   }

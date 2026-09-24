@@ -24,7 +24,7 @@ import {
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { createPersistentApplicationHost } from "./application-host.js";
-import { beginRuntimeLogging, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
+import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -57,12 +57,12 @@ export async function runServeCommand(
       homeDir: zhixingHome,
       context: processMode === "managed" ? "managed" : "foreground",
     });
-    const startup = await runStartupCheck({
+    const startup = await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
       homeDir: zhixingHome,
       mode: "host",
       records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
       secretStore,
-    });
+    }));
     if (startup.kind !== "ready") {
       recordStartupFailure(logging.records, startup);
       renderStartupFailure(startup, output);

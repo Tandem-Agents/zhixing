@@ -24,7 +24,7 @@ import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
   createConversationExecutorLedger,
 } from "../conversation-executor-ledger.js";
-import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
 import {
   createConversationResourceRecoveryPort,
   localConversationOwnerRuntime,

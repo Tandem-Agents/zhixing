@@ -23,6 +23,12 @@ const PROCESS_MODES = ["foreground", "on-demand", "managed"] as const satisfies
   readonly HostProcessMode[];
 
 describe("persistent ApplicationHost outer lifecycle", () => {
+  it("leaves the shared entry capacity alive until the entry has drained its recorder", async () => {
+    const harness = createHarness({ roles: ["anchor", "executor"] });
+    await new PersistentApplicationHost({ ...createInput("foreground"), deviceCapacity: harness.deviceCapacity }, harness.dependencies).run();
+    expect(harness.deviceCapacity.close).not.toHaveBeenCalled();
+    expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -117,6 +123,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           topology.roles.includes("executor") ? 1 : 0,
         );
         expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+        expect(harness.deviceCapacity.close).toHaveBeenCalledOnce();
         expect(harness.releaseLease).toHaveBeenCalledTimes(
           topology.roles.includes("executor") ? 1 : 0,
         );
@@ -381,6 +388,7 @@ function createHarness(input: {
   const meshStops: ReturnType<typeof vi.fn>[] = [];
   const deviceCapacity = {
     storage: { marker: "storage-maintenance" },
+    close: vi.fn(),
   } as unknown as DeviceCapacityRuntime;
   const releaseLease = vi.fn(async () => {
     events.push("release-lease");
@@ -490,6 +498,7 @@ function createHarness(input: {
 
   return {
     dependencies,
+    deviceCapacity,
     events,
     meshStops,
     prepareMesh,

@@ -18,10 +18,11 @@ const { createDeviceCapacityRuntime } = await import("../../serve/device-capacit
 const { LogFilesProcess } = await import("../files-process.js");
 const [home, mode] = process.argv.slice(2) as [string, string];
 const files = new LogFilesProcess(home);
+const capacity = createDeviceCapacityRuntime(home);
 let now = Date.now();
 const store = new LocalLogStore({
   files,
-  capacity: createDeviceCapacityRuntime(home).arbiter,
+  capacity: capacity.arbiter,
   now: () => now,
 });
 const initial = await store.initialize();
@@ -103,4 +104,5 @@ if (mode === "native") {
   await store.append([capture]);
 }
 await store.close();
+capacity.close();
 process.disconnect?.();

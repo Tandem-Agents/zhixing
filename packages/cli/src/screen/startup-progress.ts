@@ -36,7 +36,7 @@ export class StartupProgressPresenter {
     this.text = opts.text ?? chalk.yellow("正在打开知行...");
     this.longText =
       opts.longText ??
-      chalk.yellow("正在准备本机服务，首次启动可能需要几秒...");
+      chalk.yellow("正在等待知行就绪...");
   }
 
   begin(): void {

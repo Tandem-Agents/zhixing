@@ -17,6 +17,7 @@ import {
 import { formatRelativeTime } from "../commands/format.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
+import { CoreHostUnavailableError } from "./core-host-connection.js";
 
 export interface ReadOnlyConversationBrowserOptions {
   readonly writer: CliWriter;
@@ -42,6 +43,9 @@ export async function renderReadOnlyConversationBrowser(
     chalk.red(`${layout.contentPrefix}知行暂时无法启动，已打开最近对话供查看。`),
   );
   opts.writer.line(chalk.dim(`${layout.contentPrefix}对话写入与新请求已暂停；按 Enter 可重试。`));
+  if (opts.error instanceof CoreHostUnavailableError) {
+    opts.writer.line(chalk.dim(`${layout.contentPrefix}${opts.error.publicReason}`));
+  }
   opts.writer.line("");
 
   const conversations = (await opts.storage.list()).slice(0, maxConversations);
@@ -101,7 +105,7 @@ function formatMaybeRelative(iso: string): string | null {
 function renderRepairHint(writer: CliWriter): void {
   writer.line(
     chalk.dim(
-      `${layout.contentPrefix}需要排查时，可运行 zz status 查看运行状态，或用 zz serve logs 查看日志。`,
+      `${layout.contentPrefix}需要排查时，可运行 zz status 查看运行状态，或用 zz logs search --source runtime 查看启动记录。`,
     ),
   );
   writer.line("");

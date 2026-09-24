@@ -14,6 +14,7 @@
 
 import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { queryLocalLogs } from "../logging/local-query.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
@@ -40,6 +41,11 @@ export interface SpawnDaemonOptions {
   forwardedArgs: string[];
   /** handshake 上限，默认 5000ms */
   handshakeTimeoutMs?: number;
+  /** One caller-owned deadline covers preparation, spawn and discovery. */
+  deadlineAt?: number;
+  signal?: AbortSignal;
+  /** Silent automatic startup must not synchronously query evidence it will discard. */
+  reportFailure?: boolean;
   /** 轮询间隔，默认 200ms */
   pollIntervalMs?: number;
   /** 依赖注入（测试用）*/
@@ -93,6 +99,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const con = deps.console ?? console;
+  opts.signal?.throwIfAborted();
 
   // 1. resolveSelfExec
   let execArgs;
@@ -113,10 +120,13 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const spawnFn = deps.spawnFn ?? spawn;
   const child = spawnFn(execArgs.command, execArgs.args, spawnOpts);
   let childExit: ChildExit | null = null;
+  const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    childExit = { code, signal };
+  };
+  const onError = () => { childExit = { code: null, signal: null }; };
   if (typeof child.once === "function") {
-    child.once("exit", (code, signal) => {
-      childExit = { code, signal };
-    });
+    child.once("exit", onExit);
+    child.once("error", onError);
   }
   // child.unref() 允许父进程退出时不等子进程
   try {
@@ -126,17 +136,26 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   }
 
   // 4. handshake
-  const handshake = await startupHandshake({
-    timeoutMs: handshakeTimeoutMs,
-    pollIntervalMs,
-    deps: {
-      ...deps,
-      readyMarkerPath,
-      readLockFn: () => (deps.readLockFn ?? readLock)(lockPaths),
-    },
-    spawnedPid: child.pid,
-    getChildExit: () => childExit,
-  });
+  let handshake: HandshakeResult;
+  try {
+    handshake = await startupHandshake({
+      timeoutMs: handshakeTimeoutMs,
+      deadlineAt: opts.deadlineAt,
+      signal: opts.signal,
+      pollIntervalMs,
+      deps: {
+        ...deps,
+        readyMarkerPath,
+        readLockFn: () => (deps.readLockFn ?? readLock)(lockPaths),
+      },
+      spawnedPid: child.pid,
+      getChildExit: () => childExit,
+    });
+  } finally {
+    child.removeListener?.("exit", onExit);
+    // A cancelled spawn without a PID can still emit its initial error asynchronously.
+    if (child.pid !== undefined || childExit) child.removeListener?.("error", onError);
+  }
 
   if (handshake.ok) {
     printSuccessBanner(handshake.pid!, handshake.port!, logPath, con);
@@ -144,11 +163,13 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   }
 
   // 5. 失败路径
-  con.error(chalk.red(`知行服务启动未完成: ${handshake.reason ?? "unknown"}`));
-  try {
-    const evidence = await (deps.readLogsFn ?? ((home, from) => queryLocalLogs(home, { source: "runtime", from })))(zhixingHome, startedAt);
-    con.error(JSON.stringify(evidence));
-  } catch { con.error("启动日志暂不可用；可稍后运行 zz logs search --source runtime 查阅。"); }
+  if (opts.reportFailure !== false) {
+    con.error(chalk.red(`知行服务启动未完成: ${handshake.reason ?? "unknown"}`));
+    try {
+      const evidence = await (deps.readLogsFn ?? ((home, from) => queryLocalLogs(home, { source: "runtime", from })))(zhixingHome, startedAt);
+      con.error(JSON.stringify(evidence));
+    } catch { con.error("启动日志暂不可用；可稍后运行 zz logs search --source runtime 查阅。"); }
+  }
   return { ok: false, status: handshake.status ?? "failed", reason: handshake.reason, logPath };
 }
 
@@ -164,6 +185,8 @@ interface HandshakeResult {
 
 interface HandshakeOpts {
   timeoutMs: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
   pollIntervalMs: number;
   deps: SpawnDaemonDeps;
   spawnedPid?: number;
@@ -179,7 +202,7 @@ const CHILD_EXIT_DISCOVERY_GRACE_MS = 1000;
 
 async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
   const clock = opts.deps.clock ?? Date.now;
-  const sleep = opts.deps.sleep ?? defaultSleep;
+  const sleep = opts.deps.sleep ?? ((ms: number) => delay(ms, undefined, { signal: opts.signal }));
   const readLockFn = opts.deps.readLockFn ?? readLock;
   const isAlive = opts.deps.isProcessAliveFn ?? isProcessAlive;
   const httpGet = opts.deps.httpGetFn ?? defaultHttpGet;
@@ -188,13 +211,14 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
     opts.deps.checkReadyMarkerFn ?? (() => defaultCheckReadyMarker(readyMarkerPath));
 
   const start = clock();
-  const deadline = start + opts.timeoutMs;
+  const deadline = opts.deadlineAt ?? start + opts.timeoutMs;
 
   let lastLock: PidFileContents | null = null;
   let sawReadyMarker = false;
   let childExitSeenAt: number | null = null;
 
   while (clock() < deadline) {
+    opts.signal?.throwIfAborted();
     const lock = await safeReadLock(readLockFn);
     if (lock) {
       lastLock = lock;
@@ -203,7 +227,8 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
         const marker = await checkReadyMarker();
         sawReadyMarker = sawReadyMarker || marker;
         if (marker) {
-          const healthOk = await checkHealth(lock, httpGet, 500);
+          const healthOk = await checkHealth(lock, httpGet, Math.max(1, Math.min(500, deadline - clock())));
+          opts.signal?.throwIfAborted();
           if (healthOk) {
             return { ok: true, status: "ready", pid: lock.pid, port: lock.port };
           }
@@ -225,8 +250,10 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
         reason: formatChildExitReason(opts.spawnedPid, childExit),
       };
     }
-    await sleep(opts.pollIntervalMs);
+    opts.signal?.throwIfAborted();
+    await sleep(Math.min(opts.pollIntervalMs, Math.max(0, deadline - clock())));
   }
+  opts.signal?.throwIfAborted();
 
   // 超时——给出具体原因
   const childExit = opts.getChildExit?.() ?? null;
@@ -314,10 +341,6 @@ async function defaultCheckReadyMarker(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 function defaultHttpGet(url: string, timeoutMs: number): Promise<number> {

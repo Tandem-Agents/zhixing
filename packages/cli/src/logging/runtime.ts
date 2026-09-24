@@ -47,6 +47,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
       fields: { reason: "text" },
     },
     hostConnected: { message: "前台已连接宿主", level: "info", tier: "critical", fields: { attempt: "number" } },
+    startupPhase: { message: "启动阶段已结束", level: "info", tier: "critical", fields: { phase: "text", durationMs: "number" } },
     failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: {
       reason: "text", error: "text", attempt: "number",
       issues: { items: { fields: { field: "text", reason: "text" } }, maxItems: 16 },
@@ -54,6 +55,23 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     } },
   },
 };
+
+/** Bounded phase timing for the actual entry; no configuration or credential payload. */
+export async function observeStartupPhase<T>(
+  records: LogRecordPort | undefined,
+  phase: "load-interface" | "check-configuration" | "prepare-service" | "wait-for-service",
+  operation: () => Promise<T>,
+): Promise<T> {
+  const started = performance.now();
+  let result: LogResult = "failure";
+  try {
+    const value = await operation();
+    result = "success";
+    return value;
+  } finally {
+    records?.record({ event: "startupPhase", result, data: { phase, durationMs: Math.round(performance.now() - started) } });
+  }
+}
 
 /** Preserve the observed cause before entry drain, without copying configuration or credentials. */
 export function recordRuntimeFailure(records: LogRecordPort | undefined, error: unknown, reason: string, attempt?: number): void {
@@ -106,7 +124,15 @@ export function beginRuntimeLogging(
 ): RuntimeLogging {
   const { store, capacity } = createLocalLogStore(home);
   const recorder = new LogRecorder(store, {
-    onHealth: () => warn?.("运行日志暂不可用，业务继续运行；稍后可用 zz logs 查看。"),
+    onHealth: (health) => {
+      if (health.state === "ready") warn?.("运行日志已恢复写入；此前的等待或缺口可用 zz logs 查看。");
+      else if (health.state === "degraded") {
+        const reason = health.lastFailure === "writer-busy" ? "写入持续等待" : health.lastFailure === "resource-wait" ? "资源暂不可用"
+          : health.lastFailure === "probe-unavailable" ? "设备资源探测未就绪"
+          : health.lastFailure === "migration-blocked" ? "旧日志切换未完成" : "存储或采集受阻";
+        warn?.(`运行日志已降级（${reason}），业务继续运行；可用 zz logs 查看。`);
+      }
+    },
   });
   const operation = { kind: "operation", id: randomUUID() };
   const bind: BindLogSource = (source, access, refs = [], admission) => recorder.bind(source, access, [operation, ...refs], admission);
@@ -126,7 +152,7 @@ export function beginRuntimeLogging(
         stopOutput?.();
         records.record({ event: "stopped", result, data: { reason } });
         // Include the bounded OS writer proof in a short-lived entry's drain window.
-        finishing = recorder.close(5000);
+        finishing = recorder.close(5000).finally(() => capacity.close());
       }
       return finishing;
     },

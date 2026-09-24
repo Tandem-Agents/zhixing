@@ -94,6 +94,24 @@ function request(
 }
 
 describe("DefaultDeviceCapacityArbiter", () => {
+  it("distinguishes an unavailable pressure probe from real memory and disk pressure", async () => {
+    let current: DeviceCapacityPressure | undefined;
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: () => { if (!current) throw Error("disk probe not ready"); return current; } });
+    const acquire = () => arbiter.acquire(request("probe-state", budget(1, { temporaryBytes: 1 })), new AbortController().signal);
+    expect(await acquire()).toMatchObject({ kind: "backpressured", blockedBy: "probe-unavailable" });
+    expect(arbiter.snapshot()).toMatchObject({ devicePressure: null, blockedBy: "probe-unavailable" });
+    current = { ...pressure(), availableMemoryBytes: 0 };
+    expect(await acquire()).toMatchObject({ kind: "backpressured", blockedBy: "memoryReservationBytes" });
+    current = { ...pressure(), temporaryBytesAvailable: 0 };
+    expect(await acquire()).toMatchObject({ kind: "backpressured", blockedBy: "temporaryBytes" });
+    current = { ...pressure(), temporaryBytesAvailable: NaN };
+    expect(await acquire()).toMatchObject({ kind: "backpressured", blockedBy: "probe-unavailable" });
+    current = pressure();
+    const admitted = await acquire();
+    expect(admitted.kind).toBe("granted");
+    if (admitted.kind === "granted") admitted.permit.release();
+  });
+
   it("uses a stable CPU sampling window instead of treating an immature sample as saturation", async () => {
     const temporaryRoot = await createTempDir("device-capacity-probe");
     let now = 0;

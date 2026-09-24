@@ -397,7 +397,7 @@ function createDisasterRecoveryLifecycleApplication(
         },
         });
       } finally {
-        await context.disasterRecoveryStaging.close();
+        await context.close();
       }
     },
     withFinishSession: async (use) => {
@@ -423,7 +423,7 @@ function createDisasterRecoveryLifecycleApplication(
         },
         });
       } finally {
-        await context.disasterRecoveryStaging.close();
+        await context.close();
       }
     },
   });
@@ -486,6 +486,7 @@ export function disasterRecoveryPublicError(_error: unknown): Error {
 }
 
 interface RecoveryContext {
+  readonly close: () => Promise<void>;
   readonly logging?: RuntimeLogContext;
   readonly home: string;
   readonly backupTargets: BackupTargetConfigurationRepository;
@@ -512,43 +513,51 @@ async function openRecoveryContext(
     throw new Error("设备秘密存储解锁后才能恢复");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
-  const storageMaintenance = options.storageMaintenance ?? options.logging?.capacity.storage ??
-    createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity")).storage;
+  const ownedCapacity = !options.storageMaintenance && !options.logging
+    ? createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity")) : undefined;
+  const storageMaintenance = options.storageMaintenance ?? options.logging?.capacity.storage ?? ownedCapacity!.storage;
   const store = new FileMeshBootstrapStore(home, key, { storageMaintenance, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
-  const trust = await store.loadTrustRecord();
-  if (!trust) throw new Error("本机没有可验证的 home 信任记录");
-  const member = trust.members.find((candidate) =>
-    candidate.device.deviceId === key.deviceId && candidate.state === "active");
-  if (!member || !member.roles.includes("anchor")) {
-    throw new Error("恢复目标必须是仍有效且可值班的已配对设备");
-  }
-  if (requireNonIssuer && trust.issuer.deviceId === key.deviceId) {
-    throw new Error("当前设备仍在值班，无需执行无源恢复");
-  }
-  const config = loadConfig({ homeDir: home });
-  return {
-    home,
-    logging: options.logging,
-    backupTargets: createBackupTargetConfigurationInfrastructure(home),
-    secretStore,
-    key,
-    identity: member.device,
-    trust,
-    store,
-    ...(config.mesh ? { configuration: config.mesh } : {}),
-    config,
-    storageMaintenance,
-    disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({
-      zhixingHome: home,
-      storageMaintenance,
-      records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
-    }),
-    publishedDirectoryInventoryTargets: createPublishedCheckpointTargetInfrastructure({
-      zhixingHome: home,
-      storageMaintenance,
-    }).directoryInventory,
-    writeLine: options.writeLine ?? createStdoutWriter().line,
+  let staging: DisasterRecoveryStagingArea | undefined;
+  const close = async (): Promise<void> => {
+    try { await staging?.close(); } finally { try { await store.stopStorageMaintenance(); } finally { ownedCapacity?.close(); } }
   };
+  try {
+    const trust = await store.loadTrustRecord();
+    if (!trust) throw new Error("本机没有可验证的 home 信任记录");
+    const member = trust.members.find((candidate) =>
+      candidate.device.deviceId === key.deviceId && candidate.state === "active");
+    if (!member || !member.roles.includes("anchor")) {
+      throw new Error("恢复目标必须是仍有效且可值班的已配对设备");
+    }
+    if (requireNonIssuer && trust.issuer.deviceId === key.deviceId) {
+      throw new Error("当前设备仍在值班，无需执行无源恢复");
+    }
+    const config = loadConfig({ homeDir: home });
+    return {
+      close,
+      home,
+      logging: options.logging,
+      backupTargets: createBackupTargetConfigurationInfrastructure(home),
+      secretStore,
+      key,
+      identity: member.device,
+      trust,
+      store,
+      ...(config.mesh ? { configuration: config.mesh } : {}),
+      config,
+      storageMaintenance,
+      disasterRecoveryStaging: (staging = createDisasterRecoveryStagingInfrastructure({
+        zhixingHome: home,
+        storageMaintenance,
+        records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
+      })),
+      publishedDirectoryInventoryTargets: createPublishedCheckpointTargetInfrastructure({
+        zhixingHome: home,
+        storageMaintenance,
+      }).directoryInventory,
+      writeLine: options.writeLine ?? createStdoutWriter().line,
+    };
+  } catch (error) { await close(); throw error; }
 }
 
 async function openRecoveryEvidenceMesh(

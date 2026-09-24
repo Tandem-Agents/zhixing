@@ -24,6 +24,8 @@ export type DeviceCapacityDimension =
   | "writeBytes"
   | "ioOperations";
 
+export type DeviceCapacityBlocker = DeviceCapacityDimension | "probe-unavailable";
+
 export interface DeviceCapacityBudget {
   readonly occupancy: {
     readonly memoryReservationBytes: number;
@@ -60,7 +62,7 @@ export type DeviceCapacityAdmission =
   | { readonly kind: "granted"; readonly permit: DeviceCapacityPermit }
   | {
       readonly kind: "backpressured";
-      readonly blockedBy: DeviceCapacityDimension;
+      readonly blockedBy: DeviceCapacityBlocker;
       readonly retryAfterMs: number;
     }
   | {
@@ -82,9 +84,9 @@ export interface DeviceCapacityDiagnostics {
   readonly occupancyCapacity: DeviceCapacityBudget["occupancy"];
   readonly occupancyInUse: DeviceCapacityBudget["occupancy"];
   readonly quantumAvailable: DeviceCapacityBudget["quantum"];
-  readonly devicePressure: Omit<DeviceCapacityPressure, "temporaryBytesAvailable">;
+  readonly devicePressure: Omit<DeviceCapacityPressure, "temporaryBytesAvailable"> | null;
   readonly queued: Partial<Record<DeviceCapacityClass, number>>;
-  readonly blockedBy?: DeviceCapacityDimension;
+  readonly blockedBy?: DeviceCapacityBlocker;
   readonly lastViolation?: {
     readonly admissionId: string;
     readonly dimension: DeviceCapacityDimension;
@@ -173,7 +175,7 @@ export class DefaultDeviceCapacityArbiter
   #lastRefillAt: number;
   #cursor = 0;
   #drainTimer: NodeJS.Timeout | undefined;
-  #blockedBy: DeviceCapacityDimension | undefined;
+  #blockedBy: DeviceCapacityBlocker | undefined;
   #lastViolation: DeviceCapacityDiagnostics["lastViolation"];
 
   constructor(options: DefaultDeviceCapacityArbiterOptions) {
@@ -255,11 +257,11 @@ export class DefaultDeviceCapacityArbiter
       occupancyCapacity,
       occupancyInUse: { ...this.#occupancyInUse },
       quantumAvailable: { ...this.#quantumAvailable },
-      devicePressure: {
+      devicePressure: pressure ? {
         cpuBusyRatio: pressure.cpuBusyRatio,
         availableMemoryBytes: pressure.availableMemoryBytes,
         processRssBytes: pressure.processRssBytes,
-      },
+      } : null,
       queued,
       ...(this.#blockedBy ? { blockedBy: this.#blockedBy } : {}),
       ...(this.#lastViolation ? { lastViolation: this.#lastViolation } : {}),
@@ -293,7 +295,7 @@ export class DefaultDeviceCapacityArbiter
 
   #tryGrant(
     request: DeviceCapacityRequest,
-    pressure: DeviceCapacityPressure,
+    pressure: DeviceCapacityPressure | undefined,
   ): Extract<DeviceCapacityAdmission, { kind: "granted" }> | undefined {
     const blockedBy = this.#blockedDimension(request.atomic, pressure);
     if (!this.#fits(request.atomic, pressure)) {
@@ -344,8 +346,9 @@ export class DefaultDeviceCapacityArbiter
 
   #fits(
     atomic: DeviceCapacityBudget,
-    pressure: DeviceCapacityPressure,
+    pressure: DeviceCapacityPressure | undefined,
   ): boolean {
+    if (!pressure) return false;
     if (
       pressure.availableMemoryBytes <
         this.#policy.pressure.minimumAvailableMemoryBytes
@@ -394,8 +397,9 @@ export class DefaultDeviceCapacityArbiter
 
   #blockedDimension(
     atomic: DeviceCapacityBudget,
-    pressure: DeviceCapacityPressure,
-  ): DeviceCapacityDimension {
+    pressure: DeviceCapacityPressure | undefined,
+  ): DeviceCapacityBlocker {
+    if (!pressure) return "probe-unavailable";
     if (
       pressure.availableMemoryBytes <
       this.#policy.pressure.minimumAvailableMemoryBytes
@@ -420,8 +424,11 @@ export class DefaultDeviceCapacityArbiter
   }
 
   #occupancyCapacity(
-    pressure: DeviceCapacityPressure,
+    pressure: DeviceCapacityPressure | undefined,
   ): DeviceCapacityBudget["occupancy"] {
+    // An unknown probe allows no new reservation; this is an admission bound,
+    // not a fabricated measurement of zero available memory or disk space.
+    if (!pressure) return { memoryReservationBytes: 0, temporaryBytes: 0, slots: 0 };
     return {
       memoryReservationBytes: Math.max(
         0,
@@ -447,18 +454,13 @@ export class DefaultDeviceCapacityArbiter
     };
   }
 
-  #safePressure(): DeviceCapacityPressure {
+  #safePressure(): DeviceCapacityPressure | undefined {
     try {
       const pressure = this.#probe();
       validatePressure(pressure);
       return pressure;
     } catch {
-      return {
-        cpuBusyRatio: 1,
-        availableMemoryBytes: 0,
-        processRssBytes: 0,
-        temporaryBytesAvailable: 0,
-      };
+      return undefined;
     }
   }
 

@@ -14,6 +14,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import { spawn as spawnProcess } from "node:child_process";
 import { spawnDaemon } from "../daemon.js";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
@@ -62,6 +64,68 @@ function mkFakeClock() {
 // 前提：测试进程的 process.argv[1] 是有效的 .js（vitest 跑的话确实是）。
 
 describe("spawnDaemon", () => {
+  it("observes a real process exiting after five seconds without a blind recovery wait", async () => {
+    const started = Date.now();
+    const result = await spawnDaemon({
+      forwardedArgs: ["serve"], deadlineAt: started + 30_000, reportFailure: false,
+      deps: {
+        spawnFn: () => spawnProcess(process.execPath, ["-e", "setTimeout(() => process.exit(19), 5100)"], { stdio: "ignore", windowsHide: true }),
+        readLockFn: async () => null,
+        console: { log: vi.fn(), error: vi.fn() },
+      },
+    });
+    expect(result).toMatchObject({ ok: false, status: "failed" });
+    expect(result.reason).toContain("退出码 19");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 12_000);
+
+  it("observes exit after the old handshake window and releases the attempt without querying discarded logs", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const deps = makeDeps({
+      clock,
+      spawnFn: vi.fn(() => child as any),
+      sleep: async (ms) => {
+        clock.advance(ms);
+        if (clock() === 6000) child.emit("exit", 19, null);
+      },
+      readLockFn: async () => null,
+    });
+    const result = await spawnDaemon({ forwardedArgs: ["serve"], deadlineAt: 30000, reportFailure: false, deps });
+    expect(result).toMatchObject({ ok: false, status: "failed" });
+    expect(result.reason).toContain("退出码 19");
+    expect(clock()).toBe(7000);
+    expect(deps.readLogsFn).not.toHaveBeenCalled();
+    expect(child.listenerCount("exit") + child.listenerCount("error")).toBe(0);
+  });
+
+  it("accepts a healthy concurrent owner after the spawned process exits", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const result = await spawnDaemon({
+      forwardedArgs: ["serve"], deadlineAt: 30000, reportFailure: false,
+      deps: makeDeps({
+        clock, spawnFn: () => child as any,
+        sleep: async (ms) => { clock.advance(ms); if (clock() === 6000) child.emit("exit", 1, null); },
+        readLockFn: async () => clock() < 6400 ? null : { pid: 12345, port: 18900, startedAt: "t" },
+        isProcessAliveFn: () => true, httpGetFn: async () => 200,
+      }),
+    });
+    expect(result).toMatchObject({ ok: true, pid: 12345 });
+    expect(clock()).toBe(6400);
+  });
+
+  it("cancels observation without killing the shared host or leaving child listeners", async () => {
+    const abort = new AbortController();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn(), kill: vi.fn() });
+    await expect(spawnDaemon({
+      forwardedArgs: ["serve"], signal: abort.signal, reportFailure: false,
+      deps: makeDeps({ spawnFn: () => child as any, readLockFn: async () => null, sleep: async () => abort.abort() }),
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(child.listenerCount("exit") + child.listenerCount("error")).toBe(0);
+  });
+
   it("binds logs, child environment and handshake to one home before asynchronous preparation", async () => {
     const home = path.resolve("daemon-home-a");
     const other = path.resolve("daemon-home-b");

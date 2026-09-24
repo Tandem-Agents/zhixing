@@ -33,5 +33,5 @@ export async function prepareApplicationUninstall(
       }
     }
     throw error;
-  }
+  } finally { managed.close(); }
 }

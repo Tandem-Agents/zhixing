@@ -2,6 +2,7 @@
 export interface LogWriterIdentity { readonly pid: number; readonly birth: string }
 export interface LogWriterObservation {
   readonly complete: boolean;
+  /** Time the process scan began, before any later store registration. */
   readonly at: number;
   /** Current product process, identified by the OS incarnation observed in this scan. */
   readonly self?: LogWriterIdentity;

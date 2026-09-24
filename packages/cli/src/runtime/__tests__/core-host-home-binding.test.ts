@@ -60,4 +60,19 @@ describe("CoreHost default dependency home binding", () => {
     await deps.createSurfaceClient!();
     expect(calls.surface).toHaveBeenCalledWith({ zhixingHome: home });
   });
+
+  it("passes one deadline and cancellation through to the daemon without a second recovery window", async () => {
+    const attempt = { deadlineAt: Date.now() + 30_000, signal: new AbortController().signal };
+    const result = await defaultCoreHostConnectionDeps(path.resolve("test-bound-home")).spawn(attempt);
+    expect(calls.spawn).toHaveBeenCalledWith(expect.objectContaining({ ...attempt, reportFailure: false }));
+    expect(result).toMatchObject({ ok: true, recoverable: false, mode: "on-demand" });
+  });
+
+  it("does not spawn after preparation has exhausted the startup budget", async () => {
+    const result = await defaultCoreHostConnectionDeps(path.resolve("test-bound-home")).spawn({
+      deadlineAt: Date.now() - 1, signal: new AbortController().signal,
+    });
+    expect(result).toMatchObject({ ok: false, publicReason: "本机启动准备超时，请查看运行日志。" });
+    expect(calls.spawn).not.toHaveBeenCalled();
+  });
 });

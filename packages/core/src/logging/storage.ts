@@ -5,7 +5,7 @@ import type {
   DeviceCapacityBudget,
   DeviceCapacityStepPermit,
 } from "../resources/device-capacity.js";
-import { LogAppendIndeterminateError } from "./contracts.js";
+import { LogAppendIndeterminateError, LogStorageError } from "./contracts.js";
 import type {
   LogAppendReceipt,
   LogCapture,
@@ -76,7 +76,7 @@ export interface LogStoreSnapshot {
   pending: RetiredFile[];
   gaps: number;
   legacy?: LegacyLogEntry[];
-  writers?: (LogWriterIdentity & { protocol: 1 })[];
+  writers?: (LogWriterIdentity & { protocol: 1; registeredAt?: number })[];
   migration?: LogMigration;
   legacyRetired?: number;
 }
@@ -172,7 +172,7 @@ export class LocalLogStore implements LogSink {
         const state = await this.#required(true);
         await this.#recover(state);
         await this.#maintenance(state);
-        if (state.migration && state.migration.state !== "confirmed") throw Error("旧日志切换尚未完成，已暂停新增日志");
+        if (state.migration && state.migration.state !== "confirmed") throw new LogStorageError("migration-blocked", "旧日志切换尚未完成，已暂停新增日志");
         const policy = state.policy.effective;
         const published = new Set(state.segments.flatMap((segment) => segment.recordIds));
         const accepted = input
@@ -415,7 +415,8 @@ export class LocalLogStore implements LogSink {
   }
 
   async #step<T>(write: boolean, work: () => Promise<T>): Promise<T> {
-    if (this.#closed || this.#busy) throw Error("日志存储暂不可用");
+    if (this.#closed) throw new LogStorageError("owner-unavailable", "日志存储已关闭");
+    if (this.#busy) throw new LogStorageError("writer-busy", "日志存储正在维护");
     this.#busy = true;
     let settle!: () => void;
     this.#idle = new Promise<void>((resolve) => { settle = resolve; });
@@ -432,11 +433,14 @@ export class LocalLogStore implements LogSink {
         },
         this.#abort.signal,
       );
-      if (admission.kind !== "granted") throw Error("日志存储资源暂不可用");
+      if (admission.kind !== "granted") throw new LogStorageError(
+        admission.kind === "capacity-gap" ? "resource-gap" : admission.kind === "backpressured" && admission.blockedBy === "probe-unavailable" ? "probe-unavailable" : "resource-wait",
+        "日志存储资源暂不可用",
+      );
       const step = admission.permit.tryBegin(budget);
       if (!step) {
         admission.permit.release();
-        throw Error("日志存储步骤受阻");
+        throw new LogStorageError("resource-wait", "日志存储步骤受阻");
       }
       // Reserve the entire bounded step before taking the cross-process lock.
       try {
@@ -450,9 +454,9 @@ export class LocalLogStore implements LogSink {
               if (validateWriterObservation(value)) this.#writersObserved = value;
             } catch { /* Missing proof blocks migration, never becomes an empty process list. */ }
           }
-          if (this.#closed) throw Error("日志存储已关闭");
+          if (this.#closed) throw new LogStorageError("owner-unavailable", "日志存储已关闭");
           releaseLock = await this.files.tryLock();
-          if (!releaseLock) throw Error("日志存储正在维护");
+          if (!releaseLock) throw new LogStorageError("writer-busy", "日志存储正在维护");
           this.#inventoryLocked = true;
         }
         return await work();
@@ -620,7 +624,8 @@ export class LocalLogStore implements LogSink {
       !isLegacyFile(entry.name) || !/^[a-f0-9]{64}$/u.test(entry.id) || typeof entry.identity !== "string" || entry.identity.length > 128 ||
       !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw Error("旧日志登记损坏");
     if (state.writers !== undefined && (!Array.isArray(state.writers) || state.writers.length > 256 || state.writers.some((entry) =>
-      entry.protocol !== 1 || !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw Error("日志写者登记损坏");
+      entry.protocol !== 1 || (entry.registeredAt !== undefined && !Number.isSafeInteger(entry.registeredAt)) ||
+      !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw Error("日志写者登记损坏");
     if (state.migration !== undefined && (!["pending", "blocked", "confirmed"].includes(state.migration.state) || !Number.isSafeInteger(state.migration.checkedAt))) throw Error("日志切换状态损坏");
     return state;
   }
@@ -699,9 +704,16 @@ export class LocalLogStore implements LogSink {
       proof.candidates.some((entry) => entry.pid === proof.self!.pid && entry.birth === proof.self!.birth);
     // Register before judging other writers, so simultaneous new processes can converge.
     let writers = state.writers ?? [];
-    if (complete) writers = writers.filter((writer) => proof.candidates.some((entry) => entry.pid === writer.pid && entry.birth === writer.birth));
-    if (proof?.self && !writers.some((entry) => entry.pid === proof.self!.pid && entry.birth === proof.self!.birth) && writers.length < 256)
-      writers.push({ ...proof.self, protocol: 1 });
+    // The scan runs before taking the store lock. It cannot retire a writer
+    // whose registration is newer than the scan (including cached scans).
+    if (complete) writers = writers.filter((writer) =>
+      (writer.registeredAt !== undefined && writer.registeredAt >= proof.at) ||
+      proof.candidates.some((entry) => entry.pid === writer.pid && entry.birth === writer.birth));
+    if (proof?.self) {
+      const current = writers.find(writer => writer.pid === proof.self!.pid && writer.birth === proof.self!.birth);
+      if (current) current.registeredAt = this.#now();
+      else if (writers.length < 256) writers.push({ ...proof.self, protocol: 1, registeredAt: this.#now() });
+    }
     state.writers = writers;
     const compatible = complete && proof.candidates.every((entry) => writers.some((writer) => writer.protocol === 1 && writer.pid === entry.pid && writer.birth === entry.birth));
     state.migration = { state: compatible ? "pending" : "blocked", checkedAt: proof?.at ?? this.#now(), ...(compatible ? {} : { reason: complete ? "old-or-unknown-writer" : "writer-inventory-unavailable" }) };

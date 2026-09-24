@@ -173,13 +173,13 @@ export async function reconcileCurrentManagedService(
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
-  return reconcileManagedService({
+  try { return await reconcileManagedService({
     homeKey: path.resolve(homeDir),
     trigger,
     loadCurrent: () => loadCurrentManagedServiceState("activate", homeDir),
     adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage }),
     signal,
-  });
+  }); } finally { capacity.close(); }
 }
 
 export async function prepareCurrentManagedServiceConfigTurnover(
@@ -191,8 +191,8 @@ export async function prepareCurrentManagedServiceConfigTurnover(
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
-  await createManagedServiceAdapter({ storageGovernor: capacity.storage })
-    .disableFuture(current.spec, signal);
+  try { await createManagedServiceAdapter({ storageGovernor: capacity.storage })
+    .disableFuture(current.spec, signal); } finally { capacity.close(); }
 }
 
 export async function prepareManagedServiceMaintenance(
@@ -202,6 +202,15 @@ export async function prepareManagedServiceMaintenance(
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
+  try {
+    const handle = await prepareMaintenanceWithCapacity(signal, homeDir, capacity);
+    return { ...handle, close: () => capacity.close() };
+  } catch (error) { capacity.close(); throw error; }
+}
+
+async function prepareMaintenanceWithCapacity(
+  signal: AbortSignal, homeDir: string, capacity: ReturnType<typeof createDeviceCapacityRuntime>,
+): Promise<Omit<ManagedServiceMaintenanceHandle, "close">> {
   const adapter = createManagedServiceAdapter({ storageGovernor: capacity.storage });
   if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
     const absentProbe = buildManagedServiceSpec({
@@ -285,6 +294,7 @@ export async function prepareManagedServiceMaintenance(
 }
 
 export interface ManagedServiceMaintenanceHandle {
+  readonly close: () => void;
   readonly commit: () => Promise<void>;
   readonly rollback: () => Promise<void>;
 }
@@ -296,6 +306,15 @@ export async function prepareProgramUninstallManagedService(
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
+  try {
+    const handle = await prepareUninstallWithCapacity(signal, homeDir, capacity);
+    return { ...handle, close: () => capacity.close() };
+  } catch (error) { capacity.close(); throw error; }
+}
+
+async function prepareUninstallWithCapacity(
+  signal: AbortSignal, homeDir: string, capacity: ReturnType<typeof createDeviceCapacityRuntime>,
+): Promise<Omit<ProgramUninstallManagedServiceHandle, "close">> {
   const adapter = createManagedServiceAdapter({ storageGovernor: capacity.storage });
   if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
     const absentProbe = buildManagedServiceSpec({
@@ -408,6 +427,7 @@ export async function prepareProgramUninstallManagedService(
 }
 
 export interface ProgramUninstallManagedServiceHandle {
+  readonly close: () => void;
   /** Irreversibly removes the exact disabled registration after current stop. */
   readonly commit: () => Promise<void>;
   /** Restores only an enabled→disabled transition made by this operation. */

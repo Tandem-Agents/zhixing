@@ -9,7 +9,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { LocalLogStore, type LogWriterObservation } from "../../../core/src/logging/storage.js";
 import { LogApplication } from "../../../core/src/logging/application.js";
 import { DEFAULT_LOG_POLICY } from "../../../core/src/logging/policy.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
 
@@ -30,6 +30,27 @@ async function setup(text: string, observation: () => LogWriterObservation = pro
 }
 
 describe("legacy log adoption on native files", () => {
+  it("does not erase a writer registered after an older process inventory", async () => {
+    const home = await createTempDir("legacy-writer-registration-race");
+    let now = Date.now();
+    const other = { pid: self.pid + 1, birth: "later-process" };
+    let firstProof: LogWriterObservation = { complete: true, at: now, self, candidates: [self] };
+    const capacity = createDeviceCapacityRuntime(home);
+    const first = new LocalLogStore({ files: new LogFilesProcess(home), capacity: capacity.arbiter,
+      now: () => now, observeWriters: async () => firstProof });
+    const second = new LocalLogStore({ files: new LogFilesProcess(home), capacity: capacity.arbiter,
+      now: () => now, observeWriters: async () => ({ complete: true, at: now, self: other, candidates: [self, other] }) });
+    stores.push(first, second);
+    await first.initialize();
+    now += 10;
+    expect((await second.initialize()).migration?.state).toBe("confirmed");
+    // Scan order and store lock order may differ. An old scan cannot undo a
+    // registration that committed later, even if the new writer is now idle.
+    await first.maintain();
+    firstProof = { complete: true, at: now + 10, self, candidates: [self, other] };
+    now += 10;
+    expect((await first.maintain()).migration?.state).toBe("confirmed");
+  });
   it("advances a legal high legacy inventory with both unknown and compatible writers", async () => {
     const home = await createTempDir("legacy-large-inventory"), directory = path.join(home, "logs", "llm-error");
     await mkdir(directory, { recursive: true });

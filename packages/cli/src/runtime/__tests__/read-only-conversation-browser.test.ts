@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderReadOnlyConversationBrowser } from "../read-only-conversation-browser.js";
+import { CoreHostUnavailableError } from "../core-host-connection.js";
 import type { CliWriter } from "../../screen/index.js";
 import { createReadOnlyConversationStorage } from "../../serve/conversation-storage-infrastructure.js";
 
@@ -24,6 +25,16 @@ afterEach(async () => {
 });
 
 describe("read-only conversation browser", () => {
+  it("shows only the public startup summary and a direct evidence command", async () => {
+    const { writer, lines } = makeWriter();
+    await renderReadOnlyConversationBrowser({
+      writer, error: new CoreHostUnavailableError("private failure detail", "本机服务启动失败。"),
+      storage: createReadOnlyConversationStorage(home),
+    });
+    expect(lines.join("\n")).toContain("本机服务启动失败。");
+    expect(lines.join("\n")).toContain("zz logs search --source runtime");
+    expect(lines.join("\n")).not.toContain("private failure detail");
+  });
   it("只读渲染最近对话与最近 run，不需要宿主连接", async () => {
     await writeConversation("chat-a", "旧对话", "2026-01-01T00:00:00.000Z", [
       run("早一点", "旧回复", 0),

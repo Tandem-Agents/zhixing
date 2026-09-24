@@ -47,5 +47,5 @@ export async function runMaintenanceStop(
       }
     }
     throw error;
-  }
+  } finally { managed.close(); }
 }

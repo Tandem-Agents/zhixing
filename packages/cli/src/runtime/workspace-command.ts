@@ -236,6 +236,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
     typeof createDisasterRecoveryStagingInfrastructure
   > | undefined;
   let owner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>>;
+  let ownedCapacity: ReturnType<typeof createDeviceCapacityRuntime> | undefined;
   try {
     const secretStore = createPlatformSecretStore({ homeDir: zhixingHome });
     const startup = await runStartupCheck({
@@ -250,9 +251,9 @@ export async function withLocalWorkspaceClient<T, R = T>(
     const configuration = projectRuntimeConfiguration(
       startup.runtimeConfiguration,
     );
-    const capacity = logging?.capacity ?? createDeviceCapacityRuntime(
+    const capacity = logging?.capacity ?? (ownedCapacity = createDeviceCapacityRuntime(
       path.join(zhixingHome, "distributed-runtime", "capacity"),
-    );
+    ));
     disasterRecoveryStaging = createDisasterRecoveryStagingInfrastructure({
       records: logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome,
@@ -367,12 +368,14 @@ export async function withLocalWorkspaceClient<T, R = T>(
       delivery,
     );
   } finally {
-    await host?.close().catch(() => undefined);
-    await runtime?.startupCleanup.run().catch(() => undefined);
-    await mcpRuntime?.lifecycle.close().catch(() => undefined);
-    await mesh?.bootstrapStore.stopStorageMaintenance();
-    await disasterRecoveryStaging?.close();
-    await owner?.release();
+    try {
+      await host?.close().catch(() => undefined);
+      await runtime?.startupCleanup.run().catch(() => undefined);
+      await mcpRuntime?.lifecycle.close().catch(() => undefined);
+      await mesh?.bootstrapStore.stopStorageMaintenance();
+      await disasterRecoveryStaging?.close();
+      await owner?.release();
+    } finally { ownedCapacity?.close(); }
   }
 }
 

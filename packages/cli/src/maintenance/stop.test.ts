@@ -5,6 +5,7 @@ function managed() {
   return {
     commit: vi.fn(async () => undefined),
     rollback: vi.fn(async () => undefined),
+    close: vi.fn(),
   };
 }
 

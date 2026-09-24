@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createTempDir } from "@zhixing/test-utils";
 import { fileURLToPath } from "node:url";
 import { LocalLogStore } from "../../../core/src/logging/storage.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
 
 const children: ChildProcess[] = [],

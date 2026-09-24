@@ -62,13 +62,16 @@ foreach ($row in $rows) {
 /** No raw command line or environment leaves the finite platform observation. */
 export function createLogWriterProbe(home: string): (signal?: AbortSignal) => Promise<LogWriterObservation> {
   let cached: LogWriterObservation | undefined;
+  let cachedUntil = 0;
   return async (signal) => {
     signal?.throwIfAborted();
-    if (cached && Date.now() - cached.at < 1000) return cached;
+    if (cached && performance.now() < cachedUntil) return cached;
+    const at = Date.now();
     try {
       const result = process.platform === "win32" ? await windows(home, signal) : await isolatedPosix(home, signal);
-      cached = { ...result, at: Date.now() };
-    } catch { cached = { complete: false, at: Date.now(), candidates: [] }; }
+      cached = { ...result, at };
+    } catch { cached = { complete: false, at, candidates: [] }; }
+    cachedUntil = performance.now() + 1000;
     return cached;
   };
 }

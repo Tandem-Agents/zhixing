@@ -7,7 +7,7 @@ import {
 describe("managed host public status", () => {
   it.each([
     [{ desired: "none", process: "stopped" }, { state: "not-needed", label: "不需要后台运行" }],
-    [{ desired: "on-demand", process: "stopped" }, { state: "not-needed", label: "不需要后台运行" }],
+    [{ desired: "on-demand", process: "stopped" }, { state: "not-running", label: "本机服务未运行", action: "运行 zz 启动；若刚刚启动失败，可用 zz logs 查看原因" }],
     [{
       desired: "managed",
       process: "stopped",

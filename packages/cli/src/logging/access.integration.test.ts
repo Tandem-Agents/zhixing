@@ -40,7 +40,7 @@ import type { RpcConnection } from "../../../server/src/rpc/connection.js";
 import type { ServerContext } from "../../../server/src/context.js";
 import { LogRpcClient } from "@zhixing/rpc";
 import { LogFilesProcess } from "./files-process.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import {
   createLogAccess,
   createLocalLogProductApi,

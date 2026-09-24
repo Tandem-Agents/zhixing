@@ -7,7 +7,7 @@ import {
 } from "@zhixing/core/workscene/application";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
-import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
 class MemorySecrets {
   entries = new Map();
   async put(ref: { kind: string; bindingId: string }, value: string) {

@@ -93,13 +93,22 @@ export interface LogSource {
   readonly events: Readonly<Record<string, LogEventDefinition>>;
 }
 export interface LogHealth {
-  readonly state: "starting" | "ready" | "degraded" | "closed";
+  readonly state: "starting" | "waiting" | "ready" | "degraded" | "closed";
   readonly queued: number;
   readonly queuedBytes: number;
   readonly lost: number;
   readonly captureFailures: number;
   readonly unconfirmed: number;
   readonly lastFailure?: string;
+}
+
+/** Payload-free storage classifications; ordinary contention is not a file failure. */
+export type LogStorageFailure = "writer-busy" | "probe-unavailable" | "resource-wait" | "resource-gap" | "migration-blocked" | "owner-unavailable";
+export class LogStorageError extends Error {
+  constructor(readonly code: LogStorageFailure, message: string) {
+    super(message);
+    this.name = "LogStorageError";
+  }
 }
 export interface LogPolicy {
   readonly maxBytes: number;

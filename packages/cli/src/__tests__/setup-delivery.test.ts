@@ -33,7 +33,7 @@ import {
   FileExecutionSnapshotVersionStore,
   FileTrustRuleSnapshotCatalog,
 } from "../executor-snapshot-version-store.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "./device-capacity-fixture.js";
 import { StartupRollback } from "../serve/startup-rollback.js";
 
 const __filename = fileURLToPath(import.meta.url);

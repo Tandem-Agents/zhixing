@@ -266,6 +266,7 @@ describe("managed service current-state intent", () => {
         );
         await expect(handle.commit()).resolves.toBeUndefined();
         await expect(handle.rollback()).resolves.toBeUndefined();
+        handle.close();
         expect(await readPlatformSecretStoreBackendBinding(homeDir)).toBeUndefined();
       });
     },

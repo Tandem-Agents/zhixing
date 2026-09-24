@@ -380,6 +380,7 @@ async function ensureCoreHostWithReadOnlyFallback(
     readonly storage: ReturnType<typeof createReadOnlyConversationStorage>;
     onAttemptFailed?: () => void;
     records?: import("@zhixing/core/logging").LogRecordPort;
+    initialFailure?: { error: unknown };
   },
 ): Promise<boolean> {
   let lastError: unknown;
@@ -387,6 +388,7 @@ async function ensureCoreHostWithReadOnlyFallback(
   while (true) {
     attempt++;
     try {
+      if (attempt === 1 && opts.initialFailure) throw opts.initialFailure.error;
       await coreHost.ensure();
       opts.records?.record({ event: "hostConnected", result: "success", data: { attempt } });
       if (lastError !== undefined) {
@@ -464,7 +466,11 @@ function setupBracketedPasteMode(): void {
 
 // ─── 启动 REPL ───
 
-export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>, inputRecords?: import("@zhixing/core/logging").LogRecordPort, configurationRecords?: import("@zhixing/core/logging").LogRecordPort, runtimeRecords?: import("@zhixing/core/logging").LogRecordPort): Promise<void> {
+export async function startRepl(zhixingHome: string, configPath: string, beforeExit?: (code: number) => Promise<void>, inputRecords?: import("@zhixing/core/logging").LogRecordPort, configurationRecords?: import("@zhixing/core/logging").LogRecordPort, runtimeRecords?: import("@zhixing/core/logging").LogRecordPort, startup?: {
+  connection: CoreHostConnection;
+  initialFailure?: { error: unknown };
+  notices: readonly CoreHostLifecycleNotice[];
+}): Promise<void> {
   // 启用 bracketed paste mode + 初始化 paste detector：
   //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
   //   播按 listener 注册顺序执行，detector 先 setInPasteMode，下游 onKeypress 才能
@@ -537,17 +543,17 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
 
   // 核心宿主连接 —— cli 进程级唯一(连接即接入面身份单位):调度 / 会话 / 确认 /
   // 管理域经各自 facade 共用这一条已认证连接;释放在退出链(本入口持有)。
-  const coreHost = new CoreHostConnection({
-    ...defaultCoreHostConnectionDeps(zhixingHome),
-    onLifecycleNotice: (notice) =>
+  const coreHost = startup?.connection ?? new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome, runtimeRecords));
+  const renderLifecycleNotice = (notice: CoreHostLifecycleNotice) =>
       renderCoreHostLifecycleNotice({
         writer: cliWriter,
         phase: lifecycleRenderPhase,
         startupProgress,
         notice,
         deferNotice: (deferred) => deferredStartupNotices.push(deferred),
-      }),
-  });
+      });
+  coreHost.onLifecycleNotice(renderLifecycleNotice);
+  for (const notice of startup?.notices ?? []) renderLifecycleNotice(notice);
 
   // 各方法域门面——facade 不持连接,只做方法域封装。
   const schedulerFacade = new RpcSchedulerFacade({ connection: coreHost });
@@ -564,6 +570,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
       storage: createReadOnlyConversationStorage(zhixingHome),
       onAttemptFailed: () => startupProgress?.stop(),
       records: runtimeRecords,
+      initialFailure: startup?.initialFailure,
     }))
   ) {
     renderScreen?.dispose();

@@ -13,7 +13,7 @@ import { createKernelLogFactory, observeKernelRun, observeProviderCall } from ".
 import { createSecureExecuteTool } from "../../../orchestrator/src/security/secure-executor.js";
 import { runContextStorage } from "../../../orchestrator/src/runtime/run-context.js";
 import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
-import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
 import { SHIPPED_LOG_SOURCES, LOCAL_LOG_OWNER } from "./access.js";
 import { observeBackgroundOutput, STDIO_LOG_SOURCE } from "./stdio.js";

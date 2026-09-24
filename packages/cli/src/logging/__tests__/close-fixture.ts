@@ -3,7 +3,7 @@ import { LogApplication } from "@zhixing/core/logging/application";
 import { createLocalLogStore } from "../runtime.js";
 
 // No timer, IPC or other application handle may keep this process alive for close().
-const { store } = createLocalLogStore(process.argv[2]!);
+const { store, capacity } = createLocalLogStore(process.argv[2]!);
 await store.initialize();
 await store.append([
   {
@@ -34,4 +34,5 @@ const application = new LogApplication(store, () => ({
 }));
 await application.search();
 await store.close();
+capacity.close();
 process.stdout.write("closed\n");

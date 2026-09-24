@@ -676,6 +676,53 @@ describe("CoreHostConnection", () => {
     expect(notices).toContainEqual({ kind: "starting" });
   });
 
+  it("uses one deadline for spawn and discovery instead of granting a second recovery window", async () => {
+    let now = 0;
+    const conn = new CoreHostConnection({
+      discover: async () => { throw new ServerNotRunningError("missing"); },
+      spawn: async (attempt) => {
+        expect(attempt?.deadlineAt).toBe(1000);
+        now = 700;
+        return { ok: false, recoverable: true, reason: "still starting" };
+      },
+      createClient: () => asClient(makeFakeClient()),
+      clock: () => now, sleep: async (ms) => { now += ms; },
+      startupRecoveryTimeoutMs: 1000, startupRecoveryPollMs: 50,
+    });
+    await expect(conn.ensure()).rejects.toBeInstanceOf(CoreHostUnavailableError);
+    expect(now).toBe(1000);
+    await conn.dispose();
+  });
+
+  it("dispose cancels an in-flight startup wait", async () => {
+    let started!: () => void;
+    const start = new Promise<void>((resolve) => { started = resolve; });
+    const conn = new CoreHostConnection({
+      discover: async () => { throw new ServerNotRunningError("missing"); },
+      spawn: async () => { started(); return { ok: false, recoverable: true }; },
+      createClient: () => asClient(makeFakeClient()),
+    });
+    const pending = expect(conn.ensure()).rejects.toMatchObject({ name: "AbortError" });
+    await start;
+    await conn.dispose();
+    await pending;
+  });
+
+  it("a failed attempt does not prevent a later successful retry", async () => {
+    let attempts = 0;
+    let running = false;
+    const client = makeFakeClient();
+    const conn = new CoreHostConnection({
+      discover: async () => { if (!running) throw new ServerNotRunningError("missing"); return endpoint; },
+      spawn: async () => { running = ++attempts === 2; return { ok: running, reason: "child exited" }; },
+      createClient: () => asClient(client),
+    });
+    await expect(conn.ensure()).rejects.toThrow("child exited");
+    await expect(conn.ensure()).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+    await conn.dispose();
+  });
+
   it("并发 getClient 共享同一次建立", async () => {
     const client = makeFakeClient();
     const discover = vi.fn(async () => endpoint);

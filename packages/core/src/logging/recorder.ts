@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { bindLogSource, captureLog } from "./capture.js";
-import { LogAppendIndeterminateError } from "./contracts.js";
+import { LogAppendIndeterminateError, LogStorageError } from "./contracts.js";
 import type {
   LogAccess,
   LogCapture,
@@ -20,26 +20,30 @@ interface Entry {
   key: string;
   healthThrough?: number;
   unconfirmedThrough?: number;
+  storageFailuresThrough?: number;
+  recoveriesThrough?: number;
   sealed?: boolean;
   uncertain?: boolean;
   countedAtClose?: boolean;
 }
+const HEALTH_FIELDS = {
+  lost: "number", from: "number", until: "number", captureFailures: "number",
+  unconfirmed: "number", attempts: "number", reason: "text", phase: "text",
+} as const;
+// This is the maximum ordinary contention window, not a persistence guarantee.
+const STORAGE_WAIT_MS = 5000;
 const HEALTH_SOURCE = bindLogSource({
   id: "logging",
   version: 1,
   events: {
     degraded: {
-      message: "日志采集曾受阻，以下时段的证据可能不完整",
+      message: "日志采集曾降级，原因及证据缺口见记录字段",
       level: "warn",
       tier: "critical",
-      fields: {
-        lost: "number",
-        from: "number",
-        until: "number",
-        captureFailures: "number",
-        unconfirmed: "number",
-      },
+      fields: HEALTH_FIELDS,
     },
+    waiting: { message: "日志写入曾等待资源", level: "info", tier: "critical", fields: HEALTH_FIELDS },
+    recovered: { message: "日志存储已恢复写入", level: "info", tier: "critical", fields: HEALTH_FIELDS },
   },
 });
 const size = (capture: LogCapture): number => Buffer.byteLength(JSON.stringify(capture));
@@ -63,9 +67,17 @@ export class LogRecorder {
   #reportedUnconfirmed = 0;
   #failures = 0;
   #reportedLost = 0;
+  #storageFailures = 0;
+  #reportedStorageFailures = 0;
+  #recoveries = 0;
+  #reportedRecoveries = 0;
+  #blockedSince: number | undefined;
+  #failureSince = 0;
+  #lastStorageFailure = "";
+  #failurePhase = "";
   #lostSince = 0;
   #lastFailure: string | undefined;
-  #lastNotice = 0;
+  #lastNotice = -Infinity;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #timerAt = 0;
   #work: Promise<void> | undefined;
@@ -172,6 +184,8 @@ export class LogRecorder {
           } else this.#lost++;
         }
         this.#lastFailure = "close-incomplete";
+        this.#state = "degraded";
+        this.#notifyHealth();
       }
       this.#queue.length = 0;
       this.#inflight.clear();
@@ -200,7 +214,9 @@ export class LogRecorder {
     } while (
       this.#queue.some((entry) => entry.capture.record.seq <= upper) ||
       this.#lost > this.#reportedLost ||
-      this.#unconfirmed > this.#reportedUnconfirmed
+      this.#unconfirmed > this.#reportedUnconfirmed ||
+      this.#storageFailures > this.#reportedStorageFailures ||
+      this.#recoveries > this.#reportedRecoveries
     );
   }
   #lose(count = 1): void {
@@ -318,7 +334,8 @@ export class LogRecorder {
       key,
       ...(healthThrough === undefined
         ? {}
-        : { healthThrough, unconfirmedThrough: this.#unconfirmed }),
+        : { healthThrough, unconfirmedThrough: this.#unconfirmed,
+            storageFailuresThrough: this.#storageFailures, recoveriesThrough: this.#recoveries }),
     });
     this.#bytes += bytes;
     this.#schedule(10);
@@ -419,13 +436,14 @@ export class LogRecorder {
       this.#schedule(
         this.#retry
           ? Math.max(0, this.#retryAt - Date.now())
-          : this.#queue.length
+          : this.#queue.length || this.#recoveries > this.#reportedRecoveries
             ? 10
             : this.#policy.maintenanceMs,
       );
     });
   }
   async #step(): Promise<void> {
+    let phase = "initialize";
     try {
       if (!this.#ready) {
         const status = await this.#sink.initialize();
@@ -434,20 +452,25 @@ export class LogRecorder {
         this.#ready = true;
       }
       if (
-        (this.#lost > this.#reportedLost || this.#unconfirmed > this.#reportedUnconfirmed) &&
+        (this.#lost > this.#reportedLost || this.#unconfirmed > this.#reportedUnconfirmed ||
+          this.#storageFailures > this.#reportedStorageFailures || this.#recoveries > this.#reportedRecoveries) &&
         !this.#queue.some((entry) => entry.healthThrough !== undefined)
       ) {
         const health = captureLog(
           HEALTH_SOURCE,
           { scope: "storage" },
           {
-            event: "degraded",
+            event: this.#lost > this.#reportedLost || this.#unconfirmed > this.#reportedUnconfirmed || this.#state === "degraded"
+              ? "degraded" : this.#recoveries > this.#reportedRecoveries ? "recovered" : "waiting",
             data: {
               lost: this.#lost - this.#reportedLost,
-              from: this.#lostSince,
+              from: this.#lostSince || this.#failureSince,
               until: Date.now(),
               captureFailures: this.#failures,
               unconfirmed: this.#unconfirmed - this.#reportedUnconfirmed,
+              attempts: this.#storageFailures - this.#reportedStorageFailures,
+              reason: this.#lastStorageFailure || this.#lastFailure,
+              phase: this.#failurePhase,
             },
           },
           this.#policy,
@@ -492,6 +515,7 @@ export class LogRecorder {
         peakBytes += bytes;
       }
       if (batch.length) {
+        phase = "append";
         for (const entry of batch) {
           entry.sealed = true;
           this.#inflight.add(entry);
@@ -536,10 +560,11 @@ export class LogRecorder {
         this.#apply(status.policy.effective);
         if (status.storageDegraded) {
           this.#ready = false;
-          throw Error("日志写入已确认，文件所有者需重建");
+          throw new LogStorageError("owner-unavailable", "日志写入已确认，文件所有者需重建");
         }
       }
       if (!this.#stopping && Date.now() - this.#lastMaintenance >= this.#policy.maintenanceMs) {
+        phase = "maintain";
         const status = await this.#sink.maintain();
         if (this.#stopping) return;
         this.#apply(status.policy.effective);
@@ -548,12 +573,37 @@ export class LogRecorder {
       this.#retry = 0;
       this.#retryAt = 0;
       this.#lastFailure = undefined;
-      if (!this.#stopping) this.#state = "ready";
-    } catch {
       if (!this.#stopping) {
+        if (this.#blockedSince !== undefined) {
+          this.#recoveries = Math.min(Number.MAX_SAFE_INTEGER, this.#recoveries + 1);
+          this.#blockedSince = undefined;
+        }
+        const recovered = this.#state === "degraded";
+        this.#state = "ready";
+        if (recovered) { this.#lastNotice = -Infinity; this.#notifyHealth(); }
+      }
+    } catch (error) {
+      if (!this.#stopping) {
+        const reason = storageFailureReason(error);
+        const transient = reason === "writer-busy" || reason === "resource-wait" || reason === "probe-unavailable" || reason === "migration-blocked";
+        this.#blockedSince ??= Date.now();
+        this.#failureSince = this.#blockedSince;
+        this.#storageFailures = Math.min(Number.MAX_SAFE_INTEGER, this.#storageFailures + 1);
+        this.#lastStorageFailure = reason;
+        this.#failurePhase = phase;
         this.#retry++;
-        this.#retryAt = Date.now() + Math.min(30_000, 100 * 2 ** Math.min(this.#retry, 8));
-        this.#degrade("storage-unavailable");
+        this.#retryAt = Date.now() + Math.min(transient ? 500 : 30_000, 100 * 2 ** Math.min(this.#retry, 8));
+        if (transient && Date.now() - this.#blockedSince < STORAGE_WAIT_MS &&
+            this.#lost === this.#reportedLost && this.#unconfirmed === this.#reportedUnconfirmed && this.#state !== "degraded") {
+          this.#state = "waiting";
+          this.#lastFailure = reason;
+        } else this.#degrade(reason);
+        // A known pre-write refusal may outlive the waiting state captured in
+        // the queued health record. Rebuild that unsubmitted observation from
+        // current counters; never rewrite a sealed or uncertain write.
+        const pendingHealth = this.#queue.find(entry =>
+          entry.healthThrough !== undefined && !entry.sealed && !entry.uncertain);
+        if (pendingHealth) this.#remove(pendingHealth);
       }
     } finally {
       this.#inflight.clear();
@@ -563,6 +613,8 @@ export class LogRecorder {
     if (entry.healthThrough === undefined) return;
     this.#reportedLost = Math.max(this.#reportedLost, entry.healthThrough);
     this.#reportedUnconfirmed = Math.max(this.#reportedUnconfirmed, entry.unconfirmedThrough ?? 0);
+    this.#reportedStorageFailures = Math.max(this.#reportedStorageFailures, entry.storageFailuresThrough ?? 0);
+    this.#reportedRecoveries = Math.max(this.#reportedRecoveries, entry.recoveriesThrough ?? 0);
   }
   #degrade(reason: string): void {
     if (this.#stopping) return;
@@ -570,12 +622,28 @@ export class LogRecorder {
     this.#lastFailure = reason;
     if (Date.now() - this.#lastNotice < 30_000) return;
     this.#lastNotice = Date.now();
+    this.#notifyHealth();
+  }
+  #notifyHealth(): void {
     try {
       this.#notify?.(this.health());
     } catch {
       /* Health cannot fail business. */
     }
   }
+}
+
+function storageFailureReason(error: unknown): string {
+  if (error instanceof LogStorageError) return error.code;
+  if (error instanceof LogAppendIndeterminateError) return "append-unconfirmed";
+  // Never retain arbitrary exception text, paths or input payloads in health evidence.
+  try {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "EACCES" || code === "EPERM") return "permission-denied";
+    if (code === "ENOSPC") return "disk-full";
+    if (code === "EIO") return "io-failed";
+  } catch { /* Hostile error projection is also isolated. */ }
+  return "storage-unavailable";
 }
 
 function boundedDelay(value: number): number {

@@ -123,6 +123,7 @@ export class PersistentApplicationHost<Options> {
   #disasterRecoveryStaging:
     | (OwnedResource & { readonly value: DisasterRecoveryStagingArea })
     | undefined;
+  #ownedCapacity: DeviceCapacityRuntime | undefined;
   #localWorkspaceOwner:
     | (OwnedResource & { readonly value: Exclude<LocalWorkspaceOwner, undefined> })
     | undefined;
@@ -181,6 +182,7 @@ export class PersistentApplicationHost<Options> {
     const deviceCapacity = this.#input.deviceCapacity ?? this.#dependencies.createDeviceCapacity(
       `${this.#input.zhixingHome}/distributed-runtime/capacity`,
     );
+    if (!this.#input.deviceCapacity) this.#ownedCapacity = deviceCapacity;
     const plannedAnchorTransferStaging =
       this.#dependencies.createPlannedAnchorTransferStaging({
         zhixingHome: this.#input.zhixingHome,
@@ -365,6 +367,10 @@ export class PersistentApplicationHost<Options> {
         const owner = this.#localWorkspaceOwner;
         this.#localWorkspaceOwner = undefined;
         if (owner) await releaseOnce(owner);
+      },
+      async () => {
+        this.#ownedCapacity?.close();
+        this.#ownedCapacity = undefined;
       },
     ]) {
       try {

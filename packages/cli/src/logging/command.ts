@@ -65,6 +65,6 @@ export async function runLoggingCommand(
     }
     writer.line(JSON.stringify(result, null, 2));
   } finally {
-    await access.close();
+    try { await access.close(); } finally { capacity.close(); }
   }
 }

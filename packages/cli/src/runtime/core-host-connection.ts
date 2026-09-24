@@ -35,6 +35,9 @@ import { runStopCommand } from "../serve/stop.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { observeStartupPhase } from "../logging/runtime.js";
+import type { LogRecordPort } from "@zhixing/core/logging";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
 const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 30_000;
@@ -42,7 +45,7 @@ const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
-  constructor(reason: string) {
+  constructor(reason: string, readonly publicReason = "本机服务连接失败，请查看运行日志。") {
     super(`知行暂时不可用：${reason}`);
     this.name = "CoreHostUnavailableError";
   }
@@ -110,9 +113,10 @@ export interface CoreHostConnectionDeps {
   /** 发现已在跑的宿主。 */
   discover: () => Promise<ServerEndpoint>;
   /** 拉起核心宿主，返回是否成功。 */
-  spawn: () => Promise<{
+  spawn: (attempt?: { deadlineAt: number; signal: AbortSignal }) => Promise<{
     ok: boolean;
     reason?: string;
+    publicReason?: string;
     recoverable?: boolean;
     mode?: "managed" | "on-demand" | "none";
   }>;
@@ -143,7 +147,7 @@ export interface CoreHostConnectionDeps {
 }
 
 /** 默认依赖：发现走 discoverServer、拉起走静默 spawnDaemon、client 走 createRpcClient。 */
-export function defaultCoreHostConnectionDeps(zhixingHome: string): CoreHostConnectionDeps {
+export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: LogRecordPort): CoreHostConnectionDeps {
   const discoveryPaths = {
     pidPath: getDefaultPidPath(zhixingHome),
     portPath: getDefaultPortPath(zhixingHome),
@@ -151,15 +155,18 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string): CoreHostConn
   };
   return {
     discover: () => discoverServer(discoveryPaths),
-    spawn: async () => {
+    spawn: async (attempt) => {
+      attempt?.signal.throwIfAborted();
       const { reconcileCurrentManagedService } = await import(
         "../serve/managed-service-runtime.js"
       );
-      const reconciled = await reconcileCurrentManagedService("host-missing", undefined, zhixingHome).catch(
+      const reconciled = await observeStartupPhase(records, "prepare-service", () =>
+        reconcileCurrentManagedService("host-missing", attempt?.signal, zhixingHome)).catch(
         (error: unknown) => ({
           error: error instanceof Error ? error.message : "本机自动启动配置不可用",
         }),
       );
+      attempt?.signal.throwIfAborted();
       if ("error" in reconciled) {
         return { ok: false, reason: reconciled.error };
       }
@@ -169,22 +176,31 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string): CoreHostConn
       if (reconciled.plan.mode === "none") {
         return { ok: false, reason: "这台设备不需要后台运行", mode: "none" };
       }
+      if (attempt && Date.now() >= attempt.deadlineAt) {
+        return { ok: false, reason: "本机启动准备超时", publicReason: "本机启动准备超时，请查看运行日志。" };
+      }
       // 静默 console：spawnDaemon 默认会打印成功横幅 / 失败日志尾部，但 ensure 是后台
       // 按需拉起、不是用户显式 serve，结果应由本层统一封装成友好错误。
       const silent = { log: () => {}, error: () => {} };
-      const result = await spawnDaemon({
+      const result = await observeStartupPhase(records, "wait-for-service", () => spawnDaemon({
         zhixingHome,
+        deadlineAt: attempt?.deadlineAt ?? Date.now() + DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+        signal: attempt?.signal,
+        reportFailure: false,
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
         // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP
         // 按配置自适应装配），不由拉起方式决定。
         forwardedArgs: ["serve"],
         deps: { console: silent },
-      });
+      }));
       return {
         ok: result.ok,
-        reason: result.reason,
-        recoverable: result.status === "starting",
+        reason: result.status === "starting" ? "等待本机服务就绪超时，可重试或用 zz logs 查看原因" : result.reason,
+        publicReason: result.status === "starting" ? "等待本机服务就绪超时。" : "本机服务启动失败。",
+        // The daemon owner now observes this child for the whole attempt, including
+        // exit and concurrent healthy-owner takeover. No second recovery window.
+        recoverable: false,
         mode: "on-demand",
       };
     },
@@ -225,6 +241,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
   private reconnecting: Promise<void> | null = null;
   private lifecycleEpoch = 0;
   private disposed = false;
+  private readonly startupAttempts = new Set<AbortController>();
   private status: CoreHostConnectionStatus = { kind: "disconnected" };
   /**
    * 跨重连持久的 notification 订阅：method → handlers。
@@ -725,27 +742,31 @@ export class CoreHostConnection implements CoreHostRpcLink {
       return { endpoint: await this.deps.discover() };
     } catch (err) {
       if (!(err instanceof ServerNotRunningError)) throw err;
-      await this.emitNotice({ kind: "starting" });
-      const spawned = await this.deps.spawn();
-      if (spawned.mode === "none") {
-        if (!this.deps.createSurfaceClient) {
-          throw new CoreHostUnavailableError(spawned.reason ?? "值班设备暂时不可用");
+      return this.withSpawnedHost(async (spawned, deadlineAt, signal) => {
+        if (spawned.mode === "none") {
+          if (!this.deps.createSurfaceClient) {
+            throw new CoreHostUnavailableError(spawned.reason ?? "值班设备暂时不可用");
+          }
+          const surfaceClient = await this.deps.createSurfaceClient();
+          await surfaceClient.connect();
+          return { surfaceClient };
         }
-        const surfaceClient = await this.deps.createSurfaceClient();
-        await surfaceClient.connect();
-        return { surfaceClient };
-      }
-      const endpoint = await this.discoverAfterSpawn(spawned, {
-        unableToStartReason: "知行启动失败，且没有发现可用服务",
-        unableToConnectReason: "知行已启动，但暂时无法连接",
+        const endpoint = await this.discoverAfterSpawn(spawned, {
+          deadlineAt,
+          signal,
+          unableToStartReason: "知行启动失败，且没有发现可用服务",
+          unableToConnectReason: "知行已启动，但暂时无法连接",
+        });
+        return { endpoint };
       });
-      return { endpoint };
     }
   }
 
   private async discoverAfterSpawn(
     spawned: Awaited<ReturnType<CoreHostConnectionDeps["spawn"]>>,
     opts: {
+      deadlineAt: number;
+      signal: AbortSignal;
       acceptEndpoint?: (endpoint: ServerEndpoint) => boolean;
       unableToStartReason: string;
       unableToConnectReason: string;
@@ -754,16 +775,19 @@ export class CoreHostConnection implements CoreHostRpcLink {
     if (!spawned.ok) {
       const endpoint = spawned.recoverable
         ? await this.waitForDiscoverableService({
-            timeoutMs: this.deps.startupRecoveryTimeoutMs ?? DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+            deadlineAt: opts.deadlineAt,
+            signal: opts.signal,
             pollIntervalMs: this.deps.startupRecoveryPollMs ?? DEFAULT_STARTUP_RECOVERY_POLL_MS,
             acceptEndpoint: opts.acceptEndpoint,
           })
         : await this.tryDiscover(opts.acceptEndpoint);
       if (endpoint) return endpoint;
-      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason);
+      opts.signal.throwIfAborted();
+      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason, spawned.publicReason);
     }
     const endpoint = await this.waitForDiscoverableService({
-      timeoutMs: this.deps.startupRecoveryTimeoutMs ?? DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+      deadlineAt: opts.deadlineAt,
+      signal: opts.signal,
       pollIntervalMs: this.deps.startupRecoveryPollMs ?? DEFAULT_STARTUP_RECOVERY_POLL_MS,
       acceptEndpoint: opts.acceptEndpoint,
     });
@@ -776,8 +800,29 @@ export class CoreHostConnection implements CoreHostRpcLink {
     unableToStartReason: string;
     unableToConnectReason: string;
   }): Promise<ServerEndpoint> {
-    await this.emitNotice({ kind: "starting" });
-    return this.discoverAfterSpawn(await this.deps.spawn(), opts);
+    return this.withSpawnedHost((spawned, deadlineAt, signal) =>
+      this.discoverAfterSpawn(spawned, { ...opts, deadlineAt, signal }));
+  }
+
+  private async withSpawnedHost<T>(use: (
+    spawned: Awaited<ReturnType<CoreHostConnectionDeps["spawn"]>>,
+    deadlineAt: number,
+    signal: AbortSignal,
+  ) => Promise<T>): Promise<T> {
+    if (this.disposed) throw new Error("CoreHostConnection 已释放");
+    const abort = new AbortController();
+    const deadlineAt = (this.deps.clock ?? Date.now)() +
+      (this.deps.startupRecoveryTimeoutMs ?? DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS);
+    this.startupAttempts.add(abort);
+    try {
+      await this.emitNotice({ kind: "starting" });
+      abort.signal.throwIfAborted();
+      const spawned = await this.deps.spawn({ deadlineAt, signal: abort.signal });
+      abort.signal.throwIfAborted();
+      return await use(spawned, deadlineAt, abort.signal);
+    } finally {
+      this.startupAttempts.delete(abort);
+    }
   }
 
   private async tryDiscover(
@@ -793,21 +838,26 @@ export class CoreHostConnection implements CoreHostRpcLink {
   }
 
   private async waitForDiscoverableService(opts: {
-    timeoutMs: number;
+    deadlineAt: number;
+    signal: AbortSignal;
     pollIntervalMs: number;
     acceptEndpoint?: (endpoint: ServerEndpoint) => boolean;
   }): Promise<ServerEndpoint | null> {
     const clock = this.deps.clock ?? Date.now;
     const sleep =
       this.deps.sleep ??
-      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-    const deadline = clock() + opts.timeoutMs;
+      ((ms: number) => delay(ms, undefined, { signal: opts.signal }));
+    const deadline = opts.deadlineAt;
 
-    while (clock() <= deadline) {
+    // A ready result at the deadline still deserves one discovery attempt;
+    // the deadline bounds waiting, not acceptance of an already-ready owner.
+    for (;;) {
+      opts.signal.throwIfAborted();
       const endpoint = await this.tryDiscover(opts.acceptEndpoint);
+      opts.signal.throwIfAborted();
       if (endpoint) return endpoint;
       if (clock() >= deadline) break;
-      await sleep(opts.pollIntervalMs);
+      await sleep(Math.min(opts.pollIntervalMs, deadline - clock()));
     }
     return null;
   }
@@ -906,6 +956,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    for (const attempt of this.startupAttempts) attempt.abort();
     this.subscriptions.clear();
     this.lifecycleHandlers.clear();
     this.clearPendingVersionRecheck();

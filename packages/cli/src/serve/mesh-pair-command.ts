@@ -289,7 +289,8 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     });
     await reconcileAfterPairing(options, "pairing-issuer-committed");
   } finally {
-    await store.stopStorageMaintenance();
+    try { await store.stopStorageMaintenance(); }
+    finally { if (!options.logging) deviceCapacity.close(); }
   }
 }
 

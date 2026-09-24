@@ -108,14 +108,16 @@ export async function runBackupSetupCommand(
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
   const context = await openContext(options);
-  const application = createBackupRecoveryAdministration(context, options);
-  const result = await mapBackupAdministrationError(() => application.setup(selection.directory !== undefined
-    ? { kind: "directory", directory: selection.directory }
-    : {
-        kind: "paired-device",
-        displayName: selectedDevice!,
-      }));
-  renderBackupSetupResult(context, result);
+  try {
+    const application = createBackupRecoveryAdministration(context, options);
+    const result = await mapBackupAdministrationError(() => application.setup(selection.directory !== undefined
+      ? { kind: "directory", directory: selection.directory }
+      : {
+          kind: "paired-device",
+          displayName: selectedDevice!,
+        }));
+    renderBackupSetupResult(context, result);
+  } finally { await context.close(); }
 }
 
 export async function runRecoveryRootRotateCommand(
@@ -213,21 +215,26 @@ export function recoveryRootPublicError(_error: unknown): Error {
 
 export async function runBackupVerifyCommand(options: BackupCommandOptions = {}): Promise<void> {
   const context = await openContext(options, false);
-  await mapBackupAdministrationError(() =>
-    createBackupRecoveryAdministration(context, options).verify());
-  context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
+  try {
+    await mapBackupAdministrationError(() =>
+      createBackupRecoveryAdministration(context, options).verify());
+    context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
+  } finally { await context.close(); }
 }
 
 export async function runBackupStatusCommand(options: BackupCommandOptions = {}): Promise<void> {
   const context = await openContext(options, false);
-  renderBackupStatus(
-    context,
-    await mapBackupAdministrationError(() =>
-      createBackupRecoveryAdministration(context, options).status()),
-  );
+  try {
+    renderBackupStatus(
+      context,
+      await mapBackupAdministrationError(() =>
+        createBackupRecoveryAdministration(context, options).status()),
+    );
+  } finally { await context.close(); }
 }
 
 interface BackupContext {
+  readonly close: () => Promise<void>;
   readonly logging?: RuntimeLogContext;
   readonly home: string;
   readonly secretStore: SecretStorePort;
@@ -437,7 +444,7 @@ function createBackupRecoveryRootLifecycleApplication(
     now: options.now ?? (() => new Date().toISOString()),
     withIssuerSession: async (use) => {
       const context = await openContext(options, false);
-      return use({
+      try { return await use({
         context: projectRootLifecycleContext({
           projection: context.projection,
           currentDeviceId: context.key.deviceId,
@@ -545,7 +552,7 @@ function createBackupRecoveryRootLifecycleApplication(
           const record = buildHomeTrustRecord(next, context.issuerKey);
           await context.store.appendTrustEvent({ event, record });
         },
-      });
+      }); } finally { await context.close(); }
     },
     withApprovalSession: async (use) => {
       const context = await openResetApprovalContext(options);
@@ -721,71 +728,77 @@ async function openContext(
     throw new Error("设备秘密存储解锁后才能管理恢复备份");
   }
   const key = await loadOrCreateDeviceKey(secretStore);
+  const ownedCapacity = !options.storageMaintenance && !options.logging
+    ? createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity")) : undefined;
   const capacity = options.storageMaintenance
     ? { storage: options.storageMaintenance }
-    : options.logging?.capacity ?? createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity"));
+    : options.logging?.capacity ?? ownedCapacity!;
   const store = new FileMeshBootstrapStore(home, key, { storageMaintenance: capacity.storage, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
-  let projection = await store.loadTrustProjection();
-  let trust = await store.loadTrustRecord();
-  let identity: DeviceIdentity;
-  if (!projection || !trust) {
-    if (!initialize) throw new Error("当前设备尚未建立可管理恢复备份的本地身份");
-    identity = enrollDeviceIdentity(key, {
-      displayName: hostname(),
-      platform: devicePlatform(),
-      enrolledAt: new Date().toISOString(),
-    });
-    const created = await store.initializeLocalHome({
+  const close = async (): Promise<void> => { try { await store.stopStorageMaintenance(); } finally { ownedCapacity?.close(); } };
+  try {
+    let projection = await store.loadTrustProjection();
+    let trust = await store.loadTrustRecord();
+    let identity: DeviceIdentity;
+    if (!projection || !trust) {
+      if (!initialize) throw new Error("当前设备尚未建立可管理恢复备份的本地身份");
+      identity = enrollDeviceIdentity(key, {
+        displayName: hostname(),
+        platform: devicePlatform(),
+        enrolledAt: new Date().toISOString(),
+      });
+      const created = await store.initializeLocalHome({
+        key,
+        identity,
+        roles: ["anchor", "executor"],
+      });
+      projection = created.projection;
+      trust = created.record;
+    } else {
+      const member = trust.members.find((candidate) =>
+        candidate.state === "active" && candidate.device.deviceId === key.deviceId);
+      if (!member) throw new Error("当前设备不在有效的 home 信任成员中");
+      identity = member.device;
+    }
+    if (requireIssuer && trust.issuer.deviceId !== key.deviceId) {
+      throw new Error("只有当前主设备可以管理恢复备份");
+    }
+    const config = loadConfig({ homeDir: home });
+    if (config.mesh?.enabledRoles && !config.mesh.enabledRoles.includes("anchor")) {
+      throw new Error("只有当前主设备可以管理恢复备份");
+    }
+    let issuerKey = await loadActiveAnchorIssuerKey(secretStore, trust.issuer.issuerKeyId);
+    if (!issuerKey && trust.issuer.issuerKeyId === key.deviceId) {
+      const bootstrapKeyId = `home-bootstrap:${trust.homeId}`;
+      await persistAnchorIssuerKey(secretStore, bootstrapKeyId, key);
+      await activateAnchorIssuerKey(secretStore, bootstrapKeyId, key.deviceId);
+      issuerKey = key;
+    }
+    if (!issuerKey || issuerKey.deviceId !== trust.issuer.issuerKeyId) {
+      throw new Error("当前主设备缺少可用的值班签发密钥");
+    }
+    store.bindIssuerKey(issuerKey);
+    return {
+      close,
+      home,
+      logging: options.logging,
+      secretStore,
+      ...(config.mesh ? { meshConfiguration: config.mesh } : {}),
       key,
+      issuerKey,
       identity,
-      roles: ["anchor", "executor"],
-    });
-    projection = created.projection;
-    trust = created.record;
-  } else {
-    const member = trust.members.find((candidate) =>
-      candidate.state === "active" && candidate.device.deviceId === key.deviceId);
-    if (!member) throw new Error("当前设备不在有效的 home 信任成员中");
-    identity = member.device;
-  }
-  if (requireIssuer && trust.issuer.deviceId !== key.deviceId) {
-    throw new Error("只有当前主设备可以管理恢复备份");
-  }
-  const config = loadConfig({ homeDir: home });
-  if (config.mesh?.enabledRoles && !config.mesh.enabledRoles.includes("anchor")) {
-    throw new Error("只有当前主设备可以管理恢复备份");
-  }
-  let issuerKey = await loadActiveAnchorIssuerKey(secretStore, trust.issuer.issuerKeyId);
-  if (!issuerKey && trust.issuer.issuerKeyId === key.deviceId) {
-    const bootstrapKeyId = `home-bootstrap:${trust.homeId}`;
-    await persistAnchorIssuerKey(secretStore, bootstrapKeyId, key);
-    await activateAnchorIssuerKey(secretStore, bootstrapKeyId, key.deviceId);
-    issuerKey = key;
-  }
-  if (!issuerKey || issuerKey.deviceId !== trust.issuer.issuerKeyId) {
-    throw new Error("当前主设备缺少可用的值班签发密钥");
-  }
-  store.bindIssuerKey(issuerKey);
-  return {
-    home,
-    logging: options.logging,
-    secretStore,
-    ...(config.mesh ? { meshConfiguration: config.mesh } : {}),
-    key,
-    issuerKey,
-    identity,
-    trust,
-    projection,
-    store,
-    capacity,
-    backupTargets: createBackupTargetConfigurationInfrastructure(home),
-    publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
-      zhixingHome: home,
-      storageMaintenance: capacity.storage,
-    }).directory,
-    writeLine: options.writeLine ?? createStdoutWriter().line,
-    now: options.now ?? (() => new Date().toISOString()),
-  };
+      trust,
+      projection,
+      store,
+      capacity,
+      backupTargets: createBackupTargetConfigurationInfrastructure(home),
+      publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+        zhixingHome: home,
+        storageMaintenance: capacity.storage,
+      }).directory,
+      writeLine: options.writeLine ?? createStdoutWriter().line,
+      now: options.now ?? (() => new Date().toISOString()),
+    };
+  } catch (error) { await close(); throw error; }
 }
 
 interface PreparedInitialRoot {

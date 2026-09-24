@@ -1,5 +1,5 @@
 import { recordingFixture } from "../../../core/src/logging/__tests__/recording.js";
-import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
+import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { createServer } from "node:net";
 import path from "node:path";
 import { writeFile } from "node:fs/promises";

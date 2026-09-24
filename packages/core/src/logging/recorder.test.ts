@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { bindLogSource, captureLog } from "./capture.js";
 import { LogRecorder } from "./recorder.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
-import { LogAppendIndeterminateError } from "./contracts.js";
+import { LogAppendIndeterminateError, LogStorageError } from "./contracts.js";
 import type {
   LogCapture,
   LogDraft,
@@ -71,6 +71,80 @@ const pause = (): { promise: Promise<void>; resolve(): void } => {
 };
 
 describe("runtime log capture and lifecycle", () => {
+  it.each(["writer-busy", "resource-wait", "probe-unavailable", "migration-blocked"] as const)("waits through short %s without a false unavailable warning", async (code) => {
+    const target = sink(), notify = vi.fn();
+    target.initialize = vi.fn().mockRejectedValueOnce(new LogStorageError(code, "temporary contention")).mockResolvedValue(status());
+    const recorder = new LogRecorder(target, { onHealth: notify });
+    recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+    try {
+      await recorder.start();
+      expect(recorder.health()).toMatchObject({ state: "waiting", lost: 0, lastFailure: code });
+      await recorder.flush(1500);
+      expect(notify).not.toHaveBeenCalled();
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0 });
+      expect(target.stored).toContainEqual(expect.objectContaining({ record: expect.objectContaining({ source: "logging", event: "recovered", data: expect.objectContaining({ reason: code, phase: "initialize", lost: 0 }) }) }));
+    } finally { await recorder.close(); }
+  });
+
+  it.each(["initialize", "append", "maintain"] as const)("retains %s failure and recovery even without any record loss", async (phase) => {
+    const target = sink(), notify = vi.fn(), original = target[phase].bind(target);
+    target[phase] = vi.fn().mockRejectedValueOnce(Object.assign(Error("private payload"), { code: "EACCES" })).mockImplementation(original) as never;
+    const recorder = new LogRecorder(target, { onHealth: notify });
+    recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+    try {
+      await recorder.flush(1500);
+      expect(notify.mock.calls.map(([health]) => health.state)).toEqual(["degraded", "ready"]);
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0 });
+      const health = target.stored.filter(entry => entry.record.source === "logging");
+      expect(health.map(entry => entry.record.event)).toEqual(["degraded", "recovered"]);
+      expect(health[0]?.record.data).toMatchObject({ reason: "permission-denied", phase, attempts: 1, lost: 0 });
+      expect(JSON.stringify(health)).not.toContain("private payload");
+    } finally { await recorder.close(); }
+  });
+
+  it.each(["writer-busy", "migration-blocked"] as const)("reports sustained %s and does not leave retries after close", async (code) => {
+    vi.useFakeTimers();
+    const target = sink(), notify = vi.fn();
+    target.initialize = vi.fn(async () => { throw new LogStorageError(code, "busy"); });
+    const recorder = new LogRecorder(target, { onHealth: notify });
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(notify).toHaveBeenCalledWith(expect.objectContaining({ state: "degraded", lastFailure: code, lost: 0 }));
+      const closing = recorder.close(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await closing;
+      const attempts = vi.mocked(target.initialize).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(target.initialize).toHaveBeenCalledTimes(attempts);
+      expect(recorder.health()).toMatchObject({ state: "closed", lost: 1, queued: 0 });
+    } finally { await recorder.close(0); vi.useRealTimers(); }
+  });
+
+  it("persists a wait that became degraded before its health record could be written", async () => {
+    vi.useFakeTimers();
+    const target = sink(), notify = vi.fn(), append = target.append.bind(target);
+    let blocked = true;
+    target.append = async records => {
+      if (blocked) throw new LogStorageError("migration-blocked", "waiting for writer registration");
+      return append(records);
+    };
+    const recorder = new LogRecorder(target, { onHealth: notify });
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(recorder.health().state).toBe("degraded");
+      blocked = false;
+      await vi.advanceTimersByTimeAsync(1000);
+      const health = target.stored.filter(entry => entry.record.source === "logging");
+      expect(health.map(entry => entry.record.event)).toEqual(["degraded", "recovered"]);
+      expect(health[0]?.record.data).toMatchObject({ reason: "migration-blocked", lost: 0, unconfirmed: 0 });
+      expect(notify.mock.calls.map(([value]) => value.state)).toEqual(["degraded", "ready"]);
+    } finally { await recorder.close(); vi.useRealTimers(); }
+  });
+
   it.each([
     "initialize",
     "append",
@@ -95,7 +169,7 @@ describe("runtime log capture and lifecycle", () => {
     const flushing = recorder.flush(1000);
     await recorder.close(1000);
     await flushing;
-    expect(attempts).toHaveLength(2);
+    expect(attempts).toHaveLength(stage === "append" ? 3 : 2); // The final append records recovery.
     expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(190);
     expect(target.stored.filter((capture) => capture.record.source === "test")).toHaveLength(1);
     expect(recorder.health()).toMatchObject({
@@ -150,7 +224,7 @@ describe("runtime log capture and lifecycle", () => {
     try {
       await recorder.flush(20);
       expect(target.stored).toHaveLength(0);
-      await vi.waitFor(() => expect(target.stored).toHaveLength(1));
+      await vi.waitFor(() => expect(target.stored.filter(entry => entry.record.source === "test")).toHaveLength(1));
       expect(target.initialize).toHaveBeenCalledTimes(2);
     } finally {
       await recorder.close();
@@ -173,8 +247,9 @@ describe("runtime log capture and lifecycle", () => {
       port.record({ event: "error", data: { n: 2 } });
       await recorder.flush(20);
       expect(target.stored).toHaveLength(1);
-      await vi.waitFor(() => expect(target.stored).toHaveLength(2));
-      expect(target.append).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => expect(target.stored.filter(entry => entry.record.source === "test")).toHaveLength(2));
+      await recorder.flush();
+      expect(target.append).toHaveBeenCalledTimes(3);
       expect(recorder.health()).toMatchObject({ lost: 0, queued: 0, state: "ready" });
     } finally {
       await recorder.close();
@@ -338,8 +413,9 @@ describe("runtime log capture and lifecycle", () => {
       port.record({ event: "detail", data: { n: 1 } });
       expect(recorder.health().queued).toBe(1);
       await recorder.flush(1000);
-      expect(target.stored).toHaveLength(1);
-      expect(target.stored[0]?.record.repeat?.count).toBe(2);
+      const business = target.stored.filter(entry => entry.record.source === "test");
+      expect(business).toHaveLength(1);
+      expect(business[0]?.record.repeat?.count).toBe(2);
       expect(recorder.health()).toMatchObject({ lost: 0, unconfirmed: 0 });
     } finally { await recorder.close(); }
   });
@@ -555,15 +631,15 @@ describe("runtime log capture and lifecycle", () => {
         unconfirmed: gap === "unconfirmed" ? 1 : 0,
       });
       expect(attempts.flat().filter(entry => entry.record.source === "test")).toHaveLength(gap === "lost" ? 0 : 1);
-      const notices = attempts.flat().filter(entry => entry.record.source === "logging");
+      const notices = attempts.flat().filter(entry => entry.record.source === "logging" && entry.record.event === "degraded");
       expect(notices).toHaveLength(2);
       expect(new Set(notices.map(entry => entry.record.id)).size).toBe(2);
-      expect(target.stored).toHaveLength(published ? 2 : 1);
-      for (const entry of target.stored) expect(entry.record.data).toMatchObject({
+      expect(target.stored).toHaveLength(published ? 3 : 2);
+      for (const entry of target.stored.filter(entry => entry.record.event === "degraded")) expect(entry.record.data).toMatchObject({
         lost: gap === "lost" ? 1 : 0, unconfirmed: gap === "unconfirmed" ? 1 : 0,
       });
       await vi.advanceTimersByTimeAsync(DEFAULT_LOG_POLICY.maintenanceMs * 2);
-      expect(healthAttempts).toBe(2);
+      expect(healthAttempts).toBe(3);
     } finally {
       const closing = recorder.close(50);
       await vi.advanceTimersByTimeAsync(50);
