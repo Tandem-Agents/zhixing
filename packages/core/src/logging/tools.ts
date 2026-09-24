@@ -1,7 +1,7 @@
 import type { ToolDefinition } from "../types/tools.js";
 import type { ProductApiDispatcher } from "../product-api/catalog.js";
 import type { LogReadContext } from "./contracts.js";
-import { validLogToken } from "./capture.js";
+import { validLogIdentity } from "./capture.js";
 import { publicLogErrorMessage } from "./errors.js";
 import {
   LOG_READ,
@@ -19,7 +19,7 @@ interface Binding {
 const bindings = new WeakMap<ToolDefinition["call"], Binding>();
 export function conversationLogScope(conversationId: string): string {
   const scope = `conversation:${conversationId}`;
-  if (!validLogToken(scope)) throw Error("日志会话身份无效");
+  if (!validLogIdentity(scope)) throw Error("日志会话身份无效");
   return scope;
 }
 

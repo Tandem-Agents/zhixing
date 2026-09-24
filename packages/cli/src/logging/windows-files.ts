@@ -2,9 +2,10 @@ import path from "node:path";
 import {
   CheckpointDirectoryHandle,
   type CheckpointFilesystemSession,
+  type NodeProcessInventory,
 } from "@zhixing/mesh/filesystem";
 import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
-import { LegacyLogFiles, isLegacyLogFile } from "./legacy-files.js";
+import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
 
 /** The parent directly owns the asynchronous native process and its OS lock. */
 export class WindowsLogFiles implements LogFileSystem {
@@ -71,6 +72,10 @@ export class WindowsLogFiles implements LogFileSystem {
       throw Error("日志文件存储暂不可用");
     return this.#directory;
   }
+  observeNodeProcesses(): Promise<NodeProcessInventory> {
+    if (this.#closed || !this.#session || this.#session.failed) throw Error("日志文件存储暂不可用");
+    return this.#session.observeNodeProcesses();
+  }
   async list(limit: number): Promise<readonly string[]> {
     const own = this.#directory ? await this.#root().listEntries(limit) : [];
     if (own.some(isLegacyLogFile)) throw Error("日志根含保留的旧日志名称");
@@ -81,6 +86,10 @@ export class WindowsLogFiles implements LogFileSystem {
   async stat(name: string): Promise<LogFileInfo> {
     if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return { ...await entry.directory.statFile(entry.name), legacyPath: entry.relativePath }; }
     return this.#root().statFile(name);
+  }
+  statMany(names: readonly string[]): Promise<readonly LogFileInfo[]> {
+    if (this.#closed || this.#session?.failed || !this.#legacy) throw Error("日志文件存储暂不可用");
+    return statLogFiles(this.#directory, this.#legacy, names);
   }
   read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
     if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return entry.directory.readFile(entry.name, size, offset, limit, identity); }
@@ -120,7 +129,12 @@ export class WindowsLogFiles implements LogFileSystem {
   }
   async tryLock(): Promise<boolean> {
     if (this.#release) throw Error("日志互斥不可重入");
-    this.#release = await this.#root(true).tryLock("writer.lock");
+    this.#release = await this.#root(true).waitLock("writer.lock", 2000);
+    return this.#release !== undefined;
+  }
+  async tryReadLock(): Promise<boolean> {
+    if (this.#release) throw Error("日志互斥不可重入");
+    this.#release = await this.#root().waitLock("writer.lock", 2000, "shared");
     return this.#release !== undefined;
   }
   async unlock(): Promise<void> {

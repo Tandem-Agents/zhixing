@@ -247,10 +247,13 @@ export async function runExecutorRole(
       },
     });
     executorServerLifecycle.acquireBinding(localServerBinding);
-    const initialManagedServiceState = await loadCurrentManagedServiceState(
-      "activate",
-      zhixingHome,
-    );
+    const loadManagedState = (intent: Parameters<typeof loadCurrentManagedServiceState>[0]) =>
+      loadCurrentManagedServiceState(intent, zhixingHome, bootstrap.secretStore);
+    const reconcileManagedState = (
+      trigger: Parameters<typeof reconcileCurrentManagedService>[0],
+      signal?: AbortSignal,
+    ) => reconcileCurrentManagedService(trigger, signal, zhixingHome, bootstrap.secretStore);
+    const initialManagedServiceState = await loadManagedState("activate");
     const initialManagedHostAdmission = await captureManagedHostAdmission(
       processMode,
       zhixingHome,
@@ -547,8 +550,8 @@ export async function runExecutorRole(
       const result = await coordinateManagedHostTrustTransition({
         processMode,
         expectedAdmission: initialManagedHostAdmission,
-        loadCurrent: (purpose) => loadCurrentManagedServiceState(purpose, zhixingHome),
-        reconcile: (trigger, signal) => reconcileCurrentManagedService(trigger, signal, zhixingHome),
+        loadCurrent: loadManagedState,
+        reconcile: reconcileManagedState,
         refuseNewMessages: () => jobOwnerAssembly.pauseAccepting(),
         requestShutdown: () => executorInternalStop.requestStop({
           reason: "managed-role-changed",
@@ -615,7 +618,7 @@ export async function runExecutorRole(
         removalAdmissionOperationId = undefined;
       },
       cleanup: async () => {
-        const current = await loadCurrentManagedServiceState("activate", zhixingHome);
+        const current = await loadManagedState("activate");
         const adapter = current.spec
           ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
           : undefined;
@@ -847,7 +850,7 @@ export async function runExecutorRole(
       if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
       if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
       try {
-        const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
+        const current = await loadManagedState("inspect");
         if (
           !current.spec ||
           current.spec.serviceId !== candidateHost.serviceId ||

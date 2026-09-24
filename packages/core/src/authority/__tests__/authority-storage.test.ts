@@ -643,6 +643,20 @@ describe("FileArtifactStore", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
 });
 
 describe("FileAuthorityCommitLog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("reuses only validation proofs and never mutated read objects or changed bytes", async () => {
+    const { log } = await createStores();
+    await log.append([{ stream: "control", body: { value: "original" } }]);
+    const first = await log.readAll<{ value: string }>();
+    first[0]!.entries[0]!.body.value = "tampered";
+    expect((await log.readAll<{ value: string }>())[0]!.entries[0]!.body.value).toBe("original");
+    const bytes = await readFile(log.logPath);
+    const position = bytes.indexOf(Buffer.from("original"));
+    expect(position).toBeGreaterThan(0);
+    Buffer.from("modified").copy(bytes, position);
+    await writeFile(log.logPath, bytes);
+    await expect(log.readAll()).rejects.toThrow();
+  });
+
   it("keeps the compatibility bridge on legacy frames with a stable sidecar identity", async () => {
     const { artifacts, log } = await createStores();
     // 兼容桥服务的是旧版本创建的日志:新建日志现在默认写带版本头的格式,

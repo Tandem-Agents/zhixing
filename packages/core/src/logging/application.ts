@@ -9,7 +9,7 @@ import type {
   LogRef,
   LogStatus,
 } from "./contracts.js";
-import { MAX_LOG_TOKEN_LENGTH, validLogToken } from "./capture.js";
+import { MAX_LOG_TOKEN_LENGTH, MAX_LOG_ID_LENGTH, validLogToken, validLogIdentity } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
 import { LocalLogStore, logDigest, indexName, type LogStoreSnapshot, type LogRetirement } from "./storage.js";
 import { scopeLogQuery, type LogScanFiles, type LogVisibleRange } from "./query-scope.js";
@@ -28,8 +28,8 @@ export type LogAddress =
   | { storeId: string; kind: "record"; id: string }
   | { storeId: string; kind: "legacy"; id: string }
   | { storeId: string; kind: "operation"; ref: LogRef };
-// Each accepted token can expand threefold under percent encoding.
-export const MAX_LOG_ADDRESS_LENGTH = "zxlog://".length + 36 + "/operation/".length + MAX_LOG_TOKEN_LENGTH * 6 + 1;
+// A UTF-16 unit can require nine percent-encoded ASCII bytes (three UTF-8 bytes).
+export const MAX_LOG_ADDRESS_LENGTH = "zxlog://".length + 36 + "/operation/".length + MAX_LOG_TOKEN_LENGTH * 3 + MAX_LOG_ID_LENGTH * 9 + 1;
 export function formatLogAddress(address: LogAddress): string {
   const suffix =
     address.kind === "record" || address.kind === "legacy"
@@ -48,7 +48,7 @@ export function parseLogAddress(value: string): LogAddress {
   if (match[2] === "legacy" && !match[4] && (id === "catalog" || /^[a-f0-9]{64}$/u.test(id))) return { storeId: match[1]!, kind: "legacy", id };
   if (match[2] === "record" && !match[4]) return { storeId: match[1]!, kind: "record", id };
   const refId = decodeURIComponent(match[4] ?? "");
-  if (match[2] !== "operation" || !validLogToken(refId)) throw new LogRequestError("日志操作地址无效");
+  if (match[2] !== "operation" || !validLogIdentity(refId)) throw new LogRequestError("日志操作地址无效");
   return {
     storeId: match[1]!,
     kind: "operation",
@@ -548,7 +548,7 @@ function validateFilter(filter: LogFilter): void {
     (filter.source !== undefined && !validLogToken(filter.source)) ||
     (filter.ref &&
       (!validLogToken(filter.ref.kind) ||
-        !validLogToken(filter.ref.id) ||
+        !validLogIdentity(filter.ref.id) ||
         (filter.ref.storeId !== undefined && !validLogToken(filter.ref.storeId)))) ||
     (filter.level !== undefined && !["debug", "info", "warn", "error"].includes(filter.level))
   )
@@ -587,7 +587,7 @@ function parseRecord(line: string, limit: number, storeId: string): LogRecord {
     !validLogToken(record.source) ||
     !validLogToken(record.event) ||
     !validLogToken(record.process) ||
-    !validLogToken(record.access?.scope) ||
+    !validLogIdentity(record.access?.scope) ||
     !Array.isArray(record.refs) ||
     record.refs.length > 16 ||
     !Number.isSafeInteger(record.receivedAt) ||
@@ -603,7 +603,7 @@ function parseRecord(line: string, limit: number, storeId: string): LogRecord {
   for (const ref of record.refs)
     if (
       !validLogToken(ref.kind) ||
-      !validLogToken(ref.id) ||
+      !validLogIdentity(ref.id) ||
       (ref.storeId !== undefined && !validLogToken(ref.storeId))
     )
       throw Error("invalid-reference");

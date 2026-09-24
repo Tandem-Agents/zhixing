@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
+import type { SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
 import { loadConfig } from "@zhixing/providers";
@@ -44,9 +45,10 @@ export type ManagedServiceStateLoadIntent = "inspect" | "activate";
 export async function loadCurrentManagedServiceState(
   intent: ManagedServiceStateLoadIntent,
   homeDir = getZhixingHome(),
+  secretStore?: SecretStorePort,
 ): Promise<ManagedServiceCurrentState> {
   const config = loadConfig({ homeDir, noAutoCreate: intent === "inspect" });
-  return loadCurrentManagedServiceStateFromConfig(intent, homeDir, config);
+  return loadCurrentManagedServiceStateFromConfig(intent, homeDir, config, secretStore);
 }
 
 export async function proveLocalCurrentAuthority(
@@ -74,6 +76,7 @@ async function loadCurrentManagedServiceStateFromConfig(
   intent: ManagedServiceStateLoadIntent,
   homeDir: string,
   config: ReturnType<typeof loadConfig>,
+  existingSecretStore?: SecretStorePort,
 ): Promise<ManagedServiceCurrentState> {
   const initialBinding = await readPlatformSecretStoreBackendBinding(homeDir);
   const expectedBackend = managedExpectedBackend();
@@ -87,7 +90,7 @@ async function loadCurrentManagedServiceStateFromConfig(
   if (intent === "inspect" && initialBinding === undefined) {
     throw new Error("local-credentials-unavailable");
   }
-  const secretStore = createPlatformSecretStore({
+  const secretStore = existingSecretStore ?? createPlatformSecretStore({
     homeDir,
     context: process.env.ZHIXING_MANAGED === "1" ? "managed" : "foreground",
   });
@@ -169,6 +172,7 @@ export async function reconcileCurrentManagedService(
   trigger: ManagedServiceReconcileTrigger,
   signal: AbortSignal = new AbortController().signal,
   homeDir: string = getZhixingHome(),
+  secretStore?: SecretStorePort,
 ): Promise<ManagedServiceReconcileResult> {
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
@@ -176,7 +180,7 @@ export async function reconcileCurrentManagedService(
   try { return await reconcileManagedService({
     homeKey: path.resolve(homeDir),
     trigger,
-    loadCurrent: () => loadCurrentManagedServiceState("activate", homeDir),
+    loadCurrent: () => loadCurrentManagedServiceState("activate", homeDir, secretStore),
     adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage }),
     signal,
   }); } finally { capacity.close(); }

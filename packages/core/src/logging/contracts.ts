@@ -179,7 +179,9 @@ export interface LogPage {
   };
 }
 export interface LogSink {
+  /** Recovers and performs bounded maintenance before returning. */
   initialize(): Promise<LogStatus>;
+  /** Includes bounded maintenance; callers need not maintain again after this commit. */
   append(records: readonly LogCapture[]): Promise<LogAppendReceipt>;
   maintain(): Promise<LogStatus>;
   close(): Promise<void>;

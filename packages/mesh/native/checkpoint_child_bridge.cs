@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -34,6 +35,11 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool LockFileEx(IntPtr handle, uint flags, uint reserved, uint low, uint high, ref OVERLAPPED overlapped);
+  [DllImport("kernel32.dll", EntryPoint = "LockFileEx", SetLastError = true)] static extern bool QueueLockFile(IntPtr handle, uint flags, uint reserved, uint low, uint high, IntPtr overlapped);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateEventW(IntPtr security, bool manualReset, bool initialState, string name);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool CancelIoEx(IntPtr handle, IntPtr overlapped);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetOverlappedResult(IntPtr handle, IntPtr overlapped, out uint transferred, bool wait);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandle(IntPtr handle, out BY_HANDLE_FILE_INFORMATION info);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandleEx(IntPtr handle, int cls, IntPtr info, uint size);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetFileInformationByHandle(IntPtr handle, int cls, IntPtr info, uint size);
@@ -44,6 +50,9 @@ internal static class CheckpointChildBridge {
   static extern int NtSetInformationFile(IntPtr handle, out IO_STATUS_BLOCK status, IntPtr information, uint length, int informationClass);
 
   static readonly Dictionary<long, IntPtr> Handles = new Dictionary<long, IntPtr>();
+  [DllImport("shell32.dll", SetLastError = true)]
+  static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
   static long NextHandle = 1;
   static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
 
@@ -66,10 +75,22 @@ internal static class CheckpointChildBridge {
 
   static object Dispatch(Dictionary<string, object> r) {
     var op = Text(r, "op");
+    if (op == "observeNodeProcesses") return ObserveNodeProcesses();
     if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create"), r.ContainsKey("readOnly") && Flag(r, "readOnly")));
     if (op == "statFile") return StatFile(Get(r, "parent"), Text(r, "name"));
+    if (op == "statFiles") {
+      var names = r["names"] as System.Collections.IList;
+      if (names == null || names.Count > 4096) throw new InvalidOperationException("Checkpoint file inventory exceeds its bound");
+      var parent = Get(r, "parent"); var entries = new List<object>();
+      foreach (var name in names) {
+        if (!(name is string)) throw new InvalidOperationException("Checkpoint child name is invalid");
+        entries.Add(StatFile(parent, (string)name));
+      }
+      return entries;
+    }
     if (op == "truncateFile") { TruncateFile(Get(r, "parent"), Text(r, "name"), Text(r, "identity"), Number(r, "bytes")); return true; }
     if (op == "tryLock") return TryLock(Get(r, "parent"), Text(r, "name"));
+    if (op == "waitLock") return WaitLock(Get(r, "parent"), Text(r, "name"), Number(r, "waitMs"), r.ContainsKey("shared") && Flag(r, "shared"));
     if (op == "openDirectory") return Register(OpenRelative(Get(r, "parent"), Text(r, "name"), true, Flag(r, "create"), false));
     if (op == "identity") return Identity(Get(r, "handle"));
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
@@ -81,6 +102,34 @@ internal static class CheckpointChildBridge {
     if (op == "sync") { if (!FlushFileBuffers(Get(r, "handle"))) throw Win32("Unable to flush checkpoint handle"); return true; }
     if (op == "close") { var id = Number(r, "handle"); var h = GetById(id); Handles.Remove(id); if (!CloseHandle(h)) throw Win32("Unable to close checkpoint handle"); return true; }
     throw new InvalidOperationException("Unsupported checkpoint bridge operation");
+  }
+
+  // Finite OS observation only; the caller owns all product/writer classification.
+  static object ObserveNodeProcesses() {
+    var entries = new List<object>(); var complete = true; var characters = 0;
+    using (var search = new ManagementObjectSearcher("SELECT ProcessId, CreationDate, CommandLine FROM Win32_Process WHERE Name='node.exe' OR Name='node'")) {
+      search.Options.Timeout = TimeSpan.FromSeconds(2);
+      using (var rows = search.Get()) foreach (ManagementObject row in rows) using (row) {
+        if (entries.Count >= 256) { complete = false; break; }
+        var creation = row["CreationDate"] as string;
+        if (creation == null) { complete = false; continue; }
+        var birth = ManagementDateTimeConverter.ToDateTime(creation).ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var command = row["CommandLine"] as string; List<string> argv = null;
+        if (command != null && command.Length <= 32768 && characters + command.Length <= 65536) {
+          characters += command.Length;
+          int count; var memory = CommandLineToArgvW(command, out count);
+          try {
+            if (memory != IntPtr.Zero && count <= 1024) {
+              argv = new List<string>();
+              for (var i = 0; i < count; i++) argv.Add(Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size)));
+            }
+          } finally { if (memory != IntPtr.Zero) LocalFree(memory); }
+        }
+        if (argv == null) complete = false;
+        entries.Add(new Dictionary<string, object> { {"pid", Convert.ToInt32(row["ProcessId"])}, {"birth", birth}, {"argv", argv} });
+      }
+    }
+    return new Dictionary<string, object> { {"complete", complete}, {"entries", entries} };
   }
 
   static IntPtr OpenPath(string input, bool create, bool readOnly) {
@@ -106,7 +155,7 @@ internal static class CheckpointChildBridge {
     } catch { CloseHandle(current); throw; }
   }
 
-  static IntPtr OpenRelative(IntPtr parent, string name, bool directory, bool create, bool exclusive, bool writable = true) {
+  static IntPtr OpenRelative(IntPtr parent, string name, bool directory, bool create, bool exclusive, bool writable = true, bool asynchronous = false) {
     ExactName(name);
     var nameBuffer = Marshal.StringToHGlobalUni(name);
     var unicode = new UNICODE_STRING { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)(name.Length * 2)), Buffer = nameBuffer };
@@ -120,7 +169,7 @@ internal static class CheckpointChildBridge {
         ? FILE_LIST_DIRECTORY | (writable ? FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE : 0)
         : FILE_READ_DATA | (writable ? FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE : 0));
       uint disposition = create ? (exclusive ? FILE_CREATE : FILE_OPEN_IF) : FILE_OPEN;
-      uint options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
+      uint options = (asynchronous ? 0 : FILE_SYNCHRONOUS_IO_NONALERT) | FILE_OPEN_REPARSE_POINT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
       var result = NtCreateFile(out handle, access, ref attributes, out status, IntPtr.Zero, 0,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition, options, IntPtr.Zero, 0);
       if (result < 0 || handle == IntPtr.Zero || handle == new IntPtr(-1)) {
@@ -193,6 +242,47 @@ internal static class CheckpointChildBridge {
       }
       return Register(file);
     } catch { CloseHandle(file); throw; }
+  }
+
+  // The kernel retains this pending request between writers' batches. No poll
+  // interval, waiter files, or unbounded wait in the business process.
+  static long WaitLock(IntPtr parent, string name, long waitMs, bool shared) {
+    if (waitMs < 1 || waitMs > 2000) throw new InvalidOperationException("Invalid control lock wait bound");
+    var file = OpenRelative(parent, name, false, !shared, false, !shared, true);
+    IntPtr completion = IntPtr.Zero, overlapped = IntPtr.Zero;
+    bool pending = false, retained = false;
+    try {
+      BY_HANDLE_FILE_INFORMATION info;
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) != 0) throw new InvalidOperationException("Unsafe control lock");
+      completion = CreateEventW(IntPtr.Zero, true, false, null);
+      if (completion == IntPtr.Zero) throw Win32("Unable to create control lock event");
+      overlapped = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(OVERLAPPED)));
+      Marshal.StructureToPtr(new OVERLAPPED { Event = completion }, overlapped, false);
+      if (!QueueLockFile(file, shared ? 0u : 2u, 0, 1, 0, overlapped)) {
+        var error = Marshal.GetLastWin32Error();
+        if (error != 997) throw new System.ComponentModel.Win32Exception(error, "Unable to queue control lock");
+        pending = true;
+        var result = WaitForSingleObject(completion, (uint)waitMs);
+        if (result == 258) return 0; // finally cancels, joins, and releases even a racing grant.
+        if (result != 0) throw Win32("Unable to wait for control lock");
+        uint transferred;
+        if (!GetOverlappedResult(file, overlapped, out transferred, true)) throw Win32("Unable to complete control lock");
+        pending = false;
+      }
+      var id = Register(file);
+      retained = true;
+      return id;
+    } finally {
+      if (pending) {
+        // OVERLAPPED memory must remain alive until cancellation really settles.
+        CancelIoEx(file, overlapped);
+        uint transferred;
+        GetOverlappedResult(file, overlapped, out transferred, true);
+      }
+      if (!retained) CloseHandle(file);
+      if (overlapped != IntPtr.Zero) Marshal.FreeHGlobal(overlapped);
+      if (completion != IntPtr.Zero) CloseHandle(completion);
+    }
   }
 
   static string[] ListEntries(IntPtr parent, long maximumEntries) {

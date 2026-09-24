@@ -1,4 +1,5 @@
 import type { LogRecordPort, LogRef } from "./contracts.js";
+import { validLogIdentity } from "./capture.js";
 
 /** Call only in a recorder projection. Fixed identity fields, no getters or body copy. */
 export function observationRefs(value: unknown): LogRef[] {
@@ -10,7 +11,7 @@ export function observationRefs(value: unknown): LogRef[] {
     ["deliveryId", "delivery"], ["itemId", "delivery"], ["toolCallId", "toolCall"],
   ]) {
     const id = Object.getOwnPropertyDescriptor(value, field!)?.value;
-    if (typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/u.test(id)) refs.push({ kind: kind!, id });
+    if (validLogIdentity(id)) refs.push({ kind: kind!, id });
     if (refs.length === 8) break;
   }
   return refs;

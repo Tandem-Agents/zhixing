@@ -1,6 +1,6 @@
 import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
 import path from "node:path";
-import { LegacyLogFiles, isLegacyLogFile } from "./legacy-files.js";
+import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
 
 // A dedicated process owns every native handle. It never loads product configuration,
 // records arbitrary stderr, or shares the checkpoint helper with business operations.
@@ -85,6 +85,7 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
     if (all.length > limit) throw Error("log-inventory-limit");
     return all;
   }
+  if (op === "statMany") return statLogFiles(directory, legacy!, args[0] as string[]);
   if (!directory && !(typeof args[0] === "string" && isLegacyLogFile(args[0]))) throw Error("filesystem-not-open");
   if (typeof args[0] === "string" && isLegacyLogFile(args[0])) {
     const entry = legacy!.resolve(args[0]);
@@ -108,6 +109,16 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
       args[3] as number,
       args[4] as string | undefined,
     );
+  if (op === "tryReadLock") {
+    if (release) throw Error("nested-lock");
+    release = await directory.waitLock("writer.lock", 2000, "shared");
+    return release !== undefined;
+  }
+  if (op === "unlock") {
+    await release?.();
+    release = undefined;
+    return;
+  }
   if (readOnly) throw Error("filesystem-read-only");
   if (op === "write") return directory.writeFile(args[0] as string, args[1] as Uint8Array);
   if (op === "rename") {
@@ -124,13 +135,8 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
   if (op === "sync") { await directory.sync(); await legacy?.sync(); return; }
   if (op === "tryLock") {
     if (release) throw Error("nested-lock");
-    release = await directory.tryLock("writer.lock");
+    release = await directory.waitLock("writer.lock", 2000);
     return release !== undefined;
-  }
-  if (op === "unlock") {
-    await release?.();
-    release = undefined;
-    return;
   }
   throw Error("unknown-filesystem-operation");
 }

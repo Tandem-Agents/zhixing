@@ -22,6 +22,7 @@ interface Entry {
   unconfirmedThrough?: number;
   storageFailuresThrough?: number;
   recoveriesThrough?: number;
+  captureFailuresThrough?: number;
   sealed?: boolean;
   uncertain?: boolean;
   countedAtClose?: boolean;
@@ -52,7 +53,6 @@ const size = (capture: LogCapture): number => Buffer.byteLength(JSON.stringify(c
 export class LogRecorder {
   readonly #sink: LogSink;
   readonly #process = randomUUID();
-  readonly #healthProcess = randomUUID();
   readonly #queue: Entry[] = [];
   readonly #inflight = new Set<Entry>();
   readonly #sources = new Set<string>();
@@ -67,6 +67,8 @@ export class LogRecorder {
   #reportedUnconfirmed = 0;
   #failures = 0;
   #reportedLost = 0;
+  #reportedCaptureFailures = 0;
+  #lastCaptureFailure = "";
   #storageFailures = 0;
   #reportedStorageFailures = 0;
   #recoveries = 0;
@@ -127,6 +129,7 @@ export class LogRecorder {
           );
         } catch {
           this.#failures++;
+          this.#lastCaptureFailure = "capture-failed";
           this.#lose();
           this.#degrade("capture-failed");
         }
@@ -134,6 +137,7 @@ export class LogRecorder {
     } satisfies LogRecordPort);
     } catch {
       this.#failures++;
+      this.#lastCaptureFailure = "binding-failed";
       this.#lose();
       this.#degrade("binding-failed");
       return Object.freeze({ record: () => undefined });
@@ -335,7 +339,8 @@ export class LogRecorder {
       ...(healthThrough === undefined
         ? {}
         : { healthThrough, unconfirmedThrough: this.#unconfirmed,
-            storageFailuresThrough: this.#storageFailures, recoveriesThrough: this.#recoveries }),
+            storageFailuresThrough: this.#storageFailures, recoveriesThrough: this.#recoveries,
+            captureFailuresThrough: this.#failures }),
     });
     this.#bytes += bytes;
     this.#schedule(10);
@@ -450,6 +455,8 @@ export class LogRecorder {
         if (this.#stopping) return;
         this.#apply(status.policy.effective);
         this.#ready = true;
+        // Store initialization already recovered and maintained this inventory.
+        this.#lastMaintenance = Date.now();
       }
       if (
         (this.#lost > this.#reportedLost || this.#unconfirmed > this.#reportedUnconfirmed ||
@@ -461,7 +468,7 @@ export class LogRecorder {
           { scope: "storage" },
           {
             event: this.#lost > this.#reportedLost || this.#unconfirmed > this.#reportedUnconfirmed || this.#state === "degraded"
-              ? "degraded" : this.#recoveries > this.#reportedRecoveries ? "recovered" : "waiting",
+              ? "degraded" : this.#storageFailures > this.#reportedStorageFailures ? "waiting" : "recovered",
             data: {
               lost: this.#lost - this.#reportedLost,
               from: this.#lostSince || this.#failureSince,
@@ -469,12 +476,14 @@ export class LogRecorder {
               captureFailures: this.#failures,
               unconfirmed: this.#unconfirmed - this.#reportedUnconfirmed,
               attempts: this.#storageFailures - this.#reportedStorageFailures,
-              reason: this.#lastStorageFailure || this.#lastFailure,
-              phase: this.#failurePhase,
+              reason: this.#failures > this.#reportedCaptureFailures ? this.#lastCaptureFailure
+                : this.#storageFailures > this.#reportedStorageFailures || this.#recoveries > this.#reportedRecoveries
+                  ? this.#lastStorageFailure : this.#lastFailure ?? "queue-pressure",
+              phase: this.#failures > this.#reportedCaptureFailures ? "capture" : this.#failurePhase,
             },
           },
           this.#policy,
-          this.#healthProcess,
+          this.#process,
           ++this.#seq,
         );
         this.#enqueue(
@@ -562,6 +571,7 @@ export class LogRecorder {
           this.#ready = false;
           throw new LogStorageError("owner-unavailable", "日志写入已确认，文件所有者需重建");
         }
+        this.#lastMaintenance = Date.now();
       }
       if (!this.#stopping && Date.now() - this.#lastMaintenance >= this.#policy.maintenanceMs) {
         phase = "maintain";
@@ -612,6 +622,7 @@ export class LogRecorder {
   #acknowledgeHealth(entry: Entry): void {
     if (entry.healthThrough === undefined) return;
     this.#reportedLost = Math.max(this.#reportedLost, entry.healthThrough);
+    this.#reportedCaptureFailures = Math.max(this.#reportedCaptureFailures, entry.captureFailuresThrough ?? 0);
     this.#reportedUnconfirmed = Math.max(this.#reportedUnconfirmed, entry.unconfirmedThrough ?? 0);
     this.#reportedStorageFailures = Math.max(this.#reportedStorageFailures, entry.storageFailuresThrough ?? 0);
     this.#reportedRecoveries = Math.max(this.#reportedRecoveries, entry.recoveriesThrough ?? 0);

@@ -1,5 +1,5 @@
 import { LogRequestError } from "./errors.js";
-import { MAX_LOG_TOKEN_LENGTH } from "./capture.js";
+import { MAX_LOG_TOKEN_LENGTH, MAX_LOG_ID_LENGTH } from "./capture.js";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -143,7 +143,7 @@ export function parseLogSearchRequest(input: unknown): LogSearchRequest {
     throw new LogRequestError("日志级别无效");
   if (ref) {
     boundedText(ref.kind, MAX_LOG_TOKEN_LENGTH);
-    boundedText(ref.id, MAX_LOG_TOKEN_LENGTH);
+    boundedText(ref.id, MAX_LOG_ID_LENGTH);
     if (ref.storeId !== undefined) boundedText(ref.storeId, MAX_LOG_TOKEN_LENGTH);
   }
   return {

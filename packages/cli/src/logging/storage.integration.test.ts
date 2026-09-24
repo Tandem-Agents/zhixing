@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogWriterProbe } from "./writers.js";
 import { readdir, readFile, stat, rm, open, writeFile, link, rename } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
@@ -115,11 +115,172 @@ async function listing(root: string): Promise<unknown> {
 }
 
 describe("runtime log Store using real isolated processes and filesystem", () => {
+  it.each(["head", "state", "inventory", "after-inventory"])("pins metadata during concurrent %s retirement without pinning the query", async phase => {
+    const h = await setup();
+    await h.store.initialize();
+    await h.store.append([h.capture()]);
+    const files = new LogFilesProcess(h.home);
+    const reader = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(h.home).arbiter });
+    stores.push(reader);
+    let interleaved = false;
+    let writing: Promise<void> | undefined;
+    let reachedLock!: () => void;
+    const lockAttempt = new Promise<void>(resolve => { reachedLock = resolve; });
+    const lock = h.files.tryLock.bind(h.files);
+    h.files.tryLock = async () => { reachedLock(); return lock(); };
+    const publish = async () => {
+      interleaved = true;
+      await h.store.append([h.capture()]);
+      await h.store.append([h.capture()]);
+    };
+    const contend = async () => {
+      writing = publish();
+      await lockAttempt;
+    };
+    const list = files.list.bind(files), read = files.read.bind(files), statMany = files.statMany.bind(files);
+    files.list = async limit => {
+      const names = await list(limit);
+      if (phase === "head" && !interleaved) await publish();
+      return names;
+    };
+    files.read = async (...args) => {
+      if (phase === "state" && !interleaved && args[0].startsWith("state-")) await contend();
+      return read(...args);
+    };
+    files.statMany = async names => {
+      if (phase === "inventory" && !interleaved) await contend();
+      const result = await statMany(names);
+      if (phase === "after-inventory" && !interleaved) await contend();
+      return result;
+    };
+    expect(await reader.status()).toMatchObject({ upper: phase === "head" ? 3 : 1, pendingReclaims: 0 });
+    await writing;
+    expect(await reader.status()).toMatchObject({ upper: 3, pendingReclaims: 0 });
+    expect(interleaved).toBe(true);
+  }, 20_000);
+
+  it("releases metadata exclusion during the scan and keeps the fixed upper bound after a fresh final snapshot", async () => {
+    const h = await setup({ queryMs: 10_000 });
+    await h.store.initialize();
+    await h.store.append([h.capture()]);
+    const files = new LogFilesProcess(h.home);
+    const reader = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(h.home).arbiter });
+    stores.push(reader);
+    const app = new LogApplication(reader, () => owner, ["fixture:1"]);
+    const read = files.read.bind(files);
+    let states = 0, segments = 0;
+    files.read = async (...args) => {
+      if (args[0].startsWith("state-")) states++;
+      if (args[0].startsWith("segment-") && ++segments === 1) {
+        await h.store.append([h.capture()]);
+        await h.store.append([h.capture()]);
+      }
+      return read(...args);
+    };
+    const result = await app.search({ source: "fixture" });
+    expect(result.records).toHaveLength(1);
+    expect(result.coverage).toMatchObject({ upper: 1, complete: true });
+    expect(segments).toBe(1);
+    expect(states).toBe(2);
+  }, 20_000);
+
+  it("rejects physical governance corruption despite holding read exclusion", async () => {
+    const h = await setup();
+    await h.store.initialize();
+    await h.store.append([h.capture()]);
+    const files = new LogFilesProcess(h.home);
+    const reader = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(h.home).arbiter });
+    stores.push(reader);
+    const read = files.read.bind(files);
+    let reads = 0;
+    files.read = async (...args) => {
+      if (args[0].startsWith("state-") && ++reads === 1) {
+        const bytes = await readFile(path.join(h.root, args[0]));
+        bytes.fill(0x20);
+        await writeFile(path.join(h.root, args[0]), bytes);
+      }
+      return read(...args);
+    };
+    await expect(reader.read(async state => state)).rejects.toThrow();
+    expect(reads).toBe(1);
+  }, 20_000);
+
+  it("bounds metadata lock admission, releases a timed-out reader and never runs a query on invalid state", async () => {
+    const h = await setup();
+    await h.store.initialize();
+    const files = new LogFilesProcess(h.home);
+    const reader = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(h.home).arbiter });
+    stores.push(reader);
+    expect(await h.files.tryLock()).toBe(true);
+    const query = vi.fn(async state => state);
+    try {
+      await expect(reader.read(query)).rejects.toMatchObject({ code: "writer-busy" });
+      expect(query).not.toHaveBeenCalled();
+    } finally { await h.files.unlock(); }
+    expect(await reader.status()).toMatchObject({ upper: 0 });
+  }, 20_000);
+
+  it.each(["inventory", "publication"])("does not turn policy %s failures into a second successful publication", async phase => {
+    const h = await setup();
+    await h.store.initialize();
+    const write = h.files.write.bind(h.files), list = h.files.list.bind(h.files);
+    let pendingWritten = false, failInventory = false, failed = false;
+    h.files.write = async (name, bytes) => {
+      if (name.endsWith(".new")) {
+        const policyState = JSON.parse(Buffer.from(bytes).toString()).state.policy;
+        pendingWritten ||= !!policyState.desired;
+        if (phase === "publication" && policyState.version === 2 && !failed) {
+          failed = true; throw Error("injected policy publication failure");
+        }
+      }
+      await write(name, bytes);
+      if (name.endsWith(".head") && pendingWritten && !failed) failInventory = true;
+    };
+    h.files.list = async limit => {
+      if (phase === "inventory" && failInventory && !failed) {
+        failed = true; throw Error("injected policy inventory failure");
+      }
+      return list(limit);
+    };
+    await expect(h.store.applyPolicy({ ...policy, queryRecords: 2 }, 1)).rejects.toThrow(`injected policy ${phase} failure`);
+    expect((await h.store.status()).policy).toMatchObject({ version: 1, effective: { queryRecords: 3 }, desired: { queryRecords: 2 } });
+    await h.store.maintain();
+    expect((await h.store.status()).policy).toMatchObject({ version: 2, effective: { queryRecords: 2 } });
+  }, 20_000);
+
+  it("publishes one steady append and no unchanged maintenance while observing every new writer", async () => {
+    const h = await setup();
+    const self = { pid: process.pid, birth: "stable-writer" };
+    let proof = { complete: true, at: Date.now(), self, candidates: [self] };
+    const store = new LocalLogStore({ files: h.files, capacity: createDeviceCapacityRuntime(h.home).arbiter,
+      initialPolicy: policy, observeWriters: async () => proof });
+    stores.push(store);
+    await store.initialize();
+    const write = vi.spyOn(h.files, "write"), statMany = vi.spyOn(h.files, "statMany"), list = vi.spyOn(h.files, "list");
+    await store.append([h.capture()]);
+    expect(write.mock.calls.filter(([name]) => name.endsWith(".head"))).toHaveLength(1);
+    expect(statMany).toHaveBeenCalled();
+    write.mockClear();
+    list.mockClear();
+    proof = { ...proof, at: proof.at + 100 };
+    await store.maintain();
+    await store.maintain();
+    expect(write).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledTimes(2);
+    proof = { ...proof, candidates: [self, { pid: self.pid + 1, birth: "unregistered" }] };
+    await expect(store.append([h.capture()])).rejects.toMatchObject({ code: "migration-blocked" });
+    expect((await store.status()).migration?.state).toBe("blocked");
+    proof = { ...proof, candidates: [self] };
+    await store.append([h.capture()]);
+    expect((await store.status()).migration?.state).toBe("confirmed");
+  }, 20_000);
+
   it("converges two native writers on one root without reporting normal lock contention as unavailable", async () => {
     const home = await createTempDir("logging-shared-writers");
     const notices: string[] = [];
     const writers = [1, 2].map(number => {
-      const store = new LocalLogStore({ files: new LogFilesProcess(home), capacity: createDeviceCapacityRuntime(home).arbiter, observeWriters: createLogWriterProbe(home) });
+      const files = new LogFilesProcess(home);
+      const store = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(home).arbiter, observeWriters: createLogWriterProbe(home, () => files.observeNodeProcesses()) });
       const recorder = new LogRecorder(store, { onHealth: health => { if (health.state === "degraded") notices.push(health.lastFailure!); } });
       recorder.bind({ id: `writer-${number}`, version: 1, events: { observed: { message: "shared native writer", tier: "critical", level: "info", fields: {} } } }, { scope: "storage" }).record({ event: "observed" });
       return { store, recorder };

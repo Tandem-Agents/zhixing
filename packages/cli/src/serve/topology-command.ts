@@ -42,21 +42,30 @@ export async function runServeCommand(
   const logging = beginRuntimeLogging(zhixingHome, processMode, (message) => output.line(chalk.dim(message)));
   let failed = false;
   try {
-    if (processMode === "managed") {
-      const plan = resolveHostLaunchPlan(await loadCurrentManagedServiceState("activate", zhixingHome));
-      if (plan.mode !== "managed") {
-        await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
-        return;
-      }
-      const retained = await waitForManagedHostTurn({ zhixingHome });
-      if (!retained) return;
-      const reconciled = await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
-      if (reconciled.plan.mode !== "managed") return;
-    }
     const secretStore = createPlatformSecretStore({
       homeDir: zhixingHome,
       context: processMode === "managed" ? "managed" : "foreground",
     });
+    const currentLaunchPlan = async () => resolveHostLaunchPlan(
+      await loadCurrentManagedServiceState("activate", zhixingHome, secretStore),
+    );
+    const reconcile = (trigger: Parameters<typeof reconcileCurrentManagedService>[0]) =>
+      reconcileCurrentManagedService(trigger, undefined, zhixingHome, secretStore);
+    if (processMode === "managed") {
+      const plan = await currentLaunchPlan();
+      if (plan.mode !== "managed") {
+        await reconcile("managed-preflight");
+        return;
+      }
+      const retained = await waitForManagedHostTurn({
+        zhixingHome,
+        shouldRemainManaged: async () => (await currentLaunchPlan()).mode === "managed",
+        reconcileChangedPlan: async () => { await reconcile("current-trust-applied"); },
+      });
+      if (!retained) return;
+      const reconciled = await reconcile("managed-preflight");
+      if (reconciled.plan.mode !== "managed") return;
+    }
     const startup = await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
       homeDir: zhixingHome,
       mode: "host",

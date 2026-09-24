@@ -112,13 +112,17 @@ for (const trustedCommandBoundary of [
   '"/usr/bin/security"',
   '"/usr/bin/secret-tool"',
   "windowsPowerShellCommand()",
-  "sanitizedCredentialCommandEnvironment()",
+  "runCredentialCommand",
   "cleanupPrivateFileTemps",
   "SECRET_STORE_FILE_PREFIX",
 ]) {
   if (!platformSecretStore.includes(trustedCommandBoundary)) {
     errors.push(`Platform SecretStore lost trusted command boundary: ${trustedCommandBoundary}`);
   }
+}
+const credentialCommand = await readFile(path.join(root, "packages/secrets/src/credential-command.ts"), "utf8");
+for (const required of ["sanitizedCredentialCommandEnvironment()", '"LD_PRELOAD"', '"DYLD_INSERT_LIBRARIES"', '"NODE_OPTIONS"', '"NODE_PATH"']) {
+  if (!credentialCommand.includes(required)) errors.push(`Credential command lost environment boundary: ${required}`);
 }
 const builtinSecurityRules = await readFile(
   path.join(root, "packages/core/src/security/builtin-rules.ts"),

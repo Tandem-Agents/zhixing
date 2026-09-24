@@ -184,7 +184,16 @@ describe("built CLI log entry and exit chain", () => {
 
 
 describe("independent CLI logging owner", () => {
-  it.each([["backup", "setup"], ["workspace", "status"]])("drains failure from actual command %j without spawning a replacement owner", async (...args) => {
+  it.each([["workspace", "status"], ["workspace", "list"], ["backup", "status"]])("does not create a recorder for read-only command %j even on failure", async (...args) => {
+    const home = await createTempDir("logging-read-only-entry");
+    await writeFile(getGlobalConfigPath({ ZHIXING_HOME: home }, home), "{broken", "utf8");
+    const failed = await run(home, args);
+    expect(failed.code).toBe(1);
+    expect(failed.stdout + failed.stderr).not.toContain("运行日志");
+    await expect(stat(path.join(home, "logs"))).rejects.toMatchObject({ code: "ENOENT" });
+  }, 20000);
+
+  it.each([["backup", "setup"], ["workspace", "create", "test", process.cwd()]])("drains failure from actual command %j without spawning a replacement owner", async (...args) => {
     const home = await createTempDir("logging-command-entry");
     // No production settings or secrets: workspace preflight fails deterministically.
     await writeFile(getGlobalConfigPath({ ZHIXING_HOME: home }, home), "{broken", "utf8");
@@ -199,7 +208,7 @@ describe("independent CLI logging owner", () => {
 });
 
 
-it.each([false, true])("drains the standalone owner and preserves workspace JSON when logs unavailable=%s", async (unavailable) => {
+it.each([false, true])("preserves concurrent read-only workspace results without a recorder when logs unavailable=%s", async (unavailable) => {
   const home = await createTempDir("logging-natural-command");
   if (unavailable) {
     await mkdir(path.join(home, "logs"));
@@ -216,17 +225,16 @@ it.each([false, true])("drains the standalone owner and preserves workspace JSON
   });
   await host.start();
   try {
-    const result = await run(home, ["workspace", "list"]);
-    expect(result.code, result.stdout + result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual([]);
+    const results = await Promise.all([run(home, ["workspace", "list"]), run(home, ["workspace", "list"])]);
+    for (const result of results) {
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual([]);
+      expect(result.stderr).not.toContain("日志");
+    }
     if (unavailable) {
-      expect(result.stderr).toContain("日志");
-      expect(Buffer.byteLength(result.stderr)).toBeLessThan(4096);
       expect((await stat(path.join(home, "logs", "runtime"))).size).toBe(19);
     }
   } finally { await host.close(); await lease.release(); }
   if (unavailable) return;
-  const page = await run(home, ["logs", "--offline", "search"]);
-  expect(page.code).toBe(0);
-  expect(JSON.parse(page.stdout).records).toContainEqual(expect.objectContaining({ event: "stopped", result: "success" }));
+  await expect(stat(path.join(home, "logs"))).rejects.toMatchObject({ code: "ENOENT" });
 }, 20000);

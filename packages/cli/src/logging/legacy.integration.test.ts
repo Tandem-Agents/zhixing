@@ -185,7 +185,7 @@ describe("legacy log adoption on native files", () => {
     try {
       const ready = Promise.race([once(child, "message"), once(child, "exit").then(() => { throw Error("writer fixture exited"); })]);
       await ready;
-      const proof = await createLogWriterProbe(home)();
+      const proof = await probeWriters(home);
       expect(proof.candidates.some((item) => item.pid === child.pid)).toBe(true);
     } finally { const closed = once(child, "close"); child.kill(); await closed; }
   }, 30000);
@@ -238,10 +238,18 @@ describe("legacy log adoption on native files", () => {
   }, 30000);
   it("observes the current OS incarnation without returning raw command lines", async () => {
     const home = await createTempDir("log-writer-proof");
-    const result = await createLogWriterProbe(home)();
+    const result = await probeWriters(home);
     expect(result.complete).toBe(true);
     expect(result.self?.pid).toBe(process.pid);
     expect(result.self?.birth).toMatch(/^[a-zA-Z0-9_.:-]+$/u);
     expect(Object.keys(result).sort()).toEqual(["at", "candidates", "complete", "self"]);
   }, 10000);
 });
+
+async function probeWriters(home: string) {
+  const files = new LogFilesProcess(home);
+  try {
+    await files.open(true);
+    return await createLogWriterProbe(home, () => files.observeNodeProcesses())();
+  } finally { await files.close(); }
+}

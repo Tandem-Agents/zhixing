@@ -1,4 +1,4 @@
-import { validLogToken } from "./capture.js";
+import { validLogIdentity } from "./capture.js";
 import { MAX_LOG_RECORD_BYTES } from "./policy.js";
 
 /** A bounded copy of each record's access and byte range, published with its segment. */
@@ -21,7 +21,7 @@ export function projectLogAccess(
     if (end < offset || end - offset + 1 > MAX_LOG_RECORD_BYTES)
       throw Error("日志访问投影缺少完整记录");
     const record = JSON.parse(content.subarray(offset, end).toString("utf8"));
-    if (record?.id !== id || record.storeId !== storeId || !validLogToken(record.access?.scope))
+    if (record?.id !== id || record.storeId !== storeId || !validLogIdentity(record.access?.scope))
       throw Error("日志访问投影身份不一致");
     result.push({ scope: record.access.scope, offset, bytes: end - offset + 1 });
     offset = end + 1;
@@ -40,7 +40,7 @@ export function validLogAccess(
   for (const item of access) {
     if (
       !item ||
-      !validLogToken(item.scope) ||
+      !validLogIdentity(item.scope) ||
       item.offset !== offset ||
       !Number.isSafeInteger(item.bytes) ||
       item.bytes < 1 ||

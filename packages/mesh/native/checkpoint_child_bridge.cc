@@ -139,7 +139,7 @@ void AssertNotReparse(HANDLE handle) {
   }
 }
 
-HANDLE OpenRelative(HANDLE parent, const std::wstring& name, bool directory, bool create, bool exclusive = false) {
+HANDLE OpenRelative(HANDLE parent, const std::wstring& name, bool directory, bool create, bool exclusive = false, bool writable = true) {
   UNICODE_STRING unicode{};
   unicode.Buffer = const_cast<PWSTR>(name.c_str());
   unicode.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
@@ -149,8 +149,8 @@ HANDLE OpenRelative(HANDLE parent, const std::wstring& name, bool directory, boo
   IO_STATUS_BLOCK status{};
   HANDLE handle = INVALID_HANDLE_VALUE;
   const ACCESS_MASK access = SYNCHRONIZE | FILE_READ_ATTRIBUTES |
-    (directory ? FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE
-               : FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE);
+    (directory ? FILE_LIST_DIRECTORY | FILE_TRAVERSE | (writable ? FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | DELETE : 0)
+               : FILE_READ_DATA | (writable ? FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE : 0));
   const ULONG disposition = create ? (exclusive ? FILE_CREATE : FILE_OPEN_IF) : FILE_OPEN;
   const ULONG options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT |
     (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
@@ -674,17 +674,17 @@ napi_value TruncateFileCall(napi_env env, napi_callback_info info) {
   } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 }
 
-napi_value TryLockCall(napi_env env, napi_callback_info info) {
+napi_value ControlLockCall(napi_env env, napi_callback_info info, bool shared) {
   try {
     size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
     const auto name = Utf8(env, args[1]); ExactName(name);
 #ifdef _WIN32
-    HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, true);
+    HANDLE file = OpenRelative(Handle(U64(env, args[0])), Wide(name), false, !shared, false, !shared);
     try {
       BY_HANDLE_FILE_INFORMATION stat{};
       if (!GetFileInformationByHandle(file, &stat) || stat.nNumberOfLinks != 1 || stat.nFileSizeHigh || stat.nFileSizeLow) throw std::runtime_error("Unsafe control lock");
       OVERLAPPED overlapped{};
-      if (!LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
+      if (!LockFileEx(file, (shared ? 0 : LOCKFILE_EXCLUSIVE_LOCK) | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)) {
         const auto error = GetLastError();
         if (error == ERROR_LOCK_VIOLATION) { CloseHandle(file); return BigInt(env, 0); }
         throw std::runtime_error("Unable to acquire control lock");
@@ -692,11 +692,11 @@ napi_value TryLockCall(napi_env env, napi_callback_info info) {
       return BigInt(env, HandleValue(file));
     } catch (...) { CloseHandle(file); throw; }
 #else
-    int file = OpenRelative(Handle(U64(env, args[0])), name, false, true);
+    int file = OpenRelative(Handle(U64(env, args[0])), name, false, !shared, false, !shared);
     try {
       struct stat stat{};
       if (fstat(file, &stat) < 0 || !S_ISREG(stat.st_mode) || stat.st_nlink != 1 || stat.st_size != 0) throw std::runtime_error("Unsafe control lock");
-      if (flock(file, LOCK_EX | LOCK_NB) < 0) {
+      if (flock(file, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) < 0) {
         const auto error = errno;
         if (error == EWOULDBLOCK || error == EAGAIN) { close(file); return BigInt(env, 0); }
         throw std::runtime_error("Unable to acquire control lock");
@@ -706,6 +706,9 @@ napi_value TryLockCall(napi_env env, napi_callback_info info) {
 #endif
   } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 }
+
+napi_value TryLockCall(napi_env env, napi_callback_info info) { return ControlLockCall(env, info, false); }
+napi_value TryReadLockCall(napi_env env, napi_callback_info info) { return ControlLockCall(env, info, true); }
 
 napi_value SyncCall(napi_env env, napi_callback_info info) {
   try { size_t argc = 1; napi_value args[1]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call"); Flush(Handle(U64(env, args[0]))); return nullptr; }
@@ -746,6 +749,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"statFile", nullptr, StatFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"truncateFile", nullptr, TruncateFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"tryLock", nullptr, TryLockCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"tryReadLock", nullptr, TryReadLockCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openPath", nullptr, OpenPathCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"openDirectory", nullptr, OpenDirectoryCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"identity", nullptr, IdentityCall, nullptr, nullptr, nullptr, napi_default, nullptr},

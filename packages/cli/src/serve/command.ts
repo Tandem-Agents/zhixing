@@ -397,10 +397,14 @@ async function runServerProcess(
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
   const processStartTime = await resolveProcessStartTime(process.pid);
-  const initialManagedServiceState = await loadCurrentManagedServiceState(
-    "activate",
-    zhixingHome,
-  );
+  // Reuse the Host-owned platform resource, never a cached admission snapshot.
+  const loadManagedState = (intent: Parameters<typeof loadCurrentManagedServiceState>[0]) =>
+    loadCurrentManagedServiceState(intent, zhixingHome, bootstrap.secretStore);
+  const reconcileManagedState = (
+    trigger: Parameters<typeof reconcileCurrentManagedService>[0],
+    signal?: AbortSignal,
+  ) => reconcileCurrentManagedService(trigger, signal, zhixingHome, bootstrap.secretStore);
+  const initialManagedServiceState = await loadManagedState("activate");
   const initialManagedHostAdmission = await captureManagedHostAdmission(
     processMode,
     zhixingHome,
@@ -919,8 +923,8 @@ async function runServerProcess(
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
     processMode,
     expectedAdmission: initialManagedHostAdmission,
-    loadCurrent: (purpose) => loadCurrentManagedServiceState(purpose, zhixingHome),
-    reconcile: (trigger, signal) => reconcileCurrentManagedService(trigger, signal, zhixingHome),
+    loadCurrent: loadManagedState,
+    reconcile: reconcileManagedState,
     refuseNewMessages: () => inboundRouter?.refuseNewMessages(),
     requestShutdown: () => anchorInternalStop.requestStop({
       reason: "managed-role-changed",
@@ -2144,7 +2148,7 @@ async function runServerProcess(
     if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
     if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
     try {
-      const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
+      const state = await loadManagedState("inspect");
       if (
         !state.spec ||
         state.spec.serviceId !== candidateHost.serviceId ||
@@ -2262,7 +2266,7 @@ async function runServerProcess(
     }
   };
   async function cleanupLocalDevice() {
-    const current = await loadCurrentManagedServiceState("activate", zhixingHome);
+    const current = await loadManagedState("activate");
     const adapter = current.spec
       ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
       : undefined;
@@ -3165,9 +3169,10 @@ async function runServerProcess(
     initialManagedHostAdmission,
     processMode,
     zhixingHome,
+    loadManagedState,
   )) {
     boundInboundRouter?.refuseNewMessages();
-    await reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome);
+    await reconcileManagedState("managed-preflight");
     throw new Error("Managed host admission changed during startup");
   }
   runner = await runServer({

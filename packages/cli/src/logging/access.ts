@@ -31,7 +31,7 @@ export function createLogAccess(
   capacity: DeviceCapacityArbiterPort,
   files: LogFileSystem = new LogFilesProcess(home),
 ) {
-  const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home) });
+  const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files instanceof LogFilesProcess ? () => files.observeNodeProcesses() : undefined) });
   let closed = false;
   let active: Promise<unknown> | undefined;
   let closing: Promise<void> | undefined;

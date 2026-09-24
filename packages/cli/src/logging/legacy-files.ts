@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
+import type { LogFileInfo } from "@zhixing/core/logging/storage";
 
 const timestamp = "\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z";
 const dump = new RegExp(`^(?:keypress|llm-raw|llm-error)-[1-9]\\d*-${timestamp}\\.log$`, "u");
@@ -66,4 +67,23 @@ export class LegacyLogFiles {
   }
 }
 export function isLegacyLogFile(name: string): boolean { return /^legacy-[a-f0-9]{64}\.log$/u.test(name); }
+
+/** Group the same safe stat operations at the transport boundary, preserving caller order. */
+export async function statLogFiles(directory: CheckpointDirectoryHandle | undefined, legacy: LegacyLogFiles, names: readonly string[]): Promise<readonly LogFileInfo[]> {
+  if (names.length > 4096) throw Error("日志文件清点超限");
+  const groups = new Map<CheckpointDirectoryHandle, { index: number; name: string; relativePath?: string }[]>();
+  for (const [index, name] of names.entries()) {
+    const entry = isLegacyLogFile(name) ? legacy.resolve(name) : { directory, name };
+    if (!entry.directory) throw Error("日志存储尚未打开");
+    const entries = groups.get(entry.directory) ?? [];
+    entries.push({ index, name: entry.name, ...("relativePath" in entry ? { relativePath: entry.relativePath } : {}) });
+    groups.set(entry.directory, entries);
+  }
+  const result: LogFileInfo[] = new Array(names.length);
+  for (const [owner, entries] of groups) {
+    const observed = await owner.statFiles(entries.map(entry => entry.name));
+    entries.forEach((entry, index) => { result[entry.index] = { ...observed[index]!, ...(entry.relativePath ? { legacyPath: entry.relativePath } : {}) }; });
+  }
+  return result;
+}
 function missing(error: unknown): boolean { return error instanceof Error && error.message === "checkpoint-child-missing"; }

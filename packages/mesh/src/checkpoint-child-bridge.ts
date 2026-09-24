@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,7 @@ interface NativeCheckpointChildBridge {
   statFile(parent: bigint, name: string): { bytes: number; identity: string };
   truncateFile(parent: bigint, name: string, identity: string, bytes: number): void;
   tryLock(parent: bigint, name: string): bigint;
+  tryReadLock(parent: bigint, name: string): bigint;
   openDirectory(parent: bigint, name: string, create: boolean): bigint;
   identity(handle: bigint): string;
   writeFile(parent: bigint, name: string, bytes: Buffer): void;
@@ -23,10 +25,13 @@ interface NativeCheckpointChildBridge {
 }
 
 interface BridgeApi {
+  observeNodeProcesses(): Promise<NodeProcessInventory>;
   openPath(path: string, create: boolean, readOnly: boolean): Promise<bigint>;
   statFile(parent: bigint, name: string): Promise<{ bytes: number; identity: string }>;
+  statFiles(parent: bigint, names: readonly string[]): Promise<readonly { bytes: number; identity: string }[]>;
   truncateFile(parent: bigint, name: string, identity: string, bytes: number): Promise<void>;
   tryLock(parent: bigint, name: string): Promise<bigint>;
+  waitLock(parent: bigint, name: string, waitMs: number, shared: boolean): Promise<bigint>;
   openDirectory(parent: bigint, name: string, create: boolean): Promise<bigint>;
   identity(handle: bigint): Promise<string>;
   writeFile(parent: bigint, name: string, bytes: Buffer): Promise<void>;
@@ -66,6 +71,7 @@ export class CheckpointDirectoryHandle {
     const owner = ownedWindowsBridge(timeoutMs);
     return {
       get failed() { return owner.failed(); },
+      observeNodeProcesses: () => owner.api.observeNodeProcesses(),
       openPath: async (path, create, readOnly = false) => {
         if (readOnly && create) throw Error("Read-only directory cannot be created");
         const value = await owner.api.openPath(path, create, readOnly);
@@ -91,6 +97,16 @@ export class CheckpointDirectoryHandle {
     return this.#bridge.statFile(this[handle], childName(name));
   }
 
+  /** One bounded IPC operation; each child still receives the ordinary native safety checks. */
+  async statFiles(names: readonly string[]): Promise<readonly { bytes: number; identity: string }[]> {
+    if (names.length > 4096) throw new TypeError("Checkpoint file inventory exceeds its bound");
+    const children = names.map(childName);
+    await this.#assertOpen();
+    const result = await this.#bridge.statFiles(this[handle], children);
+    if (result.length !== children.length) throw new TypeError("Checkpoint file inventory is incomplete");
+    return result;
+  }
+
   /** Only the caller's already-retired object may be truncated. Never follows links. */
   async truncateFile(name: string, identity: string, bytes: number): Promise<void> {
     await this.#assertOpen();
@@ -102,6 +118,16 @@ export class CheckpointDirectoryHandle {
   async tryLock(name: string): Promise<(() => Promise<void>) | undefined> {
     await this.#assertOpen();
     const value = await this.#bridge.tryLock(this[handle], childName(name));
+    if (value === 0n) return undefined;
+    let released = false;
+    return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
+  }
+
+  /** Bounded lock admission; Windows keeps a pending kernel request across releases. */
+  async waitLock(name: string, waitMs: number, mode: "exclusive" | "shared" = "exclusive"): Promise<(() => Promise<void>) | undefined> {
+    if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 2000) throw new TypeError("Invalid control lock wait bound");
+    await this.#assertOpen();
+    const value = await this.#bridge.waitLock(this[handle], childName(name), waitMs, mode === "shared");
     if (value === 0n) return undefined;
     let released = false;
     return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
@@ -191,10 +217,21 @@ export function readDarwinProcessBirth(pid: number): string {
 
 function nativeBridge(): BridgeApi {
   return {
+    observeNodeProcesses: async () => { throw Error("Windows process inventory required"); },
     openPath: async (...args) => native().openPath(...args),
     statFile: async (...args) => native().statFile(...args),
+    statFiles: async (parent, names) => names.map(name => native().statFile(parent, name)),
     truncateFile: async (...args) => native().truncateFile(...args),
     tryLock: async (...args) => native().tryLock(...args),
+    waitLock: async (parent, name, waitMs, shared) => {
+      const deadline = performance.now() + waitMs;
+      do {
+        const value = shared ? native().tryReadLock(parent, name) : native().tryLock(parent, name);
+        if (value !== 0n) return value;
+        await delay(Math.min(10, Math.max(1, deadline - performance.now())));
+      } while (performance.now() < deadline);
+      return 0n;
+    },
     openDirectory: async (...args) => native().openDirectory(...args),
     identity: async (...args) => native().identity(...args),
     writeFile: async (...args) => native().writeFile(...args),
@@ -261,8 +298,14 @@ function windowsBridge(): BridgeApi {
   return windowsApi(request);
 }
 
+export interface NodeProcessInventory {
+  readonly complete: boolean;
+  readonly entries: readonly { pid: number; birth: string; argv: readonly string[] | null }[];
+}
+
 export interface CheckpointFilesystemSession {
   readonly failed: boolean;
+  observeNodeProcesses(): Promise<NodeProcessInventory>;
   openPath(path: string, create: boolean, readOnly?: boolean): Promise<CheckpointDirectoryHandle>;
   close(): Promise<void>;
 }
@@ -337,10 +380,13 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     return numeric;
   };
   return {
+    observeNodeProcesses: () => request<NodeProcessInventory>("observeNodeProcesses", {}),
     openPath: async (path, create, readOnly) => BigInt(await request<number>("openPath", { path, create, readOnly })),
     statFile: (parent, name) => request<{ bytes: number; identity: string }>("statFile", { parent: id(parent), name }),
+    statFiles: (parent, names) => request<readonly { bytes: number; identity: string }[]>("statFiles", { parent: id(parent), names }),
     truncateFile: (parent, name, identity, bytes) => request<void>("truncateFile", { parent: id(parent), name, identity, bytes }),
     tryLock: async (parent, name) => BigInt(await request<number>("tryLock", { parent: id(parent), name })),
+    waitLock: async (parent, name, waitMs, shared) => BigInt(await request<number>("waitLock", { parent: id(parent), name, waitMs, shared })),
     openDirectory: async (parent, name, create) => BigInt(await request<number>("openDirectory", { parent: id(parent), name, create })),
     identity: (value) => request<string>("identity", { handle: id(value) }),
     writeFile: (parent, name, bytes) => request<void>("writeFile", { parent: id(parent), name, data: bytes.toString("base64") }),

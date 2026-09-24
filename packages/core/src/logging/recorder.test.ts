@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { bindLogSource, captureLog } from "./capture.js";
+import { bindLogSource, captureLog, validLogIdentity } from "./capture.js";
 import { LogRecorder } from "./recorder.js";
+import { observationRefs } from "./producer.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
 import { LogAppendIndeterminateError, LogStorageError } from "./contracts.js";
 import type {
@@ -71,6 +72,74 @@ const pause = (): { promise: Promise<void>; resolve(): void } => {
 };
 
 describe("runtime log capture and lifecycle", () => {
+  it("身份支持 Unicode 且仍拒绝越界、控制字符和凭据", () => {
+    expect(validLogIdentity("ws:研发项目/子会话:🙂")).toBe(true);
+    expect(observationRefs({ conversationId: "ws:研发项目:primary" })).toEqual([{ kind: "conversation", id: "ws:研发项目:primary" }]);
+    for (const id of ["", "x".repeat(513), "a\nb", "a\u001bb", "a\u202eb", "\ud800", "token=private-test-value"]) {
+      expect(validLogIdentity(id)).toBe(false);
+    }
+  });
+  it("采集错误不被过去已经恢复的写锁等待覆盖", async () => {
+    const target = sink();
+    target.initialize = vi.fn().mockRejectedValueOnce(new LogStorageError("writer-busy", "busy")).mockResolvedValue(status());
+    const recorder = new LogRecorder(target), records = recorder.bind(source, { scope: "storage" });
+    try {
+      records.record({ event: "error" });
+      await recorder.flush(1500);
+      records.record(() => { throw Error("private source payload"); });
+      await recorder.flush(1500);
+      const failed = target.stored.filter(e => e.record.event === "degraded");
+      expect(failed.at(-1)?.record.data).toMatchObject({ reason: "capture-failed", phase: "capture", captureFailures: 1, lost: 1 });
+      expect(JSON.stringify(failed)).not.toContain("private source payload");
+    } finally { await recorder.close(); }
+  });
+  it("保留产品中文身份与完整会话 scope", () => {
+    const id = "ws:本机验收-20260924:conv_main";
+    const captured = captureLog(source, { scope: `conversation:${id}` }, {
+      event: "error", refs: [{ kind: "conversation", id }],
+    }, DEFAULT_LOG_POLICY, "process", 1);
+    expect(captured.record.access.scope).toBe(`conversation:${id}`);
+    expect(captured.record.refs).toEqual([{ kind: "conversation", id }]);
+  });
+  it("does not maintain again immediately after initialization and keeps health on its producer identity", async () => {
+    vi.useFakeTimers();
+    const target = sink(), maintain = vi.spyOn(target, "maintain");
+    target.initialize = vi.fn().mockRejectedValueOnce(new LogStorageError("writer-busy", "busy")).mockResolvedValue(status());
+    const recorder = new LogRecorder(target);
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0 });
+      expect(maintain).not.toHaveBeenCalled();
+      expect(new Set(target.stored.map(entry => entry.record.process)).size).toBe(1);
+      await vi.advanceTimersByTimeAsync(DEFAULT_LOG_POLICY.maintenanceMs - 1000);
+      recorder.bind(source, { scope: "storage" }).record({ event: "error", data: { n: 2 } });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(maintain).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(DEFAULT_LOG_POLICY.maintenanceMs);
+      expect(maintain).toHaveBeenCalledOnce();
+    } finally { await recorder.close(); vi.useRealTimers(); }
+  });
+
+  it("does not label a new refusal as recovery of a previously completed window", async () => {
+    vi.useFakeTimers();
+    const target = sink(), append = target.append.bind(target);
+    let attempts = 0;
+    target.append = async records => {
+      if (++attempts === 1 || attempts === 3) throw new LogStorageError("writer-busy", "busy");
+      return append(records);
+    };
+    const recorder = new LogRecorder(target);
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(target.stored.filter(entry => entry.record.source === "logging").map(entry => entry.record.event))
+        .toEqual(["waiting", "waiting", "recovered"]);
+      expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0, unconfirmed: 0 });
+    } finally { await recorder.close(); vi.useRealTimers(); }
+  });
   it.each(["writer-busy", "resource-wait", "probe-unavailable", "migration-blocked"] as const)("waits through short %s without a false unavailable warning", async (code) => {
     const target = sink(), notify = vi.fn();
     target.initialize = vi.fn().mockRejectedValueOnce(new LogStorageError(code, "temporary contention")).mockResolvedValue(status());
@@ -87,12 +156,17 @@ describe("runtime log capture and lifecycle", () => {
   });
 
   it.each(["initialize", "append", "maintain"] as const)("retains %s failure and recovery even without any record loss", async (phase) => {
-    const target = sink(), notify = vi.fn(), original = target[phase].bind(target);
+    const target = sink(phase === "maintain" ? { ...DEFAULT_LOG_POLICY, maintenanceMs: 20 } : DEFAULT_LOG_POLICY), notify = vi.fn(), original = target[phase].bind(target);
     target[phase] = vi.fn().mockRejectedValueOnce(Object.assign(Error("private payload"), { code: "EACCES" })).mockImplementation(original) as never;
     const recorder = new LogRecorder(target, { onHealth: notify });
     recorder.bind(source, { scope: "storage" }).record({ event: "error" });
     try {
       await recorder.flush(1500);
+      if (phase === "maintain") {
+        await vi.waitFor(() => expect(notify.mock.calls.map(([health]) => health.state)).toEqual(["degraded", "ready"]));
+        // Ready reports recovered storage; the recovery observation uses the next batch.
+        await recorder.flush(1500);
+      }
       expect(notify.mock.calls.map(([health]) => health.state)).toEqual(["degraded", "ready"]);
       expect(recorder.health()).toMatchObject({ state: "ready", queued: 0, lost: 0 });
       const health = target.stored.filter(entry => entry.record.source === "logging");

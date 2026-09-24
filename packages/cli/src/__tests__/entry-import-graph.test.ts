@@ -22,6 +22,7 @@ const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "./version.js",
   "./command-gate.js",
   "./runtime-support.js",
+  "./logging/entry-mode.js",
 ]);
 
 function collectRuntimeStaticImports(sourceText: string): string[] {

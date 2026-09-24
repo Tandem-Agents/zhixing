@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createTempDir } from "@zhixing/test-utils";
 import { fileURLToPath } from "node:url";
-import { LocalLogStore } from "../../../core/src/logging/storage.js";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { LocalLogStore, logDigest, type LogStoreSnapshot } from "../../../core/src/logging/storage.js";
+import { DEFAULT_LOG_POLICY } from "../../../core/src/logging/policy.js";
+import { captureLog, bindLogSource } from "../../../core/src/logging/capture.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
 
@@ -73,6 +78,51 @@ async function fixture(mode: string) {
   return { home, child, paused, store };
 }
 describe("real log process termination", () => {
+  it("drains two independently discovered writers against retained history without startup degradation", async () => {
+    const home = await createTempDir("log-concurrent-history"), root = path.join(home, "logs", "runtime");
+    await mkdir(root, { recursive: true });
+    const storeId = randomUUID(), instance = randomUUID(), now = Date.now();
+    const source = bindLogSource({ id: "history", version: 1, events: { sample: { message: "retained evidence", level: "info", tier: "critical", fields: {} } } });
+    const state: LogStoreSnapshot = { layout: "zxlog/1", storeId, generation: 1, upper: 400, policy: { version: 1, effective: DEFAULT_LOG_POLICY }, segments: [], pending: [], retired: [], gaps: 0 };
+    for (let n = 1; n <= 400; n++) {
+      const record = { ...captureLog(source, { scope: "storage" }, { event: "sample" }, DEFAULT_LOG_POLICY, instance, n).record, storeId, receivedAt: now };
+      const bytes = Buffer.from(`${JSON.stringify(record)}\n`), name = `segment-${randomUUID()}.jsonl`;
+      await writeFile(path.join(root, name), bytes);
+      state.segments.push({ name, bytes: bytes.length, start: n, end: n, receivedAt: now, tier: "critical", recordIds: [record.id], access: [{ scope: "storage", offset: 0, bytes: bytes.length }], attachments: [] });
+    }
+    await writeFile(path.join(root, "state-000000000001.json"), JSON.stringify({ state, digest: logDigest(JSON.stringify(state)) }));
+    await writeFile(path.join(root, "published-000000000001.head"), "");
+    // A real product entry with an explicit home exercises mutual OS discovery,
+    // rather than giving each writer an injected proof naming only itself.
+    const entry = path.join(home, "packages", "cli", "src", "index.ts");
+    await mkdir(path.dirname(entry), { recursive: true });
+    await writeFile(path.join(home, "package.json"), JSON.stringify({ type: "module" }));
+    await writeFile(entry, `await import(${JSON.stringify(new URL("./__tests__/concurrent-writer-fixture.ts", import.meta.url).href)});`);
+    const results = await Promise.all(["concurrent-one", "concurrent-two"].map(name => {
+      const child = spawn(process.execPath, ["--import=tsx/esm", entry, home, name, "--managed-home", home], { windowsHide: true, stdio: ["ignore", "ignore", "pipe", "ipc"] });
+      children.push(child);
+      let error = "";
+      child.stderr?.on("data", chunk => { error = (error + String(chunk)).slice(-2048); });
+      return new Promise<{ health: unknown; degraded: string[] }>((resolve, reject) => {
+        let result: { health: unknown; degraded: string[] } | undefined;
+        child.once("message", value => { result = value as typeof result; });
+        child.once("error", reject);
+        child.once("close", code => code === 0 && result ? resolve(result) : reject(Error(`concurrent writer did not close successfully (${code}): ${error}`)));
+      });
+    }));
+    for (const result of results) {
+      expect(result.health).toMatchObject({ state: "ready", queued: 0, lost: 0, unconfirmed: 0 });
+      expect(result.degraded).toEqual([]);
+    }
+    const store = new LocalLogStore({ files: new LogFilesProcess(home), capacity: createDeviceCapacityRuntime(home).arbiter });
+    stores.push(store);
+    await store.read(async snapshot => {
+      const records = (await Promise.all(snapshot.segments.filter(segment => segment.end > 400).map(segment => readFile(path.join(root, segment.name), "utf8"))))
+        .flatMap(text => text.trim().split("\n").map(line => JSON.parse(line)));
+      for (const name of ["concurrent-one", "concurrent-two"]) expect(records.filter(record => record.source === name)).toHaveLength(96);
+    });
+  }, 60_000);
+
   it.each([
     "segment",
     "detail",

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { runCredentialCommand } from "./credential-command.js";
 import { userInfo } from "node:os";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -9,7 +9,6 @@ import { acquireFileLock } from "./file-lock.js";
 
 const KEY_BYTES = 32;
 const KEYRING_SERVICE = "dev.zhixing.secret-vault";
-const COMMAND_TIMEOUT_MS = 10_000;
 const MACOS_SECURITY_COMMAND = "/usr/bin/security";
 const LINUX_SECRET_TOOL_COMMAND = "/usr/bin/secret-tool";
 const SECRET_STORE_FILE_PREFIX = "secret-vault";
@@ -67,7 +66,7 @@ export function createPlatformSecretStore(
   }
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
-  const run = options.commandRunner ?? runCommand;
+  const run = options.commandRunner ?? runCredentialCommand;
   const keyPath = path.join(options.homeDir, `${SECRET_STORE_FILE_PREFIX}.key`);
   const vaultPath = path.join(options.homeDir, `${SECRET_STORE_FILE_PREFIX}.json`);
   const bindingPath = path.join(options.homeDir, BACKEND_BINDING_FILE);
@@ -737,62 +736,6 @@ async function cleanupPrivateFileTemps(filePath: string): Promise<void> {
   if (removed) await syncDirectory(directory);
 }
 
-function runCommand(
-  command: string,
-  args: readonly string[],
-  input?: Uint8Array,
-): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const child = spawn(command, [...args], {
-      env: sanitizedCredentialCommandEnvironment(),
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      clearChunks(stdout);
-      clearChunks(stderr);
-      reject(new Error(`SecretStore credential command timed out: ${command}`));
-    }, COMMAND_TIMEOUT_MS);
-    timer.unref();
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      clearChunks(stdout);
-      clearChunks(stderr);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const stdoutResult = Buffer.concat(stdout);
-      const stderrResult = Buffer.concat(stderr);
-      clearChunks(stdout);
-      clearChunks(stderr);
-      resolve({
-        code: code ?? -1,
-        stdout: stdoutResult,
-        stderr: stderrResult,
-      });
-    });
-    child.stdin.end(input);
-  });
-}
-
-function clearChunks(chunks: Buffer[]): void {
-  for (const chunk of chunks) chunk.fill(0);
-  chunks.length = 0;
-}
-
 function windowsPowerShellCommand(): string {
   const systemRoot = process.env.SystemRoot;
   const trustedRoot = systemRoot && path.win32.isAbsolute(systemRoot)
@@ -805,20 +748,6 @@ function windowsPowerShellCommand(): string {
     "v1.0",
     "powershell.exe",
   );
-}
-
-function sanitizedCredentialCommandEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const name of [
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_FRAMEWORK_PATH",
-  ]) {
-    delete env[name];
-  }
-  return env;
 }
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {

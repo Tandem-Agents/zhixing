@@ -18,6 +18,7 @@ if (process.platform === "win32") {
     "/optimize+",
     "/target:exe",
     "/reference:System.Web.Extensions.dll",
+    "/reference:System.Management.dll",
     `/out:${output}`,
     source,
   ], { stdio: "inherit" });

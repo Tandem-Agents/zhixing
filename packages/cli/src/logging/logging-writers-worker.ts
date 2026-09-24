@@ -4,27 +4,7 @@ import path from "node:path";
 import { readDarwinProcessBirth } from "@zhixing/mesh/filesystem";
 import type { LogWriterIdentity, LogWriterObservation } from "@zhixing/core/logging/storage";
 const parentPid = Number(process.argv[3]);
-function productEntry(value: string): boolean {
-  return /(?:^|\/)(?:packages\/cli\/(?:src\/index\.ts|dist\/index\.js)|node_modules\/@zhixing\/cli\/dist\/index\.js)$/u.test(value) || /^(?:[.]\/)?(?:src\/index\.ts|dist\/index\.js)$/u.test(value);
-}
-function productWriter(argv: readonly string[], home: string): boolean {
-  let index = 1;
-  while (argv[index]?.startsWith("-")) {
-    const flag = argv[index]!;
-    if (flag === "--") { index++; break; }
-    if (["-e", "--eval", "-p", "--print"].includes(flag)) return false;
-    if (["--import", "--require", "-r", "--loader", "--conditions", "--title"].includes(flag)) index += 2;
-    else if (flag.includes("=") || ["--no-warnings", "--enable-source-maps", "--trace-warnings"].includes(flag)) index++;
-    // Unknown arity: conservatively include any product entry, without guessed tail exclusions.
-    else return argv.slice(index + 1).some(productEntry);
-  }
-  if (!productEntry(argv[index] ?? "")) return false;
-  const args = argv.slice(index + 1);
-  if (args[0] === "logs" && !args.includes("policy")) return false;
-  const managed = args.indexOf("--managed-home");
-  if (managed >= 0 && path.isAbsolute(args[managed + 1] ?? "") && path.resolve(args[managed + 1]!) !== path.resolve(home)) return false;
-  return true;
-}
+import { isProductLogWriter as productWriter } from "./writer-classification.js";
 async function prefix(file: string, max = 65536): Promise<Buffer> {
   const handle = await open(file, "r");
   try {

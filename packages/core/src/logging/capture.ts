@@ -15,10 +15,16 @@ import type {
 const SECRET_KEY =
   /(?:secret|passw(?:or)?d|passwd|pwd|credential|authorization|cookie|private.?key|token|api.?key|headers|environment|full.?config)/iu;
 export const MAX_LOG_TOKEN_LENGTH = 160;
+export const MAX_LOG_ID_LENGTH = 512;
 const TOKEN = new RegExp(`^[a-zA-Z0-9_.:-]{1,${MAX_LOG_TOKEN_LENGTH}}$`, "u");
 const RESULTS = new Set(["success", "failure", "unknown", "refused", "cancelled"]);
 export function validLogToken(value: unknown): value is string {
   return typeof value === "string" && TOKEN.test(value) && scrubSecrets(value).scrubbed === value;
+}
+/** Product identities are opaque Unicode values, not schema names or filesystem paths. */
+export function validLogIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_LOG_ID_LENGTH &&
+    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value) && scrubSecrets(value).scrubbed === value;
 }
 function plain(value: unknown): asserts value is Record<string, unknown> {
   if (
@@ -111,7 +117,7 @@ export function captureLog(
   seq: number,
   boundRefs: readonly LogRef[] = [],
 ): LogCapture {
-  if (!validLogToken(access.scope)) throw Error("invalid-log-access");
+  if (!validLogIdentity(access.scope)) throw Error("invalid-log-access");
   const event = field(draft, "event");
   if (!validLogToken(event)) throw Error("invalid-log-event");
   const definition = Object.getOwnPropertyDescriptor(source.events, event)?.value as
@@ -191,7 +197,7 @@ export function captureLog(
         storeId = field(ref, "storeId");
       if (
         !validLogToken(kind) ||
-        !validLogToken(id) ||
+        !validLogIdentity(id) ||
         (storeId !== undefined && !validLogToken(storeId))
       ) {
         redacted = true;

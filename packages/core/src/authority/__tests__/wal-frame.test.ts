@@ -11,6 +11,23 @@ import {
 } from "../wal-frame.js";
 
 describe("authority WAL frame", () => {
+  it("lets pending I/O advance during a long scan even when all reads are cached", async () => {
+    const frames = Array.from({ length: 24 }, (_, i) => encodeAuthorityWalFrame(Buffer.from("x"), frameMetadata(i + 1)));
+    const bytes = Buffer.concat(frames);
+    let ioAdvanced = false;
+    const pending = setImmediate(() => { ioAdvanced = true; });
+    let observedDuringScan = false;
+    try {
+      const result = await scanAuthorityWalFrames({ size: bytes.length, read: async (offset, length) => bytes.subarray(offset, offset + length) }, () => {
+        observedDuringScan ||= ioAdvanced;
+        const end = performance.now() + 1;
+        while (performance.now() < end) { /* A bounded reducer CPU slice. */ }
+      });
+      expect(result.frameCount).toBe(24);
+      expect(observedDuringScan).toBe(true);
+    } finally { clearImmediate(pending); }
+  });
+
   it("classifies every physically incomplete suffix as an incomplete tail", () => {
     const payload = Buffer.from('{"v":1,"lsn":1}', "utf8");
     const metadata = frameMetadata(1);

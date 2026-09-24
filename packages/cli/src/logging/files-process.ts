@@ -42,6 +42,9 @@ class NodeFilesProcess implements LogFileSystem {
   stat(name: string): Promise<LogFileInfo> {
     return this.#call("stat", [name]);
   }
+  statMany(names: readonly string[]): Promise<readonly LogFileInfo[]> {
+    return this.#call("statMany", [names]);
+  }
   read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
     return this.#call("read", [name, size, offset, limit, identity]);
   }
@@ -62,6 +65,9 @@ class NodeFilesProcess implements LogFileSystem {
   }
   tryLock(): Promise<boolean> {
     return this.#call("tryLock", []);
+  }
+  tryReadLock(): Promise<boolean> {
+    return this.#call("tryReadLock", []);
   }
   async unlock(): Promise<void> {
     if (this.#broken || this.#closed) {
@@ -184,6 +190,10 @@ export class LogFilesProcess implements LogFileSystem {
         ? new WindowsLogFiles(home, timeoutMs)
         : new NodeFilesProcess(home, timeoutMs);
   }
+  observeNodeProcesses() {
+    if (!(this.#files instanceof WindowsLogFiles)) throw Error("Windows process inventory required");
+    return this.#files.observeNodeProcesses();
+  }
   async open(readOnly: boolean): Promise<void> {
     try {
       await this.#files.open(readOnly);
@@ -207,6 +217,9 @@ export class LogFilesProcess implements LogFileSystem {
   stat(name: string): Promise<LogFileInfo> {
     return this.#files.stat(name);
   }
+  statMany(names: readonly string[]): Promise<readonly LogFileInfo[]> {
+    return this.#files.statMany!(names);
+  }
   read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
     return this.#files.read(name, size, offset, limit, identity);
   }
@@ -227,6 +240,9 @@ export class LogFilesProcess implements LogFileSystem {
   }
   tryLock(): Promise<boolean> {
     return this.#files.tryLock();
+  }
+  tryReadLock(): Promise<boolean> {
+    return this.#files.tryReadLock();
   }
   unlock(): Promise<void> {
     return this.#files.unlock();

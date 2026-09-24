@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import { AuthorityStorageError } from "./errors.js";
 
 const FILE_MAGIC = 0x5a584148;
@@ -208,6 +209,7 @@ export async function scanAuthorityWalFrames(
 
   let offset = 0;
   let frameCount = 0;
+  let yieldAt = performance.now() + 8;
   while (offset < reader.size) {
     const remaining = reader.size - offset;
     const headerLength = Math.min(AUTHORITY_WAL_HEADER_BYTES, remaining);
@@ -251,6 +253,12 @@ export async function scanAuthorityWalFrames(
     frameCount += 1;
     if (shouldContinue === false && offset < reader.size) {
       return { frameCount, validBytes: offset, stopped: true };
+    }
+    // Cached reads may resolve entirely as microtasks. Let unrelated I/O finish
+    // without releasing the caller's authority lock or changing replay order.
+    if (offset < reader.size && performance.now() >= yieldAt) {
+      await yieldToIo();
+      yieldAt = performance.now() + 8;
     }
   }
   return { frameCount, validBytes: offset };

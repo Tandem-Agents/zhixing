@@ -448,7 +448,6 @@ const migrationPackageSurfaces = [
 ];
 
 const CORE_RESTRICTED_ROOT_SOURCES = new Set([
-  "./diagnostics.js",
   "./events/index.js",
   "./types/index.js",
 ]);
@@ -475,8 +474,6 @@ async function verifyCoreRestrictedRoot(failures) {
   const expectedRuntime = new Set([
     ...Object.keys(coreTypes),
     ...Object.keys(coreEvents),
-    "logDiagnostic",
-    "setDiagnosticLogger",
   ]);
   const actualRuntime = Object.keys(coreRoot);
   if (
@@ -489,14 +486,13 @@ async function verifyCoreRestrictedRoot(failures) {
   const equivalentSourceFixture = `
 // Formatting and comments do not change the restricted export contract.
 export * from './types/index.js'
-export * from "./diagnostics.js";
 export * from './events/index.js';
 `;
   if (!isRestrictedCoreRootSource(equivalentSourceFixture)) {
     failures.push("core-exports:root:equivalent-source-counterexample-rejected");
   }
   const forbiddenValueFixture = `
-export * from "./diagnostics.js";
+export * from "./types/index.js";
 export * from "./events/index.js";
 export * from "./security/index.js";
 `;
@@ -504,7 +500,7 @@ export * from "./security/index.js";
     failures.push("core-exports:root:illegal-value-reexport-undetected");
   }
   const forbiddenTypeFixture = `
-export * from "./diagnostics.js";
+export * from "./types/index.js";
 export * from "./events/index.js";
 export type * from "./security/index.js";
 `;

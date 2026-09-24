@@ -232,11 +232,27 @@ describe("managed service current-state intent", () => {
             at: "2026-08-14T00:00:00.000Z",
           });
           await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(true);
+          const unlock = vi.spyOn(secrets, "unlockState");
+          const loadCurrent = (intent: "activate" | "inspect") =>
+            loadCurrentManagedServiceState(intent, homeDir, secrets);
+          const admission = await captureManagedHostAdmission("managed", homeDir, loadCurrent);
+          expect(unlock).toHaveBeenCalledTimes(1);
+          await expect(verifyManagedHostAdmission(admission, "managed", homeDir, loadCurrent))
+            .resolves.toBe(true);
+          await writeFile(path.join(homeDir, "config.jsonc"), JSON.stringify({
+            mesh: {
+              enabledRoles: ["anchor"],
+              anchorListen: { bind: { host: "127.0.0.1", port: 43122 } },
+            },
+          }));
+          await expect(verifyManagedHostAdmission(admission, "managed", homeDir, loadCurrent))
+            .resolves.toBe(false);
           await writeFile(
             path.join(homeDir, "distributed-runtime", "authority", "authority.log"),
             "corrupt-trust-log",
           );
           await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(false);
+          await expect(loadCurrent("inspect")).rejects.toThrow();
         } finally {
           await trust.stopStorageMaintenance();
         }
@@ -308,8 +324,8 @@ describe("managed service current-state intent", () => {
     async () => {
       const homeDir = await createTempDir("managed-current-binding-mismatch");
       let backend: Awaited<ReturnType<typeof readPlatformSecretStoreBackendBinding>>;
+      const store = createPlatformSecretStore({ homeDir, context: "foreground" });
       await withManagedEnvironment(undefined, undefined, async () => {
-        const store = createPlatformSecretStore({ homeDir, context: "foreground" });
         expect(await store.unlockState()).toBe("unlocked");
         backend = await readPlatformSecretStoreBackendBinding(homeDir);
       });
@@ -318,6 +334,9 @@ describe("managed service current-state intent", () => {
 
       await withManagedEnvironment("1", mismatched, async () => {
         await expect(loadCurrentManagedServiceState("activate", homeDir)).rejects.toThrow(
+          "local-credentials-unavailable",
+        );
+        await expect(loadCurrentManagedServiceState("activate", homeDir, store)).rejects.toThrow(
           "local-credentials-unavailable",
         );
         expect(await readPlatformSecretStoreBackendBinding(homeDir)).toBe(backend);

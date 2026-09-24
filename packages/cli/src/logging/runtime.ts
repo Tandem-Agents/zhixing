@@ -97,11 +97,12 @@ export function createLocalLogStore(home: string): {
   const capacity = createDeviceCapacityRuntime(path.resolve(home), {
     createDirectory: false,
   });
+  const files = new LogFilesProcess(path.resolve(home));
   return {
     store: new LocalLogStore({
-      files: new LogFilesProcess(path.resolve(home)),
+      files,
       capacity: capacity.arbiter,
-      observeWriters: createLogWriterProbe(path.resolve(home)),
+      observeWriters: createLogWriterProbe(path.resolve(home), () => files.observeNodeProcesses()),
     }),
     capacity,
   };

@@ -8,8 +8,6 @@
  */
 
 import chalk from "chalk";
-import { getZhixingHome } from "@zhixing/core/paths";
-import { getGlobalConfigPath } from "@zhixing/providers";
 import { Command, Help, InvalidArgumentError, Option } from "commander";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
@@ -17,12 +15,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
-import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
-import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure, type RuntimeLogging } from "./logging/runtime.js";
-import { INPUT_LOG_SOURCE } from "./logging/input.js";
+import type { RuntimeLogging } from "./logging/runtime.js";
+import { cliLoggingMode } from "./logging/entry-mode.js";
 
 let commandLogging: RuntimeLogging | undefined;
 async function exitCommand(code: number): Promise<never> {
@@ -31,7 +28,10 @@ async function exitCommand(code: number): Promise<never> {
 }
 
 async function renderActionError(error: unknown): Promise<void> {
-  recordRuntimeFailure(commandLogging?.records, error, "command-failed");
+  if (commandLogging) {
+    const { recordRuntimeFailure } = await import("./logging/runtime.js");
+    recordRuntimeFailure(commandLogging.records, error, "command-failed");
+  }
   if (
     error instanceof Error &&
     "deliveryConfirmed" in error &&
@@ -221,6 +221,10 @@ program
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
   })
   .action(async () => {
+    const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE },
+      { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
+      import("@zhixing/core/paths"), import("@zhixing/providers"), import("./logging/runtime.js"), import("./logging/input.js"),
+    ]);
     const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => createStdoutWriter().line(chalk.dim(message)));
     let connection: import("./runtime/core-host-connection.js").CoreHostConnection | undefined;
     try {
@@ -278,14 +282,21 @@ program
     }
   });
 
-program.hook("preAction", (_root, action) => {
+program.hook("preAction", async (_root, action) => {
   if (action.name() !== "help") assertSupportedRuntime();
   let top = action;
-  while (top.parent && top.parent !== program) top = top.parent;
-  if (["backup", "workspace", "pair"].includes(top.name())) {
+  const commandPath = [action.name()];
+  while (top.parent && top.parent !== program) {
+    top = top.parent;
+    commandPath.unshift(top.name());
+  }
+  if (top !== program && cliLoggingMode(commandPath) === "recorder") {
+    const [{ beginRuntimeLogging }, { getZhixingHome }] = await Promise.all([
+      import("./logging/runtime.js"), import("@zhixing/core/paths"),
+    ]);
     commandLogging = beginRuntimeLogging(
       getZhixingHome(),
-      [top.name(), ...(top === action ? [] : [action.name()])].join("."),
+      commandPath.join("."),
       (message) => createStdoutWriter({ stdout: process.stderr }).line(message),
     );
   }

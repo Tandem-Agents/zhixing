@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { authorityObservationRefs } from "./logging.js";
 import {
@@ -178,6 +178,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
+  // Only byte-validation proofs, never shared mutable envelopes or business state.
+  readonly #validatedEnvelopes = new Set<string>();
   readonly #retainedReferenceIndex: RebuildableDurableProjectionIndex;
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
@@ -1437,7 +1439,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const scanned = await scanAuthorityWalFrames(
         fileReader(handle, metadata.size - startOffset, startOffset),
         async (payload, offset, frameMetadata, nextOffset) => {
-          const envelope = parseEnvelope(payload);
+          const envelope = this.#decodeEnvelope(payload);
           if (envelope.lsn !== expectedLsn) {
             throw new AuthorityStorageError(
               "commit-log-corrupt",
@@ -1477,6 +1479,21 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     } finally {
       await handle.close();
     }
+  }
+
+  #decodeEnvelope(bytes: Buffer): CommitEnvelope<JsonValue> {
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (this.#validatedEnvelopes.delete(digest)) {
+      this.#validatedEnvelopes.add(digest);
+      // Parse a fresh object on every read. A reducer cannot mutate a later replay.
+      return JSON.parse(bytes.toString("utf8")) as CommitEnvelope<JsonValue>;
+    }
+    const envelope = parseEnvelope(bytes);
+    if (this.#validatedEnvelopes.size >= 8192) {
+      this.#validatedEnvelopes.delete(this.#validatedEnvelopes.values().next().value!);
+    }
+    this.#validatedEnvelopes.add(digest);
+    return envelope;
   }
 
   async #quarantineTail(bytes: Buffer, validBytes: number): Promise<void> {

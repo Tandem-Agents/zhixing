@@ -27,6 +27,8 @@ import {
   createLogQueryTools,
   restrictLogQueryTools,
   formatLogAddress,
+  conversationLogScope,
+  parseLogAddress,
 } from "@zhixing/core/logging/application";
 import { LocalLogStore } from "@zhixing/core/logging/storage";
 import {
@@ -63,6 +65,23 @@ import type { AgentEventMap, ToolDefinition } from "@zhixing/core/types";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+it("中文业务身份贯穿原生保存、授权投影、搜索和稳定地址", async () => {
+  const f = await fixture({ queryRecords: 10 });
+  const id = `ws:${"本机验收".repeat(45)}:conv_main`, scope = conversationLogScope(id);
+  const capture = f.capture(scope);
+  const record = { ...capture, record: { ...capture.record, refs: [{ kind: "conversation", id }] } };
+  await f.store.append([record]);
+  const address = formatLogAddress({ storeId: f.status.storeId, kind: "operation", ref: { kind: "conversation", id } });
+  expect(parseLogAddress(address)).toMatchObject({ ref: { kind: "conversation", id } });
+  const reader = new LogApplication(f.store, () => ({ ...f.scoped(), scopes: [scope] }));
+  const page = await reader.search({ ref: { kind: "conversation", id } });
+  expect(page.records.map(item => item.id)).toEqual([record.record.id]);
+  const allowed = await reader.read(address, "timeline");
+  expect(JSON.stringify(allowed)).toContain(record.record.id);
+  const forbidden = new LogApplication(f.store, () => ({ ...f.scoped(), scopes: [conversationLogScope(`${id}-other`)] }));
+  expect((await forbidden.search({ ref: { kind: "conversation", id } })).records).toEqual([]);
 });
 async function fixture(overrides: Partial<LogPolicy> = {}) {
   const home = await createTempDir("log-unit2");
@@ -191,7 +210,7 @@ function wire(
 describe("unified native log access", () => {
   it("accepts every recordable identity through public search and encoded addresses", async () => {
     const f = await fixture({ queryRecords: 16 });
-    const ref = { kind: ":".repeat(160), id: ":".repeat(160) };
+    const ref = { kind: ":".repeat(160), id: "验".repeat(512) };
     const capture = f.capture("storage");
     await f.store.append([{ ...capture, record: { ...capture.record, refs: [ref] } }]);
     const request = { context: () => LOCAL_LOG_OWNER, request: { filter: { ref } } };
@@ -201,7 +220,7 @@ describe("unified native log access", () => {
     expect(address.length).toBeGreaterThan(512);
     const located = await f.access.api.query(LOG_READ, { context: () => LOCAL_LOG_OWNER, request: { address, view: "timeline" } });
     expect(located.records.map(record => record.id)).toEqual([capture.record.id]);
-    await expect(f.access.api.query(LOG_SEARCH, { ...request, request: { filter: { ref: { ...ref, id: "x".repeat(161) } } } })).rejects.toThrow();
+    await expect(f.access.api.query(LOG_SEARCH, { ...request, request: { filter: { ref: { ...ref, id: "x".repeat(513) } } } })).rejects.toThrow();
   }, 30000);
   it("closes a blocked inventory after a finite drain and joins the physical owner and resource release", async () => {
     const f = await fixture(),
