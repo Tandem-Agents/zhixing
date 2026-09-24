@@ -178,6 +178,7 @@ export interface ConversationControllerOptions {
   onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
   onActivity?: (activity: SessionActivityPayload) => void;
+  onNotice?: (message: string) => void;
 }
 
 export interface InitialConversationSelection {
@@ -826,6 +827,9 @@ export class ConversationController {
       const prior = this.pendingStatuses.get(runId);
       if (prior && prior.statusRevision > notice.statusRevision) return;
       rememberBounded(this.pendingStatuses, runId, notice);
+      if (notice.state === "uncertain" && prior?.statusRevision !== notice.statusRevision) {
+        this.opts.onNotice?.("本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。");
+      }
       const observed = this.observedContinuations.get(runId);
       const result = terminalResultForStatus(notice);
       if (result && notice.ref.conversationId === this.active.conversationId) {
@@ -1099,7 +1103,7 @@ export class ConversationController {
       .filter(([, run]) => run.conversationId === conversationId && !run.settled)
       .map(([runId]) => runId));
     for (const input of page.inputsOutsideHistory ?? []) {
-      if (input.message.inputIdentity?.source.kind === "conversation" &&
+      if (input.state === "uncertain" || input.message.inputIdentity?.source.kind === "conversation" &&
           !this.observedContinuations.get(input.runId)?.terminalInputsReconciled) runIds.add(input.runId);
     }
     const pending = [...runIds].filter(runId => !this.durableRuns.has(runId));
@@ -1193,6 +1197,32 @@ export class ConversationController {
   }
 
   // ─── 会话命令执行体(分发在 cli、执行在宿主) ───
+
+  async uncertainRuns(): Promise<Extract<ConversationStatusNotice, { state: "uncertain" }>[]> {
+    const conversationId = this.active.conversationId;
+    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    if (this.active.conversationId !== conversationId) return [];
+    const latest = new Map<string, ConversationStatusNotice>();
+    let cursors = [...new Set((page.inputsOutsideHistory ?? []).filter(input => input.state === "uncertain").map(input => input.runId))]
+      .map(runId => ({ conversationId, runId, afterStatusRevision: 0 }));
+    while (cursors.length > 0) {
+      const history = await this.opts.conversation.statusHistory(cursors);
+      if (this.active.conversationId !== conversationId) return [];
+      for (const notice of history.notices) {
+        if (notice.ref.conversationId !== conversationId) continue;
+        const prior = latest.get(notice.ref.runId);
+        if (!prior || notice.statusRevision > prior.statusRevision) latest.set(notice.ref.runId, notice);
+      }
+      cursors = advancedStatusCursors(cursors, history.next);
+    }
+    return [...latest.values()].filter((notice): notice is Extract<ConversationStatusNotice, { state: "uncertain" }> => notice.state === "uncertain");
+  }
+
+  async resolveUncertain(...args: Parameters<RpcConversationFacade["resolveUncertain"]>): Promise<void> {
+    if (args[0].ref.conversationId !== this.active.conversationId) throw new Error("当前对话已切换，未执行处理。");
+    await this.opts.conversation.resolveUncertain(...args);
+    await this.reconcileObservedRuns();
+  }
 
   async listConversations(): Promise<SessionConversationEntry[]> {
     return this.opts.conversation.list();
@@ -1468,6 +1498,9 @@ function terminalResultForStatus(
 ): WireAgentResult | undefined {
   const resultingState =
     notice.state === "uncertain-closed" ? notice.resultingState : notice.state;
+  if (resultingState === "uncertain") {
+    return { reason: "error", error: { name: "RunUncertain", message: "本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。" }, usage: { inputTokens: 0, outputTokens: 0 } };
+  }
   if (resultingState === "cancelled") {
     return {
       reason: "aborted",

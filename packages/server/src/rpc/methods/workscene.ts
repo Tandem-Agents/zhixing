@@ -155,18 +155,20 @@ export function buildWorksceneListMethod(): MethodEntry {
 export function buildWorksceneTasksMethod(): MethodEntry {
   return { name: "workscene.tasks", requiresAuth: true, async handler(rawParams, ctx) {
     const params = requireOnlyFields(rawParams, "workscene.tasks", ["conversationId"]);
-    return requireWorksceneApplication(ctx.server).query(WORKSCENE_TASKS_QUERY, { conversationId: requestId(params.conversationId, "workscene.tasks") });
+    const conversationId = requestId(params.conversationId, "workscene.tasks");
+    return requireWorksceneApplication(ctx.server).query(WORKSCENE_TASKS_QUERY, { conversationId });
   } };
 }
 
 export function buildWorksceneTaskStopMethod(): MethodEntry {
   return { name: "workscene.stopTask", requiresAuth: true, async handler(rawParams, ctx) {
     const params = requireOnlyFields(rawParams, "workscene.stopTask", ["conversationId", "targetConversationId", "runId", "requestId"]);
-    const result = await requireWorksceneApplication(ctx.server).command(WORKSCENE_TASK_STOP_COMMAND, {
+    const command = {
       conversationId: requestId(params.conversationId, "workscene.stopTask"),
       target: { conversationId: requestId(params.targetConversationId, "workscene.stopTask"), runId: requestId(params.runId, "workscene.stopTask") },
       requestId: requestId(params.requestId, "workscene.stopTask"),
-    });
+    };
+    const result = await requireWorksceneApplication(ctx.server).command(WORKSCENE_TASK_STOP_COMMAND, command);
     return result.result;
   } };
 }

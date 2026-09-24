@@ -29,7 +29,7 @@ it("instantiates the exact signed profile when new tools appear before execution
   const errors: string[] = [];
   const worker = new ConversationAssignmentWorker({
     InProcessAssignmentSubmission,
-    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, failExecution },
+    ledger: { sealedBundleForRecovery: async () => ({ kind: "not-sealed" }), start: async () => ({ started: true }), closePendingInteractionsForRunEnd: async () => 0, pendingInteractionMirrorBatch: async () => undefined, hasPendingTicketCancellation: async () => false, hasPendingOwnerCancellation: async () => false, failExecution },
     runtimeFactory: { create }, artifacts: {},
     submissionFor: () => ({ reportStarted: async () => {}, mirrorInteractions: vi.fn(), submitBundle: vi.fn(), submitCancelProof: vi.fn() }),
     finalizeUsage: async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }),
@@ -207,7 +207,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
-      hasPendingTicketCancellation: vi.fn(async () => false),
+      hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
       failExecution,
     } as unknown as ConversationAssignmentLedger;
     const runtimeFailure = new Error("runtime factory unavailable");
@@ -298,7 +298,7 @@ describe("ConversationAssignmentWorker", () => {
         start: vi.fn(async () => ({ started: true })),
         closePendingInteractionsForRunEnd: vi.fn(async () => 0),
         pendingInteractionMirrorBatch: vi.fn(async () => undefined),
-        hasPendingTicketCancellation: vi.fn(async () => false),
+        hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
         failExecution,
       } as unknown as ConversationAssignmentLedger,
       runtimeFactory,
@@ -480,7 +480,7 @@ describe("ConversationAssignmentWorker", () => {
     );
   });
 
-  it("propagates durable remote cancellation into the active runtime", async () => {
+  it.each(["external", "owner"] as const)("propagates %s cancellation without finalizing an active runtime", async kind => {
     const assignmentId = "asg-worker-cancel";
     const conversationId = "conversation-worker-cancel";
     const envelope = {
@@ -507,6 +507,9 @@ describe("ConversationAssignmentWorker", () => {
       },
     } as unknown as Extract<DispatchEnvelope, { execution: "conversation" }>;
     const failExecution = vi.fn(async () => undefined);
+    let ownerCancelled = false;
+    const cleanup = Promise.withResolvers<void>();
+    const finalizeUsage = vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 }));
     const ledger = {
       sealedBundleForRecovery: vi.fn(async () => ({
         kind: "not-sealed" as const,
@@ -514,7 +517,7 @@ describe("ConversationAssignmentWorker", () => {
       start: vi.fn(async () => ({ started: true })),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
-      hasPendingTicketCancellation: vi.fn(async () => false),
+      hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => ownerCancelled),
       failExecution,
     } as unknown as ConversationAssignmentLedger;
     let observedSignal: AbortSignal | undefined;
@@ -527,6 +530,7 @@ describe("ConversationAssignmentWorker", () => {
         if (options.abortSignal?.aborted) resolve();
         else options.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
       });
+      if (kind === "owner") await cleanup.promise;
       return { agentResult: { reason: "aborted" } };
     });
     const interactions = interactionObserver();
@@ -537,6 +541,7 @@ describe("ConversationAssignmentWorker", () => {
         create: vi.fn(async () => ({
           run,
           executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
+          abort: vi.fn(() => true),
           dispose: vi.fn(async () => undefined),
         })),
       } as unknown as RuntimeFactory,
@@ -547,22 +552,32 @@ describe("ConversationAssignmentWorker", () => {
         submitBundle: vi.fn(),
         submitCancelProof: vi.fn(),
       }),
-      finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 })),
+      finalizeUsage,
       interactions,
     });
 
     worker.accept(envelope);
     await vi.waitFor(() => expect(observedSignal).toBeDefined());
     expect(run.mock.calls[0]?.[1]).toMatchObject({ turnContext: { worksceneTasks: [{ conversationId: "main-1", runId: "root-1", goal: "整理报告" }] } });
-    expect(worker.abort(assignmentId, new Error("cancelled"))).toBe(true);
+    if (kind === "owner") {
+      ownerCancelled = true;
+      expect(worker.requestOwnerCancellation(assignmentId)).toBe(false);
+      expect(finalizeUsage).not.toHaveBeenCalled();
+      cleanup.resolve();
+    } else expect(worker.abort(assignmentId, new Error("cancelled"))).toBe(true);
     await worker.drain();
 
     expect(observedSignal?.aborted).toBe(true);
-    expect(failExecution).toHaveBeenCalledWith(assignmentId, {
-      reason: "运行已中止",
-      usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 },
-    });
-    expect(interactions.drainAssignment).toHaveBeenCalledTimes(2);
+    if (kind === "owner") {
+      expect(failExecution).not.toHaveBeenCalled();
+      expect(worker.requestOwnerCancellation(assignmentId)).toBe(true);
+    } else {
+      expect(failExecution).toHaveBeenCalledWith(assignmentId, {
+        reason: "运行已中止",
+        usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 },
+      });
+      expect(interactions.drainAssignment).toHaveBeenCalledTimes(2);
+    }
     expect(interactions.drainAssignment).toHaveBeenLastCalledWith(
       expect.objectContaining({
         signal: expect.objectContaining({ aborted: false }),
@@ -662,7 +677,7 @@ describe("ConversationAssignmentWorker", () => {
       prepareInteractionAnswerFromSurface: vi.fn(async () => prepared),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
-      hasPendingTicketCancellation: vi.fn(async () => false),
+      hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
       failExecution: vi.fn(async () => undefined),
     } as unknown as ConversationAssignmentLedger;
     const confirmationBroker = {} as never;
@@ -690,6 +705,7 @@ describe("ConversationAssignmentWorker", () => {
         create: vi.fn(async () => ({
           run,
           confirmationBroker,
+          abort: vi.fn(() => true),
           executionProfile: () => ({ tools: [], mcpServers: [], providerIds: [] }),
           dispose: vi.fn(async () => undefined),
         })),
@@ -855,7 +871,7 @@ describe("ConversationAssignmentWorker", () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
-  it("binds turn origin to every remotely produced stream frame", async () => {
+  it.each(["none", "before-seal", "after-seal", "stream"] as const)("binds stream origin and preserves the seal boundary: %s", async (fault) => {
     const assignmentId = "asg-worker-turn-origin";
     const conversationId = "conversation-turn-origin";
     const turnOrigin = {
@@ -894,6 +910,7 @@ describe("ConversationAssignmentWorker", () => {
       payload: { prompt: "hello" },
     } as never;
     const injectedStream = new StreamDigestChain(assignmentId);
+    let kernelClosed = false;
     const final = vi.fn(
       async (
         _meta: StreamFrameMeta = {},
@@ -904,10 +921,20 @@ describe("ConversationAssignmentWorker", () => {
       append: async (
         payload: Parameters<StreamDigestChain["append"]>[0],
         meta?: Parameters<StreamDigestChain["append"]>[1],
-      ) => injectedStream.append(payload, meta),
+      ) => {
+        if (fault === "stream" && payload.kind === "agent-yield") throw new Error("stream append failed");
+        return injectedStream.append(payload, meta);
+      },
       final,
+      markTerminal: vi.fn(async () => undefined),
     }));
-    const sealConversationBundle = vi.fn(async () => ({ assignmentId } as SealedBundle));
+    const sealConversationBundle = vi.fn(async () => {
+      if (fault !== "none") throw new Error(`seal fault: ${fault}`);
+      return { assignmentId } as SealedBundle;
+    });
+    const failExecution = vi.fn(async () => fault === "after-seal" ? undefined : ({ reason: `seal fault: ${fault}` }));
+    const onError = vi.fn();
+    const submitBundle = vi.fn(async () => ({ committed: true, commitRevision: 10 }));
     const interactions = interactionObserver();
     const ledger = {
       sealedBundleForRecovery: vi.fn(async () => ({
@@ -917,8 +944,9 @@ describe("ConversationAssignmentWorker", () => {
       authorizeToolExecution: vi.fn(),
       closePendingInteractionsForRunEnd: vi.fn(async () => 0),
       pendingInteractionMirrorBatch: vi.fn(async () => undefined),
-      hasPendingTicketCancellation: vi.fn(async () => false),
+      hasPendingTicketCancellation: vi.fn(async () => false), hasPendingOwnerCancellation: vi.fn(async () => false),
       sealConversationBundle,
+      failExecution,
       acknowledge: vi.fn(async () => undefined),
     } as unknown as ConversationAssignmentLedger;
     const worker = new ConversationAssignmentWorker({
@@ -930,15 +958,17 @@ describe("ConversationAssignmentWorker", () => {
           run: async function* (_messages: unknown, options: {
             onProtocolEvent: (event: never, meta: { lineage?: string }) => void;
           }) {
-            options.onProtocolEvent(event, {});
-            yield yielded;
-            return {
-              agentResult: {
-                reason: "completed",
-                usage: { inputTokens: 1, outputTokens: 1 },
-              },
-              runRecord: { source: "interactive" },
-            };
+            try {
+              await options.onProtocolEvent(event, {});
+              yield yielded;
+              return {
+                agentResult: {
+                  reason: "completed",
+                  usage: { inputTokens: 1, outputTokens: 1 },
+                },
+                runRecord: { source: "interactive" },
+              };
+            } finally { kernelClosed = true; }
           },
           dispose: vi.fn(async () => undefined),
         })),
@@ -947,16 +977,27 @@ describe("ConversationAssignmentWorker", () => {
       submissionFor: () => ({
         reportStarted: vi.fn(async () => undefined),
         mirrorInteractions: vi.fn(),
-        submitBundle: vi.fn(async () => ({ committed: true, commitRevision: 10 })),
+        submitBundle,
         submitCancelProof: vi.fn(),
       }),
-      finalizeUsage: vi.fn(async () => ({ reportDigest: "sha256:usage", upToUsageSeq: 0 })),
+      finalizeUsage: vi.fn(async () => {
+        expect(kernelClosed).toBe(true);
+        return { reportDigest: "sha256:usage", upToUsageSeq: 0 };
+      }),
       interactions,
       createStream,
+      onError,
     });
     worker.accept(envelope);
     await worker.drain();
 
+    if (fault === "stream") {
+      expect(kernelClosed).toBe(true);
+      expect(sealConversationBundle).not.toHaveBeenCalled();
+      expect(failExecution).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ reason: "stream append failed" }));
+      expect(onError).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ message: "stream append failed" }));
+      return;
+    }
     const expected = new StreamDigestChain(assignmentId);
     expected.append({ kind: "agent-event", event }, { turnOrigin });
     expected.append({ kind: "agent-yield", yield: yielded }, { turnOrigin });
@@ -981,5 +1022,15 @@ describe("ConversationAssignmentWorker", () => {
       assignmentId,
       expect.objectContaining({ streamFinal: expected.final() }),
     );
+    if (fault === "none") {
+      expect(failExecution).not.toHaveBeenCalled();
+      expect(submitBundle).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+    } else {
+      expect(failExecution).toHaveBeenCalledWith(assignmentId, { reason: `seal fault: ${fault}`, usageFinal: { reportDigest: "sha256:usage", upToUsageSeq: 0 } });
+      expect(submitBundle).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledWith(assignmentId, expect.objectContaining({ message: `seal fault: ${fault}` }));
+      expect((await createStream.mock.results[0]!.value).markTerminal).toHaveBeenCalledTimes(fault === "before-seal" ? 1 : 0);
+    }
   });
 });

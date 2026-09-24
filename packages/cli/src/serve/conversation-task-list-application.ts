@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import type { SessionStatePort, TaskListState } from "@zhixing/core/contracts";
+import { canonicalize } from "@zhixing/core/protocol";
 import type {
   ConversationTaskListMutationDecision,
   ConversationTaskListPort,
@@ -45,14 +47,22 @@ export function createAnchorConversationTaskListPort(input: Readonly<{
   conversations: ConversationManager;
   exists(conversationId: string): Promise<boolean>;
   taskLists: TaskListService;
+  sessionState: Pick<SessionStatePort, "readTaskList" | "mutate">;
+  readMutationBase(conversationId: string, requestId: string): Promise<TaskListState | undefined>;
 }>): ConversationTaskListPort {
+  const context = (requestId: string) => ({
+    principal: { kind: "host" as const, component: "conversation-task-list" }, requestId,
+    deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+  });
   return Object.freeze({
-    requiresStableOperationIdentity: false,
-    createOperationIdentity: () => `task-list:${randomUUID()}`,
-    createTaskIdentity: () => randomUUID(),
+    requiresStableOperationIdentity: true,
+    createOperationIdentity: () => { throw new Error("Task-list command requires a stable operation identity"); },
+    createTaskIdentity: ({ operationId, content }: Parameters<ConversationTaskListPort["createTaskIdentity"]>[0]) =>
+      createHash("sha256").update(canonicalize({ requestId: operationId, content })).digest("hex").slice(0, 32),
     read: async (conversationId: string) => {
-      await input.taskLists.prime(conversationId);
-      return input.taskLists.getCached(conversationId);
+      const state = await input.sessionState.readTaskList(conversationId, context(`task-list-read:${conversationId}`));
+      input.taskLists.acceptCommitted(conversationId, state);
+      return state;
     },
     maintain: async (
       request: Parameters<ConversationTaskListPort["maintain"]>[0],
@@ -61,17 +71,14 @@ export function createAnchorConversationTaskListPort(input: Readonly<{
         request.conversationId,
         () => input.exists(request.conversationId),
         async () => {
-          await input.taskLists.prime(request.conversationId);
-          const current = input.taskLists.getCached(request.conversationId) ?? {
-            items: [],
-          };
-          const decision = request.decide(current);
-          const taskList = hasTaskListWrite(decision)
-            ? await input.taskLists.set(
-                request.conversationId,
-                decision.next.items,
-              )
-            : current;
+          const current = await input.sessionState.readTaskList(request.conversationId, context(`read:${request.operationId}`));
+          const base = await input.readMutationBase(request.conversationId, request.operationId);
+          const decision = request.decide(base ?? current);
+          // A no-effect decision also needs a receipt: a late retry must not act on a new list.
+          await input.sessionState.mutate(request.conversationId,
+            { kind: "task-list-op", op: { op: "set", state: hasTaskListWrite(decision) ? decision.next : base ?? current } }, context(request.operationId));
+          const taskList = await input.sessionState.readTaskList(request.conversationId, context(`committed:${request.operationId}`));
+          input.taskLists.acceptCommitted(request.conversationId, taskList);
           return Object.freeze({ decision, taskList });
         },
       );

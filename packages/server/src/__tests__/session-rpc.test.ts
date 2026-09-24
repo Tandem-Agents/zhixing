@@ -4647,6 +4647,8 @@ describe("session.* RPC (S2.D)", () => {
       conversations,
       exists: (conversationId) => directory.exists(conversationId),
     });
+    const requireIdentity = { ...taskLists, requiresStableOperationIdentity: true,
+      createOperationIdentity: () => { throw new Error("RPC must forward the supplied operation identity"); } };
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
@@ -4655,7 +4657,7 @@ describe("session.* RPC (S2.D)", () => {
       productApi: createConversationProductApi({
         directory,
         conversations,
-        taskLists,
+        taskLists: requireIdentity,
       }),
     });
     server = await startServer({ context: ctx });
@@ -4671,6 +4673,7 @@ describe("session.* RPC (S2.D)", () => {
 
     const updated = await client.request("session.taskListUpdate", {
       conversationId: "conv-task",
+      requestId: "task-list:test-add",
       action: { kind: "add", content: "写周报" },
     });
     expect(isSuccessResponse(updated)).toBe(true);
@@ -4690,6 +4693,7 @@ describe("session.* RPC (S2.D)", () => {
 
     const noWrite = await client.request("session.taskListUpdate", {
       conversationId: "conv-task",
+      requestId: "task-list:test-missing",
       action: { kind: "done", token: "missing" },
     });
     expect(isSuccessResponse(noWrite)).toBe(true);
@@ -4759,6 +4763,7 @@ describe("session.* RPC (S2.D)", () => {
 
     const updated = await client.request("session.taskListUpdate", {
       conversationId,
+      requestId: "task-list:test-busy",
       action: { kind: "add", content: "不能插队" },
     });
     expect(isErrorResponse(updated)).toBe(true);

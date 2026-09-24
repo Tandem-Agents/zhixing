@@ -65,6 +65,16 @@ describe("projectHistoryTail", () => {
     renderHistoryTail({ runs: [], writer: writer as never, inputsOutsideHistory: [{ runId: "r", state: "queued", consumed: false, disposition: "pending", message: userMessage("尚未启动") }] });
     expect(writer.line.mock.calls.flat().join("\n")).toContain("已接纳、待处理: 尚未启动");
   });
+  it.each([
+    ["cancelled", "运行已停止"], ["failed", "运行失败"],
+    ["uncertain", "运行结果待确认"], ["cancel-requested", "正在停止"],
+  ] as const)("shows %s separately from input consumption", (state, label) => {
+    const writer = { line: vi.fn() };
+    renderHistoryTail({ runs: [], writer: writer as never, inputsOutsideHistory: [
+      { runId: "r", state, consumed: true, disposition: "consumed", message: userMessage("待核实输入") },
+    ] });
+    expect(writer.line.mock.calls.flat().join("\n")).toContain(`已进入运行输入 · ${label}: 待核实输入`);
+  });
   it("取最近 maxRuns 条、时间正序返回，latestAt 为最近一条的时刻", () => {
     const runs = [
       run("q0", "a0"),

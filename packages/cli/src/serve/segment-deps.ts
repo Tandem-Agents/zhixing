@@ -112,6 +112,7 @@ export function createTaskListReaderFromService(
           }
         }
       }
+      await service.prime(conversationId);
       return service.getInProgressTasks(conversationId).length > 0;
     },
   };

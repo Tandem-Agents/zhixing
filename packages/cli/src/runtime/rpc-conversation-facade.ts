@@ -14,6 +14,7 @@
  */
 
 import type {
+  ConversationUncertainResolutionResult,
   ConversationCommunicationHistory as RunsPage,
   ConversationHistoryCursor as RunsPageCursor,
 } from "@zhixing/core/conversation/application";
@@ -221,6 +222,20 @@ export class RpcConversationFacade {
       }
     }
     return { notices, next };
+  }
+
+  async resolveUncertain(
+    notice: Extract<ConversationStatusNotice, { state: "uncertain" }>,
+    decision: "user-abandoned" | "user-verified-side-effects" | "user-retry-acknowledged",
+  ): Promise<ConversationUncertainResolutionResult> {
+    return this.#requestWithReconnect("session.resolve", {
+      requestId: `resolve:${generateTurnId()}`,
+      conversationId: notice.ref.conversationId,
+      runId: notice.ref.runId,
+      ownerEpoch: notice.ref.ownerEpoch,
+      openFactDigest: notice.openFactDigest,
+      decision,
+    });
   }
 
   /**

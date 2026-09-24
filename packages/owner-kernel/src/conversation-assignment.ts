@@ -1088,6 +1088,34 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => snapshot(state.taskList, "Session task list"));
   }
 
+  /** Retry decisions use their original input, never a later list or a new index target. */
+  async taskListBeforeMutation(requestId: string): Promise<TaskListState | undefined> {
+    assertIdentifier(requestId, "Task-list mutation request id");
+    if (!await this.#select(state => state.sessionMutationDigests.has(requestId))) return undefined;
+    return this.#operations.run(async () => {
+      let before: TaskListState | undefined;
+      const replay = () => this.#log.transactProjection<RunProjection, unknown, void>(
+        emptyProjection(this.#conversationId),
+        async (state, record, envelope) => {
+          if (before !== undefined) return state;
+          const body = record.body as ConversationRunJournalRecord;
+          if (record.stream === runStream(this.#conversationId) &&
+              "t" in body && body.t === "session-control" && body.requestId === requestId) {
+            if (body.mutation.kind !== "task-list-op") throw new Error("Request belongs to another session mutation");
+            before = snapshot(state.taskList, "Task-list mutation base");
+            return state;
+          }
+          return this.#reduce(state, record, envelope);
+        },
+        () => ({ kind: "return", value: undefined }),
+        { stream: runStream(this.#conversationId) },
+      );
+      await (this.#resources ? this.#resources.coordinate(replay) : replay());
+      if (before === undefined) throw new Error("Task-list retry base is unavailable");
+      return before;
+    });
+  }
+
   async sessionMutationRequest(requestId: string): Promise<
     { readonly digest: string; readonly domainRevision: number } | undefined
   > {
@@ -2112,7 +2140,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => {
       const inputs = state.deleted ? [] : projectMessageInputs(state).filter(({ lsn, status }) =>
         lsn > state.clearedThroughLsn && (status.state !== "committed" || !status.consumed));
-      return { inputs: inputs.slice(-200).map((entry) => entry.status), truncated: inputs.length > 200 };
+      // Keep unresolved work discoverable even when old terminal inputs fill the page.
+      const unresolved = inputs.filter(entry => entry.status.state === "uncertain");
+      const remaining = Math.max(0, 200 - unresolved.length);
+      const recent = remaining > 0
+        ? inputs.filter(entry => entry.status.state !== "uncertain").slice(-remaining)
+        : [];
+      const selected = [...unresolved, ...recent].slice(0, 200).sort((a, b) => a.position - b.position);
+      return { inputs: selected.map((entry) => entry.status), truncated: inputs.length > 200 };
     });
   }
 
@@ -9179,14 +9214,13 @@ function projectMessageInputs(state: RunProjection): Array<{ readonly position: 
   };
   for (const [runId, entry] of state.admittedByRun) {
     const identity = entry.record.ingress.turnOrigin?.messageIdentity;
-    if (!identity) continue;
     const consumed = [...state.assignedById.entries()].some(([assignmentId, assigned]) =>
       assigned.record.runId === runId && (hasDurableStartedObservation(state, assignmentId) ||
       state.committedByAssignment.has(assignmentId) || state.openInputAssignments.get(runId) === assignmentId ||
       state.closedInputAssignments.has(assignmentId)));
     result.push({ position: entry.record.queuedPosition, lsn: entry.lsn, status: {
       ...delivery(runId, consumed),
-      message: { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(identity) },
+      message: { ...userMessageFromTurnInput(entry.input), ...(identity ? { inputIdentity: structuredClone(identity) } : {}) },
     } });
   }
   const consumed = new Set([...state.inputConsumptions.values()].flatMap((entry) => [...entry.ingressKeys]));

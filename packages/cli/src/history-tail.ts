@@ -21,6 +21,7 @@
  */
 
 import chalk from "chalk";
+import { conversationStateLabel } from "./conversation-state-label.js";
 import { extractText, type Message } from "@zhixing/core";
 import { type RunRecord } from "@zhixing/core/transcript";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
@@ -166,7 +167,9 @@ export function renderHistoryTailLines(
   for (const input of tail.outsideInputs ?? []) {
     const source = input.message.inputIdentity?.source;
     const label = source?.kind === "conversation" ? `来自对话 ${source.conversationId}` : "用户消息";
-    const status = input.disposition === "stopped" ? "已停止、未消费" : input.consumed ? "已进入运行输入" : "已接纳、待处理";
+    const state = conversationStateLabel(input.state);
+    const status = input.disposition === "stopped" ? "已停止、未消费"
+      : input.consumed ? `已进入运行输入${state ? ` · ${state}` : ""}` : "已接纳、待处理";
     lines.push(clampLine(chalk.dim(`${prefix}◇ ${label} · ${status}: ${collapseToLine(extractText(input.message))}`), maxVisible));
   }
   if (tail.outsideInputsTruncated) lines.push(chalk.dim(`${prefix}… 尚有更早的未入历史消息，可按消息标识查询。`));

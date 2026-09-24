@@ -59,6 +59,10 @@
         "requiresAuth": true
       },
       {
+        "name": "extensions.local-setup",
+        "requiresAuth": true
+      },
+      {
         "name": "extensions.refresh",
         "requiresAuth": true
       },
@@ -350,6 +354,10 @@
       },
       {
         "name": "extensions.list",
+        "requiresAuth": true
+      },
+      {
+        "name": "extensions.local-setup",
         "requiresAuth": true
       },
       {
@@ -647,6 +655,10 @@
         "requiresAuth": true
       },
       {
+        "name": "extensions.local-setup",
+        "requiresAuth": true
+      },
+      {
         "name": "extensions.refresh",
         "requiresAuth": true
       },
@@ -941,6 +953,10 @@
         "requiresAuth": true
       },
       {
+        "name": "extensions.local-setup",
+        "requiresAuth": true
+      },
+      {
         "name": "extensions.refresh",
         "requiresAuth": true
       },
@@ -1232,7 +1248,7 @@
     ],
     "documents": [
       {
-        "path": "research/design/drafts/transcript-persistence-and-attention-window-architecture.md",
+        "path": "docs/modules/conversation/persistence.md",
         "status": "verified-current"
       },
       {
@@ -1240,7 +1256,7 @@
         "status": "verified-current"
       },
       {
-        "path": "research/design/drafts/workscene-management-architecture.md",
+        "path": "docs/modules/workscene/architecture.md",
         "status": "verified-current"
       },
       {
@@ -1252,7 +1268,7 @@
         "status": "verified-current"
       },
       {
-        "path": "research/design/specifications/message-outbox.md",
+        "path": "docs/modules/delivery/outbox.md",
         "status": "verified-current"
       },
       {
@@ -1260,7 +1276,7 @@
         "status": "verified-current"
       },
       {
-        "path": "research/design/specifications/agent-runtime-lifecycle.md",
+        "path": "docs/modules/conversation/runtime-lifecycle.md",
         "status": "verified-current"
       },
       {
@@ -1377,6 +1393,7 @@
           "rpc:dutyMigration.targets",
           "rpc:extensions.apply-configuration",
           "rpc:extensions.list",
+          "rpc:extensions.local-setup",
           "rpc:extensions.refresh",
           "rpc:extensions.set-enabled",
           "rpc:health",
@@ -1447,6 +1464,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1579,6 +1597,7 @@
           "rpc:dutyMigration.targets",
           "rpc:extensions.apply-configuration",
           "rpc:extensions.list",
+          "rpc:extensions.local-setup",
           "rpc:extensions.refresh",
           "rpc:extensions.set-enabled",
           "rpc:health",
@@ -1649,6 +1668,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1766,6 +1786,7 @@
           "rpc:dutyMigration.targets",
           "rpc:extensions.apply-configuration",
           "rpc:extensions.list",
+          "rpc:extensions.local-setup",
           "rpc:extensions.refresh",
           "rpc:extensions.set-enabled",
           "rpc:health",
@@ -1836,6 +1857,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1941,6 +1963,7 @@
           "rpc:dutyMigration.targets",
           "rpc:extensions.apply-configuration",
           "rpc:extensions.list",
+          "rpc:extensions.local-setup",
           "rpc:extensions.refresh",
           "rpc:extensions.set-enabled",
           "rpc:health",
@@ -2011,6 +2034,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2095,6 +2119,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2193,6 +2218,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2281,6 +2307,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2358,6 +2385,7 @@
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
+          "slash:resolve:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -3336,6 +3364,15 @@
         }
       },
       {
+        "name": "extensions.local-setup",
+        "requiresAuth": true,
+        "key": "rpc:extensions.local-setup",
+        "category": "rpc",
+        "target": {
+          "rowId": "runtime-config"
+        }
+      },
+      {
         "name": "extensions.refresh",
         "requiresAuth": true,
         "key": "rpc:extensions.refresh",
@@ -4003,6 +4040,18 @@
         "category": "slash",
         "target": {
           "rowId": "conversation-manage"
+        }
+      },
+      {
+        "id": "resolve:repl",
+        "name": "resolve",
+        "execution": "local",
+        "source": "packages/cli/src/commands/info-commands.ts",
+        "registrar": "registerInfoCommands",
+        "key": "slash:resolve:repl",
+        "category": "slash",
+        "target": {
+          "rowId": "uncertain-resolution"
         }
       },
       {

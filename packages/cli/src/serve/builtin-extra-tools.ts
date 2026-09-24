@@ -132,13 +132,10 @@ export interface BuiltinExtraToolsAssembly {
 /**
  * 创建 builtin extra tools assembly —— 宿主资产层构建时创建一次。
  *
- * `taskListStore` 决定 task_list 持久化层：
- *   - 单 scope：传 `ConversationRepoTaskListStore`（落盘到 conversation meta）
- *   - 核心宿主：传 `RoutedConversationRepoTaskListStore`（按全域 conversationId
- *     路由到 user / workscene 等 scope repo）
+ * `taskListStore` 只读取 Conversation owner 的任务投影；模型写入由 assignment 提交。
  */
 export function createBuiltinExtraToolsAssembly(
-  taskListStore: TaskListStore,
+  taskListStore: Pick<TaskListStore, "load">,
   taskListApplication: ConversationTaskListToolApplication,
 ): BuiltinExtraToolsAssembly {
   const taskListService = new TaskListService(taskListStore);

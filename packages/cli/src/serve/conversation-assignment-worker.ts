@@ -10,6 +10,7 @@ import type {
   ExecutionRef,
   ResourceReservationPort,
   RunSubmissionPort,
+  SealedBundle,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
@@ -36,6 +37,7 @@ import {
 } from "./durable-conversation-interactions.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+import { ConversationKernelExecution } from "./conversation-kernel-execution.js";
 import {
   assignmentGlobalCapability,
   createAssignmentMutationPort,
@@ -89,6 +91,7 @@ export class ConversationAssignmentWorker {
   readonly #running = new Map<string, Promise<void>>();
   readonly #cancellations = new Map<string, Promise<void>>();
   readonly #executionAborts = new Map<string, AbortController>();
+  readonly #kernels = new Map<string, ConversationKernelExecution>();
   readonly #preflightClaims = new Set<string>();
   readonly #abort = new AbortController();
   #closed = false;
@@ -109,6 +112,7 @@ export class ConversationAssignmentWorker {
       .catch((error) => this.options.onError?.(envelope.assignmentId, asError(error)))
       .finally(() => {
         this.#running.delete(envelope.assignmentId);
+        this.#kernels.delete(envelope.assignmentId);
         if (this.#executionAborts.get(envelope.assignmentId) === executionAbort) {
           this.#executionAborts.delete(envelope.assignmentId);
         }
@@ -127,7 +131,18 @@ export class ConversationAssignmentWorker {
     const controller = this.#executionAborts.get(assignmentId);
     if (!controller || controller.signal.aborted) return false;
     controller.abort(reason);
+    this.#kernels.get(assignmentId)?.stop();
     return true;
+  }
+
+  requestOwnerCancellation(assignmentId: string): boolean {
+    this.abort(assignmentId, new Error("Conversation assignment was cancelled"));
+    return this.#kernels.get(assignmentId)?.stop() ?? true;
+  }
+
+  async #hasPendingCancellation(assignmentId: string): Promise<boolean> {
+    return await this.options.ledger.hasPendingTicketCancellation(assignmentId) ||
+      await this.options.ledger.hasPendingOwnerCancellation(assignmentId);
   }
 
   async abortWithTicket(request: ExecutionAbortRequest): Promise<void> {
@@ -322,7 +337,9 @@ export class ConversationAssignmentWorker {
       activeInteractionBinding.broker = runtime.confirmationBroker;
       const messages = await loadWindowMessages(envelope, this.options.artifacts);
       inputPort = await this.options.inputFor?.(envelope);
-      const generator = runtime.run(messages, {
+      const kernel = new ConversationKernelExecution(runtime);
+      this.#kernels.set(assignmentId, kernel);
+      const generator = kernel.run(messages, {
         runId: envelope.work.runId,
         assignmentId: envelope.assignmentId,
         ...(inputPort ? { inputPort } : {}),
@@ -409,22 +426,29 @@ export class ConversationAssignmentWorker {
           },
         },
       });
-      while (true) {
-        const item = await this.options.interactions.withBinding(
-          interactionBinding,
-          () => generator.next(),
-        );
-        if (item.done) {
-          result = item.value;
-          break;
+      try {
+        while (true) {
+          const item = await this.options.interactions.withBinding(
+            interactionBinding,
+            () => generator.next(),
+          );
+          if (item.done) {
+            result = item.value;
+            break;
+          }
+          if (item.value.type === "tool_start") toolCalls += 1;
+          yieldOrdinal += 1;
+          await activeStream.append(
+            { kind: "agent-yield", yield: item.value },
+            streamMeta,
+            abortSignal,
+            `yield:${yieldOrdinal}`,
+          );
         }
-        if (item.value.type === "tool_start") toolCalls += 1;
-        yieldOrdinal += 1;
-        await activeStream.append(
-          { kind: "agent-yield", yield: item.value },
-          streamMeta,
-          abortSignal,
-          `yield:${yieldOrdinal}`,
+      } finally {
+        await this.options.interactions.withBinding(
+          interactionBinding,
+          () => generator.return(undefined as never),
         );
       }
     } catch (error) {
@@ -440,7 +464,7 @@ export class ConversationAssignmentWorker {
     }
     if (executionError) {
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
-      if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+      if (await this.#hasPendingCancellation(assignmentId)) {
         return;
       }
       try {
@@ -465,7 +489,7 @@ export class ConversationAssignmentWorker {
     if (!result) {
       const error = new Error("Conversation runtime ended without a result");
       const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
-      if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+      if (await this.#hasPendingCancellation(assignmentId)) {
         return;
       }
       await this.#prepareRunEndUntilAvailable(
@@ -486,7 +510,7 @@ export class ConversationAssignmentWorker {
       throw new TypeError("Conversation runtime completed without a stream");
     }
     const usageFinal = await this.#finalizeUsageUntilAvailable(assignmentId, envelope);
-    if (await this.options.ledger.hasPendingTicketCancellation(assignmentId)) {
+    if (await this.#hasPendingCancellation(assignmentId)) {
       return;
     }
     if (result.agentResult.reason !== "completed") {
@@ -523,7 +547,7 @@ export class ConversationAssignmentWorker {
       ...(source ? { source } : {}),
       ...(advancement ? { advancement } : {}),
     };
-    let streamFinal: Awaited<ReturnType<AssignmentRunStream["final"]>>;
+    let bundle: SealedBundle;
     try {
       if (!interactionBinding) {
         throw new TypeError("Conversation runtime completed without interaction binding");
@@ -534,27 +558,28 @@ export class ConversationAssignmentWorker {
         context,
         interactionBinding,
       );
-      streamFinal = await stream.final(streamMeta, abortSignal);
+      const streamFinal = await stream.final(streamMeta, abortSignal);
+      bundle = await this.options.ledger.sealConversationBundle(assignmentId, {
+        runRecord,
+        ...(result.windowCompact ? { windowCompact: result.windowCompact } : {}),
+        contentAssets: [...envelope.work.contentAssets],
+        streamFinal,
+        usage: {
+          inputTokens: result.agentResult.usage.inputTokens,
+          outputTokens: result.agentResult.usage.outputTokens,
+          toolCalls,
+        },
+        usageFinal,
+      });
     } catch (error) {
       const failure = asError(error);
-      await this.options.ledger.failExecution(assignmentId, {
+      const settled = await this.options.ledger.failExecution(assignmentId, {
         reason: failure.message,
         usageFinal,
       });
+      if (settled) await stream.markTerminal?.();
       throw failure;
     }
-    const bundle = await this.options.ledger.sealConversationBundle(assignmentId, {
-      runRecord,
-      ...(result.windowCompact ? { windowCompact: result.windowCompact } : {}),
-      contentAssets: [...envelope.work.contentAssets],
-      streamFinal,
-      usage: {
-        inputTokens: result.agentResult.usage.inputTokens,
-        outputTokens: result.agentResult.usage.outputTokens,
-        toolCalls,
-      },
-      usageFinal,
-    });
     await this.#submitUntilAcknowledged(bundle, submission, context);
     await stream.markTerminal?.();
   }

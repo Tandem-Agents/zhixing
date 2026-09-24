@@ -73,7 +73,7 @@ describe("distributed runtime migration behavior golden", () => {
     vi.useRealTimers();
   });
 
-  it("matches the normalized pre-migration behavior", async () => {
+  it("matches the normalized current product behavior", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(FIXED_NOW);
 

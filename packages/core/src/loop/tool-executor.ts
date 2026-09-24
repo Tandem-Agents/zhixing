@@ -265,7 +265,7 @@ async function* runSerialBatch(
         type: "tool_result",
         toolUseId: call.id,
         content: contentForLLM,
-        isError: toolResult.isError,
+        ...(toolResult.isError === undefined ? {} : { isError: toolResult.isError }),
       });
 
       await observeToolOutcome(eventBus, call, toolResult.isError ? "failure" : "success", toolResult.isError ? toolResult.content : undefined, duration, toolResult.content.length);
@@ -492,7 +492,7 @@ async function* runParallelBatch(
         type: "tool_result",
         toolUseId: call.id,
         content: contentForLLM,
-        isError: toolResult.isError,
+        ...(toolResult.isError === undefined ? {} : { isError: toolResult.isError }),
       });
 
       yield {

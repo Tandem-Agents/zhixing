@@ -18,6 +18,19 @@ import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcConversationFacade · 方法域", () => {
+  it("replays uncertain resolution with the same request and observed fence after disconnect", async () => {
+    const fake = makeFakeHostLink();
+    let calls = 0;
+    fake.setResponder(() => {
+      if (calls++ === 0) throw new RpcClientClosedError("connection lost");
+      return { state: "cancelled" };
+    });
+    const facade = new RpcConversationFacade(fake.link);
+    await facade.resolveUncertain({ state: "uncertain", ref: { conversationId: "conv-1", runId: "run-1", ownerEpoch: 7 }, openFactDigest: "sha256:seen" } as never, "user-abandoned");
+    expect(fake.requests).toHaveLength(2);
+    expect(fake.requests[0]).toEqual(fake.requests[1]);
+    expect(fake.requests[0]).toEqual({ method: "session.resolve", params: { requestId: expect.any(String), conversationId: "conv-1", runId: "run-1", ownerEpoch: 7, openFactDigest: "sha256:seen", decision: "user-abandoned" } });
+  });
   it("send 携带 text / conversationId / turnId,返回宿主回显的 turn 身份", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder(() => ({

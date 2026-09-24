@@ -1413,6 +1413,46 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         streamMeta,
       });
       const controlHeartbeat = effect.startHeartbeat();
+      let runEndPrepared = false;
+      const settleFailure = async (error: unknown): Promise<never> => {
+        await controlHeartbeat.stop();
+        try {
+          await this.#terminalOperations.run(async () => {
+            if (await yieldToDurableCancellation()) return;
+            const usageFinal = await flushResourceUsage();
+            if (await effect.hasOpenSideEffects()) {
+              await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
+            } else {
+              // Sealing may have succeeded before its acknowledgement was lost.
+              // Never repeat started-only cleanup after crossing that boundary.
+              if (!runEndPrepared) {
+                await this.#prepareRunEndUntilAvailable(effect, submissionContext, interactionScope);
+                runEndPrepared = true;
+              }
+              const failure = await effect.failExecution({
+                reason: executionFailureReason(error),
+                usageFinal,
+              });
+              if (failure) {
+                const currentState = await journal.runState(runId);
+                if (currentState === "dispatched" || currentState === "running") {
+                  await journal.failAssignedRun(runId, assignmentId, failure.reason, failure.usageFinal);
+                }
+                // Projection I/O must not prevent the durable failure above.
+                await stream.final(streamMeta);
+                await stream.markTerminal?.();
+              }
+            }
+            this.#kickDelivery();
+          });
+        } catch (settlementError) {
+          throw new AggregateError(
+            [error, settlementError],
+            `Conversation execution failed (${executionFailureReason(error)}) and durable failure settlement failed (${executionFailureReason(settlementError)})`,
+          );
+        }
+        throw error;
+      };
       let runResult: RunResult;
       let inputPort: import("@zhixing/core/loop").RunInputPort | undefined;
       let releaseConfirmation: (() => void) | undefined;
@@ -1421,7 +1461,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         inputPort = input.invocation.kind === "agent"
           ? await journal.openRunInput(runId, assignmentId)
           : undefined;
-        const generator = executionRuntime.run(executionMessages, {
+        const generator = effect.runKernel(executionMessages, {
           ...input.options,
           inputPort,
           turnContext: { ...input.options?.turnContext, worksceneTasks: readWorksceneTaskContext(dispatch.envelope.work.controlContext) },
@@ -1506,46 +1546,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           await interactionScope.run(() => generator.return(undefined as never));
         }
       } catch (error) {
-        await controlHeartbeat.stop();
-        try {
-          await this.#terminalOperations.run(async () => {
-            if (await yieldToDurableCancellation()) return;
-            const usageFinal = await flushResourceUsage();
-            if (await effect.hasOpenSideEffects()) {
-              await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
-            } else {
-              await this.#prepareRunEndUntilAvailable(
-                effect,
-                submissionContext,
-                interactionScope,
-              );
-              await stream.final(streamMeta);
-              const failure = await effect.failExecution({
-                reason: executionFailureReason(error),
-                usageFinal,
-              });
-              if (failure) {
-                const currentState = await journal.runState(runId);
-                if (currentState === "dispatched" || currentState === "running") {
-                  await journal.failAssignedRun(
-                    runId,
-                    assignmentId,
-                    failure.reason,
-                    failure.usageFinal,
-                  );
-                }
-              }
-              await stream.markTerminal?.();
-            }
-            this.#kickDelivery();
-          });
-        } catch (settlementError) {
-          throw new AggregateError(
-            [error, settlementError],
-            `Conversation execution failed (${executionFailureReason(error)}) and durable failure settlement failed (${executionFailureReason(settlementError)})`,
-          );
-        }
-        throw error;
+        return await settleFailure(error);
       } finally {
         try { releaseConfirmation?.(); }
         finally {
@@ -1603,6 +1604,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           submissionContext,
           interactionScope,
         );
+        runEndPrepared = true;
         const sourceValue = runResult.runRecord.source ?? input.options?.source;
         const advancement =
           runResult.runRecord.advancement ?? input.options?.advancement;
@@ -1639,7 +1641,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         }
         await stream.markTerminal?.();
         return { kind: "committed" as const, bundle, committed };
-      });
+      }).catch(settleFailure);
       if (terminal.kind === "cancelled") return cancelledRunResult(runResult);
       const { bundle, committed } = terminal;
       if (firstPartySurfaceSession && firstPartyFinalitySession) {
@@ -2348,6 +2350,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * 会话状态端口——advancement 等会话域消费者经它读写 owner 权威日志；
    * 惰性创建，journal 访问走缓存实例（查询侧不再每次重建）。
    */
+  taskListBeforeMutation(conversationId: string, requestId: string) {
+    return this.#journal(conversationId).taskListBeforeMutation(requestId);
+  }
+
   get sessionState(): SessionStatePort {
     if (!this.#sessionState) {
       this.#sessionState = new ConversationSessionStateAdapter({

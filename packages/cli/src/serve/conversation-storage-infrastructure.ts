@@ -31,7 +31,6 @@ import {
   type RunRecordWithRef,
 } from "@zhixing/core/transcript";
 import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel/conversation-manager";
-import { RoutedConversationRepoTaskListStore } from "../runtime/task-list-stores.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
 import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
@@ -55,7 +54,7 @@ export interface ConversationStorageInfrastructure {
   readonly directory: ConversationDirectoryPort;
   readonly runtime: ConversationRuntimeStoragePort;
   readonly committedViews: ConversationCommittedViewStorage;
-  readonly taskLists: TaskListStore;
+  readonly taskLists: Pick<TaskListStore, "load">;
   readonly naming: NamerConversationRepo;
   readonly maintenance: Readonly<{
     runRetentionSweep(): Promise<RetentionSweepReport>;
@@ -179,10 +178,10 @@ export function createConversationStorageInfrastructure(input: Readonly<{
     directory,
     runtime,
     committedViews,
-    taskLists: new RoutedConversationRepoTaskListStore((conversationId) => {
+    taskLists: { load: async (conversationId: string) => {
       const storage = routeConversation(conversationId);
-      return { repo: storage.repo, localId: storage.localId };
-    }),
+      return (await storage.repo.get(storage.localId))?.taskListState;
+    } },
     naming,
     maintenance,
   });

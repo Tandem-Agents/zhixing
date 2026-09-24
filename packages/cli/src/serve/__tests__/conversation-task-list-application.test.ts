@@ -18,7 +18,14 @@ function memoryStore() {
       states.delete(conversationId);
     }),
   };
-  return { store, states };
+  const sessionState = {
+    readTaskList: vi.fn(async (id: string) => states.get(id) ?? { items: [] }),
+    mutate: vi.fn(async (id: string, mutation: { kind: string; op?: { state: TaskListState } }) => {
+      if (mutation.op) states.set(id, mutation.op.state);
+      return { revision: 1 };
+    }),
+  };
+  return { store, states, sessionState, readMutationBase: vi.fn(async () => undefined) };
 }
 
 describe("createAnchorConversationTaskListPort", () => {
@@ -34,6 +41,8 @@ describe("createAnchorConversationTaskListPort", () => {
       conversations: manager,
       exists: vi.fn(async () => true),
       taskLists: new TaskListService(storage.store),
+      sessionState: storage.sessionState,
+      readMutationBase: storage.readMutationBase,
     });
 
     await expect(port.maintain({
@@ -56,7 +65,8 @@ describe("createAnchorConversationTaskListPort", () => {
       },
     });
     expect(manager.runMaintenanceExisting).toHaveBeenCalledOnce();
-    expect(storage.store.save).toHaveBeenCalledOnce();
+    expect(storage.sessionState.mutate).toHaveBeenCalledOnce();
+    expect(storage.store.save).not.toHaveBeenCalled();
   });
 
   it("does not read or write the task list when maintenance is busy", async () => {
@@ -69,6 +79,8 @@ describe("createAnchorConversationTaskListPort", () => {
       conversations: manager,
       exists: vi.fn(async () => true),
       taskLists,
+      sessionState: storage.sessionState,
+      readMutationBase: storage.readMutationBase,
     });
 
     await expect(port.maintain({
@@ -80,5 +92,7 @@ describe("createAnchorConversationTaskListPort", () => {
     })).resolves.toEqual({ status: "busy" });
     expect(storage.store.load).not.toHaveBeenCalled();
     expect(storage.store.save).not.toHaveBeenCalled();
+    expect(storage.sessionState.readTaskList).not.toHaveBeenCalled();
+    expect(storage.sessionState.mutate).not.toHaveBeenCalled();
   });
 });

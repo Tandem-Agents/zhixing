@@ -32,7 +32,7 @@ export function trackMessages(
         type: "tool_result",
         toolUseId: event.id,
         content: event.result.content,
-        isError: event.result.isError,
+        ...(event.result.isError === undefined ? {} : { isError: event.result.isError }),
       });
       break;
 

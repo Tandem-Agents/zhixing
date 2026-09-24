@@ -82,6 +82,8 @@ function setup(options: {
     },
     contextBudget,
     usage,
+    uncertainRuns: vi.fn(async () => []),
+    resolveUncertain: vi.fn(async () => {}),
   } as unknown as ConversationController;
   const management = {
     serverInfo: vi.fn(async () => ({
@@ -126,6 +128,7 @@ function setup(options: {
     contextBudget,
     usage,
     management,
+    controller,
     schedulerList,
     setConfig: (next: { readonly providerId: string; readonly model: string }) => {
       primaryModel = next;
@@ -134,12 +137,13 @@ function setup(options: {
 }
 
 describe("registerInfoCommands", () => {
-  it("7 条存活命令构成 local exact-set", () => {
+  it("8 条存活命令构成 local exact-set", () => {
     const { registry } = setup();
     const names = [
       "help",
       "status",
       "stop",
+      "resolve",
       "model",
       "usage",
       "context",
@@ -150,6 +154,17 @@ describe("registerInfoCommands", () => {
     for (const name of names) {
       expect(registry.findByName(name)?.execution).toBe("local");
     }
+  });
+
+  it.each(["return", "user-abandoned", "user-verified-side-effects", "user-retry-acknowledged"] as const)("/resolve only submits the displayed fenced choice: %s", async value => {
+    const choose = vi.fn(async () => ({ kind: "selected", value }));
+    const h = setup({ selection: { choose } as unknown as SelectionService });
+    const notice = { state: "uncertain", ref: { conversationId: "conv-1", runId: "run-1", ownerEpoch: 3 }, openFactDigest: "sha256:seen", at: "2026-09-24T00:00:00.000Z" };
+    vi.mocked(h.controller.uncertainRuns).mockResolvedValue([notice] as never);
+    await h.dispatcher.dispatch("/resolve", RUNTIME);
+    expect(choose).toHaveBeenCalledWith(expect.objectContaining({ initialValue: "return" }));
+    if (value === "return") expect(h.controller.resolveUncertain).not.toHaveBeenCalled();
+    else expect(h.controller.resolveUncertain).toHaveBeenCalledWith(notice, value);
   });
 
   it("/status 显示会话名 / 模型(本地配置)/ 代理", async () => {

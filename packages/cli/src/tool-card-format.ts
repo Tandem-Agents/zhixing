@@ -16,6 +16,7 @@
  */
 
 import type { ToolResult } from "@zhixing/core";
+import { conversationStateLabel } from "./conversation-state-label.js";
 
 const TARGET_TRUNCATE = 60;
 const ERROR_TRUNCATE = 80;
@@ -198,7 +199,7 @@ export function formatToolResult(
         if (value?.disposition === "stopped") return "已停止、未消费";
         if (value?.disposition === "pending") return "已接纳、待处理";
         if (value?.disposition === "consumed") {
-          const state = ({ queued: "待运行", dispatched: "已派发", running: "运行中", "cancel-requested": "正在停止", committed: "运行已提交", cancelled: "运行已停止", failed: "运行失败", expired: "运行已过期", uncertain: "运行结果待确认" } as Record<string, string>)[value.state];
+          const state = conversationStateLabel(value.state);
           return `已进入运行输入${state ? ` · ${state}` : ""}`;
         }
         if (Array.isArray(value?.conversations)) return `${value.conversations.length} 个对话${value.partial ? " · 部分设备不可达" : ""}`;

@@ -446,29 +446,26 @@ export class LocalConversationOwnerAssembly {
                   `task-list-read:${request.operationId}`,
                 ),
               );
-              const decision = request.decide(current);
-              if (hasTaskListWrite(decision)) {
-                await sessionState.mutate(
+              const base = await this.#protocol.taskListBeforeMutation(request.conversationId, request.operationId);
+              const decision = request.decide(base ?? current);
+              await sessionState.mutate(
                   request.conversationId,
                   {
                     kind: "task-list-op",
-                    op: { op: "set", state: decision.next },
+                    op: { op: "set", state: hasTaskListWrite(decision) ? decision.next : base ?? current },
                   },
                   hostRequestContext(
                     "local-conversation-task-list",
                     request.operationId,
                   ),
                 );
-              }
-              const taskList = hasTaskListWrite(decision)
-                ? await sessionState.readTaskList(
+              const taskList = await sessionState.readTaskList(
                     request.conversationId,
                     hostRequestContext(
                       "local-conversation-task-list",
                       `task-list-committed:${request.operationId}`,
                     ),
-                  )
-                : current;
+                  );
               return Object.freeze({ decision, taskList });
             },
           );

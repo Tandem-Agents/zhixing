@@ -409,6 +409,71 @@
     },
     {
       "emptyRequest": {},
+      "method": "extensions.apply-configuration",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "extensions.list",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "extensions.local-setup",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "extensions.refresh",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "extensions.set-enabled",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "health",
       "outcome": {
         "kind": "result",
@@ -423,6 +488,58 @@
     {
       "emptyRequest": {},
       "method": "llm.complete",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "logs.apply-policy",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "logs.read",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "logs.search",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "logs.status",
       "outcome": {
         "code": -32602,
         "kind": "error",

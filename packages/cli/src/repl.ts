@@ -697,6 +697,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
         observedTurnPresenter.onObservedTurnDelta(turn),
       onObservedTurnComplete: (turn) =>
         observedTurnPresenter.onObservedTurnComplete(turn),
+      onNotice: (message) => cliWriter.line(chalk.yellow(`\n  ${message}\n`)),
       onActivity: () => {
         cliWriter.notify(chalk.dim("  另一个入口有新动态，可用 /resume 查看。"));
       },

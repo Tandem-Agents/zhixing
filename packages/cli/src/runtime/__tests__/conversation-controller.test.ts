@@ -129,6 +129,7 @@ function makeFakes() {
     abort: vi.fn(async () => {}),
     history: vi.fn(async () => ({ runs: [], hasMore: false })),
     statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
+    resolveUncertain: vi.fn(async () => ({ state: "cancelled" })),
   };
   const workscene = {
     tasks: vi.fn(async (_conversationId: string) => [] as Array<{ conversationId: string; runId: string; goal: string }>),
@@ -257,6 +258,31 @@ function makeController(
 }
 
 describe("ConversationController", () => {
+  it("releases the local waiter on uncertainty and points to explicit resolution", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    await controller.start();
+    try {
+      const accepted = await controller.beginTurn("check");
+      const notice = { ...statusNotice(accepted.runId!, 2, "running"), state: "uncertain", openFactDigest: "sha256:seen" };
+      f.emit.status(notice);
+      await expect(accepted.outcome).resolves.toMatchObject({ result: { reason: "error", error: { name: "RunUncertain", message: expect.stringContaining("/resolve") } } });
+      expect(f.conversation.abort).not.toHaveBeenCalled();
+      expect(f.conversation.resolveUncertain).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+  it("discovers ordinary uncertain input and retains only the latest authority fence", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "run-1", state: "uncertain", message: { role: "user" } }, { runId: "run-2", state: "uncertain", message: { role: "user" } }] } as never);
+    const notice = { ...statusNotice("run-1", 3, "running"), state: "uncertain", openFactDigest: "sha256:new", ref: { execution: "conversation", conversationId: "conv-1", runId: "run-1", ownerEpoch: 2 } };
+    f.conversation.statusHistory.mockResolvedValue({ notices: [notice, { ...notice, statusRevision: 1, openFactDigest: "sha256:old" }, { ...statusNotice("run-2", 4, "failed") }], next: [] } as never);
+    expect(await controller.uncertainRuns()).toEqual([notice]);
+    await controller.resolveUncertain(notice as never, "user-abandoned");
+    expect(f.conversation.resolveUncertain).toHaveBeenCalledWith(notice, "user-abandoned");
+    await expect(controller.resolveUncertain({ ...notice, ref: { ...notice.ref, conversationId: "other" } } as never, "user-abandoned")).rejects.toThrow("对话已切换");
+    controller.dispose();
+  });
   it("all three status readers stop at unchanged durable watermarks and retain live delivery", async () => {
     const f = makeFakes();
     const { controller, onYield } = makeController(f);

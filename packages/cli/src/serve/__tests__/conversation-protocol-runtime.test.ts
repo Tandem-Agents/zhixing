@@ -12,7 +12,8 @@ import { buildConfirmationListMethod, buildConfirmationResolveMethod } from "../
 import { localConversationId } from "@zhixing/core/conversation";
 import { userMessageFromTurnInput, type Message } from "@zhixing/core";
 import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
+import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, TaskListService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
+import { createAnchorConversationTaskListPort } from "../conversation-task-list-application.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { trackMessages } from "../../../../orchestrator/src/runtime/track-messages.js";
 import { createEventBus } from "@zhixing/core/events";
@@ -336,6 +337,105 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it.each(["single", "batch"] as const)("%s cancellation stops the assignment kernel before final usage", async mode => {
+    const home = await createTempDir("conversation-cancel-meter");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const reserved = Promise.withResolvers<void>();
+    const cleanup = Promise.withResolvers<void>();
+    const teardown = Promise.withResolvers<void>();
+    const consumed = vi.fn();
+    const projection: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "cancel-meter",
+      async *run() { throw new Error("projection runtime must not execute"); }, abort: vi.fn(() => false), async dispose() {} };
+    const execution: SessionRuntime = { ...projection, abort: vi.fn(() => true),
+      async *run(messages, options) {
+        const meter = options!.modelCallResourceMeter!;
+        const usage = await meter.reserve({ callIndex: 0, tokenUpperBound: 1000 });
+        reserved.resolve();
+        const signal = options!.abortSignal!;
+        if (!signal.aborted) await Promise.race([teardown.promise, new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))]);
+        await cleanup.promise;
+        await meter.consume({ usageId: usage.usageId, tokens: 7 });
+        consumed();
+        return { agentResult: { reason: "aborted", usage: { inputTokens: 5, outputTokens: 2 } },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!], usage: { inputTokens: 5, outputTokens: 2 } }, newMessages: [], durationMs: 1 };
+      } };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => execution } } });
+    manager = new ConversationManager({ create: async () => projection }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    let running: ReturnType<typeof projectSessionTurn> | undefined;
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, "cancel-meter");
+      running = projectSessionTurn({ manager, managed, text: "cancel metered call", turnId: "meter", notify: () => {},
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "meter" } } });
+      await Promise.race([reserved.promise, running.then(result => {
+        if (result.kind === "error") throw result.error;
+        throw new Error("Execution ended before resource reservation");
+      })]);
+      const admitted = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; runId?: string }).find(body => body.t === "admitted");
+      const runId = admitted!.runId!;
+      await protocol.cancel({ conversationId: "cancel-meter", ...(mode === "single" ? { runId } : {}), requestId: `cancel-meter:${mode}`,
+        principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "test" } });
+      expect(execution.abort).toHaveBeenCalledOnce();
+      expect(consumed).not.toHaveBeenCalled();
+      const status = () => protocol.statusHistory([{ conversationId: "cancel-meter", runId, afterStatusRevision: 0 }]);
+      expect((await status()).notices.at(-1)?.state).toBe("cancel-requested");
+      cleanup.resolve();
+      expectSettled(await running);
+      expect(consumed).toHaveBeenCalledOnce();
+      expect((await status()).notices.at(-1)?.state).toBe("cancelled");
+    } finally {
+      teardown.resolve();
+      cleanup.resolve();
+      await running;
+      await protocol.stopRecoveryLoop();
+      await manager.disposeAll();
+    }
+  }, 30000);
+
+  it("keeps task-list authority and late retries independent of legacy files and later list order", async () => {
+    const home = await createTempDir("owner-task-list-retry");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => { throw new Error("task commands do not start a model"); } });
+    const id = "ws:中文验收:primary";
+    const context = (requestId: string) => ({ principal: { kind: "host" as const, component: "task-test" }, requestId, deadlineAt: new Date(Date.now() + 30000).toISOString() });
+    const cache = new TaskListService({ load: async () => { throw new Error("legacy storage must not be read"); } });
+    const port = createAnchorConversationTaskListPort({ conversations: manager, exists: value => protocol.sessionExists(value), taskLists: cache,
+      sessionState: protocol.sessionState, readMutationBase: (value, request) => protocol.taskListBeforeMutation(value, request) });
+    const add = (task: string) => ({ conversationId: id, operationId: `task:${task}`, decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+      outcome: "added" as const, taskContent: task, next: { items: [...current.items, { id: task, content: task, status: "pending" as const }] },
+    }) });
+    try {
+      await protocol.ensureSession(id);
+      const noEffect = { conversationId: id, operationId: "task:initially-empty", decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => current.items.length === 0
+        ? { outcome: "not-found" as const, token: "1" }
+        : { outcome: "completed" as const, taskContent: current.items[0]!.content, next: { items: current.items.map((item, index) => index === 0 ? { ...item, status: "completed" as const } : item) } } };
+      await port.maintain(noEffect);
+      await port.maintain(add("a"));
+      await port.maintain(add("b"));
+      await expect(port.maintain(noEffect)).resolves.toMatchObject({ decision: { outcome: "not-found" }, taskList: { items: [{ status: "pending" }, { status: "pending" }] } });
+      protocol.releaseConversation(id);
+      await expect(port.maintain(add("a"))).resolves.toMatchObject({ status: "done", taskList: { items: [{ id: "a" }, { id: "b" }] } });
+      const done = { conversationId: id, operationId: "task:done-first", decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+        outcome: "completed" as const, taskContent: current.items[0]!.content,
+        next: { items: current.items.map((item, index) => index === 0 ? { ...item, status: "completed" as const } : item) },
+      }) };
+      await port.maintain(done);
+      const state = await protocol.sessionState.readTaskList(id, context("read"));
+      await protocol.sessionState.mutate(id, { kind: "task-list-op", op: { op: "set", state: { items: [...state.items].reverse() } } }, context("reorder"));
+      await port.maintain(done);
+      expect(await port.read(id)).toEqual({ items: [{ id: "b", content: "b", status: "pending" }, { id: "a", content: "a", status: "completed" }] });
+      await protocol.sessionState.mutate(id, { kind: "task-list-op", op: { op: "set", state: { items: [] } } }, context("replace-empty"));
+      await port.maintain(add("a"));
+      expect(await port.read(id)).toEqual({ items: [] });
+      await expect(port.maintain({ ...add("a"), decide: () => ({ outcome: "added", taskContent: "changed", next: { items: [{ id: "changed", content: "changed", status: "pending" }] } }) })).rejects.toThrow();
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); await authority.startupCleanup.run(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it.each(["allow-once", "deny", "cancel", "failure"] as const)("routes %s confirmations to the issued runtime and releases its binding", async ending => {
     const home = await createTempDir("execution-confirmation");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
@@ -920,7 +1020,7 @@ describe("ConversationProtocolRuntime", () => {
         await f.protocol.recoverConversation(supportId); await f.protocol.recoverConversation(scene);
         expect(f.executions).toEqual([scene, supportId, scene]);
         expect((await f.protocol.worksceneContinuationSources(scene)).at(-1)?.state).toBe("committed");
-      }, { timeout: 15000, interval: 100 });
+      }, { timeout: TEST_DURABLE_IO_TIMEOUT_MS, interval: 500 });
     } finally {
       broker.cancelAll("session-end"); bridge.dispose();
       await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll();
@@ -2552,6 +2652,56 @@ describe("ConversationProtocolRuntime", () => {
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it.each(["invalid-transcript", "lost-seal-ack"] as const)("settles completion failures without replaying execution: %s", async (fault) => {
+    const home = await createTempDir("conversation-completion-failure");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let executions = 0;
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-completion-failure",
+      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+        executions += 1;
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+        return {
+          agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } },
+          runRecord: { timestamp: "2026-09-24T00:00:00.000Z", messages: [messages.at(-1)!, assistant], usage: { inputTokens: 1, outputTokens: 1 },
+            ...(fault === "invalid-transcript" ? { perspectives: undefined } : {}) },
+          newMessages: [assistant], durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "durable", appended: true }),
+    });
+    const conversationId = "conversation-completion-failure";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const originalSeal = ConversationAssignmentLedger.prototype.sealConversationBundle;
+    const lostAck = fault === "lost-seal-ack" ? vi.spyOn(ConversationAssignmentLedger.prototype, "sealConversationBundle")
+      .mockImplementationOnce(async function (...args) {
+        await originalSeal.apply(this, args);
+        throw new Error("seal acknowledgement lost");
+      }) : undefined;
+    try {
+      const execution = protocol.run({ conversationId, input: "check", messages: [{ role: "user", content: [{ type: "text", text: "check" }] }], baseRevision: 0,
+        runtime, invocation: { kind: "agent", source: "interactive" }, options: { turnContext: { turnId: "rpc:completion-failure" }, source: "interactive" } });
+      await expect(execution.next()).rejects.toThrow(fault === "invalid-transcript" ? "canonical JSON" : "seal acknowledgement lost");
+    } finally { lostAck?.mockRestore(); }
+    await protocol.recover();
+    const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries).map(entry => entry.body as { t?: string; state?: string });
+    expect(records.some(record => record.t === "state" && record.state === "failed")).toBe(fault === "invalid-transcript");
+    expect(records.some(record => record.t === "committed")).toBe(fault === "lost-seal-ack");
+    expect(executions).toBe(1);
+    const next = await protocol.admit({ conversationId, input: "next", invocation: { kind: "agent", source: "interactive" },
+      options: { turnContext: { turnId: "rpc:after-completion-failure" }, source: "interactive" }, surfacePrincipal: "rpc:owner" });
+    expect(next.shouldSchedule).toBe(true);
+    await protocol.cancelAdmitted(conversationId, next.runId);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("moves a locally abandoned assignment to uncertain and schedules an acknowledged retry", async () => {
     const home = await createTempDir("conversation-protocol-started-recovery");
     const secretStore = new MemorySecretStore();
@@ -2682,6 +2832,9 @@ describe("ConversationProtocolRuntime", () => {
     const uncertain = restartedStatuses.find(
       (notice) => notice.state === "uncertain" && notice.ref.runId === runId,
     );
+    expect((await restartedProtocol.messageInputsOutsideHistory("conversation-started")).inputs).toContainEqual(expect.objectContaining({
+      runId, state: "uncertain", message: { role: "user", content: [{ type: "text", text: "hello" }] },
+    }));
     expect(uncertain?.state).toBe("uncertain");
     if (!uncertain || uncertain.state !== "uncertain" || !runId) {
       throw new Error("recovery did not publish the uncertain fact");

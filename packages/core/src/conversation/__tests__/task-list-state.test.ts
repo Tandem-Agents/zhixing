@@ -109,7 +109,7 @@ describe("TaskListService cache lifecycle", () => {
     expect(store.loadCalls).toEqual(["conv-1", "conv-1"]);
   });
 
-  it("degrades a failed prime to an empty projection", async () => {
+  it("does not cache fabricated empty state when the owner read fails", async () => {
     const store: TaskListStore = {
       load: async () => {
         throw new Error("disk error");
@@ -119,8 +119,8 @@ describe("TaskListService cache lifecycle", () => {
     };
     const service = new TaskListService(store);
 
-    await expect(service.prime("conv-1")).resolves.not.toThrow();
-    expect(service.getCached("conv-1")).toEqual({ items: [] });
+    await expect(service.prime("conv-1")).rejects.toThrow("disk error");
+    expect(service.getCached("conv-1")).toBeNull();
   });
 
   it("clear evicts only the process projection and never deletes durable state", async () => {

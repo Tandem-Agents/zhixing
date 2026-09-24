@@ -625,11 +625,9 @@ export class MeshRuntimeAssembly
               );
               return;
             }
-            await options.executor!.ledger.cancel(assignmentId, fence, context);
-            worker?.abort(
-              assignmentId,
-              new Error("Conversation assignment was cancelled"),
-            );
+            await options.executor!.ledger.beginOwnerCancellation(assignmentId, fence, context);
+            if (worker?.requestOwnerCancellation(assignmentId) === false) return;
+            await options.executor!.ledger.finishOwnerCancellation(assignmentId, fence, context);
           },
           supersede: (assignmentId, fence, context) =>
             options.executor!.ledger.supersede(assignmentId, fence, context),

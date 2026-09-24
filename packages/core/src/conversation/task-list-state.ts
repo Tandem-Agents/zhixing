@@ -30,7 +30,7 @@ export class TaskListService {
   private readonly cache = new Map<string, TaskListState>();
   private readonly subscribers = new Set<TaskListStateListener>();
 
-  constructor(private readonly store: TaskListStore) {}
+  constructor(private readonly store: Pick<TaskListStore, "load"> & Partial<Pick<TaskListStore, "save">>) {}
 
   getCached(conversationId: string): TaskListState | null {
     return this.cache.get(conversationId) ?? null;
@@ -48,12 +48,8 @@ export class TaskListService {
 
   async prime(conversationId: string): Promise<void> {
     if (this.cache.has(conversationId)) return;
-    try {
-      const loaded = await this.store.load(conversationId);
-      this.cache.set(conversationId, loaded ?? { items: [] });
-    } catch {
-      this.cache.set(conversationId, { items: [] });
-    }
+    const loaded = await this.store.load(conversationId);
+    this.cache.set(conversationId, loaded ?? { items: [] });
   }
 
   clear(conversationId: string): void {
@@ -73,6 +69,7 @@ export class TaskListService {
     items: readonly TaskItem[],
   ): Promise<TaskListState> {
     const next: TaskListState = { items: [...items] };
+    if (!this.store.save) throw new Error("Task-list projection accepts only owner-committed updates");
     await this.store.save(conversationId, next);
     this.cache.set(conversationId, next);
     this.emit(conversationId, next);

@@ -19,6 +19,7 @@ import type {
 import type { ToolUseBlock } from "../../types/messages.js";
 import type { AgentLoopDeps, AgentYield } from "../types.js";
 import { executeToolCalls } from "../tool-executor.js";
+import { canonicalize } from "../../protocol/canonical.js";
 
 // ─── 辅助 ───
 
@@ -80,6 +81,14 @@ async function drain(
 // ─── 测试 ───
 
 describe("executeToolCalls · ctx.llm 注入契约", () => {
+  it.each([1, 2])("%i 个成功工具的协议结果可直接耐久序列化", async count => {
+    const gen = executeToolCalls({ toolCalls: Array.from({ length: count }, (_, i) => ({ ...TOOL_CALL, id: `call_${i}` })),
+      tools: [makeSpyTool({})], deps: passthroughDeps, workingDirectory: "/tmp/wd" });
+    while (true) {
+      const next = await gen.next();
+      if (next.done) { expect(() => canonicalize(next.value.completedResults)).not.toThrow(); break; }
+    }
+  });
   it("不传 llmRoles → ctx.llm 为 undefined", async () => {
     const captured: CapturedCtx = {};
     const tool = makeSpyTool(captured);

@@ -9,6 +9,7 @@
  */
 
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { handoffLogging } from "../logging/handoff.js";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
@@ -696,10 +697,13 @@ async function runServerProcess(
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
-  //   task_list 盘上状态按全域 conversationId 路由到所属 scope repo；user / workscene
-  //   与目录 clear 共用同一 repo 实例，保 meta 写入锁一致。
+  //   task_list 读取唯一 owner；缓存只接收已提交投影，不通过旧 meta 写入。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
-    conversationStorage.taskLists,
+    { load: conversationId => boundConversationProtocol.sessionState.readTaskList(conversationId, {
+      principal: { kind: "host", component: "task-list-projection" },
+      requestId: `task-list-read:${randomUUID()}`,
+      deadlineAt: new Date(Date.now() + 30_000).toISOString(),
+    }) },
     createAnchorConversationTaskListToolApplication(),
   );
   const communicationHandle = createConversationCommunicationAssemblyHandle();
@@ -2685,6 +2689,8 @@ async function runServerProcess(
       conversations: boundConversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
       taskLists: builtinExtraTools.taskListService,
+      sessionState: boundConversationProtocol.sessionState,
+      readMutationBase: (id, requestId) => boundConversationProtocol.taskListBeforeMutation(id, requestId),
     }),
     agentTurns: createConversationAgentTurnAdmissionPort({
       manager: boundConversations!,

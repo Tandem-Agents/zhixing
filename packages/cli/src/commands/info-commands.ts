@@ -1,7 +1,7 @@
 /**
  * info 域命令注册 —— 只读展示类命令的模块化原子注册（范式同 registerTaskCommands）。
  *
- * 覆盖 /help /status /stop /model /usage /context /tasks。
+ * 覆盖 /help /status /stop /resolve /model /usage /context /tasks。
  * 运行时信息的权威在核心宿主——经会话与管理面 RPC 取；模型 / provider
  * 显示取本地配置（宿主按同一配置装配）。
  */
@@ -315,6 +315,36 @@ function shutdownStrategyForChoice(choice: StopChoice): "immediate" | "drain" | 
 
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
+  registry.register({ id: "resolve:repl", name: "resolve", description: "处理结果待确认的运行", category: "tools", execution: "local", tag: "builtin" });
+  dispatcher.registerHandler("resolve:repl", async () => {
+    const pending = await deps.controller.uncertainRuns();
+    if (pending.length === 0) {
+      writer.line("\n  当前对话没有结果待确认的运行。\n");
+      return {};
+    }
+    if (!deps.selection) {
+      writer.line("\n  当前终端不支持选择交互，未更改运行状态。请在交互终端使用 /resolve。\n");
+      return {};
+    }
+    type Choice = "user-abandoned" | "user-verified-side-effects" | "user-retry-acknowledged" | "return";
+    for (const notice of pending) {
+      const choice = await deps.selection.choose<Choice>({
+        id: `resolve:${notice.ref.runId}`, title: "处理结果待确认的运行",
+        body: [`时间：${new Date(notice.at).toLocaleString()}`, "这次运行的最终结果尚未确认，文件修改等操作可能已经发生。", "结束运行不会撤销已有操作；重新执行可能产生重复效果。"],
+        options: [
+          { value: "return", label: "暂不处理", tone: "muted" },
+          { value: "user-abandoned", label: "结束这次运行", description: "保留已有操作，不再执行本轮", tone: "primary" },
+          { value: "user-verified-side-effects", label: "我已检查已有操作，结束本轮", description: "记录已核实的裁决，不重做操作" },
+          { value: "user-retry-acknowledged", label: "接受重复风险，重新执行", description: "仅在确认可以重复操作后选择", tone: "danger" },
+        ],
+        initialValue: "return", submitLabel: "确认", cancelLabel: "返回",
+      });
+      if (choice.kind !== "selected" || choice.value === "return") return {};
+      await deps.controller.resolveUncertain(notice, choice.value);
+      writer.line(choice.value === "user-retry-acknowledged" ? "\n  已提交重新执行。\n" : "\n  本次运行已结束，可以继续对话。\n");
+    }
+    return {};
+  });
   const getModelView = (): { modelDisplay: string; providerDisplay: string } => {
     const model = deps.getPrimaryModel();
     return {

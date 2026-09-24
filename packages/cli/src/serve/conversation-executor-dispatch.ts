@@ -46,6 +46,7 @@ import type {
   DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
 import { isRetryableMeshFailure } from "./remote-obligation-failure.js";
+import { ConversationKernelExecution } from "./conversation-kernel-execution.js";
 
 const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
 
@@ -138,6 +139,7 @@ type PreparedAssignment = Awaited<
 
 export interface ConversationExecutorExecutionEffect {
   readonly runtime: SessionRuntime;
+  runKernel: SessionRuntime["run"];
   startAndReport(context: AuthorityCallContext): Promise<void>;
   createStream(input: {
     readonly assignmentId: string;
@@ -746,6 +748,7 @@ function createLocalConversationExecutorMechanism(
   readonly mechanism: LocalConversationExecutorMechanism;
 } {
   const bindings = new Map<string, ConversationRuntimeBinding>();
+  const executions = new Map<string, ConversationKernelExecution>();
   const executorAuthority = options.authority.executorLog && options.authority.assignmentResources
     ? options.authority as ConversationOwnerRuntimeStack & {
         readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
@@ -792,7 +795,18 @@ function createLocalConversationExecutorMechanism(
   return {
     ledger,
     mechanism: {
-      executor: ledger,
+      executor: {
+        dispatch: (...args) => (ledger as RunExecutorPort).dispatch(...args),
+        queryLedger: (...args) => ledger.queryLedger(...args),
+        supersede: (...args) => ledger.supersede(...args),
+        async cancel(assignmentId, fence, context) {
+          await ledger.beginOwnerCancellation(assignmentId, fence, context);
+          // Never hold the owner terminal operation while waiting for that same
+          // operation from the executing turn. Recovery retries after quiescence.
+          if (executions.get(assignmentId)?.stop() === false) return;
+          await ledger.finishOwnerCancellation(assignmentId, fence, context);
+        },
+      },
       createSubmission(journal) {
         const implementation = new local.InProcessAssignmentSubmission({
           ledger,
@@ -865,6 +879,8 @@ function createLocalConversationExecutorMechanism(
           );
           throw error;
         }
+        const execution = new ConversationKernelExecution(runtime!);
+        executions.set(input.assignmentId, execution);
         return {
           runtime: runtime!,
           bindRuntime(binding) {
@@ -877,6 +893,7 @@ function createLocalConversationExecutorMechanism(
             const submission = effectInput.submission;
             return {
               runtime: runtime!,
+              runKernel: (...args) => execution.run(...args),
               startAndReport: async (context) => {
                 await submission.startAndReport(input.assignmentId, context);
               },
@@ -929,6 +946,7 @@ function createLocalConversationExecutorMechanism(
             bindings.delete(input.assignmentId);
             await runtime!.dispose(reason);
             if (baseRuntime !== runtime) await baseRuntime!.dispose(reason);
+            executions.delete(input.assignmentId);
             options.authority.releaseLocalConversationEnvironmentPreflight(
               input.manifest,
               input.assignmentId,

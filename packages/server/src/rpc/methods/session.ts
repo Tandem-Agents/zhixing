@@ -2492,6 +2492,7 @@ export function buildSessionSecurityMethod(): MethodEntry {
 interface SessionTaskListUpdateParams {
   conversationId?: string;
   action?: SessionTaskListAction;
+  requestId?: string;
 }
 
 /** /task new·done wire binding; Conversation owns the application decision. */
@@ -2517,6 +2518,9 @@ export function buildSessionTaskListUpdateMethod(): MethodEntry {
         );
       }
       const conversationId = params.conversationId;
+      if (typeof params.requestId !== "string" || !params.requestId.trim()) {
+        throw RpcErrors.invalidParams("session.taskListUpdate requires 'requestId'");
+      }
       const productApi = requireConversationProductApi(
         ctx.server,
         CONVERSATION_UPDATE_TASK_LIST_COMMAND,
@@ -2527,6 +2531,7 @@ export function buildSessionTaskListUpdateMethod(): MethodEntry {
           {
             kind: "update-task-list",
             conversationId,
+            operationId: params.requestId,
             action,
           },
         );

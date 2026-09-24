@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { trackMessages } from "../track-messages.js";
+import { validateTranscriptRunRecord } from "@zhixing/core/protocol";
 import type { AgentYield } from "@zhixing/core/loop";
 import type { Message, ToolResultBlock } from "@zhixing/core/types";
 
@@ -14,6 +15,16 @@ function fresh(): { newMessages: Message[]; pending: ToolResultBlock[] } {
 }
 
 describe("trackMessages", () => {
+  it.each([undefined, false, true])("工具可选错误标记 %s 可以提交到真实耐久协议", isError => {
+    const { newMessages, pending } = fresh();
+    trackMessages({ type: "tool_end", id: "read-1", name: "Read", duration: 1,
+      result: { content: "read result", ...(isError === undefined ? {} : { isError }) } }, newMessages, pending);
+    trackMessages({ type: "turn_complete", turnCount: 1, usage: { inputTokens: 1, outputTokens: 1 } }, newMessages, pending);
+    expect(() => validateTranscriptRunRecord({ type: "run", runId: "run-1", runIndex: 0,
+      timestamp: "2026-09-24T00:00:00.000Z", messages: [
+        { role: "user", content: [{ type: "text", text: "read it" }] }, ...newMessages,
+      ] })).not.toThrow();
+  });
   it("assistant_message 整条 push 到 newMessages", () => {
     const { newMessages, pending } = fresh();
     const event: AgentYield = {
@@ -109,7 +120,6 @@ describe("trackMessages", () => {
       type: "tool_result",
       toolUseId: "edit-1",
       content: "Replaced text",
-      isError: undefined,
     });
     expect(JSON.stringify(blocks)).not.toContain("file-diff");
   });
@@ -176,7 +186,6 @@ describe("trackMessages", () => {
       type: "tool_result",
       toolUseId: "grep-1",
       content: "Found 1 matching line in 1 file",
-      isError: undefined,
     });
     expect(JSON.stringify(blocks)).not.toContain("grep-results");
   });

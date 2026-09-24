@@ -27,14 +27,14 @@ const require = createRequire(new URL("../packages/core/package.json", import.me
 const ts = require("typescript");
 
 const dueDocuments = [
-  ["research/design/drafts/transcript-persistence-and-attention-window-architecture.md", "GlobalStatePort"],
+  ["docs/modules/conversation/persistence.md", "AuthorityCommitLog"],
   ["research/design/drafts/scheduler-architecture.md", "JobJournal"],
-  ["research/design/drafts/workscene-management-architecture.md", "ExplicitEnvironmentSelection"],
+  ["docs/modules/workscene/architecture.md", "ExplicitEnvironmentSelection"],
   ["research/design/drafts/task-advancement-rubric-architecture.md", "canonical evidence"],
   ["research/design/drafts/unified-core-and-access-surfaces.md", "owner-kernel"],
-  ["research/design/specifications/message-outbox.md", "已整体退役"],
+  ["docs/modules/delivery/outbox.md", "已退役"],
   ["research/design/specifications/persistent-service.md", "已整体退役"],
-  ["research/design/specifications/agent-runtime-lifecycle.md", "权威提交"],
+  ["docs/modules/conversation/runtime-lifecycle.md", "权威提交"],
   ["docs/modules/security/trust.md", "PermissionSnapshotLease"],
   ["research/design/modules/distributed-runtime/specification.md", "surface 预上传"],
 ];
@@ -87,7 +87,7 @@ const builtinRpcNames = new Set(captureBuiltinRegistryDescriptor().map((item) =>
 const coverageGroups = [
   ["session-send", ["rpc:session.send", "slash:skill:<catalog-id>"]],
   ["run-cancel", ["rpc:session.abort"]],
-  ["uncertain-resolution", ["rpc:session.resolve", "rpc:delivery.resolve"]],
+  ["uncertain-resolution", ["rpc:session.resolve", "rpc:delivery.resolve", "slash:resolve:repl"]],
   ["confirmation-resolve", ["rpc:confirmation.resolve"]],
   ["confirmation-read", ["rpc:confirmation.list"]],
   ["session-observer", ["rpc:session.subscribe", "rpc:session.unsubscribe"]],
@@ -134,7 +134,7 @@ const coverageGroups = [
     "cli:zhixing device continue",
     "slash:stop:repl",
   ]],
-  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration"]],
+  ["runtime-config", ["slash:config:repl", "slash:mcp:repl", "rpc:mcp.pending", "rpc:extensions.list", "rpc:extensions.set-enabled", "rpc:extensions.refresh", "rpc:extensions.apply-configuration", "rpc:extensions.local-setup"]],
   ["device-trust", [
     "cli:zhixing pair",
     "cli:zhixing duty targets",
