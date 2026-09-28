@@ -1,4 +1,4 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, type ChildProcess, type ForkOptions, type SpawnOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { DeviceCapacityArbiterPort, DeviceCapacityBudget, DeviceCapacityPermit, DeviceCapacityStepPermit } from "@zhixing/core/resources";
 import { LogAppendIndeterminateError, LogStorageError, type LogAppendReceipt, type LogCapture, type LogSink, type LogStatus } from "@zhixing/core/logging";
@@ -41,10 +41,14 @@ export class IsolatedLogStore implements LogSink {
   #start(): void {
     const built = new URL("./logging-store-worker.js", import.meta.url);
     const compiled = existsSync(built);
-    const worker = fork(compiled ? built : new URL("./store-worker.ts", import.meta.url), [this.home, String(process.pid)], {
+    // fork forwards this spawn option, although Node's ForkOptions omits it.
+    const options: ForkOptions & Pick<SpawnOptions, "windowsHide"> = {
       execArgv: compiled ? [] : ["--import=tsx/esm"],
+      // stdio redirection does not prevent a console when the Host has none.
+      windowsHide: true,
       stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced",
-    });
+    };
+    const worker = fork(compiled ? built : new URL("./store-worker.ts", import.meta.url), [this.home, String(process.pid)], options);
     this.#worker = worker;
     worker.on("message", (message: StoreWorkerOutput) => {
       if (worker !== this.#worker) return;

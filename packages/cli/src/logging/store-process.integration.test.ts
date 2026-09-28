@@ -15,7 +15,7 @@ afterEach(async () => { for (const store of stores.splice(0)) await store.close(
 it("releases the real disk lock while the business event loop is suspended", async () => {
   const home = await createTempDir("isolated-log-stall"), proof = path.join(home, "unlocked-proof");
   const child = fork(new URL("./__tests__/isolated-store-fixture.ts", import.meta.url), [home, String(process.pid), proof], {
-    execArgv: ["--import=tsx/esm"], stdio: ["ignore", "ignore", "pipe", "ipc"], serialization: "advanced",
+    execArgv: ["--import=tsx/esm"], windowsHide: true, stdio: ["ignore", "ignore", "pipe", "ipc"], serialization: "advanced",
   });
   let error = "";
   child.stderr?.on("data", chunk => { error = (error + String(chunk)).slice(-2048); });
