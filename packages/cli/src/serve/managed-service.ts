@@ -229,6 +229,21 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
       if (isNodeError(error, "ENOENT")) return undefined;
       throw error;
     });
+    if (this.platform === "win32" && stored === undefined) {
+      assertWindowsTaskIdentity(spec.serviceId);
+      // Most on-demand installations have no managed task. Ask the OS directly
+      // before loading PowerShell/COM solely to prove absence. A present task
+      // still crosses the complete definition, principal and state inspection.
+      const presence = await this.command(
+        windowsTaskSchedulerCommand(["/Query", "/TN", spec.serviceId]), signal,
+      );
+      const hresult = presence.code >>> 0;
+      if (hresult === 0x80070002 || hresult === 0x80070003) {
+        this.requireDefiniteAbsence(presence);
+        return { state: "absent", running: false, matches: true };
+      }
+      if (presence.code !== 0) this.throwManagerFailure(presence);
+    }
     const manager = await this.inspectManager(spec, signal);
     if (stored === undefined) {
       return manager.state === "absent"
@@ -1050,9 +1065,7 @@ try {
 function windowsTaskInspectionCommand(
   serviceId: string,
 ): { readonly command: string; readonly args: readonly string[] } {
-  if (!/^dev\.zhixing\.host\.[a-f0-9]{24}$/u.test(serviceId)) {
-    throw new ManagedServiceError("definition-drift", "Windows managed service identity is invalid");
-  }
+  assertWindowsTaskIdentity(serviceId);
   return {
     command: "powershell.exe",
     args: [
@@ -1063,6 +1076,12 @@ function windowsTaskInspectionCommand(
       WINDOWS_TASK_INSPECTION_SCRIPT.replace("__ZHIXING_TASK_NAME__", serviceId),
     ],
   };
+}
+
+function assertWindowsTaskIdentity(serviceId: string): void {
+  if (!/^dev\.zhixing\.host\.[a-f0-9]{24}$/u.test(serviceId)) {
+    throw new ManagedServiceError("definition-drift", "Windows managed service identity is invalid");
+  }
 }
 
 function decodeWindowsTaskInspection(raw: string): WindowsTaskInspection {

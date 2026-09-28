@@ -8,8 +8,8 @@ const calls = vi.hoisted(() => ({
   surface: vi.fn(),
   reconcile: vi.fn(async () => ({ plan: { mode: "on-demand" } })),
 }));
-vi.mock("@zhixing/server", async (original) => ({
-  ...await original<typeof import("@zhixing/server")>(),
+vi.mock("@zhixing/server/client", async (original) => ({
+  ...await original<typeof import("@zhixing/server/client")>(),
   discoverServer: calls.discover,
 }));
 vi.mock("../../serve/daemon.js", () => ({ spawnDaemon: calls.spawn }));
@@ -48,8 +48,8 @@ describe("CoreHost default dependency home binding", () => {
       })),
     );
     await deps.spawn();
-    expect(calls.reconcile).toHaveBeenCalledWith("host-missing", undefined, home);
-    expect(calls.spawn).toHaveBeenCalledWith(expect.objectContaining({ zhixingHome: home }));
+    expect(calls.reconcile).not.toHaveBeenCalled();
+    expect(calls.spawn).toHaveBeenCalledWith(expect.objectContaining({ zhixingHome: home, automatic: true }));
     const endpoint = { pid: { pid: 42 } } as never;
     await deps.stopUnresponsiveHost!(endpoint, new Error("unresponsive"));
     expect(calls.stop).toHaveBeenCalledWith(expect.objectContaining({

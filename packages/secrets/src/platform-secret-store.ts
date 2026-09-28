@@ -293,7 +293,14 @@ class SerializedMasterKeyProvider implements MasterKeyProvider {
 
   async state(): Promise<MasterKeyState> {
     if (this.cached) return "unlocked";
-    return this.delegate.state();
+    try {
+      const key = await this.loadOrCreate();
+      key.fill(0);
+      return "unlocked";
+    } catch (error) {
+      if (error instanceof ExistingMasterKeyUnavailableError) return "locked";
+      return "unavailable";
+    }
   }
 
   async loadOrCreate(): Promise<Buffer> {

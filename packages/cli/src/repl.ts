@@ -596,7 +596,6 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath })),
   });
   if (!startup?.progress) startupProgress?.begin(performance.now() - process.uptime() * 1000);
-  await localView.refresh();
 
   // ── 带外监听器先于 auto-resume 建立 ──
   //
@@ -670,12 +669,12 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     filter: (envelope) => watching(envelope.conversationId),
   });
   // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
-  const {
+  const [{
     active: initialActive,
     resumedConversationName,
     advancement: resumedAdvancement,
     adoptionReview: initialAdoptionReview,
-  } = await selectInitialConversation(conversationFacade, {
+  }] = await Promise.all([selectInitialConversation(conversationFacade, {
     confirmContinuation: async (unavailableCapabilities) => {
       startupProgress?.stop();
       cliWriter.line(
@@ -699,7 +698,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
         startupProgress?.begin(performance.now() - process.uptime() * 1000);
       }
     },
-  });
+  }), localView.refresh()]);
 
   // 会话控制器——当前对话指针 + turn 编排(send → delta 喂渲染 → complete)。
   controller = new ConversationController(
@@ -719,6 +718,11 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     },
     initialActive,
   );
+  // Resume has completed and listeners are installed. Reading the welcome
+  // history and attaching the observer are independent; both finish before input.
+  const initialHistory = resumedConversationName !== null
+    ? controller.history(initialActive.conversationId).catch(() => undefined)
+    : Promise.resolve(undefined);
   await controller.start();
   // 指针已就绪——事件过滤从启动全放行收敛到 isWatching
   startupWatchAll = false;
@@ -746,8 +750,8 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   // 经 RPC 倒读宿主落盘事实流。新对话无历史跳过;读失败静默(纯增益展示)。
   if (resumedConversationName !== null) {
     try {
-      const page = await controller.history(controller.current.conversationId);
-      renderHistoryTail({
+      const page = await initialHistory;
+      if (page) renderHistoryTail({
         ...page,
         runs: page.runs.map((r) => r.record),
         writer: cliWriter,

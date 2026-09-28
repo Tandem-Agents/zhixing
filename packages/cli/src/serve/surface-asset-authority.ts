@@ -654,6 +654,9 @@ async function reduceSurfaceGrantEntries(
   mutations: SurfaceGrantMutationBuffer,
   source: DurableProjectionSource,
 ): Promise<void> {
+  // Grant time advances only with control records. Run records are handled by
+  // the caller and must not force this metadata lookup for every replayed turn.
+  if (!envelope.entries.some((entry) => entry.stream === "control")) return;
   const durableTime = await mutations.get(SURFACE_GRANT_TIME_KEY);
   let latest = storedDurableTime(durableTime);
   let hasControlRecord = false;

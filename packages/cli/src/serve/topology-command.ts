@@ -1,4 +1,4 @@
-import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers";
+import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers/configuration";
 import type { ServeOptions } from "./command.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import { createPlatformSecretStore } from "@zhixing/secrets";
@@ -20,10 +20,9 @@ import {
   getDefaultPortPath,
   getDefaultTokenPath,
   ServerNotRunningError,
-} from "@zhixing/server";
+} from "@zhixing/server/client";
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
-import { createPersistentApplicationHost } from "./application-host.js";
 import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
 
 export {
@@ -38,6 +37,9 @@ export async function runServeCommand(
 ): Promise<void> {
   const zhixingHome = getZhixingHome();
   const processMode = resolveHostProcessMode(options.managed);
+  if (options.autoStart && (processMode !== "on-demand" || !process.send)) {
+    throw new Error("Automatic host preparation requires its parent startup channel");
+  }
   const output = processMode === "managed" ? SILENT_WRITER : writer;
   const logging = beginRuntimeLogging(zhixingHome, processMode, (message) => output.line(chalk.dim(message)));
   let failed = false;
@@ -51,27 +53,47 @@ export async function runServeCommand(
     );
     const reconcile = (trigger: Parameters<typeof reconcileCurrentManagedService>[0]) =>
       reconcileCurrentManagedService(trigger, undefined, zhixingHome, secretStore);
-    if (processMode === "managed") {
-      const plan = await currentLaunchPlan();
-      if (plan.mode !== "managed") {
-        await reconcile("managed-preflight");
-        return;
+    const prepareStartup = async () => {
+      if (options.autoStart) {
+        // The prospective Host owns launch planning and credential preparation.
+        // An on-demand Host reuses this same unlocked store; managed/disabled plans
+        // hand back only the plan kind, never credentials or a cached trust decision.
+        const result = await observeStartupPhase(logging.records, "prepare-service", () => reconcile("host-missing"));
+        await new Promise<void>((resolve, reject) => process.send!(
+          { type: "host-launch-plan", mode: result.plan.mode },
+          (error: Error | null) => error ? reject(error) : resolve(),
+        ));
+        if (result.plan.mode !== "on-demand") return;
       }
-      const retained = await waitForManagedHostTurn({
-        zhixingHome,
-        shouldRemainManaged: async () => (await currentLaunchPlan()).mode === "managed",
-        reconcileChangedPlan: async () => { await reconcile("current-trust-applied"); },
-      });
-      if (!retained) return;
-      const reconciled = await reconcile("managed-preflight");
-      if (reconciled.plan.mode !== "managed") return;
-    }
-    const startup = await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
-      homeDir: zhixingHome,
-      mode: "host",
-      records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
-      secretStore,
-    }));
+      if (processMode === "managed") {
+        const plan = await currentLaunchPlan();
+        if (plan.mode !== "managed") {
+          await reconcile("managed-preflight");
+          return;
+        }
+        const retained = await waitForManagedHostTurn({
+          zhixingHome,
+          shouldRemainManaged: async () => (await currentLaunchPlan()).mode === "managed",
+          reconcileChangedPlan: async () => { await reconcile("current-trust-applied"); },
+        });
+        if (!retained) return;
+        const reconciled = await reconcile("managed-preflight");
+        if (reconciled.plan.mode !== "managed") return;
+      }
+      return observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
+        homeDir: zhixingHome,
+        mode: "host",
+        records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
+        secretStore,
+      }));
+    };
+    // Only load the common Host while planning and unlocking credentials.
+    // Role selection and all role effects remain inside the admitted Host.
+    const [startup, { createPersistentApplicationHost }] = await Promise.all([
+      prepareStartup(),
+      import("./application-host.js"),
+    ]);
+    if (!startup) return;
     if (startup.kind !== "ready") {
       recordStartupFailure(logging.records, startup);
       renderStartupFailure(startup, output);

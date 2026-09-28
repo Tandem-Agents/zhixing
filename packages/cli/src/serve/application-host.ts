@@ -2,7 +2,7 @@ import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
 import type { LogRecordPort } from "@zhixing/core/logging";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
-import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers";
+import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers/configuration";
 import type { ServeOptions } from "./command.js";
 import type { StartupCheckResult } from "../startup.js";
 import {

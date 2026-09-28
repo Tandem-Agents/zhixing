@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { createTempDir } from "@zhixing/test-utils";
 import { byteDigest } from "@zhixing/core/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyManagedServiceLaunchContext,
   buildManagedServiceSpec,
@@ -68,6 +68,48 @@ function platformSpec(
 }
 
 describe("managed service platform contract", () => {
+  it.each([0x80070002, 0x80070003, 0x80070002 | 0])("proves an uninstalled Windows task absent using its OS HRESULT %s", async code => {
+    const spec = platformSpec("win32", await createTempDir("managed-absent-fast"));
+    const runner = vi.fn<ManagedServiceCommandRunner>(async () => ({ code, stdout: "", stderr: "" }));
+    const adapter = createManagedServiceAdapter({ platform: "win32", commandRunner: runner });
+    await expect(adapter.inspect(spec, new AbortController().signal))
+      .resolves.toEqual({ state: "absent", running: false, matches: true });
+    expect(runner).toHaveBeenCalledOnce();
+    expect(runner.mock.calls[0]!.slice(0, 2)).toEqual([
+      "schtasks.exe", ["/Query", "/TN", spec.serviceId, "/HRESULT"],
+    ]);
+  });
+
+  it("fully checks an existing Windows task even when its local definition is missing", async () => {
+    const spec = platformSpec("win32", await createTempDir("managed-present-without-definition"));
+    const commands: string[] = [];
+    const adapter = createManagedServiceAdapter({
+      platform: "win32",
+      commandRunner: async command => {
+        commands.push(command);
+        return { code: 0, stdout: command === "powershell.exe" ? windowsInspectionJson(spec) : "", stderr: "" };
+      },
+    });
+    await expect(adapter.inspect(spec, new AbortController().signal))
+      .resolves.toMatchObject({ state: "enabled", matches: false });
+    expect(commands).toEqual(["schtasks.exe", "powershell.exe"]);
+  });
+
+  it.each([
+    [0x80070005, "", "permission-required"],
+    [1, "not found", "manager-unavailable"],
+    [0x800706ba, "", "manager-unavailable"],
+    [0x80070002, "Access is denied", "permission-required"],
+  ] as const)("does not mistake failed Windows presence inspection %s for absence", async (code, stderr, expected) => {
+    const spec = platformSpec("win32", await createTempDir("managed-presence-failure"));
+    const adapter = createManagedServiceAdapter({
+      platform: "win32",
+      commandRunner: async () => ({ code, stdout: "", stderr }),
+    });
+    await expect(adapter.inspect(spec, new AbortController().signal))
+      .rejects.toMatchObject({ code: expected });
+  });
+
   it("keeps a macOS login registration after bootout and reloads it on explicit start", async () => {
     const directory = await createTempDir("managed-macos-unloaded");
     const spec = platformSpec("darwin", directory);
@@ -604,6 +646,11 @@ describe("managed service platform contract", () => {
       const calls: string[] = [];
       const runner: ManagedServiceCommandRunner = async (command, args) => {
         calls.push(`${command} ${args.join(" ")}`);
+        if (platform === "win32" && args.includes("/Query")) {
+          return registered
+            ? { code: 0, stdout: "", stderr: "" }
+            : { code: 0x80070002, stdout: "", stderr: "" };
+        }
         if (platform === "win32" && command === "powershell.exe") {
           return registered
             ? { code: 0, stdout: windowsInspectionJson(spec, { enabled: true, running: true }), stderr: "" }

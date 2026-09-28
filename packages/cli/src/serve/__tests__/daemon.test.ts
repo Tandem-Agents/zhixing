@@ -64,6 +64,50 @@ function mkFakeClock() {
 // 前提：测试进程的 process.argv[1] 是有效的 .js（vitest 跑的话确实是）。
 
 describe("spawnDaemon", () => {
+  it.each(["managed", "on-demand", "none"] as const)("honors the child launch plan %s within the original deadline", async mode => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const deps = makeDeps({
+      clock,
+      spawnFn: vi.fn(() => child as any),
+      sleep: async ms => {
+        clock.advance(ms);
+        if (clock() === 200) {
+          child.emit("message", { type: "host-launch-plan", mode });
+          if (mode !== "on-demand") child.emit("exit", 0, null);
+        }
+      },
+      // Managed handoff takes longer than the exited-child grace period.
+      readLockFn: async () => clock() >= 4000 ? { pid: 55555, port: 23456 } as any : null,
+      isProcessAliveFn: () => true,
+      httpGetFn: async () => 200,
+    });
+    const result = await spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps });
+    expect(result).toMatchObject({ ok: mode !== "none", launchMode: mode });
+    if (mode === "none") expect(result.reason).toBe("这台设备不需要后台运行");
+    else expect(result).toMatchObject({ status: "ready", pid: 55555 });
+    expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining(["serve", "--auto-start"]), expect.objectContaining({ windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"] }));
+    expect(child.listenerCount("message")).toBe(0);
+  });
+
+  it("does not treat a failed managed coordinator as a successful handoff", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const result = await spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps: makeDeps({
+      clock, spawnFn: () => child as any, readLockFn: async () => null,
+      sleep: async ms => {
+        clock.advance(ms);
+        if (clock() === 200) {
+          child.emit("message", { type: "host-launch-plan", mode: "managed" });
+          child.emit("exit", 1, null);
+        }
+      },
+    }) });
+    expect(result).toMatchObject({ ok: false, status: "failed" });
+    expect(result.reason).toContain("退出码 1");
+    expect(clock()).toBeLessThan(3000);
+  });
+
   it("observes a real process exiting after five seconds without a blind recovery wait", async () => {
     const started = Date.now();
     const result = await spawnDaemon({

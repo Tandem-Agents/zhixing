@@ -202,6 +202,7 @@ export async function scanAuthorityWalFrames(
     metadata: AuthorityWalFrameMetadata | undefined,
     nextOffset: number,
   ) => boolean | void | Promise<boolean | void>,
+  observeVerifiedFrame?: (bytes: Buffer) => void,
 ): Promise<AuthorityWalScanResult> {
   if (!Number.isSafeInteger(reader.size) || reader.size < 0) {
     throw new TypeError("Authority WAL reader size is invalid");
@@ -243,6 +244,7 @@ export async function scanAuthorityWalFrames(
     if (decoded.kind !== "complete" || decoded.nextOffset !== frameBytes) {
       throw corruptFrame(`Authority WAL frame is incomplete at byte ${offset}`);
     }
+    observeVerifiedFrame?.(frame);
     const shouldContinue = await visit(
       decoded.payload,
       offset,

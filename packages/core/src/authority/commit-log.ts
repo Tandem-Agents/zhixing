@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, type Hash } from "node:crypto";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { authorityObservationRefs } from "./logging.js";
 import {
@@ -132,6 +132,7 @@ interface VerifiedLogTail {
   readonly changedAt: number;
   readonly lastLsn: number;
   readonly prefixDigest: string;
+  readonly physicalHash?: Hash;
 }
 
 interface ScannedLog {
@@ -140,7 +141,29 @@ interface ScannedLog {
   readonly prefixDigest: string;
   readonly incompleteTail?: Buffer;
   readonly stopped?: true;
+  readonly physicalHash?: Hash;
 }
+
+interface VerifiedEnvelopeProof {
+  readonly lsn: number;
+  readonly envelopeDigest: string;
+  readonly logId: string;
+  readonly previousPrefix: string;
+  readonly prefixDigest: string;
+  /** Present only when every record in these validated bytes belongs to one stream. */
+  readonly singleStream?: string;
+}
+
+type EnvelopeSelection = (proof: Pick<VerifiedEnvelopeProof, "lsn" | "singleStream">) => boolean;
+
+function projectionEnvelopeSelection(streams: ReadonlySet<string> | undefined, requiredLsn?: number): EnvelopeSelection | undefined {
+  return streams ? proof => proof.lsn === requiredLsn || proof.singleStream === undefined || streams.has(proof.singleStream) : undefined;
+}
+
+// Validation is a pure function of the bytes, independent of a log instance.
+// Share only bounded digest proofs; every reader still reads and hashes the
+// current file and builds its own objects, LSN chain and projection state.
+const validatedEnvelopes = new Map<string, VerifiedEnvelopeProof>();
 
 class FileProjectionCursor implements ProjectionCursor {
   constructor(
@@ -153,6 +176,7 @@ class FileProjectionCursor implements ProjectionCursor {
     readonly modifiedAt: number | undefined,
     readonly changedAt: number | undefined,
     readonly prefixDigest: string,
+    readonly physicalDigest?: string,
   ) {}
 }
 
@@ -179,7 +203,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
   // Only byte-validation proofs, never shared mutable envelopes or business state.
-  readonly #validatedEnvelopes = new Set<string>();
   readonly #retainedReferenceIndex: RebuildableDurableProjectionIndex;
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
@@ -262,7 +285,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             });
           }
         }
-      });
+      }, 0, projectionEnvelopeSelection(new Set([stream])));
       return records;
     });
   }
@@ -500,7 +523,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           );
         }
         if (!scanned.stopped) {
-          await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+          await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
         }
         return {
           commits: commits as Array<CommitEnvelope<Body>>,
@@ -610,7 +633,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             );
           }
         }
-      });
+      }, afterLsn + 1, projectionEnvelopeSelection(selectedStreams));
       return state;
     });
   }
@@ -719,6 +742,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
                 }
               }
             },
+            selectedStreams,
           );
           const { lastLsn } = replayTail;
           if (afterLsn > lastLsn) {
@@ -1131,7 +1155,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (scanned.incompleteTail) {
       await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
     }
-    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
   }
 
   async #append<Body>(
@@ -1257,6 +1281,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         changedAt: Number.NaN,
         lastLsn: checkpoint.lsn,
         prefixDigest: checkpoint.prefixDigest,
+        physicalHash: previousTail.physicalHash?.copy().update(frame),
       };
       await handle.writeFile(frame);
       await handle.sync();
@@ -1343,13 +1368,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       envelope: CommitEnvelope<JsonValue>,
       checkpoint: DurableLogCheckpoint,
     ) => void | Promise<void> = () => undefined,
+    fromLsn = 0,
+    select?: EnvelopeSelection,
   ): Promise<number> {
     const firstRecovery = this.#verifiedTail === undefined;
-    const scanned = await this.#scanLog(visit);
+    const scanned = await this.#scanLog(visit, fromLsn, select);
     if (scanned.incompleteTail) {
       await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
     }
-    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
     if (firstRecovery || scanned.incompleteTail) this.#records?.record({ event: "recovered", result: "success", refs: [{ kind: "authority", id: this.#requireLogId() }], data: { lsn: scanned.lastLsn, incompleteTail: !!scanned.incompleteTail } });
     return scanned.lastLsn;
   }
@@ -1361,7 +1388,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       envelope: CommitEnvelope<JsonValue>,
       checkpoint: DurableLogCheckpoint,
     ) => void | Promise<void>,
+    selectedStreams?: ReadonlySet<string>,
   ): Promise<{ readonly lastLsn: number; readonly cursor: ProjectionCursor }> {
+    const select = projectionEnvelopeSelection(selectedStreams, cursor?.lsn);
     if (cursor !== undefined && !(cursor instanceof FileProjectionCursor)) {
       throw new TypeError(
         "Projection cursor was not issued by this commit log",
@@ -1391,6 +1420,35 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       return { lastLsn: cursor.lsn, cursor };
     }
 
+    if (cursor?.physicalDigest && cursor.logPath === this.logPath &&
+        cursor.logId === this.#requireLogId() && cursor.device === metadata.dev &&
+        cursor.inode === metadata.ino && cursor.byteOffset <= metadata.size) {
+      // Re-read EVERY old byte under the writer lock. The in-memory digest was
+      // formed from validated frames; no mtime assumption, cached bytes, or
+      // unverified checkpoint can authorize skipping prefix validation.
+      const physicalHash = createHash("sha256");
+      const handle = await open(this.logPath, "r");
+      try {
+        const buffer = Buffer.allocUnsafe(64 * 1024);
+        let offset = this.#logDataStartOffset();
+        while (offset < cursor.byteOffset) {
+          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, cursor.byteOffset - offset), offset);
+          if (bytesRead === 0) throw new AuthorityStorageError("commit-log-corrupt", "Authority log prefix is incomplete");
+          physicalHash.update(buffer.subarray(0, bytesRead));
+          offset += bytesRead;
+        }
+      } finally { await handle.close(); }
+      if (physicalHash.copy().digest("hex") !== cursor.physicalDigest) {
+        throw new AuthorityStorageError("commit-log-corrupt", "Authority log prefix bytes changed");
+      }
+      const scanned = await this.#scanLogFrom(
+        cursor.byteOffset, cursor.lsn, cursor.prefixDigest, visit, afterLsn + 1, physicalHash, select,
+      );
+      if (scanned.incompleteTail) await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
+      await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
+      return { lastLsn: scanned.lastLsn, cursor: this.#projectionCursor(scanned.lastLsn) };
+    }
+
     const logId = this.#requireLogId();
     let observedPrefixDigest = emptyLogPrefix(logId);
     let prefixMatches =
@@ -1406,7 +1464,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           observedPrefixDigest === cursor.prefixDigest;
       }
       if (envelope.lsn > afterLsn) await visit(envelope, checkpoint);
-    });
+    }, Math.min(afterLsn + 1, cursor?.lsn ?? afterLsn + 1), select);
     if (cursor && cursor.lsn <= lastLsn && !prefixMatches) {
       throw new AuthorityStorageError(
         "commit-log-corrupt",
@@ -1421,12 +1479,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       envelope: CommitEnvelope<JsonValue>,
       checkpoint: DurableLogCheckpoint,
     ) => void | Promise<void> = () => undefined,
+    fromLsn = 0,
+    select?: EnvelopeSelection,
   ): Promise<ScannedLog> {
     return this.#scanLogFrom(
       this.#logDataStartOffset(),
       0,
       emptyLogPrefix(this.#requireLogId()),
       visit,
+      fromLsn,
+      undefined,
+      select,
     );
   }
 
@@ -1438,6 +1501,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       envelope: CommitEnvelope<JsonValue>,
       checkpoint: DurableLogCheckpoint,
     ) => boolean | void | Promise<boolean | void> = () => undefined,
+    fromLsn = 0,
+    physicalHash = startOffset === this.#logDataStartOffset() ? createHash("sha256") : undefined,
+    select?: EnvelopeSelection,
   ): Promise<ScannedLog> {
     let handle: FileHandle;
     try {
@@ -1467,18 +1533,34 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const scanned = await scanAuthorityWalFrames(
         fileReader(handle, metadata.size - startOffset, startOffset),
         async (payload, offset, frameMetadata, nextOffset) => {
-          const envelope = this.#decodeEnvelope(payload);
-          if (envelope.lsn !== expectedLsn) {
+          // Hash the bytes read in THIS locked scan, including the old prefix.
+          // Only validation proofs are reused; no cached file bytes or mutable
+          // business records can conceal a changed WAL or leak between reducers.
+          const digest = createHash("sha256").update(payload).digest("hex");
+          const previousProof = validatedEnvelopes.get(digest);
+          const envelope = !previousProof || (previousProof.lsn >= fromLsn && select?.(previousProof) !== false)
+            ? previousProof
+              ? JSON.parse(payload.toString("utf8")) as CommitEnvelope<JsonValue>
+              : parseEnvelope(payload)
+            : undefined;
+          const identity = previousProof ?? envelope!;
+          const singleStream = previousProof ? previousProof.singleStream
+            : envelope!.entries.every(entry => entry.stream === envelope!.entries[0]!.stream)
+              ? envelope!.entries[0]!.stream : undefined;
+          if (identity.lsn !== expectedLsn) {
             throw new AuthorityStorageError(
               "commit-log-corrupt",
-              `Commit log LSN ${envelope.lsn} does not follow ${expectedLsn - 1}`,
+              `Commit log LSN ${identity.lsn} does not follow ${expectedLsn - 1}`,
             );
           }
           expectedLsn += 1;
-          prefixDigest = advanceProjectionPrefix(logId, prefixDigest, envelope);
+          const previousPrefix = prefixDigest;
+          prefixDigest = previousProof?.logId === logId && previousProof.previousPrefix === previousPrefix
+            ? previousProof.prefixDigest
+            : advanceProjectionPrefix(logId, previousPrefix, identity);
           const frameProofIsValid =
             this.#requireLogFormat() === "versioned"
-              ? frameMetadata?.lsn === envelope.lsn &&
+              ? frameMetadata?.lsn === identity.lsn &&
                 frameMetadata.prefixDigest === prefixDigest
               : frameMetadata === undefined;
           if (!frameProofIsValid) {
@@ -1487,18 +1569,32 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               `Authority WAL frame proof is invalid at byte ${startOffset + offset}`,
             );
           }
-          return visit(envelope, {
+          validatedEnvelopes.delete(digest);
+          if (validatedEnvelopes.size >= 8192) {
+            validatedEnvelopes.delete(validatedEnvelopes.keys().next().value!);
+          }
+          validatedEnvelopes.set(digest, {
+            lsn: identity.lsn, envelopeDigest: identity.envelopeDigest,
+            logId, previousPrefix, prefixDigest,
+            ...(singleStream === undefined ? {} : { singleStream }),
+          });
+          // Selection skips only object materialization/visitation. Every byte,
+          // LSN and physical frame proof above is still verified in order.
+          if (identity.lsn < fromLsn || select?.({ lsn: identity.lsn, singleStream }) === false) return;
+          return visit(envelope!, {
             logId,
-            lsn: envelope.lsn,
+            lsn: identity.lsn,
             frameEndOffset: startOffset + nextOffset,
             prefixDigest,
           });
         },
+        physicalHash ? frame => { physicalHash.update(frame); } : undefined,
       );
       return {
         lastLsn: expectedLsn - 1,
         validBytes: startOffset + scanned.validBytes,
         prefixDigest,
+        ...(physicalHash ? { physicalHash } : {}),
         ...(scanned.stopped ? { stopped: true as const } : {}),
         ...(scanned.incompleteTail
           ? { incompleteTail: scanned.incompleteTail }
@@ -1507,21 +1603,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     } finally {
       await handle.close();
     }
-  }
-
-  #decodeEnvelope(bytes: Buffer): CommitEnvelope<JsonValue> {
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (this.#validatedEnvelopes.delete(digest)) {
-      this.#validatedEnvelopes.add(digest);
-      // Parse a fresh object on every read. A reducer cannot mutate a later replay.
-      return JSON.parse(bytes.toString("utf8")) as CommitEnvelope<JsonValue>;
-    }
-    const envelope = parseEnvelope(bytes);
-    if (this.#validatedEnvelopes.size >= 8192) {
-      this.#validatedEnvelopes.delete(this.#validatedEnvelopes.values().next().value!);
-    }
-    this.#validatedEnvelopes.add(digest);
-    return envelope;
   }
 
   async #quarantineTail(bytes: Buffer, validBytes: number): Promise<void> {
@@ -1553,6 +1634,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   async #recordVerifiedTail(
     lastLsn: number,
     prefixDigest: string,
+    physicalHash?: Hash,
   ): Promise<void> {
     const metadata = await stat(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
@@ -1568,6 +1650,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           changedAt: metadata.ctimeMs,
           lastLsn,
           prefixDigest,
+          ...(physicalHash ? { physicalHash } : {}),
         }
       : undefined;
   }
@@ -1585,6 +1668,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         tail.modifiedAt,
         tail.changedAt,
         tail.prefixDigest,
+        tail.physicalHash?.copy().digest("hex"),
       );
     }
     if (lastLsn === 0) {
@@ -1818,7 +1902,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     this.#logId = logIdBytes.toString("base64url");
     this.#logFormat = "versioned";
-    await this.#recordVerifiedTail(0, emptyLogPrefix(this.#logId));
+    await this.#recordVerifiedTail(0, emptyLogPrefix(this.#logId), createHash("sha256"));
   }
 
   async #loadOrCreateLegacyLogId(): Promise<string> {
@@ -2468,7 +2552,7 @@ function createCommitEnvelope<Body>(
 function advanceProjectionPrefix(
   logId: string,
   previousDigest: string,
-  envelope: CommitEnvelope<unknown>,
+  envelope: Pick<CommitEnvelope<unknown>, "lsn" | "envelopeDigest">,
 ): string {
   return protocolDigest("AuthorityLogPrefix", 1, {
     logId,

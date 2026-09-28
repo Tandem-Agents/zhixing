@@ -952,10 +952,12 @@ const serveCmd = program
   .command("serve", { hidden: true })
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .option("--managed", "由系统托管的非交互启动")
+  .addOption(new Option("--auto-start").hideHelp())
   .addOption(new Option("--managed-home <path>").hideHelp())
   .addOption(new Option("--managed-secret-backend <backend>").hideHelp())
   .action(async (options: {
     managed?: boolean;
+    autoStart?: boolean;
     managedHome?: string;
     managedSecretBackend?: string;
   }) => {
@@ -972,7 +974,10 @@ const serveCmd = program
       const {
         runServeCommand,
       } = await import("./serve/topology-command.js");
-      await runServeCommand({ ...(options.managed ? { managed: true } : {}) });
+      await runServeCommand({
+        ...(options.managed ? { managed: true } : {}),
+        ...(options.autoStart ? { autoStart: true } : {}),
+      });
       await exitCommand(0);
     } catch (err) {
       await renderActionError(err);

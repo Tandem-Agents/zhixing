@@ -540,6 +540,9 @@ async function reduceWorksceneDurableProjection(
   envelope: import("../contracts/index.js").CommitEnvelope<JsonValue>,
   current: DurableProjectionReadContext,
 ): Promise<readonly DurableProjectionMutation[]> {
+  // Unrelated commits still advance the source checkpoint, but cannot change
+  // this domain's state and must not read its on-disk metadata during replay.
+  if (!envelope.entries.some((entry) => entry.stream === REGISTRY_STREAM)) return [];
   const mutations: DurableProjectionMutation[] = [];
   const overlay = new Map<string, JsonValue | undefined>();
   const get = async (key: string): Promise<JsonValue | undefined> =>

@@ -65,6 +65,30 @@ it("declares the background blocking relation for the periodic round", async () 
 });
 
 describe("surface asset maintenance", () => {
+  it("opens without waiting for the first collection and drains that same task on stop", async () => {
+    let finish!: () => void;
+    let signal: AbortSignal | undefined;
+    const collect = vi.fn(async (nextSignal: AbortSignal) => {
+      signal = nextSignal;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { processed: 0, removed: 0, hasMore: false };
+    });
+    const maintenance = new SurfaceAssetMaintenance({
+      surfaceAssets: { collectExpiredTemporaryAssets: collect } as unknown as SurfaceAssetCoordinator,
+    });
+    await maintenance.start();
+    await maintenance.start();
+    expect(collect).toHaveBeenCalledOnce();
+    let stopped = false;
+    const stopping = maintenance.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(signal?.aborted).toBe(true);
+    expect(stopped).toBe(false);
+    finish();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
   it("stops only its owned collection obligation", async () => {
     const stopCollectionMaintenance = vi.fn();
     const stopStorageMaintenance = vi.fn();

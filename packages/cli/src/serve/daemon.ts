@@ -38,6 +38,8 @@ export interface SpawnDaemonOptions {
   zhixingHome?: string;
   /** 传给后台 child 的 CLI 参数；应含 "serve" 及其子选项。 */
   forwardedArgs: string[];
+  /** Resolve the current managed/on-demand/disabled plan inside the new Host. */
+  automatic?: boolean;
   /** handshake 上限，默认 5000ms */
   handshakeTimeoutMs?: number;
   /** One caller-owned deadline covers preparation, spawn and discovery. */
@@ -79,6 +81,7 @@ export interface SpawnDaemonResult {
   reason?: string;
   /** 日志路径（供调用方显示）*/
   logPath: string;
+  launchMode?: "managed" | "on-demand" | "none";
 }
 
 /**
@@ -103,7 +106,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   // 1. resolveSelfExec
   let execArgs;
   try {
-    execArgs = resolveSelfExec(opts.forwardedArgs, {
+    execArgs = resolveSelfExec([...opts.forwardedArgs, ...(opts.automatic ? ["--auto-start"] : [])], {
       env: { ...process.env, ZHIXING_HOME: zhixingHome },
     });
   } catch (err) {
@@ -116,9 +119,20 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
 
   // The child owns its recorder; no append fd survives the parent.
   const spawnOpts = buildDaemonSpawnOptions(execArgs.env);
+  if (opts.automatic) spawnOpts.stdio = ["ignore", "ignore", "ignore", "ipc"];
   const spawnFn = deps.spawnFn ?? spawn;
   const child = spawnFn(execArgs.command, execArgs.args, spawnOpts);
   let childExit: ChildExit | null = null;
+  let launchMode: SpawnDaemonResult["launchMode"];
+  const onMessage = (message: unknown) => {
+    if (!opts.automatic || launchMode || !message || typeof message !== "object") return;
+    const value = message as Record<string, unknown>;
+    if (Object.keys(value).length === 2 && value.type === "host-launch-plan" &&
+        (value.mode === "managed" || value.mode === "on-demand" || value.mode === "none")) {
+      launchMode = value.mode;
+    }
+  };
+  if (opts.automatic) child.on("message", onMessage);
   const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
     childExit = { code, signal };
   };
@@ -149,16 +163,19 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
       },
       spawnedPid: child.pid,
       getChildExit: () => childExit,
+      getLaunchMode: () => launchMode,
     });
   } finally {
     child.removeListener?.("exit", onExit);
+    child.removeListener?.("message", onMessage);
+    if (child.connected) child.disconnect();
     // A cancelled spawn without a PID can still emit its initial error asynchronously.
     if (child.pid !== undefined || childExit) child.removeListener?.("error", onError);
   }
 
   if (handshake.ok) {
     printSuccessBanner(handshake.pid!, handshake.port!, logPath, con);
-    return { ok: true, status: "ready", pid: handshake.pid, port: handshake.port, logPath };
+    return { ok: true, status: "ready", pid: handshake.pid, port: handshake.port, logPath, ...(launchMode ? { launchMode } : {}) };
   }
 
   // 5. 失败路径
@@ -169,7 +186,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
       con.error(JSON.stringify(evidence));
     } catch { con.error("启动日志暂不可用；可稍后运行 zz logs search --source runtime 查阅。"); }
   }
-  return { ok: false, status: handshake.status ?? "failed", reason: handshake.reason, logPath };
+  return { ok: false, status: handshake.status ?? "failed", reason: handshake.reason, logPath, ...(launchMode ? { launchMode } : {}) };
 }
 
 // ─── handshake ───
@@ -190,6 +207,7 @@ interface HandshakeOpts {
   deps: SpawnDaemonDeps;
   spawnedPid?: number;
   getChildExit?: () => ChildExit | null;
+  getLaunchMode?: () => SpawnDaemonResult["launchMode"];
 }
 
 interface ChildExit {
@@ -198,6 +216,13 @@ interface ChildExit {
 }
 
 const CHILD_EXIT_DISCOVERY_GRACE_MS = 1000;
+
+function pendingChildFailure(opts: HandshakeOpts): ChildExit | null {
+  const exit = opts.getChildExit?.() ?? null;
+  // The launch coordinator exits after starting the OS-managed service. Its
+  // successor still has to pass the same ready-marker and health handshake.
+  return exit?.code === 0 && opts.getLaunchMode?.() === "managed" ? null : exit;
+}
 
 async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
   const clock = opts.deps.clock ?? Date.now;
@@ -218,6 +243,9 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
 
   while (clock() < deadline) {
     opts.signal?.throwIfAborted();
+    if (opts.getLaunchMode?.() === "none") {
+      return { ok: false, status: "failed", reason: "这台设备不需要后台运行" };
+    }
     const lock = await safeReadLock(readLockFn);
     if (lock) {
       lastLock = lock;
@@ -234,7 +262,7 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
         }
       }
     }
-    const childExit = opts.getChildExit?.() ?? null;
+    const childExit = pendingChildFailure(opts);
     if (childExit && childExitSeenAt === null) {
       childExitSeenAt = clock();
     }
@@ -255,7 +283,7 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
   opts.signal?.throwIfAborted();
 
   // 超时——给出具体原因
-  const childExit = opts.getChildExit?.() ?? null;
+  const childExit = pendingChildFailure(opts);
   if (childExit) {
     return {
       ok: false,

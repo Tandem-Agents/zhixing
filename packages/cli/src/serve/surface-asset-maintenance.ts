@@ -38,7 +38,8 @@ export class SurfaceAssetMaintenance {
   constructor(private readonly options: SurfaceAssetMaintenanceOptions) {}
 
   /**
-   * 启动时先回收一轮,随后按固定周期驱动。重复调用为幂等。
+   * 启动即调度首轮后台回收,不把常规 GC 放到输入就绪的等待链上。
+   * 首轮与后续轮次共用任务、取消和关闭责任。重复调用为幂等。
    *
    * 标志位在首轮回收之前置位:否则第二次调用会在首轮 await 期间穿过检查,
    * 装上第二个定时器并覆盖第一个,留下一个再也无法清除的泄漏。
@@ -46,7 +47,7 @@ export class SurfaceAssetMaintenance {
   async start(): Promise<void> {
     if (this.#stopped || this.#started) return;
     this.#started = true;
-    await this.#collect();
+    void this.#collect();
     if (this.#stopped) return;
     this.#timer = setInterval(() => {
       void this.#collect();

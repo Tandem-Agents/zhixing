@@ -22,6 +22,26 @@ async function fixture() {
 }
 
 describe("EncryptedVaultSecretStore", () => {
+  it("serializes platform initialization reached through state checks", async () => {
+    const directory = await createTempDir("platform-concurrent-state");
+    const backend = fakeCredentialBackend();
+    const openStore = () => createPlatformSecretStore({
+      homeDir: directory, platform: "linux", env: { DISPLAY: ":0" },
+      commandRunner: async (...args) => {
+        // A status check may initialize the backend; its entire operation must
+        // be inside the same lock used by direct load/create callers.
+        await readFile(path.join(directory, "secret-vault.key.init.lock"));
+        return backend.run(...args);
+      },
+    });
+    const first = openStore();
+    const second = openStore();
+    expect(await Promise.all([first.unlockState(), second.unlockState()])).toEqual(["unlocked", "unlocked"]);
+    const ref = { kind: "provider" as const, bindingId: "concurrent-state" };
+    await first.put(ref, "fixture-value");
+    expect(await second.get(ref)).toBe("fixture-value");
+  });
+
   it("公开覆盖 vault、密钥、锁和临时文件的单一文件族保护前缀", async () => {
     const directory = await createTempDir("secret-path-boundary");
     expect(getPlatformSecretStoreProtectedPaths(directory)).toEqual([

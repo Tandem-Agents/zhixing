@@ -5,6 +5,7 @@ const harness = vi.hoisted(() => ({
   order: [] as string[],
   secretStore: { marker: "secret-store" },
   startup: vi.fn(),
+  reconcile: vi.fn(),
   hostInput: undefined as unknown,
   hostRun: vi.fn(),
   logFinish: vi.fn(async () => undefined),
@@ -32,6 +33,10 @@ vi.mock("../startup.js", () => ({
 vi.mock("./application-host.js", () => ({
   createPersistentApplicationHost: (...args: unknown[]) => harness.createHost(...args),
 }));
+vi.mock("./managed-service-runtime.js", async original => ({
+  ...await original<typeof import("./managed-service-runtime.js")>(),
+  reconcileCurrentManagedService: (...args: unknown[]) => harness.reconcile(...args),
+}));
 vi.mock("../logging/runtime.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../logging/runtime.js")>(),
   beginRuntimeLogging: () => ({ capacity: harness.capacity, bind: () => ({ record: harness.logRecord }), records: { record: harness.logRecord }, finish: harness.logFinish }),
@@ -46,6 +51,7 @@ describe("serve topology command", () => {
   beforeEach(() => {
     harness.order.length = 0;
     harness.startup.mockReset();
+    harness.reconcile.mockReset();
     harness.hostInput = undefined;
     harness.hostRun.mockReset();
     harness.logFinish.mockClear();
@@ -65,6 +71,32 @@ describe("serve topology command", () => {
     harness.writer.appendInline.mockReset();
     harness.writer.notify.mockReset();
     harness.writer.ensureSegmentBreak.mockReset();
+  });
+
+  it.each(["on-demand", "managed", "none"])("automatic %s planning stays with the Host credential owner", async mode => {
+    const previousSend = process.send;
+    vi.stubEnv("ZHIXING_DAEMON_CHILD", "1");
+    const send = vi.fn((message, callback) => { callback(null); return true; });
+    process.send = send as typeof process.send;
+    harness.reconcile.mockResolvedValue({ plan: { mode } });
+    harness.startup.mockResolvedValue({ kind: "ready" });
+    try {
+      await runServeCommand({ autoStart: true }, harness.writer);
+      expect(harness.reconcile).toHaveBeenCalledWith("host-missing", undefined, "test-home", harness.secretStore);
+      expect(send).toHaveBeenCalledWith({ type: "host-launch-plan", mode }, expect.any(Function));
+      if (mode === "on-demand") {
+        expect(harness.startup).toHaveBeenCalledWith(expect.objectContaining({ secretStore: harness.secretStore }));
+        expect(harness.hostInput).toMatchObject({ secretStore: harness.secretStore });
+        expect(harness.hostRun).toHaveBeenCalledOnce();
+      } else {
+        expect(harness.startup).not.toHaveBeenCalled();
+        expect(harness.createHost).not.toHaveBeenCalled();
+      }
+      expect(harness.logFinish).toHaveBeenCalledWith("success", "completed");
+    } finally {
+      process.send = previousSend;
+      vi.unstubAllEnvs();
+    }
   });
 
   it("performs shared preflight before creating and running the production Host", async () => {

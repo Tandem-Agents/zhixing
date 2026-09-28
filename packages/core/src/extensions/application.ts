@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthorityCommitLog, ProjectionCursor } from "../authority/interfaces.js";
+import type { AuthorityCommitLog, ProjectionCursor, ProjectionTransactionDecision } from "../authority/interfaces.js";
 import type { LogicalRecord } from "../contracts/index.js";
 import {
   bindProductApiOperation,
@@ -87,8 +87,8 @@ export class ExtensionApplication {
       // Authority validates the cursor on every read, including external writes
       // and prefix replacement. The reducer is immutable, so concurrent reads
       // can share the prefix without an outer lock that prevents recovery retry.
-      const result = await log.transactProjection<State, RecordBody, void>(
-        cached?.state ?? empty(), reduce, () => ({ kind: "return", value: undefined }),
+      const result = await log.readProjection<State, RecordBody>(
+        cached?.state ?? empty(), reduce,
         { stream: EXTENSION_AUTHORITY_STREAM, ...(cached ? { cursor: cached.cursor } : {}) },
       );
       this.projection = { log, state: result.state, cursor: result.cursor };
@@ -363,8 +363,7 @@ export class ExtensionApplication {
   }
 
   private async commit(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh: boolean): Promise<ExtensionInstance> {
-    const result = await this.ports.log().transactProjection<State, RecordBody, ExtensionInstance>(
-      empty(), reduce, (state) => {
+    return this.transact<ExtensionInstance>((state) => {
         this.ports.assertOwner();
         const current = state.instances.get(id);
         let instance = decide(current);
@@ -419,9 +418,7 @@ export class ExtensionApplication {
         }
         const records: RecordBody[] = [{ kind: "extension-instance", instance }, ...[...operations.values()].map(operation => ({ kind: "extension-operation" as const, operation }))];
         return { kind: "append", entries: records.map((body) => ({ stream: EXTENSION_AUTHORITY_STREAM, body })), value: structuredClone(instance) };
-      }, { stream: EXTENSION_AUTHORITY_STREAM },
-    );
-    return result.value;
+      });
   }
 
   private exclusive(state: State, instance: ExtensionInstance): void {
@@ -430,12 +427,30 @@ export class ExtensionApplication {
   }
 
   private async decide<T>(decide: (state: State) => { value: T; records: RecordBody[] }): Promise<T> {
-    const execute = async () => (await this.ports.log().transactProjection<State, RecordBody, T>(empty(), reduce, (state) => {
+    const execute = () => this.transact<T>((state) => {
       this.ports.assertOwner();
       const result = decide(state);
       return result.records.length ? { kind: "append", entries: result.records.map((body) => ({ stream: EXTENSION_AUTHORITY_STREAM, body })), value: structuredClone(result.value) }
         : { kind: "return", value: structuredClone(result.value) };
-    }, { stream: EXTENSION_AUTHORITY_STREAM })).value;
+    });
     return this.ports.commitDecision ? this.ports.commitDecision(execute) : execute();
+  }
+
+  private async transact<T>(decide: (state: State) => ProjectionTransactionDecision<RecordBody, T>): Promise<T> {
+    const log = this.ports.log();
+    const cached = this.projection?.log === log ? this.projection : undefined;
+    try {
+      // Reuse only the verified prefix. Authority still holds the write lock,
+      // validates any changed bytes and applies the decision to the latest tail.
+      const result = await log.transactProjection(cached?.state ?? empty(), reduce, decide, {
+        stream: EXTENSION_AUTHORITY_STREAM,
+        ...(cached ? { cursor: cached.cursor } : {}),
+      });
+      this.projection = { log, state: result.state, cursor: result.cursor };
+      return result.value;
+    } catch (error) {
+      this.projection = undefined;
+      throw error;
+    }
   }
 }

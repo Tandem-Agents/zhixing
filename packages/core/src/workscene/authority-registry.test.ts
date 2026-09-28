@@ -1,9 +1,10 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
+  FileDurableProjectionIndex,
 } from "../authority/index.js";
 import {
   AnchorWorksceneRegistry,
@@ -14,6 +15,30 @@ import {
 const NOW = "2026-07-30T00:00:00.000Z";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 describe("AnchorWorksceneRegistry", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("advances past unrelated commits without reading workscene state and retains mixed commits", async () => {
+    const { log, registry } = await createRegistry();
+    const reads = vi.spyOn(FileDurableProjectionIndex.prototype, "get");
+    try {
+      await log.append([{ stream: "intent:unrelated", body: { t: "unrelated" } }]);
+      expect(reads.mock.contexts.filter((index) =>
+        index.projectionId === "global-workscene-authority-v1"
+      )).toHaveLength(0);
+      await log.append([
+        { stream: "intent:unrelated", body: { t: "unrelated" } },
+        { stream: "intent:workscene-registry", body: { t: "workscene-registry-established", at: NOW } },
+      ]);
+      await registry.initialize();
+      expect(await registry.get("missing")).toBeNull();
+      const index = log.durableProjection({
+        projectionId: "global-workscene-authority-v1", reducerVersion: 1, reduce: () => [],
+      });
+      expect((await index.checkpoints()).authority?.lsn).toBe(2);
+    } finally {
+      reads.mockRestore();
+      await log.stopStorageMaintenance();
+    }
+  });
+
   it("linearizes CRUD, exact replay, CAS and tombstones", async () => {
     const fixture = await createRegistry();
     const created = await fixture.registry.apply(

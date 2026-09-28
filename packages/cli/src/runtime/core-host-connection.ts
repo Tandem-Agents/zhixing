@@ -159,25 +159,6 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
     discover: () => discoverServer(discoveryPaths),
     spawn: async (attempt) => {
       attempt?.signal.throwIfAborted();
-      const { reconcileCurrentManagedService } = await import(
-        "../serve/managed-service-runtime.js"
-      );
-      const reconciled = await observeStartupPhase(records, "prepare-service", () =>
-        reconcileCurrentManagedService("host-missing", attempt?.signal, zhixingHome)).catch(
-        (error: unknown) => ({
-          error: error instanceof Error ? error.message : "本机自动启动配置不可用",
-        }),
-      );
-      attempt?.signal.throwIfAborted();
-      if ("error" in reconciled) {
-        return { ok: false, reason: reconciled.error };
-      }
-      if (reconciled.plan.mode === "managed") {
-        return { ok: true, recoverable: true, mode: "managed" };
-      }
-      if (reconciled.plan.mode === "none") {
-        return { ok: false, reason: "这台设备不需要后台运行", mode: "none" };
-      }
       if (attempt && Date.now() >= attempt.deadlineAt) {
         return { ok: false, reason: "本机启动准备超时", publicReason: "本机启动准备超时，请查看运行日志。" };
       }
@@ -189,6 +170,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
         deadlineAt: attempt?.deadlineAt ?? Date.now() + DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
         signal: attempt?.signal,
         reportFailure: false,
+        automatic: true,
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
         // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP
@@ -199,11 +181,11 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
       return {
         ok: result.ok,
         reason: result.status === "starting" ? "等待本机服务就绪超时，可重试或用 zz logs 查看原因" : result.reason,
-        publicReason: result.status === "starting" ? "等待本机服务就绪超时。" : "本机服务启动失败。",
+        publicReason: result.launchMode === "none" ? "这台设备不需要后台运行" : result.status === "starting" ? "等待本机服务就绪超时。" : "本机服务启动失败。",
         // The daemon owner now observes this child for the whole attempt, including
         // exit and concurrent healthy-owner takeover. No second recovery window.
         recoverable: false,
-        mode: "on-demand",
+        mode: result.launchMode ?? "on-demand",
       };
     },
     stopUnresponsiveHost: async (endpoint) => {

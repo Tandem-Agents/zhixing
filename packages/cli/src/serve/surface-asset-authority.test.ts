@@ -52,6 +52,36 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
 };
 
 describe("surface asset authority", () => {
+  it("skips grant metadata for unrelated records while applying control in a mixed commit", async () => {
+    const root = await createTempDir("surface-grant-unrelated-replay");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { clock: () => at });
+    const authority = createSurfaceAssetAuthority({
+      authorityRoot: path.join(root, "authority"), log, artifacts, retentionLogs: [],
+      signer: identity, verifier: identity, anchorEpoch: 1, clock: () => at,
+    });
+    const reads = vi.spyOn(FileDurableProjectionIndex.prototype, "get");
+    try {
+      await log.append([{ stream: "run:unrelated", body: { t: "unrelated" } }]);
+      expect(reads.mock.contexts.filter((index) =>
+        index.projectionId === "surface-asset-grants"
+      )).toHaveLength(0);
+      await log.append([
+        { stream: "intent:unrelated", body: { t: "unrelated" } },
+        { stream: "control", body: { t: "authority-time-frontier", frontier: at } },
+      ]);
+      const index = log.durableProjection({
+        projectionId: "surface-asset-grants", reducerVersion: 7, reduce: () => [],
+      });
+      expect(await index.get("meta/durable-time")).toBe(at);
+      expect((await index.checkpoints()).authority?.lsn).toBe(2);
+    } finally {
+      reads.mockRestore();
+      await authority.stopStorageMaintenance();
+      await log.stopStorageMaintenance();
+    }
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it(
     "replays an issued grant directly from its source-bound durable key",
     async () => {
