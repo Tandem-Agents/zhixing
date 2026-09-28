@@ -13,6 +13,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
+import { createStartupProgressPresenter } from "./screen/startup-progress.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
@@ -221,9 +222,11 @@ program
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
   })
   .action(async () => {
+    const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout }) : undefined;
+    progress?.begin(performance.now() - process.uptime() * 1000);
     const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE },
       { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
-      import("@zhixing/core/paths"), import("@zhixing/providers"), import("./logging/runtime.js"), import("./logging/input.js"),
+      import("@zhixing/core/paths"), import("@zhixing/providers/configuration"), import("./logging/runtime.js"), import("./logging/input.js"),
     ]);
     const plainNotice = (message: string): void => createStdoutWriter().notify(chalk.dim(message));
     let logNotice = plainNotice;
@@ -233,44 +236,40 @@ program
       const zhixingHome = getZhixingHome();
       const configPath = getGlobalConfigPath(process.env, zhixingHome);
       const [
-        { runStartupCheck },
-        { startRepl },
         { CoreHostConnection, defaultCoreHostConnectionDeps },
         { connectReplHost },
-        { createStartupProgressPresenter },
-      ] = await observeStartupPhase(logging.records, "load-interface", () => Promise.all([
-        import("./startup.js"),
-        import("./repl.js"),
+      ] = await Promise.all([
         import("./runtime/core-host-connection.js"),
         import("./runtime/repl-host-startup.js"),
-        import("./screen/startup-progress.js"),
-      ]));
+      ]);
 
       connection = new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome, logging.records));
       const notices: import("./runtime/core-host-connection.js").CoreHostLifecycleNotice[] = [];
       const stopNotices = connection.onLifecycleNotice(notice => { if (notice.kind !== "starting") notices.push(notice); });
-      const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout }) : undefined;
       const startupNotice = progress ? (message: string) => progress.notify(chalk.dim(message)) : plainNotice;
       logNotice = startupNotice;
-      const prepared = await connectReplHost({
+      const [prepared, { startRepl }] = await Promise.all([connectReplHost({
         connection,
-        starting: () => progress?.begin(),
-        settled: () => progress?.stop(),
+        starting: () => progress?.begin(performance.now() - process.uptime() * 1000),
+        settled: () => {},
         checkConfiguration: async () => {
+          progress?.stop();
           // The setup editor owns stdout until it closes. Keep a bounded set of
           // notices, then present them before startup or the REPL takes ownership.
           const pending = new Set<string>();
           logNotice = message => { pending.add(message); if (pending.size > 4) pending.delete(pending.values().next().value!); };
           try {
+            const { runStartupCheck } = await import("./startup.js");
             return await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
               homeDir: zhixingHome, configPath, mode: "repl",
               records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
             }));
           } finally { logNotice = startupNotice; for (const message of pending) startupNotice(message); }
         },
-      });
+      }), observeStartupPhase(logging.records, "load-interface", () => import("./repl.js"))]);
       stopNotices();
       if (prepared.kind === "configuration") {
+        progress?.stop();
         const startupResult = prepared.result;
         const startupExit = handleStartupResult(startupResult) ?? 2;
         recordStartupFailure(logging.records, startupResult);
@@ -281,12 +280,13 @@ program
       }
 
       await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records, {
-        connection, notices,
+        connection, notices, progress,
         setLogNoticeHandler: handler => { logNotice = handler ?? plainNotice; },
         ...(prepared.kind === "unavailable" ? { initialFailure: { error: prepared.error } } : {}),
       });
       await logging.finish("success", "completed");
     } catch (err) {
+      progress?.stop();
       logNotice = plainNotice;
       await connection?.dispose().catch(cleanup => recordRuntimeFailure(logging.records, cleanup, "foreground-cleanup-failed"));
       recordRuntimeFailure(logging.records, err, "foreground-failed");

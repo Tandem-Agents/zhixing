@@ -1555,7 +1555,7 @@ export class AnchorResourceGovernor
     const initial = cached
       ? cloneGovernorProjection(cached.state)
       : emptyGovernorProjection();
-    const transaction = await this.#log.transactProjection<GovernorProjection, unknown, void>(
+    const transaction = await this.#log.readProjection<GovernorProjection, unknown>(
       initial,
       (state, record, envelope) => {
         if (record.stream !== GOVERNOR_STREAM) return state;
@@ -1566,7 +1566,6 @@ export class AnchorResourceGovernor
           retentionCutoff,
         );
       },
-      () => ({ kind: "return", value: undefined }),
       {
         stream: GOVERNOR_STREAM,
         ...(cached ? { cursor: cached.cursor } : {}),

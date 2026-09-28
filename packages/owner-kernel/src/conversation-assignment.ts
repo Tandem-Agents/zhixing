@@ -5739,14 +5739,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const cached = this.#runProjection;
       const replay = async () => {
         try {
-          return await this.#log.transactProjection<
+          return await this.#log.readProjection<
             RunProjection,
-            unknown,
-            void
+            unknown
           >(
             cached?.state ?? emptyProjection(this.#conversationId),
             this.#reduce,
-            () => ({ kind: "return", value: undefined }),
             {
               stream: runStream(this.#conversationId),
               ...(cached ? { cursor: cached.cursor } : {}),
@@ -8752,15 +8750,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#operations.run(async () => {
       try {
         const cached = this.#publishProjection;
-        const transaction = await this.#log.transactProjection<
+        const transaction = await this.#log.readProjection<
           PublishProjection,
-          PublishRecord,
-          void
+          PublishRecord
         >(
           cached?.state ?? emptyPublishProjection(),
           (state, record, envelope) =>
             reducePublishRecord(state, record, envelope, this.#artifacts),
-          () => ({ kind: "return", value: undefined }),
           {
             stream: "publish",
             ...(cached ? { cursor: cached.cursor } : {}),
@@ -8782,10 +8778,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#operations.run(async () => {
       try {
         const cached = this.#finalProjection;
-        const transaction = await this.#log.transactProjection<
+        const transaction = await this.#log.readProjection<
           FinalOutboxProjection,
-          FinalOutboxRecord,
-          void
+          FinalOutboxRecord
         >(
           cached?.state ?? emptyFinalProjection(),
           async (projection, record, envelope) => {
@@ -8798,7 +8793,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             );
             return projection;
           },
-          () => ({ kind: "return", value: undefined }),
           {
             stream: "final-outbox",
             ...(cached ? { cursor: cached.cursor } : {}),

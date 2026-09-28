@@ -45,7 +45,7 @@ import type {
   SessionSendEngage,
   SessionUsageResult,
 } from "@zhixing/rpc";
-import { generateTurnId, type UserTurnInput } from "@zhixing/core";
+import { generateTurnId, type UserTurnInput } from "@zhixing/core/types";
 import type {
   ConversationStatusNotice,
   FinalFrame,
@@ -55,8 +55,8 @@ import {
   RpcClientError,
   RpcClientClosedError,
   RPC_ERROR_CODES,
-} from "@zhixing/server";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
+} from "@zhixing/server/client";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface SessionHistoryOptions {

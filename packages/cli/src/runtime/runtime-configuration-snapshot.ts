@@ -1,4 +1,4 @@
-import type { ZhixingConfig } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing/providers/configuration";
 
 /**
  * The one validated public-configuration value published to a running process.

@@ -11,11 +11,9 @@
 import type * as readline from "node:readline/promises";
 import { type ICommandRegistry, type CommandDispatcher, type CommandHandlerContext, type ArgSchema } from "@zhixing/core/typeahead";
 import type { CliWriter, ScreenController } from "../screen/index.js";
-import {
-  handleConfigCommand,
-  handleMcpCommand,
-  type HostReloadResult,
-  type HostReloadOptions,
+import type {
+  HostReloadResult,
+  HostReloadOptions,
 } from "../runtime/config-command.js";
 import { handleSecurityCommand, handleTrustCommand } from "../security/index.js";
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
@@ -86,6 +84,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
       return {};
     }
     if (args) throw Error("用法：/config 或 /config logs");
+    const { handleConfigCommand } = await import("../runtime/config-command.js");
     await handleConfigCommand(editorDeps());
     return {};
   });
@@ -101,6 +100,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
     visibility: chromeOnlyVisibility,
   });
   dispatcher.registerHandler("mcp:repl", async () => {
+    const { handleMcpCommand } = await import("../runtime/config-command.js");
     await handleMcpCommand({
       ...editorDeps(),
       readMcpStatusWire: async () =>

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const SRC_DIR = path.resolve(
@@ -18,6 +20,7 @@ const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "chalk",
   "commander",
   "./screen/cli-writer.js",
+  "./screen/startup-progress.js",
   "./serve/log-line-count.js",
   "./version.js",
   "./command-gate.js",
@@ -46,6 +49,20 @@ function collectRuntimeStaticImports(sourceText: string): string[] {
 }
 
 describe("CLI entry import graph", () => {
+  it("loads the built interactive surface without the backend execution stack", async () => {
+    const dist = path.resolve(SRC_DIR, "../dist");
+    const entry = (await readdir(dist)).find(name => /^repl-[A-Z0-9]+\.js$/u.test(name));
+    expect(entry, "Build the CLI before checking its actual import graph").toBeDefined();
+    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
+      import { registerHooks } from 'node:module';
+      const modules = new Set();
+      registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
+      await import(${JSON.stringify(pathToFileURL(path.join(dist, entry!)).href)});
+      process.stdout.write(JSON.stringify([...modules].filter(url => /packages\/(owner-kernel|executor|orchestrator|runtime-host|mcp|tools-builtin)\/dist\//u.test(url))));
+    `], { timeout: 15_000, windowsHide: true });
+    expect(JSON.parse(stdout)).toEqual([]);
+  });
+
   it("keeps metadata commands on the lightweight static import path", async () => {
     const sourceText = await readFile(ENTRY_FILE, "utf-8");
     const runtimeImports = collectRuntimeStaticImports(sourceText);

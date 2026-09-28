@@ -41,10 +41,9 @@ export class StartupProgressPresenter {
       chalk.yellow("正在等待知行就绪...");
   }
 
-  begin(): void {
+  begin(started = performance.now()): void {
     if (this.disabled) return;
     this.stop();
-    const started = performance.now();
     this.delayTimer = setTimeout(() => {
       this.delayTimer = null;
       this.render(this.text);

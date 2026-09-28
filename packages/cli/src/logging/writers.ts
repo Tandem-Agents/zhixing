@@ -20,7 +20,7 @@ export function classifyWindowsWriters(inventory: NodeProcessInventory, home: st
 }
 
 /** No raw command line or environment leaves the finite platform observation. */
-export function createLogWriterProbe(home: string, observeWindows?: () => Promise<NodeProcessInventory>): (signal?: AbortSignal) => Promise<LogWriterObservation> {
+export function createLogWriterProbe(home: string, observeWindows?: () => Promise<NodeProcessInventory>, ownerPid = process.pid): (signal?: AbortSignal) => Promise<LogWriterObservation> {
   let cached: LogWriterObservation | undefined;
   let cachedUntil = 0;
   return async (signal) => {
@@ -29,7 +29,7 @@ export function createLogWriterProbe(home: string, observeWindows?: () => Promis
     const at = Date.now();
     try {
       if (process.platform === "win32" && !observeWindows) throw Error("Owned Windows process observer required");
-      const result = process.platform === "win32" ? classifyWindowsWriters(await observeWindows!(), home) : await isolatedPosix(home, signal);
+      const result = process.platform === "win32" ? classifyWindowsWriters(await observeWindows!(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid);
       signal?.throwIfAborted();
       cached = { ...result, at };
     } catch { cached = { complete: false, at, candidates: [] }; }
@@ -41,8 +41,8 @@ function execute(command: string, args: string[], env: NodeJS.ProcessEnv, signal
   return new Promise((resolve, reject) => execFile(command, args, { signal, windowsHide: true, timeout: 2500, maxBuffer: 256 * 1024, encoding: "utf8", env }, (error, stdout) => error ? reject(error) : resolve(stdout)));
 }
 
-async function isolatedPosix(home: string, signal?: AbortSignal): Promise<Omit<LogWriterObservation, "at">> {
+async function isolatedPosix(home: string, signal?: AbortSignal, ownerPid = process.pid): Promise<Omit<LogWriterObservation, "at">> {
   const built = fileURLToPath(new URL("./logging-writers-worker.js", import.meta.url));
   const args = existsSync(built) ? [built] : ["--import=tsx/esm", fileURLToPath(new URL("./logging-writers-worker.ts", import.meta.url))];
-  return JSON.parse(await execute(process.execPath, [...args, home, String(process.pid)], process.env, signal));
+  return JSON.parse(await execute(process.execPath, [...args, home, String(ownerPid)], process.env, signal));
 }

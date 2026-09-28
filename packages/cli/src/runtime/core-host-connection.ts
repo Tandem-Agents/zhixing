@@ -29,9 +29,8 @@ import {
   type AuthResult,
   type RpcClient,
   type ServerEndpoint,
-} from "@zhixing/server";
+} from "@zhixing/server/client";
 import { spawnDaemon } from "../serve/daemon.js";
-import { runStopCommand } from "../serve/stop.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
@@ -209,6 +208,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
     },
     stopUnresponsiveHost: async (endpoint) => {
       const silent = { log: () => {}, warn: () => {}, error: () => {} };
+      const { runStopCommand } = await import("../serve/stop.js");
       const result = await runStopCommand({
         zhixingHome,
         verbose: false,

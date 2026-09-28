@@ -1,7 +1,5 @@
-import {
-  SESSION_NOTIFICATIONS,
-  type SessionEventEnvelope,
-} from "@zhixing/rpc";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
 import {
   createLifecycleWarningDeduper,
   renderLifecycleWarningLine,

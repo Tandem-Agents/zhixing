@@ -15,7 +15,6 @@
 import { spawn, type SpawnOptions, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { queryLocalLogs } from "../logging/local-query.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
 import chalk from "chalk";
@@ -27,7 +26,7 @@ import {
   getDefaultPortPath,
   getDefaultReadyMarkerPath,
   type PidFileContents,
-} from "@zhixing/server";
+} from "@zhixing/server/client";
 import {
   resolveSelfExec,
   buildDaemonSpawnOptions,
@@ -166,7 +165,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   if (opts.reportFailure !== false) {
     con.error(chalk.red(`知行服务启动未完成: ${handshake.reason ?? "unknown"}`));
     try {
-      const evidence = await (deps.readLogsFn ?? ((home, from) => queryLocalLogs(home, { source: "runtime", from })))(zhixingHome, startedAt);
+      const evidence = await (deps.readLogsFn ?? (async (home, from) => (await import("../logging/local-query.js")).queryLocalLogs(home, { source: "runtime", from })))(zhixingHome, startedAt);
       con.error(JSON.stringify(evidence));
     } catch { con.error("启动日志暂不可用；可稍后运行 zz logs search --source runtime 查阅。"); }
   }

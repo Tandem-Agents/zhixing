@@ -4,7 +4,7 @@ import path from "node:path";
 import type { SecretStorePort } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
-import { loadConfig } from "@zhixing/providers";
+import { loadConfig } from "@zhixing/providers/configuration";
 import {
   createPlatformSecretStore,
   readPlatformSecretStoreBackendBinding,

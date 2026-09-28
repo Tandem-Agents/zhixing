@@ -359,6 +359,20 @@ describe("ConversationController", () => {
     } finally { controller.dispose(); }
   });
 
+  it("coalesces replayed terminal input lookups but reads again for a new terminal during the query", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    let finish!: (page: { runs: never[]; hasMore: boolean }) => void;
+    f.conversation.history.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    f.emit.status(statusNotice("first", 1, "failed"));
+    f.emit.status(statusNotice("second", 1, "failed"));
+    await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalledTimes(1));
+    f.emit.status(statusNotice("later", 1, "failed"));
+    await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalledTimes(2));
+    finish({ runs: [], hasMore: false });
+    controller.dispose();
+  });
+
   it.each(["failed", "cancelled", "expired"] as const)("terminal before stream: %s keeps source and terminal once across retries, old revisions and late frames", async (state) => {
     const f = makeFakes(), writer = { line: vi.fn(), ensureSegmentBreak: vi.fn() };
     const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });
@@ -401,6 +415,7 @@ describe("ConversationController", () => {
     f.emit.status(notice);
     f.emit.assignment({ v: 1, ref, seq: 1, assignmentId: "assignment", streamEpoch: 1, meta: { turnOrigin: { channel: "rpc", messageIdentity: { id: "m", source: { kind: "conversation", conversationId: "source-a" } } } }, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "不应显示" } } });
     expect(onYield).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalledOnce());
     read({ runs: [], hasMore: false, inputsOutsideHistory: [] } as never);
     await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
     expect(JSON.stringify(onYield.mock.calls)).not.toContain("不应显示");
@@ -554,6 +569,29 @@ describe("ConversationController", () => {
     expect(complete).toHaveBeenCalledOnce();
     expect(observed).toHaveBeenCalledWith({ conversationId: "conv-1", turnId: "communication", inputs: [{ text: "核实", identity: messageIdentity }] });
     expect(controller.current.conversationId).toBe("conv-1");
+    controller.dispose();
+  });
+
+  it("coalesces replayed Finals by history page while later facts require a fresh read", async () => {
+    const f = makeFakes();
+    const complete = vi.fn();
+    const { controller } = makeController(f, vi.fn(), { onObservedTurnComplete: complete });
+    let finishFirst!: (value: never) => void;
+    const records = ["first", "second", "later"].map((runId, index) => ({ shardId: "s", record: {
+      type: "run", runId, runIndex: index + 1, timestamp: "2026-09-16T00:00:00Z",
+      worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" },
+      messages: [{ role: "assistant", content: [{ type: "text", text: runId }] }],
+    } }));
+    f.conversation.history.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
+    f.conversation.history.mockResolvedValue({ runs: records, hasMore: false } as never);
+    const final = (runId: string, commitRevision: number) => ({ v: 1, conversationId: "conv-1", runId, commitRevision, digest: `sha256:${"0".repeat(64)}` });
+    f.emit.final(final("first", 1));
+    f.emit.final(final("second", 2));
+    await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalledOnce());
+    f.emit.final(final("later", 3));
+    await vi.waitFor(() => expect(f.conversation.history).toHaveBeenCalledTimes(2));
+    finishFirst({ runs: records.slice(0, 2), hasMore: false } as never);
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(3));
     controller.dispose();
   });
 

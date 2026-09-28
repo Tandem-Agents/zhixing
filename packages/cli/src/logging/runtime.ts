@@ -16,6 +16,7 @@ import {
 import { LogFilesProcess } from "./files-process.js";
 import { observeBackgroundOutput, STDIO_LOG_SOURCE } from "./stdio.js";
 import { createLogWriterProbe } from "./writers.js";
+import { IsolatedLogStore } from "./store-process.js";
 import type { StartupCheckResult } from "../startup.js";
 
 export const RUNTIME_LOG_SOURCE: LogSource = {
@@ -123,7 +124,8 @@ export function beginRuntimeLogging(
   mode: string,
   warn?: (message: string) => void,
 ): RuntimeLogging {
-  const { store, capacity } = createLocalLogStore(home);
+  const capacity = createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false });
+  const store = new IsolatedLogStore(path.resolve(home), capacity.arbiter);
   const recorder = new LogRecorder(store, {
     onHealth: (health) => {
       if (health.state === "ready") warn?.("运行日志已恢复写入；此前的等待或缺口可用 zz logs 查看。");

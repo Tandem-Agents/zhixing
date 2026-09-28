@@ -766,14 +766,12 @@ export class DeliveryAuthority {
 
   async #synchronizeUnlocked(): Promise<void> {
     const working = cloneDeliveryProjection(this.#enqueueProjection);
-    const transaction = await this.#log.transactProjection<
+    const transaction = await this.#log.readProjection<
       DeliveryProjection,
-      unknown,
-      void
+      unknown
     >(
       working,
       this.#reduceAuthority,
-      () => ({ kind: "return", value: undefined }),
       {
         stream: DELIVERY_STREAM,
         ...(this.#cursor ? { cursor: this.#cursor } : {}),

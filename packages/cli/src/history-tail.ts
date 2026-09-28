@@ -22,7 +22,7 @@
 
 import chalk from "chalk";
 import { conversationStateLabel } from "./conversation-state-label.js";
-import { extractText, type Message } from "@zhixing/core";
+import { extractText, type Message } from "@zhixing/core/types";
 import { type RunRecord } from "@zhixing/core/transcript";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { formatToolResult } from "./tool-card-format.js";

@@ -13,6 +13,10 @@
       "types": "./dist/connection.d.ts",
       "import": "./dist/connection.js"
     },
+    "./log-client": {
+      "types": "./dist/log-client.d.ts",
+      "import": "./dist/log-client.js"
+    },
     "./skill-catalog-client": {
       "types": "./dist/skill-catalog-client.d.ts",
       "import": "./dist/skill-catalog-client.js"

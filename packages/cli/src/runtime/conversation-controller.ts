@@ -19,7 +19,7 @@
 
 import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
 import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
-import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core";
+import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core/types";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
 import type {
   ConversationStatusNotice,
@@ -47,7 +47,7 @@ import type {
   SessionSendResult,
 } from "@zhixing/rpc";
 import type { ConversationCommunicationHistory as RunsPage } from "@zhixing/core/conversation/application";
-import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
+import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server/client";
 import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 
@@ -298,6 +298,7 @@ export class ConversationController {
   private readonly finalLookups = new Map<string, Promise<void>>();
   private readonly continuationFinalLookups = new Map<string, Promise<void>>();
   private readonly continuationStatusLookups = new Map<string, Promise<void>>();
+  private readonly notificationHistoryBatches = new Map<string, ReturnType<RpcConversationFacade["history"]>>();
   private readonly observedContinuations = new Map<string, {
     conversationId: string;
     communication?: boolean;
@@ -896,6 +897,19 @@ export class ConversationController {
     void lookup.catch(() => {});
   }
 
+  private notificationHistory(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1]): ReturnType<RpcConversationFacade["history"]> {
+    const key = JSON.stringify([conversationId, options?.limit, options?.before?.shardId, options?.before?.runIndex]);
+    const pending = this.notificationHistoryBatches.get(key);
+    if (pending) return pending;
+    const page = new Promise<void>(resolve => setImmediate(resolve)).then(() => {
+      // Coalesce a notification burst, never reuse a snapshot for facts arriving during its read.
+      this.notificationHistoryBatches.delete(key);
+      return this.opts.conversation.history(conversationId, options);
+    });
+    this.notificationHistoryBatches.set(key, page);
+    return page;
+  }
+
   /** 失败/取消没有成功 Final；任何起因的 Run 都可能包含追加来信。 */
   private async presentTerminalInputs(conversationId: string, runId: string): Promise<void> {
     let delayMs = 25;
@@ -903,7 +917,7 @@ export class ConversationController {
       const notice = this.pendingStatuses.get(runId);
       if (!notice || !terminalResultForStatus(notice) || this.observedContinuations.get(runId)?.terminalInputsReconciled) return;
       try {
-        const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+        const page = await this.notificationHistory(conversationId, { limit: 1 });
         if (this.disposed || this.active.conversationId !== conversationId) return;
         if (this.pendingStatuses.get(runId)?.statusRevision !== notice.statusRevision) continue;
         const messages = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId).map(input => input.message);
@@ -981,7 +995,7 @@ export class ConversationController {
     let delayMs = 25;
     while (!this.disposed && this.active.conversationId === frame.conversationId) {
       try {
-        const page = await this.opts.conversation.history(frame.conversationId, {
+        const page = await this.notificationHistory(frame.conversationId, {
           limit: 200, ...(before ? { before } : {}),
         });
         const match = page.runs.find((item) => "runId" in item.record && item.record.runId === frame.runId);

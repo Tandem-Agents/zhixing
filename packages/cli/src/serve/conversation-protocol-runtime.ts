@@ -691,12 +691,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   /** 对话应用的只读消息投影；查询不会创建会话或启动运行。 */
   async inspectMessage(conversationId: string, messageId: string) {
-    if (!(await this.listSessions()).includes(conversationId)) return undefined;
+    if (!(await this.sessionExists(conversationId))) return undefined;
     return this.#journal(conversationId).messageStatus(messageId);
   }
 
   async messageInputsOutsideHistory(conversationId: string) {
-    if (!(await this.listSessions()).includes(conversationId)) return { inputs: [], truncated: false };
+    if (!(await this.sessionExists(conversationId))) return { inputs: [], truncated: false };
     return this.#journal(conversationId).messageInputsOutsideHistory();
   }
 

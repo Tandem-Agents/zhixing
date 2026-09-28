@@ -1304,15 +1304,15 @@ describe(
   it("does not publish a projection mutated by a failed replay", async () => {
     const fixture = await harness();
     const mutableLog = fixture.log as unknown as {
-      transactProjection: (...args: unknown[]) => Promise<unknown>;
+      readProjection: (...args: unknown[]) => Promise<unknown>;
     };
-    const original = mutableLog.transactProjection.bind(fixture.log);
-    mutableLog.transactProjection = async (...args: unknown[]) => {
+    const original = mutableLog.readProjection.bind(fixture.log);
+    mutableLog.readProjection = async (...args: unknown[]) => {
       (args[0] as DeliveryProjection).items.clear();
       throw new Error("injected projection failure");
     };
     await expect(fixture.authority.list()).rejects.toThrow("injected projection failure");
-    mutableLog.transactProjection = original;
+    mutableLog.readProjection = original;
     await expect(fixture.authority.list()).resolves.toEqual([
       expect.objectContaining({ id: fixture.itemId, state: "queued" }),
     ]);

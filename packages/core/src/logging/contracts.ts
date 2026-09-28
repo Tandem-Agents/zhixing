@@ -103,7 +103,7 @@ export interface LogHealth {
 }
 
 /** Payload-free storage classifications; ordinary contention is not a file failure. */
-export type LogStorageFailure = "writer-busy" | "probe-unavailable" | "resource-wait" | "resource-gap" | "migration-blocked" | "owner-unavailable";
+export type LogStorageFailure = "writer-busy" | "probe-unavailable" | "resource-wait" | "resource-gap" | "migration-blocked" | "owner-unavailable" | "storage-unavailable";
 export class LogStorageError extends Error {
   constructor(readonly code: LogStorageFailure, message: string) {
     super(message);

@@ -5,7 +5,7 @@ import {
 import {
   loadConfig,
   type ZhixingConfig,
-} from "@zhixing/providers";
+} from "@zhixing/providers/configuration";
 import {
   projectRuntimeConfiguration,
   type RuntimeTopologyConfigurationProjection,

@@ -1072,7 +1072,7 @@ export class MeshRuntimeAssembly
         anchorDeviceId: this.#currentAnchorDeviceId(),
         members: this.#control.currentTrust().members.map(member => member.device.deviceId),
         ...(local ? { local: { communication: local, owner: this.options.localConversationOwner!.port() } } : {}),
-        ...(anchor ? { anchor: { communication: anchor, owns: async id => (await this.options.protocol!.listSessions()).includes(id) } } : {}),
+        ...(anchor ? { anchor: { communication: anchor, owns: id => this.options.protocol!.sessionExists(id) } } : {}),
         remote,
       }, source, request);
     } });

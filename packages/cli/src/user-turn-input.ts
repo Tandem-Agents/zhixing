@@ -3,7 +3,7 @@ import {
   type ResolveFileRefsOptions,
   type ResolveResult,
 } from "./resolve-file-refs.js";
-import type { UserInputPart, UserTurnInput } from "@zhixing/core";
+import type { UserInputPart, UserTurnInput } from "@zhixing/core/types";
 import {
   createMaterialTokenPattern,
   type InputMaterialRegistry,

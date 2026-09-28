@@ -5,7 +5,8 @@ import {
 } from "@zhixing/core/protocol";
 import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing/core/contracts";
 import { publishConflictProductCopy } from "@zhixing/core/conversation/application";
-import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
+import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
 

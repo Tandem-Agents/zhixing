@@ -228,6 +228,12 @@ export interface AuthorityCommitLog {
       | Promise<ProjectionTransactionDecision<Body, Value>>,
     options?: ProjectionTransactionOptions,
   ): Promise<ProjectionTransactionResult<State, Body, Value>>;
+  /** Read a verified projection snapshot; never makes an append decision. */
+  readProjection<State, Body = JsonValue>(
+    initial: State,
+    reducer: ProjectionTransactionReducer<State, Body>,
+    options?: ProjectionReplayOptions & { readonly cursor?: ProjectionCursor },
+  ): Promise<Pick<ProjectionTransactionResult<State, Body, never>, "state" | "lastLsn" | "cursor">>;
   collectGarbage(
     options: AuthorityGarbageCollectionOptions,
   ): Promise<ArtifactGarbageCollectionResult>;

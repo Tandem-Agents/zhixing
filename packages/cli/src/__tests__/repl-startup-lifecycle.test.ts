@@ -109,7 +109,8 @@ describe("REPL startup lifecycle notice rendering", () => {
       deferNotice: (n) => deferred.push(n),
     });
 
-    expect(progress.stops).toBe(1);
+    // Host readiness does not finish conversation/history restoration.
+    expect(progress.stops).toBe(0);
     expect(writer.lines).toEqual([]);
     expect(deferred).toEqual([notice]);
 

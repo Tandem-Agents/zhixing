@@ -34,7 +34,7 @@ import {
   type ConfigSemanticIssue,
   type ZhixingConfig,
   type ZhixingCredentials,
-} from "@zhixing/providers";
+} from "@zhixing/providers/configuration";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { FileMeshBootstrapStore } from "./serve/mesh-bootstrap-store.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
@@ -46,11 +46,8 @@ import {
   createRuntimeConfigurationSnapshot,
   type RuntimeConfigurationSnapshot,
 } from "./runtime/runtime-configuration-snapshot.js";
-import {
-  checkModel,
-  runConfigEditor,
-  type SectionId,
-} from "./config-editor/index.js";
+import { checkModel } from "./config-editor/checks/model.js";
+import type { SectionId } from "./config-editor/types.js";
 
 /**
  * 入口模式——repl(交互终端)与 host(核心宿主)。两者都只校 model:
@@ -199,6 +196,7 @@ export async function runStartupCheck(
   // 4. 缺失 + TTY → 跑编辑器
   const title = pickEditorTitle(options.mode, missingSections);
   const welcomeText = pickWelcomeText(options.mode);
+  const { runConfigEditor } = await import("./config-editor/index.js");
   const editorResult = await runConfigEditor({
     initialConfig: config,
     initialCredentials: credentials,

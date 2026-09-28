@@ -1542,6 +1542,13 @@ describe("ConversationProtocolRuntime", () => {
       ownerContext("local-owner-test:delete"),
     );
     await expect(restartedProtocol.sessionExists(deleteConversationId)).resolves.toBe(false);
+    const listSessions = vi.spyOn(restartedProtocol, "listSessions").mockRejectedValue(new Error("Single-conversation queries must not enumerate unrelated conversations"));
+    await expect(restartedProtocol.inspectMessage(deleteConversationId, "missing")).resolves.toBeUndefined();
+    await expect(restartedProtocol.messageInputsOutsideHistory(deleteConversationId)).resolves.toEqual({ inputs: [], truncated: false });
+    await expect(restartedProtocol.inspectMessage("missing", "missing")).resolves.toBeUndefined();
+    await expect(restartedProtocol.messageInputsOutsideHistory(conversationId)).resolves.toMatchObject({ inputs: expect.any(Array) });
+    expect(listSessions).not.toHaveBeenCalled();
+    listSessions.mockRestore();
     await expect(
       restartedProtocol.sessionState.mutate(
         deleteConversationId,

@@ -615,6 +615,37 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  async readProjection<State, Body = JsonValue>(
+    initial: State,
+    reducer: ProjectionTransactionReducer<State, Body>,
+    options: ProjectionReplayOptions & { readonly cursor?: ProjectionCursor } = {},
+  ): Promise<Pick<ProjectionTransactionResult<State, Body, never>, "state" | "lastLsn" | "cursor">> {
+    validateProjectionStreams(options);
+    const cursor = options.cursor;
+    if (cursor !== undefined && !(cursor instanceof FileProjectionCursor)) {
+      throw new TypeError("Projection cursor was not issued by this commit log");
+    }
+    if (cursor && options.afterLsn !== undefined && cursor.lsn !== options.afterLsn) {
+      throw new TypeError("Projection cursor and afterLsn must identify the same prefix");
+    }
+    assertReplayLsn(cursor?.lsn ?? options.afterLsn ?? 0);
+    if (cursor) {
+      const unchanged = await this.#operations.run(async () => {
+        if (!this.#logId) return false;
+        const metadata = await stat(this.logPath).catch((error: unknown) => {
+          if (isNodeError(error, "ENOENT")) return undefined;
+          throw error;
+        });
+        // The cursor proves a durable complete file. This stat is the read's
+        // linearization point; later appends do not change that snapshot.
+        // Changed or partial bytes must pass the existing exclusive recovery.
+        return metadata !== undefined && canResumeProjectionCursor(cursor as FileProjectionCursor, this.logPath, this.#logId, metadata);
+      });
+      if (unchanged) return { state: initial, cursor, lastLsn: cursor.lsn };
+    }
+    return this.transactProjection(initial, reducer, () => ({ kind: "return", value: undefined }), options);
+  }
+
   async transactProjection<State, Body = JsonValue, Value = void>(
     initial: State,
     reducer: ProjectionTransactionReducer<State, Body>,
@@ -1367,11 +1398,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       cursor.logId === logId &&
       cursor.prefixDigest === observedPrefixDigest;
     const lastLsn = await this.#readAndRecover(async (envelope, checkpoint) => {
-      observedPrefixDigest = advanceProjectionPrefix(
-        logId,
-        observedPrefixDigest,
-        envelope,
-      );
+      // The physical scanner already verified this exact prefix chain.
+      observedPrefixDigest = checkpoint.prefixDigest;
       if (cursor && envelope.lsn === cursor.lsn) {
         prefixMatches =
           cursor.logId === logId &&

@@ -16,7 +16,7 @@
 
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
-import { loadConfig } from "@zhixing/providers";
+import { loadConfig } from "@zhixing/providers/configuration";
 import { recordRuntimeFailure } from "./logging/runtime.js";
 import { createRuntimeConfigurationProvider } from "./runtime/runtime-configuration-provider.js";
 import {
@@ -40,7 +40,6 @@ import {
   registerModeCommands,
 } from "./commands/session-commands.js";
 import { registerConfigCommands } from "./commands/config-commands.js";
-import { reloadCoreHostAfterConfig } from "./runtime/config-command.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
@@ -82,10 +81,6 @@ import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
 import {
-  createWorksceneFromLocalWorkspaceAuthorization,
-  withLocalWorkspaceClient,
-} from "./runtime/workspace-command.js";
-import {
   RpcManagementFacade,
   type ServerInfoResult,
 } from "./runtime/rpc-management-facade.js";
@@ -119,9 +114,6 @@ import { ReplLocalView } from "./runtime/repl-local-view.js";
 import { TerminalConfirmationRenderer } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 import { attachKeyboardSource } from "./interrupt/keyboard-source.js";
-import { renderReadOnlyConversationBrowser } from "./runtime/read-only-conversation-browser.js";
-import { createReadOnlyConversationStorage } from "./serve/conversation-storage-infrastructure.js";
-import { prepareCurrentManagedServiceConfigTurnover } from "./serve/managed-service-runtime.js";
 import {
   createWorksceneCreateSelectionRequest,
   runWorksceneCreateAssist,
@@ -294,11 +286,11 @@ export function renderCoreHostLifecycleNotice(opts: {
     renderCoreHostPersistentLifecycleNotice(writer, notice);
     return;
   }
-  startupProgress?.stop();
   if (phase === "initial" && startupProgress?.acceptsStartupNotices()) {
     deferNotice?.(notice);
     return;
   }
+  startupProgress?.stop();
   renderCoreHostPersistentLifecycleNotice(writer, notice);
 }
 
@@ -384,7 +376,7 @@ async function ensureCoreHostWithReadOnlyFallback(
   coreHost: CoreHostConnection,
   writer: CliWriter,
   opts: {
-    readonly storage: ReturnType<typeof createReadOnlyConversationStorage>;
+    readonly home: string;
     onAttemptFailed?: () => void;
     records?: import("@zhixing/core/logging").LogRecordPort;
     initialFailure?: { error: unknown };
@@ -406,10 +398,14 @@ async function ensureCoreHostWithReadOnlyFallback(
       lastError = err;
       recordRuntimeFailure(opts.records, err, "host-connection-failed", attempt);
       opts.onAttemptFailed?.();
+      const [{ renderReadOnlyConversationBrowser }, { createReadOnlyConversationStorage }] = await Promise.all([
+        import("./runtime/read-only-conversation-browser.js"),
+        import("./serve/conversation-storage-infrastructure.js"),
+      ]);
       await renderReadOnlyConversationBrowser({
         writer,
         error: err,
-        storage: opts.storage,
+        storage: createReadOnlyConversationStorage(opts.home),
       });
       if (!process.stdin.isTTY) return false;
 
@@ -477,6 +473,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   connection: CoreHostConnection;
   initialFailure?: { error: unknown };
   notices: readonly CoreHostLifecycleNotice[];
+  progress?: StartupProgressPresenter;
   setLogNoticeHandler?: (handler: ((message: string) => void) | undefined) => void;
 }): Promise<void> {
   // 启用 bracketed paste mode + 初始化 paste detector：
@@ -533,8 +530,9 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   }
 
   const startupProgress = renderScreen
-    ? createStartupProgressPresenter({ stdout: process.stdout })
+    ? startup?.progress ?? createStartupProgressPresenter({ stdout: process.stdout })
     : null;
+  if (!renderScreen) startup?.progress?.stop();
   const deferredStartupNotices: Array<
     Exclude<CoreHostLifecycleNotice, { kind: "starting" }>
   > = [];
@@ -580,7 +578,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   const startupFallbackWriter = renderScreen ? createStdoutWriter() : cliWriter;
   if (
     !(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter, {
-      storage: createReadOnlyConversationStorage(zhixingHome),
+      home: zhixingHome,
       onAttemptFailed: () => startupProgress?.stop(),
       records: runtimeRecords,
       initialFailure: startup?.initialFailure,
@@ -597,6 +595,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     management: managementFacade,
     configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath })),
   });
+  if (!startup?.progress) startupProgress?.begin(performance.now() - process.uptime() * 1000);
   await localView.refresh();
 
   // ── 带外监听器先于 auto-resume 建立 ──
@@ -678,6 +677,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     adoptionReview: initialAdoptionReview,
   } = await selectInitialConversation(conversationFacade, {
     confirmContinuation: async (unavailableCapabilities) => {
+      startupProgress?.stop();
       cliWriter.line(
         chalk.yellow(
           `${layout.contentPrefix}当前会话能力受限：${unavailableCapabilities.join("；")}。`,
@@ -696,6 +696,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
         return /^(?:y|yes|是)$/iu.test(answer.trim());
       } finally {
         prompt.close();
+        startupProgress?.begin(performance.now() - process.uptime() * 1000);
       }
     },
   });
@@ -1292,6 +1293,9 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     management: managementFacade,
     getConversationId: () => controller.current.conversationId,
     requestHostReload: async (options) => {
+      const [{ reloadCoreHostAfterConfig }, { prepareCurrentManagedServiceConfigTurnover }] = await Promise.all([
+        import("./runtime/config-command.js"), import("./serve/managed-service-runtime.js"),
+      ]);
       // 配置热重载 = 宿主换代:请求优雅退出(flush 落盘)→ 重新 ensure 拉起
       // 新宿主(按新配置装配)。重连后刷新本地派生视图并重挂当前会话 observer。
       return reloadCoreHostAfterConfig({
@@ -1627,6 +1631,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
                     onDoublePress: () => {},
                   });
                   try {
+                    const { withLocalWorkspaceClient, createWorksceneFromLocalWorkspaceAuthorization } = await import("./runtime/workspace-command.js");
                     const assist = await runWorksceneCreateAssist(name, {
                       listScenes: () => worksceneFacade.list(),
                       complete: (prompt, signal) =>

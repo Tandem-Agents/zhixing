@@ -17,8 +17,8 @@
  */
 
 import type { ConfirmationDecision, ConfirmationRendererPort, ConfirmationRequest, RequestListener } from "@zhixing/core/confirmation";
-import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc";
-import { RpcClientClosedError } from "@zhixing/server";
+import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc/confirmation-bridge";
+import { RpcClientClosedError } from "@zhixing/server/client";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface RpcConfirmationBrokerOptions {

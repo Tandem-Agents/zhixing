@@ -350,9 +350,8 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
     });
     if (existing) return this.unlock(existing);
     const key = randomBytes(KEY_BYTES);
-    const encodedKey = Buffer.from(key.toString("base64url"), "utf8");
     try {
-      const result = await this.runPowerShell("protect", encodedKey);
+      const result = await this.runPowerShell("protect", key);
       if (result.code !== 0 || result.stdout.byteLength === 0) {
         throw new Error("Windows credential protection could not initialize SecretStore");
       }
@@ -360,7 +359,6 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
       this.cached = Buffer.from(key);
       return Buffer.from(this.cached);
     } finally {
-      encodedKey.fill(0);
       key.fill(0);
     }
   }
@@ -387,7 +385,10 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
       );
     }
     try {
-      this.cached = decodeKey(result.stdout.toString("utf8").trim());
+      if (result.stdout.byteLength !== KEY_BYTES) {
+        throw new ExistingMasterKeyUnavailableError("Windows SecretStore backing key has an invalid length");
+      }
+      this.cached = Buffer.from(result.stdout);
     } finally {
       result.stdout.fill(0);
     }
@@ -395,27 +396,17 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
   }
 
   private runPowerShell(
-    mode: "probe" | "protect" | "unprotect",
+    mode: "protect" | "unprotect",
     input?: Uint8Array,
   ): Promise<CommandResult> {
     const script = [
       "$ErrorActionPreference='Stop'",
       "Add-Type -AssemblyName System.Security",
-      "$scope=[Security.Cryptography.DataProtectionScope]::CurrentUser",
-      `if ('${mode}' -eq 'probe') { [Console]::Out.Write('ok'); exit 0 }`,
-      "$stdin=[Console]::OpenStandardInput()",
       "$memory=New-Object IO.MemoryStream",
-      "$stdin.CopyTo($memory)",
-      "$bytes=$memory.ToArray()",
-      `if ('${mode}' -eq 'protect') {`,
-      "  $plain=[Convert]::FromBase64String(([Text.Encoding]::UTF8.GetString($bytes)).Replace('-','+').Replace('_','/').PadRight(([Math]::Ceiling($bytes.Length/4.0)*4),'='))",
-      "  $output=[Security.Cryptography.ProtectedData]::Protect($plain,$null,$scope)",
-      "} else {",
-      "  $plain=[Security.Cryptography.ProtectedData]::Unprotect($bytes,$null,$scope)",
-      "  $output=[Text.Encoding]::UTF8.GetBytes(([Convert]::ToBase64String($plain).TrimEnd('=').Replace('+','-').Replace('/','_')))",
-      "}",
-      "$stdout=[Console]::OpenStandardOutput()",
-      "$stdout.Write($output,0,$output.Length)",
+      "[Console]::OpenStandardInput().CopyTo($memory)",
+      // The finite operation is code; all key bytes travel only through the binary pipes.
+      `$output=[Security.Cryptography.ProtectedData]::${mode === "protect" ? "Protect" : "Unprotect"}($memory.ToArray(),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)`,
+      "[Console]::OpenStandardOutput().Write($output,0,$output.Length)",
     ].join(";");
     return this.run(windowsPowerShellCommand(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], input);
   }

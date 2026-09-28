@@ -14,10 +14,10 @@ import {
   RPC_ERROR_CODES,
   RpcClientError,
   type ServerShutdownParams,
-} from "@zhixing/server";
+} from "@zhixing/server/client";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
-import { LogRpcClient } from "@zhixing/rpc";
+import { LogRpcClient } from "@zhixing/rpc/log-client";
 import { serverShutdownRequest } from "./server-shutdown-request.js";
 
 export type { ServerShutdownStrategy } from "@zhixing/server";

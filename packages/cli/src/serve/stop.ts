@@ -15,7 +15,7 @@ import {
   readLock,
   releaseLock,
   type PidFileContents,
-} from "@zhixing/server";
+} from "@zhixing/server/client";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import {
   createManagedServiceAdapter,
