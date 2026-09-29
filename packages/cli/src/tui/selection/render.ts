@@ -1,5 +1,7 @@
+import { renderBottomInfoLine, type BottomInfoSnapshot } from "../../bottom-info/index.js";
 import { clampLine, padEndDisplay, stringWidth } from "../line-width.js";
 import { icon, layout, tone } from "../style.js";
+import { renderInputTail } from "../input-tail.js";
 import type { SelectionState } from "./state.js";
 import type {
   SelectionDetailsSpec,
@@ -13,6 +15,7 @@ import {
 } from "./types.js";
 
 export interface SelectionRenderOptions {
+  readonly renderFooter?: (content: BottomInfoSnapshot, width: number) => string;
   readonly columns: number;
   readonly viewportRows: number;
   readonly statusRows?: number;
@@ -20,7 +23,7 @@ export interface SelectionRenderOptions {
 }
 
 export type SelectionRenderResult =
-  | { readonly kind: "rendered"; readonly lines: readonly string[] }
+  | { readonly kind: "rendered"; readonly lines: readonly string[]; readonly cursor?: { row: number; col: number } }
   | { readonly kind: "unavailable"; readonly reason: string };
 
 const DEFAULT_MIN_SCROLL_ROWS = 4;
@@ -57,7 +60,7 @@ export function renderSelectionPanel<TValue extends string>(
   if (state.layer === "details") {
     const details = getSelectionDetails(request, state.selectedIndex);
     if (details) {
-      return renderDetailsPanel(request, state, details, lineBudget, maxPanelRows);
+      return renderDetailsPanel(request, state, details, lineBudget, maxPanelRows, options);
     }
   }
 
@@ -70,6 +73,7 @@ export function renderSelectionPanel<TValue extends string>(
   const optionalRows = maxPanelRows - requiredRows;
   const optionLayout = computeOptionLayout(request.options, lineBudget);
   const lines: string[] = [];
+  let cursor: { row: number; col: number } | undefined;
 
   lines.push(makeSeparator(lineBudget));
   lines.push(renderHeader(panelCopy, lineBudget));
@@ -77,15 +81,31 @@ export function renderSelectionPanel<TValue extends string>(
   lines.push(blankLine(lineBudget));
 
   request.options.forEach((option, index) => {
-    lines.push(renderOptionLine(option, index, state, optionLayout, lineBudget));
+    if (index === state.selectedIndex && state.layer === "input" && isInputOption(option)) {
+      const input = renderInputTail(
+        `${layout.contentPrefix}${tone.brand(icon.selectable)} ${styleOptionLabel(option, true)} `,
+        state.inputBuffer,
+        lineBudget,
+      );
+      cursor = { row: lines.length, col: input.cursorCol };
+      lines.push(input.line);
+    } else {
+      lines.push(renderOptionLine(option, index, state, optionLayout, lineBudget));
+    }
   });
 
+  const selected = request.options[state.selectedIndex];
   lines.push(blankLine(lineBudget));
-  lines.push(line(tone.dim(renderHint(request, state)), lineBudget));
+  lines.push(renderFooter(options, {
+    left: state.layer === "input" && !state.inputBuffer && selected && isInputOption(selected)
+      ? [tone.dim(selected.input.placeholder)] : [],
+    right: [tone.dim(renderHint(request, state))],
+  }, lineBudget));
 
   return {
     kind: "rendered",
     lines,
+    cursor,
   };
 }
 
@@ -95,6 +115,7 @@ function renderDetailsPanel<TValue extends string>(
   details: SelectionDetailsSpec,
   lineBudget: number,
   maxPanelRows: number,
+  options: SelectionRenderOptions,
 ): SelectionRenderResult {
   const bodyBudget = computeDetailsBodyRowsFromPanelRows(maxPanelRows);
   if (bodyBudget < 1) {
@@ -115,7 +136,7 @@ function renderDetailsPanel<TValue extends string>(
     makeSeparator(lineBudget),
     renderHeader({ title: request.title, summary, body: [] }, lineBudget),
     ...visible.map((bodyLine) => line(tone.dim(bodyLine), lineBudget)),
-    line(tone.dim("↑/↓ 滚动 · Esc 返回"), lineBudget),
+    renderFooter(options, { left: [], right: [tone.dim("↑/↓ 滚动 · Esc 返回")] }, lineBudget),
   ];
   return { kind: "rendered", lines };
 }
@@ -254,32 +275,24 @@ function renderOptionLine<TValue extends string>(
   const marker = selected ? tone.brand(icon.selectable) : " ";
   const prefix = `${marker} `;
 
-  let content: string;
-  if (selected && state.layer === "input" && isInputOption(option)) {
-    const value = state.inputBuffer.length > 0
-      ? tone.brand(state.inputBuffer)
-      : tone.dim(`(${option.input.placeholder})`);
-    content = `${styleOptionLabel(option, selected)} ${value}${tone.brand("▎")}`;
-  } else {
-    const label = padEndDisplay(
-      clampLine(styleOptionLabel(option, selected), optionLayout.labelWidth),
-      optionLayout.labelWidth,
-    );
-    const hotkey = option.hotkey
-      ? padEndDisplay(tone.dim(`(${option.hotkey})`), optionLayout.hotkeyWidth)
-      : " ".repeat(optionLayout.hotkeyWidth);
-    const parts = [label];
-    if (optionLayout.hotkeyWidth > 0) {
-      parts.push(" ".repeat(OPTION_LABEL_GAP), hotkey);
-    }
-    if (option.description && optionLayout.descriptionWidth > 0) {
-      parts.push(
-        " ".repeat(OPTION_HOTKEY_GAP),
-        clampLine(tone.dim(option.description), optionLayout.descriptionWidth),
-      );
-    }
-    content = parts.join("");
+  const label = padEndDisplay(
+    clampLine(styleOptionLabel(option, selected), optionLayout.labelWidth),
+    optionLayout.labelWidth,
+  );
+  const hotkey = option.hotkey
+    ? padEndDisplay(tone.dim(`(${option.hotkey})`), optionLayout.hotkeyWidth)
+    : " ".repeat(optionLayout.hotkeyWidth);
+  const parts = [label];
+  if (optionLayout.hotkeyWidth > 0) {
+    parts.push(" ".repeat(OPTION_LABEL_GAP), hotkey);
   }
+  if (option.description && optionLayout.descriptionWidth > 0) {
+    parts.push(
+      " ".repeat(OPTION_HOTKEY_GAP),
+      clampLine(tone.dim(option.description), optionLayout.descriptionWidth),
+    );
+  }
+  const content = parts.join("");
 
   return line(`${prefix}${content}`, lineBudget);
 }
@@ -332,4 +345,9 @@ function line(content: string, lineBudget: number): string {
 
 function blankLine(lineBudget: number): string {
   return line("", lineBudget);
+}
+
+function renderFooter(options: SelectionRenderOptions, content: BottomInfoSnapshot, width: number): string {
+  return options.renderFooter ? options.renderFooter(content, width)
+    : renderBottomInfoLine(content.left, content.right, width);
 }

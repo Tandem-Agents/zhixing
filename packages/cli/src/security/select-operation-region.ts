@@ -1,3 +1,4 @@
+import { BottomInfoModel, type BottomInfoScope } from "../bottom-info/index.js";
 /**
  * SelectOperationRegion —— chrome inline 的 select 面板（InputRegion 实现）
  *
@@ -60,6 +61,7 @@ import type {
   SelectResult,
 } from "../tui/select-types.js";
 import { wrapKeypressHandler } from "../paste-detector.js";
+import { renderInputTail } from "../tui/input-tail.js";
 import type {
   InputRegion,
   ScreenController,
@@ -90,8 +92,6 @@ export interface SelectOperationRegionOptions {
 
 /** Body 行起首 indent —— 4 列（layout.contentPrefix 2 + 2 让 body 视觉附属于 title） */
 const BODY_INDENT = layout.contentPrefix + "  ";
-/** Hint 行起首 indent —— 与 options / title 主轴对齐 */
-const HINT_INDENT = layout.contentPrefix;
 
 /**
  * Panel 顶部视觉分隔线 —— 与 status bar 同宽延伸到 viewport 右边缘，
@@ -114,7 +114,9 @@ function makeSeparator(columns: number): string {
 
 export class SelectOperationRegion implements InputRegion {
   private state: SelectState;
+  readonly bottomInfo: BottomInfoScope;
   private cachedLines: readonly string[] = [];
+  private cachedCursor = { row: 0, col: 0 };
   private finished = false;
   private resolveResult: ((r: SelectResult) => void) | null = null;
 
@@ -132,6 +134,7 @@ export class SelectOperationRegion implements InputRegion {
     }
     this.opts = opts;
     this.screen = opts.screen;
+    this.bottomInfo = (this.screen.bottomInfo ?? new BottomInfoModel()).createScope();
     this.stdin = opts.stdin ?? process.stdin;
     this.state = makeInitialSelectState(opts.options, opts.initialSelected);
     this.computeLines();
@@ -201,13 +204,12 @@ export class SelectOperationRegion implements InputRegion {
   // ─── InputRegion 接口 ───
 
   renderLines(): readonly string[] {
+    if (!this.finished) this.computeLines();
     return this.cachedLines;
   }
 
   cursorPosition(): { row: number; col: number } {
-    // chrome 模式硬件光标永久隐藏——cursorPosition 仅 logical 占位（screen reader
-    // / accessibility 追踪用）。返回 (0, 0) 让光标落 region 第一行第 1 列，安全无视觉副作用。
-    return { row: 0, col: 0 };
+    return this.cachedCursor;
   }
 
   // ─── 渲染 ───
@@ -238,6 +240,7 @@ export class SelectOperationRegion implements InputRegion {
   private computeLines(): void {
     const columns = this.getColumns();
     const lines: string[] = [];
+    this.cachedCursor = { row: 0, col: 0 };
 
     // 0. panel 顶部分隔线 —— 与 status bar 同宽（延伸到 viewport 右边缘），
     //    形成 chrome 内 panel 上边界，让 panel 与 status bar 视觉拉开
@@ -263,17 +266,28 @@ export class SelectOperationRegion implements InputRegion {
     // 极宽终端 hotkey 不超 60 列避免视觉过宽
     const hotkeyColumn = Math.min(60, columns - 4);
     this.opts.options.forEach((opt, idx) => {
-      lines.push(this.renderOption(opt, idx, hotkeyColumn));
+      if (idx === this.state.selected && this.state.inputMode && opt.type === "input") {
+        const input = renderInputTail(
+          `${layout.contentPrefix}${icon.cursor} ${opt.label} `,
+          this.state.inputBuffer,
+          columns - 1,
+        );
+        this.cachedCursor = { row: lines.length, col: input.cursorCol };
+        lines.push(input.line);
+      } else {
+        lines.push(this.renderOption(opt, idx, hotkeyColumn));
+      }
     });
 
-    // 5. 空行分隔
+    // 固定留白与通用信息行；输入提示和按键分别归左、右区。
+    const selected = this.opts.options[this.state.selected];
     lines.push("");
-
-    // 6. hint —— input 模式 / select 模式文案不同
-    const hint = this.state.inputMode
-      ? "Enter 提交 · Esc 退出输入"
-      : "Enter 确认 · Esc 取消";
-    lines.push(`${HINT_INDENT}${tone.dim(hint)}`);
+    const hint = this.state.inputMode ? "Enter 提交 · Esc 退出输入" : "Enter 确认 · Esc 取消";
+    lines.push(this.bottomInfo.render({
+      left: this.state.inputMode && !this.state.inputBuffer && selected?.type === "input"
+        ? [tone.dim(selected.placeholder)] : [],
+      right: [tone.dim(hint)],
+    }, columns - 1));
 
     this.cachedLines = lines;
   }
@@ -289,24 +303,7 @@ export class SelectOperationRegion implements InputRegion {
     const isCurrent = idx === this.state.selected;
     const cursor = isCurrent ? `${icon.cursor} ` : "  ";
 
-    let labelContent: string;
-    if (isCurrent && this.state.inputMode && opt.type === "input") {
-      // input 模式下当前行：label + buffer（或 placeholder）+ 视觉光标 ▎
-      const bufferDisplay = this.state.inputBuffer
-        ? tone.brand(this.state.inputBuffer)
-        : tone.dim(`(${opt.placeholder})`);
-      labelContent = `${opt.label} ${bufferDisplay}▎`;
-    } else {
-      labelContent = isCurrent ? tone.brand.bold(opt.label) : opt.label;
-    }
-
-    // hotkey 右对齐 —— input 模式当前行不参与列对齐（buffer 长度不定 + 用户专注输入）
-    if (
-      isCurrent && this.state.inputMode &&
-      opt.type === "input"
-    ) {
-      return `${layout.contentPrefix}${cursor}${labelContent}`;
-    }
+    const labelContent = isCurrent ? tone.brand.bold(opt.label) : opt.label;
 
     if (!opt.hotkey) {
       return `${layout.contentPrefix}${cursor}${labelContent}`;
@@ -475,6 +472,7 @@ export class SelectOperationRegion implements InputRegion {
   private finish(result: SelectResult): void {
     if (this.finished) return;
     this.finished = true;
+    this.bottomInfo.dispose();
     recordInputEvent(this.opts.screen.inputRecords, "finish", { result });
 
 

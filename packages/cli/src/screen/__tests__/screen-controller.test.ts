@@ -1198,3 +1198,82 @@ describe("ScreenController · 串行化", () => {
     expect(out.buffer.indexOf("pre2")).toBeLessThan(out.buffer.indexOf("post1"));
   });
 });
+
+
+describe("底部信息动态刷新", () => {
+  it("独立来源无需键盘即可新增、替换和移除；同轮变化只重画一次", async () => {
+    const { sc, out } = makeHarness();
+    const scope = sc.bottomInfo.createScope();
+    const source = sc.bottomInfo.createSource();
+    const region: InputRegion = {
+      bottomInfo: scope,
+      renderLines: () => ["input", scope.render({ left: [], right: [] }, 79)],
+      cursorPosition: () => ({ row: 0, col: 2 }),
+    };
+    sc.attachInput(region);
+    const repaint = vi.spyOn(sc, "requestInputRepaint");
+    try {
+      out.buffer = "";
+      source.set("left", "notice", "new-notice");
+      source.set("right", "notice", "right-notice");
+      await Promise.resolve();
+      expect(out.buffer).toContain("new-notice");
+      expect(out.buffer).toContain("right-notice");
+      expect(repaint).toHaveBeenCalledTimes(1);
+      out.buffer = "";
+      source.set("left", "notice", "new-notice");
+      await Promise.resolve();
+      expect(out.buffer).toBe("");
+      source.set("left", "notice", "replacement");
+      await Promise.resolve();
+      expect(out.buffer).toContain("replacement");
+      out.buffer = "";
+      source.dispose();
+      await Promise.resolve();
+      expect(out.buffer).not.toBe("");
+      expect(out.buffer).not.toContain("replacement");
+    } finally { sc.dispose(); }
+  });
+
+  it("场景切换解除旧订阅；挂起不污染独占屏；退出后不再写终端", async () => {
+    const { sc, out } = makeHarness();
+    const a = sc.bottomInfo.createScope(), b = sc.bottomInfo.createScope();
+    const old = a.createSource(), global = sc.bottomInfo.createSource();
+    const region = (bottomInfo: typeof a): InputRegion => ({
+      bottomInfo,
+      renderLines: () => ["input", bottomInfo.render({ left: [], right: [] }, 79)],
+      cursorPosition: () => ({ row: 0, col: 2 }),
+    });
+    sc.attachInput(region(a));
+    old.set("left", "x", "old");
+    sc.attachInput(region(b));
+    out.buffer = "";
+    await Promise.resolve();
+    old.set("left", "x", "late-old");
+    await Promise.resolve();
+    expect(out.buffer).toBe("");
+    sc.suspend();
+    out.buffer = "";
+    for (let i = 0; i < 5; i++) {
+      global.set("left", "x", `new-${i}`);
+      await Promise.resolve();
+    }
+    expect(out.buffer).toBe("");
+    sc.resume();
+    expect(out.buffer).toContain("new-4");
+    expect(out.buffer).not.toContain("late-old");
+    sc.detachInput();
+    out.buffer = "";
+    global.set("left", "x", "after-detach");
+    await Promise.resolve();
+    expect(out.buffer).toBe("");
+    sc.attachInput(region(a));
+    global.set("left", "x", "queued-before-dispose");
+    sc.dispose();
+    out.buffer = "";
+    await Promise.resolve();
+    global.set("left", "x", "after-dispose");
+    await Promise.resolve();
+    expect(out.buffer).toBe("");
+  });
+});

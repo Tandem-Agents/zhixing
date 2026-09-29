@@ -11,7 +11,7 @@
 
 import { stringWidth, clampLine } from "../tui/line-width.js";
 
-/** 同区多块之间的分隔 —— 当前每区至多一块,分隔暂定两空格,视觉规格后续可调。 */
+/** 同区多块之间的分隔。 */
 const BLOCK_SEP = "  ";
 
 export function renderBottomInfoLine(
@@ -25,9 +25,10 @@ export function renderBottomInfoLine(
   const rightStr = right.join(BLOCK_SEP);
   const leftW = stringWidth(leftStr);
   const rightW = stringWidth(rightStr);
+  const separatorWidth = leftW > 0 && rightW > 0 ? 2 : 0;
 
   // 装得下:左靠左、右靠右、中间空格填满到 width(左右皆空 → 整行空格占位)
-  if (leftW + rightW <= width) {
+  if (leftW + rightW + separatorWidth <= width) {
     return leftStr + " ".repeat(width - leftW - rightW) + rightStr;
   }
 
@@ -36,7 +37,7 @@ export function renderBottomInfoLine(
     return clampLine(rightStr, width);
   }
   // 左区截断到剩余宽度,与右区之间补齐空隙(截断后实际宽度可能更小)
-  const leftClamped = clampLine(leftStr, width - rightW);
+  const leftClamped = clampLine(leftStr, Math.max(0, width - rightW - separatorWidth));
   const gap = Math.max(0, width - stringWidth(leftClamped) - rightW);
   return leftClamped + " ".repeat(gap) + rightStr;
 }

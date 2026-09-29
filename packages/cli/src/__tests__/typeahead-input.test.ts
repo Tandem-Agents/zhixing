@@ -33,7 +33,11 @@ import {
   _getTerminalMouseRefcount,
   _resetTerminalMouseRefcountForTests,
 } from "../terminal-mouse.js";
-import type { ScreenController } from "../screen/index.js";
+import { createScreenController, type ScreenController } from "../screen/index.js";
+import { InlineTextPromptRegion } from "../tui/inline-text-prompt.js";
+import { SelectOperationRegion } from "../security/select-operation-region.js";
+import { InlineSelectionRegion } from "../tui/selection/inline-selection-region.js";
+import { validateSelectionRequest } from "../tui/selection/types.js";
 import { BottomInfoModel } from "../bottom-info/index.js";
 import { PasteRegistry } from "../paste-registry.js";
 import { InputMaterialRegistry } from "../input-material-registry.js";
@@ -1135,6 +1139,30 @@ describe("readInputLine — Enter 按键的 panelMode 行为", () => {
 // 删回空重新出现，不参与 submit（仅渲染层）。与 ghost text 共用 dim 通道但语义互斥
 // （buffer 空时 broker 自然无 trigger 也无 ghost）。
 describe("readInputLine — placeholder", () => {
+  it("编辑行不混入提示或补全，中文编辑和 Tab 接受仍沿用原语义", async () => {
+    const { stdin, stdout } = makeStreams(), { broker, dispatcher } = makeHarness();
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime, stdout, stdin, columns: 80, placeholder: "输入说明" });
+    try {
+      controller.start();
+      const initial = controller.renderLines();
+      expect(stripAnsi(initial[controller.cursorPosition().row]!)).not.toContain("输入说明");
+      expect(stripAnsi(initial.join("\n"))).toContain("输入说明");
+      expect(controller.bottomInfo.visible).toBe(true);
+      await typeChars(stdin, "你好");
+      expect(controller.renderLines().length).toBe(initial.length);
+      expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("输入说明");
+      await sendSyntheticKey(stdin, { name: "escape" });
+      await typeChars(stdin, "/he");
+      const candidate = controller.renderLines();
+      expect(stripAnsi(candidate[controller.cursorPosition().row]!)).toContain("/he");
+      expect(stripAnsi(candidate[controller.cursorPosition().row]!)).not.toContain("help");
+      expect(stripAnsi(candidate.join("\n"))).toContain("help");
+      await sendSyntheticKey(stdin, { name: "tab" });
+      const accepted = controller.renderLines();
+      expect(stripAnsi(accepted[controller.cursorPosition().row]!)).toContain("/help");
+    } finally { controller.stop(); }
+    expect(controller.bottomInfo.disposed).toBe(true);
+  });
   it("空 buffer 首帧 stdout 包含 dim placeholder 文案", async () => {
     const { stdin, stdout, getCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
@@ -1385,8 +1413,9 @@ describe("InputController — suspend/resume 输入态快照恢复", () => {
       expect(onEmptyEscape).toHaveBeenCalledTimes(1);
     } finally { controller.stop(); }
   });
-  function makeScreen(): ScreenController {
+  function makeScreen(bottomInfo = new BottomInfoModel()): ScreenController {
     return {
+      bottomInfo,
       attachInput: vi.fn(),
       detachInput: vi.fn(),
       dispose: vi.fn(),
@@ -3109,8 +3138,9 @@ describe("InputController — 多行粘贴提交历史区", () => {
 });
 
 describe("InputController — 底部信息行(bottomInfo)", () => {
-  function makeScreen(): ScreenController {
+  function makeScreen(bottomInfo = new BottomInfoModel()): ScreenController {
     return {
+      bottomInfo,
       attachInput: vi.fn(),
       detachInput: vi.fn(),
       dispose: vi.fn(),
@@ -3130,10 +3160,9 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
       broker,
       dispatcher,
       getRuntime: makeRuntime,
-      screen: makeScreen(),
+      screen: makeScreen(bottomInfo),
       stdin,
       columns: 80,
-      bottomInfo,
     });
     return { controller, stdin };
   }
@@ -3160,12 +3189,12 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
     controller.stop();
   });
 
-  it("命令面板模式(/)→ 不追加底部信息行(面板自带 meta 行)", async () => {
+  it("命令面板模式(/)→ 同一信息行切换候选操作提示，不另叠一行", async () => {
     const bottomInfo = new BottomInfoModel();
     const { controller, stdin } = makeController(bottomInfo);
     controller.start();
     await typeChars(stdin, "/");
-    // 有 trigger → panelLines 非空 → 渲染不追加底部信息行(即便 model 里有 escHint)
+    // 候选交互接管提示文案，普通输入的 esc 清空 不显示。
     expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
       "esc 清空",
     );
@@ -3177,35 +3206,32 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
     const { controller, stdin } = makeController(bottomInfo);
     controller.start();
     await typeChars(stdin, "hi");
-    expect(bottomInfo.snapshot().right.length).toBe(1); // buffer 非空 → 有 escHint 块
+    expect(controller.bottomInfo.visible).toBe(true);
     controller.stop();
-    expect(bottomInfo.snapshot().right.length).toBe(0); // stop 清除自己的块
+    expect(controller.bottomInfo.disposed).toBe(true);
   });
 
-  it("未注入 bottomInfo → 不渲染信息行(向后兼容)", async () => {
+  it("独立输入也使用相同的信息行", async () => {
     const { controller, stdin } = makeController(undefined);
     controller.start();
     await typeChars(stdin, "hello");
-    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
       "esc 清空",
     );
     controller.stop();
   });
 
   it("顺序守护:broker.updateInput 触发的本次 repaint 已能看到 esc hint", async () => {
-    // 守护"syncBottomInfo 必须早于 broker.updateInput":updateInput 同步触发一次
-    // repaint,若 syncBottomInfo 晚于它,本次 repaint 读到的 model 尚未更新 →
-    // esc 清空 落后一帧。捕获 requestInputRepaint 被调那一刻的 model 状态来锁住顺序。
+    // 同步提示直接投影当前草稿，重画时不存在另一份滞后的提示状态。
     const { stdin } = makeStreams();
     const { broker, dispatcher } = makeHarness();
-    const bottomInfo = new BottomInfoModel();
     let escVisibleAtLastRepaint = false;
     const screen = {
       attachInput: vi.fn(),
       detachInput: vi.fn(),
       dispose: vi.fn(),
       requestInputRepaint: vi.fn(() => {
-        escVisibleAtLastRepaint = bottomInfo.snapshot().right.length > 0;
+        escVisibleAtLastRepaint = stripAnsi(controller.renderLines().join("\n")).includes("esc 清空");
       }),
       ensureScrollLeadingBlank: vi.fn(),
       withScrollWrite: vi.fn(),
@@ -3217,7 +3243,6 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
       screen,
       stdin,
       columns: 80,
-      bottomInfo,
     });
     controller.start();
     await typeChars(stdin, "a");
@@ -3230,11 +3255,99 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
     const { controller, stdin } = makeController(bottomInfo);
     controller.start();
     await typeChars(stdin, "hi");
-    controller.suspend(); // buffer=null,model 残留(suspend 不清)
+    controller.suspend();
+    expect(controller.bottomInfo.visible).toBe(false);
     controller.resume();
     await new Promise((r) => setImmediate(r));
-    // resume 恢复 "hi" 非空 → attachKeypressOnly 末尾 + syncBroker 同步 escHint
+    // 恢复原草稿后，提示由当前草稿重新投影。
     expect(stripAnsi(controller.renderLines().join("\n"))).toContain("esc 清空");
     controller.stop();
+  });
+});
+
+
+describe("底部信息区跨交互闭环", () => {
+  it("公告在候选和临时交互中持续更新，场景提示不串场，结束后迟到发布无效", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const screen = createScreenController({
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      capability: { viewport: { rows: 30, cols: 80 }, platform: process.platform, tmux: false },
+    });
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime,
+      screen, stdin, stdout, columns: 80, placeholder: "普通输入提示" });
+    const global = screen.bottomInfo.createSource();
+    const local = controller.bottomInfo.createSource();
+    let abort: AbortController | undefined;
+    try {
+      controller.start();
+      clearCaptured();
+      global.set("left", "notice", "共享公告");
+      global.set("right", "status", "在线");
+      local.set("left", "notice", "仅主输入");
+      await new Promise(resolve => setImmediate(resolve));
+      expect(stripAnsi(getCaptured())).toContain("共享公告");
+      expect(stripAnsi(getCaptured())).toContain("普通输入提示");
+      await typeChars(stdin, "/");
+      expect(stripAnsi(controller.renderLines().at(-1)!)).toContain("共享公告");
+      expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("普通输入提示");
+      await sendSyntheticKey(stdin, { name: "escape" });
+      await sendSyntheticKey(stdin, { name: "escape" });
+
+      for (const kind of ["text", "permission", "selection"] as const) {
+        controller.suspend();
+        expect(screen.bottomInfo.snapshot(controller.bottomInfo).left).not.toContain("仅主输入");
+        abort = new AbortController();
+        const shared = { screen, stdin: stdin as unknown as NodeJS.ReadStream, columns: 80, signal: abort.signal };
+        const region = kind === "text"
+          ? new InlineTextPromptRegion({ ...shared, prompt: "修改名称", placeholder: "填写名称" })
+          : kind === "permission"
+            ? new SelectOperationRegion({ ...shared, title: "授权", body: [], options: [
+                { type: "input", value: "note", label: "填写说明", placeholder: "填写原因" },
+              ] })
+            : new InlineSelectionRegion({ ...shared, viewportRows: 30,
+                request: validateSelectionRequest({ title: "选择", options: [
+                  { kind: "input", value: "note", label: "填写说明", input: { placeholder: "填写原因" } },
+                ] }),
+              });
+        const done = region.run();
+        if (kind !== "text") await sendSyntheticKey(stdin, { name: "return" });
+        const lines = stripAnsi(region.renderLines().join("\n"));
+        expect(lines).toContain(kind === "text" ? "填写名称" : "填写原因");
+        expect(lines).toContain("共享公告");
+        expect(lines).not.toContain("仅主输入");
+        expect(lines).not.toContain("普通输入提示");
+        const scene = region.bottomInfo.createSource();
+        clearCaptured();
+        scene.set("left", "notice", "本次交互");
+        await new Promise(resolve => setImmediate(resolve));
+        expect(stripAnsi(getCaptured())).toContain("本次交互");
+        await typeChars(stdin, "中文");
+        expect(stripAnsi(region.renderLines().join("\n"))).not.toContain(kind === "text" ? "填写名称" : "填写原因");
+        abort.abort();
+        await done;
+        clearCaptured();
+        scene.set("left", "notice", "迟到旧内容");
+        await new Promise(resolve => setImmediate(resolve));
+        expect(getCaptured()).toBe("");
+        controller.resume();
+        const restored = stripAnsi(controller.renderLines().join("\n"));
+        expect(restored).toContain("普通输入提示");
+        expect(restored).toContain("共享公告");
+        expect(restored).toContain("仅主输入");
+        expect(restored).not.toContain("本次交互");
+      }
+      controller.stop();
+      local.set("left", "notice", "迟到主输入");
+      expect(screen.bottomInfo.snapshot().left).toEqual(["共享公告"]);
+      clearCaptured();
+      global.set("left", "notice", "退出后");
+      await new Promise(resolve => setImmediate(resolve));
+      expect(getCaptured()).toBe("");
+    } finally {
+      abort?.abort();
+      controller.stop();
+      screen.dispose();
+    }
   });
 });

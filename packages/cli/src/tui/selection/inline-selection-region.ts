@@ -1,3 +1,4 @@
+import { BottomInfoModel, type BottomInfoScope } from "../../bottom-info/index.js";
 import type * as readline from "node:readline";
 
 import type {
@@ -5,6 +6,7 @@ import type {
   ScreenController,
 } from "../../screen/index.js";
 import { wrapKeypressHandler } from "../../paste-detector.js";
+import { clampLine } from "../line-width.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -50,7 +52,9 @@ export class InlineSelectionRegion<TValue extends string = string>
   implements InputRegion
 {
   private state: SelectionState;
+  readonly bottomInfo: BottomInfoScope;
   private cachedLines: readonly string[] = [];
+  private cachedCursor = { row: 0, col: 0 };
   private finished = false;
   private resolveResult: ((result: SelectionResult<TValue>) => void) | null = null;
   private rawModeLease: RawModeLease | null = null;
@@ -62,20 +66,14 @@ export class InlineSelectionRegion<TValue extends string = string>
   private readonly stdin: NodeJS.ReadStream;
   private readonly stdout: NodeJS.WriteStream;
   private readonly options: InlineSelectionRegionOptions<TValue>;
-  private readonly renderOptionsSnapshot: SelectionRenderOptions;
 
   constructor(options: InlineSelectionRegionOptions<TValue>) {
     this.options = options;
     this.request = options.request;
     this.screen = options.screen;
+    this.bottomInfo = (this.screen.bottomInfo ?? new BottomInfoModel()).createScope();
     this.stdin = options.stdin ?? process.stdin;
     this.stdout = options.stdout ?? process.stdout;
-    this.renderOptionsSnapshot = {
-      columns: options.columns ?? this.stdout.columns ?? 80,
-      viewportRows: options.viewportRows ?? this.stdout.rows ?? 24,
-      statusRows: resolveRows(options.statusRows),
-      minScrollRows: options.minScrollRows,
-    };
     this.state = makeInitialSelectionState(options.request);
     this.computeLines();
   }
@@ -104,11 +102,12 @@ export class InlineSelectionRegion<TValue extends string = string>
   }
 
   renderLines(): readonly string[] {
+    if (!this.finished) this.computeLines();
     return this.cachedLines;
   }
 
   cursorPosition(): { row: number; col: number } {
-    return { row: 0, col: 0 };
+    return this.cachedCursor;
   }
 
   private handleKeypress(str: string, key: readline.Key | undefined): void {
@@ -137,6 +136,10 @@ export class InlineSelectionRegion<TValue extends string = string>
   }
 
   private applyAction(action: SelectionAction): void {
+    if (renderSelectionPanel(this.request, this.state, this.renderOptions()).kind === "unavailable") {
+      if (action.kind === "escape") this.finish({ kind: "cancelled", cause: "escape" });
+      return;
+    }
     const { state, result } = reduceSelection(
       this.state,
       action,
@@ -161,13 +164,24 @@ export class InlineSelectionRegion<TValue extends string = string>
       this.renderOptions(),
     );
     if (result.kind === "unavailable") {
-      throw new SelectionUnavailableError(result.reason);
+      // 首次准入仍拒绝无法展示的面板；已打开后缩小窗口则保留草稿，等待恢复。
+      if (!this.resolveResult) throw new SelectionUnavailableError(result.reason);
+      this.cachedLines = [clampLine("窗口过小，请放大后继续；Esc 取消", this.renderOptions().columns - 1)];
+      this.cachedCursor = { row: 0, col: 0 };
+      return;
     }
     this.cachedLines = result.lines;
+    this.cachedCursor = result.cursor ?? { row: 0, col: 0 };
   }
 
   private renderOptions(): SelectionRenderOptions {
-    return this.renderOptionsSnapshot;
+    return {
+      columns: this.options.columns ?? this.stdout.columns ?? 80,
+      viewportRows: this.options.viewportRows ?? this.stdout.rows ?? 24,
+      statusRows: resolveRows(this.options.statusRows),
+      minScrollRows: this.options.minScrollRows,
+      renderFooter: (content, width) => this.bottomInfo.render(content, width),
+    };
   }
 
   private onAbort = (): void => {
@@ -177,6 +191,7 @@ export class InlineSelectionRegion<TValue extends string = string>
   private finish(result: SelectionResult<TValue>): void {
     if (this.finished) return;
     this.finished = true;
+    this.bottomInfo.dispose();
 
     if (this.batcher) {
       this.stdin.off("keypress", this.batcher.handler);

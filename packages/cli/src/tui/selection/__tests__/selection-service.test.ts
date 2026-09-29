@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { InputRegion, ScreenController } from "../../../screen/index.js";
 import { stripAnsi } from "../../ansi.js";
+import { stringWidth } from "../../line-width.js";
 import { _resetRawModeRefcountForTests } from "../../_internal/raw-mode.js";
 import {
   createSelectionService,
@@ -74,6 +75,37 @@ async function sendKey(
 }
 
 describe("createSelectionService", () => {
+  it("input cursor follows the visible tail and resize without changing submitted text", async () => {
+    const stdin = makeStdin(), stdout = makeStdout(), screen = makeScreen();
+    const service = createSelectionService({ stdin, stdout, screen: screen.screen, isInteractive: () => true });
+    const done = service.choose({ title: "填写说明", options: [{ value: "note", label: "补充说明", input: { placeholder: "输入说明文本" } }] });
+    await new Promise(resolve => setImmediate(resolve));
+    await sendKey(stdin, { name: "return" });
+    const region = screen.attached()!;
+    const initial = region.renderLines();
+    expect(initial[region.cursorPosition().row]).not.toContain("输入说明文本");
+    expect(initial.join("\n")).toContain("输入说明文本");
+    const text = "中文 abc ".repeat(12) + "末尾";
+    for (const ch of text) await sendKey(stdin, { name: ch, sequence: ch });
+    for (const columns of [80, 24, 50]) {
+      stdout.columns = columns;
+      const lines = region.renderLines(), cursor = region.cursorPosition();
+      const row = lines[cursor.row]!;
+      expect(lines.length).toBe(initial.length);
+      expect(stripAnsi(row)).toContain("末尾");
+      expect(row).toContain("\x1b[7m \x1b[27m");
+      expect(cursor.col).toBe(stringWidth(row) - 1);
+      expect(cursor.col).toBeLessThan(columns - 1);
+    }
+    stdout.columns = 15;
+    expect(region.renderLines().join("\n")).toContain("窗口过小");
+    await sendKey(stdin, { name: "return" });
+    expect(region.renderLines()).not.toHaveLength(0);
+    stdout.columns = 80;
+    region.renderLines();
+    await sendKey(stdin, { name: "return" });
+    await expect(done).resolves.toEqual({ kind: "selected", value: "note", input: text });
+  });
   beforeEach(() => {
     _resetRawModeRefcountForTests();
   });

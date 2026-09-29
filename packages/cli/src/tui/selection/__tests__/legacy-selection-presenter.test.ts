@@ -52,15 +52,33 @@ async function sendChar(stdin: NodeJS.ReadStream, ch: string): Promise<void> {
 }
 
 describe("LegacySelectionPresenter", () => {
+  it("releases input ownership if restoring the output cursor fails", async () => {
+    const stdin = makeStdin(), stdout = makeStdout();
+    const presenter = new LegacySelectionPresenter({ stdin, stdout });
+    const done = presenter.run(validateSelectionRequest({
+      title: "输入", options: [{ value: "note", label: "说明", input: { placeholder: "补充说明" } }],
+    }));
+    await sendKey(stdin, { name: "return" });
+    await sendChar(stdin, "中");
+    const error = new Error("output closed");
+    stdout.write = (() => { throw error; }) as typeof stdout.write;
+    const rejected = expect(done).rejects.toBe(error);
+    await sendKey(stdin, { name: "return" });
+    await rejected;
+    expect(stdin.listenerCount("keypress")).toBe(0);
+    expect(stdout.listenerCount("resize")).toBe(0);
+    expect(_getRawModeRefcount()).toBe(0);
+  });
   beforeEach(() => {
     _resetRawModeRefcountForTests();
   });
 
   it("supports input options with the shared selection protocol", async () => {
     const stdin = makeStdin();
+    const stdout = makeStdout();
     const presenter = new LegacySelectionPresenter({
       stdin,
-      stdout: makeStdout(),
+      stdout,
     });
     const request = validateSelectionRequest({
       title: "选择",
@@ -80,7 +98,12 @@ describe("LegacySelectionPresenter", () => {
     await sendKey(stdin, { name: "return" });
     await sendChar(stdin, "新");
     await sendChar(stdin, "名");
+    stdout.columns = 24;
+    stdout.emit("resize");
+    // 面板末尾回到编辑行，不能把 IME 候选位置留在 footer 之后。
+    expect(stdout.chunks.at(-1)).toMatch(/\x1b\[3A\x1b\[\d+G$/);
     await sendKey(stdin, { name: "return" });
+    expect(stdout.chunks.at(-1)).toBe("\x1b[3B\r");
 
     await expect(done).resolves.toEqual({
       kind: "selected",
@@ -88,6 +111,7 @@ describe("LegacySelectionPresenter", () => {
       input: "新名",
     });
     expect(_getRawModeRefcount()).toBe(0);
+    expect(stdout.listenerCount("resize")).toBe(0);
   });
 
   it("supports confirm options and returns to the selection layer on escape", async () => {
@@ -171,7 +195,7 @@ describe("LegacySelectionPresenter", () => {
     expect(_getRawModeRefcount()).toBe(0);
   });
 
-  it("keeps the run render budget stable after terminal resize events", async () => {
+  it("waits for a usable viewport and does not accept an invisible choice after resize", async () => {
     const stdin = makeStdin();
     const stdout = makeStdout();
     stdout.columns = 40;
@@ -189,10 +213,16 @@ describe("LegacySelectionPresenter", () => {
     await tick();
     stdout.columns = 10;
     stdout.rows = 1;
+    stdout.emit("resize");
     await sendKey(stdin, { name: "down" });
     await sendKey(stdin, { name: "return" });
+    expect(stdin.listenerCount("keypress")).toBe(1);
+    stdout.columns = 40;
+    stdout.rows = 10;
+    stdout.emit("resize");
+    await sendKey(stdin, { name: "return" });
 
-    await expect(done).resolves.toEqual({ kind: "selected", value: "b" });
+    await expect(done).resolves.toEqual({ kind: "selected", value: "a" });
     expect(_getRawModeRefcount()).toBe(0);
   });
 });

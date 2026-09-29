@@ -69,7 +69,6 @@ import {
   type SelectionService,
 } from "./tui/selection/index.js";
 import { InputController, type PendingTextSubmission } from "./typeahead-input.js";
-import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import {
@@ -1426,7 +1425,6 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   if (useTypeahead && typeaheadBroker) {
     // 底部信息行内容容器(来源无关)。本期唯一来源是 InputController 自身
     // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
-    const bottomInfo = new BottomInfoModel();
     inputController = new InputController({
       onEmptyEscape: () => {
         if (state.running) return;
@@ -1453,7 +1451,6 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
       },
       textSubmitMode: "deferred",
       onCandidateDelete,
-      bottomInfo,
     });
     startupProgress?.disable();
     inputController.start();

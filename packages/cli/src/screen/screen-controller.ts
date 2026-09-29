@@ -125,9 +125,12 @@ import {
 } from "./scroll-region.js";
 import type { TerminalCapability } from "./terminal-capability.js";
 import { STATUS_TAIL_IDS } from "./status-tail-ids.js";
+import { BottomInfoModel, type BottomInfoScope } from "../bottom-info/index.js";
 import { ANSI, clampLine, layout, tone } from "../tui/index.js";
 
 export interface InputRegion {
+  /** 该次输入交互的信息区；切换区域时屏幕自动切换订阅。 */
+  readonly bottomInfo?: BottomInfoScope;
   /**
    * 渲染当前输入区为字符串数组（逐行，不含末尾 \n）。
    * 包含完整 chrome（边框 + 内 padding）、buffer 文本、可选 panel 行。
@@ -177,6 +180,7 @@ export interface ReplaceableSegmentHandle {
 }
 
 export interface ScreenController {
+  readonly bottomInfo: BottomInfoModel;
   readonly inputRecords?: import("@zhixing/core/logging").LogRecordPort;
   /** 注册唯一活跃输入区。重复 attach 会替换旧的并立刻重画。 */
   attachInput(region: InputRegion): void;
@@ -433,6 +437,9 @@ const ANSI_FIRSTATTACH_SEQUENCE = "\x1b[2J\x1b[3J\x1b[1;1H";
 const ANSI_DISPOSE_SEQUENCE = "\x1b[r\x1b[2J\x1b[1;1H";
 
 class ScreenControllerImpl implements ScreenController {
+  readonly bottomInfo = new BottomInfoModel();
+  private detachBottomInfo: (() => void) | null = null;
+  private inputRepaintPending = false;
   readonly inputRecords: import("@zhixing/core/logging").LogRecordPort | undefined;
   private readonly stdout: NodeJS.WriteStream;
   private readonly capability: TerminalCapability;
@@ -541,6 +548,20 @@ class ScreenControllerImpl implements ScreenController {
 
   attachInput(region: InputRegion): void {
     this.enqueue(() => {
+      this.detachBottomInfo?.();
+      // 一轮事件中的多个公告变更合并为一帧；换场景后旧回调不得重画。
+      let pending = false;
+      const scope = region.bottomInfo;
+      this.detachBottomInfo = scope?.subscribe(() => {
+        if (pending) return;
+        pending = true;
+        queueMicrotask(() => {
+          pending = false;
+          if (!this.disposed && this.input === region && region.bottomInfo === scope && scope.visible) {
+            this.requestInputRepaint();
+          }
+        });
+      }) ?? null;
       this.input = region;
       this.everAttached = true; // dispose 路径据此区分 pre-attach 与 detached 两态
       if (!this.scrollRegion.state.attached) {
@@ -553,6 +574,8 @@ class ScreenControllerImpl implements ScreenController {
 
   detachInput(): void {
     this.enqueue(() => {
+      this.detachBottomInfo?.();
+      this.detachBottomInfo = null;
       const wasAttached = this.scrollRegion.state.attached;
       if (wasAttached) {
         this.scrollRegion.detachInput();
@@ -631,7 +654,10 @@ class ScreenControllerImpl implements ScreenController {
   }
 
   requestInputRepaint(): void {
+    if (this.disposed || this.inputRepaintPending) return;
+    this.inputRepaintPending = true;
     this.enqueue(() => {
+      this.inputRepaintPending = false;
       if (this.scrollRegion.state.attached) {
         this.refreshChrome();
       }
@@ -835,6 +861,8 @@ class ScreenControllerImpl implements ScreenController {
 
   dispose(): void {
     if (this.disposed) return;
+    this.detachBottomInfo?.();
+    this.detachBottomInfo = null;
     this.detachResize?.();
     this.detachResize = null;
     if (this.resizeEndTimer !== null) {
@@ -1037,9 +1065,10 @@ class ScreenControllerImpl implements ScreenController {
    * ScrollRegion 协议方法末尾把 cursor 拉回 region 末（top-anchored 不变量）；
    * 这里再 emit 一次让硬件 cursor 跳到 input 内的逻辑位置。
    *
-   * **视觉副作用 = 零**：模块头"硬件光标可见性 SoT"段中 chrome 模式硬件光标
+   * 模块头"硬件光标可见性 SoT"段中 chrome 模式硬件光标
    * 永久隐藏，输入光标由 input-layout 的 reverse SGR 视觉光标承担。本函数 emit
    * cursor 定位序列的目的不再是"让用户看到光标"，而是：
+   *   - 为终端 IME 的组合文字和候选窗口提供真实编辑位置（隐藏光标仍会被使用）
    *   - 维护 logical cursor position 不变量供 screen reader / accessibility
    *     工具追踪（部分 AT 工具读硬件 cursor 位置即使其不可见）
    *   - 兜底防御：万一某个上游路径（modal / 异常退出）未走 SoT 让硬件光标暂时

@@ -19,7 +19,6 @@ import type * as readline from "node:readline";
 import { CommandDispatcher, type DispatchResult, type ITypeaheadBroker, type RuntimeContext, type SuggestionItem, type TypeaheadSessionState } from "@zhixing/core/typeahead";
 
 import {
-  ANSI,
   stringWidth,
   stripAnsi,
   tone,
@@ -80,8 +79,7 @@ import {
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import {
   BottomInfoModel,
-  BOTTOM_INFO_IDS,
-  renderBottomInfoLine,
+  type BottomInfoScope,
 } from "./bottom-info/index.js";
 
 const PASTE_FOLD_LINES = 4;
@@ -191,14 +189,6 @@ export interface InputControllerOptions {
    * 列表刷新(避免视觉残留 + selectedIndex 指向已不存在候选)。
    */
   readonly onCandidateDelete?: (item: SuggestionItem) => Promise<void>;
-
-  /**
-   * 底部信息行内容容器(来源无关)。注入后,普通模式(无候选面板)在输入框下方
-   * 追加一行信息提示行,显示该容器当前的左 / 右区块;InputController 自身作为第一
-   * 个来源,在输入内容变化时推送 "esc 清空"(buffer 非空时)。不注入则不渲染该行
-   * (readInputLine / 单次输入场景向后兼容)。
-   */
-  readonly bottomInfo?: BottomInfoModel;
 }
 
 // 兼容性：保留旧名称导出（外部仍按 TypeaheadInputOptions import）
@@ -234,6 +224,10 @@ export class InputController implements InputRegion {
   private readonly stdout: NodeJS.WriteStream;
   private readonly promptPrefix: string;
   private readonly maxVisibleItems: number;
+
+  private readonly bottomInfoModel: BottomInfoModel;
+  private bottomInfoScope: BottomInfoScope;
+  get bottomInfo(): BottomInfoScope { return this.bottomInfoScope; }
 
   private state: ControllerState = "stopped";
 
@@ -308,6 +302,8 @@ export class InputController implements InputRegion {
       });
       this.ownsScreen = true;
     }
+    this.bottomInfoModel = this.screen.bottomInfo ?? new BottomInfoModel();
+    this.bottomInfoScope = this.bottomInfoModel.createScope();
   }
 
   // ─── 公共 API ───
@@ -322,8 +318,10 @@ export class InputController implements InputRegion {
 
   start(): void {
     if (this.state !== "stopped") return;
+    if (this.bottomInfo.disposed) this.bottomInfoScope = this.bottomInfoModel.createScope();
     this.attachResources();
     this.state = "active";
+    this.bottomInfo.resume();
     this.screen.attachInput(this);
 
     if (this.options.signal?.aborted) {
@@ -339,8 +337,7 @@ export class InputController implements InputRegion {
   stop(): void {
     if (this.state === "stopped") return;
     this.pendingTextSubmission = null;
-    // 来源生命周期:本控制器销毁时清除自己贡献的底部信息块,不给容器留残留。
-    this.options.bottomInfo?.set("right", BOTTOM_INFO_IDS.escHint, null);
+    this.bottomInfo.dispose();
     this.detachResources();
     this.screen.detachInput();
     if (this.ownsScreen) {
@@ -368,6 +365,7 @@ export class InputController implements InputRegion {
     // 正常但 keypress 事件不 emit)。
     // 快照当前输入态 —— resume 时恢复（候选浏览中途被 inline 编辑接管后原样还原）。
     // confirm 场景挂起时 buffer 已是空（命令已提交），快照为空 → resume 恢复空 = 现状。
+    this.bottomInfo.pause();
     this.suspendedSnapshot = this.buffer?.snapshot() ?? null;
     this.detachKeypressOnly();
     // 不调 screen.detachInput()——scrollRegion.detachInput 会清整屏 + reset region
@@ -417,6 +415,7 @@ export class InputController implements InputRegion {
     // 与 start() 的相同顺序保持对偶；历史上 resume() 顺序与 start() 不一致，
     // 在 paintVisualCursor 引入 state 依赖前隐患不可见，现在显式拉齐。
     this.state = "active";
+    this.bottomInfo.resume();
     this.screen.attachInput(this);
     recordInputState(this.options.screen?.inputRecords, "typeahead.resume.exit", this.stdin, {
       stateAfter: this.state,
@@ -593,9 +592,6 @@ export class InputController implements InputRegion {
     if (this.shouldEnableMousePaste()) {
       this.mousePasteLease = terminalMouseController.acquire(this.stdout);
     }
-    // buffer 刚重建(start / resume)—— 立即同步 esc hint 使其与新 buffer 一致,
-    // 不依赖后续 syncBroker 是否被调用(resume 空 buffer 不走 syncBroker)。
-    this.syncBottomInfo();
   }
 
   /** stdin 物理层 attach —— 仅 start() 调用。 */
@@ -661,16 +657,6 @@ export class InputController implements InputRegion {
       return;
     }
 
-    // suffix 语义互斥：buffer 空 → placeholder；非空且 cursor 在末尾且有 ghost → ghost text
-    const cursorAtEnd =
-      this.buffer.cursor === Array.from(this.buffer.draft).length;
-    let suffix = "";
-    if (this.buffer.isEmpty && this.options.placeholder) {
-      suffix = `${ANSI.dim}${this.options.placeholder}${ANSI.reset}`;
-    } else if (cursorAtEnd && this.lastSessionState?.ghostText?.suffix) {
-      suffix = `${ANSI.dim}${this.lastSessionState.ghostText.suffix}${ANSI.reset}`;
-    }
-
     const frameWidth = this.getFrameWidth();
     const contentBudget = Math.max(1, frameWidth - 5);
     // paintVisualCursor 的不变量谓词 = "input 资源 alive"，即 this.buffer !== null。
@@ -691,7 +677,6 @@ export class InputController implements InputRegion {
       this.promptPrefix,
       this.buffer.draft,
       this.buffer.cursor,
-      suffix,
       contentBudget,
       INPUT_HANDLE_TOKEN_PATTERNS,
       this.buffer !== null,
@@ -705,16 +690,18 @@ export class InputController implements InputRegion {
     });
 
     const panelLines = this.lastSessionState
-      ? renderSessionLines(this.lastSessionState, this.computeRenderOptions())
+      ? renderSessionLines(this.lastSessionState, {
+          ...this.computeRenderOptions(),
+          renderFooter: (hint) => this.bottomInfo.render({ left: [], right: [hint] }, frameWidth),
+        })
       : [];
-
     const lines = [...boxLines, ...panelLines];
-    // 普通模式(无候选面板)且注入了 bottomInfo:在输入框下方追加一行底部信息行,
-    // 始终占位(空内容也占一行,高度不抖)。面板模式下面板自带底部 meta 行,不追加;
-    // 信息行落在 box 下方、cursor 之下,不进入下方 cursorRow 计算。
-    if (panelLines.length === 0 && this.options.bottomInfo) {
-      const snap = this.options.bottomInfo.snapshot();
-      lines.push(renderBottomInfoLine(snap.left, snap.right, frameWidth));
+    if (panelLines.length === 0) {
+      const hint = this.buffer.isEmpty ? this.options.placeholder : undefined;
+      lines.push(this.bottomInfo.render({
+        left: hint ? [tone.dim(hint)] : [],
+        right: this.buffer.isEmpty ? [] : [tone.dim("esc 清空")],
+      }, frameWidth));
     }
     // box 顶边占 1 行，cursor body row 在 box body 内 → 屏幕行偏移 = 1 + layout.cursorRow
     const cursorRow = 1 + layout.cursorRow;
@@ -1031,10 +1018,6 @@ export class InputController implements InputRegion {
         this.materialReferenceIndex.update(this.buffer.getRestorableDraftSlots()),
       );
     }
-    // esc hint 等本控制器贡献的底部信息块必须在 broker.updateInput **之前**同步 ——
-    // updateInput 会同步触发一次 repaint 读 model,晚于它写 model 会让本帧读到旧值
-    // (打字时 esc 清空 落后一个字符出现 / 消失)。
-    this.syncBottomInfo();
     // 首位 `、` 等输入法别名按 `/` 喂 broker:typeahead 命令面板 / ghost text
     // 看到规范化后的 draft,显示层保留原字符不动(echo 走 rawDraft 路径)。
     // 单字符 alias 下 cursor 数值不变;扩展多字符 alias 须重映射 cursor。
@@ -1043,20 +1026,6 @@ export class InputController implements InputRegion {
       ...ctx,
       draft: normalizeLeadingSlashAlias(ctx.draft),
     });
-  }
-
-  /**
-   * 把输入态投影成底部信息行的 "esc 清空" 块 —— 本控制器作为内容来源的职责。
-   * buffer 有内容时推送(dim 提示),空时清除。渲染侧只读 model.snapshot()、不读
-   * buffer,故"何时显示"的逻辑封装在这里(来源侧)。未注入 bottomInfo 则 no-op。
-   */
-  private syncBottomInfo(): void {
-    const show = this.buffer != null && !this.buffer.isEmpty;
-    this.options.bottomInfo?.set(
-      "right",
-      BOTTOM_INFO_IDS.escHint,
-      show ? tone.dim("esc 清空") : null,
-    );
   }
 
   private finalizePaste(content: string): void {

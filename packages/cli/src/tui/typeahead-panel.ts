@@ -161,6 +161,7 @@ export function computeWindow(
 // ─── 纯函数：render lines from state（可独立测试） ───
 
 export interface RenderOptions {
+  readonly renderFooter?: (hint: string) => string;
   readonly theme: TypeaheadTheme;
   readonly frameWidth: number;
   readonly innerWidth: number;
@@ -211,6 +212,7 @@ export function renderSessionLines(
       contentBudget,
       maxVisibleItems,
       theme,
+      opts.renderFooter,
     );
   }
 
@@ -221,6 +223,7 @@ export function renderSessionLines(
     contentBudget,
     maxVisibleItems,
     theme,
+    opts.renderFooter,
   );
 }
 
@@ -277,6 +280,7 @@ function renderEmptyChrome(
   contentBudget: number,
   maxVisibleItems: number,
   theme: TypeaheadTheme,
+  renderFooter?: (hint: string) => string,
 ): string[] {
   const body: BodyLine[] = [];
 
@@ -304,11 +308,8 @@ function renderEmptyChrome(
   // 1 行 meta。空候选下唯一有意义的 inline 操作是 create（new ctrl+n，list 级、
   // 不依赖选中）—— delete / rename 需选中候选，空列表无候选可操作，故 empty 态只
   // 提示 new。仍单行拼接，与 active 路径 shortcut meta（1 行）对齐，不引入高度跳变。
-  const meta: string[] = [
-    state.inlineActions.create
-      ? `  ${theme.hint(clampLine("new ctrl+n · Esc 清空", frameWidth - 2))}`
-      : `  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`,
-  ];
+  const hint = theme.hint(state.inlineActions.create ? "new ctrl+n · Esc 清空" : "Esc 清空");
+  const meta = [renderFooter ? renderFooter(hint) : `  ${clampLine(hint, frameWidth - 2)}`];
 
   return [
     ...renderChrome({
@@ -362,6 +363,7 @@ function renderActiveChrome(
   contentBudget: number,
   maxVisibleItems: number,
   theme: TypeaheadTheme,
+  renderFooter?: (hint: string) => string,
 ): string[] {
   const count = state.suggestions.length;
   const win = computeWindow(count, state.selectedIndex, maxVisibleItems);
@@ -445,17 +447,17 @@ function renderActiveChrome(
       `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
     );
   }
-  // 第二行导航 hint —— 纯按键、点分隔、无说明文本。Tab 仅在当前有 ghostText
-  // （灰字补全）时插入：那时 Tab 接受补全、与 Enter 接受候选语义不同才值得提示；
+  // 前缀补全的实际目标显示在提示行，不占用终端 IME 的编辑行。
+  // Tab 接受的别名可能不同于候选的规范名称，必须让用户看见将填入的文本。
   // 无 ghost 时 Tab == Enter，省去避免噪音（场景 / 参数面板无 ghost，故永不显示）。
   //
   // management 模式无 accept 业务语义（/trust 撤销规则列表）—— navKeys 去掉
   // Enter，提示准确反映：Enter 在 management 面板内 no-op。
-  const navKeys: string[] = ["↑↓"];
+  const navKeys: string[] = state.ghostText ? [`Tab 补全 ${state.ghostText.fullValue}`, "↑↓"] : ["↑↓"];
   if (state.panelMode === "picker") navKeys.push("Enter");
-  if (state.ghostText) navKeys.push("Tab");
   navKeys.push("Esc");
-  meta.push(`  ${theme.hint(clampLine(navKeys.join(" · "), frameWidth - 2))}`);
+  const hint = theme.hint(navKeys.join(" · "));
+  meta.push(renderFooter ? renderFooter(hint) : `  ${clampLine(hint, frameWidth - 2)}`);
 
   return [
     ...renderChrome({

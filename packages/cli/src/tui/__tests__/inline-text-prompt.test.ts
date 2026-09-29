@@ -57,6 +57,21 @@ async function sendChar(stdin: NodeJS.ReadStream, ch: string): Promise<void> {
 }
 
 describe("InlineTextPromptRegion", () => {
+  it("reflows draft and cursor on resize without losing text or adding the hint to submission", async () => {
+    const stdin = makeStdin();
+    const text = "中英文 abc ".repeat(5);
+    const options = { prompt: "重命名", placeholder: "请输入名称", prefill: text, columns: 80, screen: makeScreen().screen, stdin };
+    const region = new InlineTextPromptRegion(options);
+    const done = region.run();
+    const oldRow = region.cursorPosition().row;
+    options.columns = 24;
+    const lines = region.renderLines(), cursor = region.cursorPosition();
+    expect(cursor.row).toBeGreaterThan(oldRow);
+    expect(lines[cursor.row]).toContain("\x1b[7m \x1b[27m");
+    expect(lines.every(line => stringWidth(line) <= 23)).toBe(true);
+    await sendKey(stdin, { name: "return" });
+    await expect(done).resolves.toBe(text);
+  });
   it.each([24, 30, 40, 80, 120])("全部行与光标遵守 %i 列视口", columns => {
     const region = new InlineTextPromptRegion({
       prompt: "长标题".repeat(40), prefill: "中文 abc 🙂 ".repeat(30),
@@ -81,7 +96,7 @@ describe("InlineTextPromptRegion", () => {
     expect(joined).toContain("old-name");
   });
 
-  it("渲染为输入框结构:5 行(标题 + 框 3 行 + hint),含 placeholder 与 hint", () => {
+  it("占位说明独立于编辑行，框外同时保留操作提示", () => {
     const region = new InlineTextPromptRegion({
       prompt: "新建工作场景",
       placeholder: "场景名称",
@@ -90,8 +105,8 @@ describe("InlineTextPromptRegion", () => {
       columns: 50,
     });
     const lines = region.renderLines();
-    // 标题(1) + renderChrome 紧凑框 top/body/bottom(3) + hint(1)
     expect(lines.length).toBe(5);
+    expect(stripAnsi(lines[region.cursorPosition().row]!)).not.toContain("场景名称");
     const joined = stripAnsi(lines.join("\n"));
     expect(joined).toContain("新建工作场景");
     expect(joined).toContain("场景名称");

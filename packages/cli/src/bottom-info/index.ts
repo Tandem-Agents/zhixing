@@ -1,8 +1,8 @@
 export {
   BottomInfoModel,
-  BOTTOM_INFO_IDS,
+  BottomInfoScope,
   type BottomInfoZone,
-  type BottomInfoId,
+  type BottomInfoSource,
   type BottomInfoSnapshot,
 } from "./model.js";
 export { renderBottomInfoLine } from "./render.js";

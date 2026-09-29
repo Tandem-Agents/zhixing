@@ -1,3 +1,4 @@
+import { BottomInfoModel } from "../../bottom-info/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createEventBus,
@@ -10,6 +11,7 @@ import { stringWidth } from "../../tui/line-width.js";
 import type { ScreenController, InputRegion } from "../../screen/index.js";
 
 class FakeScreen implements ScreenController {
+  readonly bottomInfo = new BottomInfoModel();
   statusLines: readonly string[] | null = null;
   setStatusBarCalls: Array<readonly string[] | null> = [];
   private suspendListeners = new Set<(suspended: boolean) => void>();

@@ -26,7 +26,7 @@
  * 编辑屏 hideCursor 后同样适用。返回的 `cursor` 坐标供 inline region 额外定位用。
  */
 
-import { renderChrome, tone, icon, ANSI, renderHintBar, type KeyHint } from "./tui/index.js";
+import { renderChrome, tone, icon, renderHintBar, type KeyHint } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
 import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { clampLine } from "./tui/line-width.js";
@@ -40,7 +40,7 @@ export interface InputBoxOptions {
   readonly draft: string;
   /** 光标字符 offset（不是 UTF-16 unit），与 InputBuffer.cursor 同口径。 */
   readonly cursor: number;
-  /** 空 draft 时框内的 dim 占位提示；非空时不显示。 */
+  /** 框外固定提示行，空 draft 时显示说明；非空时保留空行。 */
   readonly placeholder?: string;
   /** 框下方提示行（成品文本，本函数加 dim + 缩进）。省略则不画提示行。 */
   readonly hint?: string;
@@ -65,11 +65,7 @@ export interface InputBoxResult {
 
 export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
   const frameWidth = Math.max(5, opts.width);
-  const contentBudget = Math.max(1, frameWidth - 4);
-  const suffix =
-    opts.draft.length === 0 && opts.placeholder
-      ? `${ANSI.dim}${opts.placeholder}${ANSI.reset}`
-      : "";
+  const contentBudget = Math.max(1, frameWidth - 5);
 
   // 框内输入行：promptPrefix 传空（框内不需要 ❯），软件光标开。边框 / padding /
   // 宽度感知截断委托 renderChrome（CJK 安全）。
@@ -77,7 +73,6 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
     "",
     opts.draft,
     opts.cursor,
-    suffix,
     contentBudget,
     INPUT_HANDLE_TOKEN_PATTERNS,
     true,
@@ -93,6 +88,10 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
     ` ${opts.titleGlyph ?? tone.brand.bold(icon.section)}${tone.bold(opts.title)}`,
     ...boxLines,
   ];
+  // IME 组合文字由终端渲染、尚未进入 draft；提示不得占据编辑行。
+  if (opts.placeholder) {
+    lines.push(opts.draft.length === 0 ? ` ${tone.dim(opts.placeholder)}` : "");
+  }
   // hintBar（结构化，说明亮 + 按键暗）优先；否则旧 hint（整体 dim）。缩进 1 列对齐框。
   if (opts.hintBar) {
     lines.push(

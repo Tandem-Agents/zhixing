@@ -285,7 +285,7 @@ describe("renderSessionLines", () => {
         defaultRenderOpts,
       ).join("\n"),
     );
-    expect(withGhost).toContain("↑↓ · Enter · Tab · Esc");
+    expect(withGhost).toContain("Tab 补全 /clear · ↑↓ · Enter · Esc");
   });
 
   // management 模式 footer 不显 Enter —— /trust 等"管理面板"语义。锁住"Enter 在

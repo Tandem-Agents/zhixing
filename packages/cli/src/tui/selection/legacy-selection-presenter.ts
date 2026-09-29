@@ -1,4 +1,6 @@
 import { wrapKeypressHandler } from "../../paste-detector.js";
+import { ANSI } from "../ansi.js";
+import { clampLine } from "../line-width.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -60,17 +62,26 @@ export class LegacySelectionPresenter implements SelectionPresenter {
       let rawModeLease: RawModeLease | null = null;
       let stdinOwnership: StdinOwnershipHandle | null = null;
       let batcher: ReturnType<typeof wrapKeypressHandler> | null = null;
-      const renderOptions: SelectionRenderOptions = {
+      let cursorRowsToEnd = 0;
+      let presented = false;
+      const renderOptions = (): SelectionRenderOptions => ({
         columns: this.columns ?? this.stdout.columns ?? 80,
         viewportRows: this.viewportRows ?? this.stdout.rows ?? 24,
         statusRows: 0,
         minScrollRows: 1,
-      };
-      const reduceOptions = {
-        detailBodyRows: computeDetailsBodyRows(renderOptions),
-      };
+      });
 
-      const cleanup = (): void => {
+      const cleanup = (): unknown => {
+        this.stdout.off("resize", onResize);
+        let restoreError: unknown;
+        if (cursorRowsToEnd > 0) {
+          try {
+            this.stdout.write(`${ANSI.moveDown(cursorRowsToEnd)}\r`);
+          } catch (err) {
+            restoreError = err;
+          }
+          cursorRowsToEnd = 0;
+        }
         options.signal?.removeEventListener("abort", onAbort);
         if (batcher) {
           this.stdin.off("keypress", batcher.handler);
@@ -81,13 +92,15 @@ export class LegacySelectionPresenter implements SelectionPresenter {
         rawModeLease = null;
         stdinOwnership?.release();
         stdinOwnership = null;
+        return restoreError;
       };
 
       const finish = (result: SelectionResult<TValue>): void => {
         if (finished) return;
         finished = true;
-        cleanup();
-        resolve(result);
+        const cleanupError = cleanup();
+        if (cleanupError !== undefined) reject(cleanupError);
+        else resolve(result);
       };
 
       const fail = (err: unknown): void => {
@@ -98,16 +111,35 @@ export class LegacySelectionPresenter implements SelectionPresenter {
       };
 
       const repaint = (): void => {
-        const rendered = renderSelectionPanel(request, state, renderOptions);
+        const rendered = renderSelectionPanel(request, state, renderOptions());
         if (rendered.kind === "unavailable") {
-          throw new SelectionUnavailableError(rendered.reason);
+          if (!presented) throw new SelectionUnavailableError(rendered.reason);
+          const hint = clampLine("窗口过小，请放大后继续；Esc 取消", renderOptions().columns - 1);
+          this.stdout.write(`${ANSI.moveDown(cursorRowsToEnd)}\r${hint}\r\n`);
+          cursorRowsToEnd = 0;
+          return;
         }
-        this.stdout.write(`${rendered.lines.join("\n")}\n`);
+        presented = true;
+        // 上一帧可能把光标留在编辑行；先回到面板之后再输出，结束亦恢复此位置。
+        let bytes = `${ANSI.moveDown(cursorRowsToEnd)}\r${rendered.lines.join("\r\n")}\r\n`;
+        cursorRowsToEnd = 0;
+        if (rendered.cursor) {
+          cursorRowsToEnd = rendered.lines.length - rendered.cursor.row;
+          bytes += `${ANSI.moveUp(cursorRowsToEnd)}\x1b[${rendered.cursor.col + 1}G`;
+        }
+        this.stdout.write(bytes);
       };
 
       const applyAction = (action: SelectionAction): void => {
         try {
-          const reduced = reduceSelection(state, action, request, reduceOptions);
+          const currentOptions = renderOptions();
+          if (renderSelectionPanel(request, state, currentOptions).kind === "unavailable") {
+            if (action.kind === "escape") finish({ kind: "cancelled", cause: "escape" });
+            return;
+          }
+          const reduced = reduceSelection(state, action, request, {
+            detailBodyRows: computeDetailsBodyRows(currentOptions),
+          });
           if (reduced.result) {
             finish(reduced.result);
             return;
@@ -124,9 +156,14 @@ export class LegacySelectionPresenter implements SelectionPresenter {
       const onAbort = (): void => {
         finish({ kind: "cancelled", cause: "aborted" });
       };
+      const onResize = (): void => {
+        if (finished) return;
+        try { repaint(); } catch (err) { fail(err); }
+      };
 
       try {
         repaint();
+        this.stdout.on("resize", onResize);
         options.signal?.addEventListener("abort", onAbort, { once: true });
         stdinOwnership = acquireStdinOwnership(this.stdin);
         rawModeLease = rawModeController.acquire(this.stdin);

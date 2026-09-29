@@ -1,20 +1,18 @@
 /**
- * 输入区行布局——把 promptPrefix + draft + 可选 suffix 按可视宽度 wrap 成多行，
+ * 输入区行布局——把 promptPrefix + draft 按可视宽度 wrap 成多行，
  * 并定位 cursor 到 wrap 后的 (row, col)。
  *
  * 视觉契约：
  *   ╭── ... ──╮
  *   │ ❯ 第一行内容继续往后跨行的部分被 wrap 到下一 │  ← 第一行：promptPrefix + chunk
  *   │   一行，hanging indent 与 prompt 之后对齐 │  ← 续行：等宽空格 + chunk
- *   │   最后一行末尾若有 suffix（ghost / placeh… │  ← suffix 拼到末行（不 wrap）
  *   ╰─────────────────────────────────────────╯
  *
  * 设计取舍：
  *   - hanging indent：续行缩进 promptVisibleWidth 个空格，让 draft 视觉左缘对齐
  *     第一行的 ❯ 之后，多行被锚定为"同一个输入"——无论分行来源是软 wrap 还是
  *     用户粘贴的硬换行 `\n`，续行 prefix 一致
- *   - suffix 单行：placeholder / ghost text 通常很短，不参与 wrap；超出由 chrome
- *     的 clampLine 兜底（追加 …）。极端长 suffix 不展开是已知小坑、不阻塞
+ *   - 编辑行仅绘制草稿。提示与补全放在独立行，避免终端 IME 组合态将其视作正文重排。
  *   - cursor 跨行边界归属：cursor === N 且第 N-1 个字符让行刚好满时，cursor 落在
  *     上一行末（col = lineWidth）；下一次按字符自然 wrap 到新行。匹配 readline
  *     在大多数终端上的行为
@@ -22,7 +20,7 @@
  *     atomic 区域整体测量宽度——放不下当前行就整体换到下行，保证占位符渲染完整
  *
  * 纯函数：无 I/O、无 ANSI 解析；ANSI 颜色码全部在调用方包装好后传入（promptPrefix
- * 与 suffix 自带 ANSI），算法只 wrap 裸 draft。返回的 bodyLines 直接喂给
+ * 自带 ANSI），算法只 wrap 裸 draft。返回的 bodyLines 直接喂给
  * renderChrome 的 body。
  */
 
@@ -50,8 +48,7 @@ export interface InputLayoutResult {
  * @param draft - 用户输入的裸文本（无 ANSI；可含 `\n` 硬换行）
  * @param cursorChars - cursor 在 draft 中的字符 offset（不是 UTF-16 unit），
  *   等于 `Array.from(draft).slice(0, cursorChars).length`
- * @param suffix - 最后一行末尾追加的提示文本（已含 ANSI dim 包装），不参与 wrap
- * @param contentBudget - chrome body 行的可见内容宽度（chrome 紧凑形态下 = frameWidth - 4）
+ * @param contentBudget - 草稿内容宽度；调用方另为末尾软件光标预留一列
  * @param atomicRegions - 可选 regex，识别为不可切碎的整体单元；不传时按字符级 wrap
  * @param paintVisualCursor - 是否在 cursorRow 上把 cursor 位置的字符（或末尾空位）
  *   用反色 SGR 包装，作为**视觉光标**渲染。这是 chrome-mode REPL 的标准做法 ——
@@ -63,7 +60,6 @@ export function layoutInputBuffer(
   promptPrefix: string,
   draft: string,
   cursorChars: number,
-  suffix: string,
   contentBudget: number,
   atomicRegions?: AtomicRegionPatterns,
   paintVisualCursor?: boolean,
@@ -188,19 +184,17 @@ export function layoutInputBuffer(
     cursorDraftCol = curWidth;
   }
 
-  // 拼装 bodyLines：首行带 promptPrefix，续行 hangingIndent；suffix 拼到末行末
+  // 拼装 bodyLines：首行带 promptPrefix，续行 hangingIndent。
   // 可选视觉光标：cursorRow 上的 text 用 reverse SGR 包裹 cursor 位置的字符（或
   // 末位反白空格）；非 cursorRow / 关闭视觉光标时按原样输出。
-  const lastIdx = lines.length - 1;
   const bodyLines = lines.map((chars, idx) => {
     const text = chars.join("");
     const prefix = idx === 0 ? promptPrefix : hangingIndent;
-    const tail = idx === lastIdx ? suffix : "";
     const decoratedText =
       paintVisualCursor && idx === cursorRow
         ? paintVisualCursorInText(text, cursorDraftCol)
         : text;
-    return prefix + decoratedText + tail;
+    return prefix + decoratedText;
   });
 
   return {
@@ -219,7 +213,7 @@ export function layoutInputBuffer(
  *   - cursorDraftCol 落在某字符的左边界 → 包裹该字符（CJK 宽字符整体包裹，
  *     视觉宽度不变）
  *   - cursorDraftCol === 总可见宽度（cursor 在文本末尾）→ 末尾追加反白空格
- *     （宽度 +1；若末尾跟随 suffix 视为占用一列在 suffix 之前）
+ *     （宽度 +1，由调用方预留）
  *   - text 为空 + cursorDraftCol=0 → 仅一个反白空格
  *
  * 不变量：返回值的可见宽度 ≥ 输入 text 的可见宽度（仅在 cursor at end 路径 +1）；

@@ -1,3 +1,5 @@
+import { tone } from "./style.js";
+import { BottomInfoModel, type BottomInfoScope } from "../bottom-info/index.js";
 /**
  * InlineTextPromptRegion —— chrome inline 的单行文本输入（InputRegion 实现）
  *
@@ -59,6 +61,7 @@ export interface InlineTextPromptOptions {
 
 export class InlineTextPromptRegion implements InputRegion {
   private readonly buffer = new InputBuffer();
+  readonly bottomInfo: BottomInfoScope;
   private cachedLines: readonly string[] = [];
   private cachedCursor: { row: number; col: number } = { row: 0, col: 0 };
   private finished = false;
@@ -75,6 +78,7 @@ export class InlineTextPromptRegion implements InputRegion {
   constructor(opts: InlineTextPromptOptions) {
     this.opts = opts;
     this.screen = opts.screen;
+    this.bottomInfo = (this.screen.bottomInfo ?? new BottomInfoModel()).createScope();
     this.stdin = opts.stdin ?? process.stdin;
     if (opts.prefill) this.buffer.setDraft(opts.prefill);
     this.computeLines();
@@ -119,6 +123,7 @@ export class InlineTextPromptRegion implements InputRegion {
   // ─── InputRegion 接口 ───
 
   renderLines(): readonly string[] {
+    if (!this.finished) this.computeLines();
     return this.cachedLines;
   }
 
@@ -149,11 +154,12 @@ export class InlineTextPromptRegion implements InputRegion {
       title: this.opts.prompt,
       draft: this.buffer.draft,
       cursor: this.buffer.cursor,
-      placeholder: this.opts.placeholder,
-      hint: "Enter 提交 · Esc 取消",
       width: this.getColumns() - 1,
     });
-    this.cachedLines = box.lines;
+    this.cachedLines = [...box.lines, this.bottomInfo.render({
+      left: this.buffer.isEmpty && this.opts.placeholder ? [tone.dim(this.opts.placeholder)] : [],
+      right: [tone.dim("Enter 提交 · Esc 取消")],
+    }, this.getColumns() - 1)];
     this.cachedCursor = box.cursor;
   }
 
@@ -236,6 +242,7 @@ export class InlineTextPromptRegion implements InputRegion {
   private finish(result: string | null): void {
     if (this.finished) return;
     this.finished = true;
+    this.bottomInfo.dispose();
 
     if (this.batcher) {
       this.stdin.off("keypress", this.batcher.handler);
