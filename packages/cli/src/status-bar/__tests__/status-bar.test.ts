@@ -1,4 +1,5 @@
 import { BottomInfoModel } from "../../bottom-info/index.js";
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createEventBus,
@@ -69,6 +70,35 @@ describe("StatusBar 状态切换", () => {
     await mainBus.emit("agent:run_start", { prompt: "hi" });
     expect(screen.statusLines).not.toBeNull();
     expect(screen.statusLines!.join("")).toContain("思考中");
+    bar.dispose();
+  });
+
+  it("按 300ms 刷新定稿帧序，事件重画不加速，完成立即停止动画", async () => {
+    vi.setSystemTime(0);
+    const { screen, mainBus, bar } = setup();
+    const glyph = () => stripVTControlCharacters(screen.statusLines![0]!).trimStart()[0];
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    for (const frame of ["◇", "□", "◈", "▤", "◆", "▦", "◈", "▨", "◇", "▩"]) {
+      expect(glyph()).toBe(frame);
+      const calls = screen.setStatusBarCalls.length;
+      vi.advanceTimersByTime(299);
+      expect(screen.setStatusBarCalls).toHaveLength(calls);
+      await mainBus.emit("llm:stream_event", { type: "text_delta", text: "hi" });
+      expect(glyph()).toBe(frame);
+      vi.advanceTimersByTime(1);
+    }
+    expect(glyph()).toBe("◇");
+    vi.advanceTimersByTime(150);
+    await mainBus.emit("agent:run_end", {
+      reason: "completed",
+      duration: 3150,
+      usage: { inputTokens: 10, outputTokens: 10 },
+    });
+    expect(glyph()).toBe("◆");
+    expect(screen.statusLines![0]).toContain("用时");
+    const calls = screen.setStatusBarCalls.length;
+    vi.advanceTimersByTime(900);
+    expect(screen.setStatusBarCalls).toHaveLength(calls);
     bar.dispose();
   });
 
@@ -563,7 +593,7 @@ describe("StatusBar 状态切换", () => {
 
     it("流式 chunk 触发立即 repaint——token 累加在过程中实时可见", async () => {
       // 修复"过程中看不到 token"的核心 invariant：stream_event 累加后立即 repaint，
-      // 不等 250ms ticker。短 turn (< 250ms) 也能让用户看到 token 增长。
+      // 不等下一次 ticker。短 turn 也能让用户看到 token 增长。
       const { screen, mainBus, bar } = setup();
       await mainBus.emit("agent:run_start", { prompt: "hi" });
       const linesBeforeChunk = screen.statusLines!.join("");

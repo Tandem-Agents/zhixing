@@ -14,7 +14,7 @@
  *                          [run_end]──▶ done ──[next run_start]──▶ thinking
  *
  * 计时与 token：
- *   - 计时：以 agent:run_start 时刻为锚，每 ~500ms 重画刷新秒数
+ *   - 计时：以 agent:run_start 时刻为锚，随动画帧节奏重画刷新秒数
  *   - 输出 token 流式估算：每个 stream chunk 经 core CJK 估算器折算累加（过程值，
  *     turn 末由 llm:request_end.usage 覆盖为真值）
  *   - 输入 token：llm:request_end.usage 经 getTotalInputTokens 取规范全量口径
@@ -32,6 +32,7 @@ import { estimateTextTokensRaw } from "@zhixing/core/context";
 import type { ScreenController } from "../screen/index.js";
 import {
   spinnerFrame,
+  SPINNER_FRAME_MS,
   COMPLETED_GLYPH,
   formatDuration,
   formatTokens,
@@ -42,9 +43,6 @@ import { tone, layout, getTerminalWidth } from "../tui/style.js";
 import { clampLine, stringWidth } from "../tui/line-width.js";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import { ANCHOR_SUB_AGENT } from "../output/speaker-state.js";
-
-/** 状态条节流频率——动画帧 + 计时秒进位都靠这个 tick 推动 */
-const TICK_INTERVAL_MS = 250;
 
 /**
  * 单轮（agent run）累加的 token 状态——单一 user prompt → agent 终止之间。
@@ -185,7 +183,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const ensureTicker = (): void => {
     if (ticker !== null) return;
-    ticker = setInterval(() => repaint(), TICK_INTERVAL_MS);
+    ticker = setInterval(() => repaint(), SPINNER_FRAME_MS);
   };
 
   const stopTicker = (): void => {
@@ -303,7 +301,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         phase = transitionTo(phase, "streaming");
       }
       // 立即 repaint——LLM stream chunk 高频但每次 setStatusBar < 1ms，立即可见胜过
-      // 等 250ms ticker（用户体感：短 turn 内根本来不及看到 token 累加）。
+      // 等下一次 ticker（用户体感：短 turn 内根本来不及看到 token 累加）。
       repaint();
     }
   });
@@ -773,7 +771,7 @@ function sanitizeTaskDetail(text: string): string {
  * 后这些过程数据不再有意义，仅保留时长作为"耗时反馈"。
  *
  * completed 路径用 dim 颜色——表达"已完成、不再活跃"的静默感；与流转中 brand 亮色
- * spinner 形成"动→静且强→弱"的双轴过渡。◆ 字符在 spinner 帧 3 出现，形态守恒。
+ * spinner 立即替换为单列静态结果，不等待动画播完，保持文字起点稳定。
  */
 function renderDonePhase(phase: Phase & { kind: "done" }): string {
   switch (phase.reason) {

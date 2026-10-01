@@ -42,6 +42,7 @@ This page is an index only. Use the root README as the user quick-start authorit
 - [会话任务列表](modules/conversation/task-list.md)
 - [CLI 总体架构](modules/cli/architecture.md)
 - [CLI 视觉设计语言](modules/cli/visual-language.md)
+- [终端状态指示符：能力边界与设计方法](research/terminal-status-indicator-design.md)
 - [输入区视觉](modules/cli/input-visual.md)
 - [CLI 屏幕渲染与能力边界](modules/cli/screen-rendering.md)
 - [CLI Markdown 流式渲染](modules/cli/markdown-rendering.md)
