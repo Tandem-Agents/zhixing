@@ -1,7 +1,7 @@
 import { fork, type ChildProcess, type ForkOptions, type SpawnOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { DeviceCapacityArbiterPort, DeviceCapacityBudget, DeviceCapacityPermit, DeviceCapacityStepPermit } from "@zhixing/core/resources";
-import { LogAppendIndeterminateError, LogStorageError, type LogAppendReceipt, type LogCapture, type LogSink, type LogStatus } from "@zhixing/core/logging";
+import { LogAppendIndeterminateError, LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogAppendReceipt, type LogCapture, type LogSink, type LogStatus } from "@zhixing/core/logging";
 import type { StoreOperation, StoreWorkerInput, StoreWorkerOutput } from "./store-worker-protocol.js";
 
 /** One in-flight Store call, using the process's existing resource owner before taking any file lock. */
@@ -9,6 +9,7 @@ export class IsolatedLogStore implements LogSink {
   #worker: ChildProcess | undefined;
   #exit: Promise<void> | undefined;
   #closed = false;
+  #failure: LogFailureEvidence | undefined;
   #id = 0;
   #pending: { id: number; operation: StoreOperation; resolve(value: LogStatus | LogAppendReceipt): void; reject(error: Error): void } | undefined;
   #admission: { id: number; abort: AbortController } | undefined;
@@ -36,9 +37,10 @@ export class IsolatedLogStore implements LogSink {
   }
   #send(message: StoreWorkerInput): void {
     const worker = this.#worker;
-    if (worker?.connected) worker.send(message, error => { if (error) worker.kill(); });
+    if (worker?.connected) worker.send(message, error => { if (error) { this.#failure ??= logFailureEvidence(error); worker.kill(); } });
   }
   #start(): void {
+    this.#failure = undefined;
     const built = new URL("./logging-store-worker.js", import.meta.url);
     const compiled = existsSync(built);
     // fork forwards this spawn option, although Node's ForkOptions omits it.
@@ -62,17 +64,18 @@ export class IsolatedLogStore implements LogSink {
       if (!pending || pending.id !== message.id) return;
       this.#pending = undefined; worker.unref(); worker.channel?.unref();
       if (message.kind === "result") pending.resolve(message.value);
-      else pending.reject(message.indeterminate ? new LogAppendIndeterminateError() : new LogStorageError(message.code, "日志事务未完成"));
+      else pending.reject(message.indeterminate ? new LogAppendIndeterminateError(message.evidence) : new LogStorageError(message.code, "日志事务未完成", message.evidence));
     });
-    worker.on("error", () => { /* exit owns cleanup and unknown-write classification. */ });
-    this.#exit = new Promise(resolve => worker.once("close", () => {
+    worker.on("error", error => { this.#failure ??= logFailureEvidence(error); /* close still fences the owner before rejecting. */ });
+    this.#exit = new Promise(resolve => worker.once("close", (code, signal) => {
       this.#admission?.abort.abort();
       if (this.#lease) {
         try { this.#release(this.#lease.id, this.#lease.budget.quantum); } catch { /* Failed owner is already fenced. */ }
       }
       const pending = this.#pending;
       this.#pending = undefined; this.#worker = undefined;
-      pending?.reject(pending.operation === "append" ? new LogAppendIndeterminateError() : new LogStorageError("owner-unavailable", "日志写者已退出"));
+      const evidence = { ...(this.#failure ?? { category: "process", code: "store-worker-exited" }), operation: `store.${pending?.operation ?? "close"}`, ...(code !== null ? { exitCode: code } : {}), ...(signal ? { signal } : {}) };
+      pending?.reject(pending.operation === "append" ? new LogAppendIndeterminateError(evidence) : new LogStorageError("owner-unavailable", "日志写者已退出", evidence));
       resolve();
     }));
     worker.unref(); worker.channel?.unref();

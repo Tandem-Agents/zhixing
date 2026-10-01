@@ -11,12 +11,15 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { handoffLogging } from "../logging/handoff.js";
+import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
+import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
 import { createMcpManagementTools } from "./mcp-tools.js";
 import { createConversationTool, createConversationCommunicationAssemblyHandle } from "./conversation-tools.js";
+import { createExtensionArtifactReceiver } from "./extension-artifact-receiver-infrastructure.js";
 import { createExtensionManagementHandle, createExtensionTools } from "./extension-tools.js";
 import { createLogAccess } from "../logging/access.js";
 import { createKernelLogFactory } from "@zhixing/orchestrator/runtime";
@@ -374,7 +377,10 @@ export async function runServeCommand(
   executor: ExecutorRoleModule | undefined,
   plan: ServeTopologyPlan,
 ): Promise<void> {
-  await runServerProcess(opts, bootstrap, executor, plan);
+  const assembly = beginLogPhase(bootstrap.bindLogs?.(RUNTIME_LOG_SOURCE, { scope: "storage" }), "assemble-anchor");
+  try { await assembly.run(() => runServerProcess(opts, bootstrap, executor, plan, assembly)); }
+  catch (error) { assembly.finish(error); throw error; }
+  finally { assembly.finish(); }
 }
 
 async function runServerProcess(
@@ -382,6 +388,7 @@ async function runServerProcess(
   bootstrap: AnchorServeBootstrapContext,
   executor: ExecutorRoleModule | undefined,
   plan: ServeTopologyPlan,
+  assembly: ReturnType<typeof beginLogPhase>,
 ): Promise<void> {
   const startupRollback = new StartupRollback();
   const lifecycleContributions = new AssemblyLifecycleContributions(
@@ -398,7 +405,8 @@ async function runServerProcess(
   const logTools = createRuntimeLogTools(() => productApi);
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
-  const processStartTime = await resolveProcessStartTime(process.pid);
+  const startupRecords = bootstrap.bindLogs?.(RUNTIME_LOG_SOURCE, { scope: "storage" });
+  const processStartTime = await observeLogPhase(startupRecords, "process-identity", () => resolveProcessStartTime(process.pid));
   // Reuse the Host-owned platform resource, never a cached admission snapshot.
   const loadManagedState = (intent: Parameters<typeof loadCurrentManagedServiceState>[0]) =>
     loadCurrentManagedServiceState(intent, zhixingHome, bootstrap.secretStore);
@@ -406,7 +414,7 @@ async function runServerProcess(
     trigger: Parameters<typeof reconcileCurrentManagedService>[0],
     signal?: AbortSignal,
   ) => reconcileCurrentManagedService(trigger, signal, zhixingHome, bootstrap.secretStore);
-  const initialManagedServiceState = await loadManagedState("activate");
+  const initialManagedServiceState = await observeLogPhase(startupRecords, "managed-service-state", () => loadManagedState("activate"));
   const initialManagedHostAdmission = await captureManagedHostAdmission(
     processMode,
     zhixingHome,
@@ -3017,7 +3025,8 @@ async function runServerProcess(
     targetDeviceId: bootstrap.mesh.deviceKey.deviceId,
   }) };
   extensionHandle.bind(meshRuntime ? meshRuntime.extensionManagementForAnchor(localExtensionManagement) : localExtensionManagement);
-  meshRuntime?.bindExtensionManagement(localExtensionManagement);
+  if (meshRuntime) meshRuntime.bindExtensionManagement(localExtensionManagement,
+    createExtensionArtifactReceiver({ home: zhixingHome, artifacts: authorityRuntime.artifacts }));
   await recoverLocalJobsAfterBindings?.();
   await localExecutor?.owner.start(startupLifecycle
     ? { lifecycle: {
@@ -3346,6 +3355,7 @@ async function runServerProcess(
         host: openingRunner.server.host,
       });
       await hostShellLifecycle.markRunning();
+      assembly.finish();
       hostShellLifecycle.startHeartbeat();
 
       if (processMode !== "managed") {

@@ -1,6 +1,4 @@
 import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
-import { join } from "node:path";
-import { FileResumableArtifactReceiver } from "@zhixing/core/authority";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
@@ -1089,11 +1087,11 @@ export class MeshRuntimeAssembly
     } };
   }
 
-  bindExtensionManagement(management: ExtensionManagementTransport): void {
+  bindExtensionManagement(management: ExtensionManagementTransport,
+    receiver: import("./extension-management-mesh.js").ExtensionArtifactReceiverPort): void {
     this.#disposers.push(registerExtensionManagementMesh({ registry: this.services, management,
       artifacts: this.options.authority.artifacts,
-      receiver: new FileResumableArtifactReceiver(this.options.authority.artifacts,
-        join(this.options.zhixingHome, "extensions", "transfers"), { maxArtifactBytes: 24 * 1024 * 1024 }),
+      receiver,
       authorizePeer: id => this.#peerHasRole(id, "executor") || this.#peerHasRole(id, "anchor") }));
   }
 

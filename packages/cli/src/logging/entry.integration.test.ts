@@ -1,7 +1,7 @@
 import { acquireLocalWorkspaceOwner, LocalWorkspaceTransportServer } from "../runtime/local-workspace-owner.js";
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { writeFile, readdir, stat, mkdir, rmdir } from "node:fs/promises";
+import { writeFile, readFile, readdir, stat, mkdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTempDir } from "@zhixing/test-utils";
@@ -42,6 +42,31 @@ function run(
   });
 }
 describe("built CLI log entry and exit chain", () => {
+  it("keeps early load failure evidence in the explicit managed home", async () => {
+    const defaultHome = await createTempDir("logging-entry-default");
+    const managedHome = await createTempDir("logging-entry-managed");
+    const source = await readFile(cli, "utf8");
+    const target = /"load-cli",[^\n]*import\("([^"]+)"\)/u.exec(source)?.[1];
+    expect(target).toBeTruthy();
+    const hook = `import { registerHooks } from 'node:module'; registerHooks({ resolve(specifier, context, next) { if (specifier === ${JSON.stringify(target)}) throw Object.assign(Error('private import path'), {code:'EACCES'}); return next(specifier, context); } });`;
+    const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(hook)}`, cli, "serve", "--managed-home", defaultHome, `--managed-home=${managedHome}`], {
+        env: { ...process.env, ZHIXING_HOME: defaultHome }, windowsHide: true, stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = ""; child.stderr.on("data", bytes => { stderr += String(bytes); });
+      const timer = setTimeout(() => { child.kill(); reject(Error("entry failure timed out")); }, 15000);
+      child.once("error", reject); child.once("close", code => { clearTimeout(timer); resolve({ code, stderr }); });
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("入口加载失败");
+    expect(await readdir(defaultHome)).toEqual([]);
+    const evidence = await run(managedHome, ["logs", "--offline", "search"]);
+    expect(evidence.code).toBe(0);
+    const events = JSON.parse(evidence.stdout).records;
+    expect(events).toContainEqual(expect.objectContaining({ event: "phaseFinished", result: "failure", data: expect.objectContaining({ phase: "load-cli", failure: { category: "system", code: "EACCES" } }) }));
+    expect(evidence.stdout).not.toContain("private import path");
+  }, 30000);
+
   it("explains an unavailable offline store without creating it or fabricating results", async () => {
     const home = await createTempDir("logging-empty"),
       root = path.join(home, "logs", "runtime");
@@ -122,6 +147,13 @@ describe("built CLI log entry and exit chain", () => {
     const page = JSON.parse(result.stdout);
     expect(page.records).toContainEqual(expect.objectContaining({ event: "failed", result: "failure", data: expect.objectContaining({ reason: "schema-error", error: expect.stringContaining("JSONC") }) }));
     expect(page.records.some((record: { event: string }) => record.event === "started")).toBe(true);
+    const load = page.records.filter((record: any) => record.data?.phase === "load-cli");
+    const starts = load.filter((record: any) => record.event === "phaseStarted");
+    expect(starts.length).toBeGreaterThan(0);
+    for (const start of starts) {
+      const id = start.refs.find((ref: any) => ref.kind === "phase").id;
+      expect(load.filter((record: any) => record.event === "phaseFinished" && record.refs.some((ref: any) => ref.kind === "phase" && ref.id === id))).toHaveLength(1);
+    }
     expect(
       page.records.some(
         (record: { event: string; result: string }) =>

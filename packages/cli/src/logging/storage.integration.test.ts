@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogWriterProbe } from "./writers.js";
+import { declaredPeer } from "./__tests__/declared-peer.js";
 import { readdir, readFile, stat, rm, open, writeFile, link, rename } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import path from "node:path";
@@ -113,8 +114,58 @@ async function listing(root: string): Promise<unknown> {
     }),
   );
 }
+/** Build an actual pre-active-segment snapshot, not a corrupt modern projection. */
+async function legacySegments(h: Awaited<ReturnType<typeof setup>>, dropAccess = false): Promise<void> {
+  const state = await h.snapshot();
+  state.segments = state.segments.map(({ ordinals: _ordinals, identity: _identity, sealed: _sealed, access, ...segment }) =>
+    ({ ...segment, ...(dropAccess ? {} : { access }) }));
+  await writeFile(path.join(h.root, `state-${String(state.generation).padStart(12, "0")}.json`),
+    JSON.stringify({ state, digest: logDigest(JSON.stringify(state)) }));
+}
 
 describe("runtime log Store using real isolated processes and filesystem", () => {
+  it("seals active segments by size and idle age without extending the original retention clock", async () => {
+    const h = await setup({ segmentBytes: 4096, segmentAgeMs: 1000 });
+    await h.store.initialize();
+    for (let n = 0; n < 8; n++) await h.store.append([h.capture("x".repeat(500))]);
+    const filled = await h.snapshot();
+    expect(filled.segments.length).toBeGreaterThan(1);
+    expect(filled.segments.every(segment => segment.bytes <= 4096)).toBe(true);
+    expect(filled.segments.slice(0, -1).every(segment => segment.sealed)).toBe(true);
+    const active = filled.segments.at(-1)!;
+    h.advance(500);
+    await h.store.append([h.capture()]);
+    expect((await h.snapshot()).segments.find(segment => segment.name === active.name)?.receivedAt).toBe(active.receivedAt);
+    h.advance(501);
+    await h.store.maintain();
+    expect((await h.snapshot()).segments.every(segment => segment.sealed)).toBe(true);
+    await h.store.append([h.capture()]);
+    const next = (await h.snapshot()).segments.at(-1)!;
+    expect(next.name).not.toBe(active.name);
+    expect(next.receivedAt).toBe(active.receivedAt + 1001);
+    expect(next.sealed).toBe(false);
+  }, 20000);
+  it("reuses one active segment per tier and preserves publication order across interleaved batches", async () => {
+    const h = await setup({ segmentBytes: 65536, queryRecords: 128, queryResultBytes: 65536 });
+    await h.store.initialize();
+    const captures: LogCapture[] = [];
+    for (let batch = 0; batch < 8; batch++) {
+      const entries = Array.from({ length: 4 }, (_, index) => {
+        const item = h.capture();
+        return { ...item, record: { ...item.record, tier: index % 2 ? "detail" as const : "critical" as const } };
+      });
+      captures.push(...entries); await h.store.append(entries);
+    }
+    expect((await h.snapshot()).segments).toHaveLength(2);
+    const first = await h.app.search();
+    expect(first.records.map(record => record.id)).toEqual(captures.map(item => item.record.id));
+    const before = await h.snapshot();
+    const segment = before.segments[0]!;
+    const prefix = await h.files.read(segment.name, segment.bytes, 0, segment.bytes, segment.identity, true);
+    await h.store.append([h.capture()]);
+    expect(await h.files.read(segment.name, segment.bytes, 0, segment.bytes, segment.identity, true)).toEqual(prefix);
+    await expect(h.files.read(segment.name, segment.bytes, 0, segment.bytes, "wrong-identity", true)).rejects.toThrow();
+  }, 20000);
   it.each(["head", "state", "inventory", "after-inventory"])("pins metadata during concurrent %s retirement without pinning the query", async phase => {
     const h = await setup();
     await h.store.initialize();
@@ -276,11 +327,12 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
   }, 20_000);
 
   it("converges two native writers on one root without reporting normal lock contention as unavailable", async () => {
+    await declaredPeer();
     const home = await createTempDir("logging-shared-writers");
     const notices: string[] = [];
     const writers = [1, 2].map(number => {
       const files = new LogFilesProcess(home);
-      const store = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(home).arbiter, observeWriters: createLogWriterProbe(home, () => files.observeNodeProcesses()) });
+      const store = new LocalLogStore({ files, capacity: createDeviceCapacityRuntime(home).arbiter, observeWriters: createLogWriterProbe(home, files) });
       const recorder = new LogRecorder(store, { onHealth: health => { if (health.state === "degraded") notices.push(health.lastFailure!); } });
       recorder.bind({ id: `writer-${number}`, version: 1, events: { observed: { message: "shared native writer", tier: "critical", level: "info", fields: {} } } }, { scope: "storage" }).record({ event: "observed" });
       return { store, recorder };
@@ -298,7 +350,9 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const h = await setup();
     await h.store.initialize();
     const write = h.files.write.bind(h.files), sync = h.files.sync.bind(h.files);
+    const append = h.files.append.bind(h.files);
     let segmentAttempts = 0, failPublishedBarrier = false;
+    h.files.append = async (...args) => { segmentAttempts++; await append(...args); };
     h.files.write = async (name, bytes) => {
       if (name.startsWith("segment-")) {
         segmentAttempts++;
@@ -567,13 +621,14 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const h = await setup();
     await h.store.initialize();
     await h.store.append([h.capture("old-one", "mine")]);
+    await legacySegments(h);
     await h.store.append([h.capture("old-two", "mine")]);
     const before = await h.snapshot();
     const ids = before.segments.flatMap((segment) => segment.recordIds);
     const original = await Promise.all(
       before.segments.map((segment) => readFile(path.join(h.root, segment.name))),
     );
-    before.segments = before.segments.map(({ access: _access, ...segment }) => segment);
+    before.segments = before.segments.map(({ access: _access, ordinals: _ordinals, identity: _identity, sealed: _sealed, ...segment }) => segment);
     const name = `state-${String(before.generation).padStart(12, "0")}.json`;
     await writeFile(
       path.join(h.root, name),
@@ -606,7 +661,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     await h.store.append([h.capture("legacy", "mine")]);
     const state = await h.snapshot();
     const segment = state.segments[0]!;
-    state.segments = state.segments.map(({ access: _access, ...item }) => item);
+    state.segments = state.segments.map(({ access: _access, ordinals: _ordinals, identity: _identity, sealed: _sealed, ...item }) => item);
     const name = `state-${String(state.generation).padStart(12, "0")}.json`;
     await writeFile(
       path.join(h.root, name),
@@ -642,7 +697,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
       ...state.policy,
       blocked: "old-maintenance-" + "x".repeat(13400 - Buffer.byteLength(JSON.stringify(state)) - 40),
     };
-    state.segments = state.segments.map(({ access: _access, ...segment }) => segment);
+    state.segments = state.segments.map(({ access: _access, ordinals: _ordinals, identity: _identity, sealed: _sealed, ...segment }) => segment);
     const name = `state-${String(state.generation).padStart(12, "0")}.json`;
     await writeFile(
       path.join(h.root, name),
@@ -900,7 +955,9 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const h = await setup();
     await h.store.initialize();
     await h.store.append([h.capture(), h.capture(), h.capture(), h.capture()]);
+    await legacySegments(h);
     await h.store.append([h.capture(), h.capture()]);
+    await legacySegments(h);
     h.advance(policy.criticalTtlMs - 1);
     const tail = h.capture("retained-tail");
     if (keepTail) await h.store.append([tail]);
@@ -926,8 +983,11 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const h = await setup();
     await h.store.initialize();
     await h.store.append([h.capture(), h.capture(), h.capture(), h.capture()]);
+    await legacySegments(h);
     await h.store.append([h.capture(), h.capture()]);
+    await legacySegments(h);
     await h.store.append([h.capture(), h.capture()]);
+    await legacySegments(h);
     const page = await h.app.search();
     h.advance(policy.criticalTtlMs + 1);
     await h.store.maintain();
@@ -1001,7 +1061,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
   it("makes metadata room before many small segments at the minimum governance budget", async () => {
     const h = await setup();
     await h.store.initialize();
-    for (let n = 0; n < 60; n++) await h.store.append([h.capture(`small-${n}`)]);
+    for (let n = 0; n < 60; n++) { await h.store.append([h.capture(`small-${n}`)]); await legacySegments(h); }
     const snapshot = await h.snapshot(),
       status = await h.store.status();
     expect(snapshot.retired.length).toBeGreaterThan(0);
@@ -1053,6 +1113,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const initial = await h.store.initialize();
     const entries = Array.from({ length: 5 }, () => h.capture());
     await h.store.append(entries);
+    await legacySegments(h);
     await h.store.applyPolicy({ ...policy, queryScanBytes: 1024 * 1024 }, 1);
     await h.store.rebuildIndex();
     const address = formatLogAddress({
@@ -1081,13 +1142,16 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     const unlock = h.files.unlock.bind(h.files);
     h.files.unlock = async () => {
       await unlock();
-      throw Error("unlock acknowledgement lost");
+      throw Object.assign(Error("unlock acknowledgement lost"), { code: "EIO" });
     };
     const receipt = await h.store.append([h.capture()]);
     expect(receipt.storageDegraded).toBe(true);
+    expect(receipt.storageFailure).toMatchObject({ category: "system", code: "EIO", operation: "files.unlock" });
     h.files.unlock = unlock;
     expect((await h.store.status()).upper).toBe(1);
     const write = h.files.write.bind(h.files);
+    const append = h.files.append.bind(h.files);
+    h.files.append = async (...args) => { await append(...args); throw Error("unconfirmed append"); };
     h.files.write = async (name, bytes) => {
       await write(name, bytes);
       if (name.startsWith("segment-")) throw Error("unconfirmed write");
@@ -1099,6 +1163,7 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     await expect(h.store.append([h.capture()])).rejects.toThrow("保存状态不确定");
     h.files.unlock = unlock;
     h.files.write = write;
+    h.files.append = append;
     await h.store.initialize();
     expect((await h.store.status()).upper).toBe(1);
   }, 20_000);

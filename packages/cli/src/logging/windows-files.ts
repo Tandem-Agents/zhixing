@@ -91,9 +91,17 @@ export class WindowsLogFiles implements LogFileSystem {
     if (this.#closed || this.#session?.failed || !this.#legacy) throw Error("日志文件存储暂不可用");
     return statLogFiles(this.#directory, this.#legacy, names);
   }
-  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
+  read(name: string, size: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Uint8Array> {
     if (isLegacyLogFile(name)) { const entry = this.#legacy!.resolve(name); return entry.directory.readFile(entry.name, size, offset, limit, identity); }
-    return this.#root().readFile(name, size, offset, limit, identity);
+    return this.#root().readFile(name, size, offset, limit, identity, prefix);
+  }
+  readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string> {
+    if (this.#closed || !this.#session || this.#session.failed) throw Error("日志文件存储暂不可用");
+    return this.#session.readLocalProcessDeclaration(endpoint, pid);
+  }
+  async append(name: string, identity: string, offset: number, bytes: Uint8Array): Promise<void> {
+    if (!/^segment-[a-f0-9-]{36}\.jsonl$/u.test(name)) throw Error("只能追加受管日志段");
+    await this.#root(true).writeRange(name, offset + bytes.length, offset, bytes, identity);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
     if (isLegacyLogFile(name)) throw Error("不能改写旧日志");

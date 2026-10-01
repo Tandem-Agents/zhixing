@@ -8,6 +8,7 @@ export function fileReader(
   handle: Pick<FileHandle, "read">,
   size: number,
   baseOffset = 0,
+  observedRead?: (bytes: number) => void,
 ): AuthorityWalReader {
   let windowStart = 0;
   let window: Buffer = Buffer.alloc(0);
@@ -21,6 +22,7 @@ export function fileReader(
       );
       if (bytesRead === 0) break;
       total += bytesRead;
+      observedRead?.(bytesRead);
     }
     return buffer.subarray(0, total);
   };

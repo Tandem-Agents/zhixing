@@ -1,5 +1,5 @@
 import { createTempDir } from "@zhixing/test-utils";
-import { realpath, open, link } from "node:fs/promises";
+import { realpath, open, link, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { freezeCheckpointDirectory } from "../checkpoint-target.js";
@@ -7,6 +7,13 @@ import { CheckpointDirectoryHandle } from "../checkpoint-child-bridge.js";
 import { setTimeout as delay } from "node:timers/promises";
 
 describe("checkpoint child bridge", () => {
+  it.skipIf(process.platform === "win32")("preserves errno when a file obstructs a directory operation", async () => {
+    const root = await realpath(await createTempDir("checkpoint-posix-cause"));
+    const file = path.join(root, "obstruction");
+    await writeFile(file, "owned fixture");
+    await expect(CheckpointDirectoryHandle.openPath(file, false)).rejects.toMatchObject({ code: "ENOTDIR" });
+  });
+
   it("shares an existing read-only control lock and excludes writers without modifying the directory", async () => {
     const root = await realpath(await createTempDir("checkpoint-read-lock"));
     const sessions = process.platform === "win32" ? Array.from({ length: 3 }, () => CheckpointDirectoryHandle.createWindowsSession()) : [];

@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { FileArtifactStore, FileAuthorityCommitLog, FileResumableArtifactReceiver } from "@zhixing/core/authority";
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { createExtensionArtifactReceiver } from "../extension-artifact-receiver-infrastructure.js";
 import { ExtensionApplication, extensionPublicSnapshot } from "@zhixing/core/extensions/application";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
 import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
@@ -13,11 +13,8 @@ import type { MeshServiceDefinition, MeshServiceRegistry } from "@zhixing/mesh/s
 import type { MeshServiceClient } from "@zhixing/mesh";
 import { createMeshExtensionManagement, registerExtensionManagementMesh } from "../extension-management-mesh.js";
 
-const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
-
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "extension-mesh-")); roots.push(root);
+  const root = await createTempDir("extension-mesh");
   const artifacts = new FileArtifactStore(join(root, "artifacts"));
   const application = new ExtensionApplication({ log: () => new FileAuthorityCommitLog(join(root, "authority"), artifacts), assertOwner() {} });
   const archive = new ExtensionCandidates(join(root, "candidates"));
@@ -27,7 +24,7 @@ async function fixture() {
   let service!: MeshServiceDefinition;
   const registry = { register: (_id: string, value: MeshServiceDefinition) => { service = value; return () => {}; } } as MeshServiceRegistry;
   const register = () => registerExtensionManagementMesh({ registry, artifacts,
-    receiver: new FileResumableArtifactReceiver(artifacts, join(root, "partials"), { maxArtifactBytes: 24 * 1024 * 1024 }),
+    receiver: createExtensionArtifactReceiver({ artifacts, home: root }),
     authorizePeer: id => id === "executor", management: { invoke: async request => ({ snapshot: extensionPublicSnapshot(await manager.manage(request)), targetDeviceId: "anchor" }) },
   });
   register();

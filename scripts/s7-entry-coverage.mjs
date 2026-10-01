@@ -713,7 +713,6 @@ export function inspectChannelRuntimeBoundary(records) {
   const channels = byPath.get("packages/cli/src/serve/channels.ts");
   const access = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const assemblyContext = byPath.get("packages/cli/src/serve/access-surface.ts");
-  const registry = byPath.get("packages/core/src/channels/registry.ts");
   const composition = byPath.get(
     "packages/cli/src/serve/lossless-data-plane-composition.ts",
   );
@@ -741,7 +740,7 @@ export function inspectChannelRuntimeBoundary(records) {
   const localOwner = byPath.get("packages/cli/src/serve/local-conversation-owner.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
-    !channels || !access || !assemblyContext || !registry || !composition ||
+    !channels || !access || !assemblyContext || !composition ||
     !binding || !command || !conversationApplication ||
     !admission || !runControl || !context || !server || !inbound ||
     !confirmation || !delivery || !lossless || !coordinator || !protocol ||
@@ -930,7 +929,7 @@ export function inspectChannelRuntimeBoundary(records) {
     !access.includes("await coordinator.recover()") ||
     access.includes("await ctx.channelCoordinator?.recover()") ||
     !channels.includes("if (!consumers) throw new Error") ||
-    !channels.includes("challenge: selected.onChallengeAction,") ||
+    !channels.includes("await selected.onChallengeAction(action)") ||
     challengeCallback < 0 || protocolCompletion < 0 ||
     !composition.includes("if (!options.isCurrentOwner())") ||
     !composition.includes("await coordinator.handleChallengeAction(action)") ||
@@ -1449,6 +1448,7 @@ export function inspectKernelRunEnvelopeOwnership(records) {
     ],
     control: ["abortSignal", "watchdog", "modelCallResourceMeter"],
     correctness: [
+      "inputPort",
       "toolSideEffectObserver",
       "authorizeToolExecution",
       "assignmentMutations",
@@ -2307,7 +2307,7 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
     [
       "packages/runtime-host/src/session-adapter.ts",
       sessionAdapter,
-      "agentRuntime\n        .run({",
+      "agentRuntime.run({",
     ],
     [
       "packages/cli/src/serve/ephemeral-executor.ts",
@@ -3043,7 +3043,8 @@ export function inspectKernelProviderDependencyInversion(records) {
     !executor.includes("this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory({") ||
     !executor.includes("configuration: options.kernelEnvironmentConfiguration,") ||
     (executor.match(/modelProvider: this\.#modelProvider\.create\s*\(/gu) ?? []).length !== 2 ||
-    (executor.match(/runtimeEnvironment: this\.#runtimeEnvironment\.create\s*\(/gu) ?? []).length !== 2 ||
+    (executor.match(/const runtimeEnvironment = this\.#runtimeEnvironment\.create\s*\(/gu) ?? []).length !== 2 ||
+    (executor.match(/^\s+runtimeEnvironment,/gmu) ?? []).length !== 2 ||
     executor.includes("providerConfiguration:") ||
     executor.includes("createProviderRoles(")
   ) {
@@ -3225,7 +3226,6 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     ["packages/cli/src/serve/conversation-task-list-application.ts", taskListAdapter],
     ["packages/cli/src/runtime/task-list-stores.ts", taskListStorage],
     ["packages/cli/src/serve/conversation-storage-infrastructure.ts", conversationStorage],
-    ["packages/cli/src/serve/access-surface.ts", accessSurface],
     ["packages/cli/src/runtime/turn-context-providers.ts", turnContextProviders],
     ["packages/cli/src/serve/segment-deps.ts", segmentDeps],
   ];
@@ -3731,6 +3731,8 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   }
 
   const allowedConfigurationSourceOwners = new Set([
+    "packages/cli/src/runtime/extensions/channel-configuration.ts",
+    "packages/cli/src/runtime/mcp-connection-adapter.ts",
     "packages/cli/src/maintenance/doctor.ts",
     "packages/cli/src/repl.ts",
     "packages/cli/src/runtime/config-command.ts",
@@ -3833,7 +3835,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !anchor.includes("modelConfiguration.llm?.main?.model") ||
     surfaces.includes("modelConfiguration.llm?.main?.model") ||
     !surfaces.includes("configuration: input.advancementConfiguration") ||
-    !surfaces.includes("entries: channelConfiguration.messaging") ||
+    !surfaces.includes("configuration: new ChannelConfiguration(input.configPath, input.secretStore)") ||
     !surfaces.includes("cancelKeywords: channelConfiguration.intent?.cancelKeywords") ||
     /ctx\.config/u.test(surfaces)
   ) {
@@ -4101,7 +4103,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("profile: zhixingProfile(") ||
     !product.includes("profile: powerProfile(") ||
     !product.includes('const ephemeral = (): RuntimeProductProjection => runtimeProduct("main");') ||
-    !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
+    !product.includes("const job = (instruction: JobExecutionInstruction, capabilities: JobRuntimeCapabilities) =>") ||
     !product.includes("selectJobRuntimeTools({") ||
     !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
     !product.includes("...zhixingProfile().enabledTools") ||
@@ -4122,10 +4124,10 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     (command.match(/runtimeHost\.createConversationRuntime\s*\(/gu) ?? []).length !== 1 ||
     !command.includes("createAgentRuntime: createConversationAgentRuntime") ||
     !command.includes("projections: anchorRuntimeProjections") ||
-    !command.includes("const projection = anchorRuntimeProjections.job(instruction);") ||
+    !command.includes("const projection = anchorRuntimeProjections.job(instruction, capabilities);") ||
     !command.includes("anchorRuntimeProjections.ephemeral()") ||
     !command.includes("capabilities: anchorRuntimeCapabilities,") ||
-    !command.includes("capabilities: anchorRuntimeProjections.capabilityCatalog()") ||
+    !command.includes("capabilities: () => anchorRuntimeProjections.jobCapabilities()") ||
     /runtimeHost\.(?:createWorksceneRuntime|capabilityCatalog)\s*\(/u.test(command)
   ) {
     failures.push("Anchor production graph does not use the one Workscene projection owner");
@@ -4876,6 +4878,8 @@ export function inspectStorageRemainderBoundary(records) {
   const processLock = required("packages/server/src/process-lock.ts");
   const managedService = required("packages/cli/src/serve/managed-service.ts");
   const logRuntime = required("packages/cli/src/logging/runtime.ts");
+  const logBootstrap = required("packages/cli/src/logging/bootstrap.ts");
+  const logEntry = required("packages/cli/src/entry.ts");
   const logStore = required("packages/core/src/logging/storage.ts");
 
   if (
@@ -5006,8 +5010,8 @@ export function inspectStorageRemainderBoundary(records) {
     !serverState.includes("return readServerStateSnapshotAt(getDefaultStatePath())") ||
     !status.includes("return readServerStateSnapshot();") ||
     /\bServerStateFile\b|getDefaultStatePath|getDefaultReadyMarkerPath/u.test(status) ||
-    count(anchor, "await loadOrCreateToken()") !== 1 ||
-    count(executor, "await loadOrCreateToken()") !== 1 ||
+    count(anchor, "await loadOrCreateToken(getDefaultTokenPath(zhixingHome))") !== 1 ||
+    count(executor, "await loadOrCreateToken(getDefaultTokenPath(zhixingHome))") !== 1 ||
     !token.includes("export async function loadOrCreateToken(") ||
     !anchorShell.includes("implements ServerLifecycleOwner") ||
     !executorShell.includes("export class ExecutorServerLifecycle") ||
@@ -5045,10 +5049,16 @@ export function inspectStorageRemainderBoundary(records) {
     "P14 NodeManagedServiceAdapter constructor",
   );
 
-  if (!logRuntime.includes("new LogRecorder(store,") || !logStore.includes("export class LocalLogStore")) {
+  if (!logBootstrap.includes("new LogRecorder(sink,") ||
+      !logBootstrap.includes("entry ??= createBootstrapLogging(mode)") ||
+      !logRuntime.includes("takeEntryLogging() ?? createBootstrapLogging(mode)") ||
+      !logRuntime.includes("boot.attach(store,") ||
+      !logEntry.includes("beginEntryLogging(") ||
+      !logEntry.includes('"load-cli", () => import("./index.js")') ||
+      !logStore.includes("export class LocalLogStore")) {
     failures.push("P15 unique runtime log owner is missing");
   }
-  requireMultiplicity("new LogRecorder(", [["packages/cli/src/logging/runtime.ts", 1]], "P15 production recorder");
+  requireMultiplicity("new LogRecorder(", [["packages/cli/src/logging/bootstrap.ts", 1]], "P15 production recorder");
   const readerSurfaces = new Set([
     "packages/orchestrator/src/tools/task.ts", "packages/rpc/src/log-client.ts",
     "packages/server/src/rpc/methods/logs.ts", "packages/cli/src/serve/command.ts",
@@ -7461,8 +7471,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneAdvancementRecovery <= worksceneEntryCommit ||
     worksceneAdvancementRead <= worksceneAdvancementRecovery ||
     !worksceneApplication.includes("this.advancement.reportFailure({ conversationId, error })") ||
-    worksceneApplication.split("defineProductApiQuery<").length - 1 !== 1 ||
-    worksceneApplication.split("defineProductApiCommand<").length - 1 !== 6 ||
+    worksceneApplication.split("defineProductApiQuery<").length - 1 !== 2 ||
+    worksceneApplication.split("defineProductApiCommand<").length - 1 !== 7 ||
     !worksceneApplication.includes("factEvents: []") ||
     !worksceneApplicationAdapter.includes(
       'from "@zhixing/core/workscene/application"',
@@ -8103,7 +8113,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !localConversationApplication.includes("resume: {") ||
     !localConversationRpc.includes("this.#application.queryList()") ||
-    !localConversationRpc.includes("this.#application.queryHistory({") ||
+    !localConversationRpc.includes("createLocalConversationCommunicationBinding(this.input.owner).invoke(conversationId, {") ||
     !localConversationRpc.includes("this.#application.create()") ||
     !localConversationRpc.includes("this.#application.rename({") ||
     !localConversationRpc.includes("this.#application.clear({") ||
@@ -8175,7 +8185,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationTaskListApplication.includes(
       "input.conversations.runMaintenanceExisting",
     ) ||
-    !conversationTaskListApplication.includes("input.taskLists.set(") ||
+    !conversationTaskListApplication.includes("input.taskLists.acceptCommitted(") ||
+    !conversationTaskListApplication.includes("await input.sessionState.mutate(") ||
     !conversationCompactApplication.includes(
       "createAnchorConversationCompactPort",
     ) ||
@@ -8752,8 +8763,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !executorLogs.includes("createRuntimeLogTools(() => logApi)") ||
     !executorLogs.includes("productApi: logApi") ||
     !composition.includes("createRuntimeLogTools(() => productApi)") ||
-    composition.indexOf("await recoverLocalJobsAfterBindings?.()") <= composition.indexOf("meshRuntime?.bindExtensionManagement(localExtensionManagement)") ||
+    composition.indexOf("await recoverLocalJobsAfterBindings?.()") <= composition.indexOf("meshRuntime.bindExtensionManagement(localExtensionManagement,") ||
     composition.indexOf("await recoverLocalJobsAfterBindings?.()") >= composition.indexOf("await localExecutor?.owner.start(startupLifecycle") ||
+    !composition.includes("meshRuntime.bindExtensionManagement(localExtensionManagement,") ||
     composition.includes("createLocalLogProductApi(")
   ) {
     failures.push("Each Host must own one Product API catalog; local log catalogs are limited to Executor and offline composition roots");
@@ -9971,26 +9983,28 @@ export function inspectManagedHostAssembly(records) {
     count(executorRoot, "coordinateManagedHostTrustTransition({") !== 1 ||
     count(executorRoot, "captureManagedHostAdmission(") !== 1 ||
     count(executorRoot, "onTrustApplied,") !== 1 ||
-    count(topology, 'reconcileCurrentManagedService("managed-preflight", undefined, zhixingHome)') < 1 ||
-    count(connection, 'reconcileCurrentManagedService("host-missing", undefined, zhixingHome)') !== 1
+    count(topology, 'reconcile("managed-preflight")') < 1 ||
+    !topology.includes("reconcileCurrentManagedService(trigger, undefined, zhixingHome, secretStore)") ||
+    count(topology, 'reconcile("host-missing")') !== 1 ||
+    connection.includes("reconcileCurrentManagedService(")
   ) failures.push("managed host production trigger exact-set drifted");
   if (
     count(service, "<UserId>${osUser}</UserId>") !== 2 ||
     !service.includes("const osUser = xmlEscape(spec.osUser);") ||
     !serviceRuntime.includes('export type ManagedServiceStateLoadIntent = "inspect" | "activate";') ||
-    count(serviceRuntime, 'loadCurrentManagedServiceState("activate", homeDir)') !== 2 ||
+    (serviceRuntime.match(/loadCurrentManagedServiceState\("activate", homeDir(?:, secretStore)?\)/gu) ?? []).length !== 2 ||
     count(serviceRuntime, 'loadCurrent("activate")') !== 1 ||
     count(serviceRuntime, 'loadCurrent("activate", homeDir)') !== 1 ||
-    count(topology, 'loadCurrentManagedServiceState("activate", zhixingHome)') !== 2 ||
+    (topology.match(/loadCurrentManagedServiceState\("activate", zhixingHome(?:, secretStore)?\)/gu) ?? []).length !== 2 ||
     count(status, 'loadCurrentManagedServiceState("inspect")') !== 1
   ) failures.push("managed host OS user or current-state intent exact-set drifted");
   if (
     !service.includes('\'<?xml version="1.0" encoding="UTF-16"?>\'') ||
     !service.includes("Buffer.from([0xff, 0xfe])") ||
     !service.includes('Buffer.from(spec.definition, "utf16le")') ||
-    count(service, "windowsTaskSchedulerCommand([") !== 7 ||
+    count(service, "windowsTaskSchedulerCommand([") !== 8 ||
     count(service, 'args: [...args, "/HRESULT"]') !== 1 ||
-    count(service, "hresult === 0x80070002") !== 1 ||
+    count(service, "hresult === 0x80070002") !== 2 ||
     count(service, "hresult === 0x80070005") !== 1 ||
     !service.includes("windowsTaskInspectionCommand(spec.serviceId)") ||
     !service.includes("currentUserIdentities.some((candidate) => windowsIdentityMatches(identity, candidate))") ||
@@ -10008,7 +10022,7 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('"--managed-home"') ||
     !service.includes('"--managed-secret-backend"') ||
     !service.includes("applyManagedServiceLaunchContext(") ||
-    !topology.includes("await waitForManagedHostTurn({ zhixingHome })") ||
+    !/await waitForManagedHostTurn\(\{\s*zhixingHome,/u.test(topology) ||
     count(topology, "createPersistentApplicationHost({") !== 1 ||
     count(topology, "await host.run()") !== 1 ||
     topology.includes("runConfiguredServeTopology(") ||
@@ -10834,7 +10848,7 @@ export function inspectRecoveryBackupAssembly(records) {
     oldBootstrapStop,
   );
   const workspaceAdmission = applicationHost.indexOf(
-    "await this.#dependencies.acquireLocalWorkspaceOwner(",
+    'await observeLogPhase(this.#input.logRecords, "workspace-owner-admission", () => this.#dependencies.acquireLocalWorkspaceOwner(',
   );
   const normalTopology = applicationHost.indexOf("await this.#runRoleComponents(");
   if (
@@ -11041,7 +11055,9 @@ export function inspectRecoveryBackupAssembly(records) {
   }
   if (
     count(setupDelivery, "export function createProductionAnchorReadySnapshot(") !== 1 ||
-    count(disasterCommand, "return createProductionAnchorReadySnapshot({") !== 1 ||
+    count(disasterCommand, "const ready = createProductionAnchorReadySnapshot({") !== 1 ||
+    !disasterCommand.includes("channels: extensions.channels") ||
+    !disasterCommand.includes("revision: extensions.revision") ||
     !disasterCommand.includes("credentialGeneration: credentials.generation") ||
     !disasterCommand.includes("credentialRevision,") ||
     !disasterTarget.includes("candidateDigest: disasterReadyCandidateDigest({") ||
@@ -11537,7 +11553,10 @@ export function inspectDisasterRecoveryStagingBoundary(records) {
     count(command, "createDisasterRecoveryStagingInfrastructure({") !== 1 ||
     count(command, "disasterRecoveryStaging: context.disasterRecoveryStaging") !== 2 ||
     count(command, "staging: context.disasterRecoveryStaging") !== 1 ||
-    count(command, "await context.disasterRecoveryStaging.close()") !== 2
+    count(command, "await context.close()") !== 2 ||
+    count(command, "await staging?.close()") !== 1 ||
+    !command.includes("await store.stopStorageMaintenance()") ||
+    !command.includes("catch (error) { await close(); throw error; }")
   ) {
     failures.push("disaster-recovery staging lifecycle or recovery-command identity drifted");
   }
@@ -12022,7 +12041,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(channels, "isOwner: options.isCurrentOwner,") !== 1 ||
     channels.includes("connectImmediately") ||
     channels.includes("if (isCurrentOwner?.() === false)") ||
-    !channels.includes("challenge: selected.onChallengeAction,") ||
+    !channels.includes("await selected.onChallengeAction(action)") ||
     count(channels, "connectConfigured: async (next)") !== 1 ||
     count(channels, "disconnectConfigured: async ()") !== 1 ||
     count(inboundRouter, "if (!this.isCurrentOwner())") !== 1 ||
@@ -13796,6 +13815,9 @@ export function inspectLocalConversationOwnerIsolation(records) {
   } else {
     const allowedPortCapabilities = new Set([
       "agentTurnAdmission",
+      "communicationMessages",
+      "runtimeState",
+      "subscribeRunNotifications",
       "answerInteractionWithTicket",
       "cancelConversationRuns",
       "commitConversationClear",
@@ -14236,6 +14258,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "assignmentResources",
   ]);
   const allowedCreateProperties = new Set([
+    "onRunStatus",
     "owner",
     "executorDispatch",
     "assignmentStaging",
@@ -14487,6 +14510,17 @@ export function inspectLocalConversationOwnerIsolation(records) {
         ts.forEachChild(node, visitLifecycle);
       };
       visitLifecycle(assemblyScope ?? source);
+      if (record.relative === "packages/cli/src/serve/access-surfaces.ts") {
+        // The paused assembly is handed to the Host; recovery starts only after
+        // its product bindings exist, and still before the public Server opens.
+        const host = records.find(item => item.relative === "packages/cli/src/serve/command.ts")?.text ?? "";
+        const start = host.indexOf("await localExecutor?.owner.start(");
+        const bindings = host.indexOf("extensionHandle.bind(");
+        const server = host.indexOf("serverCtx = createServerContext({");
+        if (start > bindings && bindings >= 0 && server > start &&
+            (host.match(/await localExecutor\?\.owner\.start\(/gu) ?? []).length === 1 &&
+            /return assembly\s*;/u.test((assemblyScope ?? source).getText(source))) startCount += 1;
+      }
       if (startCount !== 1) {
         failures.push(`${record.relative}: local owner assembly must start exactly once, got ${startCount}`);
       }
@@ -14595,11 +14629,12 @@ export function inspectConversationAdoptionAssembly(records) {
     "meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
     surfaceContext,
   );
-  const surfaceCleanup = surfaceComposition.text.indexOf(
-    'lifecycleContributions.acquire(\n      "firstPartyConversationMeshSurface.close",',
-    surfaceOwner,
+  const surfaceCleanupOffset = surfaceComposition.text.slice(surfaceOwner).search(
+    /lifecycleContributions\.acquire\(\s*"firstPartyConversationMeshSurface.close",/u,
   );
-  const surfaceServer = surfaceComposition.text.indexOf("runner = await runServer({", surfaceCleanup);
+  const surfaceCleanup = surfaceCleanupOffset < 0 ? -1 : surfaceOwner + surfaceCleanupOffset;
+  const surfaceActivation = surfaceComposition.text.indexOf("beforeActivate: async (openingRunner) =>");
+  const surfaceServer = surfaceComposition.text.indexOf("beforePublish: async (openingServer) =>", surfaceCleanup);
   const targetOwners = records.filter(({ text }) =>
     /new\s+FirstPartyConversationMeshTarget\s*\(/u.test(text)
   );
@@ -14631,7 +14666,7 @@ export function inspectConversationAdoptionAssembly(records) {
     serviceOwners.length !== 1 ||
     serviceOwners[0]?.relative !== "packages/cli/src/serve/first-party-conversation-mesh.ts" ||
     surfaceContext < 0 || surfaceOwner <= surfaceContext || surfaceCleanup <= surfaceOwner ||
-    surfaceServer <= surfaceCleanup ||
+    surfaceActivation < surfaceContext || surfaceOwner <= surfaceActivation || surfaceServer <= surfaceCleanup ||
     /bindFirstPartyConversationSurface/u.test(surfaceComposition.text)
   ) {
     failures.push("first-party conversation surface must be required by one registered lifecycle owner before Server activation");
@@ -15549,6 +15584,7 @@ const rpcClientOwners = new Set([
   "packages/cli/src/serve/stop.ts",
 ]);
 const coreHostConnectionOwners = new Set([
+  "packages/cli/src/index.ts",
   "packages/cli/src/repl.ts",
   "packages/cli/src/runtime/anchor-uninstall-command.ts",
   "packages/cli/src/runtime/device-removal-command.ts",
@@ -15645,6 +15681,32 @@ function inspectCliRpcCapabilities(relative, source, options = {}) {
   if (!relative.startsWith("packages/cli/src/")) return [];
   const failures = [];
   const bindings = new Map();
+  const namedDynamicImports = new Set();
+  // Lazy named bindings have the same ownership rules as static imports. Never
+  // admit a module namespace, rest binding, computed name or public raw client.
+  const collectDynamicBindings = (node) => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments[0] && ts.isStringLiteralLike(node.arguments[0])) {
+      const exposed = rpcExposure(relative, node.arguments[0].text, options.resolveRpcExposure);
+      const parent = ts.isAwaitExpression(node.parent) ? node.parent.parent : undefined;
+      if (exposed.size && parent && ts.isVariableDeclaration(parent) &&
+          ts.isObjectBindingPattern(parent.name) && parent.name.elements.every(element =>
+            !element.dotDotDotToken && !element.initializer && ts.isIdentifier(element.name) &&
+            (!element.propertyName || ts.isIdentifier(element.propertyName)))) {
+        namedDynamicImports.add(node);
+        for (const element of parent.name.elements) {
+          const original = exposed.get(element.propertyName?.text ?? element.name.text);
+          if (!original) continue;
+          bindings.set(element.name.text, original);
+          if (!allowedRpcCapabilityOwner(relative, original)) {
+            failures.push(`${relative}: raw RPC capability ${original} acquired outside owner`);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, collectDynamicBindings);
+  };
+  collectDynamicBindings(source);
   for (const statement of source.statements) {
     if (ts.isImportDeclaration(statement) &&
         ts.isStringLiteral(statement.moduleSpecifier) && statement.importClause) {
@@ -15826,6 +15888,7 @@ function inspectCliRpcCapabilities(relative, source, options = {}) {
           (ts.isIdentifier(node.expression) && node.expression.text === "require"))) {
       const argument = node.arguments[0];
       if (argument && ts.isStringLiteralLike(argument) &&
+          !namedDynamicImports.has(node) &&
           rpcExposure(relative, argument.text, options.resolveRpcExposure).size > 0) {
         failures.push(`${relative}: raw RPC namespace capability loaded dynamically`);
       }

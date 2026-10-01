@@ -17,6 +17,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawnDaemon } from "../daemon.js";
+import type { LogDraft, LogRecordPort } from "@zhixing/core/logging";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
 const baseEnv = { HOME: "/h", PATH: "/bin" };
@@ -64,7 +65,26 @@ function mkFakeClock() {
 // 前提：测试进程的 process.argv[1] 是有效的 .js（vitest 跑的话确实是）。
 
 describe("spawnDaemon", () => {
+  it.each([false, true])("retains spawn failure evidence without pretending a child started (sync=%s)", async synchronous => {
+    const entries: LogDraft[] = [];
+    const child = Object.assign(new EventEmitter(), { pid: undefined, unref() {} });
+    const error = Object.assign(Error("private executable path"), { code: "ENOENT" });
+    const clock = mkFakeClock();
+    const result = spawnDaemon({ forwardedArgs: ["serve"], reportFailure: false, deadlineAt: 5000,
+      records: { record: value => { entries.push(typeof value === "function" ? value() : value); } },
+      deps: makeDeps({ clock, readLockFn: async () => null, sleep: async ms => { clock.advance(ms); },
+        spawnFn: () => { if (synchronous) throw error; queueMicrotask(() => child.emit("error", error)); return child as any; } }),
+    });
+    if (synchronous) await expect(result).rejects.toBe(error);
+    else expect(await result).toMatchObject({ status: "failed" });
+    expect(entries).toContainEqual(expect.objectContaining({ event: "hostSpawnFailed", result: "failure", data: { failure: { category: "system", code: "ENOENT" } } }));
+    expect(entries.some(item => item.event === "hostSpawned")).toBe(false);
+    expect(JSON.stringify(entries)).not.toContain("private executable path");
+  });
+
   it.each(["managed", "on-demand", "none"] as const)("honors the child launch plan %s within the original deadline", async mode => {
+    const events: LogDraft[] = [];
+    const records: LogRecordPort = { record: value => { events.push(typeof value === "function" ? value() : value); } };
     const clock = mkFakeClock();
     const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
     const deps = makeDeps({
@@ -82,7 +102,14 @@ describe("spawnDaemon", () => {
       isProcessAliveFn: () => true,
       httpGetFn: async () => 200,
     });
-    const result = await spawnDaemon({ automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps });
+    const result = await spawnDaemon({ records, automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps });
+    expect(events.some(event => event.result === "failure")).toBe(false);
+    if (mode === "managed") {
+      expect(events).toContainEqual(expect.objectContaining({ event: "coordinatorExited", result: "success" }));
+      const ready = events.find(event => event.event === "hostReady")!;
+      expect(ready.data).toMatchObject({ pid: 55555, spawnedPid: 99999 });
+      expect(ready.refs).toEqual(events.find(event => event.event === "hostSpawnRequested")!.refs);
+    }
     expect(result).toMatchObject({ ok: mode !== "none", launchMode: mode });
     if (mode === "none") expect(result.reason).toBe("这台设备不需要后台运行");
     else expect(result).toMatchObject({ status: "ready", pid: 55555 });

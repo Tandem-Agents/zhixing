@@ -468,6 +468,17 @@ test("all production CleanupRegistry constructions bind exact topology owners", 
   );
 });
 
+test("lazy named RPC bindings retain ownership, namespace and escape restrictions", () => {
+  const entry = "packages/cli/src/index.ts";
+  const binding = 'const { CoreHostConnection: Connection } = await import("./runtime/core-host-connection.js");';
+  assert.deepEqual(inspectProductionSource(entry, binding + " new Connection({});"), []);
+  assert.match(inspectProductionSource(entry, binding + " export function leak() { return new Connection({}); }").join("\n"), /raw RPC capability returned/);
+  assert.match(inspectProductionSource(entry, binding + " const c = new Connection({}); c.getClient();").join("\n"), /client accessed outside facade/);
+  assert.match(inspectProductionSource(entry, 'const { createRpcClient } = await import("@zhixing/server");').join("\n"), /acquired outside owner/);
+  assert.match(inspectProductionSource(entry, 'const { CoreHostConnection, ...rest } = await import("./runtime/core-host-connection.js");').join("\n"), /namespace capability loaded dynamically/);
+  assert.match(inspectProductionSource("packages/cli/src/runtime/unowned.ts", 'const { CoreHostConnection: Connection } = await import("./core-host-connection.js");').join("\n"), /acquired outside owner/);
+});
+
 test("local conversation owner remains isolated from anchor capabilities by construction", async () => {
   const paths = [
     "packages/cli/src/serve/conversation-owner-runtime.ts",
@@ -477,6 +488,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/setup-delivery.ts",
+    "packages/cli/src/serve/command.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -664,8 +676,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   );
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
-      "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace("  await assembly.start(input.startupLifecycle", "  await Promise.resolve(input.startupLifecycle"),
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("await localExecutor?.owner.start(startupLifecycle", "await Promise.resolve(startupLifecycle"),
     )).join("\n"),
     /assembly must start exactly once, got 0/,
   );
@@ -1652,7 +1664,7 @@ test("P09 pairing continuation stays finite, durable, and required at command/Ho
     inspectMeshPairingContinuationPersistenceBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        /\s*pairingContinuations: createFileMeshPairingContinuationRepository\(\s*ctx\.zhixingHome,?\s*\),/u,
+        /\s*pairingContinuations: createFileMeshPairingContinuationRepository\(\s*input\.zhixingHome,?\s*\),/u,
         "",
       ),
     )).join("\n"),
@@ -2110,7 +2122,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "postAdoptionReviewLifecycle,\n        lifecycleAdmissionClosed:",
+        /postAdoptionReviewLifecycle,\s*lifecycleAdmissionClosed:/u,
         "lifecycleAdmissionClosed:",
       ),
     )).join("\n"),
@@ -2728,8 +2740,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/disaster-recovery-command.ts",
       (text) => text.replace(
-        "return createProductionAnchorReadySnapshot({",
-        "return createSyntheticAnchorReadySnapshot({",
+        "const ready = createProductionAnchorReadySnapshot({",
+        "const ready = createSyntheticAnchorReadySnapshot({",
       ),
     )).join("\n"),
     /shared production snapshot and exact candidate identity/,
@@ -3339,8 +3351,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/channels.ts",
       (text) => text.replace(
-        "challenge: selected.onChallengeAction,",
-        "challenge: async () => undefined,",
+        "await selected.onChallengeAction(action)",
+        "await Promise.resolve(action)",
       ),
     )).join("\n"),
     /channel current-owner connection or final guard drifted/,
@@ -3816,8 +3828,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/runtime/core-host-connection.ts",
-      (text) => text.replace('reconcileCurrentManagedService("host-missing", undefined, zhixingHome)', 'spawnDaemon({})'),
+      "packages/cli/src/serve/topology-command.ts",
+      (text) => text.replace('reconcile("host-missing")', 'Promise.resolve({})'),
     )).join("\n"),
     /production trigger exact-set drifted/,
   );
@@ -4662,7 +4674,6 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/access-surface.ts",
-    "packages/core/src/channels/registry.ts",
     "packages/cli/src/serve/lossless-data-plane-composition.ts",
     "packages/cli/src/serve/channel-conversation-product-binding.ts",
     "packages/cli/src/serve/command.ts",
@@ -4900,8 +4911,8 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/channels.ts",
       (text) => text.replace(
-        "challenge: selected.onChallengeAction,",
-        "challenge: async () => undefined,",
+        "await selected.onChallengeAction(action)",
+        "await Promise.resolve(action)",
       ),
     )).join("\n"),
     /challenge static composition or physical callback drifted/u,
@@ -6165,7 +6176,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "capabilities: anchorRuntimeProjections.capabilityCatalog()",
+        "capabilities: () => anchorRuntimeProjections.jobCapabilities()",
         "capabilities: runtimeHost.capabilityCatalog()",
       ),
     )).join("\n"),
@@ -7659,6 +7670,9 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/tools-builtin/src/schedule.ts",
     "packages/tools-builtin/src/factories.ts",
     "packages/tools-builtin/src/index.ts",
+    "packages/cli/src/logging/local-query.ts",
+    "packages/cli/src/logging/access.ts",
+    "packages/cli/src/logging/command.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -9933,6 +9947,8 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/server/src/process-lock.ts",
     "packages/cli/src/serve/managed-service.ts",
     "packages/cli/src/logging/runtime.ts",
+    "packages/cli/src/logging/bootstrap.ts",
+    "packages/cli/src/entry.ts",
     "packages/core/src/logging/storage.ts",
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
@@ -10159,7 +10175,7 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
 });
 
 test("runtime logging P15 rejects reverse reader dependencies and private writers", async () => {
-  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts"];
+  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts", "packages/cli/src/logging/bootstrap.ts", "packages/cli/src/entry.ts"];
   const records = await Promise.all(paths.map(async relative => ({ relative, text: await readFile(relative, "utf8") })));
   const inspect = (input) => inspectStorageRemainderBoundary(input).filter(failure => failure.includes("P15"));
   assert.deepEqual(inspect(records), []);
@@ -10167,4 +10183,7 @@ test("runtime logging P15 rejects reverse reader dependencies and private writer
   assert.match(inspect(append('\nimport { LocalLogStore } from "@zhixing/core/logging/storage";')).join("\n"), /producer depends on a log reader or store/);
   assert.match(inspect(append('\nconst privateRoot = path.join(home, "logs", "llm-error");')).join("\n"), /retired private log writer returned/);
   assert.match(inspect(append('\nnew LogRecorder(store, {});')).join("\n"), /production recorder.*multiplicity/);
+  assert.match(inspect(records.map(record => record.relative === paths[0]
+    ? { ...record, text: record.text.replace("takeEntryLogging() ?? createBootstrapLogging(mode)", "createBootstrapLogging(mode)") }
+    : record)).join("\n"), /unique runtime log owner/);
 });

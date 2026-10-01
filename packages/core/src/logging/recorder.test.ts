@@ -72,6 +72,45 @@ const pause = (): { promise: Promise<void>; resolve(): void } => {
 };
 
 describe("runtime log capture and lifecycle", () => {
+  it("keeps the cleanup cause after a durable append without replaying it", async () => {
+    const target = sink();
+    const append = target.append;
+    let first = true;
+    target.append = async records => {
+      const receipt = await append(records);
+      if (!first) return receipt;
+      first = false;
+      return { ...receipt, storageDegraded: true, storageFailure: { category: "system", code: "EIO", operation: "files.unlock" } };
+    };
+    const recorder = new LogRecorder(target);
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.flush(4000);
+      expect(target.stored.filter(item => item.record.source === "test")).toHaveLength(1);
+      expect(target.stored.some(item => item.record.data.firstFailure?.code === "EIO")).toBe(true);
+      expect(recorder.health()).toMatchObject({ state: "ready", lost: 0, unconfirmed: 0 });
+    } finally { await recorder.close(); }
+  });
+  it("重试与恢复保留首次底层错误，不被最后的写锁等待覆盖", async () => {
+    const target = sink();
+    target.initialize = vi.fn()
+      .mockRejectedValueOnce(new LogStorageError("permission-denied", "private path", { category: "system", code: "EACCES", operation: "files.open" }))
+      .mockRejectedValueOnce(new LogStorageError("writer-busy", "busy"))
+      .mockResolvedValue(status());
+    const recorder = new LogRecorder(target);
+    try {
+      recorder.bind(source, { scope: "storage" }).record({ event: "error" });
+      await recorder.flush(4000);
+      const failure = target.stored.find(item => item.record.source === "logging" && item.record.data.attempts === 2);
+      expect(failure?.record.data).toMatchObject({
+        firstFailure: { reason: "permission-denied", phase: "initialize", code: "EACCES", operation: "files.open" },
+        latestFailure: { reason: "writer-busy", phase: "initialize" },
+        changes: [{ reason: "writer-busy" }],
+      });
+      expect(JSON.stringify(target.stored)).not.toContain("private path");
+      expect(recorder.health().state).toBe("ready");
+    } finally { await recorder.close(); }
+  });
   it("身份支持 Unicode 且仍拒绝越界、控制字符和凭据", () => {
     expect(validLogIdentity("ws:研发项目/子会话:🙂")).toBe(true);
     expect(observationRefs({ conversationId: "ws:研发项目:primary" })).toEqual([{ kind: "conversation", id: "ws:研发项目:primary" }]);
@@ -201,7 +240,8 @@ describe("runtime log capture and lifecycle", () => {
     const target = sink(), notify = vi.fn(), append = target.append.bind(target);
     let blocked = true;
     target.append = async records => {
-      if (blocked) throw new LogStorageError("migration-blocked", "waiting for writer registration");
+      if (blocked) throw new LogStorageError("migration-blocked", "waiting for writer registration",
+        { category: "writer-admission", code: "old-or-unknown-writer", operation: "writers.admission", writerCount: 10, writerPids: [1, 2, 3, 4, 5, 6, 7, 8] });
       return append(records);
     };
     const recorder = new LogRecorder(target, { onHealth: notify });
@@ -215,6 +255,7 @@ describe("runtime log capture and lifecycle", () => {
       const health = target.stored.filter(entry => entry.record.source === "logging");
       expect(health.map(entry => entry.record.event)).toEqual(["degraded", "recovered"]);
       expect(health[0]?.record.data).toMatchObject({ reason: "migration-blocked", lost: 0, unconfirmed: 0 });
+      expect(health[0]?.record.data.firstFailure).toMatchObject({ code: "old-or-unknown-writer", writerCount: 10, writerPids: [1, 2, 3, 4, 5, 6, 7, 8] });
       expect(notify.mock.calls.map(([value]) => value.state)).toEqual(["degraded", "ready"]);
     } finally { await recorder.close(); vi.useRealTimers(); }
   });

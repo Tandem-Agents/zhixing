@@ -7,7 +7,7 @@ import { createLogAccess, createLocalLogProductApi, LOCAL_LOG_OWNER } from "./ac
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
 
 export const LOG_FORMAT_DESCRIPTION =
-  "zxlog/1：最高 published-*.head 指向已耐久的同代 state-*.json，包含存储身份、策略、水位和保留段；segment-*.jsonl 每行一条已脱敏记录；detail-*.json 为段所属详情；index-*.json 可重建。仅已发布治理版本登记的段属于保留证据。稳定地址为 zxlog://<storeId>/record/<id> 或 /operation/<kind>/<id>。";
+  "zxlog/1：最高 published-*.head 指向已耐久的同代 state-*.json，包含存储身份、策略、水位和保留段；segment-*.jsonl 每行一条已脱敏记录；detail-*.json 为段所属详情；index-*.json 可重建。仅已发布治理版本登记的段及其 bytes 字节前缀属于保留证据，活动段尚未发布的尾部不能作为证据；ordinals 给出跨段的逻辑顺序，旧格式按段内顺序读取。稳定地址为 zxlog://<storeId>/record/<id> 或 /operation/<kind>/<id>。";
 export type LoggingCommand =
   | { readonly action: "location" }
   | { readonly action: "status" }

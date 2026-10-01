@@ -17,6 +17,8 @@ import { stat } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
+import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing/core/logging";
 import chalk from "chalk";
 import {
   readLock,
@@ -34,6 +36,7 @@ import {
 } from "./self-exec.js";
 
 export interface SpawnDaemonOptions {
+  records?: LogRecordPort;
   /** 本次启动与其发现、日志和 child 共用的数据根。 */
   zhixingHome?: string;
   /** 传给后台 child 的 CLI 参数；应含 "serve" 及其子选项。 */
@@ -101,13 +104,17 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const con = deps.console ?? console;
+  const handoff = { kind: "handoff", id: randomUUID() };
+  const record = (draft: LogDraft) => {
+    try { opts.records?.record({ ...draft, refs: [handoff] }); } catch { /* Observation must not alter startup. */ }
+  };
   opts.signal?.throwIfAborted();
 
   // 1. resolveSelfExec
   let execArgs;
   try {
     execArgs = resolveSelfExec([...opts.forwardedArgs, ...(opts.automatic ? ["--auto-start"] : [])], {
-      env: { ...process.env, ZHIXING_HOME: zhixingHome },
+      env: { ...process.env, ZHIXING_HOME: zhixingHome, ZHIXING_LOG_HANDOFF: handoff.id },
     });
   } catch (err) {
     if (err instanceof UnsupportedSelfExecError) {
@@ -121,7 +128,11 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const spawnOpts = buildDaemonSpawnOptions(execArgs.env);
   if (opts.automatic) spawnOpts.stdio = ["ignore", "ignore", "ignore", "ipc"];
   const spawnFn = deps.spawnFn ?? spawn;
-  const child = spawnFn(execArgs.command, execArgs.args, spawnOpts);
+  record({ event: "hostSpawnRequested", data: {} });
+  let child: ChildProcess;
+  try { child = spawnFn(execArgs.command, execArgs.args, spawnOpts); }
+  catch (error) { record({ event: "hostSpawnFailed", result: "failure", data: { failure: logFailureEvidence(error) } }); throw error; }
+  if (child.pid !== undefined) record({ event: "hostSpawned", data: { pid: child.pid } });
   let childExit: ChildExit | null = null;
   let launchMode: SpawnDaemonResult["launchMode"];
   const onMessage = (message: unknown) => {
@@ -135,8 +146,13 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   if (opts.automatic) child.on("message", onMessage);
   const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
     childExit = { code, signal };
+    const coordinated = code === 0 && (launchMode === "managed" || launchMode === "none");
+    record({ event: coordinated ? "coordinatorExited" : "childExited", result: coordinated ? "success" : "failure", data: { pid: child.pid, exitCode: code, signal, launchMode } });
   };
-  const onError = () => { childExit = { code: null, signal: null }; };
+  const onError = (error: Error) => {
+    childExit = { code: null, signal: null };
+    record({ event: "hostSpawnFailed", result: "failure", data: { failure: logFailureEvidence(error) } });
+  };
   if (typeof child.once === "function") {
     child.once("exit", onExit);
     child.once("error", onError);
@@ -174,6 +190,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   }
 
   if (handshake.ok) {
+    record({ event: "hostReady", result: "success", data: { pid: handshake.pid, spawnedPid: child.pid, launchMode } });
     printSuccessBanner(handshake.pid!, handshake.port!, logPath, con);
     return { ok: true, status: "ready", pid: handshake.pid, port: handshake.port, logPath, ...(launchMode ? { launchMode } : {}) };
   }

@@ -103,9 +103,24 @@ export interface LogHealth {
 }
 
 /** Payload-free storage classifications; ordinary contention is not a file failure. */
-export type LogStorageFailure = "writer-busy" | "probe-unavailable" | "resource-wait" | "resource-gap" | "migration-blocked" | "owner-unavailable" | "storage-unavailable";
+export type LogStorageFailure = "writer-busy" | "probe-unavailable" | "resource-wait" | "resource-gap" | "migration-blocked" | "owner-unavailable" | "storage-unavailable" | "reclaim-pending" | "permission-denied" | "disk-full" | "io-failed" | "file-missing";
+/** Finite safe evidence. Never contains exception messages, paths or arbitrary object fields. */
+export interface LogFailureEvidence {
+  readonly category: string;
+  readonly code?: string;
+  readonly operation?: string;
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly durationMs?: number;
+  readonly admissionMs?: number;
+  readonly lockWaitMs?: number;
+  readonly ioClaims?: number;
+  readonly writerCount?: number;
+  /** At most eight unproven writer PIDs; never command lines or environments. */
+  readonly writerPids?: readonly number[];
+}
 export class LogStorageError extends Error {
-  constructor(readonly code: LogStorageFailure, message: string) {
+  constructor(readonly code: LogStorageFailure, message: string, readonly evidence?: LogFailureEvidence) {
     super(message);
     this.name = "LogStorageError";
   }
@@ -137,6 +152,8 @@ export interface LogPolicyState {
   readonly blocked?: string;
 }
 export interface LogStatus {
+  /** Bounded crash-recovery evidence, not proof that a business operation failed. */
+  readonly recovery?: { readonly unconfirmedFiles: number; readonly lastObservedAt?: number };
   readonly migration?: import("./legacy.js").LogMigration & { readonly legacyFiles: number; readonly catalog: string; readonly lastObserved: true };
   readonly storeId: string;
   readonly layout: "zxlog/1";
@@ -190,11 +207,12 @@ export interface LogSink {
 export interface LogAppendReceipt {
   readonly policy: LogPolicyState;
   readonly storageDegraded?: boolean;
+  readonly storageFailure?: LogFailureEvidence;
 }
 
 /** A physical write may have published; callers must not replay this observation batch. */
 export class LogAppendIndeterminateError extends Error {
-  constructor() {
+  constructor(readonly evidence?: LogFailureEvidence) {
     super("日志批次保存状态不确定");
     this.name = "LogAppendIndeterminateError";
   }

@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
+import { LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogStorageFailure } from "@zhixing/core/logging";
 
 /** Native operations are isolated from the event loop, including POSIX synchronous N-API. */
 class NodeFilesProcess implements LogFileSystem {
@@ -21,6 +22,7 @@ class NodeFilesProcess implements LogFileSystem {
       }
     | undefined;
   #broken = false;
+  #failure: Error | undefined;
   #closed = false;
   constructor(home: string, timeoutMs = 5000) {
     this.#home = home;
@@ -31,6 +33,7 @@ class NodeFilesProcess implements LogFileSystem {
     if (this.#broken) {
       await this.#stop();
       this.#broken = false;
+      this.#failure = undefined;
     }
     if (this.#closed) throw Error("日志文件进程已关闭");
     if (!this.#child) this.#spawn();
@@ -45,8 +48,11 @@ class NodeFilesProcess implements LogFileSystem {
   statMany(names: readonly string[]): Promise<readonly LogFileInfo[]> {
     return this.#call("statMany", [names]);
   }
-  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
-    return this.#call("read", [name, size, offset, limit, identity]);
+  read(name: string, size: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Uint8Array> {
+    return this.#call("read", [name, size, offset, limit, identity, prefix]);
+  }
+  append(name: string, identity: string, offset: number, bytes: Uint8Array): Promise<void> {
+    return this.#call("append", [name, identity, offset, bytes]);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
     return this.#call("write", [name, bytes]);
@@ -102,17 +108,22 @@ class NodeFilesProcess implements LogFileSystem {
     );
     this.#child = child;
     this.#exit = new Promise<void>((resolve) =>
-      child.once("close", () => {
+      child.once("close", (code, signal) => {
         this.#broken = true;
+        this.#failure = new LogStorageError("owner-unavailable", "日志文件进程已退出", {
+          ...(this.#failure ? logFailureEvidence(this.#failure) : { category: "process", code: "file-worker-exited" }),
+          ...(code !== null ? { exitCode: code } : {}), ...(signal ? { signal } : {}),
+        });
         this.#reject("日志文件进程已退出");
         resolve();
       }),
     );
-    child.on("error", () => {
+    child.on("error", (error) => {
+      this.#failure ??= new LogStorageError("owner-unavailable", "日志文件进程错误", logFailureEvidence(error));
       this.#broken = true;
       void this.#stop();
     });
-    child.on("message", (message: { id: number; value?: unknown; error?: string }) => {
+    child.on("message", (message: { id: number; value?: unknown; error?: string; code?: LogStorageFailure; evidence?: LogFailureEvidence }) => {
       if (this.#broken || this.#closed || this.#stopping) return;
       const pending = this.#pending;
       if (!pending || message.id !== pending.id) return;
@@ -120,7 +131,7 @@ class NodeFilesProcess implements LogFileSystem {
       this.#pending = undefined;
       child.unref();
       child.channel?.unref();
-      if (message.error) pending.reject(new Error(message.error));
+      if (message.error) pending.reject(new LogStorageError(message.code ?? "storage-unavailable", "日志文件操作未完成", message.evidence));
       else pending.resolve(message.value);
     });
     child.unref();
@@ -135,6 +146,7 @@ class NodeFilesProcess implements LogFileSystem {
       child.ref();
       child.channel?.ref();
       const timer = setTimeout(() => {
+        this.#failure ??= new LogStorageError("owner-unavailable", "日志文件操作超时", { category: "system", code: "ETIMEDOUT", operation: `files.${op}` });
         this.#broken = true;
         // Failure is reported only after the old owner process has actually exited.
         void this.#stop().then(() => reject(Error("日志文件操作超时")), reject);
@@ -147,6 +159,7 @@ class NodeFilesProcess implements LogFileSystem {
       };
       child.send({ id, op, args }, (error) => {
         if (error) {
+          this.#failure ??= new LogStorageError("owner-unavailable", "日志文件请求发送失败", logFailureEvidence(error));
           this.#broken = true;
           void this.#stop();
         }
@@ -158,7 +171,7 @@ class NodeFilesProcess implements LogFileSystem {
     this.#pending = undefined;
     if (pending) {
       clearTimeout(pending.timer);
-      pending.reject(Error(message));
+      pending.reject(this.#failure ?? new LogStorageError("owner-unavailable", message, { category: "process", code: "file-worker-exited" }));
     }
   }
   #stop(): Promise<void> {
@@ -199,10 +212,7 @@ export class LogFilesProcess implements LogFileSystem {
       await this.#files.open(readOnly);
     } catch (error) {
       if (!readOnly) throw error;
-      const missing =
-        error instanceof Error &&
-        (error.message === "checkpoint-child-missing" ||
-          error.message === "日志文件操作 open 未完成（checkpoint-child-missing）");
+      const missing = logFailureEvidence(error).code === "checkpoint-child-missing";
       throw new Error(
         missing
           ? "日志目录尚不存在，当前没有可查询的运行日志存储；可用 zz logs location 查看位置。"
@@ -220,8 +230,15 @@ export class LogFilesProcess implements LogFileSystem {
   statMany(names: readonly string[]): Promise<readonly LogFileInfo[]> {
     return this.#files.statMany!(names);
   }
-  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array> {
-    return this.#files.read(name, size, offset, limit, identity);
+  read(name: string, size: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Uint8Array> {
+    return this.#files.read(name, size, offset, limit, identity, prefix);
+  }
+  readLocalProcessDeclaration(endpoint: string, pid: number) {
+    if (!(this.#files instanceof WindowsLogFiles)) throw Error("Windows process inventory required");
+    return this.#files.readLocalProcessDeclaration(endpoint, pid);
+  }
+  append(name: string, identity: string, offset: number, bytes: Uint8Array): Promise<void> {
+    return this.#files.append!(name, identity, offset, bytes);
   }
   write(name: string, bytes: Uint8Array): Promise<void> {
     return this.#files.write(name, bytes);

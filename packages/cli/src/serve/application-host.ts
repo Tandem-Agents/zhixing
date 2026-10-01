@@ -1,5 +1,5 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
-import type { LogRecordPort } from "@zhixing/core/logging";
+import { observeLogPhase, type LogRecordPort } from "@zhixing/core/logging";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
 import type { CredentialStoreCoordinator } from "@zhixing/providers";
 import { CONFIGURATION_LOG_SOURCE, runtimeConfigurationObservation } from "@zhixing/providers/configuration";
@@ -237,10 +237,10 @@ export class PersistentApplicationHost<Options> {
     const roles = Object.freeze([...mesh.roles]) as readonly DeviceRole[];
     const configuration = Object.freeze({ roles }) satisfies ServeRoleConfiguration;
     const plan = planServeTopology(configuration);
-    const lease = await this.#dependencies.acquireLocalWorkspaceOwner(
+    const lease = await observeLogPhase(this.#input.logRecords, "workspace-owner-admission", () => this.#dependencies.acquireLocalWorkspaceOwner(
       this.#input.zhixingHome,
       roles,
-    );
+    ), { waitFor: "local-workspace-owner" });
     if (lease) this.#ownLocalWorkspaceLease(lease);
     const localWorkspaceIdentity = this.#dependencies.defineLocalWorkspaceIdentity(
       roles,
@@ -274,9 +274,9 @@ export class PersistentApplicationHost<Options> {
 
     if (plan.host === "anchor-host") {
       const [anchorRole, executor] = await Promise.all([
-        this.#dependencies.importAnchorRole(),
+        observeLogPhase(this.#input.logRecords, "load-anchor-role", () => this.#dependencies.importAnchorRole()),
         plan.loadExecutor
-          ? this.#dependencies.importExecutorModule()
+          ? observeLogPhase(this.#input.logRecords, "load-executor-module", () => this.#dependencies.importExecutorModule())
           : Promise.resolve(undefined),
       ]);
       await anchorRole.runServeCommand(
@@ -302,8 +302,8 @@ export class PersistentApplicationHost<Options> {
     }
 
     const [executorRole, executor] = await Promise.all([
-      this.#dependencies.importExecutorRole(),
-      this.#dependencies.importExecutorModule(),
+      observeLogPhase(this.#input.logRecords, "load-executor-role", () => this.#dependencies.importExecutorRole()),
+      observeLogPhase(this.#input.logRecords, "load-executor-module", () => this.#dependencies.importExecutorModule()),
     ]);
     await executorRole.runExecutorRole(
       this.#input.options,
@@ -323,7 +323,7 @@ export class PersistentApplicationHost<Options> {
     plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea,
     disasterRecoveryStaging: DisasterRecoveryStagingArea,
   ): Promise<MeshRuntimeBootstrap> {
-    const mesh = await this.#dependencies.prepareMesh({
+    const mesh = await observeLogPhase(this.#input.logRecords, "prepare-mesh", () => this.#dependencies.prepareMesh({
       records: this.#input.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
@@ -333,7 +333,7 @@ export class PersistentApplicationHost<Options> {
       ...(this.#configuration.topology.mesh
         ? { configuration: this.#configuration.topology.mesh }
         : {}),
-    });
+    }));
 
     this.#mesh = own(mesh, () => mesh.bootstrapStore.stopStorageMaintenance());
     return mesh;

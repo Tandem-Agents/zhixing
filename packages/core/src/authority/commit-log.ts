@@ -1,6 +1,6 @@
 import { createHash, randomBytes, type Hash } from "node:crypto";
 import type { LogRecordPort } from "../logging/contracts.js";
-import { authorityObservationRefs } from "./logging.js";
+import { authorityObservationRefs, AuthorityWorkObserver, type AuthorityWork } from "./logging.js";
 import {
   link,
   open,
@@ -188,6 +188,8 @@ interface RegisteredDurableProjection {
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #records: LogRecordPort | undefined;
+  readonly #workObserver: AuthorityWorkObserver;
+  #work: AuthorityWork | undefined;
   readonly rootDir: string;
   readonly logPath: string;
   readonly identityPath: string;
@@ -213,7 +215,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     artifactStore: FileArtifactStore,
     options: FileAuthorityCommitLogOptions = {},
   ) {
-    this.#records = options.records;
+    const records = options.records;
+    this.#records = records ? { record(draft) { try { records.record(draft); } catch { /* Observation never changes a durable business outcome. */ } } } : undefined;
+    this.#workObserver = new AuthorityWorkObserver(options.records, () => this.#logId);
     this.rootDir = path.resolve(rootDir);
     this.logPath = path.join(this.rootDir, "authority.log");
     this.identityPath = path.join(this.rootDir, "authority.log.identity");
@@ -246,7 +250,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const normalizedEntries = normalizeEntries(entries);
     const references = collectRetainedArtifactRefs(normalizedEntries);
     const appendOperation = () =>
-      this.#withLogLock(() => this.#append(normalizedEntries));
+      this.#withLogLock("append", () => this.#append(normalizedEntries));
     return references.length === 0
       ? appendOperation()
       : this.artifactStore.withPresentReferences(references, appendOperation);
@@ -257,7 +261,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async readSnapshot<Body = JsonValue>(): Promise<AuthorityLogSnapshot<Body>> {
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("readSnapshot", async () => {
       const envelopes: Array<CommitEnvelope<JsonValue>> = [];
       const lastLsn = await this.#readAndRecover((envelope) => {
         envelopes.push(envelope);
@@ -273,7 +277,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     stream: string,
   ): Promise<Array<{ lsn: number; at: IsoTime; body: Body }>> {
     assertStream(stream);
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("readStream", async () => {
       const records: Array<{ lsn: number; at: IsoTime; body: Body }> = [];
       await this.#readAndRecover((envelope) => {
         for (const entry of envelope.entries) {
@@ -322,7 +326,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async checkpoint(): Promise<DurableLogCheckpoint> {
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("checkpoint", async () => {
       const lastLsn = await this.#loadLastLsn();
       return this.#durableCheckpoint(lastLsn);
     });
@@ -344,7 +348,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const protectedReferences = new Map(
       candidateReferences.map((reference) => [reference.digest, reference.bytes]),
     );
-    const operation = () => this.#withLogLock(async () => {
+    const operation = () => this.#withLogLock("installPlannedAnchorPrefix", async () => {
       for (const guard of this.#appendAdmissionGuards) {
         guard(installationEntries as Array<LogicalRecord<unknown>>);
       }
@@ -472,14 +476,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (typeof guard !== "function") {
       throw new TypeError("Authority append admission guard must be callable");
     }
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("installAppendAdmissionGuard", async () => {
       this.#appendAdmissionGuards.add(guard);
       return () => this.#appendAdmissionGuards.delete(guard);
     });
   }
 
   async originCheckpoint(): Promise<DurableLogCheckpoint> {
-    return this.#withLogLock(async () => this.#durableCheckpoint(0));
+    return this.#withLogLock("originCheckpoint", async () => this.#durableCheckpoint(0));
   }
 
   /** 进程停机时取消日志迁移及该日志所拥有的全部投影维护义务。 */
@@ -488,6 +492,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     for (const projection of this.#durableProjections.values()) {
       await projection.state.stopStorageMaintenance();
     }
+    this.#workObserver.flush();
   }
 
   async readTail<Body = JsonValue>(
@@ -503,7 +508,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) {
       throw new RangeError("Authority log tail limit must be 1-256");
     }
-    return this.#withLogLock(() =>
+    return this.#withLogLock("readTail", () =>
       runPhysicalStep(async () => {
         await this.#validateDurableCheckpoint(checkpoint);
         const commits: Array<CommitEnvelope<JsonValue>> = [];
@@ -547,20 +552,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (checkpoint.lsn === 0) {
       throw new TypeError("An empty log checkpoint has no authority envelope");
     }
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("readEnvelopeAt", async () => {
       await this.#validateDurableCheckpoint(checkpoint);
       const handle = await open(this.logPath, "r");
       try {
         const metadata = await handle.stat();
         const boundary = await verifyAuthorityWalFrameBoundary(
-          fileReader(handle, metadata.size),
+          this.#walReader(handle, metadata.size),
           checkpoint.frameEndOffset,
         );
         const frameBytes =
           checkpoint.frameEndOffset - boundary.frameStartOffset;
         let result: CommitEnvelope<JsonValue> | undefined;
         const scanned = await scanAuthorityWalFrames(
-          fileReader(handle, frameBytes, boundary.frameStartOffset),
+          this.#walReader(handle, frameBytes, boundary.frameStartOffset),
           (payload, _offset, frameMetadata, nextOffset) => {
             const envelope = parseEnvelope(payload);
             // legacy 帧不携带帧级锚点,此时以信封自身的 lsn 作唯一身份依据;
@@ -606,7 +611,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const selectedStreams = validateProjectionStreams(options);
     const afterLsn = options.afterLsn ?? 0;
     assertReplayLsn(afterLsn);
-    return this.#withLogLock(async () => {
+    return this.#withLogLock("rebuildProjection", async () => {
       // Reuse only the existing identity/size/time-verified prefix. Changed files
       // still take full recovery before any reducer is called.
       const lastLsn = await this.#loadLastLsn();
@@ -709,7 +714,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.runPhysicalStep ??
       (async <T>(operation: () => Promise<T>) => operation());
     const operation = () =>
-      this.#withLogLock(() =>
+      this.#withLogLock("transactProjection", () =>
         runPhysicalStep(async () => {
           const readProjections = new Map<string, DurableProjectionReadContext>();
           for (const projectionId of readProjectionIds) {
@@ -835,7 +840,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       ]),
     );
     const operation = () =>
-      this.#withLogLock(async () => {
+      this.#withLogLock("transactDurableProjection", async () => {
         await this.#withDurableProjectionRecovery(projection, () =>
           this.#synchronizeDurableProjection(projection),
         );
@@ -1065,14 +1070,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   ): RebuildableDurableProjectionIndex {
     return {
       get: (key) =>
-        this.#withLogLock(() =>
+        this.#withLogLock("projection.get", () =>
           this.#withDurableProjectionRecovery(projection, async () => {
             await this.#synchronizeDurableProjection(projection);
             return await projection.read.get(key);
           }),
         ),
       scan: (range, limit, continuation) =>
-        this.#withLogLock(() =>
+        this.#withLogLock("projection.scan", () =>
           this.#withDurableProjectionRecovery(
             projection,
             async () => {
@@ -1085,14 +1090,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           ),
         ),
       checkpoints: () =>
-        this.#withLogLock(() =>
+        this.#withLogLock("projection.checkpoints", () =>
           this.#withDurableProjectionRecovery(projection, async () => {
             await this.#synchronizeDurableProjection(projection);
             return projection.state.checkpoints();
           }),
         ),
       rebuild: () =>
-        this.#withLogLock(() => this.#rebuildDurableProjection(projection)),
+        this.#withLogLock("projection.rebuild", () => this.#rebuildDurableProjection(projection)),
     };
   }
 
@@ -1336,7 +1341,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const handle = await open(this.logPath, "r");
       try {
         const boundary = await verifyAuthorityWalFrameBoundary(
-          fileReader(handle, metadata.size),
+          this.#walReader(handle, metadata.size),
           expected.bytes,
         );
         // 此处 legacy 已在上方早退,versioned 帧必须带锚点;缺失即为损坏。
@@ -1371,6 +1376,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     fromLsn = 0,
     select?: EnvelopeSelection,
   ): Promise<number> {
+    if (this.#work) this.#work.recoveries++;
     const firstRecovery = this.#verifiedTail === undefined;
     const scanned = await this.#scanLog(visit, fromLsn, select);
     if (scanned.incompleteTail) {
@@ -1435,6 +1441,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, cursor.byteOffset - offset), offset);
           if (bytesRead === 0) throw new AuthorityStorageError("commit-log-corrupt", "Authority log prefix is incomplete");
           physicalHash.update(buffer.subarray(0, bytesRead));
+          if (this.#work) this.#work.readBytes += bytesRead;
           offset += bytesRead;
         }
       } finally { await handle.close(); }
@@ -1531,7 +1538,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       }
       const logId = this.#requireLogId();
       const scanned = await scanAuthorityWalFrames(
-        fileReader(handle, metadata.size - startOffset, startOffset),
+        this.#walReader(handle, metadata.size - startOffset, startOffset),
         async (payload, offset, frameMetadata, nextOffset) => {
           // Hash the bytes read in THIS locked scan, including the old prefix.
           // Only validation proofs are reused; no cached file bytes or mutable
@@ -1629,6 +1636,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     } finally {
       await log.close();
     }
+  }
+
+  #walReader(handle: FileHandle, size: number, offset = 0) {
+    if (this.#work) this.#work.scans++;
+    return fileReader(handle, size, offset, bytes => { if (this.#work) this.#work.readBytes += bytes; });
   }
 
   async #recordVerifiedTail(
@@ -1803,7 +1815,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     try {
       const metadata = await handle.stat();
       const boundary = await verifyAuthorityWalFrameBoundary(
-        fileReader(handle, metadata.size),
+        this.#walReader(handle, metadata.size),
         checkpoint.frameEndOffset,
       );
       // legacy 帧没有帧级 lsn 与前缀摘要,只能校验到边界本身;versioned 帧才能
@@ -1986,17 +1998,38 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
   }
 
-  async #withLogLock<T>(operation: () => Promise<T>): Promise<T> {
+  async #withLogLock<T>(kind: Parameters<AuthorityWorkObserver["begin"]>[0], operation: () => Promise<T>): Promise<T> {
+    const observation = this.#workObserver.begin(kind);
+    let failure: [] | [unknown] = [];
+    try { return await this.#withObservedLogLock(operation, observation); }
+    catch (error) { failure = [error]; throw error; }
+    finally { observation.finish(...failure); }
+  }
+
+  async #withObservedLogLock<T>(operation: () => Promise<T>, observation: ReturnType<AuthorityWorkObserver["begin"]>): Promise<T> {
     const maintenanceDeadline = Date.now() + 5_000;
     for (;;) {
       try {
+        const queued = performance.now();
+        observation.stage("local-queue");
         return await this.#operations.run(async () => {
-          await ensureDurableDirectory(this.rootDir);
-          const release = await acquireFileLock(this.#lockPath, {
-            staleMs: this.#lockStaleMs,
-            waitMs: this.#lockWaitMs,
-            resourceName: "AuthorityCommitLog",
-          });
+          observation.data.queueMs += performance.now() - queued;
+          observation.stage("directory-preparation");
+          const preparing = performance.now();
+          try { await ensureDurableDirectory(this.rootDir); }
+          finally { observation.data.preparationMs += performance.now() - preparing; }
+          const waiting = performance.now();
+          observation.stage("authority-file-lock");
+          let release: () => Promise<void>;
+          try { release = await acquireFileLock(this.#lockPath, {
+              staleMs: this.#lockStaleMs,
+              waitMs: this.#lockWaitMs,
+              resourceName: "AuthorityCommitLog",
+            });
+          } finally { observation.data.lockWaitMs += performance.now() - waiting; }
+          const executing = performance.now();
+          observation.stage("authority-execution");
+          this.#work = observation.data;
           try {
             // 持有日志锁期间恒有权威操作在等待,故为前台。互斥区不在这里声明:
             // 外层 `#operations` 串行队列已单点标记,内层维护准入随之零等待——
@@ -2007,7 +2040,12 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               return await operation();
             });
           } finally {
-            await release();
+            this.#work = undefined;
+            observation.data.executionMs += performance.now() - executing;
+            const releasing = performance.now();
+            const previousStage = observation.stage("authority-lock-release");
+            try { await release(); } finally { observation.data.releaseMs += performance.now() - releasing; }
+            observation.stage(previousStage);
           }
         });
       } catch (error) {
@@ -2023,9 +2061,13 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         ) {
           throw error;
         }
+        observation.stage("maintenance-retry");
+        const retrying = performance.now();
         await waitForMaintenanceRetry(
           Math.min(retryAfterMs, Math.max(0, maintenanceDeadline - Date.now())),
         );
+        observation.data.retryWaitMs += performance.now() - retrying;
+        observation.data.retries++;
       }
     }
   }

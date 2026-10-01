@@ -2,8 +2,10 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { LogWriterObservation } from "@zhixing/core/logging/storage";
+import { logFailureEvidence } from "@zhixing/core/logging";
 import type { NodeProcessInventory } from "@zhixing/mesh/filesystem";
 import { isProductLogWriter } from "./writer-classification.js";
+import { LOG_WRITE_PROTOCOL, writerEndpoint, writerRootKey } from "./writer-admission.js";
 
 export function classifyWindowsWriters(inventory: NodeProcessInventory, home: string, pid = process.pid): Omit<LogWriterObservation, "at"> {
   const candidates: { pid: number; birth: string }[] = [];
@@ -16,23 +18,66 @@ export function classifyWindowsWriters(inventory: NodeProcessInventory, home: st
     if (!row.argv || row.argv.length > 1024) { complete = false; continue; }
     if (isProductLogWriter(row.argv, home, true)) candidates.push(identity);
   }
-  return { complete: complete && self !== undefined, self, candidates };
+  const failure = inventory.failure;
+  return { complete: complete && self !== undefined, self, candidates,
+    ...(failure && ["inventory-limit", "identity-unavailable", "arguments-unavailable"].includes(failure.reason) ? {
+      failure: { category: "writer-admission", operation: "writers.inventory", code: failure.reason,
+        ...(Number.isSafeInteger(failure.pid) && failure.pid! > 0 ? { writerPids: [failure.pid!] } : {}),
+      },
+    } : {}),
+  };
 }
 
-/** No raw command line or environment leaves the finite platform observation. */
-export function createLogWriterProbe(home: string, observeWindows?: () => Promise<NodeProcessInventory>, ownerPid = process.pid): (signal?: AbortSignal) => Promise<LogWriterObservation> {
+export interface LogWriterProcessObserver {
+  observeNodeProcesses(): Promise<NodeProcessInventory>;
+  readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
+}
+
+/** Inventory and peer verification are one dependency; callers cannot omit half of admission. */
+export function createLogWriterProbe(home: string, processes: LogWriterProcessObserver, ownerPid = process.pid): (signal?: AbortSignal) => Promise<LogWriterObservation> {
   let cached: LogWriterObservation | undefined;
   let cachedUntil = 0;
+  const admitted = new Set<string>();
+  const elsewhere = new Set<string>();
   return async (signal) => {
     signal?.throwIfAborted();
     if (cached && performance.now() < cachedUntil) return cached;
     const at = Date.now();
     try {
-      if (process.platform === "win32" && !observeWindows) throw Error("Owned Windows process observer required");
-      const result = process.platform === "win32" ? classifyWindowsWriters(await observeWindows!(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid);
+      let result = process.platform === "win32" ? classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid);
+      if (process.platform === "win32" && result.complete) {
+        const live = new Set(result.candidates.map(item => `${item.pid}:${item.birth}`));
+        for (const key of admitted) if (!live.has(key)) admitted.delete(key);
+        for (const key of elsewhere) if (!live.has(key)) elsewhere.delete(key);
+        // Finite probe work; unproven candidates remain conservative and retry next observation.
+        let checked = 0;
+        const proofs = new Map<string, string>();
+        for (const candidate of result.candidates) {
+          const key = `${candidate.pid}:${candidate.birth}`;
+          if (candidate.pid === ownerPid || admitted.has(key) || elsewhere.has(key) || checked++ >= 8) continue;
+          try {
+            const text = await processes.readLocalProcessDeclaration(writerEndpoint(candidate.pid), candidate.pid);
+            const value = text.length <= 512 ? JSON.parse(text) : undefined;
+            if (value?.protocol === LOG_WRITE_PROTOCOL && value.pid === candidate.pid && /^[a-f0-9]{64}$/u.test(value.root)) {
+              proofs.set(key, value.root);
+            }
+          } catch { /* Only a live peer proof can establish compatibility. */ }
+        }
+        if (proofs.size) {
+          // The OS peer proves PID, while the second inventory binds that proof to
+          // the same incarnation. A reused PID must never inherit a cached proof.
+          result = classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid);
+          if (result.complete) for (const candidate of result.candidates) {
+            const key = `${candidate.pid}:${candidate.birth}`, root = proofs.get(key);
+            if (root === writerRootKey(home)) admitted.add(key);
+            else if (root !== undefined) elsewhere.add(key);
+          }
+        }
+        result = { ...result, candidates: result.candidates.filter(item => !elsewhere.has(`${item.pid}:${item.birth}`)), compatible: result.candidates.filter(item => admitted.has(`${item.pid}:${item.birth}`)) };
+      }
       signal?.throwIfAborted();
       cached = { ...result, at };
-    } catch { cached = { complete: false, at, candidates: [] }; }
+    } catch (error) { cached = { complete: false, at, candidates: [], failure: logFailureEvidence(error) }; }
     cachedUntil = performance.now() + 1000;
     return cached;
   };

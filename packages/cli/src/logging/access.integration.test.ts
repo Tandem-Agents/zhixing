@@ -60,6 +60,7 @@ import {
 import { ConfirmationBroker } from "@zhixing/core/confirmation";
 import { createEventBus } from "@zhixing/core/events";
 import { MockLLMProvider } from "@zhixing/core/loop";
+import { declaredPeer } from "./__tests__/declared-peer.js";
 import type { AgentEventMap, ToolDefinition } from "@zhixing/core/types";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -502,6 +503,7 @@ describe("unified native log access", () => {
   }, 30_000);
 
   it("uses authenticated JSON-RPC and the same query/policy application; no query self-grant", async () => {
+    await declaredPeer();
     const f = await fixture(),
       w = wire(f.access.api);
     await expect(w.client.search()).rejects.toMatchObject({ code: -32001 });
@@ -740,6 +742,7 @@ describe("unified native log access", () => {
   }, 30_000);
 
   it("existing configuration entry uses CAS and reports the effective policy", async () => {
+    await declaredPeer();
     const f = await fixture(),
       w = wire(f.access.api);
     await w.request("auth", { token: "fixture-only" });

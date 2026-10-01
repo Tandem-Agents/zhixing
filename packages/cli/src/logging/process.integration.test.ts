@@ -10,6 +10,7 @@ import { DEFAULT_LOG_POLICY } from "../../../core/src/logging/policy.js";
 import { captureLog, bindLogSource } from "../../../core/src/logging/capture.js";
 import { createDeviceCapacityRuntime } from "../__tests__/device-capacity-fixture.js";
 import { LogFilesProcess } from "./files-process.js";
+import { declaredPeer } from "./__tests__/declared-peer.js";
 
 const children: ChildProcess[] = [],
   stores: LocalLogStore[] = [];
@@ -79,6 +80,7 @@ async function fixture(mode: string) {
 }
 describe("real log process termination", () => {
   it("drains two independently discovered writers against retained history without startup degradation", async () => {
+    await declaredPeer();
     const home = await createTempDir("log-concurrent-history"), root = path.join(home, "logs", "runtime");
     await mkdir(root, { recursive: true });
     const storeId = randomUUID(), instance = randomUUID(), now = Date.now();

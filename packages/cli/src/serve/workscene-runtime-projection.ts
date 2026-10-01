@@ -1,3 +1,4 @@
+import { createWorksceneRunToolApplication } from "./workscene-application-adapter.js";
 import { type SchedulerFacade } from "@zhixing/core/scheduler";
 import { type ToolDefinition } from "@zhixing/core";
 import type { ArtifactStore } from "@zhixing/core/authority";
@@ -156,8 +157,8 @@ function mainProductTools(
   workscenes: WorksceneToolDirectory,
 ): ToolDefinition[] {
   return [
-    createWorkmodeEnterTool(application),
-    ...createWorksceneTaskTools(),
+    createWorkmodeEnterTool(application, createWorksceneRunToolApplication()),
+    ...createWorksceneTaskTools(createWorksceneRunToolApplication()),
     createWorksceneChangeApproveTool(application, workscenes),
     createWorksceneListTool(application, workscenes),
   ];
@@ -170,11 +171,11 @@ function sceneProductTools(
 ): ToolDefinition[] {
   const identity = { sceneId: scene.sceneId, sceneName: scene.name };
   return [
-    createWorkmodeExitTool(),
-    ...createWorksceneTaskTools(),
+    createWorkmodeExitTool(createWorksceneRunToolApplication()),
+    ...createWorksceneTaskTools(createWorksceneRunToolApplication()),
     createWorksceneRenameCurrentTool(identity, application),
-    createWorksceneSetWorkdirCurrentTool(identity, application, workscenes),
-    createWorksceneClearWorkdirCurrentTool(identity, application),
+    createWorksceneSetWorkdirCurrentTool(identity, application, workscenes, createWorksceneRunToolApplication()),
+    createWorksceneClearWorkdirCurrentTool(identity, application, createWorksceneRunToolApplication()),
   ];
 }
 

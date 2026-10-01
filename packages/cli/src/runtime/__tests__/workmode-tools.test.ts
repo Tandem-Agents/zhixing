@@ -1,3 +1,4 @@
+import { createWorksceneRunToolApplication } from "../../serve/workscene-application-adapter.js";
 import { describe, expect, it, vi } from "vitest";
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
 import { getEnabledWorksceneToolActions, getWorksceneToolBoundaries } from "@zhixing/core/workscene";
@@ -146,7 +147,7 @@ async function callInRun<T>(
 describe("workscene entrusted task tools", () => {
   const reference = { conversationId: "main-1", runId: "run-1", goal: "整理获准资料" };
   it("uses issued references without UI capability and preserves pending stop semantics", async () => {
-    const [list, stop] = createWorksceneTaskTools();
+    const [list, stop] = createWorksceneTaskTools(createWorksceneRunToolApplication());
     const listed = await callInRun(() => list!.call({}, CTX), { worksceneTasks: [reference], postTurnControl: false });
     expect(JSON.parse(listed.result.content as string)).toEqual([reference]);
     const stopped = await callInRun(() => stop!.call({ conversationId: reference.conversationId, runId: reference.runId }, CTX), { worksceneTasks: [reference], postTurnControl: false });
@@ -155,7 +156,7 @@ describe("workscene entrusted task tools", () => {
     expect(stopped.staged).toEqual([]);
   });
   it("rejects guessed targets and contexts without the parent's task snapshot", async () => {
-    const stop = createWorksceneTaskTools()[1]!;
+    const stop = createWorksceneTaskTools(createWorksceneRunToolApplication())[1]!;
     for (const worksceneTasks of [undefined, [reference]]) {
       const denied = await callInRun(() => stop.call({ conversationId: "foreign", runId: "guessed" }, CTX), { worksceneTasks });
       expect(denied.result.isError).toBe(true);
@@ -167,16 +168,16 @@ describe("workscene entrusted task tools", () => {
 describe("workmode enter/exit", () => {
   it("含获准交接时不依赖 CLI consumer；交接仍要求显式确认", async () => {
     const handoff = { goal: "交付报告", constraints: ["不发布"], completed: ["数据已核对"], remaining: ["写报告"] };
-    const tool = createWorkmodeEnterTool(application);
+    const tool = createWorkmodeEnterTool(application, createWorksceneRunToolApplication());
     const call = await callInRun(() => tool.call({ sceneId: "scene-a", handoff }, CTX), { scenes: [scene("scene-a", "报告")], postTurnControl: false });
     expect(call.emitted).toEqual([{ kind: "enter", sceneId: "scene-a", handoff }]);
     expect(tool.requiresExplicitConfirmation).toBe(true);
     expect(call.result.content).toContain("当前尚未开始");
     await expect(callInRun(() => tool.call({ sceneId: "scene-a", handoff: { ...handoff, privateHistory: "不可转交" } }, CTX))).rejects.toThrow("交接只接受");
-    const exit = await callInRun(() => createWorkmodeExitTool().call({ handoff }, CTX));
+    const exit = await callInRun(() => createWorkmodeExitTool(createWorksceneRunToolApplication()).call({ handoff }, CTX));
     expect(exit.result.isError).toBe(true);
     expect(exit.emitted).toEqual([]);
-    const direct = await callInRun(() => createWorkmodeExitTool().call({ handoff }, CTX), { conversationId: "ws:reports:primary", postTurnControl: false });
+    const direct = await callInRun(() => createWorkmodeExitTool(createWorksceneRunToolApplication()).call({ handoff }, CTX), { conversationId: "ws:reports:primary", postTurnControl: false });
     expect(direct.result.isError).not.toBe(true);
     expect(direct.emitted).toEqual([{ kind: "exit", handoff }]);
   });
@@ -184,12 +185,12 @@ describe("workmode enter/exit", () => {
   it("工作区续接只随暂存变更提交，不在工具调用里重载自身运行", async () => {
     const handoff = { goal: "继续任务", constraints: [], completed: [], remaining: ["核对新环境"] };
     const current = { sceneId: "scene-a", sceneName: "报告" };
-    const call = await callInRun(() => createWorksceneClearWorkdirCurrentTool(current, application).call({ handoff }, CTX), { scenes: [scene("scene-a", "报告")] });
+    const call = await callInRun(() => createWorksceneClearWorkdirCurrentTool(current, application, createWorksceneRunToolApplication()).call({ handoff }, CTX), { scenes: [scene("scene-a", "报告")] });
     expect(call.staged).toHaveLength(1);
     expect(call.emitted).toEqual([{ kind: "set_workdir", sceneId: "scene-a", workspace: null, handoff }]);
   });
   it("enter 只读权威场景并 emit，缺少 consumer 时在查询前拒绝", async () => {
-    const tool = createWorkmodeEnterTool(application);
+    const tool = createWorkmodeEnterTool(application, createWorksceneRunToolApplication());
     const admitted = await callInRun(
       () => tool.call({ sceneId: "scene-1" }, CTX),
       { scenes: [scene("scene-1", "场景一")] },
@@ -210,12 +211,12 @@ describe("workmode enter/exit", () => {
 
   it("不存在场景不 emit；exit 仍是合法的 turn-boundary 控制", async () => {
     const missing = await callInRun(() =>
-      createWorkmodeEnterTool(application).call({ sceneId: "missing" }, CTX),
+      createWorkmodeEnterTool(application, createWorksceneRunToolApplication()).call({ sceneId: "missing" }, CTX),
     );
     expect(missing.result.isError).toBe(true);
     expect(missing.emitted).toEqual([]);
 
-    const exited = await callInRun(() => createWorkmodeExitTool().call({}, CTX));
+    const exited = await callInRun(() => createWorkmodeExitTool(createWorksceneRunToolApplication()).call({}, CTX));
     expect(exited.result.isError).toBeFalsy();
     expect(exited.emitted).toEqual([{ kind: "exit" }]);
   });
@@ -244,7 +245,7 @@ describe("workscene staged management", () => {
 
     const set = await callInRun(
       () =>
-        createWorksceneSetWorkdirCurrentTool(current, application, directory).call(
+        createWorksceneSetWorkdirCurrentTool(current, application, directory, createWorksceneRunToolApplication()).call(
           { deviceName: "本机", workspaceName: "项目" },
           { toolCallId: "set-call" } as never,
         ),
@@ -252,7 +253,7 @@ describe("workscene staged management", () => {
     );
     const cleared = await callInRun(
       () =>
-        createWorksceneClearWorkdirCurrentTool(current, application).call(
+        createWorksceneClearWorkdirCurrentTool(current, application, createWorksceneRunToolApplication()).call(
           {},
           { toolCallId: "clear-call" } as never,
         ),
@@ -390,7 +391,7 @@ describe("workscene path-free reads", () => {
 
   it("声明面仍由共享工具表派生", () => {
     const current = { sceneId: "scene-1", sceneName: "场景" };
-    expect(createWorkmodeEnterTool(application).boundaries).toEqual(
+    expect(createWorkmodeEnterTool(application, createWorksceneRunToolApplication()).boundaries).toEqual(
       getWorksceneToolBoundaries("workmode_enter"),
     );
     expect(
@@ -398,6 +399,7 @@ describe("workscene path-free reads", () => {
         current,
         application,
         makeDirectory(),
+        createWorksceneRunToolApplication(),
       ).boundaries,
     ).toEqual(getWorksceneToolBoundaries("workscene_set_workdir_current"));
   });

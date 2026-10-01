@@ -1,3 +1,5 @@
+import type { LogFailureEvidence } from "./contracts.js";
+
 /** Finite upgrade observations, supplied by the physical composition root. */
 export interface LogWriterIdentity { readonly pid: number; readonly birth: string }
 export interface LogWriterObservation {
@@ -9,6 +11,10 @@ export interface LogWriterObservation {
   /** All possible product writers, including self even when it uses the new protocol.
    * A complete inventory must contain self with the same pid and birth. */
   readonly candidates: readonly LogWriterIdentity[];
+  /** Same-connection OS peer proof of the root-bound current write protocol. */
+  readonly compatible?: readonly LogWriterIdentity[];
+  /** Observation only: never establishes completeness or compatibility. */
+  readonly failure?: LogFailureEvidence;
 }
 export interface LegacyLogEntry {
   readonly legacyPath?: string;
@@ -29,5 +35,6 @@ export function isLegacyFile(name: string): boolean { return /^legacy-[a-f0-9]{6
 export function validateWriterObservation(value: LogWriterObservation): boolean {
   const valid = (entry: LogWriterIdentity) => Number.isSafeInteger(entry.pid) && entry.pid > 0 && typeof entry.birth === "string" && /^[a-zA-Z0-9_.:-]{1,128}$/u.test(entry.birth);
   return typeof value.complete === "boolean" && Number.isSafeInteger(value.at) && value.at >= 0 &&
-    (value.self === undefined || valid(value.self)) && Array.isArray(value.candidates) && value.candidates.length <= 256 && value.candidates.every(valid);
+    (value.self === undefined || valid(value.self)) && Array.isArray(value.candidates) && value.candidates.length <= 256 && value.candidates.every(valid) &&
+    (value.compatible === undefined || (Array.isArray(value.compatible) && value.compatible.length <= 256 && value.compatible.every(entry => valid(entry) && value.candidates.some(candidate => candidate.pid === entry.pid && candidate.birth === entry.birth))));
 }

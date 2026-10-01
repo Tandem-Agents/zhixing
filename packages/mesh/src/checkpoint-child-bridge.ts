@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion, verifyCheckpointBridgeArtifact, verifyCheckpointBridgeArtifactAsync } from "./checkpoint-bridge-artifact.js";
 
 interface NativeCheckpointChildBridge {
+  readLocalProcessDeclaration(endpoint: string, pid: number): string;
   processBirth(pid: number): string;
   openPath(path: string, create: boolean, readOnly: boolean): bigint;
   statFile(parent: bigint, name: string): { bytes: number; identity: string };
@@ -15,9 +16,9 @@ interface NativeCheckpointChildBridge {
   openDirectory(parent: bigint, name: string, create: boolean): bigint;
   identity(handle: bigint): string;
   writeFile(parent: bigint, name: string, bytes: Buffer): void;
-  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Buffer;
+  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix?: boolean): Buffer;
   listEntries(parent: bigint, maximumEntries: number): string[];
-  writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): number;
+  writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): number;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): void;
   unlinkEntry(parent: bigint, name: string, directory: boolean, retiredIdentity?: string): void;
   sync(handle: bigint): void;
@@ -25,6 +26,7 @@ interface NativeCheckpointChildBridge {
 }
 
 interface BridgeApi {
+  readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
   observeNodeProcesses(): Promise<NodeProcessInventory>;
   openPath(path: string, create: boolean, readOnly: boolean): Promise<bigint>;
   statFile(parent: bigint, name: string): Promise<{ bytes: number; identity: string }>;
@@ -35,9 +37,9 @@ interface BridgeApi {
   openDirectory(parent: bigint, name: string, create: boolean): Promise<bigint>;
   identity(handle: bigint): Promise<string>;
   writeFile(parent: bigint, name: string, bytes: Buffer): Promise<void>;
-  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Promise<Buffer>;
+  readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Buffer>;
   listEntries(parent: bigint, maximumEntries: number): Promise<readonly string[]>;
-  writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer): Promise<number>;
+  writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): Promise<number>;
   renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): Promise<void>;
   unlinkEntry(parent: bigint, name: string, directory: boolean, retiredIdentity?: string): Promise<void>;
   sync(handle: bigint): Promise<void>;
@@ -72,6 +74,7 @@ export class CheckpointDirectoryHandle {
     return {
       get failed() { return owner.failed(); },
       observeNodeProcesses: () => owner.api.observeNodeProcesses(),
+      readLocalProcessDeclaration: (endpoint, pid) => owner.api.readLocalProcessDeclaration(endpoint, pid),
       openPath: async (path, create, readOnly = false) => {
         if (readOnly && create) throw Error("Read-only directory cannot be created");
         const value = await owner.api.openPath(path, create, readOnly);
@@ -133,9 +136,10 @@ export class CheckpointDirectoryHandle {
     return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
   }
 
-  async readFile(name: string, declaredBytes: number, offset: number, limit: number, identity?: string): Promise<Buffer> {
+  async readFile(name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix = false): Promise<Buffer> {
     await this.#assertOpen();
-    return this.#bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit, identity ?? "");
+    if (prefix && (!identity || declaredBytes < 0 || offset + limit > declaredBytes)) throw new TypeError("Invalid durable prefix read");
+    return this.#bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit, identity ?? "", prefix);
   }
 
   async listEntries(maximumEntries: number): Promise<readonly string[]> {
@@ -150,9 +154,9 @@ export class CheckpointDirectoryHandle {
     return [...entries].sort();
   }
 
-  async writeRange(name: string, maximumBytes: number, offset: number, bytes: Uint8Array): Promise<number> {
+  async writeRange(name: string, maximumBytes: number, offset: number, bytes: Uint8Array, identity?: string): Promise<number> {
     await this.#assertOpen();
-    return this.#bridge.writeRange(this[handle], childName(name), maximumBytes, offset, Buffer.from(bytes));
+    return this.#bridge.writeRange(this[handle], childName(name), maximumBytes, offset, Buffer.from(bytes), identity ?? "");
   }
 
   async renameTo(name: string, target: CheckpointDirectoryHandle, targetName: string): Promise<void> {
@@ -215,9 +219,16 @@ export function readDarwinProcessBirth(pid: number): string {
   return native().processBirth(pid);
 }
 
+/** Same-connection OS peer proof; used only by isolated process observers. */
+export function readLocalProcessDeclaration(endpoint: string, pid: number): string {
+  if (process.platform !== "linux") throw Error("Native local peer observation unavailable");
+  return native().readLocalProcessDeclaration(endpoint, pid);
+}
+
 function nativeBridge(): BridgeApi {
   return {
     observeNodeProcesses: async () => { throw Error("Windows process inventory required"); },
+    readLocalProcessDeclaration: async (...args) => native().readLocalProcessDeclaration(...args),
     openPath: async (...args) => native().openPath(...args),
     statFile: async (...args) => native().statFile(...args),
     statFiles: async (parent, names) => names.map(name => native().statFile(parent, name)),
@@ -301,11 +312,13 @@ function windowsBridge(): BridgeApi {
 export interface NodeProcessInventory {
   readonly complete: boolean;
   readonly entries: readonly { pid: number; birth: string; argv: readonly string[] | null }[];
+  readonly failure?: { reason: "inventory-limit" | "identity-unavailable" | "arguments-unavailable"; pid?: number };
 }
 
 export interface CheckpointFilesystemSession {
   readonly failed: boolean;
   observeNodeProcesses(): Promise<NodeProcessInventory>;
+  readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
   openPath(path: string, create: boolean, readOnly?: boolean): Promise<CheckpointDirectoryHandle>;
   close(): Promise<void>;
 }
@@ -314,9 +327,10 @@ function ownedWindowsBridge(timeoutMs: number): { api: BridgeApi; failed(): bool
   let child: ChildProcessWithoutNullStreams | undefined;
   let starting: Promise<void> | undefined, exited: Promise<void> | undefined, stopping: Promise<void> | undefined;
   let closed = false, broken = false, nextId = 0;
+  let firstFailure: Error | undefined;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   const settle = (): void => {
-    for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(Error("Filesystem owner stopped")); }
+    for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(firstFailure ?? Error("Filesystem owner stopped")); }
     pending.clear();
   };
   const stop = (): Promise<void> => {
@@ -332,7 +346,7 @@ function ownedWindowsBridge(timeoutMs: number): { api: BridgeApi; failed(): bool
       settle();
     })();
   };
-  const fail = (): void => { broken = true; void stop(); };
+  const fail = (error?: Error): void => { firstFailure ??= error ?? Object.assign(Error("Filesystem protocol failed"), { code: "ERR_CHILD_PROCESS_PROTOCOL" }); broken = true; void stop(); };
   const start = (): Promise<void> => starting ??= Promise.resolve().then(async () => {
     if (closed) throw Error("Filesystem owner closed");
     const executable = await verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL("../", import.meta.url)), checkpointBridgeTarget());
@@ -341,7 +355,10 @@ function ownedWindowsBridge(timeoutMs: number): { api: BridgeApi; failed(): bool
     child = current;
     exited = new Promise<void>((resolve) => {
       // close is also emitted for spawn failure, whereas exit need not be.
-      current.once("close", () => { broken = true; settle(); resolve(); });
+      current.once("close", (exitCode, signal) => {
+        if (!closed) firstFailure ??= Object.assign(Error("Filesystem owner exited"), { code: "ERR_CHILD_PROCESS_EXITED", exitCode, signal });
+        broken = true; settle(); resolve();
+      });
     });
     current.on("error", fail); current.stdin.on("error", fail);
     current.stdout.on("error", fail); current.stderr.on("error", fail);
@@ -359,15 +376,15 @@ function ownedWindowsBridge(timeoutMs: number): { api: BridgeApi; failed(): bool
     releaseWindowsBridge(current, pending);
   });
   const request = async <T>(op: string, input: Record<string, unknown>): Promise<T> => {
-    if (closed || broken) { await stopping; throw Error("Filesystem owner unavailable"); }
+    if (closed || broken) { await stopping; throw firstFailure ?? Error("Filesystem owner unavailable"); }
     await start();
-    if (closed || broken || !child) { await stopping; throw Error("Filesystem owner unavailable"); }
+    if (closed || broken || !child) { await stopping; throw firstFailure ?? Error("Filesystem owner unavailable"); }
     const current = child, id = ++nextId;
     return new Promise<T>((resolve, reject) => {
       current.ref(); refStream(current.stdin); refStream(current.stdout); refStream(current.stderr);
-      const timer = setTimeout(fail, timeoutMs);
+      const timer = setTimeout(() => fail(Object.assign(Error("Filesystem operation timed out"), { code: "ETIMEDOUT" })), timeoutMs);
       pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-      current.stdin.write(`${JSON.stringify({ id, op, ...input })}\n`, "utf8", (error) => { if (error) fail(); });
+      current.stdin.write(`${JSON.stringify({ id, op, ...input })}\n`, "utf8", (error) => { if (error) fail(error); });
     });
   };
   return { api: windowsApi(request), failed: () => closed || broken, stop };
@@ -381,6 +398,7 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
   };
   return {
     observeNodeProcesses: () => request<NodeProcessInventory>("observeNodeProcesses", {}),
+    readLocalProcessDeclaration: (endpoint, pid) => request<string>("readLocalProcessDeclaration", { endpoint, pid }),
     openPath: async (path, create, readOnly) => BigInt(await request<number>("openPath", { path, create, readOnly })),
     statFile: (parent, name) => request<{ bytes: number; identity: string }>("statFile", { parent: id(parent), name }),
     statFiles: (parent, names) => request<readonly { bytes: number; identity: string }[]>("statFiles", { parent: id(parent), names }),
@@ -390,15 +408,15 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     openDirectory: async (parent, name, create) => BigInt(await request<number>("openDirectory", { parent: id(parent), name, create })),
     identity: (value) => request<string>("identity", { handle: id(value) }),
     writeFile: (parent, name, bytes) => request<void>("writeFile", { parent: id(parent), name, data: bytes.toString("base64") }),
-    readFile: async (parent, name, declaredBytes, offset, limit, identity) => Buffer.from(
-      await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit, ...(identity ? { identity } : {}) }),
+    readFile: async (parent, name, declaredBytes, offset, limit, identity, prefix) => Buffer.from(
+      await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit, prefix: prefix ?? false, ...(identity ? { identity } : {}) }),
       "base64",
     ),
     listEntries: (parent, maximumEntries) => request<readonly string[]>("listEntries", {
       parent: id(parent), maximumEntries,
     }),
-    writeRange: (parent, name, maximumBytes, offset, bytes) => request<number>("writeRange", {
-      parent: id(parent), name, maximumBytes, offset, data: bytes.toString("base64"),
+    writeRange: (parent, name, maximumBytes, offset, bytes, identity) => request<number>("writeRange", {
+      parent: id(parent), name, maximumBytes, offset, data: bytes.toString("base64"), ...(identity ? { identity } : {}),
     }),
     renameEntry: (sourceParent, sourceName, targetParent, targetName) => request<void>("renameEntry", {
       sourceParent: id(sourceParent), sourceName, targetParent: id(targetParent), targetName,

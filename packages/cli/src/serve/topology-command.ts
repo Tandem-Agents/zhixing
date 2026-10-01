@@ -91,7 +91,7 @@ export async function runServeCommand(
     // Role selection and all role effects remain inside the admitted Host.
     const [startup, { createPersistentApplicationHost }] = await Promise.all([
       prepareStartup(),
-      import("./application-host.js"),
+      observeStartupPhase(logging.records, "load-host", () => import("./application-host.js")),
     ]);
     if (!startup) return;
     if (startup.kind !== "ready") {

@@ -49,11 +49,12 @@ describe("production boundaries through Recorder, native Store and public reader
     Object.defineProperty(hostile, "message", { get() { throw Error("hostile getter"); } });
     expect(() => recordRuntimeFailure(port, hostile, "host-connection-failed", 4)).not.toThrow();
     await logs.finish();
-    expect(logs.records().filter(record => record.event === "failed")).toHaveLength(3);
+    expect(logs.records().filter(record => record.event === "failed")).toHaveLength(4);
+    expect(logs.records()).toContainEqual(expect.objectContaining({ data: { reason: "host-connection-failed", attempt: 4, failure: { category: "unreadable-error" } } }));
     expect(logs.records()).toContainEqual(expect.objectContaining({ data: { reason: "semantic-error", issues: [{ field: "model", reason: "invalid selection" }] } }));
     expect(logs.records()).toContainEqual(expect.objectContaining({ data: { reason: "non-tty", missing: ["模型提供商"] } }));
     expect(logs.records()).toContainEqual(expect.objectContaining({ event: "hostConnected", data: { attempt: 3 } }));
-    expect(logs.recorder.health().captureFailures).toBe(1);
+    expect(logs.recorder.health().captureFailures).toBe(0);
     expect(JSON.stringify(logs.records())).not.toMatch(/private-value|not-retained/);
   });
   it("retains scheduler refusal and in-flight unknown outcomes without duplicating model results", async () => {

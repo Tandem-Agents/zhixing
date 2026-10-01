@@ -20,7 +20,9 @@ import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
 import type { RuntimeLogging } from "./logging/runtime.js";
-import { cliLoggingMode } from "./logging/entry-mode.js";
+import { cliLoggingMode, normalizeCliArgs } from "./logging/entry-mode.js";
+import { peekEntryLogging } from "./logging/bootstrap.js";
+import { recordFirstSurfaceOutput } from "./logging/runtime-source.js";
 
 let commandLogging: RuntimeLogging | undefined;
 async function exitCommand(code: number): Promise<never> {
@@ -222,7 +224,10 @@ program
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
   })
   .action(async () => {
-    const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout }) : undefined;
+    const earlyRecords = peekEntryLogging()?.records;
+    const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout,
+      onFirstOutput: () => recordFirstSurfaceOutput(earlyRecords),
+    }) : undefined;
     progress?.begin(performance.now() - process.uptime() * 1000);
     const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE },
       { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
@@ -235,13 +240,8 @@ program
     try {
       const zhixingHome = getZhixingHome();
       const configPath = getGlobalConfigPath(process.env, zhixingHome);
-      const [
-        { CoreHostConnection, defaultCoreHostConnectionDeps },
-        { connectReplHost },
-      ] = await Promise.all([
-        import("./runtime/core-host-connection.js"),
-        import("./runtime/repl-host-startup.js"),
-      ]);
+      const { CoreHostConnection, defaultCoreHostConnectionDeps } = await import("./runtime/core-host-connection.js");
+      const { connectReplHost } = await import("./runtime/repl-host-startup.js");
 
       connection = new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome, logging.records));
       const notices: import("./runtime/core-host-connection.js").CoreHostLifecycleNotice[] = [];
@@ -1017,19 +1017,14 @@ function isExecutedAsMain(moduleUrl: string, argvEntry: string | undefined): boo
   }
 }
 
-if (isExecutedAsMain(import.meta.url, process.argv[1])) {
-  // pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
-  // 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。
-  const argv = [...process.argv];
-  const dashIdx = argv.indexOf("--", 2);
-  if (dashIdx !== -1) {
-    argv.splice(dashIdx, 1);
-  }
+export async function runCli(): Promise<void> {
+  const argv = [...process.argv.slice(0, 2), ...normalizeCliArgs(process.argv.slice(2))];
 
   rejectUnknownCommandPath(argv, program);
 
-  program.parseAsync(argv).catch(async (err: unknown) => {
+  await program.parseAsync(argv).catch(async (err: unknown) => {
     await renderActionError(err);
     await exitCommand(1);
   });
 }
+if (isExecutedAsMain(import.meta.url, process.argv[1])) void runCli();

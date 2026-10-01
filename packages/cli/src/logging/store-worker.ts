@@ -1,5 +1,5 @@
 import { LocalLogStore } from "@zhixing/core/logging/storage";
-import { LogAppendIndeterminateError, LogStorageError } from "@zhixing/core/logging";
+import { LogAppendIndeterminateError, logFailureEvidence, logStorageFailure } from "@zhixing/core/logging";
 import type { DeviceCapacityAdmission, DeviceCapacityArbiterPort, DeviceCapacityDimension } from "@zhixing/core/resources";
 import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
@@ -50,7 +50,7 @@ const [home, owner] = process.argv.slice(2) as [string, string];
 const ownerPid = Number(owner);
 if (!home || !Number.isSafeInteger(ownerPid) || ownerPid <= 0) throw Error("Log writer owner is required");
 const files = new LogFilesProcess(home);
-const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, () => files.observeNodeProcesses(), ownerPid) });
+const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files, ownerPid) });
 let closing = false;
 const close = (): void => {
   if (closing) return;
@@ -76,7 +76,7 @@ process.on("message", (message: StoreWorkerInput) => {
     } catch (error) {
       // Native exception text can contain local paths. Only finite classes cross this boundary.
       send({ kind: "failure", id: message.id,
-        code: error instanceof LogStorageError ? error.code : "storage-unavailable",
+        code: logStorageFailure(error), evidence: logFailureEvidence(error),
         indeterminate: error instanceof LogAppendIndeterminateError });
     }
   })();

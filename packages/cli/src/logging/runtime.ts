@@ -1,12 +1,10 @@
-import { randomUUID } from "node:crypto";
-import { ZHIXING_CLI_VERSION } from "../version.js";
 import path from "node:path";
 import {
-  LogRecorder,
+  observeLogPhase,
+  logFailureEvidence,
   type BindLogSource,
   type LogRecordPort,
   type LogResult,
-  type LogSource,
 } from "@zhixing/core/logging";
 import { LocalLogStore } from "@zhixing/core/logging/storage";
 import {
@@ -19,66 +17,24 @@ import { createLogWriterProbe } from "./writers.js";
 import { IsolatedLogStore } from "./store-process.js";
 import type { StartupCheckResult } from "../startup.js";
 
-export const RUNTIME_LOG_SOURCE: LogSource = {
-  id: "runtime",
-  version: 1,
-  events: {
-    started: {
-      message: "运行入口已开始",
-      level: "info",
-      tier: "critical",
-      fields: { mode: "text", implementation: "text" },
-    },
-    hostStarted: {
-      message: "宿主开始装配",
-      level: "info",
-      tier: "critical",
-      fields: {},
-    },
-    hostStopped: {
-      message: "宿主运行与资源清理已结束",
-      level: "info",
-      tier: "critical",
-      fields: { cleanupFailures: "number" },
-    },
-    stopped: {
-      message: "运行入口已结束",
-      level: "info",
-      tier: "critical",
-      fields: { reason: "text" },
-    },
-    hostConnected: { message: "前台已连接宿主", level: "info", tier: "critical", fields: { attempt: "number" } },
-    startupPhase: { message: "启动阶段已结束", level: "info", tier: "critical", fields: { phase: "text", durationMs: "number" } },
-    failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: {
-      reason: "text", error: "text", attempt: "number",
-      issues: { items: { fields: { field: "text", reason: "text" } }, maxItems: 16 },
-      missing: { items: "text", maxItems: 32 },
-    } },
-  },
-};
+import { createBootstrapLogging, takeEntryLogging } from "./bootstrap.js";
+import { beginWriterDeclaration, closeWriterDeclaration } from "./writer-admission.js";
+export { RUNTIME_LOG_SOURCE } from "./runtime-source.js";
 
 /** Bounded phase timing for the actual entry; no configuration or credential payload. */
 export async function observeStartupPhase<T>(
   records: LogRecordPort | undefined,
-  phase: "load-interface" | "check-configuration" | "prepare-service" | "wait-for-service",
+  phase: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const started = performance.now();
-  let result: LogResult = "failure";
-  try {
-    const value = await operation();
-    result = "success";
-    return value;
-  } finally {
-    records?.record({ event: "startupPhase", result, data: { phase, durationMs: Math.round(performance.now() - started) } });
-  }
+  return observeLogPhase(records, phase, operation);
 }
 
 /** Preserve the observed cause before entry drain, without copying configuration or credentials. */
 export function recordRuntimeFailure(records: LogRecordPort | undefined, error: unknown, reason: string, attempt?: number): void {
-  records?.record(() => ({ event: "failed", result: "failure", data: {
-    reason, attempt, error: error instanceof Error ? error.message : typeof error === "string" ? error : "运行入口抛出非标准错误",
-  } }));
+  try { records?.record({ event: "failed", result: "failure", data: {
+    reason, attempt, failure: logFailureEvidence(error),
+  } }); } catch { /* Observation cannot replace the runtime's own failure. */ }
 }
 
 export function recordStartupFailure(records: LogRecordPort, result: Exclude<StartupCheckResult, { kind: "ready" }>): void {
@@ -103,7 +59,7 @@ export function createLocalLogStore(home: string): {
     store: new LocalLogStore({
       files,
       capacity: capacity.arbiter,
-      observeWriters: createLogWriterProbe(path.resolve(home), () => files.observeNodeProcesses()),
+      observeWriters: createLogWriterProbe(path.resolve(home), files),
     }),
     capacity,
   };
@@ -126,8 +82,10 @@ export function beginRuntimeLogging(
 ): RuntimeLogging {
   const capacity = createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false });
   const store = new IsolatedLogStore(path.resolve(home), capacity.arbiter);
-  const recorder = new LogRecorder(store, {
-    onHealth: (health) => {
+  const boot = takeEntryLogging() ?? createBootstrapLogging(mode);
+  const { recorder, bind, records } = boot;
+  void beginWriterDeclaration(home, (reason, failure) => records.record({ event: "writerDeclarationUnavailable", data: { reason, failure } }));
+  boot.attach(store, (health) => {
       if (health.state === "ready") warn?.("运行日志已恢复写入；此前的等待或缺口可用 zz logs 查看。");
       else if (health.state === "degraded") {
         const reason = health.lastFailure === "writer-busy" ? "写入持续等待" : health.lastFailure === "resource-wait" ? "资源暂不可用"
@@ -135,15 +93,10 @@ export function beginRuntimeLogging(
           : health.lastFailure === "migration-blocked" ? "旧日志切换未完成" : "存储或采集受阻";
         warn?.(`运行日志已降级（${reason}），业务继续运行；可用 zz logs 查看。`);
       }
-    },
   });
-  const operation = { kind: "operation", id: randomUUID() };
-  const bind: BindLogSource = (source, access, refs = [], admission) => recorder.bind(source, access, [operation, ...refs], admission);
-  const records = bind(RUNTIME_LOG_SOURCE, { scope: "storage" });
   const stopOutput = mode === "managed" || mode === "on-demand"
     ? observeBackgroundOutput(bind(STDIO_LOG_SOURCE, { scope: "storage" }, [], { maxPerSecond: 32 }))
     : undefined;
-  records.record({ event: "started", data: { mode, implementation: ZHIXING_CLI_VERSION } });
   void recorder.start();
   let finishing: Promise<void> | undefined;
   return {
@@ -155,7 +108,7 @@ export function beginRuntimeLogging(
         stopOutput?.();
         records.record({ event: "stopped", result, data: { reason } });
         // Include the bounded OS writer proof in a short-lived entry's drain window.
-        finishing = recorder.close(5000).finally(() => capacity.close());
+        finishing = recorder.close(5000).finally(async () => { await closeWriterDeclaration(); return capacity.close(); });
       }
       return finishing;
     },

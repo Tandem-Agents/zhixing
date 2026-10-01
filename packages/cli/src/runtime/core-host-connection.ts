@@ -166,6 +166,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
       // 按需拉起、不是用户显式 serve，结果应由本层统一封装成友好错误。
       const silent = { log: () => {}, error: () => {} };
       const result = await observeStartupPhase(records, "wait-for-service", () => spawnDaemon({
+        records,
         zhixingHome,
         deadlineAt: attempt?.deadlineAt ?? Date.now() + DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
         signal: attempt?.signal,

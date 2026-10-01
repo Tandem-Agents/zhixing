@@ -9,7 +9,7 @@ import type {
   WorksceneWorkspaceAdministrationReadPort,
 } from "@zhixing/core/workscene/application";
 import type { AdvancementActiveStateProjection } from "@zhixing/core/advancement/application";
-import { WorksceneAssignmentToolApplicationService } from "@zhixing/core/workscene/application";
+import { WorksceneAssignmentToolApplicationService, WorksceneRunToolApplicationService, type WorksceneRunToolApplication } from "@zhixing/core/workscene/application";
 import type { WorksceneWriteMutation } from "@zhixing/core/contracts";
 import { parseConversationId } from "@zhixing/core/conversation";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
@@ -17,6 +17,17 @@ import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
 
 interface AnchorConversationStorageProjection {
   deleteStoredConversation(conversationId: string): Promise<boolean>;
+}
+
+export function createWorksceneRunToolApplication(): WorksceneRunToolApplication {
+  return new WorksceneRunToolApplicationService(() => {
+    const run = runContextStorage.getStore();
+    return {
+      conversationId: run?.conversationId,
+      durableConversation: run?.assignmentMutations?.execution === "conversation",
+      tasks: run?.worksceneTasks ?? [],
+    };
+  });
 }
 
 interface AnchorWorksceneAdvancementDependencies {

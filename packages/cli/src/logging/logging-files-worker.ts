@@ -1,5 +1,6 @@
 import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
 import path from "node:path";
+import { logFailureEvidence, logStorageFailure } from "@zhixing/core/logging";
 import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
 
 // A dedicated process owns every native handle. It never loads product configuration,
@@ -24,13 +25,11 @@ process.on("message", (message: Request) => {
     .then(
       (value) => process.send?.({ id: message.id, value }),
       (error: unknown) => {
-        const code =
-          error instanceof Error
-            ? /NTSTATUS 0x[0-9a-f]+|Win32 \d+|checkpoint-child-missing/iu.exec(error.message)?.[0]
-            : undefined;
         process.send?.({
           id: message.id,
-          error: `日志文件操作 ${message.op} 未完成${code ? `（${code}）` : ""}`,
+          error: "日志文件操作未完成",
+          code: logStorageFailure(error),
+          evidence: logFailureEvidence(error),
         });
       },
     )
@@ -108,6 +107,7 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
       args[2] as number,
       args[3] as number,
       args[4] as string | undefined,
+      args[5] as boolean | undefined,
     );
   if (op === "tryReadLock") {
     if (release) throw Error("nested-lock");
@@ -120,6 +120,12 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
     return;
   }
   if (readOnly) throw Error("filesystem-read-only");
+  if (op === "append") {
+    const [name, identity, offset, bytes] = args as [string, string, number, Uint8Array];
+    if (!/^segment-[a-f0-9-]{36}\.jsonl$/u.test(name)) throw Error("segment-append-required");
+    await directory.writeRange(name, offset + bytes.length, offset, bytes, identity);
+    return;
+  }
   if (op === "write") return directory.writeFile(args[0] as string, args[1] as Uint8Array);
   if (op === "rename") {
     if (isLegacyLogFile(args[1] as string)) throw Error("reserved-legacy-name");

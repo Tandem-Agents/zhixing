@@ -19,6 +19,7 @@ import chalk from "chalk";
 import { loadConfig } from "@zhixing/providers/configuration";
 import { recordRuntimeFailure } from "./logging/runtime.js";
 import { createRuntimeConfigurationProvider } from "./runtime/runtime-configuration-provider.js";
+import { recordFirstSurfaceOutput } from "./logging/runtime-source.js";
 import {
   CommandProvider,
   FileProvider,
@@ -529,7 +530,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   }
 
   const startupProgress = renderScreen
-    ? startup?.progress ?? createStartupProgressPresenter({ stdout: process.stdout })
+    ? startup?.progress ?? createStartupProgressPresenter({ stdout: process.stdout, onFirstOutput: () => recordFirstSurfaceOutput(runtimeRecords) })
     : null;
   if (!renderScreen) startup?.progress?.stop();
   const deferredStartupNotices: Array<
@@ -744,6 +745,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     return lines;
   };
   for (const line of initialRegionLines()) cliWriter.line(line);
+  recordFirstSurfaceOutput(runtimeRecords);
 
   // 历史尾巴 —— "回到工位"的用户侧一半:恢复对话时渲染最近几轮变暗摘录,
   // 经 RPC 倒读宿主落盘事实流。新对话无历史跳过;读失败静默(纯增益展示)。
@@ -1487,6 +1489,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     flushDeferredStartupNotices();
   }
 
+  runtimeRecords?.record({ event: "interactionReady", result: "success", data: { sinceProcessStartMs: Math.round(process.uptime() * 1000) } });
   // close 只表达"有人请求普通退出"。真正的退出提示、屏幕归还、连接释放
   // 统一在主循环尾部执行，避免 /exit 与 Ctrl+C 各自维护不同 cleanup 顺序。
   let replShuttingDown = false;

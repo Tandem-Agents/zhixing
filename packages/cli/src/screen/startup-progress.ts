@@ -10,6 +10,7 @@ export interface StartupProgressPresenterOptions {
   longDelayMs?: number;
   text?: string;
   longText?: string;
+  onFirstOutput?: () => void;
 }
 
 const DEFAULT_DELAY_MS = 700;
@@ -26,6 +27,7 @@ export class StartupProgressPresenter {
   private visible = false;
   private disabled = false;
   private currentText = "";
+  private outputObserved = false;
 
   private readonly delayMs: number;
   private readonly longDelayMs: number;
@@ -77,6 +79,7 @@ export class StartupProgressPresenter {
     const restore = this.visible;
     if (restore) this.opts.stdout.write("\r\x1b[2K");
     this.opts.stdout.write(message.endsWith("\n") ? message : `${message}\n`);
+    this.observeOutput();
     if (restore) this.render(this.currentText);
   }
 
@@ -87,6 +90,7 @@ export class StartupProgressPresenter {
   private render(text: string): void {
     if (this.disabled) return;
     this.opts.stdout.write(`\r\x1b[2K${text}`);
+    this.observeOutput();
     this.currentText = text;
     this.visible = true;
   }
@@ -96,6 +100,11 @@ export class StartupProgressPresenter {
     if (!timer) return;
     clearTimeout(timer);
     this[name] = null;
+  }
+  private observeOutput(): void {
+    if (this.outputObserved) return;
+    this.outputObserved = true;
+    try { this.opts.onFirstOutput?.(); } catch { /* Observation cannot fail presentation. */ }
   }
 }
 

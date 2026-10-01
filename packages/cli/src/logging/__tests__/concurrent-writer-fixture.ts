@@ -7,7 +7,7 @@ import { createLogWriterProbe } from "../writers.js";
 const [home, source] = process.argv.slice(2) as [string, string];
 const files = new LogFilesProcess(home), capacity = createDeviceCapacityRuntime(home);
 const degraded: string[] = [];
-const store = new LocalLogStore({ files, capacity: capacity.arbiter, observeWriters: createLogWriterProbe(home, () => files.observeNodeProcesses()) });
+const store = new LocalLogStore({ files, capacity: capacity.arbiter, observeWriters: createLogWriterProbe(home, files) });
 const recorder = new LogRecorder(store, { onHealth: health => { if (health.state === "degraded") degraded.push(health.lastFailure ?? "unknown"); } });
 try {
   const port = recorder.bind({ id: source, version: 1, events: {

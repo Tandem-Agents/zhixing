@@ -18,6 +18,7 @@ import type {
 } from "./contracts.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
 import { fitLogCapture } from "./limits.js";
+import { logFailureEvidence, logStorageFailure } from "./failure.js";
 import { projectLogAccess, validLogAccess, type LogRecordAccess } from "./access-projection.js";
 import { isLegacyFile, validateWriterObservation, type LegacyLogEntry, type LogMigration, type LogWriterIdentity, type LogWriterObservation } from "./legacy.js";
 export type { LegacyLogEntry, LogMigration, LogWriterIdentity, LogWriterObservation } from "./legacy.js";
@@ -34,8 +35,10 @@ export interface LogFileSystem {
   stat(name: string): Promise<LogFileInfo>;
   /** Optional transport batch; same ordered, per-file proof as stat, never cached across transactions. */
   statMany?(names: readonly string[]): Promise<readonly LogFileInfo[]>;
-  read(name: string, size: number, offset: number, limit: number, identity?: string): Promise<Uint8Array>;
+  read(name: string, size: number, offset: number, limit: number, identity?: string, prefix?: boolean): Promise<Uint8Array>;
   write(name: string, bytes: Uint8Array): Promise<void>;
+  /** Append only to the exact admitted object and durable length; synchronize before returning. */
+  append?(name: string, identity: string, offset: number, bytes: Uint8Array): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   truncate(name: string, identity: string, bytes: number): Promise<void>;
   remove(name: string, identity?: string): Promise<void>;
@@ -56,6 +59,10 @@ export interface LogSegment {
   readonly recordIds: readonly string[];
   readonly access?: readonly LogRecordAccess[];
   readonly attachments: readonly { name: string; bytes: number }[];
+  /** v2 writers retain independent active segments per tier. Legacy segments stay sealed. */
+  readonly ordinals?: readonly number[];
+  readonly identity?: string;
+  readonly sealed?: boolean;
 }
 interface RetiredFile {
   name: string;
@@ -79,8 +86,9 @@ export interface LogStoreSnapshot {
   retired: LogRetirement[];
   pending: RetiredFile[];
   gaps: number;
+  lastRecoveryAt?: number;
   legacy?: LegacyLogEntry[];
-  writers?: (LogWriterIdentity & { protocol: 1; registeredAt?: number })[];
+  writers?: (LogWriterIdentity & { protocol: 1 | 2; registeredAt?: number })[];
   migration?: LogMigration;
   legacyRetired?: number;
 }
@@ -90,8 +98,13 @@ const RECOVERY_RESERVE = 8192;
 const OWNED =
   /^(?:published-\d{12}\.head|segment-[a-f0-9-]{36}\.jsonl|detail-[a-f0-9-]{36}\.json|index-[a-f0-9-]{36}\.json|state-\d{12}\.(?:json|new))$/u;
 const CONTROL_FILES = 7;
+function storageFault(code: string, message: string): LogStorageError {
+  return new LogStorageError("storage-unavailable", message, { category: "store", code });
+}
 /** Expected bounded reclamation work; never use this category for physical I/O failures. */
-class LogReclaimPendingError extends Error {}
+class LogReclaimPendingError extends LogStorageError {
+  constructor(message: string) { super("reclaim-pending", message); }
+}
 const STEP: DeviceCapacityBudget = {
   occupancy: {
     memoryReservationBytes: 32 * 1024 * 1024,
@@ -126,6 +139,7 @@ export class LocalLogStore implements LogSink {
   readonly #inventoryDirty = new Set<string>();
   readonly #observeWriters: ((signal: AbortSignal) => Promise<LogWriterObservation>) | undefined;
   #writersObserved: LogWriterObservation | undefined;
+  #ioClaims = 0;
 
   constructor(options: {
     files: LogFileSystem;
@@ -135,8 +149,9 @@ export class LocalLogStore implements LogSink {
     observeWriters?: (signal: AbortSignal) => Promise<LogWriterObservation>;
   }) {
     this.files = meteredFiles(options.files, (dimension, amount) => {
-      if (!this.#permit) throw Error("日志物理操作缺少资源许可");
+      if (!this.#permit) throw storageFault("resource-permit-missing", "日志物理操作缺少资源许可");
       this.#permit.claim(dimension, amount);
+      if (dimension === "ioOperations") this.#ioClaims += amount;
     }, (...names) => {
       this.#namesCache = undefined;
       for (const name of names) this.#inventoryDirty.add(name);
@@ -153,7 +168,7 @@ export class LocalLogStore implements LogSink {
       if (!state) {
         const names = await this.#list();
         if (names.some((name) => name !== "writer.lock" && !isLegacyFile(name)))
-          throw Error("日志存储缺少可信元信息，未重置目录");
+          throw storageFault("metadata-missing", "日志存储缺少可信元信息，未重置目录");
         state = {
           layout: "zxlog/1",
           storeId: randomUUID(),
@@ -175,7 +190,7 @@ export class LocalLogStore implements LogSink {
   }
 
   async append(input: readonly LogCapture[]): Promise<LogAppendReceipt> {
-    if (input.length > 8) throw Error("日志批次超限");
+    if (input.length > 8) throw storageFault("batch-limit", "日志批次超限");
     let wrote = false,
       committed: LogAppendReceipt | undefined;
     try {
@@ -183,7 +198,15 @@ export class LocalLogStore implements LogSink {
         const state = await this.#required(true);
         await this.#recover(state);
         await this.#maintenance(state);
-        if (state.migration && state.migration.state !== "confirmed") throw new LogStorageError("migration-blocked", "旧日志切换尚未完成，已暂停新增日志");
+        if (state.migration && state.migration.state !== "confirmed") {
+          const reason = state.migration.reason ?? "migration-pending";
+          const writers = reason === "old-or-unknown-writer" ? this.#unprovenWriters(state) : undefined;
+          throw new LogStorageError("migration-blocked", "旧日志切换尚未完成，已暂停新增日志",
+            reason === "writer-inventory-unavailable" && this.#writersObserved?.failure
+              ? { ...this.#writersObserved.failure, operation: "writers.inventory" }
+              : { category: "writer-admission", operation: "writers.admission", code: reason,
+                  ...(writers ? { writerCount: writers.length, writerPids: writers.slice(0, 8).map(writer => writer.pid) } : {}) });
+        }
         const policy = state.policy.effective;
         const published = new Set(state.segments.flatMap((segment) => segment.recordIds));
         const accepted = input
@@ -203,7 +226,7 @@ export class LocalLogStore implements LogSink {
             Buffer.byteLength(JSON.stringify(record)) + 512 > policy.recordBytes ||
             (detail && Buffer.byteLength(detail) > policy.attachmentBytes)
           )
-            throw Error("日志记录超过生效限额");
+            throw storageFault("record-limit", "日志记录超过生效限额");
         }
         const tiers: {
           tier: LogTier;
@@ -212,7 +235,7 @@ export class LocalLogStore implements LogSink {
         }[] = [];
         for (const entry of accepted) {
           const estimatedBytes = Buffer.byteLength(JSON.stringify(entry.record)) + 512;
-          const last = tiers.at(-1);
+          const last = tiers.findLast(group => group.tier === entry.record.tier && group.estimatedBytes + estimatedBytes <= policy.segmentBytes);
           if (
             last &&
             last.tier === entry.record.tier &&
@@ -228,9 +251,13 @@ export class LocalLogStore implements LogSink {
             });
         }
         const now = this.#now();
-        let ordinal = state.upper;
+        const ordinal = state.upper + accepted.length;
+        const entryOrdinals = new Map(accepted.map((entry, index) => [entry.record.id, state.upper + index + 1]));
+        const extended = new Set<string>();
         const batches = tiers.map((group) => {
-          const name = `segment-${randomUUID()}.jsonl`;
+          const prior = this.files.append ? state.segments.findLast(segment => !extended.has(segment.name) && segment.tier === group.tier && segment.ordinals && segment.access && segment.identity && !segment.sealed &&
+            now - segment.receivedAt < policy.segmentAgeMs && segment.bytes + group.estimatedBytes <= policy.segmentBytes && segment.recordIds.length + group.entries.length <= 4096 && segment.attachments.length + group.entries.filter(entry => entry.detail).length <= 8) : undefined;
+          if (prior) extended.add(prior.name);
           const attachments: {
             name: string;
             bytes: number;
@@ -257,15 +284,17 @@ export class LocalLogStore implements LogSink {
             };
           });
           const bytes = Buffer.concat(records.map(logJson));
-          if (bytes.length > policy.segmentBytes) throw Error("日志批次超过分段限额");
-          const segment: LogSegment = {
-            name,
+          if (bytes.length > policy.segmentBytes) throw storageFault("segment-limit", "日志批次超过分段限额");
+          const added: LogSegment = {
+            name: `segment-${randomUUID()}.jsonl`,
             bytes: bytes.length,
-            start: ordinal + 1,
-            end: ordinal + records.length,
+            start: entryOrdinals.get(records[0]!.id)!,
+            end: entryOrdinals.get(records.at(-1)!.id)!,
             receivedAt: now,
             tier: group.tier,
             recordIds: records.map((record) => record.id),
+            ordinals: records.map(record => entryOrdinals.get(record.id)!),
+            sealed: false,
             access: projectLogAccess(
               bytes,
               records.map((record) => record.id),
@@ -276,10 +305,8 @@ export class LocalLogStore implements LogSink {
               bytes: length,
             })),
           };
-          ordinal += records.length;
-          return { segment, records, attachments, bytes };
+          return { segment: prior ? extendSegment(prior, added) : added, added, prior, records, attachments, bytes };
         });
-        const newSegments = batches.map((batch) => batch.segment);
         await this.#makeRoom(
           state,
           batches.reduce(
@@ -291,10 +318,15 @@ export class LocalLogStore implements LogSink {
           ),
           batches.reduce((sum, batch) => sum + 1 + batch.attachments.length, 0),
           policy,
-          { append: newSegments },
+          { append: batches.map(batch => batch.added), extend: batches.flatMap(batch => batch.prior ? [{ name: batch.prior.name, addition: batch.added }] : []) },
         );
         wrote = true;
         for (const batch of batches) {
+          // Reclamation may retire the previous active segment to make room.
+          if (batch.prior) {
+            batch.prior = state.segments.find(segment => segment.name === batch.prior!.name);
+            if (!batch.prior) batch.segment = batch.added;
+          }
           for (const attachment of batch.attachments) {
             try {
               await this.files.write(attachment.name, attachment.content);
@@ -310,26 +342,37 @@ export class LocalLogStore implements LogSink {
             }
           }
           const bytes = Buffer.concat(batch.records.map(logJson));
-          await this.files.write(batch.segment.name, bytes);
-          batch.segment = {
-            ...batch.segment,
+          const added = {
+            ...batch.added,
             bytes: bytes.length,
-            access: projectLogAccess(bytes, batch.segment.recordIds, state.storeId),
-            attachments: batch.segment.attachments.filter((item) =>
+            access: projectLogAccess(bytes, batch.added.recordIds, state.storeId),
+            attachments: batch.added.attachments.filter((item) =>
               batch.records.some((record) => record.detail?.name === item.name),
             ),
           };
+          if (batch.prior) {
+            await this.files.append!(batch.prior.name, batch.prior.identity!, batch.prior.bytes, bytes);
+            batch.segment = extendSegment(batch.prior, added);
+          } else {
+            await this.files.write(added.name, bytes);
+            batch.segment = { ...added, identity: (await this.files.stat(added.name)).identity };
+          }
         }
         await this.files.sync();
-        state.segments.push(...batches.map((batch) => batch.segment));
+        for (const batch of batches) {
+          state.segments = state.segments.filter(segment => segment.name !== batch.segment.name).map(segment =>
+            segment.tier === batch.segment.tier && segment.ordinals && !segment.sealed ? { ...segment, sealed: true } : segment);
+          state.segments.push(batch.segment);
+        }
+        state.segments.sort((a, b) => a.start - b.start);
         state.upper = ordinal;
         // One publication for every tier in this batch. Unknown acknowledgements are never replayed.
         await this.#save(state);
         return (committed = { policy: state.policy });
       });
     } catch (error) {
-      if (committed) return { ...committed, storageDegraded: true };
-      if (wrote) throw new LogAppendIndeterminateError();
+      if (committed) return { ...committed, storageDegraded: true, storageFailure: logFailureEvidence(error) };
+      if (wrote) throw new LogAppendIndeterminateError(logFailureEvidence(error));
       throw error;
     }
   }
@@ -397,7 +440,7 @@ export class LocalLogStore implements LogSink {
     return this.#step(true, async () => {
       const state = await this.#required(true),
         names = new Set(await this.#list());
-      const segment = state.segments.find((item) => !names.has(indexName(item.name)));
+      const segment = state.segments.find((item) => (!item.ordinals || item.sealed) && !names.has(indexName(item.name)));
       if (state.migration && state.migration.state !== "confirmed") return false;
       if (!segment) return false;
       const bytes = await this.files.read(segment.name, segment.bytes, 0, segment.bytes);
@@ -429,6 +472,9 @@ export class LocalLogStore implements LogSink {
     if (this.#closed) throw new LogStorageError("owner-unavailable", "日志存储已关闭");
     if (this.#busy) throw new LogStorageError("writer-busy", "日志存储正在维护");
     this.#busy = true;
+    this.#ioClaims = 0;
+    const started = performance.now();
+    let admissionMs = 0, lockWaitMs = 0;
     let settle!: () => void;
     this.#idle = new Promise<void>((resolve) => { settle = resolve; });
     let releaseLock = false;
@@ -444,9 +490,11 @@ export class LocalLogStore implements LogSink {
         },
         this.#abort.signal,
       );
+      admissionMs = performance.now() - started;
       if (admission.kind !== "granted") throw new LogStorageError(
         admission.kind === "capacity-gap" ? "resource-gap" : admission.kind === "backpressured" && admission.blockedBy === "probe-unavailable" ? "probe-unavailable" : "resource-wait",
         "日志存储资源暂不可用",
+        { category: "capacity", operation: "capacity.acquire", code: admission.kind === "backpressured" ? admission.blockedBy : admission.kind },
       );
       const step = admission.permit.tryBegin(budget);
       if (!step) {
@@ -454,6 +502,7 @@ export class LocalLogStore implements LogSink {
         throw new LogStorageError("resource-wait", "日志存储步骤受阻");
       }
       // Reserve the entire bounded step before taking the cross-process lock.
+      let failed = false, primary: unknown;
       try {
         this.#permit = step;
         await this.files.open(!write);
@@ -463,14 +512,20 @@ export class LocalLogStore implements LogSink {
             try {
               const value = await this.#observeWriters(this.#abort.signal);
               if (validateWriterObservation(value)) this.#writersObserved = value;
-            } catch { /* Missing proof blocks migration, never becomes an empty process list. */ }
+            } catch (error) {
+              // Missing proof still blocks migration; retain why it was unavailable.
+              this.#writersObserved = { complete: false, at: this.#now(), candidates: [], failure: logFailureEvidence(error) };
+            }
           }
           if (this.#closed) throw new LogStorageError("owner-unavailable", "日志存储已关闭");
-          releaseLock = await this.files.tryLock();
+          const waiting = performance.now();
+          try { releaseLock = await this.files.tryLock(); }
+          finally { lockWaitMs = performance.now() - waiting; }
           if (!releaseLock) throw new LogStorageError("writer-busy", "日志存储正在维护");
           this.#inventoryLocked = true;
         }
         return await work();
+      } catch (error) { failed = true; primary = error; throw error;
       } finally {
         this.#inventoryLocked = false;
         this.#inventoryCache = undefined;
@@ -478,12 +533,20 @@ export class LocalLogStore implements LogSink {
         this.#inventoryDirty.clear();
         try {
           if (releaseLock) await this.files.unlock();
+        } catch (error) {
+          if (failed) throw new AggregateError([primary, error], "日志事务与释放均未完成", { cause: primary });
+          throw error;
         } finally {
           this.#permit = undefined;
           step.complete();
           admission.permit.release();
         }
       }
+    } catch (error) {
+      if (!write || error instanceof LogRequestError || error instanceof LogStoreNotInitializedError) throw error;
+      throw new LogStorageError(logStorageFailure(error), error instanceof Error ? error.message : "日志事务未完成", {
+        ...logFailureEvidence(error), durationMs: Math.round(performance.now() - started), admissionMs: Math.round(admissionMs), lockWaitMs: Math.round(lockWaitMs), ioClaims: this.#ioClaims,
+      });
     } finally {
       this.#busy = false;
       settle();
@@ -515,7 +578,7 @@ export class LocalLogStore implements LogSink {
     // Legacy/uninitialized offline reads must not create a root or a control file.
     const names = await this.#list();
     if (!names.includes("writer.lock")) {
-      if (names.some(name => HEAD.test(name))) throw Error("日志治理控制文件缺失");
+      if (names.some(name => HEAD.test(name))) throw storageFault("control-file-missing", "日志治理控制文件缺失");
       // Observe the absence at this point, rather than racing first publication.
       // Callers below must not read a newly published state without exclusion.
       if (absent) return absent();
@@ -560,13 +623,13 @@ export class LocalLogStore implements LogSink {
       if (published > 0) {
         const previous = await this.#readState(`state-${String(published).padStart(12, "0")}.json`);
         if (candidate.storeId !== previous.storeId || candidate.upper < previous.upper)
-          throw Error("日志发布身份或水位回退");
+          throw storageFault("publication-regressed", "日志发布身份或水位回退");
       }
       // Complete candidates preserve observation identity, even if a final namespace barrier failed.
       for (const segment of candidate.segments) {
         for (const file of [{ name: segment.name, bytes: segment.bytes }, ...segment.attachments]) {
           const actual = await this.files.stat(file.name);
-          if (actual.bytes !== file.bytes) throw Error("日志发布候选引用不完整");
+          if (actual.bytes !== file.bytes) throw storageFault("publication-incomplete", "日志发布候选引用不完整");
           await this.files.truncate(file.name, actual.identity, actual.bytes);
         }
       }
@@ -585,10 +648,11 @@ export class LocalLogStore implements LogSink {
   }
   async #readState(name: string): Promise<LogStoreSnapshot> {
     const info = await this.files.stat(name);
-    if (info.bytes > 4 * 1024 * 1024) throw Error("日志治理文件超限");
-    const envelope = JSON.parse(
-      Buffer.from(await this.files.read(name, info.bytes, 0, info.bytes, info.identity)).toString("utf8"),
-    ) as { digest: string; state: LogStoreSnapshot };
+    if (info.bytes > 4 * 1024 * 1024) throw storageFault("metadata-size-limit", "日志治理文件超限");
+    const content = Buffer.from(await this.files.read(name, info.bytes, 0, info.bytes, info.identity)).toString("utf8");
+    let envelope: { digest: string; state: LogStoreSnapshot };
+    try { envelope = JSON.parse(content); }
+    catch { throw storageFault("metadata-json-invalid", "日志治理文件损坏"); }
     const state = envelope.state;
     if (
       !state ||
@@ -597,11 +661,13 @@ export class LocalLogStore implements LogSink {
       !/^[a-f0-9-]{36}$/u.test(state.storeId) ||
       !Number.isSafeInteger(state.generation) ||
       !Number.isSafeInteger(state.upper) ||
+      !Number.isSafeInteger(state.gaps) || state.gaps < 0 ||
+      (state.lastRecoveryAt !== undefined && !Number.isSafeInteger(state.lastRecoveryAt)) ||
       !Array.isArray(state.segments) ||
       !Array.isArray(state.pending) ||
       !Array.isArray(state.retired)
     )
-      throw Error("日志治理文件损坏");
+      throw storageFault("metadata-corrupt", "日志治理文件损坏");
     if (
       state.generation !== Number(name.slice(6, 18)) ||
       state.generation < 1 ||
@@ -609,12 +675,12 @@ export class LocalLogStore implements LogSink {
       !Number.isSafeInteger(state.policy.version) ||
       state.policy.version < 1
     )
-      throw Error("日志治理代际损坏");
+      throw storageFault("generation-corrupt", "日志治理代际损坏");
     validateLogPolicy(state.policy.effective);
     if (state.policy.desired) validateLogPolicy(state.policy.desired);
     if (state.segments.length > 4096 || state.pending.length > 4096 || state.retired.length > 64)
-      throw Error("日志治理状态超限");
-    let previousEnd = 0;
+      throw storageFault("metadata-count-limit", "日志治理状态超限");
+    const ordinals = new Set<number>(), segmentNames = new Set<string>();
     for (const segment of state.segments) {
       if (
         !/^segment-[a-f0-9-]{36}\.jsonl$/u.test(segment.name) ||
@@ -623,19 +689,19 @@ export class LocalLogStore implements LogSink {
         segment.bytes > 8 * 1024 * 1024 ||
         !Number.isSafeInteger(segment.start) ||
         !Number.isSafeInteger(segment.end) ||
-        segment.start <= previousEnd ||
+        segment.start < 1 ||
         segment.end < segment.start ||
         segment.end > state.upper ||
         !Array.isArray(segment.recordIds) ||
-        segment.recordIds.length !== segment.end - segment.start + 1 ||
-        segment.recordIds.length > 8 ||
+        segment.recordIds.length !== (segment.ordinals?.length ?? segment.end - segment.start + 1) ||
+        segment.recordIds.length > 4096 ||
         segment.recordIds.some((id) => !/^[a-f0-9-]{36}$/u.test(id)) ||
         !Array.isArray(segment.attachments) ||
-        segment.attachments.length > 8 ||
+        segment.attachments.length > 4096 ||
         !["critical", "detail"].includes(segment.tier) ||
         !Number.isSafeInteger(segment.receivedAt)
       )
-        throw Error("日志段元信息损坏");
+        throw storageFault("segment-metadata-corrupt", "日志段元信息损坏");
       for (const detail of segment.attachments)
         if (
           !/^detail-[a-f0-9-]{36}\.json$/u.test(detail.name) ||
@@ -643,13 +709,23 @@ export class LocalLogStore implements LogSink {
           detail.bytes <= 0 ||
           detail.bytes > 1024 * 1024
         )
-          throw Error("日志详情元信息损坏");
+          throw storageFault("detail-metadata-corrupt", "日志详情元信息损坏");
       if (
         segment.access !== undefined &&
         !validLogAccess(segment.access, segment.recordIds.length, segment.bytes)
       )
-        throw Error("日志访问投影损坏");
-      previousEnd = segment.end;
+        throw storageFault("access-projection-corrupt", "日志访问投影损坏");
+      if (segmentNames.has(segment.name)) throw storageFault("duplicate-segment", "日志段身份重复");
+      segmentNames.add(segment.name);
+      if (segment.ordinals && (!Array.isArray(segment.ordinals) || !segment.ordinals.length ||
+        segment.ordinals[0] !== segment.start || segment.ordinals.at(-1) !== segment.end ||
+        typeof segment.identity !== "string" || segment.identity.length > 128 || typeof segment.sealed !== "boolean" || !segment.access)) throw storageFault("active-segment-corrupt", "日志活动段元信息损坏");
+      let prior = 0;
+      for (let index = 0; index < segment.recordIds.length; index++) {
+        const ordinal = segment.ordinals?.[index] ?? segment.start + index;
+        if (!Number.isSafeInteger(ordinal) || ordinal <= prior || ordinal > state.upper || ordinals.has(ordinal)) throw storageFault("ordinal-corrupt", "日志序号损坏或重复");
+        ordinals.add(ordinal); prior = ordinal;
+      }
     }
     for (const item of state.pending)
       if (
@@ -660,14 +736,14 @@ export class LocalLogStore implements LogSink {
         item.identity.length > 128 ||
         typeof item.reclaimed !== "boolean"
       )
-        throw Error("日志回收状态损坏");
+        throw storageFault("retirement-corrupt", "日志回收状态损坏");
     if (state.legacy !== undefined && (!Array.isArray(state.legacy) || state.legacy.length > 4096 || state.legacy.some((entry) =>
       !isLegacyFile(entry.name) || !/^[a-f0-9]{64}$/u.test(entry.id) || typeof entry.identity !== "string" || entry.identity.length > 128 ||
-      !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw Error("旧日志登记损坏");
+      !Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || !Number.isSafeInteger(entry.registeredAt) || !Number.isSafeInteger(entry.generation)))) throw storageFault("legacy-metadata-corrupt", "旧日志登记损坏");
     if (state.writers !== undefined && (!Array.isArray(state.writers) || state.writers.length > 256 || state.writers.some((entry) =>
-      entry.protocol !== 1 || (entry.registeredAt !== undefined && !Number.isSafeInteger(entry.registeredAt)) ||
-      !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw Error("日志写者登记损坏");
-    if (state.migration !== undefined && (!["pending", "blocked", "confirmed"].includes(state.migration.state) || !Number.isSafeInteger(state.migration.checkedAt))) throw Error("日志切换状态损坏");
+      ![1, 2].includes(entry.protocol) || (entry.registeredAt !== undefined && !Number.isSafeInteger(entry.registeredAt)) ||
+      !validateWriterObservation({ complete: true, at: 0, candidates: [entry] })))) throw storageFault("writer-metadata-corrupt", "日志写者登记损坏");
+    if (state.migration !== undefined && (!["pending", "blocked", "confirmed"].includes(state.migration.state) || !Number.isSafeInteger(state.migration.checkedAt))) throw storageFault("migration-metadata-corrupt", "日志切换状态损坏");
     return state;
   }
   async #save(state: LogStoreSnapshot): Promise<void> {
@@ -691,7 +767,7 @@ export class LocalLogStore implements LogSink {
       state,
     });
     if (content.length > Math.floor(state.policy.effective.governanceBytes / 3))
-      throw Error("日志治理预留不足");
+      throw storageFault("governance-reserve", "日志治理预留不足");
     const stem = `state-${String(state.generation).padStart(12, "0")}`;
     const inventory = await this.#inventory();
     // Adoption may start above the new limit. Only bounded governance can grow then;
@@ -702,7 +778,7 @@ export class LocalLogStore implements LogSink {
         state.policy.effective.maxBytes ||
       budgetInventory.length + 2 > state.policy.effective.maxFiles
     )
-      throw Error("日志治理发布缺少预算");
+      throw storageFault("publication-budget", "日志治理发布缺少预算");
     await this.files.write(`${stem}.new`, content);
     await this.files.sync();
     await this.files.rename(`${stem}.new`, `${stem}.json`);
@@ -720,7 +796,7 @@ export class LocalLogStore implements LogSink {
     const missing: string[] = [];
     for (const name of await this.#list()) {
       if (name !== "writer.lock" && !OWNED.test(name) && !isLegacyFile(name))
-        throw Error("日志根含未登记文件，已停止写入");
+        throw storageFault("unmanaged-file", "日志根含未登记文件，已停止写入");
       const prior = cached?.get(name);
       if (prior && !(refreshLegacy && isLegacyFile(name)) && !this.#inventoryDirty.has(name)) result.set(name, prior);
       else missing.push(name);
@@ -728,7 +804,7 @@ export class LocalLogStore implements LogSink {
     const observed = !missing.length ? [] : this.files.statMany
       ? await this.files.statMany(missing)
       : await sequentialStats(this.files, missing);
-    if (observed.length !== missing.length) throw Error("日志文件清点不完整");
+    if (observed.length !== missing.length) throw storageFault("inventory-incomplete", "日志文件清点不完整");
     missing.forEach((name, index) => result.set(name, observed[index]!));
     if (this.#inventoryLocked) {
       this.#inventoryCache = result;
@@ -741,6 +817,12 @@ export class LocalLogStore implements LogSink {
     await this.files.truncate(name, info.identity, 0);
     await this.files.remove(name, info.identity);
     await this.files.sync();
+  }
+  #unprovenWriters(state: LogStoreSnapshot): readonly LogWriterIdentity[] {
+    const proof = this.#writersObserved;
+    return proof?.candidates.filter(entry =>
+      !state.writers?.some(writer => writer.protocol === 2 && writer.pid === entry.pid && writer.birth === entry.birth) &&
+      !proof.compatible?.some(writer => writer.pid === entry.pid && writer.birth === entry.birth)) ?? [];
   }
   async #refreshMigration(state: LogStoreSnapshot): Promise<void> {
     // Legacy may still have an incompatible writer; registration always observes it afresh.
@@ -760,10 +842,11 @@ export class LocalLogStore implements LogSink {
       proof.candidates.some((entry) => entry.pid === writer.pid && entry.birth === writer.birth));
     if (proof?.self) {
       const current = writers.find(writer => writer.pid === proof.self!.pid && writer.birth === proof.self!.birth);
-      if (!current && writers.length < 256) writers.push({ ...proof.self, protocol: 1, registeredAt: this.#now() });
+      if (current) current.protocol = 2;
+      else if (writers.length < 256) writers.push({ ...proof.self, protocol: 2, registeredAt: this.#now() });
     }
     state.writers = writers;
-    const compatible = complete && proof.candidates.every((entry) => writers.some((writer) => writer.protocol === 1 && writer.pid === entry.pid && writer.birth === entry.birth));
+    const compatible = complete && this.#unprovenWriters(state).length === 0;
     const previous = state.migration;
     const migration = { state: compatible ? previous?.state === "confirmed" ? "confirmed" : "pending" : "blocked", checkedAt: previous?.checkedAt ?? proof?.at ?? this.#now(), ...(compatible ? {} : { reason: complete ? "old-or-unknown-writer" : "writer-inventory-unavailable" }) } as LogMigration;
     state.migration = migration;
@@ -785,9 +868,9 @@ export class LocalLogStore implements LogSink {
     }
   }
   async #retireLegacy(state: LogStoreSnapshot, entry: LegacyLogEntry): Promise<void> {
-    if (state.migration?.state === "blocked") throw Error("旧日志写者尚未退出");
+    if (state.migration?.state === "blocked") throw storageFault("legacy-writer-live", "旧日志写者尚未退出");
     const actual = await this.files.stat(entry.name);
-    if (actual.identity !== entry.identity || actual.bytes !== entry.bytes) throw Error("旧日志在切换期间发生变化");
+    if (actual.identity !== entry.identity || actual.bytes !== entry.bytes) throw storageFault("legacy-changed", "旧日志在切换期间发生变化");
     state.pending.push({ name: entry.name, ...actual, reclaimed: false });
     state.legacy = state.legacy!.filter((item) => item !== entry);
     state.legacyRetired = Math.min(Number.MAX_SAFE_INTEGER, (state.legacyRetired ?? 0) + 1);
@@ -804,6 +887,17 @@ export class LocalLogStore implements LogSink {
       ]),
     );
     const inventory = await this.#inventory();
+    // Only unpublished tails may be truncated. Published candidates were recovered first.
+    for (const segment of state.segments.filter(item => item.ordinals && !item.sealed)) {
+      const actual = inventory.get(segment.name);
+      if (!actual || actual.identity !== segment.identity || actual.bytes < segment.bytes) throw storageFault("published-prefix-corrupt", "日志活动段已发布前缀损坏");
+      if (actual.bytes > segment.bytes) {
+        await this.files.truncate(segment.name, actual.identity, segment.bytes);
+        state.gaps++;
+        state.lastRecoveryAt = this.#now();
+        await this.#save(state);
+      }
+    }
     // An unpublished governance candidate has no evidence rights. Reclaim it first
     // so recovery never needs a fourth full snapshot's unreserved peak.
     for (const [name] of inventory)
@@ -811,6 +905,7 @@ export class LocalLogStore implements LogSink {
         await this.#erase(name);
         inventory.delete(name);
         state.gaps++;
+        state.lastRecoveryAt = this.#now();
       }
     const orphans = [...inventory].filter(
       ([name]) =>
@@ -819,6 +914,7 @@ export class LocalLogStore implements LogSink {
     for (const [name, info] of orphans.slice(0, 8)) {
       state.pending.push({ name, ...info, reclaimed: false });
       state.gaps++;
+      state.lastRecoveryAt = this.#now();
     }
     if (orphans.length) {
       await this.#save(state);
@@ -826,30 +922,34 @@ export class LocalLogStore implements LogSink {
     }
   }
   async #reclaimPending(state: LogStoreSnapshot): Promise<void> {
-    for (const item of [...state.pending].slice(0, 16)) {
-      if (isLegacyFile(item.name) && state.migration?.state === "blocked") continue;
+    const batch = state.pending.filter(item => !isLegacyFile(item.name) || state.migration?.state !== "blocked").slice(0, 16);
+    if (!batch.length) return;
+    for (const item of batch) {
       if (!item.reclaimed) {
         const actual = await this.files.stat(item.name);
-        if (actual.identity !== item.identity) throw Error("待回收日志文件已替换");
+        if (actual.identity !== item.identity) throw storageFault("retirement-file-replaced", "待回收日志文件已替换");
         await this.files.truncate(item.name, item.identity, 0);
         item.reclaimed = true;
         item.bytes = 0;
-        await this.#save(state);
       }
-      const names = await this.#list();
+    }
+    await this.#save(state);
+    const names = await this.#list();
+    for (const item of batch) {
       if (names.includes(item.name)) {
         const actual = await this.files.stat(item.name);
         if (actual.identity !== item.identity || actual.bytes !== 0)
-          throw Error("待回收日志空间未确认");
+          throw storageFault("retirement-unconfirmed", "待回收日志空间未确认");
         await this.files.remove(item.name, item.identity);
-        await this.files.sync();
       }
       state.pending = state.pending.filter((entry) => entry !== item);
-      await this.#save(state);
     }
+    await this.files.sync();
+    await this.#save(state);
   }
-  async #retire(state: LogStoreSnapshot, segment: LogSegment, reason: string): Promise<void> {
+  async #retireSegments(state: LogStoreSnapshot, segments: readonly LogSegment[], reason: string): Promise<void> {
     const names = new Set(await this.#list());
+    for (const segment of segments) {
     for (const name of [
       segment.name,
       ...segment.attachments.map((item) => item.name),
@@ -863,12 +963,8 @@ export class LocalLogStore implements LogSink {
         });
     }
     state.segments = state.segments.filter((item) => item !== segment);
-    state.retired.push({
-      start: segment.start,
-      end: segment.end,
-      at: this.#now(),
-      reason,
-    });
+    for (const range of segmentRanges(segment)) state.retired.push({ ...range, at: this.#now(), reason });
+    }
     state.retired = state.retired.slice(-64);
     await this.#save(state);
     await this.#reclaimPending(state);
@@ -880,11 +976,12 @@ export class LocalLogStore implements LogSink {
     target = state.policy.effective,
     changes: {
       append?: readonly LogSegment[];
+      extend?: readonly { name: string; addition: LogSegment }[];
       access?: { name: string; value: readonly LogRecordAccess[] };
     } = {},
   ): Promise<boolean> {
-    if (state.migration?.state === "blocked") throw Error("旧日志写者尚未完成切换");
-    for (let attempt = 0; attempt < 8; attempt++) {
+    if (state.migration?.state === "blocked") throw storageFault("migration-incomplete", "旧日志写者尚未完成切换");
+    for (let attempt = 0; attempt <= 8; attempt++) {
       const inventory = await this.#inventory();
       const payload = [...inventory].filter(
         ([name]) => !name.startsWith("state-") && !HEAD.test(name) && name !== "writer.lock",
@@ -895,11 +992,13 @@ export class LocalLogStore implements LogSink {
           ...state,
           segments: [
             ...state.segments.map((segment) =>
-              segment.name === changes.access?.name
+              changes.extend?.some(item => item.name === segment.name)
+                ? extendSegment(segment, changes.extend.find(item => item.name === segment.name)!.addition)
+                : segment.name === changes.access?.name
                 ? { ...segment, access: changes.access.value }
                 : segment,
             ),
-            ...(changes.append ?? []),
+            ...(changes.append ?? []).filter(segment => !changes.extend?.some(extension => extension.addition === segment && state.segments.some(old => old.name === extension.name))),
           ],
         }).length + 256;
       // 8 KiB covers one retirement (10 files), eight orphan descriptors, policy intent,
@@ -910,6 +1009,7 @@ export class LocalLogStore implements LogSink {
         metadata <= Math.floor(target.governanceBytes / 3) - RECOVERY_RESERVE
       )
         return true;
+      if (attempt === 8) break;
       const withDetails = state.segments.find((segment) => segment.attachments.length > 0);
       if (withDetails) {
         await this.#retireDetails(state, withDetails);
@@ -917,12 +1017,26 @@ export class LocalLogStore implements LogSink {
       }
       const historical = state.legacy?.[0];
       if (historical) { await this.#retireLegacy(state, historical); continue; }
-      const next = [...state.segments].sort(
+      const candidates = [...state.segments].sort(
         (a, b) =>
           (a.tier === b.tier ? 0 : a.tier === "detail" ? -1 : 1) || a.receivedAt - b.receivedAt,
-      )[0];
-      if (!next) throw new LogReclaimPendingError("日志容量已满，空间尚未回收");
-      await this.#retire(state, next, "capacity");
+      );
+      if (!candidates.length) throw new LogReclaimPendingError("日志容量已满，空间尚未回收");
+      const selected: LogSegment[] = [];
+      let reclaimedBytes = 0, reclaimedFiles = 0, metadataBytes = 0;
+      for (const candidate of candidates.slice(0, 8 - attempt)) {
+        selected.push(candidate);
+        for (const name of [candidate.name, indexName(candidate.name), ...candidate.attachments.map(item => item.name)]) {
+          const info = inventory.get(name);
+          if (info) { reclaimedBytes += info.bytes; reclaimedFiles++; }
+        }
+        metadataBytes += logJson(candidate).length;
+        if (total - reclaimedBytes + bytes + target.governanceBytes <= target.maxBytes &&
+          payload.length - reclaimedFiles + count + CONTROL_FILES <= target.maxFiles &&
+          metadata - metadataBytes <= Math.floor(target.governanceBytes / 3) - RECOVERY_RESERVE) break;
+      }
+      await this.#retireSegments(state, selected, "capacity");
+      attempt += selected.length - 1;
     }
     throw new LogReclaimPendingError("日志回收仍在进行");
   }
@@ -937,16 +1051,20 @@ export class LocalLogStore implements LogSink {
     }
     const now = this.#now(),
       policy = state.policy.desired ?? state.policy.effective;
+    if (state.segments.some(segment => segment.ordinals && !segment.sealed && (segment.bytes >= policy.segmentBytes || now - segment.receivedAt >= policy.segmentAgeMs))) {
+      state.segments = state.segments.map(segment => segment.ordinals && !segment.sealed && (segment.bytes >= policy.segmentBytes || now - segment.receivedAt >= policy.segmentAgeMs) ? { ...segment, sealed: true } : segment);
+      await this.#save(state);
+    }
     for (const entry of [...(state.legacy ?? [])].filter((entry) => now - entry.registeredAt >= policy.detailTtlMs).slice(0, 4))
       await this.#retireLegacy(state, entry);
-    for (const segment of [...state.segments]
+    const expired = [...state.segments]
       .filter(
         (item) =>
           now - item.receivedAt >=
           (item.tier === "critical" ? policy.criticalTtlMs : policy.detailTtlMs),
       )
-      .slice(0, 4))
-      await this.#retire(state, segment, "retention");
+      .slice(0, 4);
+    if (expired.length) await this.#retireSegments(state, expired, "retention");
     for (const segment of [...state.segments]
       .filter((item) => item.attachments.length && now - item.receivedAt >= policy.attachmentTtlMs)
       .slice(0, 4))
@@ -1033,6 +1151,7 @@ export class LocalLogStore implements LogSink {
             : state.policy.effective.detailTtlMs),
       ),
       upper: state.upper,
+      ...(state.gaps ? { recovery: { unconfirmedFiles: state.gaps, ...(state.lastRecoveryAt !== undefined ? { lastObservedAt: state.lastRecoveryAt } : {}) } } : {}),
       ...(migration ? { migration: { ...migration, legacyFiles: state.legacy?.length ?? 0, catalog: `zxlog://${state.storeId}/legacy/catalog`, lastObserved: true as const } } : {}),
     };
   }
@@ -1058,6 +1177,24 @@ export function indexName(segment: string): string {
   return segment.replace(/^segment-/u, "index-").replace(/jsonl$/u, "json");
 }
 
+function extendSegment(prior: LogSegment, addition: LogSegment): LogSegment {
+  return { ...prior, bytes: prior.bytes + addition.bytes, end: addition.end,
+    recordIds: [...prior.recordIds, ...addition.recordIds], ordinals: [...prior.ordinals!, ...addition.ordinals!],
+    access: [...prior.access!, ...addition.access!.map(entry => ({ ...entry, offset: prior.bytes + entry.offset }))],
+    attachments: [...prior.attachments, ...addition.attachments] };
+}
+
+function segmentRanges(segment: LogSegment): { start: number; end: number }[] {
+  if (!segment.ordinals) return [{ start: segment.start, end: segment.end }];
+  const ranges: { start: number; end: number }[] = [];
+  for (const ordinal of segment.ordinals) {
+    const last = ranges.at(-1);
+    if (last?.end === ordinal - 1) last.end = ordinal;
+    else ranges.push({ start: ordinal, end: ordinal });
+  }
+  return ranges;
+}
+
 async function sequentialStats(files: LogFileSystem, names: readonly string[]): Promise<LogFileInfo[]> {
   const result: LogFileInfo[] = [];
   for (const name of names) result.push(await files.stat(name));
@@ -1070,7 +1207,7 @@ function meteredFiles(
   changed: (...names: string[]) => void,
 ): LogFileSystem {
   const io = (count = 1): void => claim("ioOperations", count);
-  return {
+  const measured: LogFileSystem = {
     open: async (readOnly) => {
       io(8);
       await files.open(readOnly);
@@ -1087,11 +1224,15 @@ function meteredFiles(
       io(names.length);
       return files.statMany!(names);
     } } : {}),
-    read: async (name, size, offset, limit, identity) => {
+    read: async (name, size, offset, limit, identity, prefix) => {
       io();
       claim("readBytes", limit);
-      return files.read(name, size, offset, limit, identity);
+      return files.read(name, size, offset, limit, identity, prefix);
     },
+    ...(files.append ? { append: async (name: string, identity: string, offset: number, bytes: Uint8Array) => {
+      io(); claim("writeBytes", bytes.byteLength); changed(name);
+      await files.append!(name, identity, offset, bytes);
+    } } : {}),
     write: async (name, bytes) => {
       io();
       claim("writeBytes", bytes.byteLength);
@@ -1132,4 +1273,11 @@ function meteredFiles(
       await files.close();
     },
   };
+  // Preserve the physical operation and finite native cause at the first trusted boundary.
+  return Object.fromEntries(Object.entries(measured).map(([operation, method]) => [operation, async (...args: unknown[]) => {
+    try { return await Reflect.apply(method, measured, args); }
+    catch (error) {
+      throw new LogStorageError(logStorageFailure(error), error instanceof Error ? error.message : `日志文件操作 ${operation} 未完成`, { ...logFailureEvidence(error), operation: `files.${operation}` });
+    }
+  }])) as unknown as LogFileSystem;
 }

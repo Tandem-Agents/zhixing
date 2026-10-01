@@ -14,6 +14,7 @@ import type { AdvancementActiveStateProjection } from "../advancement/applicatio
 import { parseConversationId } from "../conversation/scope-id.js";
 import { normalizeSceneName } from "./validation.js";
 import type { WorksceneContinuationApplication, WorksceneTaskReference } from "./continuation.js";
+export { WorksceneRunToolApplicationService, type WorksceneRunToolApplication, type WorksceneToolRun } from "./run-tools.js";
 export {
   WorksceneContinuationApplication,
   isWorksceneSupportConversation,

@@ -40,9 +40,9 @@
     "lint:fix": "biome check --write .",
     "clean": "pnpm -r run clean",
     "playground": "node --import=tsx/esm playground/chat.ts",
-    "cli": "node --import=tsx/esm packages/cli/src/index.ts",
+    "cli": "node --import=tsx/esm packages/cli/src/entry.ts",
     "cli:build": "pnpm --filter @zhixing/cli build",
-    "serve": "node --import=tsx/esm packages/cli/src/index.ts serve"
+    "serve": "node --import=tsx/esm packages/cli/src/entry.ts serve"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.14",

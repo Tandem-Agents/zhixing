@@ -30,6 +30,34 @@ async function setup(text: string, observation: () => LogWriterObservation = pro
 }
 
 describe("legacy log adoption on native files", () => {
+  it.each(["incomplete", "unknown", "fault"] as const)("retains the %s admission cause without admitting an unproven writer", async kind => {
+    let recovered = false;
+    const unknown = Array.from({ length: 10 }, (_, index) => ({ pid: 100 + index, birth: `unknown-${index}` }));
+    const h = await setup("", () => {
+      if (recovered) return proof();
+      if (kind === "fault") throw Object.assign(Error("private inventory path"), { code: "EACCES" });
+      return kind === "unknown" ? { ...proof(), candidates: [self, ...unknown] } : { ...proof(), complete: false };
+    });
+    expect((await h.store.initialize()).migration?.state).toBe("blocked");
+    await expect(h.store.append([])).rejects.toMatchObject({ code: "migration-blocked", evidence:
+      kind === "fault" ? { category: "system", code: "EACCES", operation: "writers.inventory" } :
+      { category: "writer-admission", code: kind === "unknown" ? "old-or-unknown-writer" : "writer-inventory-unavailable", operation: "writers.admission",
+        ...(kind === "unknown" ? { writerCount: 10, writerPids: unknown.slice(0, 8).map(writer => writer.pid) } : {}) } });
+    recovered = true;
+    await expect(h.store.append([])).resolves.toBeDefined();
+  });
+  it("keeps confirmed writers admitted while a peer-proven newcomer registers, but not after PID reuse", async () => {
+    let observation = proof();
+    const h = await setup("", () => observation);
+    expect((await h.store.initialize()).migration?.state).toBe("confirmed");
+    const newcomer = { pid: 18, birth: "new-instance" };
+    observation = { ...proof(), candidates: [self, newcomer], compatible: [newcomer] };
+    expect((await h.store.maintain()).migration?.state).toBe("confirmed");
+    observation = { ...proof(), candidates: [self, { ...newcomer, birth: "reused-pid" }] };
+    expect((await h.store.maintain()).migration?.state).toBe("blocked");
+    observation = proof();
+    expect((await h.store.maintain()).migration?.state).toBe("confirmed");
+  });
   it("does not erase a writer registered after an older process inventory", async () => {
     const home = await createTempDir("legacy-writer-registration-race");
     let now = Date.now();
@@ -242,7 +270,7 @@ describe("legacy log adoption on native files", () => {
     expect(result.complete).toBe(true);
     expect(result.self?.pid).toBe(process.pid);
     expect(result.self?.birth).toMatch(/^[a-zA-Z0-9_.:-]+$/u);
-    expect(Object.keys(result).sort()).toEqual(["at", "candidates", "complete", "self"]);
+    expect(Object.keys(result).sort()).toEqual(["at", "candidates", "compatible", "complete", "self"]);
   }, 10000);
 });
 
@@ -250,6 +278,6 @@ async function probeWriters(home: string) {
   const files = new LogFilesProcess(home);
   try {
     await files.open(true);
-    return await createLogWriterProbe(home, () => files.observeNodeProcesses())();
+    return await createLogWriterProbe(home, files)();
   } finally { await files.close(); }
 }

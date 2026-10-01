@@ -75,18 +75,18 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 
 ### 进程与 Host
 
-1. `@zhixing/cli` 的 `zz` 与 `zhixing` 两个 bin 指向同一个 Commander 入口 `packages/cli/src/index.ts`；默认交互、管理命令和内部 `serve` 都从这里分派。
+1. `@zhixing/cli` 的 `zz` 与 `zhixing` 两个 bin 指向轻量入口 `packages/cli/src/entry.ts`，先建立运行观察身份，再装载 `index.ts` 的 Commander 分派；默认交互、管理命令和内部 `serve` 共用该入口。
 2. 持久服务入口 `packages/cli/src/serve/topology-command.ts` 解析进程模式，取得 home、启动检查和秘密投影，然后只创建一个 `PersistentApplicationHost`。
 3. `PersistentApplicationHost` 完成 Mesh/bootstrap maintenance、恢复根前置、容量与本机 workspace lease，再用 `planServeTopology` 选择 `anchor-host`、`executor-host` 或 disabled；Anchor+Executor 仍是同一个 Host 中的两项角色贡献，不是第二组合根。
 4. Host 在任何角色副作用前装入所需模块。Anchor-only 不装入 Executor，Executor-only 不装入 Anchor；角色正常返回或失败后，外层资源都由同一个 Host 终止路径释放。
 
 ### 运行日志
 
-`@zhixing/core/logging` 分为来源只写端口、Recorder、有界独立 Store 和授权 LogApplication；记录不是业务事实，生产方不能反向读取日志恢复状态。CLI 进程入口先创建 Recorder 与容量端口，Host 沿用并在业务清理后排空；备份／恢复、配对及离线工作区命令显式传递同一进程 owner，纯日志查询不启动写者。
+`@zhixing/core/logging` 分为来源只写端口、Recorder、有界独立 Store 和授权 LogApplication；记录不是业务事实，生产方不能反向读取日志恢复状态。轻入口的 Recorder 与正式存储接续共用身份及有界队列；容量端口就绪后才开始受管持久化，Host 沿用并在业务清理后排空。关键阶段成对记录并关联父阶段、进程交接、等待对象和工作量；有界健康状态保留首次失败、后续变化及恢复。备份／恢复、配对及离线工作区命令显式传递同一进程 owner，纯日志查询不启动写者。
 
 每个来源在实际边界投影安全字段和既有身份，共用有界队列；Authority 在持久提交完成后观察，Kernel 使用明确事件绑定及 Provider 实际调用，扩展经宿主 IPC 校验和实例限流。领域事件与直接采集不重复订阅。未知效果保留原判断，后续证据追加关联。
 
-Store 使用独立 `logs/runtime/` 根，跨进程互斥发布、耐久水位和可重建索引；完整写事务在入口拥有的独立子进程中执行，避免业务线程停顿延长持锁。资源许可由入口原容量 owner 在持锁前预留，持久预算由 Store 自身计量。CLI、RPC 与模型日志工具沿同一应用授权读取；旧日志保留原格式并统一计量，只有存活写者兼容、遗留占用受控才确认整体预算生效。旧私有 dump、按键文件和后台文件写者已经退役。
+Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小／年龄封段；跨进程互斥发布、耐久水位和可重建索引，读取只承认已发布前缀。完整写事务在入口拥有的独立子进程中执行，有界批量回收共用事务内清点结果。资源许可由入口原容量 owner 在持锁前预留，持久预算由 Store 自身计量。新写者以 OS 对端身份验证的本地协议声明和 PID incarnation 参与准入，声明不授予写盘权；未知／旧写者继续阻止迁移确认。CLI、RPC 与模型日志工具沿同一应用授权读取；旧日志保留原格式并统一计量，只有存活写者兼容、遗留占用受控才确认整体预算生效。旧私有 dump、按键文件和后台文件写者已经退役。
 
 ### 产品调用
 

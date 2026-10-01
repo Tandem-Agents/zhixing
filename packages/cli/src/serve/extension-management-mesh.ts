@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { assertArtifactRef, validateArtifactReceiveProgress, type ArtifactStore, type FileResumableArtifactReceiver } from "@zhixing/core/authority";
+import { assertArtifactRef, validateArtifactReceiveProgress, type ArtifactStore, type ArtifactReceiveProgress } from "@zhixing/core/authority";
 import type { ArtifactRef } from "@zhixing/core/contracts";
 import type { MeshServiceClient } from "@zhixing/mesh";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
@@ -13,10 +13,15 @@ const CHUNK_BYTES = 256 * 1024;
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value));
 const decode = (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8"));
 
+export interface ExtensionArtifactReceiverPort {
+  readonly progress: (ref: ArtifactRef) => Promise<ArtifactReceiveProgress>;
+  readonly append: (ref: ArtifactRef, offset: number, bytes: Uint8Array) => Promise<ArtifactReceiveProgress>;
+}
+
 export function registerExtensionManagementMesh(input: {
   registry: MeshServiceRegistry; authorizePeer(id: string): boolean; management: ExtensionManagementTransport;
   artifacts: Pick<ArtifactStore, "get">;
-  receiver: Pick<FileResumableArtifactReceiver, "progress" | "append">;
+  receiver: ExtensionArtifactReceiverPort;
 }) {
   return input.registry.register(SERVICE, { access: "write", availability: "negotiated-version",
     authorize: connection => input.authorizePeer(connection.peer.deviceId),

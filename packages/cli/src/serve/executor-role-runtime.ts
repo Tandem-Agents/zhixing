@@ -1,8 +1,11 @@
+import { createWorksceneRunToolApplication } from "./workscene-application-adapter.js";
 
 import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
 import { handoffLogging } from "../logging/handoff.js";
+import { beginLogPhase } from "@zhixing/core/logging";
+import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
 import {
   createAgentRuntime,
   createKernelLogFactory,
@@ -156,9 +159,19 @@ import { selectJobRuntimeTools, type JobRuntimeCapabilities } from "./job-runtim
 import { createPermissionStorageInfrastructure } from "./permission-storage-infrastructure.js";
 
 export async function runExecutorRole(
+  options: ServeOptions, bootstrap: ExecutorServeBootstrapContext, executor?: ExecutorRoleModule,
+): Promise<void> {
+  const assembly = beginLogPhase(bootstrap.bindLogs?.(RUNTIME_LOG_SOURCE, { scope: "storage" }), "assemble-executor");
+  try { await assembly.run(() => runExecutorProcess(options, bootstrap, executor, assembly)); }
+  catch (error) { assembly.finish(error); throw error; }
+  finally { assembly.finish(); }
+}
+
+async function runExecutorProcess(
   options: ServeOptions,
   bootstrap: ExecutorServeBootstrapContext,
   executor?: ExecutorRoleModule,
+  assembly?: ReturnType<typeof beginLogPhase>,
 ): Promise<void> {
   if (!executor) throw new Error("Executor role module is unavailable");
   if (bootstrap.mesh.mode !== "trusted-home") {
@@ -1017,6 +1030,7 @@ export async function runExecutorRole(
           host: openingRunner.server.host,
         });
         await executorServerLifecycle.markRunning();
+        assembly?.finish();
       },
     });
     executorServerLifecycle.assertRunningServer(localConversationServer);
@@ -1178,10 +1192,10 @@ export class ExecutorRuntimeSubstrate {
           ...(this.options.extensionTools ?? []),
           ...(this.options.mcpProductTools ?? []),
           ...mcp.tools,
-          ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools()),
+          ...(sessionId && isLocalConversationId(sessionId) ? [] : createWorksceneTaskTools(createWorksceneRunToolApplication())),
         ...(sessionId && isLocalConversationId(sessionId) ? [] : workscene
-          ? [createWorkmodeExitTool()]
-          : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
+          ? [createWorkmodeExitTool(createWorksceneRunToolApplication())]
+          : [createWorkmodeEnterTool(createAnchorWorksceneAssignmentToolApplication(), createWorksceneRunToolApplication()), createWorksceneListTool(createAnchorWorksceneAssignmentToolApplication())]),
       ].filter((tool) => !executionProfile || executionProfile.tools.includes(tool.name)),
       executionMcpServers: mcp.serverIds.filter((id) => !executionProfile || executionProfile.mcpServers.includes(id)),
       confirmationLifecycleObserver: this.options.interactions,
@@ -1257,7 +1271,7 @@ export class ExecutorRuntimeSubstrate {
           WORKSCENE_PRODUCT_TOOL_IDS.enter,
           WORKSCENE_PRODUCT_TOOL_IDS.exit,
           WORKSCENE_PRODUCT_TOOL_IDS.list,
-          ...createWorksceneTaskTools().map(tool => tool.name),
+          ...createWorksceneTaskTools(createWorksceneRunToolApplication()).map(tool => tool.name),
         ]),
       ].sort(),
       mcpServers: mcp.serverIds,

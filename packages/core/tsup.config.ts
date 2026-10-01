@@ -1,7 +1,13 @@
-import { defineConfig } from "tsup";
+import { build, defineConfig } from "tsup";
+import { spawnSync } from "node:child_process";
+// biome-ignore lint/style/noRestrictedImports: Build-only scratch is removed in finally; Vitest lifecycle helpers cannot run in the builder.
+import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+// biome-ignore lint/style/noRestrictedImports: Declaration output is OS-temporary build data, not product home or a test fixture.
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-export default defineConfig({
-  entry: [
+const entry = [
     "src/logging/index.ts",
     "src/logging/storage.ts",
     "src/logging/application.ts",
@@ -66,10 +72,34 @@ export default defineConfig({
     "src/environment/workspace-binding-catalog-persistence.ts",
     "src/test-support/s7-durable.ts",
     "src/test-support/s7-durable-harness.ts",
-  ],
+];
+
+export default defineConfig({
+  entry,
   format: ["esm"],
-  dts: true,
+  dts: false,
   sourcemap: true,
   clean: true,
   target: "node24",
+  async onSuccess() {
+    // Release the TypeScript checker before Rollup builds the declaration graph.
+    // Public declarations remain bundled; neither stage needs an enlarged V8 heap.
+    const scratch = await mkdtemp(path.join(tmpdir(), "zhixing-core-dts-"));
+    try {
+      const require = createRequire(import.meta.url);
+      const emitted = spawnSync(process.execPath, [require.resolve("typescript/bin/tsc"),
+        "--emitDeclarationOnly", "--declarationMap", "false", "--outDir", scratch,
+      ], { windowsHide: true, stdio: "inherit" });
+      if (emitted.error) throw emitted.error;
+      if (emitted.status !== 0) throw Error(`TypeScript declaration emission failed (${emitted.signal ?? emitted.status})`);
+      await build({ config: false, entry: Object.fromEntries(entry.map(source => {
+        const name = source.slice(4, -3);
+        return [name, path.join(scratch, `${name}.d.ts`)];
+      })), outDir: "dist", format: ["esm"], dts: { only: true }, clean: false });
+    } finally {
+      if (path.dirname(scratch) !== path.resolve(tmpdir()) || !path.basename(scratch).startsWith("zhixing-core-dts-"))
+        throw Error("Unexpected declaration scratch directory");
+      await rm(scratch, { recursive: true, force: true });
+    }
+  },
 });

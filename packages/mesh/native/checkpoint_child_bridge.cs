@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Pipes;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -32,6 +33,7 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool LockFileEx(IntPtr handle, uint flags, uint reserved, uint low, uint high, ref OVERLAPPED overlapped);
@@ -67,7 +69,8 @@ internal static class CheckpointChildBridge {
         var value = Dispatch(request);
         Reply(request, true, value, null);
       } catch (Exception error) {
-        Reply(request, false, null, error.Message);
+        var native = error as System.ComponentModel.Win32Exception;
+        Reply(request, false, null, native == null ? error.Message : error.Message + " (Win32 " + native.NativeErrorCode + ")");
       }
     }
     foreach (var handle in Handles.Values) CloseHandle(handle);
@@ -76,6 +79,7 @@ internal static class CheckpointChildBridge {
   static object Dispatch(Dictionary<string, object> r) {
     var op = Text(r, "op");
     if (op == "observeNodeProcesses") return ObserveNodeProcesses();
+    if (op == "readLocalProcessDeclaration") return ReadLocalProcessDeclaration(Text(r, "endpoint"), Number(r, "pid"));
     if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create"), r.ContainsKey("readOnly") && Flag(r, "readOnly")));
     if (op == "statFile") return StatFile(Get(r, "parent"), Text(r, "name"));
     if (op == "statFiles") {
@@ -94,9 +98,9 @@ internal static class CheckpointChildBridge {
     if (op == "openDirectory") return Register(OpenRelative(Get(r, "parent"), Text(r, "name"), true, Flag(r, "create"), false));
     if (op == "identity") return Identity(Get(r, "handle"));
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
-    if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null));
+    if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null, r.ContainsKey("prefix") && Flag(r, "prefix")));
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
-    if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")));
+    if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")), r.ContainsKey("identity") ? Text(r, "identity") : null);
     if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName")); return true; }
     if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory"), r.ContainsKey("retiredIdentity") ? Text(r, "retiredIdentity") : null); return true; }
     if (op == "sync") { if (!FlushFileBuffers(Get(r, "handle"))) throw Win32("Unable to flush checkpoint handle"); return true; }
@@ -105,14 +109,42 @@ internal static class CheckpointChildBridge {
   }
 
   // Finite OS observation only; the caller owns all product/writer classification.
+  static string ReadLocalProcessDeclaration(string endpoint, long expectedPid) {
+    const string prefix = "\\\\.\\pipe\\";
+    if (!endpoint.StartsWith(prefix, StringComparison.Ordinal) || endpoint.Length > 160 || expectedPid <= 0)
+      throw new InvalidOperationException("Invalid local declaration endpoint");
+    using (var pipe = new NamedPipeClientStream(".", endpoint.Substring(prefix.Length), PipeDirection.In, PipeOptions.Asynchronous)) {
+      pipe.Connect(150);
+      uint pid;
+      if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out pid) || pid != expectedPid)
+        throw new InvalidOperationException("Local declaration peer mismatch");
+      var bytes = new byte[512]; var size = 0;
+      var deadline = DateTime.UtcNow.AddMilliseconds(250);
+      while (size < bytes.Length) {
+        var read = pipe.ReadAsync(bytes, size, bytes.Length - size);
+        var remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+        if (!read.Wait(remaining)) throw new TimeoutException("Local declaration timed out");
+        var count = read.Result;
+        if (count == 0) break;
+        size += count;
+        if (Array.IndexOf(bytes, (byte)10, 0, size) >= 0) return Encoding.UTF8.GetString(bytes, 0, size);
+      }
+      throw new InvalidOperationException("Local declaration incomplete");
+    }
+  }
+
   static object ObserveNodeProcesses() {
-    var entries = new List<object>(); var complete = true; var characters = 0;
+    var entries = new List<object>(); var complete = true; var characters = 0; object failure = null;
     using (var search = new ManagementObjectSearcher("SELECT ProcessId, CreationDate, CommandLine FROM Win32_Process WHERE Name='node.exe' OR Name='node'")) {
       search.Options.Timeout = TimeSpan.FromSeconds(2);
       using (var rows = search.Get()) foreach (ManagementObject row in rows) using (row) {
-        if (entries.Count >= 256) { complete = false; break; }
+        if (entries.Count >= 256) { complete = false; if (failure == null) failure = new { reason = "inventory-limit" }; break; }
+        var pid = Convert.ToInt32(row["ProcessId"]);
         var creation = row["CreationDate"] as string;
-        if (creation == null) { complete = false; continue; }
+        if (creation == null) {
+          if (ProcessHasExited(pid)) continue;
+          complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; continue;
+        }
         var birth = ManagementDateTimeConverter.ToDateTime(creation).ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var command = row["CommandLine"] as string; List<string> argv = null;
         if (command != null && command.Length <= 32768 && characters + command.Length <= 65536) {
@@ -125,11 +157,25 @@ internal static class CheckpointChildBridge {
             }
           } finally { if (memory != IntPtr.Zero) LocalFree(memory); }
         }
-        if (argv == null) complete = false;
-        entries.Add(new Dictionary<string, object> { {"pid", Convert.ToInt32(row["ProcessId"])}, {"birth", birth}, {"argv", argv} });
+        if (argv == null) {
+          // WMI can retain a row after exit while CommandLine has already vanished.
+          // Only OS-proven exit permits exclusion; unreadable live peers still block.
+          if (ProcessHasExited(pid)) continue;
+          complete = false; if (failure == null) failure = new { reason = "arguments-unavailable", pid };
+        }
+        entries.Add(new Dictionary<string, object> { {"pid", pid}, {"birth", birth}, {"argv", argv} });
       }
     }
-    return new Dictionary<string, object> { {"complete", complete}, {"entries", entries} };
+    var result = new Dictionary<string, object> { {"complete", complete}, {"entries", entries} };
+    if (failure != null) result.Add("failure", failure);
+    return result;
+  }
+
+  static bool ProcessHasExited(int pid) {
+    try { using (var process = System.Diagnostics.Process.GetProcessById(pid)) return process.HasExited; }
+    catch (ArgumentException) { return true; }
+    catch (System.ComponentModel.Win32Exception error) { return error.NativeErrorCode == 87; }
+    catch (InvalidOperationException) { return true; }
   }
 
   static IntPtr OpenPath(string input, bool create, bool readOnly) {
@@ -190,20 +236,21 @@ internal static class CheckpointChildBridge {
     } finally { Array.Clear(bytes, 0, bytes.Length); CloseHandle(file); }
   }
 
-  static byte[] ReadFile(IntPtr parent, string name, long declared, long offset, long limit, string expected) {
+  static byte[] ReadFile(IntPtr parent, string name, long declared, long offset, long limit, string expected, bool prefix) {
     if (offset < 0 || limit <= 0) throw new InvalidOperationException("Checkpoint file range is invalid");
     var file = OpenRelative(parent, name, false, false, false, false);
     try {
       BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint file identity changed");
       if (expected != null && Identity(info) != expected) throw new InvalidOperationException("Checkpoint read identity changed");
-      var actual = Size(info); if ((declared >= 0 && actual != declared) || (declared < 0 && actual > limit) || offset > actual) throw new InvalidOperationException("Checkpoint file length changed");
+      if (prefix && (expected == null || declared < 0 || offset + limit > declared)) throw new InvalidOperationException("Invalid durable prefix read");
+      var actual = Size(info); if ((declared >= 0 && (prefix ? actual < declared : actual != declared)) || (declared < 0 && actual > limit) || offset > actual) throw new InvalidOperationException("Checkpoint file length changed");
       var length = checked((int)Math.Min(limit, actual - offset)); var bytes = new byte[length];
       using (var safe = new SafeFileHandle(file, false))
       using (var stream = new FileStream(safe, FileAccess.Read, 64 * 1024, false)) {
         stream.Position = offset; var read = 0; while (read < length) { var current = stream.Read(bytes, read, length - read); if (current == 0) throw new EndOfStreamException("Checkpoint file range is truncated"); read += current; }
       }
       BY_HANDLE_FILE_INFORMATION after;
-      if (!GetFileInformationByHandle(file, out after) || after.NumberOfLinks != 1 || Size(after) != actual || Identity(after) != Identity(info)) throw new InvalidOperationException("Checkpoint file identity changed during read");
+      if (!GetFileInformationByHandle(file, out after) || after.NumberOfLinks != 1 || (prefix ? Size(after) < declared : Size(after) != actual) || Identity(after) != Identity(info)) throw new InvalidOperationException("Checkpoint file identity changed during read");
       return bytes;
     } finally { CloseHandle(file); }
   }
@@ -324,12 +371,12 @@ internal static class CheckpointChildBridge {
     } finally { Marshal.FreeHGlobal(buffer); }
   }
 
-  static long WriteRange(IntPtr parent, string name, long maximum, long offset, byte[] bytes) {
+  static long WriteRange(IntPtr parent, string name, long maximum, long offset, byte[] bytes, string expected) {
     if (maximum < 0 || offset < 0 || offset > maximum || offset + bytes.LongLength > maximum) throw new InvalidOperationException("Checkpoint file range is invalid");
     var file = OpenRelative(parent, name, false, true, false);
     try {
       BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint durable prefix identity changed");
-      var actual = Size(info); if (actual > maximum || offset > actual) throw new InvalidOperationException("Checkpoint durable prefix is invalid");
+      var actual = Size(info); if (actual > maximum || offset > actual || (expected != null && (Identity(info) != expected || actual != offset))) throw new InvalidOperationException("Checkpoint durable prefix is invalid");
       using (var safe = new SafeFileHandle(file, false))
       using (var stream = new FileStream(safe, FileAccess.ReadWrite, 64 * 1024, false)) {
         stream.Position = offset;

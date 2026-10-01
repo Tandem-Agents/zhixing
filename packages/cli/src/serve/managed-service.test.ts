@@ -335,7 +335,7 @@ describe("managed service platform contract", () => {
       const parsed = await execFileAsync(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-        { encoding: "utf8" },
+        { encoding: "utf8", windowsHide: true },
       );
       expect(parsed.stdout).toBe("Task|test|test|InteractiveToken|CurrentUser");
     },
@@ -389,7 +389,7 @@ describe("managed service platform contract", () => {
         const readBack = await execFileAsync(
           powershell,
           ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-          { encoding: "utf8" },
+          { encoding: "utf8", windowsHide: true },
         );
         const [principal, trigger, logonType, actionContext] = readBack.stdout.split("|");
         expect(principal).toBe(trigger);

@@ -9,7 +9,6 @@ import {
 import type { LogReadContext } from "@zhixing/core/logging";
 import {
   LocalLogStore,
-  type LogFileSystem,
 } from "@zhixing/core/logging/storage";
 import type { DeviceCapacityArbiterPort } from "@zhixing/core/resources";
 import { LogFilesProcess } from "./files-process.js";
@@ -29,9 +28,9 @@ export const LOCAL_LOG_OWNER: Readonly<LogReadContext> = Object.freeze({
 export function createLogAccess(
   home: string,
   capacity: DeviceCapacityArbiterPort,
-  files: LogFileSystem = new LogFilesProcess(home),
+  files: LogFilesProcess = new LogFilesProcess(home),
 ) {
-  const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files instanceof LogFilesProcess ? () => files.observeNodeProcesses() : undefined) });
+  const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files) });
   let closed = false;
   let active: Promise<unknown> | undefined;
   let closing: Promise<void> | undefined;

@@ -52,8 +52,11 @@ describe("WAL file read window", () => {
   it("does not retain bytes between scans or read beyond the fixed scan extent", async () => {
     const bytes = Buffer.from("before-ignored");
     const { handle, reads } = source(bytes);
-    const first = fileReader(handle, 6);
+    let physicalBytes = 0;
+    const first = fileReader(handle, 6, 0, count => { physicalBytes += count; });
     expect(Buffer.from(await first.read(0, 6)).toString()).toBe("before");
+    await first.read(0, 3);
+    expect(physicalBytes).toBe(6); // Cache hits do not pretend to be physical reads.
     Buffer.from("after!").copy(bytes);
     expect(Buffer.from(await fileReader(handle, 6).read(0, 20)).toString()).toBe("after!");
     expect(reads).toEqual([{ position: 0, length: 6 }, { position: 0, length: 6 }]);

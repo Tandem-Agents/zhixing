@@ -1,3 +1,4 @@
+import { createWorksceneRunToolApplication } from "../workscene-application-adapter.js";
 import { describe, expect, it } from "vitest";
 import { subAgentProfile } from "@zhixing/orchestrator/profile";
 import { zhixingProfile as mainProfile, ZHIXING_IDENTITY as MAIN_IDENTITY_INSTRUCTIONS, ZHIXING_VALUES } from "../zhixing-agent-profile.js";
@@ -90,7 +91,7 @@ function stubTool(name: string): ToolDefinition {
 }
 
 describe("Workscene model guidance", () => {
-  const entry = () => createWorkmodeEnterTool({ get: async () => null });
+  const entry = () => createWorkmodeEnterTool({ get: async () => null }, createWorksceneRunToolApplication());
 
   it("任务交接指引保持中文与边界清晰，同一产品身份在不同场景使用同源前缀", () => {
     expect(WORKING_MODE_TEXT).toContain("单纯切换时省略 handoff，不启动旧任务");
@@ -120,7 +121,7 @@ describe("Workscene model guidance", () => {
     const build = (tools: ToolDefinition[]) => buildSystemPrompt({ tools, cwd: "/test/project" });
     expect(build([stubTool("workmode_enter")])).not.toContain(WORKING_MODE_TEXT);
     expect(build([{ ...entry(), name: "renamed-entry" }])).toContain(WORKING_MODE_TEXT);
-    expect(build([createWorkmodeExitTool()])).not.toContain(WORKING_MODE_TEXT);
+    expect(build([createWorkmodeExitTool(createWorksceneRunToolApplication())])).not.toContain(WORKING_MODE_TEXT);
     expect(build([])).not.toContain(WORKING_MODE_TEXT);
   });
 

@@ -13,6 +13,17 @@ import type {
 } from "./contracts.js";
 import { fitLogCapture } from "./limits.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
+import { LOG_FAILURE_FIELDS, logFailureEvidence, logStorageFailure } from "./failure.js";
+import type { LogFailureEvidence } from "./contracts.js";
+import { currentLogPhaseRefs } from "./phase.js";
+
+interface FailureObservation extends LogFailureEvidence {
+  at: number;
+  attempt: number;
+  phase: string;
+  reason: string;
+}
+const FAILURE_FIELDS = { ...LOG_FAILURE_FIELDS, at: "number", attempt: "number", phase: "text", reason: "text" } as const;
 
 interface Entry {
   capture: LogCapture;
@@ -30,6 +41,8 @@ interface Entry {
 const HEALTH_FIELDS = {
   lost: "number", from: "number", until: "number", captureFailures: "number",
   unconfirmed: "number", attempts: "number", reason: "text", phase: "text",
+  firstFailure: { fields: FAILURE_FIELDS }, latestFailure: { fields: FAILURE_FIELDS },
+  changes: { items: { fields: FAILURE_FIELDS }, maxItems: 3 }, omittedChanges: "number",
 } as const;
 // This is the maximum ordinary contention window, not a persistence guarantee.
 const STORAGE_WAIT_MS = 5000;
@@ -77,6 +90,10 @@ export class LogRecorder {
   #failureSince = 0;
   #lastStorageFailure = "";
   #failurePhase = "";
+  #firstStorageFailure: FailureObservation | undefined;
+  #latestStorageFailure: FailureObservation | undefined;
+  readonly #failureChanges: FailureObservation[] = [];
+  #omittedChanges = 0;
   #lostSince = 0;
   #lastFailure: string | undefined;
   #lastNotice = -Infinity;
@@ -125,7 +142,8 @@ export class LogRecorder {
           }
           const projected = typeof draft === "function" ? draft() : draft;
           this.#enqueue(
-            captureLog(boundSource, boundAccess, projected, this.#policy, this.#process, ++this.#seq, boundRefs),
+            captureLog(boundSource, boundAccess, projected, this.#policy, this.#process, ++this.#seq,
+              [...boundRefs, ...currentLogPhaseRefs().filter(ref => !projected.refs?.some(explicit => explicit.kind === ref.kind))]),
           );
         } catch {
           this.#failures++;
@@ -480,6 +498,10 @@ export class LogRecorder {
                 : this.#storageFailures > this.#reportedStorageFailures || this.#recoveries > this.#reportedRecoveries
                   ? this.#lastStorageFailure : this.#lastFailure ?? "queue-pressure",
               phase: this.#failures > this.#reportedCaptureFailures ? "capture" : this.#failurePhase,
+              firstFailure: this.#firstStorageFailure,
+              latestFailure: this.#latestStorageFailure,
+              changes: this.#failureChanges,
+              omittedChanges: this.#omittedChanges,
             },
           },
           this.#policy,
@@ -569,7 +591,7 @@ export class LogRecorder {
         this.#apply(status.policy.effective);
         if (status.storageDegraded) {
           this.#ready = false;
-          throw new LogStorageError("owner-unavailable", "日志写入已确认，文件所有者需重建");
+          throw new LogStorageError("owner-unavailable", "日志写入已确认，文件所有者需重建", status.storageFailure);
         }
         this.#lastMaintenance = Date.now();
       }
@@ -595,12 +617,20 @@ export class LogRecorder {
     } catch (error) {
       if (!this.#stopping) {
         const reason = storageFailureReason(error);
-        const transient = reason === "writer-busy" || reason === "resource-wait" || reason === "probe-unavailable" || reason === "migration-blocked";
+        const transient = reason === "writer-busy" || reason === "resource-wait" || reason === "probe-unavailable" || reason === "migration-blocked" || reason === "reclaim-pending";
         this.#blockedSince ??= Date.now();
         this.#failureSince = this.#blockedSince;
         this.#storageFailures = Math.min(Number.MAX_SAFE_INTEGER, this.#storageFailures + 1);
         this.#lastStorageFailure = reason;
         this.#failurePhase = phase;
+        const failure: FailureObservation = { ...logFailureEvidence(error), at: Date.now(), attempt: this.#storageFailures, phase, reason };
+        this.#firstStorageFailure ??= failure;
+        const prior = this.#latestStorageFailure;
+        if (prior && (prior.reason !== reason || prior.phase !== phase || prior.code !== failure.code || prior.operation !== failure.operation)) {
+          if (this.#failureChanges.length === 3) { this.#failureChanges.shift(); this.#omittedChanges++; }
+          this.#failureChanges.push(failure);
+        }
+        this.#latestStorageFailure = failure;
         this.#retry++;
         this.#retryAt = Date.now() + Math.min(transient ? 500 : 30_000, 100 * 2 ** Math.min(this.#retry, 8));
         if (transient && Date.now() - this.#blockedSince < STORAGE_WAIT_MS &&
@@ -626,6 +656,12 @@ export class LogRecorder {
     this.#reportedUnconfirmed = Math.max(this.#reportedUnconfirmed, entry.unconfirmedThrough ?? 0);
     this.#reportedStorageFailures = Math.max(this.#reportedStorageFailures, entry.storageFailuresThrough ?? 0);
     this.#reportedRecoveries = Math.max(this.#reportedRecoveries, entry.recoveriesThrough ?? 0);
+    if (this.#blockedSince === undefined && this.#reportedStorageFailures === this.#storageFailures && this.#reportedRecoveries === this.#recoveries) {
+      this.#firstStorageFailure = undefined;
+      this.#latestStorageFailure = undefined;
+      this.#failureChanges.length = 0;
+      this.#omittedChanges = 0;
+    }
   }
   #degrade(reason: string): void {
     if (this.#stopping) return;
@@ -645,16 +681,8 @@ export class LogRecorder {
 }
 
 function storageFailureReason(error: unknown): string {
-  if (error instanceof LogStorageError) return error.code;
   if (error instanceof LogAppendIndeterminateError) return "append-unconfirmed";
-  // Never retain arbitrary exception text, paths or input payloads in health evidence.
-  try {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (code === "EACCES" || code === "EPERM") return "permission-denied";
-    if (code === "ENOSPC") return "disk-full";
-    if (code === "EIO") return "io-failed";
-  } catch { /* Hostile error projection is also isolated. */ }
-  return "storage-unavailable";
+  return logStorageFailure(error);
 }
 
 function boundedDelay(value: number): number {

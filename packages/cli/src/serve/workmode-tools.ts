@@ -33,15 +33,11 @@ import {
   type WorksceneManagementToolName,
 } from "@zhixing/core/workscene";
 import { type JsonSchema, type ToolDefinition } from "@zhixing/core";
-import type { WorksceneTaskHandoff } from "@zhixing/core/types";
-import { isLocalConversationId, parseConversationId } from "@zhixing/core/conversation";
 import type { WorksceneDto } from "@zhixing/core/contracts";
-import type { WorksceneAssignmentToolApplication } from "@zhixing/core/workscene/application";
-import { validateWorksceneTaskHandoff } from "@zhixing/core/workscene/application";
+import type { WorksceneAssignmentToolApplication, WorksceneRunToolApplication } from "@zhixing/core/workscene/application";
 import {
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,
-  runContextStorage,
 } from "@zhixing/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import { WORKING_MODE_TEXT } from "./workscene-agent-guidance.js";
@@ -60,14 +56,14 @@ export const WORKSCENE_PRODUCT_TOOL_IDS = Object.freeze({
   taskStop: "workscene_task_stop",
 } as const);
 
-export function createWorksceneTaskTools(): ToolDefinition[] {
+export function createWorksceneTaskTools(application: WorksceneRunToolApplication): ToolDefinition[] {
   return [{
     name: WORKSCENE_PRODUCT_TOOL_IDS.taskList,
     description: "查看当前对话尚未交付的场景委托及其停止引用；这里只列本轮开始时的事实快照。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     isReadOnly: true, isParallelSafe: true,
     boundaries: [{ boundaryType: "filesystem", access: "read", dynamic: false }],
-    async call() { return ok(JSON.stringify(runContextStorage.getStore()?.worksceneTasks ?? [])); },
+    async call() { return ok(JSON.stringify(application.tasks())); },
   }, {
     name: WORKSCENE_PRODUCT_TOOL_IDS.taskStop,
     description: "用户明确撤销或替换场景委托时，按 workscene_task_list 的原委托引用请求停止。进度询问、补充约束或另开话题不等于撤销；含糊时先澄清。停止请求随本轮成功提交，不撤销已发生的动作。",
@@ -75,10 +71,9 @@ export function createWorksceneTaskTools(): ToolDefinition[] {
     isReadOnly: false, isParallelSafe: false,
     boundaries: [{ boundaryType: "agent-context", access: "switch", dynamic: false }],
     async call(input) {
-      const run = runContextStorage.getStore();
-      if (!run?.assignmentMutations || run.assignmentMutations.execution !== "conversation") return fail("停止委托需要当前耐久对话");
-      const target = run.worksceneTasks?.find((task) => task.conversationId === input.conversationId && task.runId === input.runId);
-      if (!target) return fail("停止引用不在本轮获准委托列表中，请核对任务，不要猜测引用");
+      const selected = application.stopTarget({ conversationId: input.conversationId, runId: input.runId });
+      if ("error" in selected) return fail(selected.error);
+      const { target } = selected;
       emitPostTurnControlIntent({ kind: "stop_task", conversationId: target.conversationId, runId: target.runId });
       return ok("已请求停止该委托，待本轮成功提交后生效；请结束本轮。尚未确认停止，不代表动作已回滚。");
     },
@@ -117,14 +112,6 @@ const handoffSchema = {
   required: ["goal", "constraints", "completed", "remaining"],
   additionalProperties: false,
 };
-
-function readHandoff(input: Record<string, unknown>): WorksceneTaskHandoff | undefined {
-  if (input.handoff === undefined) return undefined;
-  validateWorksceneTaskHandoff(input.handoff);
-  const run = runContextStorage.getStore();
-  if (run?.assignmentMutations?.execution !== "conversation" || (run.conversationId && isLocalConversationId(run.conversationId))) throw new Error("任务交接需要 Anchor 所属的耐久对话，当前运行不能接纳场景续接。");
-  return structuredClone(input.handoff);
-}
 
 function assertPostTurnControlSupported(
   toolName: WorksceneManagementToolName,
@@ -198,6 +185,7 @@ async function selectWorkspace(
  */
 export function createWorkmodeEnterTool(
   application: Pick<WorksceneAssignmentToolApplication, "get">,
+  runApplication: WorksceneRunToolApplication,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -227,7 +215,7 @@ export function createWorkmodeEnterTool(
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
-      const handoff = readHandoff(input);
+      const handoff = runApplication.handoff(input.handoff);
       const unsupported = handoff?.remaining.length ? undefined : assertPostTurnControlSupported("workmode_enter");
       if (unsupported) return unsupported;
       const scene = await application.get(sceneId);
@@ -249,7 +237,7 @@ export function createWorkmodeEnterTool(
  * 零依赖:意图经 emitPostTurnControlIntent 发当前 run 的 bus,turn 边界由
  * 调用方消费——交互直驱与宿主装配共用同一工具。
  */
-export function createWorkmodeExitTool(): ToolDefinition {
+export function createWorkmodeExitTool(runApplication: WorksceneRunToolApplication): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
     properties: { handoff: handoffSchema },
@@ -267,8 +255,8 @@ export function createWorkmodeExitTool(): ToolDefinition {
       worksceneToolRequiresExplicitConfirmation("workmode_exit"),
     boundaries: getWorksceneToolBoundaries("workmode_exit"),
     async call(input) {
-      const handoff = readHandoff(input);
-      if (handoff && parseConversationId(runContextStorage.getStore()?.conversationId ?? "").scope.kind !== "workscene")
+      const handoff = runApplication.handoff(input.handoff);
+      if (handoff && !runApplication.canReturnToMain())
         return fail("只有当前工作场景可以交接到主对话。");
       const unsupported = handoff?.remaining.length ? undefined : assertPostTurnControlSupported("workmode_exit");
       if (unsupported) return unsupported;
@@ -515,6 +503,7 @@ export function createWorksceneSetWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
   application: Pick<WorksceneAssignmentToolApplication, "setWorkspace">,
   workscenes: Pick<WorksceneToolDirectory, "selectWorkspace">,
+  runApplication: WorksceneRunToolApplication,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -544,7 +533,7 @@ export function createWorksceneSetWorkdirCurrentTool(
     boundaries: getWorksceneToolBoundaries("workscene_set_workdir_current"),
     confirmationDisplayContext: currentDisplayContext(scene),
     async call(input, context) {
-      const handoff = readHandoff(input);
+      const handoff = runApplication.handoff(input.handoff);
       const selected = await selectWorkspace(workscenes, input);
       if ("error" in selected) return fail(selected.error);
       const changed = await application.setWorkspace({
@@ -565,6 +554,7 @@ export function createWorksceneSetWorkdirCurrentTool(
 export function createWorksceneClearWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
   application: Pick<WorksceneAssignmentToolApplication, "setWorkspace">,
+  runApplication: WorksceneRunToolApplication,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -583,7 +573,7 @@ export function createWorksceneClearWorkdirCurrentTool(
     boundaries: getWorksceneToolBoundaries("workscene_clear_workdir_current"),
     confirmationDisplayContext: currentDisplayContext(scene),
     async call(input, context) {
-      const handoff = readHandoff(input);
+      const handoff = runApplication.handoff(input.handoff);
       const changed = await application.setWorkspace({
         sceneId: scene.sceneId,
         workspace: null,
