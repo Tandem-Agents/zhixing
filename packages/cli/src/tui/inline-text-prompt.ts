@@ -12,8 +12,8 @@ import { BottomInfoModel, type BottomInfoScope } from "../bottom-info/index.js";
  * stdin ownership / keypress listener）+ screen.attachInput(self)，finish() 时
  * release + resolve。文本编辑委托 InputBuffer（字符 offset、CJK / emoji 安全）。
  *
- * **视觉单一来源**：框 + 标题 + hint 的渲染委托 `renderInputBox`（与主输入区 /
- * 技能 AI 编辑屏同一原语）——本类只管 I/O 生命周期与键盘，不重复拼框。
+ * **视觉单一来源**：标题、框和光标委托 `renderInputBox`；场景说明及操作提示
+ * 交给 BottomInfoScope，与主输入及其他交互共用信息行布局。
  *
  * **协作契约**：InputController（typeahead）先 suspend 让出键盘，本 region run()
  * 接管；run() resolve 后由 caller 调 inputController.resume() 恢复 typeahead ——
@@ -139,8 +139,8 @@ export class InlineTextPromptRegion implements InputRegion {
   }
 
   /**
-   * 渲染当前帧 —— 委托 `renderInputBox`（▎标题 + 框 + hint，框内 reverse SGR 软件
-   * 光标）。结构：
+   * 渲染当前帧 —— `renderInputBox` 负责标题、框和软件光标，信息行由 scope 组合。
+   * 结构：
    *   ▎ <prompt>
    *   ╭──────────────╮
    *   │ <文本>            │

@@ -1425,8 +1425,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
   // 屏幕协调器），inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不
   // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
   if (useTypeahead && typeaheadBroker) {
-    // 底部信息行内容容器(来源无关)。本期唯一来源是 InputController 自身
-    // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
+    // 当前输入持独立信息 scope；跨场景公告由 ScreenController 的共享来源发布。
     inputController = new InputController({
       onEmptyEscape: () => {
         if (state.running) return;

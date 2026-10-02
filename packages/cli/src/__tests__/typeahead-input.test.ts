@@ -3267,6 +3267,11 @@ describe("InputController — 底部信息行(bottomInfo)", () => {
 
 
 describe("底部信息区跨交互闭环", () => {
+  function expectInfoInsets(region: { renderLines(): readonly string[] }): void {
+    const footer = stripAnsi(region.renderLines().at(-1)!);
+    expect(stringWidth(footer)).toBe(79);
+    expect(footer).toMatch(/^  \S.*\S  $/u);
+  }
   it("公告在候选和临时交互中持续更新，场景提示不串场，结束后迟到发布无效", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
@@ -3288,7 +3293,9 @@ describe("底部信息区跨交互闭环", () => {
       await new Promise(resolve => setImmediate(resolve));
       expect(stripAnsi(getCaptured())).toContain("共享公告");
       expect(stripAnsi(getCaptured())).toContain("普通输入提示");
+      expectInfoInsets(controller);
       await typeChars(stdin, "/");
+      expectInfoInsets(controller);
       expect(stripAnsi(controller.renderLines().at(-1)!)).toContain("共享公告");
       expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("普通输入提示");
       await sendSyntheticKey(stdin, { name: "escape" });
@@ -3317,11 +3324,13 @@ describe("底部信息区跨交互闭环", () => {
         expect(lines).toContain("共享公告");
         expect(lines).not.toContain("仅主输入");
         expect(lines).not.toContain("普通输入提示");
+        expectInfoInsets(region);
         const scene = region.bottomInfo.createSource();
         clearCaptured();
         scene.set("left", "notice", "本次交互");
         await new Promise(resolve => setImmediate(resolve));
         expect(stripAnsi(getCaptured())).toContain("本次交互");
+        expectInfoInsets(region);
         await typeChars(stdin, "中文");
         expect(stripAnsi(region.renderLines().join("\n"))).not.toContain(kind === "text" ? "填写名称" : "填写原因");
         abort.abort();
@@ -3336,6 +3345,7 @@ describe("底部信息区跨交互闭环", () => {
         expect(restored).toContain("共享公告");
         expect(restored).toContain("仅主输入");
         expect(restored).not.toContain("本次交互");
+        expectInfoInsets(controller);
       }
       controller.stop();
       local.set("left", "notice", "迟到主输入");

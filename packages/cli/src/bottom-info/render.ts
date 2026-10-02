@@ -1,5 +1,5 @@
 /**
- * 底部信息行布局 —— 纯函数:左区块左对齐、右区块右对齐、中间空格填充到行宽。
+ * 底部信息行布局 —— 两侧统一内容留白，左区左对齐、右区右对齐。
  *
  * 输入是已渲染好(可含 ANSI 颜色)的左 / 右块列表;本函数只管布局,不关心块
  * 内容来自谁、是什么颜色。左右皆空时产出整行空格 —— 信息行始终占位、高度不抖。
@@ -10,6 +10,7 @@
  */
 
 import { stringWidth, clampLine } from "../tui/line-width.js";
+import { layout } from "../tui/style.js";
 
 /** 同区多块之间的分隔。 */
 const BLOCK_SEP = "  ";
@@ -19,25 +20,24 @@ export function renderBottomInfoLine(
   right: readonly string[],
   width: number,
 ): string {
-  if (width <= 0) return "";
+  if (!Number.isFinite(width) || width < 1) return "";
+  width = Math.floor(width);
+
+  // 与 CLI 内容基线同源。极窄视口对称收缩留白，至少保留一列内容；
+  // 调用方只提供整行预算，场景与消息不拥有缩进或额外宽度扣减。
+  const inset = Math.min(layout.contentIndent, Math.floor((width - 1) / 2));
+  const padding = " ".repeat(inset);
+  const contentWidth = width - inset * 2;
 
   const leftStr = left.join(BLOCK_SEP);
-  const rightStr = right.join(BLOCK_SEP);
+  const rightStr = clampLine(right.join(BLOCK_SEP), contentWidth);
   const leftW = stringWidth(leftStr);
   const rightW = stringWidth(rightStr);
   const separatorWidth = leftW > 0 && rightW > 0 ? 2 : 0;
 
-  // 装得下:左靠左、右靠右、中间空格填满到 width(左右皆空 → 整行空格占位)
-  if (leftW + rightW + separatorWidth <= width) {
-    return leftStr + " ".repeat(width - leftW - rightW) + rightStr;
-  }
-
-  // 超宽:右区优先保留。右区单独都放不下 → 截右区
-  if (rightW >= width) {
-    return clampLine(rightStr, width);
-  }
-  // 左区截断到剩余宽度,与右区之间补齐空隙(截断后实际宽度可能更小)
-  const leftClamped = clampLine(leftStr, Math.max(0, width - rightW - separatorWidth));
-  const gap = Math.max(0, width - stringWidth(leftClamped) - rightW);
-  return leftClamped + " ".repeat(gap) + rightStr;
+  // 先保右侧操作，再给左侧说明预算；CJK 截短不足一列时仍补齐，
+  // 不让右侧锚点漂移。空内容同样输出完整一行，不影响输入区高度。
+  const leftClamped = clampLine(leftStr, Math.max(0, contentWidth - rightW - separatorWidth));
+  const gap = contentWidth - stringWidth(leftClamped) - rightW;
+  return padding + leftClamped + " ".repeat(gap) + rightStr + padding;
 }

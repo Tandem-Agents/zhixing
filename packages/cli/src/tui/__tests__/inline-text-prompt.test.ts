@@ -111,6 +111,7 @@ describe("InlineTextPromptRegion", () => {
     expect(joined).toContain("新建工作场景");
     expect(joined).toContain("场景名称");
     expect(joined).toContain("Enter 提交");
+    expect(stripAnsi(lines.at(-1)!)).toMatch(/^  场景名称.*Enter 提交 · Esc 取消  $/u);
   });
 
   it("输入字符 + Enter → resolve 提交文本", async () => {

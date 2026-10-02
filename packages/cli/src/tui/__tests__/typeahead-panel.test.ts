@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import type { SuggestionItem, SuggestionProvider, TriggerMatch, TypeaheadSessionState } from "@zhixing/core/typeahead";
 
 import { stripAnsi } from "../ansi.js";
+import { BottomInfoModel } from "../../bottom-info/index.js";
+import { stringWidth } from "../line-width.js";
 import {
   computeWindow,
   defaultTypeaheadTheme,
@@ -94,6 +96,33 @@ const defaultRenderOpts: RenderOptions = {
   innerWidth: 58,
   maxVisibleItems: 8,
 };
+
+it("候选直接渲染和公共栏接入使用相同的间距，辅助行不另设缩进", () => {
+  const scope = new BottomInfoModel().createScope();
+  const states = [
+    makeState(),
+    makeState({ loading: true }),
+    makeState({ suggestions: [makeSuggestion("a", "/a")], selectedIndex: 0 }),
+    makeState({ suggestions: [makeSuggestion("a", "/a")], selectedIndex: 0,
+      inlineActions: { delete: true, rename: true, create: true } }),
+    makeState({ suggestions: [makeSuggestion("a", "/a")], selectedIndex: 0,
+      inlineActions: { delete: true }, deletePending: "a" }),
+  ];
+  for (const frameWidth of [23, 39, 79]) {
+    for (const state of states) {
+      const options = { ...defaultRenderOpts, frameWidth, innerWidth: frameWidth - 2 };
+      const direct = renderSessionLines(state, options);
+      const attached = renderSessionLines(state, { ...options,
+        renderFooter: hint => scope.render({ left: [], right: [hint] }, frameWidth) });
+      expect(attached).toEqual(direct);
+      const border = direct.findLastIndex(line => stripAnsi(line).startsWith("╰"));
+      for (const line of direct.slice(border + 1)) {
+        expect(stringWidth(line)).toBe(frameWidth);
+        expect(stripAnsi(line)).toMatch(/^  .*  $/u);
+      }
+    }
+  }
+});
 
 // ─── computeWindow 纯函数 ───
 

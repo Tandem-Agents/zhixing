@@ -6,7 +6,7 @@ export interface BottomInfoSnapshot {
   readonly right: readonly string[];
 }
 
-/** 每个发布者只持有自己的块；释放后，迟到更新无效。 */
+/** 每个发布者只持有自己的内容块（不含布局缩进）；释放后，迟到更新无效。 */
 export interface BottomInfoSource {
   set(zone: BottomInfoZone, id: string, content: string | null): void;
   dispose(): void;

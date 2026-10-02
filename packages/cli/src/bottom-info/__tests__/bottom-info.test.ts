@@ -47,13 +47,13 @@ describe("renderBottomInfoLine", () => {
 
   it("仅右区 → 右对齐,可见宽度 = width", () => {
     const line = renderBottomInfoLine([], ["abc"], 10);
-    expect(line).toBe(" ".repeat(7) + "abc");
+    expect(line).toBe(" ".repeat(5) + "abc  ");
     expect(stringWidth(line)).toBe(10);
   });
 
   it("左右各一块 → 左对齐 + 右对齐 + 中间填充", () => {
     expect(renderBottomInfoLine(["L"], ["R"], 10)).toBe(
-      "L" + " ".repeat(8) + "R",
+      "  L" + " ".repeat(4) + "R  ",
     );
   });
 
@@ -61,7 +61,7 @@ describe("renderBottomInfoLine", () => {
     // "清空" 占 4 列
     const line = renderBottomInfoLine([], ["清空"], 10);
     expect(stringWidth(line)).toBe(10);
-    expect(line.endsWith("清空")).toBe(true);
+    expect(line.endsWith("清空  ")).toBe(true);
   });
 
   it("超宽 → 右区优先保留、左区截断,可见宽度不超 width", () => {
@@ -72,7 +72,7 @@ describe("renderBottomInfoLine", () => {
     );
     expect(stringWidth(stripAnsi(line))).toBeLessThanOrEqual(8);
     // 右区(优先)仍在
-    expect(stripAnsi(line).endsWith("右")).toBe(true);
+    expect(stripAnsi(line).endsWith("右  ")).toBe(true);
   });
 
   it("width <= 0 → 空串(防御)", () => {
@@ -80,10 +80,43 @@ describe("renderBottomInfoLine", () => {
   });
 
   it("窄窗口截断仍分隔说明和操作，不能把左右文字粘成一句", () => {
-    const line = stripAnsi(renderBottomInfoLine(["场景名称"], ["Enter 提交"], 15));
-    expect(line).toMatch(/  Enter 提交$/u);
-    expect(stringWidth(line)).toBeLessThanOrEqual(15);
-    expect(renderBottomInfoLine(["说明"], ["Enter"], 6)).toBe(" Enter");
+    const line = stripAnsi(renderBottomInfoLine(["场景名称"], ["Enter 提交"], 19));
+    expect(line).toBe("  场…  Enter 提交  ");
+    expect(stringWidth(line)).toBe(19);
+    expect(stripAnsi(renderBottomInfoLine(["说明"], ["Enter"], 6))).toBe("  E…  ");
+  });
+
+  it("场景文案与独立公告共用两列基线，更新或撤销不改变左右锚点", () => {
+    const model = new BottomInfoModel(), scope = model.createScope();
+    const global = model.createSource(), local = scope.createSource();
+    const content = { left: ["输入说明"], right: ["确认"] };
+    expect(scope.render(content, 40)).toMatch(/^  输入说明.*确认  $/u);
+    global.set("left", "notice", "公告");
+    local.set("right", "state", "在线");
+    expect(scope.render(content, 40)).toMatch(/^  输入说明  公告.*确认  在线  $/u);
+    global.set("left", "notice", "中文公告更新");
+    local.dispose();
+    expect(scope.render(content, 40)).toMatch(/^  输入说明  中文公告更新.*确认  $/u);
+    global.dispose();
+    expect(scope.render({ left: [], right: [] }, 40)).toBe(" ".repeat(40));
+  });
+
+  it("所有窄宽度下保持单行预算、两侧留白与右侧优先，含 ANSI 和 CJK 截短", () => {
+    for (let width = 1; width <= 100; width++) {
+      for (const left of [[], ["说明"], ["\x1b[36m较长的中文说明\x1b[0m", "公告"]]) {
+        for (const right of [[], ["Enter"], ["\x1b[2m确认完成\x1b[22m"]]) {
+          const line = renderBottomInfoLine(left, right, width);
+          const plain = stripAnsi(line);
+          expect(stringWidth(line)).toBe(width);
+          expect(plain).not.toMatch(/[\r\n]/u);
+          if (width >= 5) {
+            expect(plain.startsWith("  ")).toBe(true);
+            expect(plain.endsWith("  ")).toBe(true);
+          }
+          if (right.length && width >= 12) expect(plain.endsWith(stripAnsi(right[0]!) + "  ")).toBe(true);
+        }
+      }
+    }
   });
 });
 

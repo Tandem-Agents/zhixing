@@ -4,9 +4,8 @@
  *   导航 ↑↓  退出 Esc            置顶 p  禁用 d  改 mode m  归档 a
  *   └说明┘└键┘                   说明在前、亮（终端默认前景）；按键在后、dim。
  *
- * 为什么独立成原语：footer（带分隔线的页脚）与 inputBox（框下提示行）此前各自把
- * hint 拼成字符串、各自染色——重复即债务。提成 `renderHintBar` 后两个 caller 共享
- * 同一样式与布局，改观感只改这一处。
+ * 独占页面 footer 的结构化按键样式与布局；REPL 输入场景的信息行由 bottom-info
+ * 负责，不通过本原语另设缩进。
  *
  * **alt-screen 行宽不变量**：输出恒 ≤ `width`（clampLine 兜底）。Renderer 不截断写入行
  * （render.ts），超 columns 会触发终端折行、打乱清行光标数学（line-width.ts docstring）。
@@ -37,7 +36,7 @@ export interface HintBarOptions {
   hints: readonly KeyHint[];
   /** 右区 —— 功能 / 变更操作（贴右、两端对齐到 width）。省略 = 仅左区。 */
   rightHints?: readonly KeyHint[];
-  /** 左缩进，缺省 `layout.contentPrefix`（2 列）；inputBox 框下提示传 1 列对齐框。 */
+  /** 左缩进，缺省 `layout.contentPrefix`（2 列）。 */
   indent?: string;
 }
 

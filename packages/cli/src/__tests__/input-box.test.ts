@@ -3,21 +3,20 @@ import { stripAnsi, ANSI } from "../tui/index.js";
 import { renderInputBox } from "../input-box.js";
 
 describe("renderInputBox", () => {
-  it("结构:标题(1) + 框(3) + hint(1) = 5 行", () => {
+  it("只渲染标题和框，信息行由场景的公共容器承接", () => {
     const r = renderInputBox({
       title: "新建",
       draft: "",
       cursor: 0,
-      hint: "Enter 提交",
       width: 50,
     });
-    expect(r.lines.length).toBe(5);
+    expect(r.lines.length).toBe(4);
     const joined = stripAnsi(r.lines.join("\n"));
     expect(joined).toContain("新建");
-    expect(joined).toContain("Enter 提交");
+    expect(joined).not.toContain("Enter 提交");
   });
 
-  it("省略 hint → 无 hint 行(标题 + 框 = 4 行)", () => {
+  it("标题 + 框 = 4 行", () => {
     const r = renderInputBox({ title: "x", draft: "", cursor: 0, width: 50 });
     expect(r.lines.length).toBe(4);
   });
@@ -37,48 +36,14 @@ describe("renderInputBox", () => {
     expect(pen.lines.length).toBe(def.lines.length); // 框结构不变
   });
 
-  it("hintBar:框下结构化提示行(说明 键、左右分区),共 5 行", () => {
-    const r = renderInputBox({
-      title: "新建",
-      draft: "",
-      cursor: 0,
-      width: 60,
-      hintBar: {
-        hints: [{ label: "放弃", key: "Esc" }],
-        rightHints: [{ label: "提交", key: "Enter" }],
-      },
-    });
-    expect(r.lines.length).toBe(5); // 标题 + 框(3) + hintBar(1)
-    const joined = stripAnsi(r.lines.join("\n"));
-    expect(joined).toContain("放弃 Esc");
-    expect(joined).toContain("提交 Enter");
-  });
-
-  it("hintBar 优先于 hint(同时传时只画 hintBar)", () => {
+  it("输入字符不会改变单行框的高度", () => {
     const r = renderInputBox({
       title: "x",
       draft: "",
       cursor: 0,
-      width: 60,
-      hint: "旧提示文本",
-      hintBar: { hints: [{ label: "提交", key: "Enter" }] },
-    });
-    const joined = stripAnsi(r.lines.join("\n"));
-    expect(joined).toContain("提交 Enter");
-    expect(joined).not.toContain("旧提示文本");
-  });
-
-  it("空态说明在框外固定行，输入后高度不跳变", () => {
-    const r = renderInputBox({
-      title: "x",
-      draft: "",
-      cursor: 0,
-      placeholder: "请输入",
       width: 50,
     });
-    expect(stripAnsi(r.lines.join("\n"))).toContain("请输入");
-    expect(stripAnsi(r.lines[r.cursor.row]!)).not.toContain("请输入");
-    const filled = renderInputBox({ title: "x", draft: "中", cursor: 1, placeholder: "请输入", width: 50 });
+    const filled = renderInputBox({ title: "x", draft: "中", cursor: 1, width: 50 });
     expect(filled.lines.length).toBe(r.lines.length);
   });
 
@@ -90,17 +55,15 @@ describe("renderInputBox", () => {
     expect(r.cursor.col).toBe(21);
   });
 
-  it("非空 draft → 显示文本、不显示 placeholder", () => {
+  it("非空 draft → 显示实际文本", () => {
     const r = renderInputBox({
       title: "x",
       draft: "已有内容",
       cursor: 4,
-      placeholder: "请输入",
       width: 50,
     });
     const joined = stripAnsi(r.lines.join("\n"));
     expect(joined).toContain("已有内容");
-    expect(joined).not.toContain("请输入");
   });
 
   it("软件光标:cursor 位置用 reverse SGR 渲染", () => {

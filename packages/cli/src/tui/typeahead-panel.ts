@@ -23,6 +23,7 @@ import type { SuggestionItem, TypeaheadSessionState } from "@zhixing/core/typeah
 
 import chalk from "chalk";
 import { stripAnsi } from "./ansi.js";
+import { renderBottomInfoLine } from "../bottom-info/render.js";
 import { renderChrome, type BodyLine } from "./chrome.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
@@ -309,7 +310,7 @@ function renderEmptyChrome(
   // 不依赖选中）—— delete / rename 需选中候选，空列表无候选可操作，故 empty 态只
   // 提示 new。仍单行拼接，与 active 路径 shortcut meta（1 行）对齐，不引入高度跳变。
   const hint = theme.hint(state.inlineActions.create ? "new ctrl+n · Esc 清空" : "Esc 清空");
-  const meta = [renderFooter ? renderFooter(hint) : `  ${clampLine(hint, frameWidth - 2)}`];
+  const meta = [renderFooter ? renderFooter(hint) : renderBottomInfoLine([], [hint], frameWidth)];
 
   return [
     ...renderChrome({
@@ -431,7 +432,7 @@ function renderActiveChrome(
     if (state.deletePending) {
       // 删除准备态优先 —— 覆盖其他操作提示,聚焦二次确认（整行 dim）
       meta.push(
-        `  ${theme.hint(clampLine("再按一次 ctrl+d 确认删除", frameWidth - 2))}`,
+        renderBottomInfoLine([theme.hint("再按一次 ctrl+d 确认删除")], [], frameWidth),
       );
     } else {
       // 每个操作 = 动作词（默认前景，亮）+ 按键（dim），让"做什么"与"按哪个键"
@@ -440,11 +441,11 @@ function renderActiveChrome(
       if (ia.delete) pairs.push(`delete ${tone.dim("ctrl+d")}`);
       if (ia.rename) pairs.push(`rename ${tone.dim("ctrl+r")}`);
       if (ia.create) pairs.push(`new ${tone.dim("ctrl+n")}`);
-      meta.push(`  ${clampLine(pairs.join("   "), frameWidth - 2)}`);
+      meta.push(renderBottomInfoLine([pairs.join("   ")], [], frameWidth));
     }
   } else if (state.argumentHint) {
     meta.push(
-      `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
+      renderBottomInfoLine([theme.hint(state.argumentHint.renderedHint)], [], frameWidth),
     );
   }
   // 前缀补全的实际目标显示在提示行，不占用终端 IME 的编辑行。
@@ -457,7 +458,7 @@ function renderActiveChrome(
   if (state.panelMode === "picker") navKeys.push("Enter");
   navKeys.push("Esc");
   const hint = theme.hint(navKeys.join(" · "));
-  meta.push(renderFooter ? renderFooter(hint) : `  ${clampLine(hint, frameWidth - 2)}`);
+  meta.push(renderFooter ? renderFooter(hint) : renderBottomInfoLine([], [hint], frameWidth));
 
   return [
     ...renderChrome({

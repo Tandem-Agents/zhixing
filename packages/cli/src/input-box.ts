@@ -1,32 +1,21 @@
 /**
- * renderInputBox —— "带框单行输入区"的单一视觉来源（纯函数原语）。
+ * renderInputBox —— 标题、输入框与真实编辑光标的纯渲染原语。
  *
  * 产品形态（与主输入区 / `/work` 新建场景框一致）：
  *   ▎ <title>                    ← 标题行（brand 章节锚 ▎ + bold，框外缩进 1 格）
  *   ╭──────────────────────────╮ ← 输入框（renderChrome 紧凑形态）
  *   │ <文本，含 reverse SGR 光标>  │ ← 框内输入行（layoutInputBuffer 渲染）
  *   ╰──────────────────────────╯
- *    <hint>                      ← 提示行（dim，可选；框外缩进 1 格）
  *
- * 为什么是纯函数、放这一层：
- *   - 输入框视觉此前在两处各写一套（`tui/inline-text-prompt` 的 chrome inline 框、
- *     技能 AI 编辑屏的手搓 `› {input}`）——重复即债务。提成单一原语后，两个 caller
- *     （inline region + alt-screen 编辑屏）共享，改样式只改这里。
- *   - 纯函数（输入 = 数据，输出 = 行 + 光标坐标，无 I/O / 无状态）——chrome inline
- *     与 alt-screen 两套渲染体系都能用：inline region 用返回的 cursor 坐标定位、
- *     alt-screen 直接画 lines（光标已由 layoutInputBuffer 以 reverse SGR 软件画在
- *     行内，硬件光标在 alt-screen 期间隐藏）。
- *   - 与 `input-layout` 同层（cli/src/，非 tui/）：二者都是"输入区视觉构造"件，
- *     `input-box` 在 `layoutInputBuffer`（布局）之上再装配框 + 标题 + hint。放此层
- *     避免 tui/index → input-box → input-layout → tui/index 的循环依赖（input-layout
- *     自身已依赖 tui/index）。
+ * 场景说明与操作提示由调用方通过 BottomInfoScope 组合，输入框不另设页脚。
+ * 它只在 layoutInputBuffer 之上装配标题和框体，不读场景、不管理提示生命周期。
  *
  * 光标：始终走 `layoutInputBuffer` 的 `paintVisualCursor`（reverse SGR 软件光标）——
  * chrome-mode REPL 的标准做法（硬件光标统一隐藏、输入光标画在内容里），alt-screen
  * 编辑屏 hideCursor 后同样适用。返回的 `cursor` 坐标供 inline region 额外定位用。
  */
 
-import { renderChrome, tone, icon, renderHintBar, type KeyHint } from "./tui/index.js";
+import { renderChrome, tone, icon } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
 import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { clampLine } from "./tui/line-width.js";
@@ -40,21 +29,12 @@ export interface InputBoxOptions {
   readonly draft: string;
   /** 光标字符 offset（不是 UTF-16 unit），与 InputBuffer.cursor 同口径。 */
   readonly cursor: number;
-  /** 框外固定提示行，空 draft 时显示说明；非空时保留空行。 */
-  readonly placeholder?: string;
-  /** 框下方提示行（成品文本，本函数加 dim + 缩进）。省略则不画提示行。 */
-  readonly hint?: string;
-  /**
-   * 框下方提示行的结构化形态——「说明亮 + 按键暗」，可左右分区，委托 `renderHintBar`
-   * 渲染（不额外 dim、样式自带）。优先于 `hint`；两者皆省略则不画提示行。
-   */
-  readonly hintBar?: { hints: readonly KeyHint[]; rightHints?: readonly KeyHint[] };
   /** 可用框宽（含左右边框）；调用者为终端末列预留空间。 */
   readonly width: number;
 }
 
 export interface InputBoxResult {
-  /** 成品帧行（标题 + 框 + 可选 hint），caller 直接写出。 */
+  /** 成品帧行（标题 + 框），caller 与公共信息行组合。 */
   readonly lines: string[];
   /**
    * 框内光标 (row, col)，相对 `lines[0]` 起（0-based）。chrome inline 场景用它
@@ -88,24 +68,6 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
     ` ${opts.titleGlyph ?? tone.brand.bold(icon.section)}${tone.bold(opts.title)}`,
     ...boxLines,
   ];
-  // IME 组合文字由终端渲染、尚未进入 draft；提示不得占据编辑行。
-  if (opts.placeholder) {
-    lines.push(opts.draft.length === 0 ? ` ${tone.dim(opts.placeholder)}` : "");
-  }
-  // hintBar（结构化，说明亮 + 按键暗）优先；否则旧 hint（整体 dim）。缩进 1 列对齐框。
-  if (opts.hintBar) {
-    lines.push(
-      renderHintBar({
-        width: frameWidth,
-        indent: " ",
-        hints: opts.hintBar.hints,
-        rightHints: opts.hintBar.rightHints,
-      }),
-    );
-  } else if (opts.hint) {
-    lines.push(` ${tone.dim(opts.hint)}`);
-  }
-
   // 标题(1) + box 顶边(1) → cursor 落在第 2 + layout.cursorRow 行；
   // 列 = 左 │(1) + indent(1) + layout.cursorCol。
   return {
