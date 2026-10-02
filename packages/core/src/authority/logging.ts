@@ -21,7 +21,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
   },
 };
 
-export type AuthorityOperation = "append" | "readSnapshot" | "readStream" | "checkpoint" | "installPlannedAnchorPrefix"
+export type AuthorityOperation = "append" | "readSnapshot" | "readStream" | "readProjection" | "checkpoint" | "installPlannedAnchorPrefix"
   | "installAppendAdmissionGuard" | "originCheckpoint" | "readTail" | "readEnvelopeAt" | "rebuildProjection"
   | "transactProjection" | "transactDurableProjection" | "projection.get" | "projection.scan" | "projection.checkpoints" | "projection.rebuild";
 export interface AuthorityWork {

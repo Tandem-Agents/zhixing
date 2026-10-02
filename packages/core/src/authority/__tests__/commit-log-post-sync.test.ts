@@ -25,11 +25,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
             };
           }
           if (property === "stat") {
-            return async () => {
+            return async (...options: Parameters<typeof target.stat>) => {
               if (synced && faults.postSyncStat) {
                 throw new Error("injected post-sync stat failure");
               }
-              return target.stat();
+              return target.stat(...options);
             };
           }
           if (property === "close") {
@@ -54,7 +54,7 @@ import { FileAuthorityCommitLog } from "../commit-log.js";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
 describe("FileAuthorityCommitLog post-sync boundary", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
-  it("publishes the committed envelope without post-sync metadata I/O", async () => {
+  it("publishes the committed envelope even when optional post-sync metadata fails", async () => {
     const fixture = await createFixture();
     faults.postSyncStat = true;
 

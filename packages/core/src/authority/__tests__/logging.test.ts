@@ -26,11 +26,14 @@ it("real WAL work reports actual reads and queue time with the owning startup ph
   expect(summaries.length).toBeGreaterThan(0);
   expect(summaries.every(item => item.refs?.some(ref => ref.kind === "authority") && item.refs?.some(ref => ref.kind === "phase"))).toBe(true);
   expect(summaries.reduce((sum, item) => sum + Number(item.data!.operations), 0)).toBeGreaterThanOrEqual(4);
-  expect(summaries.reduce((sum, item) => sum + Number(item.data!.readBytes), 0)).toBeGreaterThan(0);
+  expect(summaries.every(item => Number(item.data!.readBytes) >= 0)).toBe(true);
   expect(summaries.some(item => item.data!.operation === "append")).toBe(true);
   const snapshots = summaries.filter(item => item.data!.operation === "readSnapshot");
   expect(snapshots.reduce((sum, item) => sum + Number(item.data!.operations), 0)).toBe(3);
-  expect(snapshots.reduce((sum, item) => sum + Number(item.data!.recoveries), 0)).toBe(3);
+  // Reuse avoids repeated decoding/recovery, not the current-byte checks.
+  // Physical verification must remain visible in the work counters.
+  expect(snapshots.reduce((sum, item) => sum + Number(item.data!.readBytes), 0)).toBeGreaterThan(0);
+  expect(snapshots.reduce((sum, item) => sum + Number(item.data!.recoveries), 0)).toBeLessThanOrEqual(1);
   expect(summaries.every(item => Number(item.data!.queueMs) >= 0 && Number(item.data!.executionMs) >= 0)).toBe(true);
 }, 20000);
 

@@ -1,4 +1,5 @@
 import { createHash, randomBytes, type Hash } from "node:crypto";
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { authorityObservationRefs, AuthorityWorkObserver, type AuthorityWork } from "./logging.js";
 import {
@@ -79,6 +80,7 @@ import type {
 } from "./interfaces.js";
 import {
   AUTHORITY_WAL_FILE_HEADER_BYTES,
+  AUTHORITY_WAL_SCAN_SLICE_MS,
   decodeAuthorityWalFileHeader,
   encodeAuthorityWalFileHeader,
   encodeAuthorityWalFrame,
@@ -86,6 +88,17 @@ import {
   verifyAuthorityWalFrameBoundary,
 } from "./wal-frame.js";
 import { fileReader } from "./wal-file-reader.js";
+import {
+  MAX_VERIFIED_WAL_VIEW_BYTES,
+  MAX_VERIFIED_WAL_VIEW_FRAMES,
+  matchesWalVersion,
+  readWalVersion,
+  type WalFileVersion,
+  verifiedWalViews,
+  type VerifiedWalFrame,
+  type VerifiedWalTail as VerifiedLogTail,
+  type VerifiedWalView,
+} from "./verified-wal-view.js";
 
 export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
@@ -123,18 +136,6 @@ export interface RetainedReferenceQueryOptions {
   readonly deadConversations?: ReadonlySet<string>;
 }
 
-interface VerifiedLogTail {
-  readonly logId: string;
-  readonly device: number;
-  readonly inode: number;
-  readonly bytes: number;
-  readonly modifiedAt: number;
-  readonly changedAt: number;
-  readonly lastLsn: number;
-  readonly prefixDigest: string;
-  readonly physicalHash?: Hash;
-}
-
 interface ScannedLog {
   readonly lastLsn: number;
   readonly validBytes: number;
@@ -142,6 +143,7 @@ interface ScannedLog {
   readonly incompleteTail?: Buffer;
   readonly stopped?: true;
   readonly physicalHash?: Hash;
+  readonly reused?: true;
 }
 
 interface VerifiedEnvelopeProof {
@@ -161,8 +163,8 @@ function projectionEnvelopeSelection(streams: ReadonlySet<string> | undefined, r
 }
 
 // Validation is a pure function of the bytes, independent of a log instance.
-// Share only bounded digest proofs; every reader still reads and hashes the
-// current file and builds its own objects, LSN chain and projection state.
+// Digest proofs also accelerate scans after a file version changes. A bounded
+// verified WAL view separately shares one proven version, never reducer objects.
 const validatedEnvelopes = new Map<string, VerifiedEnvelopeProof>();
 
 class FileProjectionCursor implements ProjectionCursor {
@@ -170,11 +172,11 @@ class FileProjectionCursor implements ProjectionCursor {
     readonly lsn: number,
     readonly logId: string,
     readonly logPath: string,
-    readonly device: number | undefined,
-    readonly inode: number | undefined,
+    readonly device: bigint | undefined,
+    readonly inode: bigint | undefined,
     readonly byteOffset: number,
-    readonly modifiedAt: number | undefined,
-    readonly changedAt: number | undefined,
+    readonly modifiedAt: bigint | undefined,
+    readonly changedAt: bigint | undefined,
     readonly prefixDigest: string,
     readonly physicalDigest?: string,
   ) {}
@@ -190,6 +192,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #records: LogRecordPort | undefined;
   readonly #workObserver: AuthorityWorkObserver;
   #work: AuthorityWork | undefined;
+  /** One verified snapshot per exclusive operation; never survives lock release. */
+  #operationView: VerifiedWalView | undefined;
   readonly rootDir: string;
   readonly logPath: string;
   readonly identityPath: string;
@@ -556,7 +560,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await this.#validateDurableCheckpoint(checkpoint);
       const handle = await open(this.logPath, "r");
       try {
-        const metadata = await handle.stat();
+        const metadata = await readWalVersion(handle);
         const boundary = await verifyAuthorityWalFrameBoundary(
           this.#walReader(handle, metadata.size),
           checkpoint.frameEndOffset,
@@ -612,7 +616,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const afterLsn = options.afterLsn ?? 0;
     assertReplayLsn(afterLsn);
     return this.#withLogLock("rebuildProjection", async () => {
-      // Reuse only the existing identity/size/time-verified prefix. Changed files
+      // Reuse only the byte-verified prefix in this exclusive operation. Changed files
       // still take full recovery before any reducer is called.
       const lastLsn = await this.#loadLastLsn();
       if (afterLsn > lastLsn) {
@@ -658,17 +662,34 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     assertReplayLsn(cursor?.lsn ?? options.afterLsn ?? 0);
     if (cursor) {
-      const unchanged = await this.#operations.run(async () => {
-        if (!this.#logId) return false;
-        const metadata = await stat(this.logPath).catch((error: unknown) => {
-          if (isNodeError(error, "ENOENT")) return undefined;
-          throw error;
+      const observation = this.#workObserver.begin("readProjection");
+      const queued = performance.now();
+      let failure: [] | [unknown] = [];
+      let unchanged: boolean;
+      try {
+        unchanged = await this.#operations.run(async () => {
+          observation.data.queueMs += performance.now() - queued;
+          const started = performance.now();
+          observation.stage("verify-read-view");
+          this.#work = observation.data;
+          try {
+            if (!this.#logId) return false;
+            const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
+              if (isNodeError(error, "ENOENT")) return undefined;
+              throw error;
+            });
+            // Preserve the caller's already validated read view when its file
+            // version is unchanged. No bytes or decisions are adopted here;
+            // materializing new data and every write still verify actual bytes.
+            return metadata !== undefined && canResumeProjectionCursor(cursor as FileProjectionCursor, this.logPath, this.#logId, metadata);
+          } finally {
+            this.#operationView = undefined;
+            this.#work = undefined;
+            observation.data.executionMs += performance.now() - started;
+          }
         });
-        // The cursor proves a durable complete file. This stat is the read's
-        // linearization point; later appends do not change that snapshot.
-        // Changed or partial bytes must pass the existing exclusive recovery.
-        return metadata !== undefined && canResumeProjectionCursor(cursor as FileProjectionCursor, this.logPath, this.#logId, metadata);
-      });
+      } catch (error) { failure = [error]; throw error; }
+      finally { observation.finish(...failure); }
       if (unchanged) return { state: initial, cursor, lastLsn: cursor.lsn };
     }
     return this.transactProjection(initial, reducer, () => ({ kind: "return", value: undefined }), options);
@@ -1265,12 +1286,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const handle = await open(this.logPath, "a", 0o600);
     let committed = false;
     let nextTail: VerifiedLogTail | undefined;
+    let previousView: VerifiedWalView | undefined;
     try {
-      const metadata = await handle.stat();
+      const metadata = await readWalVersion(handle);
       if (
         metadata.dev !== previousTail.device ||
         metadata.ino !== previousTail.inode ||
-        metadata.size !== previousTail.bytes
+        metadata.size !== previousTail.bytes ||
+        !matchesWalVersion(previousTail, metadata)
       ) {
         throw new AuthorityStorageError(
           "commit-log-corrupt",
@@ -1282,12 +1305,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         device: metadata.dev,
         inode: metadata.ino,
         bytes: checkpoint.frameEndOffset,
-        modifiedAt: Number.NaN,
-        changedAt: Number.NaN,
+        modifiedAt: undefined,
+        changedAt: undefined,
         lastLsn: checkpoint.lsn,
         prefixDigest: checkpoint.prefixDigest,
         physicalHash: previousTail.physicalHash?.copy().update(frame),
       };
+      previousView = verifiedWalViews.get(this.logPath, checkpoint.logId, metadata);
+      verifiedWalViews.delete(this.logPath);
+      this.#operationView = undefined;
       await handle.writeFile(frame);
       await handle.sync();
       committed = true;
@@ -1298,6 +1324,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       this.#verifiedTail = nextTail;
       for (const { projection, prepared, checkpoints } of preparedProjections) {
         projection.state.publish(prepared, checkpoints);
+      }
+      // Cache publication is optional after the durable commit. A failed stat
+      // must never turn a committed write into an apparent failed transaction.
+      const published = await readWalVersion(handle).catch(() => undefined);
+      if (published && published.dev === nextTail.device && published.ino === nextTail.inode &&
+          published.size === nextTail.bytes) {
+        nextTail = { ...nextTail, modifiedAt: published.mtimeNs, changedAt: published.ctimeNs };
+        this.#verifiedTail = nextTail;
       }
     } catch (error) {
       if (!committed) this.#records?.record(() => ({ event: "uncertain", result: "unknown",
@@ -1312,59 +1346,66 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         await handle.close();
       }
     }
+    if (previousView && nextTail && nextTail.modifiedAt !== undefined) {
+      try {
+        verifiedWalViews.put(this.logPath, {
+          tail: nextTail,
+          physicalBytes: Buffer.concat([previousView.physicalBytes, frame]),
+          frames: [...previousView.frames, {
+            lsn, frameEndOffset, prefixDigest, payload: bytes.toString("utf8"),
+            ...(entries.every(entry => entry.stream === entries[0]!.stream) ? { singleStream: entries[0]!.stream } : {}),
+          }],
+        });
+      } catch { verifiedWalViews.delete(this.logPath); } // Never fail an already durable commit for an optimization.
+    }
     return envelope;
   }
 
   async #loadLastLsn(): Promise<number> {
-    const metadata = await stat(this.logPath).catch((error: unknown) => {
+    const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
     if (!metadata) {
       this.#verifiedTail = undefined;
+      verifiedWalViews.delete(this.logPath);
       return 0;
     }
-    if (this.#verifiedTail && tailMatches(this.#verifiedTail, metadata)) {
-      return this.#verifiedTail.lastLsn;
+    const verified = await this.#verifiedView(metadata);
+    if (verified) {
+      this.#verifiedTail = verified.tail;
+      return verified.tail.lastLsn;
     }
-    if (
-      this.#verifiedTail &&
-      Number.isNaN(this.#verifiedTail.modifiedAt) &&
-      this.#verifiedTail.device === metadata.dev &&
-      this.#verifiedTail.inode === metadata.ino &&
-      this.#verifiedTail.bytes === metadata.size
-    ) {
-      if (this.#requireLogFormat() === "legacy") {
-        return this.#readAndRecover();
-      }
-      const expected = this.#verifiedTail;
+    const tail = this.#verifiedTail;
+    if (tail?.physicalHash && tail.logId === this.#requireLogId() && tail.device === metadata.dev &&
+        tail.inode === metadata.ino && tail.bytes === metadata.size) {
+      // Eviction must not force every append to parse history again. A bounded
+      // digest still proves the prefix, after checking every current byte.
       const handle = await open(this.logPath, "r");
       try {
-        const boundary = await verifyAuthorityWalFrameBoundary(
-          this.#walReader(handle, metadata.size),
-          expected.bytes,
-        );
-        // 此处 legacy 已在上方早退,versioned 帧必须带锚点;缺失即为损坏。
-        if (
-          !boundary.metadata ||
-          boundary.metadata.lsn !== expected.lastLsn ||
-          boundary.metadata.prefixDigest !== expected.prefixDigest
-        ) {
-          throw new AuthorityStorageError(
-            "commit-log-corrupt",
-            "Authority log tail changed after commit",
-          );
+        if (this.#work) this.#work.scans++;
+        const digest = createHash("sha256");
+        const buffer = Buffer.allocUnsafe(64 * 1024);
+        let offset = this.#logDataStartOffset();
+        while (offset < metadata.size) {
+          const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, metadata.size - offset), offset);
+          if (bytesRead === 0) break;
+          if (this.#work) this.#work.readBytes += bytesRead;
+          digest.update(buffer.subarray(0, bytesRead));
+          offset += bytesRead;
         }
-      } finally {
-        await handle.close();
-      }
-      this.#verifiedTail = {
-        ...expected,
-        modifiedAt: metadata.mtimeMs,
-        changedAt: metadata.ctimeMs,
-      };
-      return expected.lastLsn;
+        if (offset === metadata.size && digest.digest("hex") === tail.physicalHash.copy().digest("hex")) {
+          const current = await readWalVersion(handle);
+          const proof = { ...tail, modifiedAt: metadata.mtimeNs, changedAt: metadata.ctimeNs };
+          if (matchesWalVersion(proof, current)) {
+            this.#verifiedTail = proof;
+            return proof.lastLsn;
+          }
+        }
+      } finally { await handle.close(); }
     }
+    // Missing post-commit metadata grants no reuse: recover the whole changed
+    // version instead of trusting only a frame footer over an unverified prefix.
     return this.#readAndRecover();
   }
 
@@ -1376,13 +1417,13 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     fromLsn = 0,
     select?: EnvelopeSelection,
   ): Promise<number> {
-    if (this.#work) this.#work.recoveries++;
     const firstRecovery = this.#verifiedTail === undefined;
     const scanned = await this.#scanLog(visit, fromLsn, select);
+    if (this.#work && !scanned.reused) this.#work.recoveries++;
     if (scanned.incompleteTail) {
       await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
     }
-    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
+    if (!scanned.reused) await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest, scanned.physicalHash);
     if (firstRecovery || scanned.incompleteTail) this.#records?.record({ event: "recovered", result: "success", refs: [{ kind: "authority", id: this.#requireLogId() }], data: { lsn: scanned.lastLsn, incompleteTail: !!scanned.incompleteTail } });
     return scanned.lastLsn;
   }
@@ -1402,7 +1443,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         "Projection cursor was not issued by this commit log",
       );
     }
-    const metadata = await stat(this.logPath).catch((error: unknown) => {
+    const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
@@ -1411,8 +1452,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       return { lastLsn: 0, cursor: this.#projectionCursor(0) };
     }
 
+    const verified = await this.#verifiedView(metadata);
     if (
-      cursor &&
+      verified && cursor &&
       canResumeProjectionCursor(
         cursor,
         this.logPath,
@@ -1426,7 +1468,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       return { lastLsn: cursor.lsn, cursor };
     }
 
-    if (cursor?.physicalDigest && cursor.logPath === this.logPath &&
+    if (!verified && cursor?.physicalDigest && cursor.logPath === this.logPath &&
         cursor.logId === this.#requireLogId() && cursor.device === metadata.dev &&
         cursor.inode === metadata.ino && cursor.byteOffset <= metadata.size) {
       // Re-read EVERY old byte under the writer lock. The in-memory digest was
@@ -1435,6 +1477,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const physicalHash = createHash("sha256");
       const handle = await open(this.logPath, "r");
       try {
+        if (this.#work) this.#work.scans++;
         const buffer = Buffer.allocUnsafe(64 * 1024);
         let offset = this.#logDataStartOffset();
         while (offset < cursor.byteOffset) {
@@ -1529,7 +1572,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     let expectedLsn = previousLsn + 1;
     let prefixDigest = previousPrefixDigest;
     try {
-      const metadata = await handle.stat();
+      const metadata = await readWalVersion(handle);
       if (startOffset > metadata.size) {
         throw new AuthorityStorageError(
           "commit-log-corrupt",
@@ -1537,12 +1580,25 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         );
       }
       const logId = this.#requireLogId();
+      const verified = await this.#verifiedView(metadata, handle);
+      if (verified) return await this.#visitVerifiedView(verified, startOffset, previousLsn,
+        previousPrefixDigest, visit, fromLsn, select);
+      let capture: VerifiedWalFrame[] | undefined = previousLsn === 0 &&
+        startOffset === this.#logDataStartOffset() && metadata.size * 3 <= MAX_VERIFIED_WAL_VIEW_BYTES ? [] : undefined;
+      let captureBytes = 256 + metadata.size;
+      const physicalFrames: Buffer[] = [];
+      if (capture && startOffset > 0) {
+        const header = Buffer.alloc(startOffset);
+        const { bytesRead } = await handle.read(header, 0, header.length, 0);
+        if (this.#work) this.#work.readBytes += bytesRead;
+        if (bytesRead !== header.length) throw new AuthorityStorageError("commit-log-corrupt", "Authority WAL header is incomplete");
+        physicalFrames.push(header);
+      }
       const scanned = await scanAuthorityWalFrames(
         this.#walReader(handle, metadata.size - startOffset, startOffset),
         async (payload, offset, frameMetadata, nextOffset) => {
-          // Hash the bytes read in THIS locked scan, including the old prefix.
-          // Only validation proofs are reused; no cached file bytes or mutable
-          // business records can conceal a changed WAL or leak between reducers.
+          // A changed file always goes through physical validation. Capture only
+          // immutable payloads from a complete, stable scan for later readers.
           const digest = createHash("sha256").update(payload).digest("hex");
           const previousProof = validatedEnvelopes.get(digest);
           const envelope = !previousProof || (previousProof.lsn >= fromLsn && select?.(previousProof) !== false)
@@ -1585,6 +1641,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             logId, previousPrefix, prefixDigest,
             ...(singleStream === undefined ? {} : { singleStream }),
           });
+          if (capture) {
+            captureBytes += payload.byteLength * 2 + 192;
+            if (captureBytes > MAX_VERIFIED_WAL_VIEW_BYTES || capture.length >= MAX_VERIFIED_WAL_VIEW_FRAMES) {
+              capture = undefined;
+              physicalFrames.length = 0;
+            }
+            else capture.push({ lsn: identity.lsn, frameEndOffset: startOffset + nextOffset,
+              prefixDigest, payload: payload.toString("utf8"), ...(singleStream === undefined ? {} : { singleStream }) });
+          }
           // Selection skips only object materialization/visitation. Every byte,
           // LSN and physical frame proof above is still verified in order.
           if (identity.lsn < fromLsn || select?.({ lsn: identity.lsn, singleStream }) === false) return;
@@ -1595,8 +1660,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             prefixDigest,
           });
         },
-        physicalHash ? frame => { physicalHash.update(frame); } : undefined,
+        frame => { physicalHash?.update(frame); if (capture) physicalFrames.push(Buffer.from(frame)); },
       );
+      if (capture && !scanned.incompleteTail && !scanned.stopped) {
+        const tail: VerifiedLogTail = { logId, device: metadata.dev, inode: metadata.ino,
+          bytes: metadata.size, modifiedAt: metadata.mtimeNs, changedAt: metadata.ctimeNs,
+          lastLsn: expectedLsn - 1, prefixDigest, ...(physicalHash ? { physicalHash: physicalHash.copy() } : {}) };
+        // Never label bytes observed before a concurrent rewrite with its newer
+        // timestamp. Cooperative writers are excluded by the WAL lock.
+        if (matchesWalVersion(tail, await readWalVersion(handle))) {
+          const view = { tail, frames: capture, physicalBytes: Buffer.concat(physicalFrames) };
+          verifiedWalViews.put(this.logPath, view);
+          if (this.#work) this.#operationView = view;
+        }
+      }
       return {
         lastLsn: expectedLsn - 1,
         validBytes: startOffset + scanned.validBytes,
@@ -1610,6 +1687,69 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     } finally {
       await handle.close();
     }
+  }
+
+  /** Metadata is not a proof on every filesystem (notably rapid Windows writes).
+   * One bulk byte comparison reuses parsing/digest proofs without hiding changes. */
+  async #verifiedView(metadata: WalFileVersion, supplied?: FileHandle): Promise<VerifiedWalView | undefined> {
+    const view = verifiedWalViews.get(this.logPath, this.#requireLogId(), metadata);
+    if (!view) return undefined;
+    if (this.#work && this.#operationView === view) return view;
+    const handle = supplied ?? await open(this.logPath, "r");
+    try {
+      if (this.#work) this.#work.scans++;
+      const current = Buffer.allocUnsafe(view.physicalBytes.byteLength);
+      let offset = 0;
+      while (offset < current.length) {
+        const { bytesRead } = await handle.read(current, offset, current.length - offset, offset);
+        if (this.#work) this.#work.readBytes += bytesRead;
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+      }
+      if (offset === current.length && current.equals(view.physicalBytes) && matchesWalVersion(view.tail, await readWalVersion(handle))) {
+        if (this.#work) this.#operationView = view;
+        return view;
+      }
+      verifiedWalViews.delete(this.logPath);
+      this.#operationView = undefined;
+      this.#verifiedTail = undefined;
+      return undefined;
+    } finally { if (!supplied) await handle.close(); }
+  }
+
+  async #visitVerifiedView(
+    view: VerifiedWalView, startOffset: number, previousLsn: number, previousPrefixDigest: string,
+    visit: (envelope: CommitEnvelope<JsonValue>, checkpoint: DurableLogCheckpoint) => boolean | void | Promise<boolean | void>,
+    fromLsn: number, select?: EnvelopeSelection,
+  ): Promise<ScannedLog> {
+    const boundary = view.frames[previousLsn - 1];
+    if (previousLsn === 0 ? startOffset !== this.#logDataStartOffset() || previousPrefixDigest !== emptyLogPrefix(view.tail.logId)
+      : !boundary || boundary.frameEndOffset !== startOffset || boundary.prefixDigest !== previousPrefixDigest) {
+      throw new AuthorityStorageError("commit-log-corrupt", "Projection boundary does not match the verified WAL");
+    }
+    this.#verifiedTail = view.tail;
+    let yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
+    for (let index = Math.max(previousLsn, fromLsn - 1); index < view.frames.length; index++) {
+      const frame = view.frames[index]!;
+      const hasRemaining = frame.frameEndOffset < view.tail.bytes;
+      if (select?.(frame) !== false) {
+        // Each consumer owns its objects; reducer/caller mutations cannot poison
+        // another reader or the next durable append.
+        const shouldContinue = await visit(JSON.parse(frame.payload) as CommitEnvelope<JsonValue>, {
+          logId: view.tail.logId, lsn: frame.lsn, frameEndOffset: frame.frameEndOffset, prefixDigest: frame.prefixDigest,
+        });
+        // Match the physical scanner: a limit reached at EOF is completion,
+        // not an early stop that promises another page.
+        if (shouldContinue === false && hasRemaining) return { lastLsn: frame.lsn, validBytes: frame.frameEndOffset,
+          prefixDigest: frame.prefixDigest, stopped: true, reused: true };
+      }
+      if (hasRemaining && performance.now() >= yieldAt) {
+        await yieldToIo();
+        yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
+      }
+    }
+    return { lastLsn: view.tail.lastLsn, validBytes: view.tail.bytes, prefixDigest: view.tail.prefixDigest,
+      ...(view.tail.physicalHash ? { physicalHash: view.tail.physicalHash.copy() } : {}), reused: true };
   }
 
   async #quarantineTail(bytes: Buffer, validBytes: number): Promise<void> {
@@ -1629,6 +1769,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     await syncDirectory(this.quarantineDir);
     await syncDirectory(this.rootDir);
 
+    verifiedWalViews.delete(this.logPath);
+    this.#operationView = undefined;
     const log = await open(this.logPath, "r+");
     try {
       await log.truncate(validBytes);
@@ -1648,21 +1790,27 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     prefixDigest: string,
     physicalHash?: Hash,
   ): Promise<void> {
-    const metadata = await stat(this.logPath).catch((error: unknown) => {
+    const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
+    const previous = this.#verifiedTail;
+    // A suffix-only synchronization must not discard an existing prefix proof.
+    // Reusing the proof still requires checking current bytes at the next read.
+    const provenHash = physicalHash ?? (previous && metadata && previous.logId === this.#requireLogId() &&
+      previous.device === metadata.dev && previous.inode === metadata.ino && previous.bytes === metadata.size &&
+      previous.lastLsn === lastLsn && previous.prefixDigest === prefixDigest ? previous.physicalHash : undefined);
     this.#verifiedTail = metadata
       ? {
           logId: this.#requireLogId(),
           device: metadata.dev,
           inode: metadata.ino,
           bytes: metadata.size,
-          modifiedAt: metadata.mtimeMs,
-          changedAt: metadata.ctimeMs,
+          modifiedAt: metadata.mtimeNs,
+          changedAt: metadata.ctimeNs,
           lastLsn,
           prefixDigest,
-          ...(physicalHash ? { physicalHash } : {}),
+          ...(provenHash ? { physicalHash: provenHash } : {}),
         }
       : undefined;
   }
@@ -1813,7 +1961,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     const handle = await open(this.logPath, "r");
     try {
-      const metadata = await handle.stat();
+      const metadata = await readWalVersion(handle);
       const boundary = await verifyAuthorityWalFrameBoundary(
         this.#walReader(handle, metadata.size),
         checkpoint.frameEndOffset,
@@ -1836,7 +1984,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   async #ensureInitialized(): Promise<void> {
-    const metadata = await stat(this.logPath).catch((error: unknown) => {
+    const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
     });
@@ -2040,6 +2188,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               return await operation();
             });
           } finally {
+            this.#operationView = undefined;
             this.#work = undefined;
             observation.data.executionMs += performance.now() - executing;
             const releasing = performance.now();
@@ -2638,7 +2787,7 @@ function canResumeProjectionCursor(
   cursor: FileProjectionCursor,
   logPath: string,
   logId: string,
-  metadata: Awaited<ReturnType<typeof stat>>,
+  metadata: WalFileVersion,
 ): boolean {
   return (
     cursor.logId === logId &&
@@ -2647,21 +2796,8 @@ function canResumeProjectionCursor(
     cursor.inode === metadata.ino &&
     cursor.byteOffset >= 0 &&
     cursor.byteOffset === metadata.size &&
-    cursor.modifiedAt === metadata.mtimeMs &&
-    cursor.changedAt === metadata.ctimeMs
-  );
-}
-
-function tailMatches(
-  tail: VerifiedLogTail,
-  metadata: Awaited<ReturnType<typeof stat>>,
-): boolean {
-  return (
-    tail.device === metadata.dev &&
-    tail.inode === metadata.ino &&
-    tail.bytes === metadata.size &&
-    tail.modifiedAt === metadata.mtimeMs &&
-    tail.changedAt === metadata.ctimeMs
+    cursor.modifiedAt === metadata.mtimeNs &&
+    cursor.changedAt === metadata.ctimeNs
   );
 }
 

@@ -194,6 +194,9 @@ export function decodeAuthorityWalFrame(
   };
 }
 
+/** Physical scans and verified-view replays share the same cooperative CPU slice. */
+export const AUTHORITY_WAL_SCAN_SLICE_MS = 8;
+
 export async function scanAuthorityWalFrames(
   reader: AuthorityWalReader,
   visit: (
@@ -210,7 +213,7 @@ export async function scanAuthorityWalFrames(
 
   let offset = 0;
   let frameCount = 0;
-  let yieldAt = performance.now() + 8;
+  let yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
   while (offset < reader.size) {
     const remaining = reader.size - offset;
     const headerLength = Math.min(AUTHORITY_WAL_HEADER_BYTES, remaining);
@@ -260,7 +263,7 @@ export async function scanAuthorityWalFrames(
     // without releasing the caller's authority lock or changing replay order.
     if (offset < reader.size && performance.now() >= yieldAt) {
       await yieldToIo();
-      yieldAt = performance.now() + 8;
+      yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
     }
   }
   return { frameCount, validBytes: offset };
