@@ -1,7 +1,7 @@
 import {
   describeProxy,
   type ProxyDescription,
-} from "@zhixing/network";
+} from "@zhixing/network/proxy";
 import {
   loadConfig,
   type ZhixingConfig,

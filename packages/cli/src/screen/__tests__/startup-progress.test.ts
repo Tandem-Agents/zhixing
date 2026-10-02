@@ -14,6 +14,21 @@ afterEach(() => {
 });
 
 describe("StartupProgressPresenter", () => {
+  it("shows initial feedback synchronously and cancels all work at handoff", () => {
+    vi.useFakeTimers();
+    const out = new FakeStdout();
+    const first = vi.fn();
+    const progress = createStartupProgressPresenter({ stdout: out, text: "opening", onFirstOutput: first });
+    progress.begin();
+    expect(out.buffer).toBe("\r\x1b[2Kopening");
+    progress.begin();
+    expect(first).toHaveBeenCalledOnce();
+    progress.disable();
+    const final = out.buffer;
+    vi.advanceTimersByTime(10000);
+    expect(out.buffer).toBe(final);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("writes asynchronous notices on their own line and preserves the progress line until stop", () => {
     vi.useFakeTimers();
     const out = new FakeStdout();

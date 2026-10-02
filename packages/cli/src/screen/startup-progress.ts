@@ -13,7 +13,7 @@ export interface StartupProgressPresenterOptions {
   onFirstOutput?: () => void;
 }
 
-const DEFAULT_DELAY_MS = 700;
+const DEFAULT_DELAY_MS = 0;
 const DEFAULT_LONG_DELAY_MS = 4_000;
 
 /**
@@ -46,7 +46,9 @@ export class StartupProgressPresenter {
   begin(started = performance.now()): void {
     if (this.disabled) return;
     this.stop();
-    this.delayTimer = setTimeout(() => {
+    // Initial feedback must not wait behind synchronous module evaluation.
+    if (this.delayMs <= 0) this.render(this.text);
+    else this.delayTimer = setTimeout(() => {
       this.delayTimer = null;
       this.render(this.text);
     }, this.delayMs);

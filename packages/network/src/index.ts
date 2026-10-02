@@ -22,7 +22,7 @@ export {
   describeProxy,
   redactProxyUrl,
   resolveProxy,
-} from "./safe-fetcher-internal.js";
+} from "./proxy.js";
 
 // 类型契约
 export type {

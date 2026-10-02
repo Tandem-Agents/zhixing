@@ -4,6 +4,10 @@
   "description": "知行网络出口原语 — SSRF 安全的 fetch、URL/IP 防护、文本净化",
   "type": "module",
   "exports": {
+    "./proxy": {
+      "types": "./dist/proxy.d.ts",
+      "import": "./dist/proxy.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

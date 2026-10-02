@@ -155,7 +155,7 @@ import type {
   ServeTopologyPlan,
 } from "./role-topology.js";
 import { projectRuntimeSecrets } from "../runtime/runtime-secret-projections.js";
-import { createRenderSubscribers } from "../render.js";
+import { createRunEventSubscribers } from "../render-events.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
   createBlockedRenderer,
@@ -641,7 +641,7 @@ async function runServerProcess(
   // 直接打到 stdout 日志。工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自
   // 装配独立 listener,工厂自身无跨 run 状态,共享安全且节省一次函数创建开销。
   const serveWriter = createStdoutWriter();
-  const renderDecorator = createRenderSubscribers({ writer: serveWriter });
+  const renderDecorator = createRunEventSubscribers({ writer: serveWriter });
 
   // 带外事件与活动提示在任何长期消费者之前取得同一稳定 Host port；真实
   // Server transport 只在 inactive endpoint 的 activation gate 内安装。

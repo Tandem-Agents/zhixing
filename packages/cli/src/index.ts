@@ -13,7 +13,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
-import { createStartupProgressPresenter } from "./screen/startup-progress.js";
+import { createStartupProgressPresenter, type StartupProgressPresenter } from "./screen/startup-progress.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
@@ -100,6 +100,7 @@ function handleStartupResult(result: StartupCheckResult): number | undefined {
 }
 
 export const program = new Command();
+let entryProgress: StartupProgressPresenter | undefined;
 const COMMANDER_HELP = new Help();
 
 const ROOT_HELP_TITLES: Readonly<Record<string, string>> = Object.freeze({
@@ -225,10 +226,10 @@ program
   })
   .action(async () => {
     const earlyRecords = peekEntryLogging()?.records;
-    const progress = process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout,
+    const progress = entryProgress ?? (process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout,
       onFirstOutput: () => recordFirstSurfaceOutput(earlyRecords),
-    }) : undefined;
-    progress?.begin(performance.now() - process.uptime() * 1000);
+    }) : undefined);
+    if (!entryProgress) progress?.begin(performance.now() - process.uptime() * 1000);
     const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE },
       { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
       import("@zhixing/core/paths"), import("@zhixing/providers/configuration"), import("./logging/runtime.js"), import("./logging/input.js"),
@@ -1017,14 +1018,17 @@ function isExecutedAsMain(moduleUrl: string, argvEntry: string | undefined): boo
   }
 }
 
-export async function runCli(): Promise<void> {
-  const argv = [...process.argv.slice(0, 2), ...normalizeCliArgs(process.argv.slice(2))];
+export async function runCli(progress?: StartupProgressPresenter): Promise<void> {
+  entryProgress = progress;
+  try {
+    const argv = [...process.argv.slice(0, 2), ...normalizeCliArgs(process.argv.slice(2))];
 
-  rejectUnknownCommandPath(argv, program);
+    rejectUnknownCommandPath(argv, program);
 
-  await program.parseAsync(argv).catch(async (err: unknown) => {
-    await renderActionError(err);
-    await exitCommand(1);
-  });
+    await program.parseAsync(argv).catch(async (err: unknown) => {
+      await renderActionError(err);
+      await exitCommand(1);
+    });
+  } finally { entryProgress = undefined; }
 }
 if (isExecutedAsMain(import.meta.url, process.argv[1])) void runCli();
