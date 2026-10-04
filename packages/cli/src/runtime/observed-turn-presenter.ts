@@ -13,13 +13,11 @@ import { ADVANCEMENT_TURN_LABEL } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { clampLine } from "../tui/line-width.js";
 import { layout } from "../tui/style.js";
+import { sameConversationOutput, type ConversationOutputIdentity } from "./conversation-output.js";
 
 type RunStartPayload = AgentEventMap["agent:run_start"];
 
-export interface ObservedTurnIdentity {
-  conversationId: string;
-  turnId?: string;
-}
+export interface ObservedTurnIdentity extends ConversationOutputIdentity {}
 
 export interface ObservedTurnPresenterOptions {
   writer: Pick<CliWriter, "ensureSegmentBreak" | "line">;
@@ -134,6 +132,7 @@ export class ObservedTurnPresenter {
     this.active = {
       conversationId: identity.conversationId,
       turnId: identity.turnId,
+      runId: identity.runId,
       promptShown: false,
       sawOutput: false,
       fallbackTimer: null,
@@ -185,9 +184,7 @@ function sameTurn(
   left: ObservedTurnIdentity,
   right: ObservedTurnIdentity,
 ): boolean {
-  return (
-    left.conversationId === right.conversationId && left.turnId === right.turnId
-  );
+  return sameConversationOutput(left, right);
 }
 
 function collapsePrompt(prompt: string): string {

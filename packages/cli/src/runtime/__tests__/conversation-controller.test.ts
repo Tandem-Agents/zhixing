@@ -516,7 +516,7 @@ describe("ConversationController", () => {
     f.emit.final({ v: 1, conversationId: "conv-1", runId, commitRevision: 1, digest: `sha256:${"0".repeat(64)}` });
     await vi.waitFor(() => expect(inputs.mock.calls.flatMap(([value]) => value.inputs)).toContainEqual({ text: "补充要求", identity: a }));
     if (mode !== "user-run" && mode !== "local-waiter") expect(inputs.mock.calls.flatMap(([value]) => value.inputs)).toContainEqual({ text: "原始要求", identity: c });
-    if (mode === "stream") expect(onYield.mock.calls.filter(([delta]) => delta.type === "text_delta")).toEqual([[{ type: "text_delta", text: "完成" }]]);
+    if (mode === "stream") expect(onYield.mock.calls.filter(([delta]) => delta.type === "text_delta").map(([delta]) => [delta])).toEqual([[{ type: "text_delta", text: "完成" }]]);
     if (local) await local.outcome;
     controller.dispose();
   });
@@ -566,9 +566,9 @@ describe("ConversationController", () => {
     ] };
     f.conversation.history.mockResolvedValue({ runs: [{ shardId: "s", record }], hasMore: false } as never);
     f.emit.final({ v: 1, conversationId: "conv-1", runId: "communication", commitRevision: 1, digest: `sha256:${"0".repeat(64)}` });
-    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "核实完成" }));
+    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "核实完成" }, expect.objectContaining({ kind: "history", conversationId: "conv-1", runId: "communication", final: expect.objectContaining({ runId: "communication" }) })));
     expect(complete).toHaveBeenCalledOnce();
-    expect(observed).toHaveBeenCalledWith({ conversationId: "conv-1", turnId: "communication", inputs: [{ text: "核实", identity: messageIdentity }] });
+    expect(observed).toHaveBeenCalledWith({ conversationId: "conv-1", runId: "communication", inputs: [{ text: "核实", identity: messageIdentity }] });
     expect(controller.current.conversationId).toBe("conv-1");
     controller.dispose();
   });
@@ -606,7 +606,7 @@ describe("ConversationController", () => {
     f.emit.assignment(frame);
     f.emit.assignment(frame);
     expect(onYield).toHaveBeenCalledTimes(1);
-    expect(onYield).toHaveBeenCalledWith(frame.payload.yield);
+    expect(onYield).toHaveBeenCalledWith(frame.payload.yield, { kind: "stream", conversationId: "conv-1", runId: "auto-result", frame });
     const final = { v: 1, conversationId: "conv-1", runId: "auto-result", commitRevision: 2, digest: `sha256:${"0".repeat(64)}` };
     f.conversation.history.mockResolvedValue({ runs: [{ shardId: "000001", record: { type: "run", runId: "auto-result", runIndex: 1, timestamp: "2026-09-15T00:00:00Z", messages: [{ role: "assistant", content: [{ type: "text", text: "已核实报告，尚未发布。" }] }] } }], hasMore: false } as never);
     f.emit.final(final);
@@ -638,7 +638,7 @@ describe("ConversationController", () => {
     if (order === "partial-then-reference") f.emit.assignment({ v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-ref" }, assignmentId: "a", streamEpoch: 1, seq: 1, payload: { kind: "agent-yield", yield: { type: "text_delta", text: "正在核对。" } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } });
     if (order !== "final-only") f.emit.assignment({ v: 1, ref: { execution: "conversation", conversationId: "conv-1", runId: "auto-ref" }, assignmentId: "a", streamEpoch: 1, seq: 2, payload: { kind: "agent-yield", yield: { ref: { digest: `sha256:${"0".repeat(64)}`, bytes: 20 } } }, meta: { turnOrigin: { channel: "rpc", worksceneContinuation: { kind: "result", conversationId: "ws:reports:primary", runId: "child" } } } });
     f.emit.final(final);
-    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "完整的最终结果" }));
+    await vi.waitFor(() => expect(onYield).toHaveBeenCalledWith({ type: "text_delta", text: "完整的最终结果" }, { kind: "history", conversationId: "conv-1", runId: "auto-ref", final }));
     expect(complete).toHaveBeenCalledTimes(1);
     controller.dispose();
   });
@@ -1521,7 +1521,7 @@ describe("ConversationController", () => {
       conversationId: "conv-1",
       turnId,
     });
-    expect(onYield).toHaveBeenCalledWith(frame);
+    expect(onYield).toHaveBeenCalledWith(frame, expect.objectContaining({ kind: "delta", conversationId: "conv-1", notification: expect.objectContaining({ delta: frame }) }));
 
     releaseSend();
     const acceptedTurn = await acceptedPromise;
@@ -1602,7 +1602,7 @@ describe("ConversationController", () => {
     });
 
     expect(onYield).toHaveBeenCalledTimes(1);
-    expect(onYield).toHaveBeenCalledWith(frame);
+    expect(onYield).toHaveBeenCalledWith(frame, expect.objectContaining({ kind: "delta", conversationId: "conv-1", notification: expect.objectContaining({ delta: frame }) }));
   });
 
   it("activity 只通知非当前对话,不进入主渲染", () => {
@@ -1660,7 +1660,7 @@ describe("ConversationController", () => {
       result: { reason: "completed" },
     });
 
-    expect(onYield).toHaveBeenCalledWith(frame);
+    expect(onYield).toHaveBeenCalledWith(frame, expect.objectContaining({ kind: "delta", conversationId: "conv-1", notification: expect.objectContaining({ delta: frame }) }));
     expect(onObservedTurnDelta).toHaveBeenCalledWith({
       conversationId: "conv-1",
       turnId: "turn-remote",
@@ -1727,7 +1727,7 @@ describe("ConversationController", () => {
 
     await turn;
     expect(onYield).toHaveBeenCalledTimes(1);
-    expect(onYield).toHaveBeenCalledWith(ownFrame);
+    expect(onYield).toHaveBeenCalledWith(ownFrame, expect.objectContaining({ kind: "delta", conversationId: "conv-1", notification: expect.objectContaining({ delta: ownFrame }) }));
   });
 
   it("enterScene 切指针到场景对话(模式由全域键派生);exitScene 经宿主确认后切回 main 目标", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createOutputRenderer } from "../output-renderer.js";
+import type { ConversationOutputSource } from "../../runtime/conversation-output.js";
 import { stripAnsi } from "../../tui/ansi.js";
 import { stringWidth } from "../../tui/line-width.js";
 import type { CliWriter } from "../../screen/index.js";
@@ -89,6 +90,26 @@ function makeCaptureWriter(): CapturedWriter {
 }
 
 describe("createOutputRenderer · 工具事件分流", () => {
+  it.each(["different-run", "different-conversation"])("输出身份变化先结清上一段：%s", change => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    const source = (conversationId: string, runId: string, turnId: string): ConversationOutputSource => ({
+      kind: "history", conversationId, runId, turnId,
+      final: { v: 1, conversationId, runId, commitRevision: 1, digest: `sha256:${"0".repeat(64)}` },
+    });
+    renderer.handleEvent({ type: "text_delta", text: "**first" }, source("conv", "run-a", "turn-a"));
+    renderer.handleEvent({ type: "text_delta", text: " rest**" }, source("conv", "run-a", "turn-b"));
+    expect(writer.buffer).toBe("");
+    renderer.handleEvent({ type: "text_delta", text: "second" }, source(
+      change === "different-conversation" ? "other" : "conv",
+      change === "different-run" ? "run-b" : "run-a", "turn-b",
+    ));
+    expect(stripAnsi(writer.buffer)).toContain("first rest");
+    expect(stripAnsi(writer.buffer)).not.toContain("second");
+    renderer.stop();
+    expect(stripAnsi(writer.buffer)).toContain("second");
+  });
+
   it("default 工具 tool_start 不立即写 scrollback——进行中视觉由状态条接管", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });

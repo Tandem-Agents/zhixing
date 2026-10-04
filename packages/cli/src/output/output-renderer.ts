@@ -31,6 +31,7 @@
 
 import chalk from "chalk";
 import type { AgentYield } from "@zhixing/core/loop";
+import { sameConversationOutput, type ConversationOutputSource } from "../runtime/conversation-output.js";
 import type { SubAgentResultPresentationArtifact } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import type { CliWriter, ReplaceableSegmentHandle } from "../screen/index.js";
@@ -161,7 +162,7 @@ function renderThinkingTail(
 
 export interface OutputRenderer {
   startThinking: () => void;
-  handleEvent: (event: AgentYield) => void;
+  handleEvent: (event: AgentYield, source?: ConversationOutputSource) => void;
   stop: () => void;
 }
 
@@ -445,6 +446,7 @@ export function createOutputRenderer(
     }
   };
 
+  let outputSource: ConversationOutputSource | undefined;
   return {
     startThinking() {
       // status-bar 接管"思考中 / 回复中"等动态状态条；本接口仍保留以兼容
@@ -453,11 +455,16 @@ export function createOutputRenderer(
       flushTextStream();
     },
 
-    handleEvent(event: AgentYield) {
+    handleEvent(event: AgentYield, source?: ConversationOutputSource) {
+      if (source && outputSource && !sameConversationOutput(outputSource, source)) {
+        this.stop();
+      }
+      outputSource = source;
       renderEvent(event);
     },
 
     stop() {
+      outputSource = undefined;
       // 防御性 cleanup —— 异常退出 / abort / dispose 路径若 thinking segment
       // 还在,这里关闭 (与 markdown segment / batch segment 同模式)
       closeThinkingSegment();

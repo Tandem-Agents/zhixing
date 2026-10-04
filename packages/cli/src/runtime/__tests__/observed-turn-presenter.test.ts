@@ -58,6 +58,16 @@ function decorate(
 }
 
 describe("ObservedTurnPresenter", () => {
+  it("耐久 run 的迟到 complete 不结清另一个 run 的输出", () => {
+    const flushOutput = vi.fn();
+    const presenter = createObservedTurnPresenter({ writer: makeWriter(), flushOutput, isLocalTurn: () => false });
+    presenter.onObservedTurnDelta({ conversationId: "conv", runId: "current" });
+    presenter.onObservedTurnComplete({ conversationId: "conv", runId: "previous" });
+    expect(flushOutput).not.toHaveBeenCalled();
+    presenter.onObservedTurnComplete({ conversationId: "conv", runId: "current" });
+    expect(flushOutput).toHaveBeenCalledOnce();
+  });
+
   it("restores a missed incoming prompt from committed history without duplicate labels", () => {
     const writer = makeWriter();
     const presenter = createObservedTurnPresenter({ writer, flushOutput: vi.fn(), isLocalTurn: () => false, width: () => 160 });

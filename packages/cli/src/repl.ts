@@ -706,7 +706,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     {
       conversation: conversationFacade,
       workscene: worksceneFacade,
-      onYield: (e) => renderer.handleEvent(e),
+      onYield: (e, source) => renderer.handleEvent(e, source),
       onObservedInputs: (turn) => observedTurnPresenter.onObservedInputs(turn),
       onObservedTurnDelta: (turn) =>
         observedTurnPresenter.onObservedTurnDelta(turn),

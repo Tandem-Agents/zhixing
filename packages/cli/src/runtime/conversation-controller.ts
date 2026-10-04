@@ -50,6 +50,7 @@ import type { ConversationCommunicationHistory as RunsPage } from "@zhixing/core
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server/client";
 import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
+import type { ConversationOutputIdentity, ConversationOutputSource } from "./conversation-output.js";
 
 /** 当前对话指针 + 模式视图(由全域键派生,场景显示名取自 enter 响应) */
 export interface ActiveConversation {
@@ -175,7 +176,7 @@ export interface ConversationControllerOptions {
   conversation: RpcConversationFacade;
   workscene: RpcWorksceneFacade;
   /** 主通道还原:当前对话的 AgentYield 流(渲染器 handleEvent 的喂入点) */
-  onYield: (event: AgentYield) => void;
+  onYield: (event: AgentYield, source: ConversationOutputSource) => void;
   /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
   onObservedInputs?: (turn: ObservedTurnNotification & AgentEventMap["agent:input_received"]) => void;
@@ -201,10 +202,7 @@ export class ConversationContinuationDeclinedError extends Error {
   }
 }
 
-export interface ObservedTurnNotification {
-  conversationId: string;
-  turnId?: string;
-}
+export interface ObservedTurnNotification extends ConversationOutputIdentity {}
 
 interface DurableRunWatch {
   readonly conversationId: string;
@@ -353,7 +351,8 @@ export class ConversationController {
             turnId: p.turnId,
           });
         }
-        this.opts.onYield(p.delta);
+        const runId = this.durableRunByTurn.get(p.turnId);
+        this.opts.onYield(p.delta, { conversationId: p.conversationId, turnId: p.turnId, ...(runId ? { runId } : {}), kind: "delta", notification: p });
       }),
       // 控制意图:仅发起连接可达,先于 complete;暂存到 turn 落定统一消费
       opts.conversation.onPostTurnControlIntent((p) => {
@@ -903,10 +902,10 @@ export class ConversationController {
     const result = terminalResultForStatus(notice);
     if (!observed || observed.settled || !result || observed.conversationId !== this.active.conversationId) return;
     observed.settled = true;
-    const identity = { conversationId: observed.conversationId, turnId: notice.ref.runId };
+    const identity = { conversationId: observed.conversationId, runId: notice.ref.runId };
     this.opts.onObservedTurnDelta?.(identity);
     const label = observed.communication ? "来信处理" : "任务续接";
-    this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` });
+    this.opts.onYield({ type: "text_delta", text: result.reason === "error" ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: "status", notice });
     this.opts.onObservedTurnComplete?.(identity);
   }
 
@@ -970,9 +969,9 @@ export class ConversationController {
     if (frame.payload.kind === "agent-event" && "event" in frame.payload.event) {
       const event = frame.payload.event;
       if (event.event === "agent:input_received") {
-        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, turnId: frame.ref.runId, ...event.payload });
+        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, runId: frame.ref.runId, ...event.payload });
       } else if (event.event === "agent:run_start" && communication) {
-        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, turnId: frame.ref.runId, inputs: [{ text: event.payload.prompt, identity: frame.meta.turnOrigin!.messageIdentity! }] });
+        this.opts.onObservedInputs?.({ conversationId: frame.ref.conversationId, runId: frame.ref.runId, inputs: [{ text: event.payload.prompt, identity: frame.meta.turnOrigin!.messageIdentity! }] });
       }
     }
     if (!frame.meta.turnOrigin?.worksceneContinuation && !communication) return;
@@ -1009,8 +1008,9 @@ export class ConversationController {
     if (delta.type === "text_delta") observed.text += delta.text;
     // Only the final assistant segment can be a prefix of the committed answer.
     if (delta.type === "tool_start") observed.text = "";
-    this.opts.onObservedTurnDelta?.({ conversationId: observed.conversationId, turnId: frame.ref.runId });
-    this.opts.onYield(delta);
+    const identity = { conversationId: observed.conversationId, runId: frame.ref.runId };
+    this.opts.onObservedTurnDelta?.(identity);
+    this.opts.onYield(delta, { ...identity, kind: "stream", frame });
   }
 
   private async presentContinuationFinal(frame: FinalFrame): Promise<void> {
@@ -1037,10 +1037,11 @@ export class ConversationController {
           const text = message?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
           const remaining = text?.startsWith(observed.text) ? text.slice(observed.text.length) : text;
           if (remaining) {
-            this.opts.onObservedTurnDelta?.({ conversationId: frame.conversationId, turnId: frame.runId });
-            this.opts.onYield({ type: "text_delta", text: remaining });
+            const identity = { conversationId: frame.conversationId, runId: frame.runId };
+            this.opts.onObservedTurnDelta?.(identity);
+            this.opts.onYield({ type: "text_delta", text: remaining }, { ...identity, kind: "history", final: frame });
           }
-          this.opts.onObservedTurnComplete?.({ conversationId: frame.conversationId, turnId: frame.runId });
+          this.opts.onObservedTurnComplete?.({ conversationId: frame.conversationId, runId: frame.runId });
           return;
         }
         const last = page.runs.at(-1);
@@ -1061,7 +1062,7 @@ export class ConversationController {
     if (conversationId !== this.active.conversationId) return;
     const inputs = messages.flatMap(message => message.inputIdentity?.source.kind === "conversation"
       ? [{ text: extractText(message), identity: message.inputIdentity }] : []);
-    if (inputs.length) this.opts.onObservedInputs?.({ conversationId, turnId: runId, inputs });
+    if (inputs.length) this.opts.onObservedInputs?.({ conversationId, runId, inputs });
   }
 
   private async retryCommittedRunLookup(runId: string): Promise<void> {
