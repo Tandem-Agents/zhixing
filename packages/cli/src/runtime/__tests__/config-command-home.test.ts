@@ -26,6 +26,7 @@ vi.mock("../../serve/managed-service-runtime.js", () => ({
   reconcileCurrentManagedService: calls.reconcile,
 }));
 import { handleConfigCommand, handleMcpCommand } from "../config-command.js";
+import { ChannelConfiguration } from "../extensions/channel-configuration.js";
 
 describe("REPL config command home binding", () => {
   const makeDeps = () => ({
@@ -77,6 +78,56 @@ describe("REPL config command home binding", () => {
     expect(deps.requestHostReload).toHaveBeenCalledOnce();
     expect(deps.writer.line.mock.calls.flat().join("\n")).toContain(failed ? "尚未确认生效" : "已保存并生效");
     expect(deps.rl.resume).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])("通道应用失败不跳过同次模型与启动项变更，重载失败=%s 分别反馈", async reloadFails => {
+    const deps = makeDeps(), turn = Promise.withResolvers<void>();
+    deps.state.activeTurnPromise = turn.promise;
+    deps.requestHostReload.mockImplementation(async () => { if (reloadFails) throw Error("reload unavailable"); });
+    const apply = vi.fn(async () => { throw Error("channel response lost"); });
+    calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
+    calls.write.mockImplementation(async () => undefined);
+    calls.editor.mockImplementation(async input => {
+      const result = { kind: "completed", config: {
+        llm: { main: { provider: "synthetic", model: "synthetic-model" } },
+        mesh: { enabledRoles: ["executor"], executorAutoStart: true },
+        messaging: { synthetic: { enabled: true } },
+      }, credentials: {} };
+      await input.writers.save(result); return result;
+    });
+    const run = handleConfigCommand({ ...deps, applyExtensionConfiguration: apply });
+    await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(["synthetic"]));
+    expect(deps.requestHostReload).not.toHaveBeenCalled();
+    turn.resolve(); await run;
+    expect(deps.requestHostReload).toHaveBeenCalledExactlyOnceWith({ launchSelectionChanged: true });
+    expect(calls.reconcile).toHaveBeenCalledExactlyOnceWith("local-role-config-committed", undefined, deps.zhixingHome);
+    const lines = deps.writer.line.mock.calls.flat().join("\n");
+    expect(lines).toContain("消息通道尚未确认应用");
+    expect(lines).toContain(reloadFails ? "核心宿主重载未确认" : "核心宿主已按新配置重启");
+    expect(deps.rl.resume).toHaveBeenCalledOnce();
+  });
+
+  it("只有通道的应用失败保持待应用，重开未改配置仍重试原发布且不换代", async () => {
+    const deps = makeDeps();
+    const config = { messaging: { synthetic: { enabled: true } } };
+    calls.snapshot.mockResolvedValue({ config, credentials: {} });
+    calls.write.mockImplementation(async () => undefined);
+    calls.editor.mockImplementation(async input => {
+      const result = { kind: "completed", config: input.initialConfig, credentials: input.initialCredentials };
+      await input.writers.save(result); return result;
+    });
+    const pending = vi.spyOn(ChannelConfiguration.prototype, "pending").mockResolvedValue(true);
+    const snapshot = { instances: [], operations: [] } as never;
+    const apply = vi.fn().mockRejectedValueOnce(Error("channel response lost")).mockResolvedValueOnce(snapshot);
+    try {
+      const input = { ...deps, readExtensions: async () => snapshot, applyExtensionConfiguration: apply };
+      await handleConfigCommand(input);
+      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("消息通道尚未确认应用");
+      await handleConfigCommand(input);
+      expect(apply.mock.calls).toEqual([[["synthetic"]], [["synthetic"]]]);
+      expect(deps.requestHostReload).not.toHaveBeenCalled();
+      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("连接按需局部刷新");
+      expect(deps.rl.resume).toHaveBeenCalledTimes(2);
+    } finally { pending.mockRestore(); }
   });
   afterEach(() => {
     vi.unstubAllEnvs();

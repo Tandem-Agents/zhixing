@@ -87,11 +87,15 @@ async function runEditorCommand(deps: ConfigCommandDeps, opts: {
     });
     if (result.kind === "mcp") {
       writer.line((result.result.status === "active" ? chalk.green : chalk.yellow)(layout.contentPrefix + result.result.message));
-
+    } else if (result.kind === "saved-pending") {
+      writer.line(chalk.yellow(layout.contentPrefix + "配置已保存，但消息通道尚未确认应用；重新打开配置可重试。"));
     } else if (result.kind === "local-applied") {
       writer.line(chalk.green(layout.contentPrefix + "配置已保存，连接按需局部刷新；其他任务不受影响。"));
     } else if (result.kind === "reloaded") {
       const { effects } = result;
+      if (result.pendingChannels) {
+        writer.line(chalk.yellow(layout.contentPrefix + "消息通道尚未确认应用；重新打开配置可重试。"));
+      }
       if (
         effects.reload.status === "succeeded" &&
         effects.reconcile.status !== "failed"

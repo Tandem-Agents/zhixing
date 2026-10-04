@@ -27,7 +27,8 @@ export interface ConfigurationInteractionOptions {
 }
 export type ConfigurationApplicationResult =
   | { readonly kind: "cancelled" | "non-tty" | "local-applied" }
-  | { readonly kind: "reloaded"; readonly effects: ConfigPostCommitEffects }
+  | { readonly kind: "saved-pending"; readonly stage: "channels" }
+  | { readonly kind: "reloaded"; readonly effects: ConfigPostCommitEffects; readonly pendingChannels?: true }
   | { readonly kind: "mcp"; readonly result: Awaited<ReturnType<McpManagementApplication["edit"]>> };
 
 export interface HostReloadResult {
@@ -188,16 +189,18 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
     return { kind: "mcp", result };
   }
   const changedIds = changedChannels(editorResult.config, editorResult.credentials, editorResult.channelIntents);
+  let pendingChannels = false;
   if (changedIds.length > 0) {
-    if (!deps.applyExtensionConfiguration) throw new Error("渠道管理入口不可用，配置已保存但尚未应用");
-    await deps.applyExtensionConfiguration(changedIds);
+    if (!deps.applyExtensionConfiguration) pendingChannels = true;
+    else try { await deps.applyExtensionConfiguration(changedIds); }
+    catch { pendingChannels = true; }
   }
   const { messaging: _oldMessaging, ...oldConfig } = config;
   const { messaging: _newMessaging, ...newConfig } = editorResult.config;
   const { channels: _oldChannels, ...oldCredentials } = credentials;
   const { channels: _newChannels, ...newCredentials } = editorResult.credentials;
   if (canonicalize(oldConfig) === canonicalize(newConfig) && canonicalize(oldCredentials) === canonicalize(newCredentials)) {
-    return { kind: "local-applied" };
+    return pendingChannels ? { kind: "saved-pending", stage: "channels" } : { kind: "local-applied" };
   }
   const launchSelectionChanged = canonicalize({
     enabledRoles: config.mesh?.enabledRoles ?? [],
@@ -217,7 +220,9 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
     reload: deps.requestHostReload,
     reconcile: () => reconcileCurrentManagedService("local-role-config-committed", undefined, homeDir),
   });
-  return { kind: "reloaded", effects };
+  // Channel publication and host configuration are independent committed
+  // effects. A local channel failure cannot discard the same edit's reload.
+  return { kind: "reloaded", effects, ...(pendingChannels ? { pendingChannels: true } : {}) };
 }
 
 export interface McpConfigurationDeps {
