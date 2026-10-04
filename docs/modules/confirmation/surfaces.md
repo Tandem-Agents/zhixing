@@ -27,13 +27,13 @@
 
 轻量原生终端方案支持内联输入与可控布局，不引入 React/Ink 依赖；只提供选择列表的组件不能直接完成“选择并补充文字”的一次交互，先接过渡库再替换也会重复适配。当前使用 Chrome 内联操作区，早期独立屏原地擦行方案已退出。宿主用 beforeShow／afterShow 协调输入让位与恢复，避免两个输入消费者争用；通用机制见[选择模块](../cli/selection.md)与[屏幕渲染](../cli/screen-rendering.md)，权限面板尚不是 SelectionService 的业务调用。
 
-CLI 通过 [RpcConfirmationBroker](../../../packages/cli/src/runtime/rpc-confirmation-broker.ts)接收完整请求并去重；`refresh` 可补查漏通知。同步 `resolve=true` 仅表示本地发起，异步失败上报并尝试刷新。当前回程等待 RPC Promise，但未判断返回体的 `ok:false`；不能将面板消失写成授权成功保证。该适配器也不自建全局审批队列，不能宣称已有“#N of M”视图或批量审批。
+CLI 通过 [RpcConfirmationBroker](../../../packages/cli/src/runtime/rpc-confirmation-broker.ts)接收完整请求并去重；`refresh` 可补查漏通知。同步 `resolve=true` 仅表示本地发起，只有 RPC 返回 `ok:true` 才完成本次回程。`ok:false`、无效回执或异步失败均上报并尝试刷新真实 pending，不自动重发失败决定；连接关闭仍以同一原始决定重放。面板消失本身不是授权成功保证。该适配器也不自建全局审批队列，不能宣称已有“#N of M”视图或批量审批。
 
 ## RPC 可见性、应答与重放
 
 [ConfirmationBridge](../../../packages/rpc/src/confirmation-bridge.ts)统一投影 pending／resolved；[方法层](../../../packages/server/src/rpc/methods/confirmation.ts)处理 list／resolve。会话列表按 observer 过滤，无会话请求的列表查询按发起身份匹配；通知另有边界：有会话时按 observer 推送，无会话时向宿主所有已认证、未关闭连接发送 pending 摘要和 resolved 通知。完整可执行请求仅附给已认证、loopback 且匹配发起身份的连接；不能把列表过滤等同于摘要通知隔离。
 
-活跃请求只允许匹配原始 RPC 发起身份的连接应答：请求来源须为 rpc，且 `turnOrigin.triggeredBy` 等于当前连接 ID 或其 `surfacePrincipal`。仅有 observer 身份不可代答；若来源绑定的是稳定 `surfacePrincipal`，连接变化本身不撤销匹配资格。已认证且 loopback 的本机面支持 allow-once、deny、allow-session、allow-context、allow-global；其他 RPC 面仅前两种。两级均不接受 cancelled、expired 或 edit-then-allow；持久决定还校验 pattern 结构。不能用“经 RPC 就禁止持久授权”概括当前信任模型。
+活跃请求只允许匹配原始 RPC 发起身份的连接应答：请求来源须为 rpc，且 `turnOrigin.triggeredBy` 等于当前连接 ID 或其 `surfacePrincipal`。仅有 observer 身份不可代答；若来源绑定的是稳定 `surfacePrincipal`，连接变化本身不撤销匹配资格。已认证且 loopback 的本机面支持 allow-once、deny、allow-session、allow-context、allow-global，以及仅限 user-ctrl-c／user-ctrl-d 原因的 cancelled；其他 RPC 面仅支持 allow-once／deny。本机用户取消保留取消原因，不转换成拒绝或允许；内部取消原因、expired 与 edit-then-allow 均不能通过该入口提交。持久决定还校验 pattern 结构。不能用“经 RPC 就禁止持久授权”概括当前信任模型。
 
 耐久对话请求已出内存索引时，可携 conversationId、requestId 和同一完整决定重放：answered 记录摘要一致返回成功，不再次执行；不一致返回 decision-conflict；其他终态或无记录返回 already-resolved-or-not-found。此只读结果重放不要求原 connectionId，不等于新连接取得未解决请求的应答权。
 

@@ -157,7 +157,15 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
       while (!this.disposed) {
         const client = await this.opts.link.getClient();
         try {
-          await client.request("confirmation.resolve", params);
+          const result = await client.request<{ readonly ok: boolean; readonly reason?: string }>("confirmation.resolve", params);
+          if (result?.ok !== true) {
+            const message = result?.reason === "decision-conflict"
+              ? "此确认已有不同的决定，宿主未接受此次应答。"
+              : result?.reason === "already-resolved-or-not-found"
+                ? "此确认已处理或已失效，宿主未接受此次应答。"
+                : "未取得有效的确认应答回执，请核对当前请求状态。";
+            throw new Error(message);
+          }
           return;
         } catch (error) {
           if (!(error instanceof RpcClientClosedError)) throw error;

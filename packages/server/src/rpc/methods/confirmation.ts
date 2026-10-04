@@ -40,8 +40,9 @@ import type {
  * 维持受限白名单,"远程不得沉淀永久规则"的安全意图在身份模型下完整保留
  * (远程接入面的可信身份模型留待真实需求)。
  *
- * 两级都不包含 cancelled / expired / edit-then-allow：
- *   - cancelled / expired 不是用户决策——由 broker 内部产生
+ * 可信本机面可回传用户 Ctrl+C/Ctrl+D 的 cancelled；内部取消原因不能伪造。
+ * 两级都不包含 expired / edit-then-allow：
+ *   - expired 和非用户取消由 broker 内部产生
  *   - edit-then-allow：需要改工具输入，远程 UX 未设计
  *
  * 自由文本拒绝：通过 `{ kind: "deny", reason: "..." }` 表达——RPC 客户端传 reason
@@ -58,6 +59,7 @@ const TRUSTED_KINDS: ReadonlySet<ConfirmationDecision["kind"]> = new Set([
   "allow-session",
   "allow-context",
   "allow-global",
+  "cancelled",
 ]);
 
 // ─── list ───
@@ -265,6 +267,9 @@ function validateDecisionShape(decision: {
   kind: string;
   [key: string]: unknown;
 }): void {
+  if (decision.kind === "cancelled" && decision.cause !== "user-ctrl-c" && decision.cause !== "user-ctrl-d") {
+    throw RpcErrors.invalidParams("confirmation.resolve cancelled requires a user Ctrl+C/Ctrl+D cause");
+  }
   if (
     decision.kind === "allow-session" ||
     decision.kind === "allow-context" ||

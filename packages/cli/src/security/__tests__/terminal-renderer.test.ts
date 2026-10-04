@@ -550,6 +550,7 @@ describe("TerminalConfirmationRenderer integration", () => {
   it("选择后异步收尾/断线不丢决定，新面板等待旧输入所有权释放", async () => {
     const { stdin } = makeStreams();
     const fake = makeFakeHostLink();
+    fake.setResponder(() => ({ ok: true }));
     const broker = new RpcConfirmationBroker({ link: fake.link });
     const cleanup = Promise.withResolvers<void>();
     const beforeShow = vi.fn();

@@ -547,6 +547,47 @@ describe("confirmation.resolve", () => {
 
   // ─── kind 白名单——按接入面信任级分级 ───
 
+  it.each(["user-ctrl-c", "user-ctrl-d"] as const)("本机发起面的 %s 保留取消原因，旁观与非可信接入不能代答", async cause => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("cancel-source", broker, { conversationId: "conv-A" });
+    const pending = broker.requestConfirmation(makeRequest("cancel-user"));
+    const server = {
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map([["conv-A", new Set(["1", "2"])]])),
+    } as unknown as ServerContext;
+    const method = buildConfirmationResolveMethod();
+    const decision = { kind: "cancelled" as const, cause };
+    const params = { requestId: "cancel-user", decision };
+    try {
+      await expect(method.handler(params, makeContext(server, makeConnection(2)))).rejects.toBeInstanceOf(RpcAppError);
+      await expect(method.handler(params, makeContext(server, makeConnection(1, { loopback: false })))).rejects.toBeInstanceOf(RpcAppError);
+      expect(hub.findEntry("cancel-user")).toBeDefined();
+      await expect(method.handler(params, makeContext(server, makeConnection(1)))).resolves.toEqual({ ok: true });
+      await expect(pending).resolves.toEqual(decision);
+    } finally {
+      broker.cancelAll("session-end");
+      await pending;
+    }
+  });
+
+  it("本机接入不能伪造内部取消、过期或缺失取消原因", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker(); broker.onRequest(() => {});
+    hub.attach("cancel-internal", broker);
+    const pending = broker.requestConfirmation(makeRequest("cancel-internal"));
+    const server = { confirmation: makeConfirmationBinding(hub) } as unknown as ServerContext;
+    try {
+      for (const decision of [
+        { kind: "cancelled" }, { kind: "cancelled", cause: "aborted" },
+        { kind: "cancelled", cause: "session-end" }, { kind: "cancelled", cause: "backpressure" },
+        { kind: "cancelled", cause: 42 }, { kind: "expired" },
+      ]) await expect(buildConfirmationResolveMethod().handler({ requestId: "cancel-internal", decision }, makeContext(server, makeConnection(1)))).rejects.toBeInstanceOf(RpcAppError);
+      expect(hub.findEntry("cancel-internal")).toBeDefined();
+    } finally { broker.cancelAll("session-end"); await pending; }
+  });
+
   it.each([
     ["allow-session", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
     ["allow-context", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],

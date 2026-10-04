@@ -129,6 +129,7 @@ describe("RpcConfirmationBroker", () => {
 
   it("resolve 走 RPC 回程;失败经 onResolveError 上报", async () => {
     const fake = makeFakeHostLink();
+    fake.setResponder(() => ({ ok: true }));
     const errors: Array<{ requestId: string }> = [];
     const broker = new RpcConfirmationBroker({
       link: fake.link,
@@ -174,6 +175,26 @@ describe("RpcConfirmationBroker", () => {
       { method: "confirmation.list", params: undefined },
       { method: "confirmation.list", params: undefined },
     ]);
+    broker.dispose();
+  });
+
+  it.each(["already-resolved-or-not-found", "decision-conflict", "invalid-response"])("宿主 %s 不被冒认为应答成功，也不自动重发决定", async reason => {
+    const fake = makeFakeHostLink();
+    const request = makeRequest("r-unaccepted");
+    const onResolveError = vi.fn();
+    const received = vi.fn();
+    fake.setResponder(method => method === "confirmation.list"
+      ? { items: [{ request }] }
+      : reason === "invalid-response" ? {} : { ok: false, reason });
+    const broker = new RpcConfirmationBroker({ link: fake.link, onResolveError });
+    broker.onRequest(received);
+    fake.notify("confirmation.pending", { request });
+    expect(broker.resolve(request.id, { kind: "allow-once" })).toBe(true);
+    await vi.waitFor(() => expect(onResolveError).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(received).toHaveBeenCalledTimes(2));
+    expect(onResolveError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(onResolveError.mock.calls[0]?.[1]).toBe(request.id);
+    expect(fake.requests.filter(call => call.method === "confirmation.resolve")).toHaveLength(1);
     broker.dispose();
   });
 
