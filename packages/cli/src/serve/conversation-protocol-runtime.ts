@@ -136,6 +136,8 @@ export interface ConversationProtocolRuntimeOptions {
   readonly owner?: ConversationOwnerRuntimeStack;
   readonly losslessDataPlane: ConversationLosslessDataPlaneTopology;
   readonly manager: () => ConversationManager;
+  /** Existing directory identities can precede their first owner-journal fact. */
+  readonly storedIdentityExists?: (conversationId: string) => Promise<boolean>;
   readonly clock?: () => string;
   readonly interactions: DurableConversationInteractionObserver;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
@@ -290,6 +292,7 @@ export function createConversationCommittedTurnListenerAssemblyHandle(): Readonl
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: ConversationOwnerRuntimeStack;
   readonly #manager: () => ConversationManager;
+  readonly #storedIdentityExists: ConversationProtocolRuntimeOptions["storedIdentityExists"];
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
   readonly #executorDispatch: ConversationExecutorDispatchApplication;
@@ -374,6 +377,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     };
     this.#authority = authority;
     this.#manager = options.manager;
+    this.#storedIdentityExists = options.storedIdentityExists;
     const protocol = this;
     this.deferredIntentAuthority = Object.freeze({
       transact<Value>(input: DeferredIntentConversationTransaction<Value>) {
@@ -2358,7 +2362,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!this.#sessionState) {
       this.#sessionState = new ConversationSessionStateAdapter({
         journalFor: (conversationId) => this.#journal(conversationId),
-        sessionExists: (conversationId) => this.sessionExists(conversationId),
+        sessionExists: async (conversationId) => await this.sessionExists(conversationId) ||
+          (await this.#storedIdentityExists?.(conversationId)) === true,
+        establishIdentity: (conversationId) => this.ensureSession(conversationId),
         mutateControl: async (conversationId, mutation, ctx) => {
           const principal = ctx.principal.kind === "surface"
             ? {

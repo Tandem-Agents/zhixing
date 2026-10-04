@@ -10,7 +10,7 @@ import { createMcpManagementTools } from "../mcp-tools.js";
 import { createServerConfirmationBinding, createServerConversationBinding } from "../server-product-bindings.js";
 import { buildConfirmationListMethod, buildConfirmationResolveMethod } from "../../../../server/src/rpc/methods/confirmation.js";
 import { localConversationId } from "@zhixing/core/conversation";
-import { userMessageFromTurnInput, type Message } from "@zhixing/core";
+import { userTurnInputFromText, userMessageFromTurnInput, type Message } from "@zhixing/core";
 import { runAgentLoop, MockLLMProvider, type AgentYield, type RunResult } from "@zhixing/core/loop";
 import { ConversationCommunicationApplicationService, ConversationDirectoryApplicationService, TaskListService, type ConversationMessageExecutionRequest } from "@zhixing/core/conversation/application";
 import { createAnchorConversationTaskListPort } from "../conversation-task-list-application.js";
@@ -47,6 +47,9 @@ import { WorksceneContinuationApplication, type WorksceneApplication, type Works
 import type { PostTurnControlOutcome } from "@zhixing/core/types";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createTempDir } from "@zhixing/test-utils";
+import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
+import { SessionAdvancementStore } from "@zhixing/owner-services/advancement";
+import { LLMRubricDraftGenerationStrategy, RubricContractBuilder } from "@zhixing/core/advancement";
 import { ExtensionApplication } from "@zhixing/core/extensions/application";
 import { ExtensionArtifacts } from "@zhixing/core/extensions/artifacts";
 import { ExtensionCandidates } from "@zhixing/core/extensions/candidate";
@@ -394,6 +397,36 @@ describe("ConversationProtocolRuntime", () => {
       await manager.disposeAll();
     }
   }, 30000);
+
+  it("establishes a created empty conversation before its first Advancement fact", async () => {
+    const home = await createTempDir("advancement-empty-conversation");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const storage = createConversationStorageInfrastructure({ zhixingHome: home, optimalMaxTokens: 1000,
+      worksceneConversationStorageRemoval: { removeConversation: async () => {} } });
+    const manager = new ConversationManager({ create: async () => { throw new Error("Draft persistence must not start execution"); } });
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      storedIdentityExists: id => storage.directory.exists(id) });
+    const store = new SessionAdvancementStore({ port: protocol.sessionState });
+    const builder = new RubricContractBuilder({ generationStrategy: new LLMRubricDraftGenerationStrategy({ complete: async () => JSON.stringify({
+      title: "离线交互核对", description: "核对离线交互结果", passCriteria: ["说明本次核对结果"],
+      evidenceRequirements: [{ kind: "conversation-fact", description: "明确答复", required: false }],
+      failureHandling: [{ scenario: "遗漏结果", reply: "请补充结果" }],
+    }) }) });
+    const input = userTurnInputFromText("核对原任务");
+    try {
+      const draft = await builder.buildDraft({ originalTurnId: "draft-turn", originalUserTask: input });
+      await expect(store.createSession({ id: "adv-absent", conversationId: "conversation-absent", originalUserTask: input, pendingRubricDraft: draft }))
+        .rejects.toMatchObject({ code: "not-found" });
+      expect(await authority.controlAdmission.listCreatedConversationIds()).not.toContain("conversation-absent");
+      const created = await storage.directory.create();
+      expect(await protocol.sessionExists(created.conversationId)).toBe(false);
+      await expect(store.createSession({ id: "adv-first-draft", conversationId: created.conversationId, originalUserTask: input, pendingRubricDraft: draft }))
+        .resolves.toMatchObject({ id: "adv-first-draft", status: "awaiting-rubric-confirmation", pendingRubricDraft: draft });
+      expect(await authority.controlAdmission.listCreatedConversationIds()).toContain(created.conversationId);
+      protocol.releaseConversation(created.conversationId);
+      expect(await store.loadSession(created.conversationId, "adv-first-draft")).toMatchObject({ id: "adv-first-draft", pendingRubricDraft: draft });
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); await authority.startupCleanup.run(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps task-list authority and late retries independent of legacy files and later list order", async () => {
     const home = await createTempDir("owner-task-list-retry");

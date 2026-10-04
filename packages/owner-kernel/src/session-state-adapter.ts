@@ -20,6 +20,8 @@ import type { ConversationRunJournal } from "./conversation-assignment.js";
 export interface ConversationSessionStateAdapterOptions {
   readonly journalFor: (conversationId: string) => ConversationRunJournal;
   readonly sessionExists?: (conversationId: string) => Promise<boolean>;
+  /** Establish the known owner's durable identity before its first dependent write. */
+  readonly establishIdentity?: (conversationId: string) => Promise<void>;
   readonly mutateControl?: (
     conversationId: string,
     mutation: Exclude<SessionControlMutation, { readonly kind: "advancement-event" }>,
@@ -81,6 +83,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
             `Session does not exist: ${conversationId}`,
           );
         }
+        await this.#options.establishIdentity?.(conversationId);
       }
       const result = await journal.applyAdvancementEvents({
         requestId: ctx.requestId,

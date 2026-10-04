@@ -656,6 +656,7 @@ export async function createConversationServices(
       });
   const protocol = new ConversationProtocolRuntime({
     authority: inputAuthorityRuntime,
+    storedIdentityExists: (conversationId) => inputConversationIdentityLifecycle.identityExists(conversationId),
     manager: managerAssembly.resolve,
     recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
     losslessDataPlane: Object.freeze({
