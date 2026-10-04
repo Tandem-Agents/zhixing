@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderReadOnlyConversationBrowser } from "../read-only-conversation-browser.js";
 import { CoreHostUnavailableError } from "../core-host-connection.js";
+import { listReadOnlyConversations, queryReadOnlyConversationHistory } from "../read-only-conversation-query.js";
 import type { CliWriter } from "../../screen/index.js";
 import { createReadOnlyConversationStorage } from "../../serve/conversation-storage-infrastructure.js";
 
@@ -25,6 +26,29 @@ afterEach(async () => {
 });
 
 describe("read-only conversation browser", () => {
+  it.each(["pending", "read-failed", "projection-failed"])("后项%s仍保留已显示的前项历史", async scenario => {
+    await writeConversation("first", "首个对话", "2026-01-03T00:00:00.000Z", [run("已读问题", "已读回复", 0)]);
+    await writeConversation("second", "后续对话", "2026-01-02T00:00:00.000Z", []);
+    const storage = createReadOnlyConversationStorage(home);
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof storage.readHistory>>>();
+    const readHistory = vi.fn((id: string, options: Parameters<typeof storage.readHistory>[1]) =>
+      id === "second" ? pending.promise : storage.readHistory(id, options));
+    const { writer, lines } = makeWriter();
+    const outcome = renderReadOnlyConversationBrowser({
+      writer, error: "offline", storage: { list: () => storage.list(), readHistory }, width: 100,
+    }).then(result => ({ result }), error => ({ error }));
+    await vi.waitFor(() => expect(readHistory).toHaveBeenCalledWith("second", { limit: 1 }));
+    expect(lines.join("\n")).toContain("已读问题");
+    expect(lines.join("\n")).toContain("已读回复");
+    expect(lines.join("\n")).toContain("后续对话 (second)");
+    if (scenario === "read-failed") pending.reject(new Error("synthetic read failure"));
+    else pending.resolve(scenario === "pending" ? { runs: [], hasMore: false } : {
+      runs: [{ shardId: "000001", record: { ...run("unused", "unused", 0), messages: [] } }], hasMore: false,
+    } as Awaited<ReturnType<typeof storage.readHistory>>);
+    expect(await outcome).toHaveProperty(scenario === "pending" ? "result" : "error");
+    expect(lines.join("\n")).toContain("已读回复");
+  });
+
   it("shows only the public startup summary and a direct evidence command", async () => {
     const { writer, lines } = makeWriter();
     await renderReadOnlyConversationBrowser({
@@ -151,6 +175,24 @@ describe("read-only conversation browser", () => {
     expect(lines.join("\n")).toContain("旧元数据 (chat-legacy)");
     expect(lines.join("\n")).toContain("仍可浏览");
   });
+});
+
+it("只读查询继续消费 owner 的归档过滤与 limit/before 倒读页", async () => {
+  await writeConversation("archived", "已归档", "2026-01-04T00:00:00.000Z", [run("不显示", "归档回复", 0)]);
+  const archivedPath = path.join(home, "conversations", "archived", "meta.json");
+  const meta = JSON.parse(await fs.readFile(archivedPath, "utf8"));
+  await fs.writeFile(archivedPath, JSON.stringify({ ...meta, archived: true }));
+  await writeConversation("paged", "分页", "2026-01-03T00:00:00.000Z", [run("较旧", "旧回复", 0), run("最新", "新回复", 1)]);
+  const storage = createReadOnlyConversationStorage(home);
+  const entries = await listReadOnlyConversations(storage, 5);
+  expect(entries.map(item => item.conversationId)).toEqual(["paged"]);
+  const result = await queryReadOnlyConversationHistory(storage, "paged", 1);
+  expect(result.history.entries[0]?.userText).toBe("最新");
+  expect(JSON.stringify(result)).not.toContain("\u001b");
+  const first = await storage.readHistory("paged", { limit: 1 });
+  const cursor = first.runs[0]!;
+  const next = await storage.readHistory("paged", { limit: 1, before: { shardId: cursor.shardId, runIndex: cursor.record.runIndex } });
+  expect(next.runs[0]?.record.messages[0]?.content).toEqual([{ type: "text", text: "较旧" }]);
 });
 
 async function writeConversation(

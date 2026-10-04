@@ -9,15 +9,14 @@ import chalk from "chalk";
 import type {
   ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
-import type { RunRecord } from "@zhixing/core/transcript";
 import {
-  projectHistoryTail,
   renderHistoryTailLines,
 } from "../history-tail.js";
 import { formatRelativeTime } from "../commands/format.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { CoreHostUnavailableError } from "./core-host-connection.js";
+import { listReadOnlyConversations, queryReadOnlyConversationHistory } from "./read-only-conversation-query.js";
 
 export interface ReadOnlyConversationBrowserOptions {
   readonly writer: CliWriter;
@@ -48,7 +47,7 @@ export async function renderReadOnlyConversationBrowser(
   }
   opts.writer.line("");
 
-  const conversations = (await opts.storage.list()).slice(0, maxConversations);
+  const conversations = await listReadOnlyConversations(opts.storage, maxConversations);
   if (conversations.length === 0) {
     opts.writer.line(chalk.dim(`${layout.contentPrefix}没有可显示的本地对话。`));
     renderRepairHint(opts.writer);
@@ -65,14 +64,10 @@ export async function renderReadOnlyConversationBrowser(
         }`,
       ),
     );
-    const runs = await readRecentRuns(
-      opts.storage,
-      conversation.conversationId,
-      maxRunsPerConversation,
-    );
-    renderedRuns += runs.length;
+    const result = await queryReadOnlyConversationHistory(opts.storage, conversation.conversationId, maxRunsPerConversation);
+    renderedRuns += result.renderedRuns;
     const lines = renderHistoryTailLines(
-      projectHistoryTail(runs, maxRunsPerConversation),
+      result.history,
       width,
     );
     if (lines.length === 0) {
@@ -85,16 +80,6 @@ export async function renderReadOnlyConversationBrowser(
 
   renderRepairHint(opts.writer);
   return { conversations: conversations.length, renderedRuns };
-}
-
-async function readRecentRuns(
-  storage: Pick<ConversationDirectoryStorage, "readHistory">,
-  conversationId: string,
-  limit: number,
-): Promise<RunRecord[]> {
-  if (limit <= 0) return [];
-  const page = await storage.readHistory(conversationId, { limit });
-  return page.runs.map(({ record }) => record);
 }
 
 function formatMaybeRelative(iso: string): string | null {
