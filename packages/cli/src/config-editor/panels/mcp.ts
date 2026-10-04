@@ -6,67 +6,18 @@
  * 连接状态只读展示（来自注入的 runtime）。接入新 server 的引导向导是另一条路径（异步），
  * 不在此面板。
  */
-
-import type {
-  ConfigEditorContext,
-  ConfigEditorRuntime,
-  PanelAction,
-  PanelDescriptor,
-  WorkingState,
-} from "../types.js";
-import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
-import {
-  clearInputBuffer,
-  isMcpServerEnabled,
-  listMcpServerIds,
-  patchMcpSecrets,
-  readMcpServer,
-  removeMcpServer,
-  setInputBuffer,
-  setMcpServerEnabled,
-  upsertMcpServer,
-} from "../state.js";
-import { applyMcpSetup, validateMcpSetup } from "@zhixing/core/mcp-management";
+import type { ConfigEditorRuntime, PanelDescriptor, WorkingState } from "../types.js";
+import { isMcpServerEnabled, readMcpServer } from "../state.js";
 import { maskForInput } from "../ui/mask.js";
-import {
-  CONTENT_INDENT,
-  writeInputThenFooterAndRestoreCursor,
-} from "./input.js";
-import {
-  tone,
-  renderChrome,
-  chromeContentWidth,
-  renderButtonRow,
-  renderFooter,
-  osc8Hyperlink,
-  wrapToWidth,
-  Renderer,
-  type KeyEvent,
-} from "../../tui/index.js";
+import { CONTENT_INDENT, writeInputThenFooterAndRestoreCursor } from "./input.js";
+import { tone, renderChrome, chromeContentWidth, renderButtonRow, renderFooter, osc8Hyperlink, wrapToWidth, Renderer } from "../../tui/index.js";
+import { findStatus, describeStatus } from '../model/mcp.js';
+export { type McpServerPanelKeyResult, handleMcpServerPanelKey, handleMcpAddPanelKey, handleMcpAddInputPanelKey, handleMcpChoicesPanelKey } from '../model/mcp.js';
+
+
 
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 确认", "Esc 返回", "Ctrl+C 退出"] as const;
 
-/** 面板动作：0 = 启停，1 = 删除。 */
-const ACTION_TOGGLE = 0;
-const ACTION_REMOVE = 1;
-const ACTION_COUNT = 2;
-
-function findStatus(
-  serverId: string,
-  runtime?: ConfigEditorRuntime,
-): McpManagementServerStatus | undefined {
-  return runtime?.mcpServerStatuses?.().find((s) => s.serverId === serverId);
-}
-
-function describeStatus(
-  enabled: boolean,
-  status: McpManagementServerStatus | undefined,
-): string {
-  if (!enabled) return "已停用";
-  if (!status) return "已启用（暂无连接信息）";
-  if (status.status === "connected") return `已连接 · ${status.toolCount} 工具`;
-  return status.error ? `连接中 · ${status.error}` : "连接中";
-}
 
 export function renderMcpServerPanel(
   state: WorkingState,
@@ -124,57 +75,6 @@ export function renderMcpServerPanel(
   renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
 }
 
-export interface McpServerPanelKeyResult {
-  action: PanelAction;
-  cursor: { index: number };
-}
-
-export function handleMcpServerPanelKey(
-  state: WorkingState,
-  descriptor: Extract<PanelDescriptor, { kind: "mcp-server" }>,
-  cursor: { index: number },
-  key: KeyEvent,
-): McpServerPanelKeyResult {
-  const max = ACTION_COUNT - 1;
-  switch (key.type) {
-    case "ctrl-c":
-      return { action: { type: "exit", result: { kind: "cancelled" } }, cursor };
-    case "escape":
-      return { action: { type: "pop", state }, cursor };
-    case "arrow-up":
-      return {
-        action: { type: "stay", state },
-        cursor: { index: cursor.index > 0 ? cursor.index - 1 : max },
-      };
-    case "arrow-down":
-      return {
-        action: { type: "stay", state },
-        cursor: { index: cursor.index < max ? cursor.index + 1 : 0 },
-      };
-    case "enter": {
-      if (cursor.index === ACTION_TOGGLE) {
-        const enabled = isMcpServerEnabled(state, descriptor.serverId);
-        return {
-          action: {
-            type: "stay",
-            state: setMcpServerEnabled(state, descriptor.serverId, !enabled),
-          },
-          cursor,
-        };
-      }
-      if (cursor.index === ACTION_REMOVE) {
-        // 删除后该 server 不复存在——pop 回列表
-        return {
-          action: { type: "pop", state: removeMcpServer(state, descriptor.serverId) },
-          cursor,
-        };
-      }
-      return { action: { type: "stay", state }, cursor };
-    }
-    default:
-      return { action: { type: "stay", state }, cursor };
-  }
-}
 
 // ─── mcp-add：按预设接入新 server（输入密钥 → 带密钥 discovery 验证） ───
 
@@ -183,6 +83,7 @@ const MCP_ADD_FOOTER_HINTS = [
   "Esc 取消",
   "Ctrl+C 退出",
 ] as const;
+
 
 export function renderMcpAddPanel(
   state: WorkingState,
@@ -272,96 +173,6 @@ export function renderMcpAddPanel(
   }
 }
 
-export function handleMcpAddPanelKey(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-  descriptor: Extract<PanelDescriptor, { kind: "mcp-add" }>,
-  key: KeyEvent,
-): PanelAction {
-  const { candidate, inputs, fieldIndex } = descriptor;
-  const fields = candidate.secretFields;
-  const field = fields[fieldIndex];
-
-  switch (key.type) {
-    case "ctrl-c":
-      return { type: "exit", result: { kind: "cancelled" } };
-    case "escape":
-      return { type: "pop", state: clearInputBuffer(state) };
-    case "backspace": {
-      if (!field || state.inputBuffer.length === 0) return { type: "stay", state };
-      const chars = Array.from(state.inputBuffer);
-      chars.pop();
-      return { type: "stay", state: setInputBuffer(state, chars.join("")) };
-    }
-    case "char":
-      if (!field) return { type: "stay", state }; // 无字段时不收输入
-      return {
-        type: "stay",
-        state: setInputBuffer(state, state.inputBuffer + key.ch),
-      };
-    case "enter": {
-      // 有当前字段 → 收集其值并累积；非末字段则推进到下一字段
-      let collected = inputs;
-      if (field) {
-        const value = state.inputBuffer.trim();
-        if (!value) return { type: "stay", state }; // 需先输入当前密钥
-        collected = { ...inputs, [field.key]: value };
-        if (fieldIndex + 1 < fields.length) {
-          return {
-            type: "replace",
-            state: clearInputBuffer(state),
-            panel: {
-              ...descriptor,
-              inputs: collected,
-              fieldIndex: fieldIndex + 1,
-              error: undefined,
-            },
-          };
-        }
-      }
-
-      // 末字段（或无字段）→ 带密钥 discovery 验证 → 落盘
-      const probe = ctx.runtime?.mcpProbe;
-      if (!probe) {
-        // 理论上 /mcp 必注入 probe；防御性原地报错而非静默
-        return {
-          type: "replace",
-          state,
-          panel: { ...descriptor, error: "无法验证连接（未注入探测能力）" },
-        };
-      }
-
-      const finalInputs = collected;
-      return {
-        type: "loading",
-        message: `正在验证 ${descriptor.label ?? candidate.serverId} 连接…`,
-        state: clearInputBuffer(state), // 取消（Esc）→ pop，丢弃输入
-        run: async (signal) => {
-          const result = await validateMcpSetup(candidate, finalInputs, probe, signal);
-          if (result.ok) {
-            const { entry, secrets } = applyMcpSetup(candidate, finalInputs);
-            let next = upsertMcpServer(
-              clearInputBuffer(state),
-              candidate.serverId,
-              entry,
-            );
-            next = patchMcpSecrets(next, candidate.serverId, secrets);
-            return { type: "pop", state: next };
-          }
-          // 失败：停在当前字段、回显错误，保留外层 state（当前字段已输入值供修改重试）
-          // 与前序字段的 inputs，让用户改一处即可重试，不必从头再填。
-          return {
-            type: "replace",
-            state,
-            panel: { ...descriptor, error: result.error },
-          };
-        },
-      };
-    }
-    default:
-      return { type: "stay", state };
-  }
-}
 
 // ─── mcp-add-input：统一输入接入（输入标识 → mcpResolve 解析为候选 → 候选面板） ───
 
@@ -370,6 +181,7 @@ const MCP_ADD_INPUT_FOOTER_HINTS = [
   "Esc 取消",
   "Ctrl+C 退出",
 ] as const;
+
 
 export function renderMcpAddInputPanel(
   state: WorkingState,
@@ -411,92 +223,6 @@ export function renderMcpAddInputPanel(
   );
 }
 
-export function handleMcpAddInputPanelKey(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-  _descriptor: Extract<PanelDescriptor, { kind: "mcp-add-input" }>,
-  key: KeyEvent,
-): PanelAction {
-  switch (key.type) {
-    case "ctrl-c":
-      return { type: "exit", result: { kind: "cancelled" } };
-    case "escape":
-      return { type: "pop", state: clearInputBuffer(state) };
-    case "backspace": {
-      if (state.inputBuffer.length === 0) return { type: "stay", state };
-      const chars = Array.from(state.inputBuffer);
-      chars.pop();
-      return { type: "stay", state: setInputBuffer(state, chars.join("")) };
-    }
-    case "char":
-      return {
-        type: "stay",
-        state: setInputBuffer(state, state.inputBuffer + key.ch),
-      };
-    case "enter": {
-      const input = state.inputBuffer.trim();
-      if (!input) return { type: "stay", state }; // 需先输入标识
-
-      const resolve = ctx.runtime?.mcpResolve;
-      if (!resolve) {
-        // 理论上 /mcp 必注入 mcpResolve；防御性原地报错
-        return {
-          type: "replace",
-          state,
-          panel: { kind: "mcp-add-input", error: "无法识别（未注入解析能力）" },
-        };
-      }
-
-      return {
-        type: "loading",
-        message: `正在识别 ${input}…`,
-        state: clearInputBuffer(state),
-        // report 把搜索引导的当前步骤（已是人话）更新到 loading 显示
-        run: async (signal, report) => {
-          const result = await resolve(input, signal, report);
-          // 解析失败 / 没找到：保留输入供修改（不退回让用户手填技术字段）
-          if (!result.ok) {
-            return {
-              type: "replace",
-              state,
-              panel: { kind: "mcp-add-input", error: result.error },
-            };
-          }
-          // 裸输入经搜索引导出候选列表 → 选择面板（选中后再阶段2提取）
-          if ("choices" in result) {
-            return {
-              type: "replace",
-              state: clearInputBuffer(state),
-              panel: { kind: "mcp-choices", choices: result.choices, selectedIndex: 0 },
-            };
-          }
-          // 确定性候选（预设 / URL / 命令）→ 唯一性检查 → 填密钥面板
-          const { candidate } = result;
-          if (listMcpServerIds(state).includes(candidate.serverId)) {
-            return {
-              type: "replace",
-              state,
-              panel: {
-                kind: "mcp-add-input",
-                error: `已存在 server "${candidate.serverId}"——在其面板编辑 / 删除，或换个标识。`,
-              },
-            };
-          }
-          // 用 replace（非 navigate）切到候选面板收集密钥：这样接入成功 / 取消时单次 pop
-          // 即回到 MCP 服务主列表（看到刚接入的 server），而不是停在本输入页造成"没成功"
-          // 的错觉（无 label：候选面板标题用 serverId）。
-          return {
-            type: "replace",
-            state: clearInputBuffer(state),
-            panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
-          };
-        },
-      };
-    }
-    default:
-      return { type: "stay", state };
-  }
-}
 
 // ─── mcp-choices：搜索引导出的候选列表（↑↓ 选一个 → 阶段2 提取 → 填密钥） ───
 
@@ -506,6 +232,7 @@ const MCP_CHOICES_FOOTER_HINTS = [
   "Esc 重新输入",
   "Ctrl+C 退出",
 ] as const;
+
 
 export function renderMcpChoicesPanel(
   _state: WorkingState,
@@ -545,70 +272,4 @@ export function renderMcpChoicesPanel(
   }
 
   renderer.writeLines(renderFooter({ width, hints: MCP_CHOICES_FOOTER_HINTS }));
-}
-
-export function handleMcpChoicesPanelKey(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-  descriptor: Extract<PanelDescriptor, { kind: "mcp-choices" }>,
-  key: KeyEvent,
-): PanelAction {
-  const count = descriptor.choices.length;
-
-  switch (key.type) {
-    case "ctrl-c":
-      return { type: "exit", result: { kind: "cancelled" } };
-    case "escape":
-      // 回输入框重输关键词（choices 由 replace 而来，栈上无输入页可 pop）
-      return { type: "replace", state, panel: { kind: "mcp-add-input" } };
-    case "arrow-up": {
-      const idx = (descriptor.selectedIndex - 1 + count) % count;
-      return { type: "replace", state, panel: { ...descriptor, selectedIndex: idx, error: undefined } };
-    }
-    case "arrow-down": {
-      const idx = (descriptor.selectedIndex + 1) % count;
-      return { type: "replace", state, panel: { ...descriptor, selectedIndex: idx, error: undefined } };
-    }
-    case "enter": {
-      const choice = descriptor.choices[descriptor.selectedIndex];
-      if (!choice) return { type: "stay", state };
-
-      const extract = ctx.runtime?.mcpExtract;
-      if (!extract) {
-        return { type: "replace", state, panel: { ...descriptor, error: "无法接入（未注入提取能力）" } };
-      }
-
-      return {
-        type: "loading",
-        message: `正在读取 ${choice.name} 的说明…`,
-        state,
-        run: async (signal) => {
-          const result = await extract(choice.name, signal);
-          // 提取失败 / 无设置说明：原地回显，留在候选列表让用户换一个
-          if (!result.ok) {
-            return { type: "replace", state, panel: { ...descriptor, error: result.error } };
-          }
-          // mcpExtract 是确定包名提取，不应返回 choices——防御
-          if ("choices" in result) {
-            return { type: "replace", state, panel: { ...descriptor, error: "提取结果异常，请换一个" } };
-          }
-          const { candidate } = result;
-          if (listMcpServerIds(state).includes(candidate.serverId)) {
-            return {
-              type: "replace",
-              state,
-              panel: { ...descriptor, error: `已存在 server "${candidate.serverId}"——换一个，或去其面板编辑。` },
-            };
-          }
-          return {
-            type: "replace",
-            state: clearInputBuffer(state),
-            panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
-          };
-        },
-      };
-    }
-    default:
-      return { type: "stay", state };
-  }
 }

@@ -339,4 +339,7 @@ export interface ConfigEditorWriters {
   save: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
 }
 
+/** Node configuration decisions do not receive a terminal stream or renderer. */
+export type ConfigModelContext = Pick<ConfigEditorContext, 'sections' | 'runtime'>;
+
 export type ConfigEditorResult = import("../runtime/configuration-edit.js").ConfigurationEditResult;

@@ -8,28 +8,12 @@
  *   Enter  进入该项的目标 panel；按钮触发对应动作
  *   Ctrl+C 退出（cancelled）
  */
+import type { ConfigEditorContext, WorkingState } from "../types.js";
+import { tone, renderChrome, type BrandAnchor, renderSectionHead, renderEntryRow, renderButtonRow, renderFooter, Renderer } from "../../tui/index.js";
+import { type MainPanelCursor, type MainPanelOption, buildOptions, collectAllIssues } from '../model/main.js';
+export { type MainPanelCursor, type MainPanelKeyResult, handleMainPanelKey, initialMainCursor } from '../model/main.js';
 
-import type {
-  ConfigEditorContext,
-  PanelAction,
-  PanelDescriptor,
-  Section,
-  Status,
-  WorkingState,
-} from "../types.js";
-import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
-import { getSections } from "../sections/index.js";
-import {
-  tone,
-  renderChrome,
-  type BrandAnchor,
-  renderSectionHead,
-  renderEntryRow,
-  renderButtonRow,
-  renderFooter,
-  Renderer,
-  type KeyEvent,
-} from "../../tui/index.js";
+
 
 const FOOTER_HINTS = [
   "↑↓ 选择",
@@ -37,6 +21,7 @@ const FOOTER_HINTS = [
   "Ctrl+S 完成",
   "Esc / Ctrl+C 退出",
 ] as const;
+
 
 /**
  * 品牌锚"浮灵 / Drift"的固定形态：
@@ -48,72 +33,13 @@ const FOOTER_HINTS = [
  * `buildBrandAnchor` 中按 ctx 拼装。
  */
 const ANCHOR_GLYPH_ROW1 = " ▄▄▄";
+
 const ANCHOR_GLYPH_ROW2 = "▌●●▐";
-const ANCHOR_GLYPH_ROW3 = " ▀▀ "; // 末尾补 1 空格使三行视宽一致（4 col），便于 inline 文字对齐
-const ANCHOR_INLINE_GAP = "    "; // 锚右侧到 inline 文字之间的 4 空格留白
 
-/** UI 主面板的当前光标位置——平铺所有可选项（sections + 按钮） */
-export interface MainPanelCursor {
-  index: number;
-}
+const ANCHOR_GLYPH_ROW3 = " ▀▀ ";
+ // 末尾补 1 空格使三行视宽一致（4 col），便于 inline 文字对齐
+const ANCHOR_INLINE_GAP = "    ";
 
-interface MainPanelItem {
-  kind: "section-entry";
-  sectionId: string;
-  entryIndex: number;
-  enterTarget?: PanelDescriptor;
-  label: string;
-  /** 派生自 entry 的 statusText + issues + disabled——caller 不直接声明 */
-  status: Status;
-  /** 阻塞 issues——空数组 = 此 entry 完整 */
-  issues: readonly string[];
-}
-interface MainPanelButton {
-  kind: "button";
-  label: string;
-  action: "complete" | "cancel";
-}
-
-type MainPanelOption = MainPanelItem | MainPanelButton;
-
-/** 平铺面板所有可选项——sections 中的 entries 加上底部 [完成]/[取消]。 */
-function buildOptions(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-): { sections: Array<{ section: Section; entries: MainPanelItem[] }>; options: MainPanelOption[] } {
-  const sections = getSections(ctx.sections).map((section) => {
-    const entries = section.entries(state, ctx.runtime).map<MainPanelItem>((entry, idx) => ({
-      kind: "section-entry",
-      sectionId: section.id,
-      entryIndex: idx,
-      enterTarget: entry.enterTarget,
-      label: entry.label,
-      // Status / issues 由派生 helper 从 EntryState 派生——确保两者从同源出
-      status: deriveEntryStatus(entry),
-      issues: deriveEntryIssues(entry),
-    }));
-    return { section, entries };
-  });
-
-  const options: MainPanelOption[] = [];
-  for (const { entries } of sections) {
-    options.push(...entries);
-  }
-  options.push({ kind: "button", label: "完成（保存并启动）", action: "complete" });
-  options.push({ kind: "button", label: "取消并退出", action: "cancel" });
-
-  return { sections, options };
-}
-
-/**
- * 收集所有 entries 的 issues——progress 计数 + 完成校验的**单一数据源**。
- * 保证"待补充 N 项"与点击完成后的错误数永远一致。
- */
-function collectAllIssues(
-  sections: Array<{ section: Section; entries: MainPanelItem[] }>,
-): string[] {
-  return sections.flatMap(({ entries }) => entries.flatMap((e) => e.issues));
-}
 
 /**
  * 按钮右侧的 hint 文本——纯描述，不影响按下逻辑。
@@ -125,6 +51,7 @@ function pickButtonHint(action: "complete" | "cancel", pending: number): string 
   if (action === "cancel") return "退出";
   return pending > 0 ? "请先补全必填项" : "保存并启动";
 }
+
 
 /**
  * 拼装 BrandAnchor：锚 body 三行各自携带 inline 文字（知行 / 副标题 / 欢迎语）。
@@ -151,6 +78,7 @@ function buildBrandAnchor(ctx: ConfigEditorContext): BrandAnchor {
   };
 }
 
+
 /**
  * 拼装 Welcome chrome 的 body：仅 3 个路径行（工作目录 / 配置 / 凭证）。
  *
@@ -168,6 +96,7 @@ function buildHeaderBody(ctx: ConfigEditorContext): string[] {
   }
   return rows;
 }
+
 
 export function renderMainPanel(
   ctx: ConfigEditorContext,
@@ -271,104 +200,4 @@ export function renderMainPanel(
   renderer.writeLines(
     renderFooter({ width, hints: FOOTER_HINTS }),
   );
-}
-
-/**
- * 处理按键，返回下一步动作。
- *
- * 返回 errorMessage 时由 caller 重渲染——校验失败回 main 面板时用。
- */
-export interface MainPanelKeyResult {
-  action: PanelAction;
-  cursor: MainPanelCursor;
-  /** 渲染时显示在底部的错误（校验失败） */
-  errorMessage?: string;
-}
-
-export function handleMainPanelKey(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-  cursor: MainPanelCursor,
-  key: KeyEvent,
-): MainPanelKeyResult {
-  const { sections, options } = buildOptions(ctx, state);
-  const max = options.length - 1;
-
-  switch (key.type) {
-    case "arrow-up":
-      return {
-        action: { type: "stay", state },
-        cursor: { index: cursor.index > 0 ? cursor.index - 1 : max },
-      };
-    case "arrow-down":
-      return {
-        action: { type: "stay", state },
-        cursor: { index: cursor.index < max ? cursor.index + 1 : 0 },
-      };
-    case "ctrl-c":
-    case "escape":
-      // 主面板是顶层：Esc 与 Ctrl+C 都退出（cancelled）。
-      // 子页面的 Esc=返回上一页由各子面板 handler 自己处理，不到这里。
-      return {
-        action: { type: "exit", result: { kind: "cancelled" } },
-        cursor,
-      };
-    case "ctrl-s":
-      // 全局"完成"快捷键——等同选中并确认完成按钮（含必填校验），无需把光标移到按钮区
-      return completeAction(sections, state, cursor);
-    case "enter": {
-      const selected = options[cursor.index];
-      if (!selected) return { action: { type: "stay", state }, cursor };
-      if (selected.kind === "button") {
-        if (selected.action === "cancel") {
-          return { action: { type: "exit", result: { kind: "cancelled" } }, cursor };
-        }
-        // complete：校验所有 entries 的 issues（与进度计数同源）
-        return completeAction(sections, state, cursor);
-      }
-      // section-entry：跳转
-      if (selected.enterTarget) {
-        return {
-          action: { type: "navigate", state, panel: selected.enterTarget },
-          cursor,
-        };
-      }
-      return { action: { type: "stay", state }, cursor };
-    }
-    default:
-      return { action: { type: "stay", state }, cursor };
-  }
-}
-
-/**
- * 触发"完成"——校验所有 entries 的 issues（与进度计数同源）：有错回 main 面板原地显示，
- * 无错则 exit completed。由"完成"按钮 Enter 与全局 Ctrl+S 共用，逻辑单点不重复。
- */
-function completeAction(
-  sections: Parameters<typeof collectAllIssues>[0],
-  state: WorkingState,
-  cursor: MainPanelCursor,
-): MainPanelKeyResult {
-  const errors = collectAllIssues(sections);
-  if (errors.length > 0) {
-    return { action: { type: "stay", state }, cursor, errorMessage: errors.join("；") };
-  }
-  return {
-    action: {
-      type: "exit",
-      result: { kind: "completed", config: state.config, credentials: state.credentials,
-        ...(state.channelIntents ? { channelIntents: state.channelIntents } : {}) },
-    },
-    cursor,
-  };
-}
-
-/**
- * 计算初始光标位置——目前固定指向第一项。
- *
- * 未来可基于 ctx + state 计算"第一个未配置的 entry"以引导用户，但当前没有
- * 强需求；保持简单，不引入未用参数。
- */
-export function initialMainCursor(): MainPanelCursor {
-  return { index: 0 };
 }
