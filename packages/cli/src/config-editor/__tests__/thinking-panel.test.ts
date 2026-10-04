@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { createInitialState, writeModelRole } from "../state.js";
 import { handleListPanelKey } from "../panels/list.js";
 import { handleThinkingBudgetPanelKey } from "../panels/input.js";
+import { handleEntityPanelKey } from "../panels/entity.js";
 import type { PanelDescriptor, WorkingState } from "../types.js";
 
 const modelListDesc = {
@@ -171,5 +172,36 @@ describe("handleThinkingBudgetPanelKey", () => {
     if (action.type === "pop") {
       expect(action.state.inputBuffer).toBe("");
     }
+  });
+});
+
+describe("服务商页完成后的模型设置", () => {
+  const provider = { kind: "provider-config", role: "main", providerId: "deepseek" } as const;
+
+  it("旧面板选模型、选择强度、返回完成后保留思考；真正换模型仍清掉旧设置", () => {
+    const initial = createInitialState({}, { providers: { deepseek: { apiKey: "synthetic-key" } } });
+    const selected = enterAt(initial, modelListDesc, 0).action;
+    expect(selected.type).toBe("navigate");
+    if (selected.type !== "navigate") throw Error("model selection did not open thinking");
+    const thinking = enterAt(selected.state, selected.panel, 3).action;
+    expect(thinking.type).toBe("pop");
+    if (thinking.type !== "pop") throw Error("thinking did not return to provider");
+    const completed = handleEntityPanelKey(thinking.state, provider, { index: 2 }, { type: "enter" }).action;
+    expect(completed.type).toBe("pop");
+    if (completed.type !== "pop") throw Error("provider did not complete");
+    expect(completed.state.config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-v4-pro", thinking: { mode: "effort", effort: "max" } });
+    const changed = enterAt(completed.state, modelListDesc, 1).action;
+    expect(changed.type).toBe("pop");
+    if (changed.type !== "pop") throw Error("model change did not complete");
+    expect(changed.state.config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-v4-flash" });
+  });
+
+  it("保留当前选择不绕过缺失API Key校验", () => {
+    const initial = createInitialState({ llm: { main: { provider: "deepseek", model: "deepseek-v4-pro", thinking: { mode: "off" } } } }, {});
+    const completed = handleEntityPanelKey(initial, provider, { index: 2 }, { type: "enter" });
+    expect(completed.action.type).toBe("stay");
+    if (completed.action.type !== "stay") throw Error("missing credential must keep the panel open");
+    expect(completed.errorMessage).toContain("API Key");
+    expect(completed.action.state.config.llm?.main?.thinking).toEqual({ mode: "off" });
   });
 });
