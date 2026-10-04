@@ -281,6 +281,7 @@ export function buildSessionSendMethod(): MethodEntry {
               activePrepared.conversationId,
               activePrepared.advancementSessionId,
               activePrepared.draft,
+              { turnId, disposition: "revision-saved" },
             );
           }
           if (activePrepared.kind === "contract-failed") {
@@ -390,6 +391,7 @@ export function buildSessionSendMethod(): MethodEntry {
               prepared.conversationId,
               prepared.advancementSessionId,
               prepared.draft,
+              { turnId, disposition: "original-saved" },
             );
           }
 
@@ -485,6 +487,7 @@ export function buildSessionSendMethod(): MethodEntry {
               controlled.result.conversationId,
               controlled.result.advancementSessionId,
               controlled.result.rubricDraft,
+              { turnId, disposition: "not-saved" },
             );
           }
           if (controlled.result.kind === "direct-original-task") {
@@ -492,6 +495,7 @@ export function buildSessionSendMethod(): MethodEntry {
               conversationId: controlled.result.conversationId,
               sessionId: controlled.result.conversationId,
               turnId: controlled.result.turnId,
+              ...(controlled.result.runId ? { runId: controlled.result.runId } : {}),
             };
           }
           if (controlled.result.kind === "cancelled") {
@@ -1282,19 +1286,21 @@ function publishActiveAdvancementDraft(
 /**
  * awaiting 结果的 turnId 单源：恒取草案的 originalTurnId——它是确认后
  * 真正执行的 turn 身份，confirm / direct / revise 的校验链都锚定它。
- * 不接受调用方传 turnId：await-existing（二次 send 命中已有草案）场景下
+ * 确认身份不接受调用方覆盖；submission 仅关联当前输入。await-existing 场景下
  * 本次 send 的 turnId 与原始 turnId 不同，取错会让确认链在客户端断裂。
  */
 function awaitingRubricResult(
   conversationId: string,
   advancementSessionId: string,
   rubricDraft: RubricContractDraftSnapshot,
+  submission: NonNullable<SessionAwaitingRubricResult["submission"]>,
 ): SessionAwaitingRubricResult {
   return {
     conversationId,
     sessionId: conversationId,
     turnId: rubricDraft.originalTurnId,
     status: "awaiting-rubric-confirmation",
+    submission,
     advancementSessionId,
     rubricDraftId: rubricDraft.draftId,
     rubricDraft,

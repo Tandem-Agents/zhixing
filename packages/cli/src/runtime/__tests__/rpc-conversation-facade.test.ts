@@ -18,6 +18,13 @@ import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcConversationFacade · 方法域", () => {
+  it.each(["original-saved", "revision-saved", "not-saved"])("awaiting 的 %s 与原任务/当前提交身份无损传递", async disposition => {
+    const fake = makeFakeHostLink();
+    const result = { conversationId: "conv-1", sessionId: "conv-1", turnId: "original", status: "awaiting-rubric-confirmation", submission: { turnId: "current", disposition }, rubricDraftId: "draft", rubricDraft: { originalTurnId: "original" }, advancementSessionId: "adv" };
+    fake.setResponder(() => result);
+    const facade = new RpcConversationFacade(fake.link);
+    expect(await facade.send("本次输入", "conv-1", "current")).toBe(result);
+  });
   it("replays uncertain resolution with the same request and observed fence after disconnect", async () => {
     const fake = makeFakeHostLink();
     let calls = 0;

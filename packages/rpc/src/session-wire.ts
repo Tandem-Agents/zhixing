@@ -164,7 +164,7 @@ export interface SessionAcceptedSendResult {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
-  /** 本次 send 对应的 turn 身份;delta/complete/postTurnControlIntent 均携同值 */
+  /** 执行/控制结果的 turn 身份；awaiting 指原任务，当前输入另由 submission 关联。 */
   turnId: string;
   /** 耐久 owner 分配的权威 run 身份；取消与终态补读必须使用该值。 */
   runId?: string;
@@ -180,6 +180,11 @@ export interface SessionAcceptedSendResult {
 
 export interface SessionAwaitingRubricResult extends SessionAcceptedSendResult {
   status: "awaiting-rubric-confirmation";
+  /** 当前提交的处置；turnId 仍属于待确认的原任务。旧宿主可能不提供此事实。 */
+  submission?: {
+    turnId: string;
+    disposition: "original-saved" | "revision-saved" | "not-saved";
+  };
   advancementSessionId: string;
   rubricDraftId: string;
   rubricDraft: RubricContractDraftSnapshot;

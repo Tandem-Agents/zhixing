@@ -20,6 +20,7 @@ import {
 import type { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
+import { createUserSubmission } from "../user-submission.js";
 
 type Handler<T> = (p: T) => void;
 
@@ -1144,6 +1145,130 @@ describe("ConversationController", () => {
       turnId,
       { engage: { kind: "perspectives", question: "审查方案" } },
     );
+  });
+
+  it.each([
+    ["original-saved", true, "原任务已保存"],
+    ["revision-saved", true, "准则修订已保存"],
+    ["not-saved", false, "本次新输入未保存"],
+    [undefined, false, "无法确认"],
+    ["wrong-submission", false, "无法确认"],
+    ["contract-failed", false, undefined],
+    ["cancelled", true, undefined],
+    ["accepted", true, undefined],
+  ] as const)("旧输入结清消费当前提交事实：%s", async (disposition, committed, notice) => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const draft = { commit: vi.fn(), reject: vi.fn() };
+    const submission = createUserSubmission(draft);
+    f.conversation.send.mockImplementationOnce(async (_text, _id, turnId) => ({
+      conversationId: "conv-1", sessionId: "conv-1", turnId: "turn-original",
+      ...(disposition === "accepted" ? { turnId } : {
+        status: disposition === "contract-failed" || disposition === "cancelled" ? disposition : "awaiting-rubric-confirmation",
+        advancementSessionId: "adv-1", rubricDraftId: "draft-1", rubricDraft: rubricDraft("turn-original"),
+        error: { message: "draft failed" },
+        ...(disposition ? { submission: {
+          turnId: disposition === "wrong-submission" ? "previous-submission" : turnId,
+          disposition: disposition === "wrong-submission" ? "original-saved" : disposition,
+        } } : {}),
+      }),
+    }));
+    const result = await controller.beginUserTurn("本次文字", { onAccepted: submission.accept });
+    const message = submission.settle(result);
+    if (notice) expect(message).toContain(notice);
+    else expect(message).toBeUndefined();
+    expect(draft.commit).toHaveBeenCalledTimes(committed ? 1 : 0);
+    expect(draft.reject).toHaveBeenCalledTimes(committed ? 0 : 1);
+    if (result.kind === "awaiting-rubric-confirmation") {
+      expect(result.turnId).toBe("turn-original");
+      expect(result.submission?.turnId).toBe(f.conversation.send.mock.calls[0]![2]);
+      expect(result.submission?.turnId).not.toBe(result.turnId);
+    }
+    controller.dispose();
+  });
+
+  it.each(["delta", "complete"] as const)("matching %s 先接纳，晚到 send 错误不恢复已交付草稿", async (kind) => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const draft = { commit: vi.fn(), reject: vi.fn() };
+    const submission = createUserSubmission(draft);
+    f.conversation.send.mockImplementationOnce(async (_text, _id, turnId) => {
+      const payload = { conversationId: "conv-1", turnId, delta: { type: "text_delta", text: "已受理" }, result: { reason: "completed" } };
+      f.emit[kind](payload);
+      f.emit[kind](payload);
+      throw new Error("late response error");
+    });
+    await expect(controller.beginUserTurn("本次文字", { onAccepted: submission.accept })).rejects.toThrow("late response error");
+    submission.reject();
+    expect(draft.commit).toHaveBeenCalledOnce();
+    expect(draft.reject).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("直接执行原任务的返回身份及响应前 Final 沿原 run 收敛", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: "s", record: { type: "run", runId: "run-original", runIndex: 1, messages: [{ role: "assistant", content: [{ type: "text", text: "原任务完成" }] }] } }], hasMore: false } as never);
+    f.conversation.send.mockImplementationOnce(async () => {
+      f.emit.final({ v: 1, conversationId: "conv-1", runId: "run-original", commitRevision: 1, digest: "sha256:original" });
+      return { conversationId: "conv-1", sessionId: "conv-1", turnId: "turn-original", runId: "run-original" };
+    });
+    const result = await controller.beginUserTurn("直接执行");
+    if (result.kind !== "accepted") throw new Error("expected original execution");
+    expect(result.turn.turnId).toBe("turn-original");
+    expect(result.turn.turnId).not.toBe(f.conversation.send.mock.calls[0]![2]);
+    await expect(result.turn.outcome).resolves.toMatchObject({ result: { reason: "completed" } });
+    controller.dispose();
+  });
+
+  it.each([
+    { name: "same-before", original: false, before: true, failed: false },
+    { name: "original-before", original: true, before: true, failed: false },
+    { name: "original-after", original: true, before: false, failed: false },
+    { name: "original-before-error", original: true, before: true, failed: true },
+  ])("执行身份落定后恰好下发中止并按回执结清：$name", async ({ original, before, failed }) => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const response = Promise.withResolvers<void>();
+    const abortResult = Promise.withResolvers<void>();
+    f.conversation.send.mockImplementationOnce(async (_text, _id, turnId) => {
+      await response.promise;
+      return { conversationId: "conv-1", sessionId: "conv-1", turnId: original ? "turn-original" : turnId, runId: "run-original" };
+    });
+    f.conversation.abort.mockImplementationOnce(() => abortResult.promise);
+    const starting = controller.beginUserTurn("直接执行");
+    let aborting = before ? controller.abort() : undefined;
+    if (before) expect(f.conversation.abort).not.toHaveBeenCalled();
+    response.resolve();
+    const result = await starting;
+    if (result.kind !== "accepted") throw new Error("expected accepted execution");
+    aborting ??= controller.abort();
+    let settled = false;
+    const cancellation = aborting.then(() => { settled = true; }, error => { settled = true; return error; });
+    await Promise.resolve();
+    expect(f.conversation.abort).toHaveBeenCalledExactlyOnceWith("conv-1", expect.stringMatching(/^cancel:/), "run-original");
+    expect(settled).toBe(false);
+    const error = new Error("synthetic abort failure");
+    if (failed) abortResult.reject(error);
+    else abortResult.resolve();
+    expect(await cancellation).toBe(failed ? error : undefined);
+    f.emit.complete({ conversationId: "conv-1", turnId: result.turn.turnId, result: { reason: "aborted" } });
+    await result.turn.outcome;
+    controller.dispose();
+  });
+
+  it("其它 conversation 的同 turnId complete 不能接纳当前提交", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const accepted = vi.fn();
+    f.conversation.send.mockImplementationOnce(async (_text, _id, turnId) => {
+      f.emit.complete({ conversationId: "different", turnId, result: { reason: "completed" } });
+      expect(accepted).not.toHaveBeenCalled();
+      throw new Error("not accepted");
+    });
+    await expect(controller.beginUserTurn("本次文字", { onAccepted: accepted })).rejects.toThrow("not accepted");
+    expect(accepted).not.toHaveBeenCalled();
+    controller.dispose();
   });
 
   it("beginUserTurn:Rubric 待确认是控制面结果,不等待 complete", async () => {

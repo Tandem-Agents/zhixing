@@ -2769,6 +2769,31 @@ describe("InputController — 多行粘贴提交历史区", () => {
     controller.stop();
   });
 
+  it("旧提交结果不能结清恢复编辑后的新草稿", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({ broker, dispatcher, getRuntime: makeRuntime, screen, stdin, columns: 80, textSubmitMode: "deferred" });
+    controller.start();
+    const first = controller.waitOnce();
+    await typeChars(stdin, "original");
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const old = await first;
+    if (old.kind !== "pending-text") throw new Error("expected deferred input");
+    old.reject();
+    await typeChars(stdin, " revised");
+    const second = controller.waitOnce();
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const current = await second;
+    if (current.kind !== "pending-text") throw new Error("expected deferred input");
+    old.commit(); old.reject();
+    expect(stripAnsi(getScrollbackText())).toBe("");
+    expect(current.text).toBe("original revised");
+    current.commit();
+    expect(stripAnsi(getScrollbackText())).toContain("original revised");
+    controller.stop();
+  });
+
   it("deferred 材料提交 reject 时不写历史且保留输入 chip", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {

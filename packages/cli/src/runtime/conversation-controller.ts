@@ -86,6 +86,11 @@ export interface AwaitingRubricConfirmationTurn {
   readonly advancementSessionId: string;
   readonly rubricDraftId: string;
   readonly rubricDraft: SessionAwaitingRubricResult["rubricDraft"];
+  /** 仅 beginUserTurn 有当前提交；恢复旧确认时没有。未知事实不得当作已保存。 */
+  readonly submission?: {
+    readonly turnId: string;
+    readonly disposition: "original-saved" | "revision-saved" | "not-saved" | "unknown";
+  };
 }
 
 export interface ContractFailedTurn {
@@ -373,7 +378,9 @@ export class ConversationController {
           }
           return;
         }
-        this.finishTurn(p.conversationId, p.turnId, p.result);
+        if (this.localTurnsByConversation.get(p.conversationId) === p.turnId) {
+          this.finishTurn(p.conversationId, p.turnId, p.result);
+        }
       }),
       opts.conversation.onFinal((frame) => {
         this.consumeFinal(frame);
@@ -469,7 +476,7 @@ export class ConversationController {
   ): Promise<BeginUserTurnResult> {
     const target = this.active.conversationId;
     const turnId = generateTurnId();
-    const outcome = this.attachTurnWaiter(target, turnId, options);
+    let outcome = this.attachTurnWaiter(target, turnId, options);
     try {
       const sendResult = options.engage
         ? await this.opts.conversation.send(input, target, turnId, {
@@ -486,6 +493,12 @@ export class ConversationController {
           advancementSessionId: sendResult.advancementSessionId,
           rubricDraftId: sendResult.rubricDraftId,
           rubricDraft: sendResult.rubricDraft,
+          submission: {
+            turnId,
+            disposition: sendResult.submission?.turnId === turnId
+              ? sendResult.submission.disposition
+              : "unknown",
+          },
         };
       }
       if (isContractFailedResult(sendResult)) {
@@ -506,13 +519,23 @@ export class ConversationController {
           advancementSessionId: sendResult.advancementSessionId,
         };
       }
-      this.registerDurableRun(target, turnId, sendResult.runId);
-      this.markLocalTurnAccepted({ conversationId: target, turnId });
+      const acceptedId = sendResult.turnId;
+      if (acceptedId !== turnId) {
+        // 自然语言“直接执行”接纳的是待确认原任务。沿其耐久 run 收敛，不把当前输入 ID 当执行 ID。
+        const pendingAbort = this.pendingAbortByTurn.get(turnId);
+        // 身份改挂不是取消完成；保留原请求及等待者，交给实际 run 的登记路径下发。
+        this.pendingAbortByTurn.delete(turnId);
+        this.discardTurnWaiter(target, turnId);
+        outcome = this.attachTurnWaiter(target, acceptedId, options);
+        if (pendingAbort) this.pendingAbortByTurn.set(acceptedId, pendingAbort);
+      }
+      this.registerDurableRun(target, acceptedId, sendResult.runId);
+      this.markLocalTurnAccepted({ conversationId: target, turnId: acceptedId });
       return {
         kind: "accepted",
         turn: {
           conversationId: target,
-          turnId,
+          turnId: acceptedId,
           ...(sendResult.runId ? { runId: sendResult.runId } : {}),
           outcome,
           ...(sendResult.advancementContinuation

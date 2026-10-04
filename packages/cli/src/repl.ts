@@ -97,6 +97,7 @@ import { createAdvancementControlPresenter } from "./runtime/advancement-control
 import { createLifecycleDiagnosticsPresenter } from "./runtime/lifecycle-diagnostics-presenter.js";
 import { createPublishResultPresenter } from "./runtime/publish-result-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
+import { createUserSubmission } from "./runtime/user-submission.js";
 import {
   ConversationController,
   selectInitialConversation,
@@ -1887,20 +1888,16 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
       void controller.abort().catch(() => {});
     });
 
+    const inputSubmission = createUserSubmission(pendingTextSubmission);
     try {
-      let inputCommitted = false;
-      const commitAcceptedInput = () => {
-        if (inputCommitted) return;
-        inputCommitted = true;
-        pendingTextSubmission?.commit();
-      };
       const startedTurn = await controller.beginUserTurn(preparedInput.input, {
         ...(preparedEngage?.kind === "ready"
           ? { engage: preparedEngage.engage }
           : {}),
-        onAccepted: commitAcceptedInput,
+        onAccepted: inputSubmission.accept,
       });
-      commitAcceptedInput();
+      const submissionNotice = inputSubmission.settle(startedTurn);
+      if (submissionNotice) cliWriter.line(chalk.dim(submissionNotice));
       let acceptedTurn: AcceptedTurn | null = null;
       if (startedTurn.kind === "accepted") {
         acceptedTurn = startedTurn.turn;
@@ -1911,7 +1908,8 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
           controller,
           selection: selectionService,
           writer: cliWriter,
-          onAccepted: commitAcceptedInput,
+          // 选择执行的是待确认原任务；本次输入已按 send 事实独立结清。
+          onAccepted: () => {},
           onBeforeExecution: () => renderer.startThinking(),
         });
       } else if (startedTurn.kind === "contract-failed") {
@@ -1962,7 +1960,7 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
         await applyPostTurnControl(outcome.postTurnControl);
       }
     } catch (err) {
-      pendingTextSubmission?.reject();
+      inputSubmission.reject();
       renderer.stop();
       renderError(err, cliWriter);
     } finally {

@@ -2024,6 +2024,7 @@ describe("session.* RPC (S2.D)", () => {
       rubricDraft: { originalTurnId: string };
     };
     expect(result.status).toBe("awaiting-rubric-confirmation");
+    expect(result).toMatchObject({ submission: { turnId: "turn-adv-1", disposition: "original-saved" } });
     expect(result.turnId).toBe("turn-adv-1");
     expect(result.rubricDraft.originalTurnId).toBe("turn-adv-1");
     expect(recordsByConversation.get(result.conversationId)).toEqual([]);
@@ -2103,6 +2104,7 @@ describe("session.* RPC (S2.D)", () => {
       status: "awaiting-rubric-confirmation",
       turnId: "turn-original",
       rubricDraftId: awaiting.rubricDraftId,
+      submission: { turnId: "turn-second", disposition: "not-saved" },
     });
 
     // 确认链走通：confirm 返回的 turnId 与 awaiting 结果一致
@@ -3452,10 +3454,12 @@ describe("session.* RPC (S2.D)", () => {
       "rubricDraftId",
       "sessionId",
       "status",
+      "submission",
       "turnId",
     ]);
     expect(resp.result).toMatchObject({
       status: "awaiting-rubric-confirmation",
+      submission: { turnId: "turn-revise", disposition: "revision-saved" },
     });
 
     const exitedEvent = await client.waitNotification("session.event");
