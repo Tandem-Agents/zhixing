@@ -14,6 +14,8 @@ import type { CliWriter } from "../../screen/index.js";
 import type { ConversationController } from "../../runtime/conversation-controller.js";
 import type { RpcManagementFacade } from "../../runtime/rpc-management-facade.js";
 import type { SelectionService } from "../../tui/selection/index.js";
+import { validateSelectionRequest } from "../../tui/selection/types.js";
+import { makeInitialSelectionState, reduceSelection } from "../../tui/selection/state.js";
 
 const RUNTIME: RuntimeContext = {
   sessionBusy: false,
@@ -279,6 +281,34 @@ describe("registerInfoCommands", () => {
     expect(h.management.serverShutdown).toHaveBeenCalledWith(
       expect.objectContaining({ strategy: "drain" }),
     );
+  });
+
+  it.each([false, true])("/stop 取消工作先二次确认，确认=%s 才发送取消策略", async confirm => {
+    const requestExit = vi.fn();
+    const selection: SelectionService = { async choose(raw) {
+      const request = validateSelectionRequest(raw);
+      const initial = makeInitialSelectionState(request);
+      const selected = reduceSelection(initial, { kind: "hotkey", key: "x" }, request);
+      expect(selected.state.layer).toBe("confirm");
+      expect(selected.result).toBeUndefined();
+      const option = request.options[selected.state.selectedIndex]!;
+      expect("confirm" in option && option.confirm.body?.join(" ")).toContain("不会回滚");
+      expect(h.management.serverShutdown).not.toHaveBeenCalled();
+      if (confirm) return reduceSelection(selected.state, { kind: "enter" }, request).result!;
+      const back = reduceSelection(selected.state, { kind: "escape" }, request);
+      expect(back.result).toBeUndefined();
+      return reduceSelection(back.state, { kind: "escape" }, request).result!;
+    } };
+    const h = setup({ selection, requestExit });
+    (h.management.serverInfo as any).mockResolvedValueOnce({
+      activeWork: { count: 1, cancellableCount: 1, drainOnlyCount: 0,
+        cancellableWork: [{ id: "conversation:1", label: "conv-1", count: 1 }], drainOnlyWork: [] },
+      deferredWork: [], keepAliveWork: [], accessSurfaces: { otherRpcConnections: 0, liveChannels: [] },
+    });
+    await h.dispatcher.dispatch("/stop", RUNTIME);
+    expect(h.management.serverShutdown).toHaveBeenCalledTimes(confirm ? 1 : 0);
+    expect(requestExit).toHaveBeenCalledTimes(confirm ? 1 : 0);
+    if (confirm) expect(h.management.serverShutdown).toHaveBeenCalledWith({ reason: "user-stop", strategy: "cancel", timeoutMs: 30_000 });
   });
 
   it("/model 显示本地配置的模型与 provider", async () => {

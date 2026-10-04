@@ -1,3 +1,5 @@
+import { countWork, formatWorkItems, liveChannels, activeWork, otherRpcConnections, createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
+import { BUILTIN_COMMANDS } from "./builtin-definitions.js";
 /**
  * info 域命令注册 —— 只读展示类命令的模块化原子注册（范式同 registerTaskCommands）。
  *
@@ -15,8 +17,6 @@ import { layout } from "../tui/style.js";
 import type { CliWriter } from "../screen/index.js";
 import type {
   RpcManagementFacade,
-  RuntimeControlWorkItem,
-  ServerActiveWork,
   ServerInfoResult,
 } from "../runtime/rpc-management-facade.js";
 import type { ConversationController } from "../runtime/conversation-controller.js";
@@ -25,7 +25,7 @@ import type {
   RuntimePrimaryModelDisplayProjection,
 } from "../runtime/runtime-configuration-provider.js";
 import { formatRelativeTime } from "./format.js";
-import type { SelectionService, SelectionOption } from "../tui/selection/index.js";
+import type { SelectionService } from "../tui/selection/index.js";
 import {
   SelectionBusyError,
   SelectionUnavailableError,
@@ -149,42 +149,6 @@ function formatChannelStatus(status: ChannelStatus): string {
   }
 }
 
-function countWork(items: readonly RuntimeControlWorkItem[] | undefined): number {
-  return (items ?? []).reduce((sum, item) => sum + Math.max(0, item.count), 0);
-}
-
-function formatWorkItems(items: readonly RuntimeControlWorkItem[] | undefined): string {
-  const list = items ?? [];
-  if (list.length === 0) return "无";
-  return list.map((item) => `${item.label} x${item.count}`).join("、");
-}
-
-function liveChannels(hostInfo: ServerInfoResult | null): ChannelStatus[] {
-  const fromSnapshot = hostInfo?.accessSurfaces?.liveChannels;
-  if (fromSnapshot) return fromSnapshot;
-  return (hostInfo?.channels ?? []).filter(
-    (s) => s.state === "connected" || s.state === "connecting",
-  );
-}
-
-function activeWork(hostInfo: ServerInfoResult | null): ServerActiveWork {
-  return (
-    hostInfo?.activeWork ?? {
-      count: hostInfo?.busyConversations ?? 0,
-      cancellableCount: hostInfo?.busyConversations ?? 0,
-      drainOnlyCount: 0,
-      cancellableWork: [],
-      drainOnlyWork: [],
-    }
-  );
-}
-
-function otherRpcConnections(hostInfo: ServerInfoResult | null): number {
-  const projected = hostInfo?.accessSurfaces?.otherRpcConnections;
-  if (typeof projected === "number") return Math.max(0, projected);
-  return Math.max(0, (hostInfo?.connectionCount ?? 1) - 1);
-}
-
 function renderRuntimeControlStatus(
   hostInfo: ServerInfoResult | null,
   writer: CliWriter,
@@ -231,91 +195,9 @@ function renderRuntimeControlStatus(
   writer.line(chalk.dim("  需要停止知行请输入 /stop。\n"));
 }
 
-type StopChoice = "stop" | "wait" | "cancel-work-stop" | "cancel";
-
-function buildStopBody(hostInfo: ServerInfoResult | null): string[] {
-  if (!hostInfo) {
-    return ["当前无法读取宿主状态。为避免误停，先取消并稍后重试。"];
-  }
-  const body: string[] = [];
-  const otherRpc = otherRpcConnections(hostInfo);
-  const live = liveChannels(hostInfo);
-  const work = activeWork(hostInfo);
-  const deferredCount = countWork(hostInfo.deferredWork);
-  const keepAliveCount = countWork(hostInfo.keepAliveWork);
-
-  if (otherRpc > 0 || live.length > 0) {
-    const surfaces = [
-      otherRpc > 0 ? `其他终端 ${otherRpc}` : "",
-      live.length > 0 ? live.map((s) => s.channelId).join("、") : "",
-    ].filter(Boolean);
-    body.push(`停止后会断开其他接入面：${surfaces.join("；")}`);
-  }
-  if (work.count > 0) {
-    body.push(
-      `当前有运行中的工作：可取消 ${work.cancellableCount}，等待投递 ${work.drainOnlyCount}。`,
-    );
-  }
-  if (deferredCount > 0) {
-    body.push(`还有 ${deferredCount} 条未送达消息，会保留并在下次启动后重试。`);
-  }
-  if (keepAliveCount > 0) {
-    body.push(`有 ${keepAliveCount} 个已启用定时任务，停止后不会继续触发。`);
-  }
-  if (body.length === 0) body.push("当前没有其他接入面或运行中的工作。");
-  return body;
-}
-
-function buildStopOptions(
-  hostInfo: ServerInfoResult | null,
-): SelectionOption<StopChoice>[] {
-  const work = activeWork(hostInfo);
-  if (!hostInfo) {
-    return [{ value: "cancel", label: "取消", hotkey: "c", tone: "primary" }];
-  }
-  if (work.count > 0) {
-    const options: SelectionOption<StopChoice>[] = [
-      {
-        value: "wait",
-        label: "等待完成后停止",
-        description: "先 flush 可投递消息，再请求宿主退出",
-        hotkey: "w",
-        tone: "primary",
-      },
-    ];
-    if (work.cancellableCount > 0) {
-      options.push({
-        value: "cancel-work-stop",
-        label: "取消工作并停止",
-        description: "中断当前对话/任务后退出宿主",
-        hotkey: "x",
-        tone: "danger",
-      });
-    }
-    options.push({ value: "cancel", label: "返回", hotkey: "c", tone: "muted" });
-    return options;
-  }
-  return [
-    {
-      value: "stop",
-      label: "停止知行",
-      description: "关闭宿主，当前终端也会退出",
-      hotkey: "s",
-      tone: "danger",
-    },
-    { value: "cancel", label: "返回", hotkey: "c", tone: "muted" },
-  ];
-}
-
-function shutdownStrategyForChoice(choice: StopChoice): "immediate" | "drain" | "cancel" {
-  if (choice === "wait") return "drain";
-  if (choice === "cancel-work-stop") return "cancel";
-  return "immediate";
-}
-
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
-  registry.register({ id: "resolve:repl", name: "resolve", description: "处理结果待确认的运行", category: "tools", execution: "local", tag: "builtin" });
+  registry.register(BUILTIN_COMMANDS["resolve:repl"]);
   dispatcher.registerHandler("resolve:repl", async () => {
     const pending = await deps.controller.uncertainRuns();
     if (pending.length === 0) {
@@ -354,27 +236,13 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
   };
 
   // /help —— registry 的消费者：把当前命令集渲染成命令地图，按 ctx 过滤 hidden + visibility。
-  registry.register({
-    id: "help:repl",
-    name: "help",
-    description: "显示帮助信息",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["help:repl"]);
   dispatcher.registerHandler("help:repl", (ctx: CommandHandlerContext) => {
     renderHelpCommands(registry.list(ctx.runtime), writer);
     return {};
   });
 
-  registry.register({
-    id: "status:repl",
-    name: "status",
-    description: "查看当前运行状态",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["status:repl"]);
   dispatcher.registerHandler("status:repl", async () => {
     // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态 off / auto+null /
     // auto+url / explicit—— mode=auto+null 时 dim 灰色提示直连，其他状态正常色。
@@ -410,14 +278,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     return {};
   });
 
-  registry.register({
-    id: "stop:repl",
-    name: "stop",
-    description: "停止知行",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["stop:repl"]);
   dispatcher.registerHandler("stop:repl", async () => {
     const selection = deps.selection;
     if (!selection) {
@@ -427,15 +288,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
 
     const hostInfo = await deps.management.serverInfo().catch(() => null);
     try {
-      const result = await selection.choose<StopChoice>({
-        id: "server-stop",
-        title: "停止知行",
-        body: buildStopBody(hostInfo),
-        options: buildStopOptions(hostInfo),
-        initialValue: activeWork(hostInfo).count > 0 ? "wait" : hostInfo ? "stop" : "cancel",
-        submitLabel: "确认",
-        cancelLabel: "返回",
-      });
+      const result = await selection.choose(createStopSelectionRequest(hostInfo));
       if (result.kind !== "selected" || result.value === "cancel") {
         writer.line(chalk.dim("\n  已取消停止。\n"));
         return {};
@@ -458,14 +311,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     return {};
   });
 
-  registry.register({
-    id: "model:repl",
-    name: "model",
-    description: "显示当前模型信息",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["model:repl"]);
   dispatcher.registerHandler("model:repl", () => {
     const { modelDisplay, providerDisplay } = getModelView();
     writer.line(
@@ -475,14 +321,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     return {};
   });
 
-  registry.register({
-    id: "usage:repl",
-    name: "usage",
-    description: "查看 token 用量详情",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["usage:repl"]);
   dispatcher.registerHandler("usage:repl", async () => {
     try {
       const view = await deps.controller.usage();
@@ -503,14 +342,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     return {};
   });
 
-  registry.register({
-    id: "context:repl",
-    name: "context",
-    description: "上下文容量可视化",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["context:repl"]);
   dispatcher.registerHandler("context:repl", async () => {
     try {
       const view = await deps.controller.contextBudget();
@@ -525,14 +357,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     return {};
   });
 
-  registry.register({
-    id: "tasks:repl",
-    name: "tasks",
-    description: "查看定时任务",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["tasks:repl"]);
   dispatcher.registerHandler("tasks:repl", async () => {
     // 领域应用已经裁决用户可见任务；Surface 只负责展示该投影。
     // 「执行中」是宿主内存瞬态，读投影拿不到，故不显示。

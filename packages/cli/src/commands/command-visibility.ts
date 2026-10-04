@@ -13,7 +13,6 @@
  * 读取方单点定义，不在多处各写一遍字符串而漂移。
  */
 
-import type { CommandVisibility, RuntimeContext } from "@zhixing/core/typeahead";
 import chalk from "chalk";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
@@ -22,16 +21,13 @@ import type { CliWriter, ScreenController } from "../screen/index.js";
  * 终端具备 chrome 能力（alt-screen 渲染 + 持久输入区）的 feature 键。
  * 非 TTY / 管道 / dumb 终端探测降级时为 false。
  */
-export const FEATURE_CHROME = "chrome";
+export { FEATURE_CHROME, chromeOnlyVisibility } from './command-capabilities.js';
 
 /**
  * 需要 chrome 才能交互的命令（`/config`·`/mcp` 的 alt-screen 编辑器、`/skills`
  * 管理屏等接管终端的屏）共用的可见性规则：无 chrome 终端下补全与
  * `/help` 都不列出。这只管"列不列"，硬打名字仍能命中——执行期兜底见 `requireChrome`。
  */
-export const chromeOnlyVisibility: CommandVisibility = {
-  predicate: (ctx: RuntimeContext) => ctx.features[FEATURE_CHROME] === true,
-};
 
 /**
  * alt-screen 命令的执行期 chrome 兜底：handler 入口调用，有 chrome（screen 非 null）放行

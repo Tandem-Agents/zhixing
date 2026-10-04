@@ -1,3 +1,4 @@
+import { BUILTIN_COMMANDS } from "./builtin-definitions.js";
 /**
  * task_list cli 命令组 —— /tasklist 与 /task 子命令。
  *
@@ -54,26 +55,12 @@ const TASK_USAGE_HINT =
   "用法：/task new <内容> · /task done <序号或 id> · /task <内容>（new 简写）";
 
 export function registerTaskCommands(opts: TaskCommandsOptions): void {
-  opts.registry.register({
-    id: "tasklist:repl",
-    name: "tasklist",
-    description: "查看当前对话的任务列表",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
+  opts.registry.register(BUILTIN_COMMANDS["tasklist:repl"]);
   opts.dispatcher.registerHandler("tasklist:repl", async () =>
     handleTasklist(opts),
   );
 
-  opts.registry.register({
-    id: "task:repl",
-    name: "task",
-    description: "管理任务（new <内容> / done <序号或 id>）",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
+  opts.registry.register(BUILTIN_COMMANDS["task:repl"]);
   opts.dispatcher.registerHandler("task:repl", async (ctx) =>
     handleTask(ctx, opts),
   );

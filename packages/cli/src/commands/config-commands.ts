@@ -1,3 +1,4 @@
+import { BUILTIN_COMMANDS } from "./builtin-definitions.js";
 /**
  * config 域命令注册 —— 配置 / 权限 / 安全类命令的模块化原子注册（范式同
  * registerInfoCommands）。覆盖 /config /mcp /trust /security。
@@ -18,7 +19,6 @@ import type {
 import { handleSecurityCommand, handleTrustCommand } from "../security/index.js";
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
 import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
-import { chromeOnlyVisibility } from "./command-visibility.js";
 import { configureLogs } from "../logging/configuration.js";
 
 export interface ConfigCommandsDeps {
@@ -68,15 +68,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   });
 
   // ── /config ──
-  registry.register({
-    id: "config:repl",
-    name: "config",
-    description: "修改基础配置；/config logs 查看或调整日志容量与保留期限",
-    category: "config",
-    execution: "local",
-    tag: "builtin",
-    visibility: chromeOnlyVisibility,
-  });
+  registry.register(BUILTIN_COMMANDS["config:repl"]);
   dispatcher.registerHandler("config:repl", async (ctx) => {
     const args = typeof ctx.args._rest === "string" ? ctx.args._rest.trim() : "";
     if (args === "logs" || args.startsWith("logs ")) {
@@ -90,15 +82,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   });
 
   // ── /mcp ──
-  registry.register({
-    id: "mcp:repl",
-    name: "mcp",
-    description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）",
-    category: "config",
-    execution: "local",
-    tag: "builtin",
-    visibility: chromeOnlyVisibility,
-  });
+  registry.register(BUILTIN_COMMANDS["mcp:repl"]);
   dispatcher.registerHandler("mcp:repl", async () => {
     const { handleMcpCommand } = await import("../runtime/config-command.js");
     await handleMcpCommand({
@@ -125,15 +109,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
       deps.management.trustList(deps.getConversationId()),
     ),
   };
-  registry.register({
-    id: "trust:repl",
-    name: "trust",
-    description: "权限规则管理",
-    category: "config",
-    execution: "local",
-    tag: "builtin",
-    args: [trustRuleArgSchema],
-  });
+  registry.register({ ...BUILTIN_COMMANDS["trust:repl"], args: [trustRuleArgSchema] });
   dispatcher.registerHandler(
     "trust:repl",
     async (ctx: CommandHandlerContext) => {
@@ -149,14 +125,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   );
 
   // ── /security ──
-  registry.register({
-    id: "security:repl",
-    name: "security",
-    description: "安全状态概览",
-    category: "config",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["security:repl"]);
   dispatcher.registerHandler("security:repl", async (ctx: CommandHandlerContext) => {
     const args = typeof ctx.args._rest === "string" ? ctx.args._rest : "";
     await handleSecurityCommand(args, {

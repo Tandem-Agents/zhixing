@@ -1,3 +1,4 @@
+import { BUILTIN_COMMANDS } from "./builtin-definitions.js";
 /**
  * session 域命令注册 —— 对话生命周期 + 工作场景控制的模块化原子注册（范式同
  * registerInfoCommands）。
@@ -72,14 +73,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   const { registry, dispatcher, writer, controller } = deps;
 
   // ── /new ──
-  registry.register({
-    id: "new:repl",
-    name: "new",
-    description: "创建新对话",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["new:repl"]);
   dispatcher.registerHandler("new:repl", async () => {
     try {
       const created = await controller.newConversation();
@@ -96,14 +90,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
 
   // ── /clear ──
-  registry.register({
-    id: "clear:repl",
-    name: "clear",
-    description: "清空对话历史",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["clear:repl"]);
   dispatcher.registerHandler("clear:repl", async () => {
     // 清空是事件而非销毁:宿主先盘(transcript clear 事件 + meta 视图层清理)
     // 后窗(活跃窗口归零),busy 时拒绝。
@@ -131,15 +118,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
 
   // ── /resume ──
-  registry.register({
-    id: "resume:repl",
-    name: "resume",
-    description: "切换到其他对话",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-    args: [buildResumeArgSchema(deps)],
-  });
+  registry.register({ ...BUILTIN_COMMANDS["resume:repl"], args: [buildResumeArgSchema(deps)] });
   dispatcher.registerHandler("resume:repl", async (ctx) => {
     const input = argRest(ctx).trim();
     if (!input) {
@@ -239,14 +218,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
 
   // ── /advancement ──
-  registry.register({
-    id: "advancement:repl",
-    name: "advancement",
-    description: "查看当前对话的任务推进详情（判定归因 / 证据 / 收场回看）",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["advancement:repl"]);
   dispatcher.registerHandler("advancement:repl", async () => {
     try {
       const detail = await controller.advancementDetail();
@@ -267,14 +239,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
 
   // ── /name ──
-  registry.register({
-    id: "name:repl",
-    name: "name",
-    description: "为当前会话命名",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["name:repl"]);
   dispatcher.registerHandler("name:repl", async (ctx) => {
     const name = argRest(ctx).trim();
     if (!name) {
@@ -295,14 +260,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
 
   // ── /compact ──
-  registry.register({
-    id: "compact:repl",
-    name: "compact",
-    description: "手动触发上下文压缩",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["compact:repl"]);
   dispatcher.registerHandler("compact:repl", async () => {
     writer.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
     try {
@@ -414,15 +372,7 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
 
   // ── /work ──
-  registry.register({
-    id: "work:repl",
-    name: "work",
-    description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-    args: [buildWorkSceneArgSchema(deps)],
-  });
+  registry.register({ ...BUILTIN_COMMANDS["work:repl"], args: [buildWorkSceneArgSchema(deps)] });
   dispatcher.registerHandler("work:repl", async (ctx) => {
     // 已在工作场景中：不重复进入（work 模式内切换到另一场景属后续需求）。
     if (deps.getActiveMode().kind !== "main") {
@@ -462,15 +412,7 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
   });
 
   // ── /exit ──
-  registry.register({
-    id: "exit:repl",
-    name: "exit",
-    aliases: ["quit"],
-    description: "退出工作场景 / 退出知行",
-    category: "session",
-    execution: "local",
-    tag: "builtin",
-  });
+  registry.register(BUILTIN_COMMANDS["exit:repl"]);
   dispatcher.registerHandler("exit:repl", async () => {
     // 工作场景中：/exit 语义为退出工作场景回主对话（非退出进程）。
     if (deps.getActiveMode().kind === "workscene") {
