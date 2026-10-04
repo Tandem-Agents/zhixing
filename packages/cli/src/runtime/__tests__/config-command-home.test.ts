@@ -25,9 +25,59 @@ vi.mock("../../config-editor/index.js", () => ({
 vi.mock("../../serve/managed-service-runtime.js", () => ({
   reconcileCurrentManagedService: calls.reconcile,
 }));
-import { handleConfigCommand } from "../config-command.js";
+import { handleConfigCommand, handleMcpCommand } from "../config-command.js";
 
 describe("REPL config command home binding", () => {
+  const makeDeps = () => ({
+    zhixingHome: path.resolve("synthetic-config-home"), configPath: path.resolve("synthetic-config-home/config.jsonc"),
+    rl: { pause: vi.fn(), resume: vi.fn() } as never,
+    renderer: { stop: vi.fn() }, writer: { line: vi.fn(), appendInline: vi.fn(), notify: vi.fn(), ensureSegmentBreak: vi.fn() },
+    screen: { reassertCursorHidden: vi.fn() } as never,
+    state: { activeTurnPromise: null as Promise<unknown> | null }, requestHostReload: vi.fn(async () => undefined),
+  });
+
+  it.each(["cancelled", "save-failed", "unchanged"])("旧配置适配器的 %s 不请求换代且恢复输入", async scenario => {
+    calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
+    calls.write.mockImplementation(async () => { if (scenario === "save-failed") throw new Error("fenced edit rejected"); });
+    calls.editor.mockImplementation(async input => {
+      if (scenario === "cancelled") return { kind: "cancelled" };
+      const result = { kind: "completed", config: {}, credentials: {} };
+      await input.writers.save(result);
+      return result;
+    });
+    const deps = makeDeps();
+    await handleConfigCommand(deps);
+    expect(deps.requestHostReload).not.toHaveBeenCalled();
+    expect(deps.rl.resume).toHaveBeenCalledOnce();
+    expect(deps.screen.reassertCursorHidden).toHaveBeenCalledOnce();
+    if (scenario === "save-failed") {
+      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("fenced edit rejected");
+      expect(deps.writer.line.mock.calls.flat().join("\n")).not.toContain("已保存");
+    }
+  });
+
+  it.each([false, true])("MCP owner 保存一次，等待当前轮再激活，激活失败=%s 保留已保存反馈", async failed => {
+    const deps = makeDeps();
+    const turn = Promise.withResolvers<void>();
+    deps.state.activeTurnPromise = turn.promise;
+    deps.requestHostReload.mockImplementation(async () => { if (failed) throw new Error("activation failed"); });
+    calls.load.mockReturnValue({});
+    calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
+    calls.write.mockImplementation(async () => undefined);
+    calls.editor.mockImplementation(async input => {
+      const result = { kind: "completed", config: { mcp: { servers: {} } }, credentials: { mcp: {} } };
+      await input.writers.save(result);
+      return result;
+    });
+    const run = handleMcpCommand({ ...deps, readMcpStatusWire: async () => [], llmComplete: vi.fn(async () => { throw new Error("no model"); }) });
+    await vi.waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
+    expect(deps.requestHostReload).not.toHaveBeenCalled();
+    turn.resolve(); await run;
+    expect(calls.write.mock.calls[0]?.[2]).toMatchObject({ scope: "mcp", configPath: deps.configPath });
+    expect(deps.requestHostReload).toHaveBeenCalledOnce();
+    expect(deps.writer.line.mock.calls.flat().join("\n")).toContain(failed ? "尚未确认生效" : "已保存并生效");
+    expect(deps.rl.resume).toHaveBeenCalledOnce();
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();

@@ -339,7 +339,4 @@ export interface ConfigEditorWriters {
   save: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
 }
 
-export type ConfigEditorResult =
-  | { kind: "completed"; config: ZhixingConfig; credentials: ZhixingCredentials; channelIntents?: Readonly<Record<string, boolean>> }
-  | { kind: "cancelled" }
-  | { kind: "non-tty" };
+export type ConfigEditorResult = import("../runtime/configuration-edit.js").ConfigurationEditResult;

@@ -155,25 +155,6 @@ function formatErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-async function waitForReloadStatus(
-  management: RpcManagementFacade,
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
-): Promise<ServerInfoResult | null> {
-  const timeoutMs = opts.timeoutMs ?? 10_000;
-  const intervalMs = opts.intervalMs ?? 300;
-  const deadline = Date.now() + timeoutMs;
-
-  let lastInfo: ServerInfoResult | null = null;
-  do {
-    lastInfo = await management.serverInfo().catch(() => null);
-    const channels = lastInfo?.channels ?? [];
-    if (channels.every((s) => s.state !== "connecting")) return lastInfo;
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  } while (Date.now() < deadline);
-
-  return lastInfo;
-}
-
 function countRuntimeItems(items: unknown): number {
   if (!Array.isArray(items)) return 0;
   return items.reduce((sum, item) => {
@@ -1299,8 +1280,8 @@ export async function startRepl(zhixingHome: string, configPath: string, beforeE
     management: managementFacade,
     getConversationId: () => controller.current.conversationId,
     requestHostReload: async (options) => {
-      const [{ reloadCoreHostAfterConfig }, { prepareCurrentManagedServiceConfigTurnover }] = await Promise.all([
-        import("./runtime/config-command.js"), import("./serve/managed-service-runtime.js"),
+      const [{ reloadCoreHostAfterConfig, waitForReloadStatus }, { prepareCurrentManagedServiceConfigTurnover }] = await Promise.all([
+        import("./runtime/configuration-application.js"), import("./serve/managed-service-runtime.js"),
       ]);
       // 配置热重载 = 宿主换代:请求优雅退出(flush 落盘)→ 重新 ensure 拉起
       // 新宿主(按新配置装配)。重连后刷新本地派生视图并重挂当前会话 observer。
