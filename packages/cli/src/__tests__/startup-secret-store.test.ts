@@ -3,8 +3,9 @@ import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { writeCredentials } from "@zhixing/providers";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runStartupCheck } from "../startup.js";
+import { checkStartupConfiguration } from "../runtime/startup-application.js";
 
 class MemoryStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -40,6 +41,27 @@ class MemoryStore implements SecretStorePort {
 }
 
 describe("startup SecretStore boundary", () => {
+  it.each(["repl", "host", "pairing"] as const)("%s 首配编辑端口通过 owner 保存后重读，不依赖终端或模型", async mode => {
+    const homeDir = await createTempDir("startup-edit-port");
+    const store = new MemoryStore();
+    const edit = vi.fn(async ({ save }: Parameters<Parameters<typeof checkStartupConfiguration>[0]["edit"]>[0]) => {
+      await save({ config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } }, credentials: { providers: { deepseek: { apiKey: "synthetic-key" } } } });
+      return { kind: "completed" as const };
+    });
+    const result = await checkStartupConfiguration({ homeDir, mode, isTTY: true, secretStore: store, edit });
+    expect(edit).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: "ready", configurationCompleted: true, runtimeConfiguration: { llm: { main: { provider: "deepseek" } } } });
+    expect(await readFile(path.join(homeDir, "config.jsonc"), "utf8")).not.toContain("synthetic-key");
+  });
+
+  it("取消首配不宣称完成，非交互必要缺项不调用编辑端口", async () => {
+    const homeDir = await createTempDir("startup-edit-cancel");
+    const edit = vi.fn(async () => ({ kind: "cancelled" as const }));
+    const options = { homeDir, mode: "repl" as const, secretStore: new MemoryStore(), edit };
+    expect(await checkStartupConfiguration({ ...options, isTTY: true })).toEqual({ kind: "cancelled" });
+    expect(await checkStartupConfiguration({ ...options, isTTY: false })).toMatchObject({ kind: "non-tty" });
+    expect(edit).toHaveBeenCalledOnce();
+  });
   it("migrates legacy plaintext before returning a ready in-memory projection", async () => {
     const homeDir = await createTempDir("startup-secret");
     await mkdir(homeDir, { recursive: true });
