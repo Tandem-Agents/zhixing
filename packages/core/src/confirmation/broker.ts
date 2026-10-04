@@ -290,6 +290,10 @@ export class ConfirmationBroker implements IConfirmationBroker {
     };
   }
 
+  onInvalidated(listener: (requestId: ConfirmationRequestId) => void): BrokerUnsubscribe {
+    return this.onResolved((requestId) => listener(requestId));
+  }
+
   onResolved(listener: ResolvedListener): BrokerUnsubscribe {
     this.resolvedListeners.push(listener);
     return () => {

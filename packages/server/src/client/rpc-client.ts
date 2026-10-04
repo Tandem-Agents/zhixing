@@ -79,6 +79,10 @@ export interface RpcClient {
   close(): Promise<void>;
   /** 当前连接是否已关闭 */
   readonly closed: boolean;
+  /** 被动观察连接关闭；不建立连接。 */
+  onClose?(handler: () => void): Unsubscribe;
+  /** 逻辑 client 保持可用，但已认证接入代次更换；旧代投影随之失效。 */
+  onTurnover?(handler: () => void): Unsubscribe;
 }
 
 // ─── 实现 ───
@@ -90,6 +94,15 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   let ws: WebSocket | null = null;
   let nextId = 0;
   let closed = false;
+  const closeHandlers = new Set<() => void>();
+  const notifyClosed = () => {
+    if (closed) return;
+    closed = true;
+    for (const handler of [...closeHandlers]) {
+      try { handler(); } catch { /* 与 notification listener 一样隔离订阅者。 */ }
+    }
+    closeHandlers.clear();
+  };
 
   const pending = new Map<
     string | number,
@@ -158,6 +171,14 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   }
 
   return {
+    onClose(handler) {
+      if (closed) {
+        try { handler(); } catch { /* 与关闭事件的订阅者隔离保持一致。 */ }
+        return () => {};
+      }
+      closeHandlers.add(handler);
+      return () => { closeHandlers.delete(handler); };
+    },
     get closed() {
       return closed;
     },
@@ -203,7 +224,7 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
 
       ws.on("close", () => {
         rejectAllPending(new RpcClientClosedError("Connection closed by server"));
-        closed = true;
+        notifyClosed();
       });
 
       ws.on("error", () => {
@@ -266,7 +287,7 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
 
     async close(): Promise<void> {
       if (closed) return;
-      closed = true;
+      notifyClosed();
       rejectAllPending(new RpcClientClosedError("Client closed"));
       if (ws) {
         const w = ws;

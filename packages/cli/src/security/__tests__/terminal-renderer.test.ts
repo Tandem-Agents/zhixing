@@ -30,6 +30,8 @@ import {
 } from "../terminal-renderer.js";
 import type { ScreenController } from "../../screen/index.js";
 import { _resetRawModeRefcountForTests } from "../../tui/index.js";
+import { RpcConfirmationBroker } from "../../runtime/rpc-confirmation-broker.js";
+import { makeFakeHostLink } from "../../runtime/__tests__/fake-host-link.js";
 
 /**
  * Fake ScreenController —— integration 测试用。
@@ -521,6 +523,53 @@ describe("buildInlinePanelTitle", () => {
 // ─── 层 3：整合测试 ───
 
 describe("TerminalConfirmationRenderer integration", () => {
+  it.each(["before-show", "showing"])("外部终结于 %s：卸载旧面板且不伪造用户取消", async phase => {
+    const { stdin } = makeStreams();
+    const fake = makeFakeHostLink();
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const before = Promise.withResolvers<void>();
+    const screen = makeFakeScreen();
+    const attach = vi.spyOn(screen, "attachInput");
+    const afterShow = vi.fn();
+    const renderer = new TerminalConfirmationRenderer({ screen, stdin, beforeShow: () => before.promise, afterShow });
+    renderer.attach(broker);
+    fake.notify("confirmation.pending", { request: makeRequest() });
+    await tick();
+    if (phase === "showing") { before.resolve(); await tick(); expect(attach).toHaveBeenCalledOnce(); }
+    fake.notify("confirmation.resolved", { requestId: "req-1" });
+    before.resolve();
+    await tick();
+    await sendKeys(stdin, [ENTER]);
+    expect(afterShow).toHaveBeenCalledOnce();
+    expect(attach).toHaveBeenCalledTimes(phase === "showing" ? 1 : 0);
+    expect(stdin.listenerCount("keypress")).toBe(0);
+    expect(fake.requests).toEqual([]);
+    renderer.detach(); broker.dispose();
+  });
+
+  it("选择后异步收尾/断线不丢决定，新面板等待旧输入所有权释放", async () => {
+    const { stdin } = makeStreams();
+    const fake = makeFakeHostLink();
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const cleanup = Promise.withResolvers<void>();
+    const beforeShow = vi.fn();
+    const afterShow = vi.fn().mockImplementationOnce(() => cleanup.promise);
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin, beforeShow, afterShow });
+    renderer.attach(broker);
+    fake.notify("confirmation.pending", { conversationId: "conv-1", request: makeRequest() });
+    await tick(); await sendKeys(stdin, [ENTER]);
+    expect(fake.requests).toEqual([{ method: "confirmation.resolve", params: { conversationId: "conv-1", requestId: "req-1", decision: { kind: "allow-once" } } }]);
+    fake.disconnect();
+    fake.notify("confirmation.pending", { request: makeRequest({ id: "req-2" }) });
+    await tick(); expect(beforeShow).toHaveBeenCalledOnce();
+    cleanup.reject(new Error("fixture cleanup failed"));
+    await tick(); expect(beforeShow).toHaveBeenCalledTimes(2);
+    await sendKeys(stdin, [CTRL_C]);
+    expect(fake.requests[1]?.params).toEqual({ requestId: "req-2", decision: { kind: "cancelled", cause: "user-ctrl-c" } });
+    expect(fake.requests).toHaveLength(2);
+    renderer.detach(); broker.dispose();
+  });
+
   it("attach 后 broker 有请求 → SelectOperationRegion 显示 → 用户选第一项 → broker.resolve", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();

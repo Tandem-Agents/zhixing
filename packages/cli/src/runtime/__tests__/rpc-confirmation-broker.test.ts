@@ -38,6 +38,69 @@ function makeRequest(id: string): ConfirmationRequest {
 }
 
 describe("RpcConfirmationBroker", () => {
+  it.each(["resolved", "disconnect", "refresh", "dispose"])("%s 真正失效可见请求，迟到选择不产生决定", async cause => {
+    const fake = makeFakeHostLink();
+    fake.setResponder(() => ({ items: [] }));
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const invalidated = vi.fn();
+    broker.onInvalidated(invalidated);
+    fake.notify("confirmation.pending", { request: makeRequest("r-old") });
+    if (cause === "resolved") fake.notify("confirmation.resolved", { requestId: "r-old" });
+    if (cause === "disconnect") fake.disconnect();
+    if (cause === "refresh") await broker.refresh();
+    if (cause === "dispose") broker.dispose();
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith("r-old");
+    expect(broker.resolve("r-old", { kind: "allow-once" })).toBe(false);
+    expect(fake.requests.filter(r => r.method === "confirmation.resolve")).toEqual([]);
+    broker.dispose();
+  });
+
+  it.each(["resolved", "disconnect", "newer-refresh", "dispose"])("迟到 list 被 %s 淘汰，不能重开面板", async cause => {
+    const fake = makeFakeHostLink();
+    const pending = Promise.withResolvers<unknown>();
+    fake.setResponder(() => pending.promise);
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const received = vi.fn();
+    broker.onRequest(received);
+    const refresh = broker.refresh();
+    await flush();
+    if (cause === "resolved") fake.notify("confirmation.resolved", { requestId: "old" });
+    if (cause === "disconnect") fake.disconnect();
+    if (cause === "dispose") broker.dispose();
+    if (cause === "newer-refresh") {
+      fake.setResponder(() => ({ items: [] }));
+      await broker.refresh();
+    }
+    pending.resolve({ items: [{ request: makeRequest("old") }] });
+    await refresh;
+    expect(received).not.toHaveBeenCalled();
+    broker.dispose();
+  });
+
+  it("已选完整决定跨断线和外部 resolved 保持同一耐久重放，重复选择拒绝", async () => {
+    const fake = makeFakeHostLink();
+    const first = Promise.withResolvers<unknown>();
+    let calls = 0;
+    fake.setResponder(() => ++calls === 1 ? first.promise : { ok: true });
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    const received = vi.fn();
+    broker.onRequest(received);
+    fake.notify("confirmation.pending", { conversationId: "conv-original", request: makeRequest("r-selected") });
+    const decision = { kind: "allow-with-note" as const, note: "只处理合成目录" };
+    expect(broker.resolve("r-selected", decision)).toBe(true);
+    expect(broker.resolve("r-selected", { kind: "deny" })).toBe(false);
+    await flush();
+    fake.disconnect();
+    fake.notify("confirmation.resolved", { requestId: "r-selected" });
+    fake.notify("confirmation.pending", { request: makeRequest("r-selected") });
+    first.reject(new RpcClientClosedError("response lost"));
+    await vi.waitFor(() => expect(fake.requests).toHaveLength(2));
+    expect(fake.requests[0]?.params).toEqual({ requestId: "r-selected", conversationId: "conv-original", decision });
+    expect(fake.requests[1]).toEqual(fake.requests[0]);
+    expect(received).toHaveBeenCalledOnce();
+    broker.dispose();
+  });
+
   it("pending 推送(含完整 request)还原为 onRequest;无 request 投影忽略", () => {
     const fake = makeFakeHostLink();
     const broker = new RpcConfirmationBroker({ link: fake.link });
@@ -72,6 +135,7 @@ describe("RpcConfirmationBroker", () => {
       onResolveError: (_err, requestId) => errors.push({ requestId }),
     });
 
+    fake.notify("confirmation.pending", { request: makeRequest("r1") });
     expect(broker.resolve("r1", { kind: "allow-once" })).toBe(true);
     await flush();
     expect(fake.requests).toEqual([
@@ -84,6 +148,7 @@ describe("RpcConfirmationBroker", () => {
     fake.setResponder(() => {
       throw new Error("宿主拒绝");
     });
+    fake.notify("confirmation.pending", { request: makeRequest("r2") });
     broker.resolve("r2", { kind: "deny" });
     await flush();
     expect(errors).toEqual([{ requestId: "r2" }]);
@@ -152,12 +217,14 @@ describe("RpcConfirmationBroker", () => {
       return { ok: true };
     });
 
+    fake.notify("confirmation.pending", { conversationId: "conversation-retry", request: makeRequest("r-retry") });
     expect(broker.resolve("r-retry", { kind: "allow-once" })).toBe(true);
     await vi.waitFor(() => {
       expect(fake.requests).toHaveLength(3);
     });
     expect(fake.requests[1]).toEqual(fake.requests[0]);
     expect(fake.requests[2]).toEqual(fake.requests[0]);
+    expect(fake.requests[0]?.params).toEqual({ requestId: "r-retry", conversationId: "conversation-retry", decision: { kind: "allow-once" } });
     expect(errors).toEqual([]);
 
     broker.dispose();

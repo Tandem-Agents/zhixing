@@ -418,6 +418,8 @@ export interface ConfirmationRendererPort {
    * 只有 "showing" 状态的请求会触发监听器；queued 的不会。
    */
   onRequest(listener: RequestListener): BrokerUnsubscribe;
+  /** 展示已失效：请求终结或连接换代。关闭面板，不产生用户决定。 */
+  onInvalidated(listener: (requestId: ConfirmationRequestId) => void): BrokerUnsubscribe;
 
   /**
    * 解决一个 pending 请求——由渲染器调用。

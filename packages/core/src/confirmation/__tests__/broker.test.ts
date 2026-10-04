@@ -987,6 +987,21 @@ describe("createConfirmationBroker + generateRequestId", () => {
 // 路径，不覆盖 cancel / expire / 兜底 / backpressure。
 
 describe("ConfirmationBroker — onResolved 监听器", () => {
+  it("失效窄投影复用 owner 终结并允许退订，不暴露第二个决定入口", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const invalidated = vi.fn();
+    const off = broker.onInvalidated(invalidated);
+    const first = broker.requestConfirmation(makeRequest({ id: "invalidate-first" }));
+    broker.cancel("invalidate-first", "user-ctrl-c");
+    await first;
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith("invalidate-first");
+    off();
+    const second = broker.requestConfirmation(makeRequest({ id: "invalidate-second" }));
+    broker.resolve("invalidate-second", { kind: "deny" });
+    await second;
+    expect(invalidated).toHaveBeenCalledOnce();
+  });
   it("user resolve 路径触发 onResolved，携带正确的 requestId 和 decision", async () => {
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});

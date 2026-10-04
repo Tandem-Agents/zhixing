@@ -30,6 +30,12 @@ export interface RpcConfirmationBrokerOptions {
 
 export class RpcConfirmationBroker implements ConfirmationRendererPort {
   private readonly listeners = new Set<RequestListener>();
+  private readonly invalidatedListeners = new Set<(requestId: string) => void>();
+  private readonly resolving = new Set<string>();
+  private readonly retired = new Set<string>();
+  private generation = 0;
+  private refreshSequence = 0;
+  private eventRevision = 0;
   private readonly unsubscribes: readonly (() => void)[];
   private readonly visible = new Set<string>();
   /**
@@ -47,31 +53,68 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
     this.unsubscribes = [
       opts.link.onNotification(
         CONFIRMATION_NOTIFICATIONS.pending,
-        (params) => this.acceptPending(params),
+        (params) => { this.eventRevision++; this.acceptPending(params); },
       ),
       opts.link.onNotification(
         CONFIRMATION_NOTIFICATIONS.resolved,
         (params) => {
           const requestId = (params as { requestId?: unknown }).requestId;
           if (typeof requestId !== "string") return;
-          this.visible.delete(requestId);
-          this.pendingConversations.delete(requestId);
+          this.eventRevision++;
+          this.retire(requestId);
         },
       ),
+      ...(opts.link.onDisconnect ? [opts.link.onDisconnect(() => {
+        this.generation++;
+        this.invalidateAll();
+        this.retired.clear();
+      })] : []),
     ];
   }
 
   /** Replays pending requests after a missed notification or host reconnect. */
   async refresh(): Promise<void> {
     if (this.disposed) return;
+    const generation = this.generation;
+    const sequence = ++this.refreshSequence;
+    const revision = this.eventRevision;
     const client = await this.opts.link.getClient();
+    if (this.disposed || generation !== this.generation || sequence !== this.refreshSequence) return;
     const result = await client.request<{
       readonly items: readonly {
         readonly conversationId?: string;
         readonly request?: ConfirmationRequest;
       }[];
     }>("confirmation.list");
+    // 旧连接/旧请求/在途通知之前的快照不能重新打开旧面板。
+    if (this.disposed || client.closed || generation !== this.generation ||
+        sequence !== this.refreshSequence || revision !== this.eventRevision) return;
+    const pending = new Set(result.items.flatMap(item => item.request ? [item.request.id] : []));
+    for (const id of [...this.visible]) if (!pending.has(id)) this.retire(id);
     for (const item of result.items) this.acceptPending(item);
+  }
+
+  onInvalidated(listener: (requestId: string) => void): () => void {
+    this.invalidatedListeners.add(listener);
+    return () => { this.invalidatedListeners.delete(listener); };
+  }
+
+  private invalidate(requestId: string): void {
+    const wasVisible = this.visible.delete(requestId);
+    this.pendingConversations.delete(requestId);
+    if (wasVisible) for (const listener of [...this.invalidatedListeners]) listener(requestId);
+  }
+
+  private invalidateAll(): void {
+    for (const id of [...this.visible]) this.invalidate(id);
+  }
+
+  private retire(requestId: string): void {
+    this.retired.add(requestId);
+    if (this.retired.size > RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS) {
+      this.retired.delete(this.retired.values().next().value!);
+    }
+    this.invalidate(requestId);
   }
 
   onRequest(listener: RequestListener): () => void {
@@ -82,12 +125,16 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
   }
 
   resolve(requestId: string, decision: ConfirmationDecision): boolean {
-    if (this.disposed) return false;
-    void this.resolveWithReconnect(requestId, decision).catch((err) => {
-      this.visible.delete(requestId);
+    if (this.disposed || !this.visible.has(requestId) || this.resolving.has(requestId)) return false;
+    this.resolving.add(requestId);
+    // 在任何失效通知/await 前捕获完整决定与耐久定位；之后的断线只关闭展示。
+    const pending = this.resolveWithReconnect(requestId, structuredClone(decision));
+    this.invalidate(requestId);
+    void pending.then(() => this.retire(requestId)).catch((err) => {
+      this.resolving.delete(requestId);
       this.opts.onResolveError?.(err, requestId);
       void this.refresh().catch(() => {});
-    });
+    }).finally(() => { this.resolving.delete(requestId); });
     return true;
   }
 
@@ -124,10 +171,14 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.generation++;
+    this.invalidateAll();
     for (const unsubscribe of this.unsubscribes) unsubscribe();
     this.listeners.clear();
+    this.invalidatedListeners.clear();
     this.pendingConversations.clear();
     this.visible.clear();
+    this.retired.clear();
   }
 
   private acceptPending(params: unknown): void {
@@ -136,7 +187,7 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
       request?: ConfirmationRequest;
       conversationId?: string;
     };
-    if (!payload.request || this.visible.has(payload.request.id)) return;
+    if (!payload.request || this.visible.has(payload.request.id) || this.resolving.has(payload.request.id) || this.retired.has(payload.request.id)) return;
     this.visible.add(payload.request.id);
     if (payload.conversationId) {
       if (

@@ -16,6 +16,7 @@ export interface RecordedRequest {
 export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
   const requests: RecordedRequest[] = [];
   const handlers = new Map<string, Set<(params: unknown) => void>>();
+  const disconnectHandlers = new Set<() => void>();
   let responder: (method: string, params: unknown) => unknown = () => ({});
   const connected = opts.connected ?? true;
 
@@ -27,6 +28,10 @@ export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
   } as unknown as RpcClient;
 
   const link: CoreHostRpcLink = {
+    onDisconnect: handler => {
+      disconnectHandlers.add(handler);
+      return () => { disconnectHandlers.delete(handler); };
+    },
     getClient: async () => client,
     getConnectedClient: () => (connected ? client : null),
     onNotification: (method, handler) => {
@@ -45,6 +50,7 @@ export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
   return {
     link,
     requests,
+    disconnect: () => { for (const handler of [...disconnectHandlers]) handler(); },
     /** 注入 request 响应(按 method 分支返回)。 */
     setResponder(fn: (method: string, params: unknown) => unknown): void {
       responder = fn;

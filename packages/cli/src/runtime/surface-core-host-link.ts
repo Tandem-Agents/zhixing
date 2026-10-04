@@ -8,6 +8,7 @@ import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   PROTOCOL_VERSION,
   RpcAppError,
+  RpcClientClosedError,
   type AuthResult,
   type RpcClient,
 } from "@zhixing/server";
@@ -30,6 +31,15 @@ import {
 type NotificationHandler = (params: unknown) => void;
 type WildcardNotificationHandler = (method: string, params: unknown) => void;
 let nextSurfaceConnectionId = 1;
+
+interface SurfaceBinding {
+  readonly ownerDeviceId: string;
+  readonly ownerIdentity: string;
+  readonly connection: FirstPartyIngressConnection;
+  readonly remote: FirstPartyConversationMeshClient;
+  readonly closeHandlers: Set<() => void>;
+  closed: boolean;
+}
 
 export async function createCurrentAnchorSurfaceRpcClient(options: {
   readonly zhixingHome: string;
@@ -88,12 +98,14 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
   readonly #methodHandlers = new Map<string, Set<NotificationHandler>>();
   readonly #wildcardHandlers = new Set<WildcardNotificationHandler>();
   readonly #closeHandlers = new Set<() => void>();
-  readonly #connection: FirstPartyIngressConnection;
-  #remote: FirstPartyConversationMeshClient | undefined;
-  #ownerDeviceId: string | undefined;
-  #ownerIdentity: string | undefined;
+  readonly #turnoverHandlers = new Set<() => void>();
+  readonly #surfacePrincipal = `rpc:${randomUUID()}`;
+  readonly #retiring = new Set<Promise<void>>();
+  #binding: SurfaceBinding | undefined;
+  #surfaceGeneration = 0;
   #started = false;
   #closed = false;
+  #closing: Promise<void> | undefined;
 
   constructor(
     private readonly sourceDeviceId: string,
@@ -104,24 +116,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     private readonly bootstrapStore: {
       readonly stopStorageMaintenance: () => Promise<void>;
     },
-  ) {
-    const connectionId = nextSurfaceConnectionId++;
-    const owner = this;
-    this.#connection = {
-      id: connectionId,
-      get closed() { return owner.#closed; },
-      authenticated: true,
-      loopback: true,
-      clientInfo: { id: "zhixing-cli-surface", version: ZHIXING_CLI_VERSION },
-      surfacePrincipal: `rpc:${randomUUID()}`,
-      surfaceGeneration: 1,
-      notify: (method, params) => this.#notify(method, params),
-      onClose: (handler) => {
-        this.#closeHandlers.add(handler);
-        return () => this.#closeHandlers.delete(handler);
-      },
-    };
-  }
+  ) {}
 
   get closed(): boolean { return this.#closed; }
 
@@ -149,12 +144,14 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     const trust = this.control.currentTrust();
     const owner = trust.issuer.deviceId;
     if (owner === this.sourceDeviceId) {
+      this.#retireBinding(true);
       throw new CoreHostUnavailableError("当前设备没有可用的本机核心宿主");
     }
-    await this.#selectOwner(owner, canonicalize(trust));
+    const binding = this.#selectOwner(owner, canonicalize(trust));
     try {
-      return await this.#remote!.dispatch(method, params, this.#connection) as T;
+      return await binding.remote.dispatch(method, params, binding.connection) as T;
     } catch (error) {
+      if (binding.closed) throw new RpcClientClosedError("远端接入代次已经更换");
       if (error instanceof RpcAppError) throw error;
       throw new CoreHostUnavailableError("值班设备暂时离线，请稍后重试");
     }
@@ -178,53 +175,114 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     return () => this.#wildcardHandlers.delete(handler);
   }
 
+  onClose(handler: () => void): () => void {
+    if (this.#closed) {
+      try { handler(); } catch { /* 订阅者隔离。 */ }
+      return () => {};
+    }
+    this.#closeHandlers.add(handler);
+    return () => { this.#closeHandlers.delete(handler); };
+  }
+
+  onTurnover(handler: () => void): () => void {
+    this.#turnoverHandlers.add(handler);
+    return () => { this.#turnoverHandlers.delete(handler); };
+  }
+
   async close(): Promise<void> {
+    if (this.#closing) return this.#closing;
     if (this.#closed) return;
     this.#closed = true;
-    for (const handler of [...this.#closeHandlers]) handler();
-    this.#closeHandlers.clear();
-    if (this.#remote) await this.#remote.close(this.#connection);
-    this.#remote = undefined;
-    this.#ownerDeviceId = undefined;
-    this.#ownerIdentity = undefined;
-    try {
-      await this.control.stop();
-    } finally {
-      await this.bootstrapStore.stopStorageMaintenance();
+    this.#retireBinding(false);
+    for (const handler of [...this.#closeHandlers]) {
+      try { handler(); } catch { /* 订阅者隔离。 */ }
     }
+    this.#closeHandlers.clear();
+    this.#turnoverHandlers.clear();
     this.#methodHandlers.clear();
     this.#wildcardHandlers.clear();
+    this.#closing = (async () => {
+      await Promise.all(this.#retiring);
+      try { await this.control.stop(); }
+      finally { await this.bootstrapStore.stopStorageMaintenance(); }
+    })();
+    return this.#closing;
   }
 
   async reconcileOwner(record: HomeTrustRecord): Promise<void> {
+    if (this.#closed) return;
     const identity = canonicalize(record);
     if (
-      record.issuer.deviceId === this.#ownerDeviceId &&
-      identity === this.#ownerIdentity
+      record.issuer.deviceId === this.#binding?.ownerDeviceId &&
+      identity === this.#binding.ownerIdentity
     ) return;
-    if (this.#remote) await this.#remote.close(this.#connection);
-    this.#remote = undefined;
-    this.#ownerDeviceId = undefined;
-    this.#ownerIdentity = undefined;
+    await this.#retireBinding(true);
   }
 
-  async #selectOwner(ownerDeviceId: string, ownerIdentity: string): Promise<void> {
+  #selectOwner(ownerDeviceId: string, ownerIdentity: string): SurfaceBinding {
     if (
-      ownerDeviceId === this.#ownerDeviceId &&
-      ownerIdentity === this.#ownerIdentity &&
-      this.#remote
-    ) return;
-    if (this.#remote) await this.#remote.close(this.#connection);
-    this.#ownerDeviceId = ownerDeviceId;
-    this.#ownerIdentity = ownerIdentity;
-    this.#remote = new FirstPartyConversationMeshClient(
-      this.control.connections.client(ownerDeviceId),
-      this.sourceDeviceId,
-    );
+      ownerDeviceId === this.#binding?.ownerDeviceId &&
+      ownerIdentity === this.#binding.ownerIdentity
+    ) return this.#binding;
+    const previous = this.#binding;
+    this.#retireBinding(false);
+    // 每个接入代次有不可变身份及独立 closed 标志；旧 dispatch/poll 永不借用新代。
+    const closeHandlers = new Set<() => void>();
+    let binding: SurfaceBinding;
+    const connection: FirstPartyIngressConnection = {
+      id: nextSurfaceConnectionId++,
+      get closed() { return binding.closed; },
+      authenticated: true,
+      loopback: true,
+      clientInfo: { id: "zhixing-cli-surface", version: ZHIXING_CLI_VERSION },
+      surfacePrincipal: this.#surfacePrincipal,
+      surfaceGeneration: ++this.#surfaceGeneration,
+      notify: (method, params) => { if (!binding.closed) this.#notify(method, params, binding); },
+      onClose: (handler) => {
+        closeHandlers.add(handler);
+        return () => closeHandlers.delete(handler);
+      },
+    };
+    binding = {
+      ownerDeviceId, ownerIdentity, connection, closeHandlers, closed: false,
+      remote: new FirstPartyConversationMeshClient(this.control.connections.client(ownerDeviceId), this.sourceDeviceId),
+    };
+    this.#binding = binding;
+    if (previous) this.#notifyTurnover();
+    return binding;
   }
 
-  #notify(method: string, params: unknown): void {
-    for (const handler of this.#methodHandlers.get(method) ?? []) handler(params);
-    for (const handler of this.#wildcardHandlers) handler(method, params);
+  #retireBinding(notify: boolean): Promise<void> | undefined {
+    const binding = this.#binding;
+    if (!binding) return;
+    this.#binding = undefined;
+    binding.closed = true;
+    // close 同步停止 poll、撤掉其 close listener；远端收尾不能阻挡本地失效。
+    const closing = binding.remote.close(binding.connection).catch(() => {});
+    this.#retiring.add(closing);
+    void closing.then(() => this.#retiring.delete(closing));
+    for (const handler of [...binding.closeHandlers]) {
+      try { handler(); } catch { /* 订阅者隔离。 */ }
+    }
+    binding.closeHandlers.clear();
+    if (notify) this.#notifyTurnover();
+    return closing;
+  }
+
+  #notifyTurnover(): void {
+    for (const handler of [...this.#turnoverHandlers]) {
+      try { handler(); } catch { /* 订阅者隔离。 */ }
+    }
+  }
+
+  #notify(method: string, params: unknown, binding: SurfaceBinding): void {
+    for (const handler of [...this.#methodHandlers.get(method) ?? []]) {
+      if (binding.closed) return;
+      try { handler(params); } catch { /* 订阅者隔离。 */ }
+    }
+    for (const handler of [...this.#wildcardHandlers]) {
+      if (binding.closed) return;
+      try { handler(method, params); } catch { /* 订阅者隔离。 */ }
+    }
   }
 }

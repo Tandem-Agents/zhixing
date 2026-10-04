@@ -109,6 +109,8 @@ export interface CoreHostRpcLink extends CoreHostNotificationLink {
   getClient(): Promise<RpcClient>;
   /** 返回当前已连接 client；不发现、不拉起宿主。 */
   getConnectedClient?(): RpcClient | null;
+  /** 当前连接关闭/换代，已展示的远端请求随之失效。订阅本身不拉起宿主。 */
+  onDisconnect?(handler: () => void): () => void;
 }
 
 export interface CoreHostConnectionDeps {
@@ -235,6 +237,8 @@ export class CoreHostConnection implements CoreHostRpcLink {
    */
   private readonly subscriptions = new Map<string, Set<NotificationHandler>>();
   private readonly lifecycleHandlers = new Set<LifecycleHandler>();
+  private readonly disconnectHandlers = new Set<() => void>();
+  private unsubscribeClose: (() => void) | undefined;
   /** 当前活 client 上已挂转发器的 method 集合（随连接重建重置）。 */
   private forwardedMethods = new Set<string>();
   private versionRecheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -253,6 +257,38 @@ export class CoreHostConnection implements CoreHostRpcLink {
 
   getStatus(): CoreHostConnectionStatus {
     return this.status;
+  }
+
+  onDisconnect(handler: () => void): () => void {
+    this.disconnectHandlers.add(handler);
+    return () => { this.disconnectHandlers.delete(handler); };
+  }
+
+  private invalidateConnection(): void {
+    this.unsubscribeClose?.();
+    this.unsubscribeClose = undefined;
+    this.status = { kind: "disconnected" };
+    this.notifyDisconnected();
+  }
+
+  private notifyDisconnected(): void {
+    for (const handler of [...this.disconnectHandlers]) {
+      try { handler(); } catch { /* 订阅者隔离。 */ }
+    }
+  }
+
+  private observeClientClose(client: RpcClient): void {
+    this.unsubscribeClose?.();
+    const unsubscribeClose = client.onClose?.(() => {
+      if (this.client === client) this.invalidateConnection();
+    });
+    const unsubscribeTurnover = client.onTurnover?.(() => {
+      if (this.client !== client) return;
+      // 同一逻辑 surface 的新接入代次沿用订阅，但旧代投影必须同步失效。
+      this.notifyDisconnected();
+      void this.emitNotice({ kind: "reconnected", reason: "connection-closed" }).catch(() => {});
+    });
+    this.unsubscribeClose = () => { unsubscribeClose?.(); unsubscribeTurnover?.(); };
   }
 
   onLifecycleNotice(handler: LifecycleHandler): () => void {
@@ -347,6 +383,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     }
     this.client = client;
     this.endpoint = null;
+    this.observeClientClose(client);
     this.forwardedMethods = new Set();
     this.status = {
       kind: "connected",
@@ -381,6 +418,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     }
     this.client = client;
     this.endpoint = established.endpoint;
+    this.observeClientClose(client);
     this.forwardedMethods = new Set();
     this.status = {
       kind: "connected",
@@ -706,6 +744,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     if (this.forwardedMethods.has(method)) return;
     this.forwardedMethods.add(method);
     client.onNotification(method, (params) => {
+      if (this.client !== client || client.closed || this.disposed) return;
       const handlers = this.subscriptions.get(method);
       if (!handlers) return;
       // 快照分发——分发中退订不影响本帧可达性（与 EventBus 语义一致）
@@ -875,7 +914,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     this.client = null;
     this.endpoint = null;
     this.forwardedMethods = new Set();
-    this.status = { kind: "disconnected" };
+    this.invalidateConnection();
     this.clearPendingVersionRecheck();
     if (current) {
       await current.close().catch(() => {});
@@ -947,6 +986,8 @@ export class CoreHostConnection implements CoreHostRpcLink {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.invalidateConnection();
+    this.disconnectHandlers.clear();
     for (const attempt of this.startupAttempts) attempt.abort();
     this.subscriptions.clear();
     this.lifecycleHandlers.clear();

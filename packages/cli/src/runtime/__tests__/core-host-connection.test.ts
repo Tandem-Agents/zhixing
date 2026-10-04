@@ -42,6 +42,7 @@ function makeFakeClient(opts: {
 } = {}) {
   let closed = false;
   const handlers = new Map<string, Array<(p: unknown) => void>>();
+  const closeHandlers = new Set<() => void>();
   const client = {
     connect: vi.fn(opts.connect ?? (async () => {})),
     authenticate: vi.fn(
@@ -61,14 +62,20 @@ function makeFakeClient(opts: {
       return () => {};
     }),
     onAnyNotification: vi.fn(() => () => {}),
+    onClose: (handler: () => void) => {
+      closeHandlers.add(handler);
+      return () => { closeHandlers.delete(handler); };
+    },
     close: vi.fn(async () => {
       closed = true;
+      for (const handler of [...closeHandlers]) handler();
     }),
     emit(m: string, p: unknown) {
       for (const h of handlers.get(m) ?? []) h(p);
     },
     markClosed() {
       closed = true;
+      for (const handler of [...closeHandlers]) handler();
     },
   };
   Object.defineProperty(client, "closed", { get: () => closed });
@@ -79,6 +86,27 @@ type FakeClient = ReturnType<typeof makeFakeClient>;
 const asClient = (c: FakeClient) => c as unknown as RpcClient;
 
 describe("CoreHostConnection", () => {
+  it("被动关闭通知失效当前展示，旧代迟到消息不能进入新订阅", async () => {
+    const c1 = makeFakeClient();
+    const c2 = makeFakeClient();
+    let created = 0;
+    const conn = new CoreHostConnection({ discover: async () => endpoint, spawn: async () => ({ ok: true }), createClient: () => asClient(++created === 1 ? c1 : c2) });
+    const disconnected = vi.fn();
+    const notified = vi.fn();
+    conn.onDisconnect(disconnected);
+    conn.onNotification("confirmation.pending", notified);
+    expect(created).toBe(0);
+    await conn.getClient();
+    c1.emit("confirmation.pending", "old-live");
+    c1.markClosed();
+    expect(disconnected).toHaveBeenCalledOnce();
+    expect(conn.getStatus().kind).toBe("disconnected");
+    await conn.getClient();
+    c1.emit("confirmation.pending", "old-late");
+    c2.emit("confirmation.pending", "new-live");
+    expect(notified.mock.calls).toEqual([["old-live"], ["new-live"]]);
+    await conn.dispose();
+  });
   it("allows ready callbacks to reenter during manual reconnect, never exposing the old client", async () => {
     const authenticated = Promise.withResolvers<void>();
     const authenticating = Promise.withResolvers<void>();

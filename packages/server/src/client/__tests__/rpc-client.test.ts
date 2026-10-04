@@ -4,7 +4,7 @@
  * 复用 server.test 同样的测试模式：startServer(port=0) → connect → 调用 → close
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { startServer, type ZhixingServerInstance } from "../../server.js";
 import { createServerContext } from "../../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../../types.js";
@@ -53,6 +53,33 @@ describe("RpcClient", () => {
     await c.connect();
     await c.close();
     expect(c.closed).toBe(true);
+  });
+
+  it.each(["local", "remote"])("%s 关闭主动通知被动订阅者一次并支持退订", async side => {
+    const c = createClient();
+    const notified = vi.fn();
+    const removed = vi.fn();
+    c.onClose!(notified);
+    c.onClose!(removed)();
+    await c.connect();
+    if (side === "local") await c.close();
+    else await server.close();
+    await vi.waitFor(() => expect(notified).toHaveBeenCalledOnce());
+    expect(c.closed).toBe(true);
+    expect(removed).not.toHaveBeenCalled();
+    await c.close();
+    expect(notified).toHaveBeenCalledOnce();
+  });
+
+  it("关闭已发起后注册的订阅者不会被迟到的 socket close 再次通知", async () => {
+    const c = createClient();
+    await c.connect();
+    const closing = c.close();
+    const late = vi.fn();
+    c.onClose!(late);
+    expect(late).toHaveBeenCalledOnce();
+    await closing;
+    expect(late).toHaveBeenCalledOnce();
   });
 
   it("connect rejects on invalid URL", async () => {

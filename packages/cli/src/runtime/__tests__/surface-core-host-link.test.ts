@@ -1,12 +1,33 @@
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import type { MeshServiceClient } from "@zhixing/mesh";
 import { describe, expect, it, vi } from "vitest";
+import { FirstPartyConversationMeshTarget } from "../../serve/first-party-conversation-mesh.js";
 import {
   createCurrentAnchorSurfaceRpcClient,
   CurrentAnchorSurfaceRpcClient,
 } from "../surface-core-host-link.js";
 
 describe("current anchor surface core-host link", () => {
+  it("真实两侧转发边界保留三种 awaiting 处置及完整 delta 信封", async () => {
+    for (const disposition of ["original-saved", "revision-saved", "not-saved"]) {
+      const result = { conversationId: "conv-1", sessionId: "conv-1", turnId: "original", status: "awaiting-rubric-confirmation", submission: { turnId: "current", disposition }, rubricDraftId: "draft", rubricDraft: { originalTurnId: "original" }, advancementSessionId: "adv" };
+      const delta = { conversationId: "conv-1", sessionId: "conv-1", turnId: "original", delta: { type: "tool_start", id: "tool-1", name: "read", input: { path: "synthetic.txt" } } };
+      const target = new FirstPartyConversationMeshTarget({ surface: { dispatch: async ({ connection }: { connection: { notify(method: string, params: unknown): void } }) => {
+        connection.notify("session.delta", delta);
+        return result;
+      } } as never });
+      const client = new CurrentAnchorSurfaceRpcClient("device:surface", {
+        start: vi.fn(), stop: vi.fn(), currentTrust: () => trust("device:anchor"),
+        connections: { client: () => ({ request: (_service: string, payload: Uint8Array, signal?: AbortSignal) => target.handle(payload, { peer: { deviceId: "device:surface" } } as never, signal ?? new AbortController().signal) }) },
+      } as never, { stopStorageMaintenance: vi.fn() });
+      const received: unknown[] = [];
+      client.onNotification("session.delta", value => received.push(value));
+      await client.connect();
+      expect(await client.request("session.send", { conversationId: "conv-1", turnId: "current", text: "本次输入" })).toEqual(result);
+      expect(received).toContainEqual(delta);
+      await client.close();
+    }
+  });
   it("consumes only the Configuration Provider topology projection", async () => {
     const readTopology = vi.fn(() => Object.freeze({}));
 

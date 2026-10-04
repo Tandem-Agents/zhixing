@@ -259,11 +259,22 @@ export class FirstPartyConversationMeshClient {
     if (!METHODS.has(method)) throw new TypeError("First-party conversation method is not allowed");
     const surface = surfaceIdentity(this.sourceDeviceId, connection);
     this.#ensurePolling(surface, connection);
-    const response = await this.#request({ v: 1, op: "dispatch", surface, method, params });
-    for (const notification of response.notifications) {
-      if (!connection.closed) connection.notify(notification.method, notification.params);
+    // Poll 的暂时/稳定失败不等于接入面关闭；dispatch 跟随真正的 ingress 生命周期。
+    const abort = new AbortController();
+    const unsubscribe = connection.onClose(() => abort.abort());
+    try {
+      if (connection.closed) abort.abort();
+      const response = await this.#request({ v: 1, op: "dispatch", surface, method, params: params === undefined ? {} : params }, abort.signal);
+      if (connection.closed || abort.signal.aborted) {
+        throw new MeshProtocolError("connection-closed", "First-party ingress was replaced during dispatch");
+      }
+      for (const notification of response.notifications) {
+        if (!connection.closed && !abort.signal.aborted) connection.notify(notification.method, notification.params);
+      }
+      return response.result;
+    } finally {
+      unsubscribe();
     }
-    return response.result;
   }
 
   async close(connection: FirstPartyIngressConnection): Promise<void> {
@@ -277,8 +288,10 @@ export class FirstPartyConversationMeshClient {
     }).catch(() => {});
   }
 
-  #ensurePolling(surface: SurfaceIdentity, connection: FirstPartyIngressConnection): void {
-    if (this.#active.has(connection.id)) return;
+  #ensurePolling(surface: SurfaceIdentity, connection: FirstPartyIngressConnection): ActivePoll {
+    if (connection.closed) throw new MeshProtocolError("connection-closed", "First-party ingress is closed");
+    const existing = this.#active.get(connection.id);
+    if (existing) return existing;
     const active: ActivePoll = {
       abort: new AbortController(),
       remove: () => {},
@@ -287,8 +300,12 @@ export class FirstPartyConversationMeshClient {
     active.remove = connection.onClose(() => {
       void this.close(connection);
     });
-    if (this.#active.get(connection.id) !== active) return;
-    void this.#poll(surface, connection, active);
+    if (this.#isActive(connection, active)) void this.#poll(surface, connection, active);
+    return active;
+  }
+
+  #isActive(connection: FirstPartyIngressConnection, active: ActivePoll): boolean {
+    return !connection.closed && !active.abort.signal.aborted && this.#active.get(connection.id) === active;
   }
 
   async #poll(
@@ -309,7 +326,7 @@ export class FirstPartyConversationMeshClient {
         attempt: async (signal) => {
           const response = await this.#request({ v: 1, op: "poll", surface }, signal);
           for (const notification of response.notifications) {
-            if (!connection.closed) connection.notify(notification.method, notification.params);
+            if (this.#isActive(connection, active)) connection.notify(notification.method, notification.params);
           }
           completed = true;
         },

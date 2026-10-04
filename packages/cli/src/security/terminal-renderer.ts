@@ -90,7 +90,8 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
 
   private broker: ConfirmationRendererPort | null = null;
   private unsub: BrokerUnsubscribe | null = null;
-  private currentAbort: AbortController | null = null;
+  private readonly panels = new Map<string, AbortController>();
+  private presentation: Promise<void> = Promise.resolve();
   private detached = false;
 
   constructor(private readonly options: TerminalConfirmationRendererOptions) {}
@@ -103,10 +104,16 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
     }
     this.broker = broker;
     this.detached = false;
-    this.unsub = broker.onRequest((req) => {
-      // fire-and-forget: handleRequest 内部自己处理所有异常并最终 resolve
-      void this.handleRequest(req);
+    this.unsub?.();
+    const unsubscribeRequest = broker.onRequest((req) => {
+      const abort = new AbortController();
+      this.panels.get(req.id)?.abort();
+      this.panels.set(req.id, abort);
+      // 仅串行占用终端；请求是否有效仍由 broker 的失效通知决定。
+      this.presentation = this.presentation.then(() => this.handleRequest(req, broker, abort));
     });
+    const unsubscribeInvalidated = broker.onInvalidated(id => this.panels.get(id)?.abort());
+    this.unsub = () => { unsubscribeRequest(); unsubscribeInvalidated(); };
     return () => this.detach();
   }
 
@@ -115,65 +122,56 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
     this.detached = true;
     this.unsub?.();
     this.unsub = null;
-    if (this.currentAbort) {
-      this.currentAbort.abort();
-      this.currentAbort = null;
-    }
+    for (const abort of this.panels.values()) abort.abort();
+    this.panels.clear();
     this.broker = null;
   }
 
   // ─── 核心：处理单个请求 ───
 
-  private async handleRequest(request: ConfirmationRequest): Promise<void> {
-    const broker = this.broker;
-    if (!broker) return;
-
-    // 构造一个 AbortController 跟踪当前请求——detach 时用来强制中断
-    const abort = new AbortController();
-    this.currentAbort = abort;
-
+  private async handleRequest(request: ConfirmationRequest, broker: ConfirmationRendererPort, abort: AbortController): Promise<void> {
+    if (abort.signal.aborted) {
+      if (this.panels.get(request.id) === abort) this.panels.delete(request.id);
+      return;
+    }
+    let entered = false;
+    let decided = false;
     try {
       // host 暂停当前 InputRegion（让出 chrome 给 SelectOperationRegion）
-      if (this.options.beforeShow) {
-        await this.options.beforeShow();
-      }
+      entered = true;
+      await this.options.beforeShow?.();
+      if (abort.signal.aborted) return;
 
       // 构造面板入参
       const { selectOptions, optionById } = buildSelectOptions(request);
       const title = buildInlinePanelTitle(request);
       const bodyLines = buildInlinePanelBody(request);
 
-      let result: SelectResult;
-      try {
-        const region = new SelectOperationRegion({
+      const region = new SelectOperationRegion({
           screen: this.options.screen,
           title,
           body: bodyLines,
           options: selectOptions,
           stdin: this.options.stdin ?? process.stdin,
           signal: abort.signal,
-        });
-        result = await region.run();
-      } finally {
-        // host 恢复 InputRegion —— 无论成功或抛错都要
-        if (this.options.afterShow) {
-          await this.options.afterShow();
-        }
-      }
-
+      });
+      const result = await region.run();
+      if (abort.signal.aborted) return;
       const decision = translate(result, optionById);
+      decided = true;
+      // 真实用户选择在异步收尾前交回；收尾/断线不能把它改成取消或丢失。
       broker.resolve(request.id, decision);
     } catch (err) {
       // 渲染失败兜底：发 deny，把错误信息回写 reason 便于定位
       const message = err instanceof Error ? err.message : String(err);
-      broker.resolve(request.id, {
+      if (!abort.signal.aborted && !decided) broker.resolve(request.id, {
         kind: "deny",
         reason: `渲染确认对话框失败：${message}`,
       });
     } finally {
-      if (this.currentAbort === abort) {
-        this.currentAbort = null;
-      }
+      try { if (entered) await this.options.afterShow?.(); }
+      catch { /* 收尾失败不能改写已选决定，也不能阻断后续面板。 */ }
+      finally { if (this.panels.get(request.id) === abort) this.panels.delete(request.id); }
     }
   }
 }
