@@ -14,6 +14,9 @@ export class ObservedTextPrefix {
     this.#units += text.length;
   }
   reset(): void { this.#hash = createHash('sha256'); this.#units = 0; }
+  /** Final recovery can resume after an acknowledged fragment without keeping
+   * the decoded history page. A mismatching live prefix starts a new prefix. */
+  align(message: Message | undefined): void { if (!this.#matches(message)) this.reset(); }
 
   *remaining(message: Message | undefined): Generator<string> {
     let skip = this.#matches(message) ? this.#units : 0;

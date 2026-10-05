@@ -33,7 +33,10 @@ import {
  * 接入引导所需的 LLM 能力，由宿主按当前模型选择注入，与工具调用上下文无关。
  * 收 AbortSignal 以支持面板 loading 态的取消（注入方把它透传给底层 LLM 调用）。
  */
-export type McpSetupLlm = (prompt: string, signal?: AbortSignal) => Promise<string>;
+export interface McpSetupLlm {
+  (prompt: string, signal?: AbortSignal): Promise<string>;
+  consume?<T>(prompt: string, consume: (text: string) => T, signal?: AbortSignal): Promise<T>;
+}
 
 /** 信息源抓取函数 —— 由 Host adapter 注入，管理层只消费有限 source result。 */
 export type McpSourceFetcher = (
@@ -132,6 +135,7 @@ export async function resolveMcpSetup(
       search: deps.search,
       fetchSource: deps.fetchSource,
       complete: deps.llm,
+      consumeComplete: deps.llm.consume,
       ...(onStep ? { onProgress: (p) => onStep(mcpProgressText(p)) } : {}),
     },
     signal,
@@ -227,14 +231,14 @@ export async function extractMcpCandidate(
     };
   }
 
-  let raw: string;
+  let parsed: ParsedInference;
   try {
-    raw = await deps.llm(buildExtractionPrompt(packageName, source.readme), signal);
+    const prompt = buildExtractionPrompt(packageName, source.readme);
+    parsed = deps.llm.consume ? await deps.llm.consume(prompt, raw => parseExtraction(raw, packageName), signal)
+      : parseExtraction(await deps.llm(prompt, signal), packageName);
   } catch (err) {
     return { ok: false, error: `读取设置说明失败：${errMsg(err)}` };
   }
-  const parsed = parseExtraction(raw, packageName);
-
   return {
     ok: true,
     candidate: {

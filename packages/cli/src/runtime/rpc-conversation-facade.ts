@@ -55,6 +55,8 @@ import {
   RpcClientError,
   RpcClientClosedError,
   RPC_ERROR_CODES,
+  type RpcClient,
+  type RpcEncodedJsonSource,
 } from "@zhixing/server/client";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
@@ -71,6 +73,14 @@ export interface ConversationStatusCursor {
   readonly runId: string;
   readonly afterStatusRevision: number;
 }
+
+export interface SessionSendSnapshotIdentity {
+  readonly conversationId?: string;
+  readonly turnId: string;
+  readonly surfaceCapabilities: { readonly postTurnControl: true };
+  readonly acceptLimitedCapabilities?: true;
+}
+export interface DisposableSessionSendSource extends RpcEncodedJsonSource { dispose(): Promise<void> }
 
 export class RpcConversationFacade {
   #continuationRequirement: readonly string[] | null = null;
@@ -105,12 +115,62 @@ export class RpcConversationFacade {
   ): Promise<SessionSendResult> {
     return this.#requestWithReconnect<SessionSendResult>("session.send", {
       ...(typeof input === "string" ? { text: input } : { input }),
-      conversationId,
-      turnId,
-      surfaceCapabilities: { postTurnControl: true },
+      ...this.#sendIdentity(conversationId, turnId),
       ...(options.engage ? { engage: options.engage } : {}),
-      ...this.#continuationConsent(),
     });
+  }
+
+  /** Only ordinary session.send inputs have a cold exact-replay source.
+   * Freeze consent/operation identity now, prepare once, then change only the
+   * transport request ID on a ClosedError replay. Never re-read materials. */
+  async sendPrepared<T = SessionSendResult>(
+    prepare: (identity: SessionSendSnapshotIdentity, signal: AbortSignal, maximumBytes: number) => Promise<DisposableSessionSendSource>,
+    conversationId: string | undefined, turnId: string, signal?: AbortSignal,
+    consume?: (result: SessionSendResult) => T,
+  ): Promise<T> {
+    const identity = this.#sendIdentity(conversationId, turnId);
+    let source: DisposableSessionSendSource | undefined;
+    try {
+      const client = await this.link.getClient();
+      if (!client.prepareRequestSource || !client.maximumRequestSourceBytes || !client.requestEncoded) throw Error('当前连接不支持有界输入准备，草稿已保留。');
+      const maximum = client.maximumRequestSourceBytes('session.send');
+      const prepared = await client.prepareRequestSource(async preparationSignal => {
+        const value = await prepare(identity, preparationSignal, maximum);
+        // Cancellation may settle the caller while local IO is still ending.
+        // A source published late still has an owner that disposes it here.
+        if (preparationSignal.aborted) { await value.dispose().catch(() => {}); preparationSignal.throwIfAborted(); }
+        source = value; return value;
+      }, signal);
+      return await this.#sendSource(source!, client, prepared.deadline, signal, consume);
+    } finally {
+      // Physical/account uncertainty remains charged by the source owner. A
+      // late cleanup failure cannot retract the server's D06 acceptance.
+      await source?.dispose().catch(() => {});
+    }
+  }
+
+  #sendIdentity(conversationId: string | undefined, turnId: string): SessionSendSnapshotIdentity {
+    return { conversationId, turnId, surfaceCapabilities: { postTurnControl: true }, ...this.#continuationConsent() };
+  }
+
+  async #sendSource<T>(source: RpcEncodedJsonSource, first: RpcClient, deadline: number, signal: AbortSignal | undefined, consume?: (result: SessionSendResult) => T): Promise<T> {
+    let client = first;
+    let options: { deadline?: number; signal?: AbortSignal } = { deadline, signal };
+    for (;;) {
+      signal?.throwIfAborted();
+      if (!client.requestEncoded) throw Error('重连接入面不支持有界输入发送，草稿已保留。');
+      try {
+        if (consume && client.consumeEncoded) return await client.consumeEncoded<SessionSendResult, T>('session.send', source, consume, options);
+        const result = await client.requestEncoded<SessionSendResult>('session.send', source, options);
+        return consume ? consume(result) : result as T;
+      } catch (error) {
+        if (!(error instanceof RpcClientClosedError)) throw error;
+        client = await this.link.getClient();
+        // Each existing transport attempt has its own original timeout. Only
+        // the first includes preparation; none receives a per-fragment reset.
+        options = { signal };
+      }
+    }
   }
 
   /** 对话列表——盘上全量叠加活跃态(/resume 候选源)。 */
@@ -394,6 +454,24 @@ export class RpcConversationFacade {
       conversationId,
       ...this.#continuationConsent(),
     });
+  }
+
+  async consumeReviseAdvancement<T>(conversationId: string, advancementSessionId: string, userFeedback: string, consume: (result: SessionAdvancementReviseResult) => T): Promise<T> {
+    const client = await this.link.getClient(), params = { conversationId, advancementSessionId, userFeedback };
+    return client.consume ? client.consume<SessionAdvancementReviseResult, T>('session.advancementRevise', params, consume)
+      : consume(await client.request<SessionAdvancementReviseResult>('session.advancementRevise', params));
+  }
+
+  async consumeResume<T>(conversationId: string, consume: (result: SessionResumeResult) => T): Promise<T> {
+    const client = await this.link.getClient();
+    const params = { conversationId, ...this.#continuationConsent() };
+    return client.consume ? client.consume<SessionResumeResult, T>('session.resume', params, consume)
+      : consume(await client.request<SessionResumeResult>('session.resume', params));
+  }
+
+  async consumeResumeIfExists<T>(conversationId: string, consume: (result: SessionResumeResult) => T): Promise<T | null> {
+    try { return await this.consumeResume(conversationId, consume); }
+    catch (error) { if (isRpcNotFound(error)) return null; throw error; }
   }
 
   /**

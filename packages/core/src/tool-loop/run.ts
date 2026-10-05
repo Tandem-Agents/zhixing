@@ -31,16 +31,16 @@ export async function runToolLoop<R>(
 
     report(deps, { round, phase: "deciding" });
 
-    let raw: string;
+    let decision: Decision;
     try {
-      raw = await deps.complete(buildPrompt(spec, history), signal);
+      const prompt = buildPrompt(spec, history);
+      decision = deps.consumeComplete ? await deps.consumeComplete(prompt, parseDecision, signal)
+        : parseDecision(await deps.complete(prompt, signal));
     } catch (err) {
       // complete（LLM 调用本身）失败是无法继续的框架级错误
-      return { kind: "error", reason: errMsg(err) };
+      return { kind: "error", reason: truncate(errMsg(err)) };
     }
     if (signal?.aborted) return { kind: "error", reason: "aborted" };
-
-    const decision = parseDecision(raw);
 
     if (decision.kind === "unparsable") {
       history.push('（你上次的输出无法解析；请只输出 {"call":…} 或 {"final":…} 形式的 JSON。）');
@@ -50,7 +50,7 @@ export async function runToolLoop<R>(
     if (decision.kind === "final") {
       const parsed = spec.parseFinal(decision.payload);
       if (parsed.ok) return { kind: "done", result: parsed.result, rounds: round };
-      history.push(`（你的最终结果被拒绝：${parsed.reason} 请据此调整后重试。）`);
+      history.push(truncate(`（你的最终结果被拒绝：${truncate(parsed.reason)} 请据此调整后重试。）`));
       continue;
     }
 
@@ -58,7 +58,7 @@ export async function runToolLoop<R>(
     const tool = toolByName.get(decision.tool);
     if (!tool) {
       const names = spec.tools.map((t) => t.name).join(" / ");
-      history.push(`（没有名为 "${decision.tool}" 的工具，可用：${names}。）`);
+      history.push(truncate(`（没有名为 "${truncate(decision.tool)}" 的工具，可用：${truncate(names)}。）`));
       continue;
     }
 
@@ -68,9 +68,9 @@ export async function runToolLoop<R>(
     try {
       const result = await tool.run(decision.input as Record<string, unknown>, signal);
       if (signal?.aborted) return { kind: "error", reason: "aborted" };
-      history.push(`调用 ${tool.name}（${truncate(stringify(decision.input))}）的结果：\n${truncate(stringify(result))}`);
+      history.push(truncate(`调用 ${tool.name}（${truncate(stringify(decision.input))}）的结果：\n${truncate(stringify(result))}`));
     } catch (err) {
-      history.push(`调用 ${tool.name} 失败：${errMsg(err)} 可重试、换个方式或据已知信息收尾。`);
+      history.push(truncate(`调用 ${tool.name} 失败：${truncate(errMsg(err))} 可重试、换个方式或据已知信息收尾。`));
     }
   }
 

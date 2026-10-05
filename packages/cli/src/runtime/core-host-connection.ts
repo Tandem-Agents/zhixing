@@ -227,6 +227,11 @@ export class CoreHostConnection implements CoreHostRpcLink {
   private endpoint: ServerEndpoint | null = null;
   private connecting: Promise<RpcClient> | null = null;
   private reconnecting: Promise<void> | null = null;
+  private retiringWork = Promise.resolve();
+  private retiringDeadline = 0;
+  private retiringCount = 0;
+  private retirementStarted = false;
+  private readonly retiredClients = new WeakSet<RpcClient>();
   private lifecycleEpoch = 0;
   private disposed = false;
   private readonly startupAttempts = new Set<AbortController>();
@@ -280,6 +285,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
   private observeClientClose(client: RpcClient): void {
     this.unsubscribeClose?.();
     const unsubscribeClose = client.onClose?.(() => {
+      this.retireClientWork(client);
       if (this.client === client) this.invalidateConnection();
     });
     const unsubscribeTurnover = client.onTurnover?.(() => {
@@ -344,6 +350,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     const reconnectReason =
       this.client?.closed === true ? "connection-closed" : undefined;
     if (reconnectReason) {
+      this.retireClientWork(this.client!);
       this.client = null;
       this.endpoint = null;
       this.forwardedMethods = new Set();
@@ -365,6 +372,13 @@ export class CoreHostConnection implements CoreHostRpcLink {
     epoch: number,
     reconnectReason?: "connection-closed",
   ): Promise<RpcClient> {
+    // The owner outlives each socket/client. No next discovery/transport/auth
+    // can overlap an old asynchronous page consumer or hot preparation.
+    if (this.retirementStarted) {
+      await this.waitForRetiredWork();
+      if (this.disposed) throw new Error('CoreHostConnection 在连接建立期间被释放');
+      if (epoch !== this.lifecycleEpoch) throw new Error('CoreHostConnection 在连接建立期间被换代');
+    }
     const established = await this.establish();
     if ("surfaceClient" in established) {
       return this.activateSurfaceClient(established.surfaceClient, epoch, reconnectReason);
@@ -918,6 +932,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
     this.clearPendingVersionRecheck();
     if (current) {
       await current.close().catch(() => {});
+      this.retireClientWork(current);
     }
     if (inflight) {
       const client = await inflight.catch(() => null);
@@ -928,10 +943,39 @@ export class CoreHostConnection implements CoreHostRpcLink {
           this.forwardedMethods = new Set();
         }
         await client.close().catch(() => {});
+        this.retireClientWork(client);
       }
       this.endpoint = null;
     }
     return staleEndpoint;
+  }
+
+  private retireClientWork(client: RpcClient): void {
+    if (!client.drain || this.retiredClients.has(client)) return;
+    this.retiredClients.add(client);
+    this.retirementStarted = true;
+    this.retiringDeadline = Math.max(this.retiringDeadline, client.drainDeadline ?? 0);
+    this.retiringCount++;
+    const work = client.drain().finally(() => { this.retiringCount--; });
+    this.retiringWork = Promise.all([this.retiringWork, work]).then(() => {});
+    // A later getClient observes a failed/unknown drain; no unhandled promise.
+    void this.retiringWork.catch(() => {});
+  }
+
+  private async waitForRetiredWork(): Promise<void> {
+    if (!this.retiringCount) { await this.retiringWork; return; }
+    // Allow already-returned callback frames to leave. This is not a timeout
+    // release: unfinished work remains in retiringWork after this wait fails.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (!this.retiringCount) { await this.retiringWork; return; }
+    const remaining = this.retiringDeadline - Date.now();
+    if (remaining <= 0) throw new CoreHostUnavailableError('旧连接的实际工作尚未排空，暂不能重连');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([this.retiringWork, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new CoreHostUnavailableError('旧连接工作排空超时，暂不能重连')), remaining);
+      })]);
+    } finally { clearTimeout(timer); }
   }
 
   private async waitForEndpointTurnover(

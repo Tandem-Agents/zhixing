@@ -3,7 +3,7 @@
  * 通知订阅还原(payload 原样、含 conversationId 供调用方过滤)。
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   RPC_ERROR_CODES,
   RpcClientClosedError,
@@ -18,6 +18,65 @@ import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcConversationFacade · 方法域", () => {
+  it('projects a prepared send receipt inside its consumer before any draft wait', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    const source = { byteLength: 2, open: vi.fn(), dispose: vi.fn(async () => {}) };
+    client.maximumRequestSourceBytes = () => 1000;
+    client.prepareRequestSource = async producer => ({ source: await producer(new AbortController().signal), deadline: Date.now() + 1000 });
+    client.requestEncoded = vi.fn(); let inside = false;
+    client.consumeEncoded = async (_method, _source, consume) => {
+      inside = true;
+      try { return await consume({ status: 'awaiting-rubric-confirmation', rubricDraft: { text: 'synthetic'.repeat(10000) }, turnId: 'turn' } as any); }
+      finally { inside = false; }
+    };
+    const facade = new RpcConversationFacade(fake.link);
+    const receipt = await facade.sendPrepared(async () => source, 'conversation', 'turn', undefined, result => {
+      expect(inside).toBe(true); return { turnId: result.turnId };
+    });
+    expect(receipt).toEqual({ turnId: 'turn' }); expect(inside).toBe(false);
+    expect(client.requestEncoded).not.toHaveBeenCalled(); expect(source.dispose).toHaveBeenCalledOnce();
+  });
+  it('replays the same cold source once prepared and never reruns the material producer', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    const source = { byteLength: 2, open: vi.fn(), dispose: vi.fn(async () => {}) };
+    const prepare = vi.fn(async () => source), abort = new AbortController();
+    client.maximumRequestSourceBytes = () => 100 * 1024 * 1024 - 256;
+    client.prepareRequestSource = async producer => ({ source: await producer(abort.signal), deadline: Date.now() + 2_000 });
+    const request = vi.fn().mockRejectedValueOnce(new RpcClientClosedError()).mockResolvedValueOnce({ status: 'accepted', turnId: 'turn' });
+    client.requestEncoded = request;
+    const facade = new RpcConversationFacade(fake.link);
+    expect(await facade.sendPrepared(prepare, 'conversation', 'turn', abort.signal)).toEqual({ status: 'accepted', turnId: 'turn' });
+    expect(prepare).toHaveBeenCalledOnce(); expect(prepare.mock.calls[0]![0]).toMatchObject({ turnId: 'turn', conversationId: 'conversation', surfaceCapabilities: { postTurnControl: true } });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[0]![1]).toBe(source); expect(request.mock.calls[1]![1]).toBe(source);
+    expect(request.mock.calls[0]![2].deadline).toBeGreaterThan(Date.now());
+    expect(request.mock.calls[1]![2]).toEqual({ signal: abort.signal }); expect(source.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not replay unpublished preparation failure or retract acceptance after cleanup uncertainty', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    client.maximumRequestSourceBytes = () => 1000;
+    client.prepareRequestSource = async producer => ({ source: await producer(new AbortController().signal), deadline: Date.now() + 1000 });
+    const request = vi.fn().mockResolvedValue({ status: 'accepted', turnId: 'turn' }); client.requestEncoded = request;
+    const facade = new RpcConversationFacade(fake.link), failed = vi.fn(async () => { throw Error('preparation interrupted'); });
+    await expect(facade.sendPrepared(failed, 'conversation', 'turn')).rejects.toThrow('preparation interrupted');
+    expect(failed).toHaveBeenCalledOnce(); expect(request).not.toHaveBeenCalled();
+    expect(await facade.sendPrepared(async () => ({ byteLength: 2, open: vi.fn(), dispose: async () => { throw Error('delete unknown'); } }), 'conversation', 'turn')).toEqual({ status: 'accepted', turnId: 'turn' });
+  });
+
+  it('cleans a late published source after the preparation lease already rejected', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>(), abort = new AbortController();
+    const dispose = vi.fn(async () => {}); let actual: Promise<unknown>;
+    client.maximumRequestSourceBytes = () => 1000; client.requestEncoded = vi.fn();
+    client.prepareRequestSource = async producer => {
+      actual = producer(abort.signal); void actual.catch(() => {});
+      await entered.promise; abort.abort(); throw Error('lease lost');
+    };
+    const facade = new RpcConversationFacade(fake.link);
+    await expect(facade.sendPrepared(async () => { entered.resolve(); await finish.promise; return { byteLength: 2, open: vi.fn(), dispose }; }, 'conversation', 'turn')).rejects.toThrow('lease lost');
+    finish.resolve(); await actual!.catch(() => {}); expect(dispose).toHaveBeenCalledOnce(); expect(client.requestEncoded).not.toHaveBeenCalled();
+  });
   it("history retains the transport consumer through asynchronous display work", async () => {
     const fake = makeFakeHostLink();
     const client = await fake.link.getClient();

@@ -102,6 +102,10 @@ export interface ContractFailedTurn {
   readonly error: { readonly message: string };
 }
 
+export type AwaitingRubricReferenceTurn = Omit<AwaitingRubricConfirmationTurn, 'rubricDraft'>;
+export type SessionSendReferenceResult = Exclude<SessionSendResult, SessionAwaitingRubricResult> | Omit<SessionAwaitingRubricResult, 'rubricDraft'>;
+export type BeginReferencedUserTurnResult<Outcome = TurnOutcome> = Exclude<BeginUserTurnResult<Outcome>, AwaitingRubricConfirmationTurn> | AwaitingRubricReferenceTurn;
+
 export interface CancelledRubricTurn {
   readonly kind: "cancelled";
   readonly conversationId: string;
@@ -213,6 +217,7 @@ interface DurableRunWatch {
   readonly conversationId: string;
   readonly turnId: string;
   statusRevision: number;
+  finalRequested?: boolean;
 }
 
 /** 由全域键派生模式视图;场景名后补(enter 响应 / list 查询) */
@@ -307,6 +312,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly continuationFinalLookups = new Map<string, Promise<void>>();
   private readonly continuationStatusLookups = new Map<string, Promise<void>>();
   private readonly notificationHistoryBatches = new Map<string, { consume(page: RunsPage): void; reject(error: unknown): void }[]>();
+  private lookupScheduled?: ReturnType<typeof setImmediate>;
   private readonly observedContinuations = new Map<string, {
     conversationId: string;
     communication?: boolean;
@@ -499,6 +505,23 @@ export class ConversationController<Outcome = TurnOutcome> {
     return this.finishUserTurn(request, target, turnId, outcome, options);
   }
 
+  /** The terminal retains the durable rubric identity, then reads its current
+   * detail only while presenting that one control surface. D06 is unchanged. */
+  async beginReferencedUserTurn(send: (conversationId: string, turnId: string) => Promise<SessionSendReferenceResult>, options: BeginTurnOptions = {}): Promise<BeginReferencedUserTurnResult<Outcome>> {
+    const target = this.active.conversationId, turnId = generateTurnId();
+    const outcome = this.attachTurnWaiter(target, turnId, options);
+    try {
+      const result = await send(target, turnId);
+      if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
+        this.observedConversationId = target; this.discardTurnWaiter(target, turnId);
+        return { kind: 'awaiting-rubric-confirmation', conversationId: result.conversationId, turnId: result.turnId,
+          advancementSessionId: result.advancementSessionId, rubricDraftId: result.rubricDraftId,
+          submission: { turnId, disposition: result.submission?.turnId === turnId ? result.submission.disposition : 'unknown' } };
+      }
+      return await this.finishUserTurn(Promise.resolve(result), target, turnId, outcome, options);
+    } catch (error) { this.discardTurnWaiter(target, turnId); throw error; }
+  }
+
   private async finishUserTurn(
     request: Promise<SessionSendResult>, target: string, turnId: string,
     initialOutcome: Promise<Outcome>, options: BeginTurnOptions,
@@ -626,7 +649,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   async cancelRubricContract(
-    pending: AwaitingRubricConfirmationTurn,
+    pending: AwaitingRubricReferenceTurn,
     opts: { executeOriginal?: boolean; onAccepted?: BeginTurnOptions["onAccepted"] } = {},
   ): Promise<RubricContractCancelResult<Outcome>> {
     const executeOriginal = opts.executeOriginal ?? false;
@@ -847,18 +870,12 @@ export class ConversationController<Outcome = TurnOutcome> {
     }
     const watch = this.durableRuns.get(frame.runId);
     if (!watch) {
-      const observed = this.observedContinuations.get(frame.runId);
-      if (this.active.conversationId === frame.conversationId && !observed?.settled) {
-        if (!this.continuationFinalLookups.has(frame.runId)) {
-          const lookup = this.presentContinuationFinal(frame).finally(() => {
-            if (this.continuationFinalLookups.get(frame.runId) === lookup) this.continuationFinalLookups.delete(frame.runId);
-          });
-          this.continuationFinalLookups.set(frame.runId, lookup);
-          void lookup.catch(() => {});
-        }
-      }
       if (this.active.conversationId === frame.conversationId || this.localTurnsByConversation.has(frame.conversationId)) {
         rememberBounded(this.pendingFinals, frame.runId, frame);
+      }
+      const observed = this.observedContinuations.get(frame.runId);
+      if (this.active.conversationId === frame.conversationId && !observed?.settled) {
+        this.startContinuationFinalLookup(frame);
       }
       return;
     }
@@ -911,14 +928,55 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   private startFinalLookup(runId: string): void {
+    const watch = this.durableRuns.get(runId);
+    if (watch) watch.finalRequested = true;
     if (this.finalLookups.has(runId)) return;
+    if (this.lookupCount >= 4) return;
     const lookup = this.retryCommittedRunLookup(runId).finally(() => {
       if (this.finalLookups.get(runId) === lookup) {
         this.finalLookups.delete(runId);
       }
+      this.scheduleLookups();
     });
     this.finalLookups.set(runId, lookup);
     void lookup.catch(() => {});
+  }
+
+  private get lookupCount(): number {
+    return this.finalLookups.size + this.continuationFinalLookups.size + this.continuationStatusLookups.size;
+  }
+
+  private startContinuationFinalLookup(frame: FinalFrame): void {
+    if (this.lookupCount >= 4 || this.continuationFinalLookups.has(frame.runId)) return;
+    const lookup = this.presentContinuationFinal(frame).finally(() => {
+      if (this.continuationFinalLookups.get(frame.runId) === lookup) this.continuationFinalLookups.delete(frame.runId);
+      if (this.pendingFinals.get(frame.runId) === frame) this.pendingFinals.delete(frame.runId);
+      this.scheduleLookups();
+    });
+    this.continuationFinalLookups.set(frame.runId, lookup);
+    void lookup.catch(() => {});
+  }
+
+  /** Facts wait in the existing bounded control records, not one sleeping
+   * retry coroutine per notification. Only four lookup lifetimes can run. */
+  private scheduleLookups(): void {
+    if (this.disposed || this.lookupScheduled) return;
+    this.lookupScheduled = setImmediate(() => {
+      this.lookupScheduled = undefined;
+      if (this.disposed) return;
+      for (const [id, watch] of this.durableRuns) {
+        if (this.lookupCount >= 4) return;
+        if (watch.finalRequested) this.startFinalLookup(id);
+      }
+      for (const frame of this.pendingFinals.values()) {
+        if (this.lookupCount >= 4) return;
+        if (frame.conversationId === this.active.conversationId && !this.observedContinuations.get(frame.runId)?.settled) this.startContinuationFinalLookup(frame);
+      }
+      for (const notice of this.pendingStatuses.values()) {
+        if (this.lookupCount >= 4) return;
+        if (terminalResultForStatus(notice)) this.startTerminalInputLookup(notice);
+      }
+    });
   }
 
   private finishObservedStatus(notice: ConversationStatusNotice): void {
@@ -936,8 +994,10 @@ export class ConversationController<Outcome = TurnOutcome> {
   private startTerminalInputLookup(notice: ConversationStatusNotice): void {
     const runId = notice.ref.runId;
     if (notice.ref.conversationId !== this.active.conversationId || this.observedContinuations.get(runId)?.terminalInputsReconciled || this.continuationStatusLookups.has(runId)) return;
+    if (this.lookupCount >= 4) return;
     const lookup = this.presentTerminalInputs(notice.ref.conversationId, runId).finally(() => {
       if (this.continuationStatusLookups.get(runId) === lookup) this.continuationStatusLookups.delete(runId);
+      this.scheduleLookups();
     });
     this.continuationStatusLookups.set(runId, lookup);
     void lookup.catch(() => {});
@@ -1562,6 +1622,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   dispose(): void {
     this.disposed = true;
+    clearImmediate(this.lookupScheduled); this.lookupScheduled = undefined;
     this.observedContinuations.clear();
     for (const unsub of this.unsubscribes) unsub();
     for (const turnId of this.pendingAbortByTurn.keys()) {

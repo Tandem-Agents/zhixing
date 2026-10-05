@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { once } from "node:events";
 import { WebSocket, WebSocketServer } from "ws";
 import { RpcMessagePump } from "../rpc-message-pump.js";
@@ -63,5 +63,49 @@ describe("pinned receiver body storage", () => {
     peer.send(Buffer.from([0xc3, 0x28]), { binary: false, compress: false });
     await ended;
     expect(deliveries).toBe(0);
+  });
+
+  it('keeps the retired workspace until the actual inflater callback returns', async () => {
+    const dispatch = vi.fn(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const peer = await connect(dispatch);
+    const receiver = (client as unknown as { _receiver: RpcReceiverEdge })._receiver;
+    const extension = receiver._extensions['permessage-deflate']!, original = extension.decompress;
+    let returned = false;
+    extension.decompress = function(data, fin, done) {
+      original.call(this, data, fin, (error, decoded) => {
+        entered.resolve();
+        void release.promise.then(() => { done(error, decoded); returned = true; });
+      });
+    };
+    peer.send('x'.repeat(256 * 1024), { compress: true });
+    await entered.promise; pump.close();
+    let drained = false; const draining = pump.drain().then(() => { drained = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+      expect(drained).toBe(false); expect(returned).toBe(false);
+    } finally { release.resolve(); }
+    await draining; expect(returned).toBe(true); expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('lets an interrupted real inflater callback return before WebSocket cleanup', async () => {
+    const dispatch = vi.fn(), entered = Promise.withResolvers<void>();
+    const peer = await connect(dispatch);
+    const receiver = (client as unknown as { _receiver: RpcReceiverEdge })._receiver;
+    const extension = receiver._extensions['permessage-deflate']!, original = extension.decompress;
+    let callbackReturned = false, draining: Promise<void> | undefined;
+    extension.decompress = function(data, fin, done) {
+      original.call(this, data, fin, (error, decoded) => { done(error, decoded); callbackReturned = true; });
+      queueMicrotask(() => { pump.close(); draining = pump.drain(); entered.resolve(); });
+    };
+    // events.once(close) rejects on the intentional Receiver teardown error;
+    // observe the actual close receipt and assert that error separately.
+    const errors: Error[] = [];
+    client.on('error', error => { errors.push(error); });
+    const closed = new Promise<void>(resolve => client.once('close', () => resolve()));
+    peer.send('x'.repeat(256 * 1024), { compress: true });
+    await entered.promise; await closed; await draining;
+    expect(callbackReturned).toBe(true); expect(dispatch).not.toHaveBeenCalled();
+    expect(errors.map(error => error.message)).toEqual(['RPC receive boundary closed']);
   });
 });

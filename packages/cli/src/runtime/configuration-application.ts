@@ -236,6 +236,7 @@ export interface McpConfigurationDeps {
       role?: "main" | "light",
       signal?: AbortSignal,
     ) => Promise<string>;
+    llmConsume?: <T>(prompt: string, consume: (text: string) => T, role?: 'main' | 'light', signal?: AbortSignal) => Promise<T>;
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
@@ -250,6 +251,7 @@ export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
   // 面板取消（Esc）放弃等待、后台结果丢弃即可。
   const inferLlm: NonNullable<ConstructorParameters<typeof McpManagementApplication>[0]["llm"]> = (prompt, signal) =>
     deps.llmComplete(prompt, "main", signal);
+  if (deps.llmConsume) inferLlm.consume = (prompt, consume, signal) => deps.llmConsume!(prompt, consume, 'main', signal);
   const application = new McpManagementApplication({ discovery: management, llm: inferLlm });
 
   // 连接状态取进屏时刻的宿主快照——管理屏打开期间不实时刷新(编辑器 runtime

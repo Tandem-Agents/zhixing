@@ -8,7 +8,7 @@
  * 判断（搜什么、换不换词、挑哪几个）全交给 LLM；框架与本层都不替它臆造事实。
  */
 
-import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "../tool-loop/index.js";
+import { runToolLoop, type ToolLoopDeps, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "../tool-loop/index.js";
 import type {
   McpManagementSearchResult,
   McpManagementSourceResult,
@@ -35,6 +35,7 @@ export interface McpDiscoveryDeps {
   fetchSource: (packageName: string, signal?: AbortSignal) => Promise<McpManagementSourceResult>;
   /** LLM 文本完成（callText 风格，绑 "main" 档）。 */
   complete: (prompt: string, signal?: AbortSignal) => Promise<string>;
+  consumeComplete?: ToolLoopDeps['consumeComplete'];
   /** 进度观察（可选）——结构化进度，由调用方经 mcpProgressText 翻译成人话。 */
   onProgress?: (progress: ToolLoopProgress) => void;
 }
@@ -105,7 +106,7 @@ export async function runMcpDiscovery(
     parseFinal: (payload) => parseChoices(payload, seen),
   };
 
-  const result = await runToolLoop(spec, { complete: deps.complete, ...(deps.onProgress ? { onProgress: deps.onProgress } : {}) }, signal);
+  const result = await runToolLoop(spec, { complete: deps.complete, consumeComplete: deps.consumeComplete, ...(deps.onProgress ? { onProgress: deps.onProgress } : {}) }, signal);
 
   if (result.kind === "done") {
     return result.result.length > 0

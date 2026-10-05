@@ -86,6 +86,29 @@ type FakeClient = ReturnType<typeof makeFakeClient>;
 const asClient = (c: FakeClient) => c as unknown as RpcClient;
 
 describe("CoreHostConnection", () => {
+  it('does not create a successor before the old actual consumer/preparation drain', async () => {
+    const first = makeFakeClient(), second = makeFakeClient();
+    const gate = Promise.withResolvers<void>();
+    Object.assign(first, { drain: () => gate.promise, drainDeadline: Date.now() + 2_000 });
+    let created = 0;
+    const connection = new CoreHostConnection({ discover: async () => endpoint, spawn: async () => ({ ok: true }), createClient: () => asClient(++created === 1 ? first : second) });
+    await connection.getClient(); first.markClosed();
+    const reconnect = connection.getClient();
+    await new Promise(resolve => setImmediate(resolve)); expect(created).toBe(1); expect(second.connect).not.toHaveBeenCalled();
+    gate.resolve(); expect(await reconnect).toBe(second); expect(created).toBe(2);
+    await connection.dispose();
+  });
+
+  it('a failed drain deadline blocks new admission until actual work later exits', async () => {
+    const first = makeFakeClient(), second = makeFakeClient(); const gate = Promise.withResolvers<void>();
+    Object.assign(first, { drain: () => gate.promise, drainDeadline: Date.now() - 1 });
+    let created = 0;
+    const connection = new CoreHostConnection({ discover: async () => endpoint, spawn: async () => ({ ok: true }), createClient: () => asClient(++created === 1 ? first : second) });
+    await connection.getClient(); first.markClosed();
+    await expect(connection.getClient()).rejects.toThrow('尚未排空'); expect(created).toBe(1);
+    gate.resolve(); await new Promise(resolve => setImmediate(resolve));
+    expect(await connection.getClient()).toBe(second); await connection.dispose();
+  });
   it("被动关闭通知失效当前展示，旧代迟到消息不能进入新订阅", async () => {
     const c1 = makeFakeClient();
     const c2 = makeFakeClient();

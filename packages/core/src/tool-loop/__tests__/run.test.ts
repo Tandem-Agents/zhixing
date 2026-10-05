@@ -29,6 +29,20 @@ function spec(
 }
 
 describe("runToolLoop", () => {
+  it('parses within the result consumer and releases it before running a tool or requesting the next round', async () => {
+    let inside = false, round = 0;
+    const complete = vi.fn(async () => { throw Error('unconsumed model response'); });
+    const run = vi.fn(async (input: unknown) => { expect(inside).toBe(false); expect(input).toEqual({ query: 'bounded' }); return 'found'; });
+    const result = await runToolLoop(spec([makeTool('search', run)]), { complete,
+      consumeComplete: async (_prompt, consume) => {
+        expect(inside).toBe(false); inside = true;
+        try { return consume(round++ ? '{"final":"done"}' : '{"call":{"tool":"search","input":{"query":"bounded"}}}'); }
+        finally { inside = false; }
+      },
+    });
+    expect(complete).not.toHaveBeenCalled(); expect(run).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: 'done', result: 'done', rounds: 2 });
+  });
   it("调工具拿真实结果 → final → done（携带轮数）", async () => {
     const search = vi.fn(async () => ["pkgA", "pkgB"]);
     const complete = scripted(

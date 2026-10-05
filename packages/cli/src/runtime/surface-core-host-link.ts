@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RpcEncodedJsonSource, RpcRequestDeadline } from '@zhixing/server/client';
 
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
@@ -106,6 +107,10 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
   #started = false;
   #closed = false;
   #closing: Promise<void> | undefined;
+  #preparing?: Promise<unknown>;
+  #preparationAbort?: AbortController;
+  #drainDeadline = 0;
+  readonly #requests = new Set<Promise<unknown>>();
 
   constructor(
     private readonly sourceDeviceId: string,
@@ -119,6 +124,53 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
   ) {}
 
   get closed(): boolean { return this.#closed; }
+  get drainDeadline(): number { return this.#drainDeadline; }
+  async drain(): Promise<void> {
+    await Promise.allSettled([this.#preparing, ...this.#requests]);
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+
+  maximumRequestSourceBytes(method: string): number {
+    const binding = this.#currentBinding(method);
+    return binding.remote.dispatchParamsByteLimit(method, binding.connection);
+  }
+
+  async prepareRequestSource<T extends RpcEncodedJsonSource | undefined>(prepare: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<{ source: T; deadline: number }> {
+    if (this.#closed || this.#preparing || signal?.aborted) throw Error('远端输入准备不可用；草稿已保留。');
+    const deadline = this.#drainDeadline = Date.now() + 30_000;
+    const abort = new AbortController(); this.#preparationAbort = abort;
+    const cancel = () => abort.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(cancel, deadline - Date.now());
+    // This source is capped to the existing <=1 MiB service envelope. It never
+    // borrows the local 100 MiB receive workspace or expands the Mesh protocol.
+    const work = Promise.resolve().then(() => prepare(abort.signal));
+    this.#preparing = work;
+    try {
+      const source = await work; abort.signal.throwIfAborted();
+      return { source, deadline };
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      this.#preparing = undefined; this.#preparationAbort = undefined;
+    }
+  }
+
+  async requestEncoded<T>(method: string, source: RpcEncodedJsonSource, options?: Partial<RpcRequestDeadline>): Promise<T> {
+    await this.drain();
+    const binding = this.#currentBinding(method);
+    if (source.byteLength > binding.remote.dispatchParamsByteLimit(method, binding.connection)) throw Error('远端请求超过现有消息容量，草稿已保留。');
+    const abort = new AbortController();
+    const deadline = options?.deadline ?? Date.now() + 30_000;
+    if (deadline <= Date.now() || options?.signal?.aborted) throw Error('RPC request deadline or cancellation');
+    const cancel = () => abort.abort();
+    options?.signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(cancel, deadline - Date.now());
+    try {
+      const params = await readSmallParams(source, abort.signal);
+      return await this.#dispatch<T>(binding, method, params, abort.signal);
+    } finally { clearTimeout(timer); options?.signal?.removeEventListener('abort', cancel); }
+  }
 
   async connect(): Promise<void> {
     if (this.#closed) throw new CoreHostUnavailableError("远端接入面已经关闭");
@@ -137,6 +189,16 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
   }
 
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
+    return this.#dispatch<T>(this.#currentBinding(method), method, params);
+  }
+
+  async consumeEncoded<T, R>(method: string, source: RpcEncodedJsonSource, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>): Promise<R> {
+    // The existing Mesh envelope is <=1 MiB. Its response has no shared
+    // WebSocket receive workspace, but must still complete the consumer.
+    return consumer(await this.requestEncoded<T>(method, source, options));
+  }
+
+  #currentBinding(method: string): SurfaceBinding {
     if (this.#closed) throw new CoreHostUnavailableError("远端接入面已经关闭");
     if (!isCurrentAnchorRelayMethod(method)) {
       throw new TypeError("设备本地或未知方法不能通过 current anchor 接入面代理");
@@ -147,14 +209,21 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
       this.#retireBinding(true);
       throw new CoreHostUnavailableError("当前设备没有可用的本机核心宿主");
     }
-    const binding = this.#selectOwner(owner, canonicalize(trust));
+    return this.#selectOwner(owner, canonicalize(trust));
+  }
+
+  async #dispatch<T>(binding: SurfaceBinding, method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+    if (this.#requests.size >= 12) throw Error('远端请求处理中，请稍后重试。');
+    this.#drainDeadline = Math.max(this.#drainDeadline, Date.now() + 30_000);
+    const work = binding.remote.dispatch(method, params, binding.connection, signal);
+    this.#requests.add(work);
     try {
-      return await binding.remote.dispatch(method, params, binding.connection) as T;
+      return await work as T;
     } catch (error) {
       if (binding.closed) throw new RpcClientClosedError("远端接入代次已经更换");
       if (error instanceof RpcAppError) throw error;
       throw new CoreHostUnavailableError("值班设备暂时离线，请稍后重试");
-    }
+    } finally { this.#requests.delete(work); }
   }
 
   onNotification<T = unknown>(method: string, handler: (params: T) => void): () => void {
@@ -193,6 +262,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     if (this.#closing) return this.#closing;
     if (this.#closed) return;
     this.#closed = true;
+    this.#preparationAbort?.abort();
     this.#retireBinding(false);
     for (const handler of [...this.#closeHandlers]) {
       try { handler(); } catch { /* 订阅者隔离。 */ }
@@ -256,6 +326,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     const binding = this.#binding;
     if (!binding) return;
     this.#binding = undefined;
+    this.#preparationAbort?.abort();
     binding.closed = true;
     // close 同步停止 poll、撤掉其 close listener；远端收尾不能阻挡本地失效。
     const closing = binding.remote.close(binding.connection).catch(() => {});
@@ -285,4 +356,22 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
       try { handler(method, params); } catch { /* 订阅者隔离。 */ }
     }
   }
+}
+
+/** Only the existing small Mesh envelope is decoded. A 100 MiB WebSocket
+ * source never enters this fallback. Release the file borrow after real IO. */
+async function readSmallParams(source: RpcEncodedJsonSource, signal: AbortSignal): Promise<unknown> {
+  if (!Number.isSafeInteger(source.byteLength) || source.byteLength < 1 || source.byteLength > 1024 * 1024) throw Error('远端请求容量无效');
+  const reader = source.open();
+  try {
+    const bytes = Buffer.allocUnsafe(source.byteLength);
+    for (let offset = 0; offset < bytes.length;) {
+      signal.throwIfAborted();
+      const page = await reader.read(offset, Math.min(32 * 1024, bytes.length - offset), signal);
+      if (!page.byteLength || page.byteLength > Math.min(32 * 1024, bytes.length - offset)) throw Error('远端参数源不完整');
+      bytes.set(page, offset); offset += page.byteLength;
+    }
+    signal.throwIfAborted();
+    return JSON.parse(bytes.toString('utf8'));
+  } finally { reader.release(); }
 }

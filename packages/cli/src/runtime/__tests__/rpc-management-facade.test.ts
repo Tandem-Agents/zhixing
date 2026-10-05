@@ -19,6 +19,16 @@ function linkWithRequest(
 }
 
 describe("RpcManagementFacade", () => {
+  it('consumes model semantics before releasing the response and rejects an oversized retained decision', async () => {
+    let inside = false;
+    const client = { consume: async (_method: string, _params: unknown, consume: (result: { text: string }) => unknown) => {
+      inside = true; try { return consume({ text: '{"input":"small"}' }); } finally { inside = false; }
+    }, request: vi.fn() } as unknown as RpcClient;
+    const facade = new RpcManagementFacade({ getClient: async () => client, onNotification: () => () => {} });
+    expect(await facade.llmConsume('fixture', raw => { expect(inside).toBe(true); return JSON.parse(raw); })).toEqual({ input: 'small' });
+    expect(inside).toBe(false); expect(client.request).not.toHaveBeenCalled();
+    await expect(facade.llmConsume('fixture', () => ({ input: '\\'.repeat(256 * 1024) }))).rejects.toThrow('展示容量');
+  });
   it.each([undefined, "test-stop", { reason: "config-reload", strategy: "drain" as const }, { reason: "user-stop", strategy: "cancel" as const, timeoutMs: 30_000 }])("sends a durable stop accepted by the actual server contract: %j", async input => {
     const target = { pid: 123, startedAt: "2026-09-24T10:00:00.000Z" };
     const prepare = vi.fn(async params => ({ ...params, phase: "ready-to-stop" }));

@@ -8,6 +8,42 @@ import {
 } from "../surface-core-host-link.js";
 
 describe("current anchor surface core-host link", () => {
+  it('preflights the actual 1 MiB service envelope before opening a cold source and preserves small dispatch', async () => {
+    const received: unknown[] = [];
+    const target = new FirstPartyConversationMeshTarget({ surface: { dispatch: async ({ params }: { params: unknown }) => { received.push(params); return { accepted: true }; } } as never });
+    const client = new CurrentAnchorSurfaceRpcClient('device:surface', {
+      start: vi.fn(), stop: vi.fn(), currentTrust: () => trust('device:anchor'),
+      connections: { client: () => ({ request: (_service: string, payload: Uint8Array, signal?: AbortSignal) => {
+        expect(payload.byteLength).toBeLessThanOrEqual(1024 * 1024);
+        return target.handle(payload, { peer: { deviceId: 'device:surface' } } as never, signal ?? new AbortController().signal);
+      } }) },
+    } as never, { stopStorageMaintenance: vi.fn() });
+    await client.connect();
+    const maximum = client.maximumRequestSourceBytes('session.send'), open = vi.fn();
+    expect(maximum).toBeLessThan(1024 * 1024);
+    await expect(client.requestEncoded('session.send', { byteLength: maximum + 1, open })).rejects.toThrow('容量');
+    expect(open).not.toHaveBeenCalled(); expect(received).toEqual([]);
+    const original = { turnId: 'stable-turn', input: { parts: [{ type: 'text', text: '同一内容' }] } };
+    const bytes = Buffer.from(JSON.stringify(original)), release = vi.fn();
+    expect(await client.requestEncoded('session.send', { byteLength: bytes.length, open: () => ({
+      async read(offset, length) { return bytes.subarray(offset, offset + length); }, release,
+    }) })).toEqual({ accepted: true });
+    expect(received).toEqual([original]); expect(release).toHaveBeenCalledOnce(); await client.close();
+  });
+
+  it('keeps remote hot preparation in drain after close until the actual callback exits', async () => {
+    const client = new CurrentAnchorSurfaceRpcClient('device:surface', {
+      start: vi.fn(), stop: vi.fn(), currentTrust: () => trust('device:anchor'), connections: { client: vi.fn() },
+    } as never, { stopStorageMaintenance: vi.fn() });
+    const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+    const preparing = client.prepareRequestSource(async signal => {
+      entered.resolve(); await finish.promise; expect(signal.aborted).toBe(true); return undefined;
+    }).catch(error => error);
+    await entered.promise; await client.close();
+    let drained = false; const draining = client.drain().then(() => { drained = true; });
+    await new Promise(resolve => setImmediate(resolve)); expect(drained).toBe(false);
+    finish.resolve(); await draining; expect(await preparing).toBeInstanceOf(Error);
+  });
   it("真实两侧转发边界保留三种 awaiting 处置及完整 delta 信封", async () => {
     for (const disposition of ["original-saved", "revision-saved", "not-saved"]) {
       const result = { conversationId: "conv-1", sessionId: "conv-1", turnId: "original", status: "awaiting-rubric-confirmation", submission: { turnId: "current", disposition }, rubricDraftId: "draft", rubricDraft: { originalTurnId: "original" }, advancementSessionId: "adv" };

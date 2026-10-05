@@ -19,6 +19,7 @@
 import { WebSocket } from "ws";
 import { RpcMessagePump } from "./rpc-message-pump.js";
 import { RpcRequestSender } from "./rpc-request-sender.js";
+import type { RpcEncodedJsonSource, RpcRequestDeadline } from "./rpc-encoded-source.js";
 import {
   encodeRequest,
   parseMessage,
@@ -35,6 +36,11 @@ export interface RpcClientOptions {
   timeout?: number;
   /** 连接握手超时（毫秒）。默认 5_000 */
   connectTimeout?: number;
+  /** Surface-owned correlation admission; released after response consumption
+   * and actual send retirement, including after caller cancellation. */
+  acquireRequest?: () => () => void;
+  maximumPendingRequests?: number;
+  maximumQueuedRequestBytes?: number;
 }
 
 export interface AuthResult {
@@ -75,6 +81,18 @@ export interface RpcClient {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
   /** 消费完成前保留接收背压，用于异步分页写入；不重发或重置请求超时。 */
   consume?<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>): Promise<R>;
+  /** Prepare one immutable JSON value at an idle receive-message boundary.
+   * The returned deadline includes waiting and preparation, not just sending. */
+  prepareRequestSource?<T extends RpcEncodedJsonSource | undefined>(prepare: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<{ source: T; deadline: number }>;
+  maximumRequestSourceBytes?(method: string): number;
+  requestEncoded?<T = unknown>(method: string, params: RpcEncodedJsonSource, options?: Partial<RpcRequestDeadline>): Promise<T>;
+  consumeEncoded?<T, R>(method: string, params: RpcEncodedJsonSource, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>): Promise<R>;
+  /** Actual consumer/preparation/source-read exit, independent of close ACK. */
+  drain?(): Promise<void>;
+  /** Latest original deadline of work admitted by this client; never renewed
+   * by close/drain. A connection owner may fail its wait without opening a new
+   * generation while drain() is still unsettled. */
+  readonly drainDeadline?: number;
   /** 订阅特定方法名的通知 */
   onNotification<T = unknown>(method: string, handler: NotificationHandler<T>): Unsubscribe;
   /** 订阅所有通知（用于调试/监听全局事件） */
@@ -101,6 +119,7 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   let nextId = 0;
   let closed = false;
   let closing: Promise<void> | undefined;
+  let drainDeadline = 0;
   const closeHandlers = new Set<() => void>();
   const notifyClosed = () => {
     if (closed) return;
@@ -116,8 +135,9 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   const pending = new Map<
     string | number,
     { resolve: (value: unknown) => void; reject: (err: unknown) => void; timer: ReturnType<typeof setTimeout>;
-      consume?: (value: unknown) => unknown | Promise<unknown> }
+      consume?: (value: unknown) => unknown | Promise<unknown>; retire(): void }
   >();
+  const liveRequests = new Set<NonNullable<ReturnType<typeof pending.get>>>();
   const consuming = new Set<NonNullable<ReturnType<typeof pending.get>>>();
   const methodHandlers = new Map<string, Set<NotificationHandler>>();
   const wildcardHandlers = new Set<WildcardNotificationHandler>();
@@ -183,20 +203,32 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
     }).then(entry.resolve, entry.reject).finally(() => {
       clearTimeout(entry.timer);
       consuming.delete(entry);
+      entry.retire();
     });
   }
 
-  function request<T>(method: string, params?: unknown, consume?: (value: unknown) => unknown | Promise<unknown>): Promise<T> {
+  function request<T>(method: string, params?: unknown, consume?: (value: unknown) => unknown | Promise<unknown>,
+    encoded?: { source: RpcEncodedJsonSource; options?: Partial<RpcRequestDeadline> }): Promise<T> {
     if (closed) return Promise.reject(new RpcClientClosedError());
     if (!ws || ws.readyState !== ws.OPEN) return Promise.reject(new RpcClientClosedError("Not connected"));
+    if (liveRequests.size >= (opts.maximumPendingRequests ?? 32)) return Promise.reject(Error('RPC pending request capacity'));
+    const deadline = encoded?.options?.deadline ?? Date.now() + timeout;
+    drainDeadline = Math.max(drainDeadline, deadline);
+    const signal = encoded?.options?.signal;
+    if (deadline <= Date.now() || signal?.aborted) return Promise.reject(Error('RPC request deadline or cancellation'));
+    let release: (() => void) | undefined;
+    try { release = opts.acquireRequest?.(); }
+    catch (error) { return Promise.reject(error); }
     const id = ++nextId;
     return new Promise<T>((resolve, reject) => {
       let entry: NonNullable<ReturnType<typeof pending.get>>;
       let cancelSend: (() => boolean) | undefined;
-      const timer = setTimeout(() => {
+      let settled = false, sendRetired = false;
+      const reading = new AbortController();
+      const cancel = () => {
         pending.delete(id);
         const partialSend = cancelSend?.();
-        reject(new Error(`RPC request timeout after ${timeout}ms: ${method}`));
+        entry.reject(new Error(encoded ? `RPC request deadline or cancellation: ${method}` : `RPC request timeout after ${timeout}ms: ${method}`));
         // A held result cannot be discarded while its consumer still owns it.
         // End this connection on the original deadline instead of admitting
         // another large message or waiting indefinitely for consumer IO.
@@ -205,13 +237,28 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
           rejectAllPending(new RpcClientClosedError("Response consumption timed out"));
           ws?.terminate();
         }
-      }, timeout);
-      entry = { resolve: resolve as (value: unknown) => void, reject, timer, consume };
+      };
+      const timer = setTimeout(cancel, deadline - Date.now());
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); };
+      entry = {
+        resolve: value => { cleanup(); settled = true; resolve(value as T); entry.retire(); },
+        reject: error => { cleanup(); settled = true; reading.abort(); reject(error); entry.retire(); }, timer, consume,
+        retire: () => {
+          if (!settled || !sendRetired || consuming.has(entry)) return;
+          if (liveRequests.delete(entry)) { const done = release; release = undefined; done?.(); }
+        },
+      };
+      liveRequests.add(entry);
       pending.set(id, entry);
-      cancelSend = sender!.send(() => encodeRequest(id, method, params), () => pending.has(id), error => {
+      signal?.addEventListener('abort', cancel, { once: true });
+      const done = (error?: Error) => {
         if (!error) return;
-        clearTimeout(timer); pending.delete(id); reject(error);
-      });
+        pending.delete(id); entry.reject(error);
+      };
+      const retired = () => { sendRetired = true; entry.retire(); };
+      cancelSend = encoded
+        ? sender!.sendEncoded(id, method, encoded.source, reading.signal, () => pending.has(id), done, retired)
+        : sender!.send(() => encodeRequest(id, method, params), () => pending.has(id), done, retired);
     });
   }
 
@@ -222,10 +269,29 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
     }
     pending.clear();
     for (const entry of consuming) { clearTimeout(entry.timer); entry.reject(reason); }
-    consuming.clear();
+    // Keep actual consumers registered until their own finally has returned.
   }
 
   return {
+    async prepareRequestSource(prepare, signal) {
+      if (closed || !pump) throw Error('RPC preparation connection unavailable');
+      const deadline = Date.now() + timeout;
+      drainDeadline = Math.max(drainDeadline, deadline);
+      const source = await pump.prepare(prepare, { deadline, signal });
+      return { source, deadline };
+    },
+    maximumRequestSourceBytes(method) {
+      const prefix = `{"jsonrpc":"2.0","id":${Number.MAX_SAFE_INTEGER},"method":${JSON.stringify(method)},"params":`;
+      return 100 * 1024 * 1024 - Buffer.byteLength(prefix) - 1;
+    },
+    requestEncoded<T>(method: string, source: RpcEncodedJsonSource, options?: Partial<RpcRequestDeadline>) {
+      return request<T>(method, undefined, undefined, { source, options });
+    },
+    consumeEncoded<T, R>(method: string, source: RpcEncodedJsonSource, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>) {
+      return request<R>(method, undefined, value => consumer(value as T), { source, options });
+    },
+    async drain() { await Promise.all([pump?.drain(), sender?.drain()]); },
+    get drainDeadline() { return drainDeadline; },
     onClose(handler) {
       if (closed) {
         try { handler(); } catch { /* 与关闭事件的订阅者隔离保持一致。 */ }
@@ -261,7 +327,7 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
             sender = new RpcRequestSender(ws!, () => {
               rejectAllPending(new RpcClientClosedError("Request transmission failed"));
               notifyClosed(); ws?.terminate();
-            });
+            }, opts.maximumQueuedRequestBytes);
             ws!.on("message", data => pump!.accept(data));
             ws!.on("close", () => {
               rejectAllPending(new RpcClientClosedError("Connection closed by server"));

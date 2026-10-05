@@ -14,13 +14,14 @@ export interface RpcReceiverEdge {
   _bufferedBytes: number;
   _compressed: boolean;
   _fin: boolean;
-  _fragmented?: number;
   _maxPayload: number;
   _messageLength: number;
+  _fragmented?: number;
   _fragments: Buffer[];
-  _extensions: Record<string, { decompress(data: Buffer, fin: boolean, done: (error: Error | null, data: Buffer) => void): void }>;
+  _extensions: Record<string, { decompress(data: Buffer, fin: boolean, done: Inflated): void }>;
   consume(bytes: number): Buffer;
   getData(done: Done): void;
+  getInfo?(done: Done): void;
   dataMessage(done: Done): void;
   startLoop(done: Done): void;
   destroy(error?: Error): void;
@@ -33,6 +34,8 @@ export interface RpcReceiverEdge {
  * three message-sized copies before an outer message handler can intervene. */
 export class RpcReceiverBody {
   readonly #getData: RpcReceiverEdge["getData"];
+  readonly #getInfo: RpcReceiverEdge["getInfo"];
+  #headerStarted = false;
   #pages: Buffer[] = [];
   #tailBytes = 0;
   #length = 0;
@@ -40,9 +43,20 @@ export class RpcReceiverBody {
   #scheduled?: ReturnType<typeof setImmediate>;
   #inflation?: Promise<void>;
 
-  constructor(readonly receiver: RpcReceiverEdge) {
+  constructor(readonly receiver: RpcReceiverEdge, beforeHeader?: () => boolean) {
     this.#getData = receiver.getData;
+    this.#getInfo = receiver.getInfo;
+    if (this.#getInfo) receiver.getInfo = done => {
+      if (this.atMessageBoundary && beforeHeader?.() === false) { receiver._loop = false; return; }
+      if (receiver._bufferedBytes) this.#headerStarted = true;
+      this.#getInfo!.call(receiver, done);
+    };
     receiver.getData = done => this.#read(done);
+  }
+
+  get atMessageBoundary(): boolean {
+    return this.receiver._state === GET_INFO && !this.#headerStarted && !this.#length &&
+      !this.receiver._fragmented && !this.#scheduled;
   }
 
   /** Includes incomplete headers, non-final frames (even empty ones), active
@@ -52,11 +66,16 @@ export class RpcReceiverBody {
       this.#length > 0 || !!this.receiver._fragmented || !!this.#scheduled;
   }
 
+  /** Called after admission is sealed: the actual inflater callback must
+   * return before this receiver's workspace can be reused. */
+  async drain(): Promise<void> { await this.#inflation; }
+
   close(): Promise<void> {
     this.#closed = true;
     clearImmediate(this.#scheduled);
     this.#pages = [];
     this.receiver.getData = this.#getData;
+    if (this.#getInfo) this.receiver.getInfo = this.#getInfo;
     // Destroying Receiver lets ws emitClose clean up the inflater. Its flush
     // callback still reads extension._inflate, so first let that callback exit.
     return this.#inflation ?? Promise.resolve();
@@ -64,7 +83,11 @@ export class RpcReceiverBody {
 
   #read(done: Done): void {
     const receiver = this.receiver;
-    if (receiver._opcode > 7) { this.#getData.call(receiver, done); return; }
+    if (receiver._opcode > 7) {
+      this.#getData.call(receiver, done);
+      if (receiver._state === GET_INFO) this.#headerStarted = false;
+      return;
+    }
     if (receiver._payloadLength && !receiver._bufferedBytes) { receiver._loop = false; return; }
     const bytes = Math.min(receiver._payloadLength, receiver._bufferedBytes, PAGE_BYTES);
     const data = bytes ? receiver.consume(bytes) : Buffer.alloc(0);
@@ -129,6 +152,7 @@ export class RpcReceiverBody {
 
   #finishFrame(done: Done): void {
     const receiver = this.receiver;
+    this.#headerStarted = false;
     if (!receiver._fin) { receiver._state = GET_INFO; return; }
     if (this.#pages.length && this.#tailBytes !== PAGE_BYTES) {
       this.#pages[this.#pages.length - 1] = this.#pages.at(-1)!.subarray(0, this.#tailBytes);

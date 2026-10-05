@@ -17,6 +17,7 @@ import {
 } from "@zhixing/server/client";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
+import { boundedControlProjection } from './control-projection.js';
 import { LogRpcClient } from "@zhixing/rpc/log-client";
 import { serverShutdownRequest } from "./server-shutdown-request.js";
 
@@ -348,6 +349,21 @@ export class RpcManagementFacade {
     });
     const result = signal ? await abortable(request, signal) : await request;
     return result.text;
+  }
+
+  /** The caller owns the semantics; the receiver owns the large response until
+   * synchronous parsing and the finite control projection have completed. */
+  async llmConsume<T>(prompt: string, consume: (text: string) => T,
+    role?: 'main' | 'light', signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const client = signal ? await abortable(this.link.getClient(), signal) : await this.link.getClient();
+    const project = (result: { text: string }): T => {
+      signal?.throwIfAborted();
+      return boundedControlProjection(consume(result.text), 256 * 1024);
+    };
+    const request = client.consume ? client.consume<{ text: string }, T>('llm.complete', { prompt, role }, project)
+      : client.request<{ text: string }>('llm.complete', { prompt, role }).then(project);
+    return signal ? abortable(request, signal) : request;
   }
 }
 

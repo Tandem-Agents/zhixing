@@ -80,23 +80,44 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
     const revision = this.eventRevision;
     const client = await this.opts.link.getClient();
     if (this.disposed || generation !== this.generation || sequence !== this.refreshSequence) return;
-    const result = await client.request<{
-      readonly items: readonly {
-        readonly conversationId?: string;
-        readonly request?: ConfirmationRequest;
-      }[];
-    }>("confirmation.list");
-    // 旧连接/旧请求/在途通知之前的快照不能重新打开旧面板。
-    if (this.disposed || client.closed || generation !== this.generation ||
-        sequence !== this.refreshSequence || revision !== this.eventRevision) return;
-    const pending = new Set(result.items.flatMap(item => item.request ? [item.request.id] : []));
-    for (const id of [...this.visible]) if (!pending.has(id)) this.retire(id);
-    for (const item of result.items) this.acceptPending(item);
+    type List = { readonly items: readonly { readonly conversationId?: string; readonly request?: ConfirmationRequest }[] };
+    const consume = (result: List): void => {
+      // 旧连接/旧请求/在途通知之前的快照不能重新打开旧面板。
+      if (this.disposed || client.closed || generation !== this.generation ||
+          sequence !== this.refreshSequence || revision !== this.eventRevision) return;
+      const pending = new Set<string>();
+      for (const item of result.items) {
+        if (!item.request) continue;
+        if (pending.size >= RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS || item.request.id.length > 512) throw Error('confirmation identity capacity');
+        pending.add(item.request.id);
+      }
+      for (const id of [...this.visible]) if (!pending.has(id)) this.retire(id);
+      for (const item of result.items) this.acceptPending(item);
+    };
+    if (client.consume) await client.consume<List, void>('confirmation.list', undefined, consume);
+    else consume(await client.request<List>('confirmation.list'));
   }
 
   onInvalidated(listener: (requestId: string) => void): () => void {
     this.invalidatedListeners.add(listener);
     return () => { this.invalidatedListeners.delete(listener); };
+  }
+
+  /** Fetch a deferred panel from the authority; queued surfaces retain identity
+   * only, rather than holding every request body during another page. */
+  async readPending<T = ConfirmationRequest>(requestId: string,
+    project: (request: ConfirmationRequest) => T = request => request as T): Promise<T | undefined> {
+    if (this.disposed || !this.visible.has(requestId)) return;
+    const generation = this.generation;
+    const client = await this.opts.link.getClient();
+    type List = { readonly items: readonly { readonly request?: ConfirmationRequest }[] };
+    const consume = (result: List): T | undefined => {
+      if (this.disposed || client.closed || generation !== this.generation || !this.visible.has(requestId)) return;
+      const request = result.items.find(item => item.request?.id === requestId)?.request;
+      return request ? project(request) : undefined;
+    };
+    return client.consume ? client.consume<List, T | undefined>('confirmation.list', undefined, consume)
+      : consume(await client.request<List>('confirmation.list'));
   }
 
   private invalidate(requestId: string): void {
@@ -196,6 +217,8 @@ export class RpcConfirmationBroker implements ConfirmationRendererPort {
       conversationId?: string;
     };
     if (!payload.request || this.visible.has(payload.request.id) || this.resolving.has(payload.request.id) || this.retired.has(payload.request.id)) return;
+    if (payload.request.id.length > 512 || (payload.conversationId?.length ?? 0) > 512 ||
+      this.visible.size >= RpcConfirmationBroker.MAX_PENDING_CONVERSATIONS) throw Error('confirmation identity capacity');
     this.visible.add(payload.request.id);
     if (payload.conversationId) {
       if (

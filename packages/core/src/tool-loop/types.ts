@@ -60,6 +60,9 @@ export interface ToolLoopDeps {
    * signal 为 best-effort（绑定方如 callText 可能不向底层透传，abort 主要靠循环在轮边界放弃）。
    */
   complete(prompt: string, signal?: AbortSignal): Promise<string>;
+  /** Parse within the transport's result lifetime; only the decision leaves it.
+   * The callback is synchronous and never waits for a tool or another model. */
+  consumeComplete?<T>(prompt: string, consume: (text: string) => T, signal?: AbortSignal): Promise<T>;
   /**
    * 进度观察（可选）。框架在"让 LLM 决策前""调工具前"同步回调，产出通用结构化进度。
    * 框架吞掉本回调抛出的错误——进度是 best-effort 观察，不得因报告失败而坏主循环。

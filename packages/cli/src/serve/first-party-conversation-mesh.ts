@@ -255,15 +255,24 @@ export class FirstPartyConversationMeshClient {
     private readonly onError?: (error: Error) => void,
   ) {}
 
-  async dispatch(method: string, params: unknown, connection: FirstPartyIngressConnection): Promise<unknown> {
+  /** Current-anchor surface uses the channel's existing 1 MiB payload default.
+   * Preflight a cold params value without materializing it or changing Mesh. */
+  dispatchParamsByteLimit(method: string, connection: FirstPartyIngressConnection): number {
+    const envelope = { v: 1, op: 'dispatch', surface: surfaceIdentity(this.sourceDeviceId, connection), method, params: null };
+    return 1024 * 1024 - Buffer.byteLength(canonicalize(envelope)) + 4;
+  }
+
+  async dispatch(method: string, params: unknown, connection: FirstPartyIngressConnection, signal?: AbortSignal): Promise<unknown> {
     if (!METHODS.has(method)) throw new TypeError("First-party conversation method is not allowed");
     const surface = surfaceIdentity(this.sourceDeviceId, connection);
     this.#ensurePolling(surface, connection);
     // Poll 的暂时/稳定失败不等于接入面关闭；dispatch 跟随真正的 ingress 生命周期。
     const abort = new AbortController();
     const unsubscribe = connection.onClose(() => abort.abort());
+    const cancel = () => abort.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
-      if (connection.closed) abort.abort();
+      if (connection.closed || signal?.aborted) abort.abort();
       const response = await this.#request({ v: 1, op: "dispatch", surface, method, params: params === undefined ? {} : params }, abort.signal);
       if (connection.closed || abort.signal.aborted) {
         throw new MeshProtocolError("connection-closed", "First-party ingress was replaced during dispatch");
@@ -273,6 +282,7 @@ export class FirstPartyConversationMeshClient {
       }
       return response.result;
     } finally {
+      signal?.removeEventListener('abort', cancel);
       unsubscribe();
     }
   }

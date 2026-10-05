@@ -38,6 +38,20 @@ function makeRequest(id: string): ConfirmationRequest {
 }
 
 describe("RpcConfirmationBroker", () => {
+  it('projects refresh and a deferred detail inside the receive consumer', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    let inside = false;
+    client.consume = async (_method, _params, consume) => {
+      inside = true;
+      try { return await consume({ items: [{ request: makeRequest('inside') }] } as never); }
+      finally { inside = false; }
+    };
+    const broker = new RpcConfirmationBroker({ link: fake.link });
+    broker.onRequest(() => expect(inside).toBe(true));
+    await broker.refresh();
+    expect(await broker.readPending('inside', request => { expect(inside).toBe(true); return { id: request.id }; })).toEqual({ id: 'inside' });
+    expect(inside).toBe(false); expect(fake.requests).toHaveLength(0); broker.dispose();
+  });
   it.each(["resolved", "disconnect", "refresh", "dispose"])("%s 真正失效可见请求，迟到选择不产生决定", async cause => {
     const fake = makeFakeHostLink();
     fake.setResponder(() => ({ items: [] }));

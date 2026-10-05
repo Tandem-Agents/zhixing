@@ -1,4 +1,4 @@
-import type { BeginUserTurnResult } from "./conversation-controller.js";
+import type { BeginReferencedUserTurnResult } from "./conversation-controller.js";
 
 /** 旧输入框的提交结清；只消费应用事实，不推断保存或重新发送。 */
 export function createUserSubmission(draft: { commit(): void; reject(): void } | null) {
@@ -16,7 +16,7 @@ export function createUserSubmission(draft: { commit(): void; reject(): void } |
   return {
     accept,
     reject,
-    settle(result: BeginUserTurnResult<unknown>): string | undefined {
+    settle(result: BeginReferencedUserTurnResult<unknown>): string | undefined {
       if (result.kind === "accepted" || result.kind === "cancelled") {
         accept();
       } else if (result.kind === "contract-failed") {
