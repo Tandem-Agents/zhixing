@@ -52,7 +52,7 @@ export function createAdvancementReviewExternalMechanism(
         : undefined;
     },
     materializeReviewRoot({ root, binding }) {
-      if (root.audience !== undefined || root.scopeBinding !== undefined) {
+      if (root.audience !== undefined || root.scopeBinding !== undefined || root.delegation !== undefined) {
         throw new TypeError("Advancement review root is already bound");
       }
       if (binding === undefined) return root;
@@ -60,6 +60,7 @@ export function createAdvancementReviewExternalMechanism(
       return {
         ...root,
         audience: { executorId: decoded.executorId },
+        delegation: reviewEvidenceDelegation(root.budget, decoded.executorId),
         scopeBinding: {
           kind: "conversation",
           conversationId: decoded.conversationId,
@@ -69,7 +70,7 @@ export function createAdvancementReviewExternalMechanism(
     },
     reviewRootMatchesBinding({ root, binding }) {
       if (binding === undefined) {
-        return root.audience === undefined && root.scopeBinding === undefined;
+        return root.audience === undefined && root.scopeBinding === undefined && root.delegation === undefined;
       }
       const decoded = decodeReviewRootBinding(binding);
       const audience = root.audience;
@@ -77,6 +78,13 @@ export function createAdvancementReviewExternalMechanism(
       return (
         isExactRecord(audience, ["executorId"]) &&
         audience.executorId === decoded.executorId &&
+        (root.delegation === undefined || (
+          isExactRecord(root.delegation, ["executorId", "maxBudget", "maxDepth"]) &&
+          root.delegation.executorId === decoded.executorId &&
+          root.delegation.maxDepth === 1 &&
+          isExactRecord(root.delegation.maxBudget, ["maxCalls"]) &&
+          root.delegation.maxBudget.maxCalls === root.budget.maxCalls
+        )) &&
         isExactRecord(scope, ["conversationId", "kind", "ownerEpoch"]) &&
         scope.kind === "conversation" &&
         scope.conversationId === decoded.conversationId &&
@@ -164,6 +172,16 @@ export function createAdvancementReviewExternalMechanism(
       return outcome;
     },
   };
+}
+
+function reviewEvidenceDelegation(
+  budget: import("@zhixing/core/contracts").ResourceLease["budget"],
+  executorId: string,
+): NonNullable<import("@zhixing/core/contracts").ResourceLease["delegation"]> {
+  if (!Number.isSafeInteger(budget.maxCalls) || budget.maxCalls! <= 0) {
+    throw new TypeError("Advancement evidence requires a bounded review call budget");
+  }
+  return { executorId, maxDepth: 1, maxBudget: { maxCalls: budget.maxCalls! } };
 }
 
 function encodeReviewRootBinding(

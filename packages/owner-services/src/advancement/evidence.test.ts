@@ -21,6 +21,7 @@ import {
 } from "@zhixing/core/protocol";
 import { describe, expect, it } from "vitest";
 import type { AdvancementSessionStore } from "./session-store.js";
+import { createAdvancementReviewExternalMechanism } from "./review-external-mechanism.js";
 import {
   AdvancementEvidenceCoordinator,
   AdvancementEvidenceDeferredError,
@@ -46,6 +47,28 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
 };
 
 describe("AdvancementEvidenceCoordinator", () => {
+  it("materializes only the accepted target's bounded delegation and preserves old frozen roots", async () => {
+    const mechanism = createAdvancementReviewExternalMechanism({ evidence: {
+      carriedOutcomeRootTarget: () => undefined,
+      resolveTarget: async () => target(),
+      collect: async () => ({ canonicalEvidence: [] }),
+    } });
+    const request = { conversationId: "conversation-1", runId: "run-1", runIndex: 0, runRecord: runRecord() };
+    const binding = await mechanism.resolveRootBinding(session(), request);
+    const base = { workload: { kind: "control" as const, id: "review-root", attempt: 1 },
+      budget: { maxCalls: 8, maxTokens: 300_000 }, requestId: "review-root-request" };
+    expect(mechanism.materializeReviewRoot({ root: base, binding: undefined })).toEqual(base);
+    const root = mechanism.materializeReviewRoot({ root: base, binding });
+    expect(root).toMatchObject({ scopeBinding: { kind: "conversation", conversationId: "conversation-1", ownerEpoch: 3 },
+      audience: { executorId: "executor-1" }, delegation: { executorId: "executor-1", maxDepth: 1, maxBudget: { maxCalls: 8 } } });
+    expect(mechanism.reviewRootMatchesBinding({ root, binding })).toBe(true);
+    expect(mechanism.reviewRootMatchesBinding({ root: { ...root, delegation: { ...root.delegation!, executorId: "another-executor" } }, binding })).toBe(false);
+    const { delegation: _delegation, ...oldRoot } = root;
+    expect(mechanism.reviewRootMatchesBinding({ root: oldRoot, binding })).toBe(true);
+    expect(oldRoot).not.toHaveProperty("delegation");
+    expect(() => mechanism.materializeReviewRoot({ root, binding })).toThrow("already bound");
+  });
+
   it("durably records the request before transport and closes usage before review consumption", async () => {
     const calls: string[] = [];
     const store = storeRecording(calls);

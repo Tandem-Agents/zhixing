@@ -45,15 +45,7 @@ export function assertResourceLeaseBaseContract(
   assertDomain(lease.domain, label);
 
   if (lease.delegation !== undefined) {
-    assertPlainObject(lease.delegation, `${label} delegation`);
-    assertExactKeys(
-      lease.delegation,
-      ["executorId", "maxBudget", "maxDepth"],
-      `${label} delegation`,
-    );
-    assertIdentifier(lease.delegation.executorId, `${label} delegation executorId`);
-    assertPositiveInteger(lease.delegation.maxDepth, `${label} delegation maxDepth`);
-    assertBudget(lease.delegation.maxBudget, `${label} delegation budget`);
+    assertResourceDelegation(lease.delegation, label);
   }
 
   assertCanonicalTime(lease.issuedAt, `${label} issuedAt`);
@@ -101,6 +93,17 @@ export function assertResourceLeaseActiveAt(
 /** scope binding 结构的唯一运行时验证——签名租约校验与准入前置验证共用。 */
 export function assertResourceScopeBinding(value: unknown, label: string): void {
   assertScopeBinding(value, label);
+}
+
+export function assertResourceDelegation(
+  value: unknown,
+  label: string,
+): asserts value is NonNullable<ResourceLease["delegation"]> {
+  assertPlainObject(value, `${label} delegation`);
+  assertExactKeys(value, ["executorId", "maxBudget", "maxDepth"], `${label} delegation`);
+  assertIdentifier(value.executorId, `${label} delegation executorId`);
+  assertPositiveInteger(value.maxDepth, `${label} delegation maxDepth`);
+  assertBudget(value.maxBudget, `${label} delegation budget`);
 }
 
 function assertScopeBinding(value: unknown, label: string): void {

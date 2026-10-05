@@ -35,6 +35,7 @@ import {
   assertActivatedResourceCapability,
   assertBudgetWithinBudget,
   assertResourceAdmissionRequest,
+  assertImmediateRootResourceBinding,
   assertAssignmentReservationRequest,
   assertSystemJobReservationRequest,
   canonicalize,
@@ -366,25 +367,13 @@ export class AnchorResourceGovernor
       kind: "control",
       subject: workload.id,
     },
+    delegation?: ResourceLease["delegation"],
   ): Promise<ImmediateRootResourceLease> {
     const validatedOrigin = validateReservationOrigin(origin);
     this.#guard.assert(ctx.principal, "reservation.acquireRoot");
     assertResourceAdmissionRequest(workload, budget);
     requireIdentifier(ctx.requestId, "Reservation requestId");
-    requireIdentifier(audience.executorId, "Reservation audience executorId");
-    if (scopeBinding.kind === "conversation") {
-      requireIdentifier(scopeBinding.conversationId, "Reservation conversationId");
-      if (!Number.isSafeInteger(scopeBinding.ownerEpoch) || scopeBinding.ownerEpoch <= 0) {
-        throw new TypeError("Reservation ownerEpoch must be a positive safe integer");
-      }
-    } else if (scopeBinding.kind === "job") {
-      requireIdentifier(scopeBinding.taskId, "Reservation taskId");
-      if (!Number.isSafeInteger(scopeBinding.anchorEpoch) || scopeBinding.anchorEpoch <= 0) {
-        throw new TypeError("Reservation anchorEpoch must be a positive safe integer");
-      }
-    } else {
-      requireIdentifier(scopeBinding.subject, "Reservation control subject");
-    }
+    assertImmediateRootResourceBinding(audience, scopeBinding, budget, delegation);
     deadlineFromContext(ctx, this.#clock(), this.#monotonicClock());
     const reservationId = immediateReservationId(workload);
     await this.#enqueue(reservationId, workload, validatedOrigin.admissionClass);
@@ -401,11 +390,13 @@ export class AnchorResourceGovernor
                 scopeBinding: candidate.scopeBinding,
                 audience: candidate.audience,
                 budget: candidate.budget,
+                delegation: candidate.delegation ?? null,
               }) === canonicalize({
                 workload,
                 scopeBinding,
                 audience,
                 budget,
+                delegation: delegation ?? null,
               }),
             () => this.#signLease({
               reservationId,
@@ -414,6 +405,7 @@ export class AnchorResourceGovernor
               scopeBinding,
               audience,
               budget,
+              ...(delegation === undefined ? {} : { delegation }),
               domain: { kind: "anchor", anchorEpoch: this.#anchorEpoch },
             }) as ImmediateRootResourceLease,
           ),

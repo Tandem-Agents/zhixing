@@ -85,7 +85,7 @@ function lazyResourcePort(
       required().prepareAssignmentRoot(request, origin, ctx),
     prepareSystemJobRoot: (request, origin, ctx) =>
       required().prepareSystemJobRoot(request, origin, ctx),
-    acquireRoot: (workload, budget, origin, ctx, audience, scopeBinding) =>
+    acquireRoot: (workload, budget, origin, ctx, audience, scopeBinding, delegation) =>
       required().acquireRoot(
         workload,
         budget,
@@ -93,6 +93,7 @@ function lazyResourcePort(
         ctx,
         audience,
         scopeBinding,
+        delegation,
       ),
     inspectImmediateRoot: (workload) =>
       required().inspectImmediateRoot(workload),

@@ -34,6 +34,7 @@ import {
   assertActivatedResourceCapability,
   assertBudgetWithinBudget,
   assertResourceAdmissionRequest,
+  assertImmediateRootResourceBinding,
   assertAssignmentReservationRequest,
   canonicalize,
   cloneGovernorProjection,
@@ -435,11 +436,17 @@ export class ExecutorResourceGovernor
     audience: { readonly executorId: string } = {
       executorId: this.#executorId,
     },
+    scopeBinding: ResourceLease["scopeBinding"] = {
+      kind: "control",
+      subject: workload.id,
+    },
+    delegation?: ResourceLease["delegation"],
   ): Promise<ImmediateRootResourceLease> {
     const validatedOrigin = validateReservationOrigin(origin);
     this.#guard.assert(ctx.principal, "reservation.acquireRoot");
     assertResourceAdmissionRequest(workload, budget);
     requireIdentifier(ctx.requestId, "Reservation requestId");
+    assertImmediateRootResourceBinding(audience, scopeBinding, budget, delegation);
     if (audience.executorId !== this.#executorId) {
       throw new TypeError(
         "Executor-local resource governor cannot issue a lease for another executor",
@@ -461,19 +468,22 @@ export class ExecutorResourceGovernor
                 scopeBinding: candidate.scopeBinding,
                 audience: candidate.audience,
                 budget: candidate.budget,
+                delegation: candidate.delegation ?? null,
               }) === canonicalize({
                 workload,
-                scopeBinding: { kind: "control", subject: workload.id },
+                scopeBinding,
                 audience: { executorId: this.#executorId },
                 budget,
+                delegation: delegation ?? null,
               }),
             () => this.#signLease({
               reservationId,
               admissionClass: validatedOrigin.admissionClass,
               workload,
-              scopeBinding: { kind: "control", subject: workload.id },
+              scopeBinding,
               audience: { executorId: this.#executorId },
               budget,
+              ...(delegation === undefined ? {} : { delegation }),
               domain: {
                 kind: "local",
                 localDomainId: this.#localDomainId,

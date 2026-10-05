@@ -123,9 +123,25 @@ describe("isAdvancementControlEvent", () => {
       attempt: { ...started.attempt, unknown: true },
     }, verifier)).toBe(false);
   });
+
+  it("validates and freezes the explicit review evidence delegation", () => {
+    const event = reviewAttemptEvent("invoking", true);
+    expect(isAdvancementControlEvent(event, verifier)).toBe(true);
+    const root = event.attempt.root;
+    for (const delegation of [undefined,
+      { ...root.delegation!, executorId: "another-executor" },
+      { ...root.delegation!, maxDepth: 0 },
+      { ...root.delegation!, maxBudget: { maxCalls: 9 } },
+      { ...root.delegation!, maxBudget: { maxCalls: 7 } },
+    ]) {
+      const { delegation: _previous, ...unbound } = root;
+      const changed = { ...unbound, ...(delegation === undefined ? {} : { delegation }) };
+      expect(isAdvancementControlEvent({ ...event, attempt: { ...event.attempt, root: changed } }, verifier)).toBe(false);
+    }
+  });
 });
 
-function reviewAttemptEvent(phase: "started" | "invoking") {
+function reviewAttemptEvent(phase: "started" | "invoking", delegated = false) {
   const runRecordRef = { shardId: "shard-1", runIndex: 0 };
   const lineageId = advancementReviewLineageId("session-1", runRecordRef);
   const id = advancementReviewAttemptId(lineageId, 1);
@@ -133,15 +149,21 @@ function reviewAttemptEvent(phase: "started" | "invoking") {
     workload: { kind: "control" as const, id, attempt: 1 },
     budget: { maxCalls: 8, maxTokens: 300_000 },
     requestId: `advancement-review-root:${id}`,
+    ...(delegated ? {
+      audience: { executorId: "executor-1" },
+      scopeBinding: { kind: "conversation" as const, conversationId: "conversation-1", ownerEpoch: 1 },
+      delegation: { executorId: "executor-1", maxDepth: 1, maxBudget: { maxCalls: 8 } },
+    } : {}),
   };
   const unsignedLease = {
     v: 1 as const,
     reservationId: `reservation:${id}`,
     admissionClass: "advancement" as const,
     workload: root.workload,
-    scopeBinding: { kind: "control" as const, subject: id },
+    scopeBinding: root.scopeBinding ?? { kind: "control" as const, subject: id },
     audience: { executorId: "executor-1" },
     budget: root.budget,
+    ...(root.delegation ? { delegation: root.delegation } : {}),
     domain: { kind: "anchor" as const, anchorEpoch: 1 },
     issuedAt: "2026-08-04T00:00:00.000Z",
     expiry: "2026-08-04T01:00:00.000Z",

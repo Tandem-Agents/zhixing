@@ -403,6 +403,7 @@ export interface ResourceReservationPort {
     ctx: AuthorityCallContext,
     audience?: { readonly executorId: string },
     scopeBinding?: ResourceLease["scopeBinding"],
+    delegation?: ResourceLease["delegation"],
   ): Promise<ImmediateRootResourceLease>;
   inspectImmediateRoot(
     workload: ImmediateRootWorkload,

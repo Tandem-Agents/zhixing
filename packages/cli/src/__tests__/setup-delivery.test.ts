@@ -35,6 +35,8 @@ import {
 } from "../executor-snapshot-version-store.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-fixture.js";
 import { StartupRollback } from "../serve/startup-rollback.js";
+import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
+import { userMessage, type LLMRole } from "@zhixing/core/types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -95,6 +97,76 @@ describe("setupDelivery — Channel effect binding", () => {
     if (stack) {
       await stack.stop().catch(() => {});
       stack = null;
+    }
+  });
+
+  it("binds advancement root lifecycle and completion metering to their actual Host principals", async () => {
+    const runtime = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+    });
+    const governor = runtime.resourceGovernor;
+    const ctx = (component: string) => ({
+      principal: { kind: "host" as const, component },
+      requestId: `binding-test:${component}`,
+      deadlineAt: new Date(Date.now() + 20_000).toISOString(),
+    });
+    const workload = { kind: "control" as const, id: "binding-control", attempt: 1 };
+    const budget = { maxCalls: 1, maxTokens: 300_000 };
+    const origin = { admissionClass: "advancement" as const, entry: "advancement-control" as const };
+    const control = ctx("advancement-control");
+    const completion = ctx("control-completion");
+    const chat = vi.fn(async function* () {
+      yield { type: "text_delta" as const, text: "governed control reply" };
+      yield { type: "message_end" as const, stopReason: "end_turn" as const, usage: { inputTokens: 10, outputTokens: 3 } };
+    });
+    const role = { model: "binding-test", provider: { id: "binding-test", models: [], chat }, chat } satisfies LLMRole;
+    try {
+      // Exercise the guard actually installed by the production composition root.
+      for (const component of ["control-completion", "advancement-evidence", "unregistered-control"]) {
+        await expect(governor.acquireRoot(workload, budget, origin, ctx(component)))
+          .rejects.toThrow("cannot call reservation.acquireRoot");
+      }
+      const lease = await governor.acquireRoot(workload, budget, origin, control);
+      await expect(governor.acquireChild(lease, { kind: "evidence", id: "ordinary-control-child", attempt: 1 }, { maxCalls: 1 }, ctx("advancement-evidence")))
+        .rejects.toThrow("Resource root does not authorize child issuance");
+      const usage = { usageId: "binding-denied", tokens: 1, calls: 1 };
+      await expect(governor.reserveUsage(lease, usage, control)).rejects.toThrow("cannot call reservation.reserveUsage");
+      await expect(governor.consume(lease, usage, control)).rejects.toThrow("cannot call reservation.consume");
+      await expect(governor.settle(lease, completion)).rejects.toThrow("cannot call reservation.settle");
+      await expect(governor.release(lease, completion)).rejects.toThrow("cannot call reservation.release");
+      const port = createControlCompletionPort({ roles: { main: role, light: role }, meter: governor, defaultMaxOutputTokens: 1024 });
+      await expect(port.complete({ role: "light", messages: [userMessage("binding test")], lease,
+        abort: new AbortController().signal, deadlineAt: control.deadlineAt }))
+        .resolves.toMatchObject({ ok: true, text: "governed control reply", usage: { inputTokens: 10, outputTokens: 3 } });
+      expect(chat).toHaveBeenCalledOnce();
+      await governor.settle(lease, control);
+      await governor.release(lease, control);
+
+      // The same product's review owner holds both lifecycle and meter duties.
+      const review = ctx("advancement-review");
+      const scope = { kind: "conversation" as const, conversationId: "binding-review-conversation", ownerEpoch: 1 };
+      const delegation = { executorId: runtime.deviceId, maxDepth: 1, maxBudget: { maxCalls: 2 } };
+      const reviewLease = await governor.acquireRoot({ ...workload, id: "binding-review" }, { ...budget, maxCalls: 2 }, origin, review,
+        { executorId: runtime.deviceId }, scope, delegation);
+      const reviewUsage = { usageId: "binding-review-usage", tokens: 13, calls: 1 };
+      await governor.reserveUsage(reviewLease, reviewUsage, review);
+      await governor.consume(reviewLease, reviewUsage, review);
+      await expect(governor.acquireChild(reviewLease, { ...workload, id: "binding-child" }, budget, review))
+        .rejects.toThrow("cannot call reservation.acquireChild");
+      const evidence = ctx("advancement-evidence");
+      const child = await governor.acquireChild(reviewLease, { kind: "evidence", id: "binding-evidence", attempt: 1 }, { maxCalls: 1 }, evidence);
+      expect(child.scopeBinding).toEqual(scope);
+      const evidenceUsage = { usageId: "binding-evidence-usage", calls: 1 };
+      await governor.reserveUsage(child, evidenceUsage, evidence);
+      await governor.consume(child, evidenceUsage, evidence);
+      await governor.settle(child, evidence);
+      await governor.release(child, evidence);
+      await governor.settle(reviewLease, review);
+      await governor.release(reviewLease, review);
+    } finally {
+      await runtime.startupCleanup.run();
     }
   });
 

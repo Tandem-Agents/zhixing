@@ -101,6 +101,7 @@ export function createAdvancementReviewAttemptApplication(
         rootContext(root, deadlineMs),
         root.audience,
         root.scopeBinding,
+        root.delegation,
       ),
     settle: (root, lease) =>
       options.resources.settle(lease, rootContext(root)),

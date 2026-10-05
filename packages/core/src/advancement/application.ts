@@ -1491,6 +1491,7 @@ function assertFrozenReviewRootLease(
   if (
     canonicalize(lease.workload) !== canonicalize(root.workload) ||
     canonicalize(lease.budget) !== canonicalize(root.budget) ||
+    canonicalize(lease.delegation ?? null) !== canonicalize(root.delegation ?? null) ||
     canonicalize(lease.scopeBinding) !== canonicalize(expectedScope) ||
     (root.audience !== undefined &&
       canonicalize(lease.audience) !== canonicalize(root.audience))

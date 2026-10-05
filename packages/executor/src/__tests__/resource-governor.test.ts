@@ -95,6 +95,46 @@ describe("ExecutorResourceGovernor", {
     )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
+  it("freezes a bounded review delegation and preserves its conversation scope through child usage", async () => {
+    const fixture = await createHarness();
+    const context: AuthorityCallContext = { principal: { kind: "host", component: "executor-resource-test" },
+      requestId: "review-delegation", deadlineAt: "2026-07-20T00:00:30.000Z" };
+    const workload = { kind: "control", id: "review-delegation", attempt: 1 } as const;
+    const origin = { admissionClass: "advancement", entry: "advancement-control" } as const;
+    const audience = { executorId: "executor-1" };
+    const scope = { kind: "conversation", conversationId: "review-conversation", ownerEpoch: 3 } as const;
+    const budget = { maxCalls: 3, maxTokens: 100 };
+    const delegation = { executorId: "executor-1", maxDepth: 1, maxBudget: { maxCalls: 2 } };
+    const before = (await fixture.log.readAll()).length;
+    for (const invalid of [
+      { ...delegation, executorId: "another-executor" },
+      { ...delegation, maxDepth: 0 },
+      { ...delegation, maxBudget: { maxCalls: 4 } },
+      { ...delegation, extra: true },
+    ]) {
+      await expect(fixture.governor.acquireRoot(workload, budget, origin, context, audience, scope, invalid)).rejects.toThrow();
+    }
+    expect(await fixture.log.readAll()).toHaveLength(before);
+    const root = await fixture.governor.acquireRoot(workload, budget, origin, context, audience, scope, delegation);
+    expect(root).toMatchObject({ scopeBinding: scope, delegation });
+    await expect(fixture.restart().acquireRoot(workload, budget, origin, context, audience, scope, delegation)).resolves.toEqual(root);
+    await expect(fixture.governor.acquireRoot(workload, budget, origin, context, audience, scope)).rejects.toThrow();
+    await expect(fixture.governor.acquireRoot(workload, budget, origin, context, audience, { ...scope, ownerEpoch: 4 }, delegation)).rejects.toThrow();
+    const childWorkload = { kind: "evidence", id: "review-evidence", attempt: 1 } as const;
+    await expect(fixture.governor.acquireChild(root, childWorkload, { maxCalls: 3 }, context)).rejects.toThrow();
+    const child = await fixture.governor.acquireChild(root, childWorkload, { maxCalls: 1 }, context);
+    expect(child).toMatchObject({ scopeBinding: scope, audience, parentId: root.reservationId });
+    await expect(fixture.governor.acquireChild(child, { ...childWorkload, id: "too-deep" }, { maxCalls: 1 }, context)).rejects.toThrow(/depth/);
+    const usage = { usageId: "review-evidence-usage", calls: 1 };
+    await fixture.governor.reserveUsage(child, usage, context);
+    await fixture.governor.consume(child, usage, context);
+    await fixture.governor.settle(child, context);
+    await fixture.governor.release(child, context);
+    await fixture.governor.settle(root, context);
+    await fixture.governor.release(root, context);
+    await expect(fixture.restart().inspectImmediateRoot(workload)).resolves.toMatchObject({ kind: "reservation", state: "released", lease: root });
+  });
+
   it("rejects invalid admission requests before any queue side-effect", async () => {
     const fixture = await createHarness();
     const origin = { admissionClass: "interactive", entry: "conversation-input" } as const;

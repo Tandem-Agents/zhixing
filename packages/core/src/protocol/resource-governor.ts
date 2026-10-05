@@ -27,6 +27,7 @@ import {
   assertResourceLeaseActiveAt,
   assertResourceLeaseBudget,
   assertResourceScopeBinding,
+  assertResourceDelegation,
   type ResourceLeaseSignatureVerifier,
 } from "./resource-lease.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
@@ -294,6 +295,28 @@ export function validateReservableResourceLease(
 }
 
 export { assertResourceLeaseActiveAt };
+
+/** Validate explicit control-root bindings before admission can append anything. */
+export function assertImmediateRootResourceBinding(
+  audience: { readonly executorId: string },
+  scopeBinding: ResourceLease["scopeBinding"],
+  budget: ResourceLease["budget"],
+  delegation?: ResourceLease["delegation"],
+): void {
+  assertPlainObject(audience, "Immediate resource audience");
+  if (canonicalize(Object.keys(audience).sort()) !== canonicalize(["executorId"])) {
+    throw new TypeError("Immediate resource audience fields are invalid");
+  }
+  assertIdentifier(audience.executorId, "Immediate resource audience executorId");
+  assertResourceScopeBinding(scopeBinding, "Immediate resource");
+  if (delegation !== undefined) {
+    assertResourceDelegation(delegation, "Immediate resource");
+    if (delegation.executorId !== audience.executorId) {
+      throw new TypeError("Immediate resource delegation changed its executor audience");
+    }
+    assertBudgetWithinBudget(delegation.maxBudget, budget, "Resource delegation budget");
+  }
+}
 
 export function assertResourceCapabilityBinding(input: {
   readonly context: AuthorityCallContext;
@@ -1518,8 +1541,10 @@ function assertReservableLeaseVariant(
   if (!root) return;
   const activation = "activation" in lease ? lease.activation : undefined;
   if (activation === undefined) {
-    if (lease.workload.kind !== "control" || lease.scopeBinding.kind !== "control") {
-      throw new TypeError("Immediate resource root must use a control workload and scope");
+    // Control work may inspect an accepted conversation without becoming an
+    // execution assignment. Its scope still binds the exact owner and epoch.
+    if (lease.workload.kind !== "control") {
+      throw new TypeError("Immediate resource root must use a control workload");
     }
     return;
   }

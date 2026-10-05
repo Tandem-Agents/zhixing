@@ -449,6 +449,7 @@ export {
   assertAcceptedResourceCapabilityBinding,
   assertActivatedResourceCapability,
   assertResourceAdmissionRequest,
+  assertImmediateRootResourceBinding,
   assertAssignmentReservationRequest,
   assertSystemJobReservationRequest,
   assertResourceCapabilityBinding,

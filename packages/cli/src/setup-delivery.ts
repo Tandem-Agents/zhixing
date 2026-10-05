@@ -722,6 +722,30 @@ export async function setupAuthorityRuntime(
         "reservation.settle",
         "reservation.release",
       ],
+      // Advancement callers own roots; the completion adapter only meters them.
+      "advancement-control": [
+        "reservation.acquireRoot",
+        "reservation.settle",
+        "reservation.release",
+      ],
+      "control-completion": [
+        "reservation.reserveUsage",
+        "reservation.consume",
+      ],
+      "advancement-review": [
+        "reservation.acquireRoot",
+        "reservation.reserveUsage",
+        "reservation.consume",
+        "reservation.settle",
+        "reservation.release",
+      ],
+      "advancement-evidence": [
+        "reservation.acquireChild",
+        "reservation.reserveUsage",
+        "reservation.consume",
+        "reservation.settle",
+        "reservation.release",
+      ],
     });
     let resourceGovernor = authorityLog
       ? new ownerRuntime!.AnchorResourceGovernor({

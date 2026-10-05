@@ -529,6 +529,7 @@ export interface AdvancementReviewRootContract {
   readonly requestId: string;
   readonly audience?: { readonly executorId: string };
   readonly scopeBinding?: ResourceLease["scopeBinding"];
+  readonly delegation?: ResourceLease["delegation"];
 }
 
 /**

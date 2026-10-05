@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import {
   assertResourceAdmissionRequest,
+  assertImmediateRootResourceBinding,
   canonicalize,
   validateEvidenceBundle,
   validateEvidenceRequest,
@@ -281,6 +282,7 @@ function isReviewAttemptShape(
         lease.workload.kind !== "control" ||
         canonicalize(lease.workload) !== canonicalize(root.workload) ||
         canonicalize(lease.budget) !== canonicalize(root.budget) ||
+        canonicalize(lease.delegation ?? null) !== canonicalize(root.delegation ?? null) ||
         (root.audience !== undefined &&
           canonicalize(lease.audience) !== canonicalize(root.audience)) ||
         (root.scopeBinding !== undefined &&
@@ -306,6 +308,7 @@ function isReviewRootContractShape(value: unknown): boolean {
     !hasExactKeys(root, [
       ...(root.audience === undefined ? [] : ["audience"]),
       "budget",
+      ...(root.delegation === undefined ? [] : ["delegation"]),
       "requestId",
       ...(root.scopeBinding === undefined ? [] : ["scopeBinding"]),
       "workload",
@@ -321,6 +324,13 @@ function isReviewRootContractShape(value: unknown): boolean {
   }
   const workload = root.workload as { kind?: unknown };
   if (workload.kind !== "control") return false;
+  if (root.delegation !== undefined) {
+    try {
+      const contract = root as unknown as AdvancementReviewAttempt["root"];
+      if (!contract.audience || !contract.scopeBinding) return false;
+      assertImmediateRootResourceBinding(contract.audience, contract.scopeBinding, contract.budget, contract.delegation);
+    } catch { return false; }
+  }
   if (root.audience !== undefined) {
     const audience = root.audience as Record<string, unknown>;
     if (
