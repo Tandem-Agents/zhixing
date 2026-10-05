@@ -22,7 +22,10 @@ const fullCredentialProjectionAllowed = new Set([
   "packages/providers/src/configuration-edit.ts",
   "packages/providers/src/index.ts",
   "packages/providers/src/types.ts",
-  "packages/cli/src/startup.ts",
+  "packages/cli/src/runtime/startup-application.ts",
+  // Trusted Node startup/editing contracts retain the baseline in-process;
+  // consumers and terminal UI still receive only purpose-specific projections.
+  "packages/cli/src/runtime/configuration-edit.ts",
   "packages/cli/src/runtime/runtime-secret-projections.ts",
   "packages/cli/src/serve/command.ts",
 ]);
