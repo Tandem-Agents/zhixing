@@ -7,7 +7,15 @@ import type { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from "node:url";
 import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion, verifyCheckpointBridgeArtifact, verifyCheckpointBridgeArtifactAsync } from "./checkpoint-bridge-artifact.js";
 
+import { ownedPosixFilesystem, POSIX_FILESYSTEM_LIMITS } from './checkpoint-posix-session.js';
+export { checkpointFilesystemCompletion } from './checkpoint-posix-session.js';
+
 interface NativeCheckpointChildBridge {
+  availableDiskBytes(handle: bigint): number;
+  statEntry(parent: bigint, name: string): CheckpointEntry;
+  writeAt(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): CheckpointEntry;
+  copyRange(parent: bigint, source: string, sourceIdentity: string, sourceBytes: number, sourceOffset: number, target: string, targetIdentity: string, targetOffset: number, length: number): CheckpointEntry;
+  listEntryPage(parent: bigint, offset: number, limit: number): { names: readonly string[]; end: boolean };
   readLocalProcessDeclaration(endpoint: string, pid: number): string;
   processBirth(pid: number): string;
   openPath(path: string, create: boolean, readOnly: boolean): bigint;
@@ -21,13 +29,14 @@ interface NativeCheckpointChildBridge {
   readFile(parent: bigint, name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix?: boolean): Buffer;
   listEntries(parent: bigint, maximumEntries: number): string[];
   writeRange(parent: bigint, name: string, maximumBytes: number, offset: number, bytes: Buffer, identity?: string): number;
-  renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string): void;
-  unlinkEntry(parent: bigint, name: string, directory: boolean, retiredIdentity?: string): void;
+  renameEntry(sourceParent: bigint, sourceName: string, targetParent: bigint, targetName: string, replace?: boolean): void;
+  unlinkEntry(parent: bigint, name: string, directory: boolean, retiredIdentity?: string, expectedIdentity?: string): void;
   sync(handle: bigint): void;
   close(handle: bigint): void;
 }
 
 interface BridgeApi {
+  readonly maximumTransferBytes?: number;
   copyRange(parent: bigint, source: string, sourceIdentity: string, sourceBytes: number, sourceOffset: number, target: string, targetIdentity: string | undefined, targetOffset: number, length: number): Promise<CheckpointEntry>;
   availableDiskBytes(handle: bigint): Promise<number>;
   statEntry(parent: bigint, name: string): Promise<CheckpointEntry>;
@@ -39,7 +48,7 @@ interface BridgeApi {
   statFiles(parent: bigint, names: readonly string[]): Promise<readonly { bytes: number; identity: string }[]>;
   truncateFile(parent: bigint, name: string, identity: string, bytes: number): Promise<void>;
   tryLock(parent: bigint, name: string): Promise<bigint>;
-  waitLock(parent: bigint, name: string, waitMs: number, shared: boolean): Promise<bigint>;
+  waitLock(parent: bigint, name: string, waitMs: number, shared: boolean, assertOpen?: () => void): Promise<bigint>;
   openDirectory(parent: bigint, name: string, create: boolean): Promise<bigint>;
   identity(handle: bigint): Promise<string>;
   writeFile(parent: bigint, name: string, bytes: Buffer): Promise<void>;
@@ -71,9 +80,11 @@ export interface CheckpointFilesystemProcess extends EventEmitter {
   readonly stderr: Readable;
   ref(): unknown;
   unref(): unknown;
-  kill(): boolean;
+  kill(signal?: NodeJS.Signals): boolean;
 }
-export type CheckpointFilesystemProcessFactory = (verifiedExecutable: string) => CheckpointFilesystemProcess;
+/** POSIX supplies fixed Node helper arguments; the execution owner must preserve
+ * both these arguments and the requested termination signal. */
+export type CheckpointFilesystemProcessFactory = (verifiedExecutable: string, args?: readonly string[]) => CheckpointFilesystemProcess;
 
 export class CheckpointDirectoryHandle {
   readonly identity: string;
@@ -110,30 +121,71 @@ export class CheckpointDirectoryHandle {
     };
   }
 
+  /** A successful close proves actual owner exit; a deadline failure does not. */
+  static createPosixSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory): CheckpointFilesystemSession {
+    if (process.platform !== 'linux' && process.platform !== 'darwin') throw Error('POSIX filesystem session required');
+    const owner = ownedPosixFilesystem(timeoutMs, () => verifyCheckpointBridgeArtifactAsync(
+      fileURLToPath(new URL('../', import.meta.url)), checkpointBridgeTarget(),
+    ), createProcess);
+    const api: BridgeApi = { ...windowsApi(owner.request), maximumTransferBytes: POSIX_FILESYSTEM_LIMITS.fileBytes };
+    const writeFile = api.writeFile, writeRange = api.writeRange, readFile = api.readFile;
+    // Reject before the shared wire adapter creates a base64 copy.
+    api.writeFile = (parent, name, bytes) => bytes.length > POSIX_FILESYSTEM_LIMITS.fileBytes
+      ? Promise.reject(Error('Filesystem write exceeds its byte bound')) : writeFile(parent, name, bytes);
+    api.writeRange = (parent, name, maximum, offset, bytes, identity) => bytes.length > POSIX_FILESYSTEM_LIMITS.fileBytes
+      ? Promise.reject(Error('Filesystem write exceeds its byte bound')) : writeRange(parent, name, maximum, offset, bytes, identity);
+    api.readFile = (parent, name, declared, offset, limit, identity, prefix) => !Number.isSafeInteger(limit) || limit < 1 || limit > POSIX_FILESYSTEM_LIMITS.fileBytes
+      ? Promise.reject(Error('Filesystem read exceeds its byte bound')) : readFile(parent, name, declared, offset, limit, identity, prefix);
+    return {
+      get failed() { return owner.failed(); },
+      observeNodeProcesses: () => api.observeNodeProcesses(),
+      readLocalProcessDeclaration: (endpoint, pid) => api.readLocalProcessDeclaration(endpoint, pid),
+      openPath: async (path, create, readOnly = false) => {
+        if (readOnly && create) throw Error('Read-only directory cannot be created');
+        const value = await api.openPath(path, create, readOnly);
+        try { return new CheckpointDirectoryHandle(value, await api.identity(value), api); }
+        catch (cause) { await api.close(value).catch(() => {}); throw cause; }
+      },
+      close: owner.stop,
+    };
+  }
+
+  static createSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory): CheckpointFilesystemSession {
+    return process.platform === 'win32'
+      ? this.createWindowsSession(timeoutMs, createProcess)
+      : this.createPosixSession(timeoutMs, createProcess);
+  }
+
   async openDirectory(name: string, create: boolean): Promise<CheckpointDirectoryHandle> {
     await this.#assertOpen();
-    const value = await this.#bridge.openDirectory(this[handle], childName(name), create);
-    return new CheckpointDirectoryHandle(value, await this.#bridge.identity(value), this.#bridge);
+    const value = await this.#bridge.openDirectory(this.#openHandle(), childName(name), create);
+    try {
+      const identity = await this.#bridge.identity(value);
+      this.#openHandle();
+      return new CheckpointDirectoryHandle(value, identity, this.#bridge);
+    }
+    catch (cause) { await this.#bridge.close(value).catch(() => {}); throw cause; }
   }
 
   async writeFile(name: string, bytes: Uint8Array): Promise<void> {
+    if (bytes.byteLength > (this.#bridge.maximumTransferBytes ?? Infinity)) throw new TypeError('Filesystem write exceeds its byte bound');
     await this.#assertOpen();
-    await this.#bridge.writeFile(this[handle], childName(name), Buffer.from(bytes));
+    await this.#bridge.writeFile(this.#openHandle(), childName(name), Buffer.from(bytes));
   }
 
   async statFile(name: string): Promise<{ bytes: number; identity: string }> {
     await this.#assertOpen();
-    return this.#bridge.statFile(this[handle], childName(name));
+    return this.#bridge.statFile(this.#openHandle(), childName(name));
   }
 
   /** Physical inventory of one pinned child, rejecting reparse points/hard links. */
   async statEntry(name: string): Promise<CheckpointEntry> {
     await this.#assertOpen();
-    return this.#bridge.statEntry(this[handle], childName(name));
+    return this.#bridge.statEntry(this.#openHandle(), childName(name));
   }
   async availableDiskBytes(): Promise<number> {
     await this.#assertOpen();
-    const bytes = await this.#bridge.availableDiskBytes(this[handle]);
+    const bytes = await this.#bridge.availableDiskBytes(this.#openHandle());
     if (!Number.isSafeInteger(bytes) || bytes < 0) throw Error('Invalid volume free space');
     return bytes;
   }
@@ -143,14 +195,14 @@ export class CheckpointDirectoryHandle {
     await this.#assertOpen();
     if (!Number.isSafeInteger(maximumBytes) || !Number.isSafeInteger(offset) || offset < 0 || maximumBytes < offset + bytes.byteLength || bytes.byteLength > 256 * 1024)
       throw new TypeError('Invalid bounded file write');
-    return this.#bridge.writeAt(this[handle], childName(name), maximumBytes, offset, Buffer.from(bytes), identity);
+    return this.#bridge.writeAt(this.#openHandle(), childName(name), maximumBytes, offset, Buffer.from(bytes), identity);
   }
 
   async copyRange(source: string, sourceIdentity: string, sourceBytes: number, sourceOffset: number, target: string, targetIdentity: string | undefined, targetOffset: number, length: number): Promise<CheckpointEntry> {
     await this.#assertOpen();
-    if (![sourceBytes, sourceOffset, targetOffset, length].every(Number.isSafeInteger) || sourceOffset < 0 || targetOffset < 0 || length <= 0 || length > 1024 * 1024 || sourceBytes - sourceOffset < length || !Number.isSafeInteger(targetOffset + length))
+    if (![sourceBytes, sourceOffset, targetOffset, length].every(Number.isSafeInteger) || sourceOffset < 0 || targetOffset < 0 || (!targetIdentity && targetOffset !== 0) || length <= 0 || length > 1024 * 1024 || sourceBytes - sourceOffset < length || !Number.isSafeInteger(targetOffset + length))
       throw new TypeError('Invalid bounded file copy');
-    return this.#bridge.copyRange(this[handle], childName(source), sourceIdentity, sourceBytes, sourceOffset, childName(target), targetIdentity, targetOffset, length);
+    return this.#bridge.copyRange(this.#openHandle(), childName(source), sourceIdentity, sourceBytes, sourceOffset, childName(target), targetIdentity, targetOffset, length);
   }
 
   /** One bounded IPC operation; each child still receives the ordinary native safety checks. */
@@ -158,7 +210,7 @@ export class CheckpointDirectoryHandle {
     if (names.length > 4096) throw new TypeError("Checkpoint file inventory exceeds its bound");
     const children = names.map(childName);
     await this.#assertOpen();
-    const result = await this.#bridge.statFiles(this[handle], children);
+    const result = await this.#bridge.statFiles(this.#openHandle(), children);
     if (result.length !== children.length) throw new TypeError("Checkpoint file inventory is incomplete");
     return result;
   }
@@ -167,14 +219,16 @@ export class CheckpointDirectoryHandle {
   async truncateFile(name: string, identity: string, bytes: number): Promise<void> {
     await this.#assertOpen();
     if (!Number.isSafeInteger(bytes) || bytes < 0) throw new TypeError("Invalid truncate size");
-    await this.#bridge.truncateFile(this[handle], childName(name), identity, bytes);
+    await this.#bridge.truncateFile(this.#openHandle(), childName(name), identity, bytes);
   }
 
   /** One permanent, empty control file; contention creates no temporary files. */
   async tryLock(name: string): Promise<(() => Promise<void>) | undefined> {
     await this.#assertOpen();
-    const value = await this.#bridge.tryLock(this[handle], childName(name));
+    const value = await this.#bridge.tryLock(this.#openHandle(), childName(name));
     if (value === 0n) return undefined;
+    try { this.#openHandle(); }
+    catch (cause) { await this.#bridge.close(value).catch(() => {}); throw cause; }
     let released = false;
     return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
   }
@@ -183,8 +237,10 @@ export class CheckpointDirectoryHandle {
   async waitLock(name: string, waitMs: number, mode: "exclusive" | "shared" = "exclusive"): Promise<(() => Promise<void>) | undefined> {
     if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 2000) throw new TypeError("Invalid control lock wait bound");
     await this.#assertOpen();
-    const value = await this.#bridge.waitLock(this[handle], childName(name), waitMs, mode === "shared");
+    const value = await this.#bridge.waitLock(this.#openHandle(), childName(name), waitMs, mode === "shared", () => { this.#openHandle(); });
     if (value === 0n) return undefined;
+    try { this.#openHandle(); }
+    catch (cause) { await this.#bridge.close(value).catch(() => {}); throw cause; }
     let released = false;
     return async () => { if (!released) { released = true; await this.#bridge.close(value); } };
   }
@@ -192,7 +248,7 @@ export class CheckpointDirectoryHandle {
   async readFile(name: string, declaredBytes: number, offset: number, limit: number, identity?: string, prefix = false): Promise<Buffer> {
     await this.#assertOpen();
     if (prefix && (!identity || declaredBytes < 0 || offset + limit > declaredBytes)) throw new TypeError("Invalid durable prefix read");
-    return this.#bridge.readFile(this[handle], childName(name), declaredBytes, offset, limit, identity ?? "", prefix);
+    return this.#bridge.readFile(this.#openHandle(), childName(name), declaredBytes, offset, limit, identity ?? "", prefix);
   }
 
   async listEntries(maximumEntries: number): Promise<readonly string[]> {
@@ -200,7 +256,7 @@ export class CheckpointDirectoryHandle {
     if (!Number.isSafeInteger(maximumEntries) || maximumEntries < 1) {
       throw new TypeError("Checkpoint directory entry bound is invalid");
     }
-    const entries = await this.#bridge.listEntries(this[handle], maximumEntries);
+    const entries = await this.#bridge.listEntries(this.#openHandle(), maximumEntries);
     if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
       throw new TypeError("Checkpoint directory entries are invalid");
     }
@@ -212,37 +268,38 @@ export class CheckpointDirectoryHandle {
   async listEntryPage(offset: number, limit: number): Promise<{ names: readonly string[]; end: boolean }> {
     await this.#assertOpen();
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 4096 || !Number.isSafeInteger(limit) || limit < 1 || limit > 32) throw Error('Invalid directory page');
-    const page = await this.#bridge.listEntryPage(this[handle], offset, limit);
+    const page = await this.#bridge.listEntryPage(this.#openHandle(), offset, limit);
     if (!Array.isArray(page.names) || page.names.length > limit || page.names.some(name => typeof name !== 'string') || typeof page.end !== 'boolean' || (!page.end && !page.names.length)) throw Error('Invalid directory page result');
     return page;
   }
 
   async writeRange(name: string, maximumBytes: number, offset: number, bytes: Uint8Array, identity?: string): Promise<number> {
+    if (bytes.byteLength > (this.#bridge.maximumTransferBytes ?? Infinity)) throw new TypeError('Filesystem write exceeds its byte bound');
     await this.#assertOpen();
-    return this.#bridge.writeRange(this[handle], childName(name), maximumBytes, offset, Buffer.from(bytes), identity ?? "");
+    return this.#bridge.writeRange(this.#openHandle(), childName(name), maximumBytes, offset, Buffer.from(bytes), identity ?? "");
   }
 
   async renameTo(name: string, target: CheckpointDirectoryHandle, targetName: string, replace = false): Promise<void> {
     await this.#assertOpen();
     await target.#assertOpen();
     if (this.#bridge !== target.#bridge) throw Error("Cross-session filesystem rename");
-    await this.#bridge.renameEntry(this[handle], childName(name), target[handle], childName(targetName), replace);
+    await this.#bridge.renameEntry(this.#openHandle(), childName(name), target.#openHandle(), childName(targetName), replace);
   }
 
   async unlink(name: string, directory: boolean, expectedIdentity?: string): Promise<void> {
     await this.#assertOpen();
-    await this.#bridge.unlinkEntry(this[handle], childName(name), directory, undefined, expectedIdentity);
+    await this.#bridge.unlinkEntry(this.#openHandle(), childName(name), directory, undefined, expectedIdentity);
   }
 
   /** Remove only a verified zero-length retired file, even while a reader holds it. */
   async removeRetired(name: string, identity: string): Promise<void> {
     await this.#assertOpen();
-    await this.#bridge.unlinkEntry(this[handle], childName(name), false, identity);
+    await this.#bridge.unlinkEntry(this.#openHandle(), childName(name), false, identity);
   }
 
   async sync(): Promise<void> {
     await this.#assertOpen();
-    await this.#bridge.sync(this[handle]);
+    await this.#bridge.sync(this.#openHandle());
   }
 
   async assertIdentity(): Promise<void> {
@@ -256,10 +313,17 @@ export class CheckpointDirectoryHandle {
   }
 
   async #assertOpen(): Promise<void> {
-    if (this.#closed) throw new Error("Checkpoint directory handle is closed");
-    if (await this.#bridge.identity(this[handle]) !== this.identity) {
+    if (await this.#bridge.identity(this.#openHandle()) !== this.identity) {
       throw new TypeError("Checkpoint directory handle identity changed");
     }
+    this.#openHandle();
+  }
+
+  /** Recheck in the same turn as dispatch: an awaited identity check alone
+   * permits close/reuse of a native fd before the operation resumes. */
+  #openHandle(): bigint {
+    if (this.#closed) throw new Error("Checkpoint directory handle is closed");
+    return this[handle];
   }
 }
 
@@ -290,10 +354,10 @@ export function readLocalProcessDeclaration(endpoint: string, pid: number): stri
 
 function nativeBridge(): BridgeApi {
   return {
-    availableDiskBytes: async () => { throw Error('Windows pinned volume query required'); },
-    statEntry: async () => { throw Error('Windows entry inventory required'); },
-    writeAt: async () => { throw Error('Windows bounded file write required'); },
-    copyRange: async () => { throw Error('Windows bounded file copy required'); },
+    availableDiskBytes: async (...args) => native().availableDiskBytes(...args),
+    statEntry: async (...args) => native().statEntry(...args),
+    writeAt: async (parent, name, maximum, offset, bytes, identity) => native().writeAt(parent, name, maximum, offset, bytes, identity ?? ''),
+    copyRange: async (parent, source, sourceIdentity, sourceBytes, sourceOffset, target, targetIdentity, targetOffset, length) => native().copyRange(parent, source, sourceIdentity, sourceBytes, sourceOffset, target, targetIdentity ?? '', targetOffset, length),
     observeNodeProcesses: async () => { throw Error("Windows process inventory required"); },
     readLocalProcessDeclaration: async (...args) => native().readLocalProcessDeclaration(...args),
     openPath: async (...args) => native().openPath(...args),
@@ -301,9 +365,10 @@ function nativeBridge(): BridgeApi {
     statFiles: async (parent, names) => names.map(name => native().statFile(parent, name)),
     truncateFile: async (...args) => native().truncateFile(...args),
     tryLock: async (...args) => native().tryLock(...args),
-    waitLock: async (parent, name, waitMs, shared) => {
+    waitLock: async (parent, name, waitMs, shared, assertOpen) => {
       const deadline = performance.now() + waitMs;
       do {
+        assertOpen?.();
         const value = shared ? native().tryReadLock(parent, name) : native().tryLock(parent, name);
         if (value !== 0n) return value;
         await delay(Math.min(10, Math.max(1, deadline - performance.now())));
@@ -315,15 +380,16 @@ function nativeBridge(): BridgeApi {
     writeFile: async (...args) => native().writeFile(...args),
     readFile: async (...args) => native().readFile(...args),
     listEntries: async (...args) => native().listEntries(...args),
-    listEntryPage: async () => { throw Error('Windows bounded directory page required'); },
+    listEntryPage: async (...args) => native().listEntryPage(...args),
     writeRange: async (...args) => native().writeRange(...args),
     renameEntry: async (source, name, target, targetName, replace) => {
-      if (replace) throw Error('Windows atomic replacement required');
-      native().renameEntry(source, name, target, targetName);
+      native().renameEntry(source, name, target, targetName, replace ?? false);
     },
     unlinkEntry: async (parent, name, directory, retiredIdentity, expectedIdentity) => {
-      if (expectedIdentity) throw Error('Windows identity-bound removal required');
-      native().unlinkEntry(parent, name, directory, retiredIdentity);
+      // Native cooperation is implemented, but N/S complete-operation exclusion
+      // and cleanup ownership must pass the same delivery before public use.
+      if (expectedIdentity) throw Object.assign(Error('POSIX identity deletion awaits owner integration'), { code: 'ENOTSUP' });
+      native().unlinkEntry(parent, name, directory, retiredIdentity ?? '', expectedIdentity ?? '');
     },
     sync: async (...args) => native().sync(...args),
     close: async (...args) => native().close(...args),
@@ -394,7 +460,9 @@ export interface CheckpointFilesystemSession {
   observeNodeProcesses(): Promise<NodeProcessInventory>;
   readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
   openPath(path: string, create: boolean, readOnly?: boolean): Promise<CheckpointDirectoryHandle>;
-  close(): Promise<void>;
+  /** POSIX can shorten its close bound to the containing owner's remaining
+   * milliseconds. Repeated calls never extend the first close deadline. */
+  close(remainingMs?: number): Promise<void>;
 }
 
 function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesystemProcessFactory): { api: BridgeApi; failed(): boolean; stop(): Promise<void> } {

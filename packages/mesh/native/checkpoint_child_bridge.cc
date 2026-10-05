@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cerrno>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -49,6 +51,7 @@ const char* PosixCode(int value) {
     ERRNO_NAME(ELOOP) ERRNO_NAME(EEXIST) ERRNO_NAME(EBADF) ERRNO_NAME(EINVAL)
     ERRNO_NAME(EAGAIN) ERRNO_NAME(EINTR) ERRNO_NAME(EROFS) ERRNO_NAME(ENAMETOOLONG)
     ERRNO_NAME(EMFILE) ERRNO_NAME(ENFILE) ERRNO_NAME(EBUSY)
+    ERRNO_NAME(ENOTSUP)
 #undef ERRNO_NAME
     default: return nullptr;
   }
@@ -277,6 +280,53 @@ void Flush(HANDLE handle) {
 
 using NativeHandle = int;
 
+// Every cooperating namespace writer uses an independent open description of
+// the pinned parent. dup() would share flock state and cannot serialize callers.
+// This is advisory exclusion, not an inode-conditional unlink kernel primitive.
+class NamespaceLocks {
+  struct Slot { int fd = -1; uint64_t device = 0; uint64_t inode = 0; } slots_[2];
+  size_t count_ = 0;
+
+  void Release() noexcept {
+    while (count_) { const int fd = slots_[--count_].fd; if (fd >= 0) close(fd); }
+  }
+  void Add(int parent) {
+    struct stat expected{};
+    if (fstat(parent, &expected) < 0) throw PosixFailure("Unable to inspect namespace parent");
+    if (!S_ISDIR(expected.st_mode) || expected.st_nlink == 0) throw std::runtime_error("Unsafe namespace parent");
+    const auto device = static_cast<uint64_t>(expected.st_dev), inode = static_cast<uint64_t>(expected.st_ino);
+    for (size_t index = 0; index < count_; ++index)
+      if (slots_[index].device == device && slots_[index].inode == inode) return;
+    const int fd = openat(parent, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) throw PosixFailure("Unable to open namespace lock");
+    slots_[count_++] = {fd, device, inode};
+    struct stat actual{};
+    if (fstat(fd, &actual) < 0) throw PosixFailure("Unable to inspect namespace lock");
+    if (!S_ISDIR(actual.st_mode) || actual.st_nlink == 0 || actual.st_dev != expected.st_dev || actual.st_ino != expected.st_ino)
+      throw std::runtime_error("Namespace parent identity changed");
+  }
+
+ public:
+  explicit NamespaceLocks(int parent, int second = -1) {
+    try {
+      if (parent >= 0) Add(parent);
+      if (second >= 0) Add(second);
+      if (count_ == 2 && (slots_[1].device < slots_[0].device ||
+          (slots_[1].device == slots_[0].device && slots_[1].inode < slots_[0].inode)))
+        std::swap(slots_[0], slots_[1]);
+      for (size_t index = 0; index < count_; ++index) {
+        if (flock(slots_[index].fd, LOCK_EX | LOCK_NB) < 0) {
+          const int error = errno;
+          throw PosixFailure("Unable to acquire namespace lock", error == EWOULDBLOCK || error == EAGAIN ? EBUSY : error);
+        }
+      }
+    } catch (...) { Release(); throw; }
+  }
+  ~NamespaceLocks() { Release(); }
+  NamespaceLocks(const NamespaceLocks&) = delete;
+  NamespaceLocks& operator=(const NamespaceLocks&) = delete;
+};
+
 NativeHandle OpenPath(const std::string& path, bool create) {
   if (path.empty() || path[0] != '/') throw std::runtime_error("Checkpoint path must be absolute");
   int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -290,10 +340,14 @@ NativeHandle OpenPath(const std::string& path, bool create) {
       if (end == std::string::npos) end = path.size();
       const auto part = path.substr(start, end - start);
       ExactName(part);
-      if (create && mkdirat(current, part.c_str(), 0700) < 0 && errno != EEXIST) {
-        throw PosixFailure("Unable to create checkpoint directory");
-      }
       int next = openat(current, part.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+      if (next < 0 && errno == ENOENT && create) {
+        NamespaceLocks names(current);
+        if (mkdirat(current, part.c_str(), 0700) < 0 && errno != EEXIST)
+          throw PosixFailure("Unable to create checkpoint directory");
+        next = openat(current, part.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0) throw PosixFailure("Unable to open created checkpoint directory without following links");
+      }
       if (next < 0) throw PosixFailure("Unable to open checkpoint directory without following links");
       close(current);
       current = next;
@@ -311,12 +365,21 @@ NativeHandle OpenRelative(NativeHandle parent, const std::string& name, bool dir
   if (directory && create && mkdirat(parent, name.c_str(), 0700) < 0 && errno != EEXIST) {
     throw PosixFailure("Unable to create checkpoint directory");
   }
-  int flags = O_CLOEXEC | O_NOFOLLOW | (directory ? O_RDONLY | O_DIRECTORY : writable ? O_RDWR : O_RDONLY);
+  // Do not block on a substituted FIFO/device before checking its actual kind.
+  int flags = O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | (directory ? O_RDONLY | O_DIRECTORY : writable ? O_RDWR : O_RDONLY);
   if (!directory && create) flags |= O_CREAT | (exclusive ? O_EXCL : 0);
   int result = openat(parent, name.c_str(), flags, 0600);
   if (result < 0) {
     if (errno == ENOENT) throw std::runtime_error("checkpoint-child-missing");
     throw PosixFailure("Unable to open checkpoint child relative to its frozen parent");
+  }
+  struct stat info{};
+  if (fstat(result, &info) < 0) {
+    const int error = errno; close(result);
+    throw PosixFailure("Unable to inspect checkpoint child", error);
+  }
+  if (directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode) || info.st_nlink != 1) {
+    close(result); throw std::runtime_error("Unsafe checkpoint child kind or links");
   }
   return result;
 }
@@ -439,6 +502,189 @@ uint64_t HandleValue(NativeHandle handle) {
 #endif
 }
 
+#ifndef _WIN32
+// The managed POSIX session invokes these synchronous primitives in its owned
+// process. Keeping descriptors through the whole operation pins the object even
+// when the caller's namespace is renamed concurrently.
+class ScopedFd {
+ public:
+  const int value;
+  explicit ScopedFd(int fd) : value(fd) {}
+  ~ScopedFd() { if (value >= 0) close(value); }
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
+};
+
+constexpr int64_t kSafeInteger = 9007199254740991LL;
+int64_t BoundedInteger(napi_env env, napi_value value) {
+  double number = 0;
+  Check(env, napi_get_value_double(env, value, &number), "Expected an integer");
+  if (!std::isfinite(number) || number < 0 || number > kSafeInteger || std::floor(number) != number)
+    throw std::runtime_error("Invalid bounded integer");
+  return static_cast<int64_t>(number);
+}
+
+struct stat EntryStat(int fd) {
+  struct stat info{};
+  if (fstat(fd, &info) < 0) throw PosixFailure("Unable to inspect checkpoint entry");
+  if ((!S_ISDIR(info.st_mode) && (!S_ISREG(info.st_mode) || info.st_nlink != 1)) ||
+      info.st_size < 0 || info.st_size > kSafeInteger || info.st_blocks < 0 ||
+      static_cast<uint64_t>(info.st_blocks) > static_cast<uint64_t>(kSafeInteger) / 512)
+    throw std::runtime_error("Unsafe checkpoint entry kind, links or allocation");
+  return info;
+}
+
+std::string StatIdentity(const struct stat& info) {
+  return std::to_string(static_cast<uint64_t>(info.st_dev)) + ":" + std::to_string(static_cast<uint64_t>(info.st_ino));
+}
+
+napi_value EntryResult(napi_env env, const struct stat& info) {
+  auto result = Object(env);
+  Set(env, result, "kind", String(env, S_ISDIR(info.st_mode) ? "directory" : "file"));
+  Set(env, result, "bytes", Integer(env, info.st_size));
+  Set(env, result, "allocatedBytes", Integer(env, static_cast<int64_t>(info.st_blocks) * 512));
+  Set(env, result, "identity", String(env, StatIdentity(info)));
+  return result;
+}
+
+int OpenEntry(int parent, const std::string& name, bool allowMissing = false) {
+  ExactName(name);
+  const int fd = openat(parent, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0 && !(allowMissing && errno == ENOENT)) throw PosixFailure("Unable to open checkpoint entry");
+  return fd;
+}
+
+void WriteAtFd(int fd, const char* data, size_t length, int64_t offset) {
+  size_t written = 0;
+  while (written < length) {
+    const auto count = pwrite(fd, data + written, length - written, static_cast<off_t>(offset + written));
+    if (count < 0) { if (errno == EINTR) continue; throw PosixFailure("Checkpoint bounded write failed"); }
+    if (count == 0) throw std::runtime_error("Checkpoint bounded write made no progress");
+    written += static_cast<size_t>(count);
+  }
+}
+
+napi_value AvailableDiskBytesCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 1; napi_value args[1]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    struct statvfs volume{};
+    if (fstatvfs(Handle(U64(env, args[0])), &volume) < 0) throw PosixFailure("Unable to query pinned volume free space");
+    const auto unit = static_cast<uint64_t>(volume.f_frsize);
+    const auto available = static_cast<uint64_t>(volume.f_bavail);
+    if (!unit || unit > static_cast<uint64_t>(kSafeInteger) || available > static_cast<uint64_t>(kSafeInteger) / unit)
+      throw std::runtime_error("Invalid pinned volume free space");
+    return Integer(env, static_cast<int64_t>(available * unit));
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
+
+napi_value StatEntryCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    ScopedFd child(OpenEntry(Handle(U64(env, args[0])), Utf8(env, args[1])));
+    return EntryResult(env, EntryStat(child.value));
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
+
+napi_value WriteAtCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 6; napi_value args[6]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto name = Utf8(env, args[1]); ExactName(name);
+    const auto maximum = BoundedInteger(env, args[2]), offset = BoundedInteger(env, args[3]);
+    void* data = nullptr; size_t length = 0;
+    Check(env, napi_get_buffer_info(env, args[4], &data, &length), "Expected a byte buffer");
+    const auto expected = argc >= 6 ? Utf8(env, args[5]) : "";
+    if (length > 256 * 1024 || offset > maximum || length > static_cast<uint64_t>(maximum - offset))
+      throw std::runtime_error("Invalid bounded file write");
+    const auto parent = Handle(U64(env, args[0]));
+    NamespaceLocks names(parent);
+    ScopedFd file(OpenRelative(parent, name, false, expected.empty(), expected.empty()));
+    const auto before = EntryStat(file.value);
+    if (!S_ISREG(before.st_mode) || before.st_size > maximum || (!expected.empty() && StatIdentity(before) != expected))
+      throw std::runtime_error("Bounded file identity changed before write");
+    WriteAtFd(file.value, static_cast<const char*>(data), length, offset);
+    Flush(file.value);
+    const auto after = EntryStat(file.value);
+    if (after.st_size > maximum || StatIdentity(after) != StatIdentity(before))
+      throw std::runtime_error("Bounded file identity changed during write");
+    return EntryResult(env, after);
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
+
+napi_value CopyRangeCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 9; napi_value args[9]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto parent = Handle(U64(env, args[0]));
+    const auto sourceName = Utf8(env, args[1]), sourceIdentity = Utf8(env, args[2]);
+    const auto sourceBytes = BoundedInteger(env, args[3]), sourceOffset = BoundedInteger(env, args[4]);
+    const auto targetName = Utf8(env, args[5]), targetIdentity = Utf8(env, args[6]);
+    const auto targetOffset = BoundedInteger(env, args[7]), length = BoundedInteger(env, args[8]);
+    ExactName(sourceName); ExactName(targetName);
+    if (sourceName == targetName || sourceIdentity.empty() || (targetIdentity.empty() && targetOffset != 0) || length < 1 || length > 1024 * 1024 ||
+        sourceOffset > sourceBytes || length > sourceBytes - sourceOffset || targetOffset > kSafeInteger - length)
+      throw std::runtime_error("Invalid bounded file copy");
+    NamespaceLocks names(parent);
+    ScopedFd source(OpenRelative(parent, sourceName, false, false, false, false));
+    const auto sourceBefore = EntryStat(source.value);
+    if (StatIdentity(sourceBefore) != sourceIdentity || sourceBefore.st_size != sourceBytes)
+      throw std::runtime_error("Copy source identity changed");
+    ScopedFd target(OpenRelative(parent, targetName, false, targetIdentity.empty(), targetIdentity.empty()));
+    const auto targetBefore = EntryStat(target.value);
+    if (targetBefore.st_size != targetOffset || StatIdentity(targetBefore) == sourceIdentity ||
+        (!targetIdentity.empty() && StatIdentity(targetBefore) != targetIdentity))
+      throw std::runtime_error("Copy target identity changed");
+    std::vector<char> buffer(64 * 1024);
+    int64_t copied = 0;
+    while (copied < length) {
+      const auto count = pread(source.value, buffer.data(), static_cast<size_t>(std::min<int64_t>(buffer.size(), length - copied)), sourceOffset + copied);
+      if (count < 0) { if (errno == EINTR) continue; throw PosixFailure("Copy source read failed"); }
+      if (count == 0) throw std::runtime_error("Copy source range is truncated");
+      WriteAtFd(target.value, buffer.data(), static_cast<size_t>(count), targetOffset + copied);
+      copied += count;
+    }
+    Flush(target.value);
+    const auto sourceAfter = EntryStat(source.value), targetAfter = EntryStat(target.value);
+    if (StatIdentity(sourceAfter) != sourceIdentity || sourceAfter.st_size != sourceBytes ||
+        StatIdentity(targetAfter) != StatIdentity(targetBefore) || targetAfter.st_size != targetOffset + length)
+      throw std::runtime_error("Copy identity changed during transfer");
+    return EntryResult(env, targetAfter);
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
+
+napi_value ListEntryPageCall(napi_env env, napi_callback_info info) {
+  try {
+    size_t argc = 3; napi_value args[3]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    const auto offset = BoundedInteger(env, args[1]), limit = BoundedInteger(env, args[2]);
+    if (offset > 4096 || limit < 1 || limit > 32) throw std::runtime_error("Invalid directory page");
+    const int copy = openat(Handle(U64(env, args[0])), ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (copy < 0) throw PosixFailure("Unable to open directory enumeration");
+    DIR* directory = fdopendir(copy);
+    if (!directory) { const int error = errno; close(copy); throw PosixFailure("Unable to enumerate directory", error); }
+    std::vector<std::string> names;
+    bool end = true;
+    try {
+      int64_t skipped = 0;
+      while (true) {
+        errno = 0;
+        const auto* entry = readdir(directory);
+        if (!entry) { if (errno) throw PosixFailure("Unable to read directory page"); break; }
+        const std::string name(entry->d_name);
+        if (name == "." || name == "..") continue;
+        // Invalid names remain a visible failure, never invisible occupied assets.
+        ExactName(name);
+        if (skipped++ < offset) continue;
+        if (names.size() == static_cast<size_t>(limit)) { end = false; break; }
+        names.push_back(name);
+      }
+      closedir(directory);
+    } catch (...) { closedir(directory); throw; }
+    auto result = Object(env); Set(env, result, "names", Strings(env, names));
+    napi_value ended; Check(env, napi_get_boolean(env, end, &ended), "Unable to return directory page");
+    Set(env, result, "end", ended);
+    return result;
+  } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
+}
+#endif
+
 napi_value OpenPathCall(napi_env env, napi_callback_info info) {
   try {
     size_t argc = 2; napi_value args[2]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
@@ -453,7 +699,10 @@ napi_value OpenDirectoryCall(napi_env env, napi_callback_info info) {
 #ifdef _WIN32
     auto child = OpenRelative(Handle(U64(env, args[0])), Wide(name), true, Bool(env, args[2]));
 #else
-    auto child = OpenRelative(Handle(U64(env, args[0])), name, true, Bool(env, args[2]));
+    const auto parent = Handle(U64(env, args[0]));
+    const bool create = Bool(env, args[2]);
+    NamespaceLocks names(create ? parent : -1);
+    auto child = OpenRelative(parent, name, true, create);
 #endif
     return BigInt(env, HandleValue(child));
   } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
@@ -482,7 +731,9 @@ napi_value WriteFileCall(napi_env env, napi_callback_info info) {
       CloseHandle(file);
     } catch (...) { CloseHandle(file); throw; }
 #else
-    int file = OpenRelative(Handle(U64(env, args[0])), name, false, true, true);
+    const auto parent = Handle(U64(env, args[0]));
+    NamespaceLocks names(parent);
+    int file = OpenRelative(parent, name, false, true, true);
     try {
       size_t offset = 0;
       while (offset < length) { ssize_t written = write(file, static_cast<char*>(data) + offset, length - offset); if (written < 0) throw PosixFailure("Checkpoint file IO failed"); if (written == 0) throw std::runtime_error("Checkpoint file write made no progress"); offset += static_cast<size_t>(written); }
@@ -576,7 +827,11 @@ napi_value WriteRangeCall(napi_env env, napi_callback_info info) {
       return Integer(env, size.QuadPart);
     } catch (...) { CloseHandle(file); throw; }
 #else
-    int file = OpenRelative(Handle(U64(env, args[0])), name, false, true);
+    const auto parent = Handle(U64(env, args[0]));
+    NamespaceLocks names(parent);
+    // A missing file can only begin at zero without a prior identity. Reject a
+    // missing append/replay target before creating any namespace entry.
+    int file = OpenRelative(parent, name, false, expected.empty() && offset == 0);
     try {
       struct stat st{}; if (fstat(file, &st) < 0) throw PosixFailure("Unable to inspect checkpoint file"); if (st.st_size > maximum || offset > st.st_size || !S_ISREG(st.st_mode) || st.st_nlink != 1 || (!expected.empty() && (IdentityValue(file) != expected || st.st_size != offset))) throw std::runtime_error("Checkpoint durable prefix is invalid");
       if (offset < st.st_size) {
@@ -598,8 +853,9 @@ napi_value WriteRangeCall(napi_env env, napi_callback_info info) {
 
 napi_value RenameCall(napi_env env, napi_callback_info info) {
   try {
-    size_t argc = 4; napi_value args[4]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    size_t argc = 5; napi_value args[5]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
     const auto source = Utf8(env, args[1]); const auto target = Utf8(env, args[3]); ExactName(source); ExactName(target);
+    const bool replace = argc >= 5 && Bool(env, args[4]);
 #ifdef _WIN32
     HANDLE file;
     try { file = OpenRelative(Handle(U64(env, args[0])), Wide(source), true, false); }
@@ -607,14 +863,22 @@ napi_value RenameCall(napi_env env, napi_callback_info info) {
     const auto wide = Wide(target);
     std::vector<unsigned char> storage(sizeof(FILE_RENAME_INFO) + wide.size() * sizeof(wchar_t));
     auto* renameInfo = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-    renameInfo->ReplaceIfExists = FALSE; renameInfo->RootDirectory = Handle(U64(env, args[2])); renameInfo->FileNameLength = static_cast<DWORD>(wide.size() * sizeof(wchar_t));
+    renameInfo->ReplaceIfExists = replace ? TRUE : FALSE; renameInfo->RootDirectory = Handle(U64(env, args[2])); renameInfo->FileNameLength = static_cast<DWORD>(wide.size() * sizeof(wchar_t));
     memcpy(renameInfo->FileName, wide.data(), renameInfo->FileNameLength);
     if (!SetFileInformationByHandle(file, FileRenameInfo, renameInfo, static_cast<DWORD>(storage.size()))) { CloseHandle(file); throw std::runtime_error("Unable to rename checkpoint entry by handle"); }
     CloseHandle(file);
 #else
-    RenameNoReplace(
-      Handle(U64(env, args[0])), source,
-      Handle(U64(env, args[2])), target);
+    NamespaceLocks names(Handle(U64(env, args[0])), Handle(U64(env, args[2])));
+    ScopedFd sourceEntry(OpenEntry(Handle(U64(env, args[0])), source));
+    EntryStat(sourceEntry.value);
+    if (replace) {
+      ScopedFd targetEntry(OpenEntry(Handle(U64(env, args[2])), target, true));
+      if (targetEntry.value >= 0) EntryStat(targetEntry.value);
+      if (renameat(Handle(U64(env, args[0])), source.c_str(), Handle(U64(env, args[2])), target.c_str()) < 0)
+        throw PosixFailure("Unable to atomically replace checkpoint entry");
+    } else {
+      RenameNoReplace(Handle(U64(env, args[0])), source, Handle(U64(env, args[2])), target);
+    }
 #endif
     return nullptr;
   } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
@@ -622,12 +886,14 @@ napi_value RenameCall(napi_env env, napi_callback_info info) {
 
 napi_value UnlinkCall(napi_env env, napi_callback_info info) {
   try {
-    size_t argc = 4; napi_value args[4]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
+    size_t argc = 5; napi_value args[5]; Check(env, napi_get_cb_info(env, info, &argc, args, nullptr, nullptr), "Invalid call");
     const auto name = Utf8(env, args[1]); ExactName(name); const bool directory = Bool(env, args[2]);
     const std::string retiredIdentity = argc >= 4 ? Utf8(env, args[3]) : "";
+    const std::string expectedIdentity = argc >= 5 ? Utf8(env, args[4]) : "";
     if (directory && !retiredIdentity.empty()) throw std::runtime_error("Retired target must be a file");
 #ifdef _WIN32
     HANDLE child = OpenRelative(Handle(U64(env, args[0])), Wide(name), directory, false);
+    if (!expectedIdentity.empty() && IdentityValue(child) != expectedIdentity) { CloseHandle(child); throw std::runtime_error("Checkpoint entry identity changed before delete"); }
     if (!directory) { BY_HANDLE_FILE_INFORMATION info{}; if (!GetFileInformationByHandle(child, &info) || info.nNumberOfLinks != 1) { CloseHandle(child); throw std::runtime_error("Checkpoint file identity changed before delete"); } }
     if (!retiredIdentity.empty()) {
       BY_HANDLE_FILE_INFORMATION info{};
@@ -640,13 +906,19 @@ napi_value UnlinkCall(napi_env env, napi_callback_info info) {
     }
     CloseHandle(child);
 #else
-    if (!directory) {
-      int child = OpenRelative(Handle(U64(env, args[0])), name, false, false);
-      struct stat st{}; if (fstat(child, &st) < 0) { const int error = errno; close(child); throw PosixFailure("Unable to inspect checkpoint file", error); } if (!S_ISREG(st.st_mode) || st.st_nlink != 1) { close(child); throw std::runtime_error("Checkpoint file identity changed before delete"); }
-      if (!retiredIdentity.empty() && (st.st_size != 0 || IdentityValue(child) != retiredIdentity)) { close(child); throw std::runtime_error("Retired file space is not confirmed"); }
-      close(child);
-    }
-    if (unlinkat(Handle(U64(env, args[0])), name.c_str(), directory ? AT_REMOVEDIR : 0) < 0) {
+    const auto parent = Handle(U64(env, args[0]));
+    NamespaceLocks names(parent);
+    ScopedFd child(OpenRelative(parent, name, directory, false, false, false));
+    const auto stat = EntryStat(child.value);
+    if ((directory ? !S_ISDIR(stat.st_mode) : !S_ISREG(stat.st_mode)) ||
+        (!expectedIdentity.empty() && StatIdentity(stat) != expectedIdentity))
+      throw std::runtime_error("Checkpoint entry identity changed before delete");
+    if (!retiredIdentity.empty() && (stat.st_size != 0 || StatIdentity(stat) != retiredIdentity))
+      throw std::runtime_error("Retired file space is not confirmed");
+    // All legal namespace writers hold the same parent lock through this point.
+    // Public POSIX transports remain fenced until their N/S owner prerequisites
+    // are integrated and validated; this is not protection from bypass writers.
+    if (unlinkat(parent, name.c_str(), directory ? AT_REMOVEDIR : 0) < 0) {
       if (errno == ENOENT) throw std::runtime_error("checkpoint-child-missing");
       throw PosixFailure("Unable to delete checkpoint entry by handle");
     }
@@ -729,17 +1001,25 @@ napi_value ControlLockCall(napi_env env, napi_callback_info info, bool shared) {
       return BigInt(env, HandleValue(file));
     } catch (...) { CloseHandle(file); throw; }
 #else
-    int file = OpenRelative(Handle(U64(env, args[0])), name, false, !shared, false, !shared);
+    int file = -1;
     try {
-      struct stat stat{};
-      if (fstat(file, &stat) < 0) throw PosixFailure("Unable to inspect checkpoint file"); if (!S_ISREG(stat.st_mode) || stat.st_nlink != 1 || stat.st_size != 0) throw std::runtime_error("Unsafe control lock");
+      {
+        const auto parent = Handle(U64(env, args[0]));
+        NamespaceLocks names(parent);
+        file = OpenRelative(parent, name, false, !shared, false, !shared);
+        struct stat stat{};
+        if (fstat(file, &stat) < 0) throw PosixFailure("Unable to inspect checkpoint file");
+        if (!S_ISREG(stat.st_mode) || stat.st_nlink != 1 || stat.st_size != 0) throw std::runtime_error("Unsafe control lock");
+      }
+      // The permanent control file is pinned, and no namespace lock is held
+      // when attempting the longer-lived business lock.
       if (flock(file, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) < 0) {
         const auto error = errno;
         if (error == EWOULDBLOCK || error == EAGAIN) { close(file); return BigInt(env, 0); }
         throw PosixFailure("Unable to acquire control lock", error);
       }
       return BigInt(env, HandleValue(file));
-    } catch (...) { close(file); throw; }
+    } catch (...) { if (file >= 0) close(file); throw; }
 #endif
   } catch (const std::exception& error) { ThrowFailure(env, error); return nullptr; }
 }
@@ -823,6 +1103,13 @@ napi_value ReadLocalProcessDeclarationCall(napi_env env, napi_callback_info info
 
 napi_value Init(napi_env env, napi_value exports) {
   const napi_property_descriptor properties[] = {
+#ifndef _WIN32
+    {"availableDiskBytes", nullptr, AvailableDiskBytesCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"statEntry", nullptr, StatEntryCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"writeAt", nullptr, WriteAtCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"copyRange", nullptr, CopyRangeCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"listEntryPage", nullptr, ListEntryPageCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
     {"readLocalProcessDeclaration", nullptr, ReadLocalProcessDeclarationCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"processBirth", nullptr, ProcessBirthCall, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"statFile", nullptr, StatFileCall, nullptr, nullptr, nullptr, napi_default, nullptr},

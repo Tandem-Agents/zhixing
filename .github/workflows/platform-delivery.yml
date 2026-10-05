@@ -2,6 +2,11 @@ name: Platform delivery verification
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed candidate commit (40 hexadecimal characters)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,9 +18,16 @@ jobs:
       matrix: ${{ steps.matrix.outputs.value }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '24.0.0'
+      - name: Verify exact candidate and runtime
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: >-
+          node -e "const cp=require('node:child_process'); const expected=process.env.EXPECTED_SHA; const actual=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); if(!/^[0-9a-f]{40}$/.test(expected)||actual!==expected||process.env.GITHUB_SHA!==expected||process.version!=='v24.0.0') process.exit(1); console.log(JSON.stringify({sha:actual,node:process.version,platform:process.platform,arch:process.arch,glibc:process.report.getReport().header.glibcVersionRuntime??null}));"
       - id: matrix
         run: |
           node --input-type=module <<'JS'
@@ -38,9 +50,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '24.0.0'
+      - name: Verify exact candidate and runtime
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_ID: ${{ matrix.id }}
+        run: >-
+          node -e "const cp=require('node:child_process'); const expected=process.env.EXPECTED_SHA; const actual=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); if(!/^[0-9a-f]{40}$/.test(expected)||actual!==expected||process.env.GITHUB_SHA!==expected||process.version!=='v24.0.0'||process.platform+'-'+process.arch!==process.env.TARGET_ID) process.exit(1); console.log(JSON.stringify({sha:actual,node:process.version,platform:process.platform,arch:process.arch,glibc:process.report.getReport().header.glibcVersionRuntime??null}));"
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: node packages/mesh/scripts/build-checkpoint-child-bridge.mjs
@@ -62,9 +82,17 @@ jobs:
       npm_config_workspace_concurrency: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '24.0.0'
+      - name: Verify exact candidate and runtime
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_ID: ${{ matrix.id }}
+        run: >-
+          node -e "const cp=require('node:child_process'); const expected=process.env.EXPECTED_SHA; const actual=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); if(!/^[0-9a-f]{40}$/.test(expected)||actual!==expected||process.env.GITHUB_SHA!==expected||process.version!=='v24.0.0'||process.platform+'-'+process.arch!==process.env.TARGET_ID) process.exit(1); const evidence=JSON.stringify({sha:actual,node:process.version,platform:process.platform,arch:process.arch,glibc:process.report.getReport().header.glibcVersionRuntime??null}); require('node:fs').writeFileSync('platform-identity.json',evidence+'\n'); console.log(evidence);"
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
@@ -73,6 +101,17 @@ jobs:
           merge-multiple: true
           path: packages/mesh/build/prebuilt
       - run: pnpm build
-      - run: pnpm --filter @zhixing/mesh exec vitest run src/__tests__/checkpoint-bridge-artifact.test.ts src/__tests__/checkpoint-child-bridge.test.ts --maxWorkers=1 --minWorkers=1
-      - run: pnpm --filter @zhixing/cli exec vitest run src/runtime-support.test.ts src/serve/managed-service.test.ts --maxWorkers=1 --minWorkers=1
+      - run: pnpm --filter @zhixing/mesh exec node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
+      - run: pnpm --filter @zhixing/mesh exec vitest run src/__tests__/checkpoint-bridge-artifact.test.ts src/__tests__/checkpoint-child-bridge.test.ts src/__tests__/checkpoint-filesystem-session.test.ts src/__tests__/checkpoint-posix-session.test.ts src/__tests__/checkpoint-posix-session-native.test.ts --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json "--outputFile=${{ github.workspace }}/packages/mesh/mesh-platform-tests.json"
+      - run: pnpm --filter @zhixing/cli exec vitest run src/runtime-support.test.ts src/serve/managed-service.test.ts src/logging/store-process.integration.test.ts --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json "--outputFile=${{ github.workspace }}/packages/cli/cli-platform-tests.json"
       - run: pnpm package:check -- --skip-build --all-targets
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mesh-results-${{ matrix.id }}-${{ github.sha }}
+          path: |
+            platform-identity.json
+            packages/mesh/mesh-platform-tests.json
+            packages/cli/cli-platform-tests.json
+            packages/mesh/build/prebuilt/*/descriptor.json
+          if-no-files-found: warn
