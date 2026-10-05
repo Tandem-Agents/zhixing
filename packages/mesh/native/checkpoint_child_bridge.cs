@@ -33,6 +33,8 @@ internal static class CheckpointChildBridge {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint capacity, uint flags);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool GetDiskFreeSpaceExW(string directory, out ulong available, out ulong total, out ulong free);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FlushFileBuffers(IntPtr handle);
   [StructLayout(LayoutKind.Sequential)] struct OVERLAPPED { public IntPtr Internal, InternalHigh; public uint Offset, OffsetHigh; public IntPtr Event; }
@@ -61,6 +63,18 @@ internal static class CheckpointChildBridge {
   static void Main() {
     Console.InputEncoding = new UTF8Encoding(false);
     Console.OutputEncoding = new UTF8Encoding(false);
+    // Only the containing foreground owner supplies this fixed private pipe.
+    // Ordinary checkpoint/logging owners retain their existing stdio protocol.
+    var endpoint = Environment.GetEnvironmentVariable("ZHIXING_CHECKPOINT_PIPE");
+    NamedPipeClientStream transport = null;
+    if (endpoint != null) {
+      const string prefix = "\\\\.\\pipe\\zhixing-terminal-";
+      if (!endpoint.StartsWith(prefix, StringComparison.Ordinal) || endpoint.Length > 160) throw new InvalidOperationException("Invalid filesystem owner pipe");
+      transport = new NamedPipeClientStream(".", endpoint.Substring(9), PipeDirection.InOut);
+      transport.Connect(5000);
+      Console.SetIn(new StreamReader(transport, new UTF8Encoding(false), false, 4096, true));
+      Console.SetOut(new StreamWriter(transport, new UTF8Encoding(false), 4096, true) { AutoFlush = true });
+    }
     string line;
     while ((line = Console.ReadLine()) != null) {
       Dictionary<string, object> request = null;
@@ -74,6 +88,7 @@ internal static class CheckpointChildBridge {
       }
     }
     foreach (var handle in Handles.Values) CloseHandle(handle);
+    if (transport != null) transport.Dispose();
   }
 
   static object Dispatch(Dictionary<string, object> r) {
@@ -82,6 +97,10 @@ internal static class CheckpointChildBridge {
     if (op == "readLocalProcessDeclaration") return ReadLocalProcessDeclaration(Text(r, "endpoint"), Number(r, "pid"));
     if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create"), r.ContainsKey("readOnly") && Flag(r, "readOnly")));
     if (op == "statFile") return StatFile(Get(r, "parent"), Text(r, "name"));
+    if (op == "statEntry") return StatEntry(Get(r, "parent"), Text(r, "name"));
+    if (op == "availableDiskBytes") return AvailableDiskBytes(Get(r, "handle"));
+    if (op == "writeAt") return WriteAt(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")), r.ContainsKey("identity") ? Text(r, "identity") : null);
+    if (op == "copyRange") return CopyRange(Get(r, "parent"), Text(r, "source"), Text(r, "sourceIdentity"), Number(r, "sourceBytes"), Number(r, "sourceOffset"), Text(r, "target"), r.ContainsKey("targetIdentity") ? Text(r, "targetIdentity") : null, Number(r, "targetOffset"), Number(r, "length"));
     if (op == "statFiles") {
       var names = r["names"] as System.Collections.IList;
       if (names == null || names.Count > 4096) throw new InvalidOperationException("Checkpoint file inventory exceeds its bound");
@@ -100,9 +119,14 @@ internal static class CheckpointChildBridge {
     if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
     if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null, r.ContainsKey("prefix") && Flag(r, "prefix")));
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
+    if (op == "listEntryPage") {
+      var offset = Number(r, "offset"); var limit = Number(r, "limit");
+      if (offset < 0 || offset > 4096 || limit < 1 || limit > 32) throw new InvalidOperationException("Invalid directory page");
+      return ReadEntries(Get(r, "parent"), offset, limit, false);
+    }
     if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")), r.ContainsKey("identity") ? Text(r, "identity") : null);
-    if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName")); return true; }
-    if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory"), r.ContainsKey("retiredIdentity") ? Text(r, "retiredIdentity") : null); return true; }
+    if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName"), r.ContainsKey("replace") && Flag(r, "replace")); return true; }
+    if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory"), r.ContainsKey("retiredIdentity") ? Text(r, "retiredIdentity") : null, r.ContainsKey("expectedIdentity") ? Text(r, "expectedIdentity") : null); return true; }
     if (op == "sync") { if (!FlushFileBuffers(Get(r, "handle"))) throw Win32("Unable to flush checkpoint handle"); return true; }
     if (op == "close") { var id = Number(r, "handle"); var h = GetById(id); Handles.Remove(id); if (!CloseHandle(h)) throw Win32("Unable to close checkpoint handle"); return true; }
     throw new InvalidOperationException("Unsupported checkpoint bridge operation");
@@ -137,6 +161,11 @@ internal static class CheckpointChildBridge {
     var entries = new List<object>(); var complete = true; var characters = 0; object failure = null;
     using (var search = new ManagementObjectSearcher("SELECT ProcessId, CreationDate, CommandLine FROM Win32_Process WHERE Name='node.exe' OR Name='node'")) {
       search.Options.Timeout = TimeSpan.FromSeconds(2);
+      // This inventory is consumed once, forward only. Avoid retaining a
+      // rewindable COM enumeration and fetching each row in a separate batch.
+      // Freshness, identity sources and conservative completeness stay intact.
+      search.Options.Rewindable = false;
+      search.Options.BlockSize = 16;
       using (var rows = search.Get()) foreach (ManagementObject row in rows) using (row) {
         if (entries.Count >= 256) { complete = false; if (failure == null) failure = new { reason = "inventory-limit" }; break; }
         var pid = Convert.ToInt32(row["ProcessId"]);
@@ -334,6 +363,12 @@ internal static class CheckpointChildBridge {
 
   static string[] ListEntries(IntPtr parent, long maximumEntries) {
     if (maximumEntries < 1 || maximumEntries > 100000) throw new InvalidOperationException("Checkpoint directory entry bound is invalid");
+    return ReadEntries(parent, 0, maximumEntries, true).names;
+  }
+
+  sealed class DirectoryPage { public string[] names; public bool end; }
+
+  static DirectoryPage ReadEntries(IntPtr parent, long skip, long maximumEntries, bool complete) {
     const int bufferSize = 64 * 1024, fileNameLengthOffset = 60, fileNameOffset = 104;
     var buffer = Marshal.AllocHGlobal(bufferSize);
     var values = new List<string>();
@@ -354,8 +389,14 @@ internal static class CheckpointChildBridge {
           }
           var name = Marshal.PtrToStringUni(IntPtr.Add(current, fileNameOffset), nameBytes / 2);
           if (name != "." && name != "..") {
-            if (++total > maximumEntries) throw new InvalidOperationException("Checkpoint directory inventory exceeds its bound");
-            if (ValidName(name)) values.Add(name);
+            if (!ValidName(name)) throw new InvalidOperationException("Checkpoint directory contains an unknown child name");
+            if (++total > skip) {
+              if (values.Count == maximumEntries) {
+                if (complete) throw new InvalidOperationException("Checkpoint directory inventory exceeds its bound");
+                return new DirectoryPage { names = values.ToArray(), end = false };
+              }
+              values.Add(name);
+            }
           }
           var next = Marshal.ReadInt32(current, 0);
           if (next == 0) break;
@@ -366,14 +407,16 @@ internal static class CheckpointChildBridge {
         }
         infoClass = FileIdBothDirectoryInfo;
       }
-      values.Sort(StringComparer.Ordinal);
-      return values.ToArray();
+      if (complete) values.Sort(StringComparer.Ordinal);
+      return new DirectoryPage { names = values.ToArray(), end = true };
     } finally { Marshal.FreeHGlobal(buffer); }
   }
 
   static long WriteRange(IntPtr parent, string name, long maximum, long offset, byte[] bytes, string expected) {
-    if (maximum < 0 || offset < 0 || offset > maximum || offset + bytes.LongLength > maximum) throw new InvalidOperationException("Checkpoint file range is invalid");
-    var file = OpenRelative(parent, name, false, true, false);
+    if (maximum < 0 || offset < 0 || offset > maximum || bytes.LongLength > maximum - offset) throw new InvalidOperationException("Checkpoint file range is invalid");
+    // A resumed or identity-bound prefix must already exist. Opening it may
+    // fail, but must never create an unowned empty name before validation.
+    var file = OpenRelative(parent, name, false, expected == null && offset == 0, false);
     try {
       BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint durable prefix identity changed");
       var actual = Size(info); if (actual > maximum || offset > actual || (expected != null && (Identity(info) != expected || actual != offset))) throw new InvalidOperationException("Checkpoint durable prefix is invalid");
@@ -395,14 +438,110 @@ internal static class CheckpointChildBridge {
     } finally { Array.Clear(bytes, 0, bytes.Length); CloseHandle(file); }
   }
 
-  static void Rename(IntPtr sourceParent, string sourceName, IntPtr targetParent, string targetName) {
+  static object EntryInfo(IntPtr handle) {
+    RejectReparse(handle);
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, out info)) throw Win32("Unable to inspect pinned entry");
+    var directory = (info.FileAttributes & 0x10) != 0;
+    if (!directory && info.NumberOfLinks != 1) throw new InvalidOperationException("Checkpoint entry has multiple links");
+    // FILE_STANDARD_INFO has AllocationSize at offset 0 and EndOfFile at 8.
+    var standard = Marshal.AllocHGlobal(24);
+    try {
+      if (!GetFileInformationByHandleEx(handle, 1, standard, 24)) throw Win32("Unable to inspect physical allocation");
+      var allocated = Marshal.ReadInt64(standard, 0); var bytes = Marshal.ReadInt64(standard, 8);
+      if (allocated < 0 || bytes < 0) throw new InvalidOperationException("Invalid physical allocation");
+      return new { kind = directory ? "directory" : "file", bytes = bytes, allocatedBytes = allocated, identity = Identity(info) };
+    } finally { Marshal.FreeHGlobal(standard); }
+  }
+
+  static long AvailableDiskBytes(IntPtr handle) {
+    var path = new StringBuilder(1024);
+    var length = GetFinalPathNameByHandleW(handle, path, 1024, 1); // VOLUME_NAME_GUID
+    if (length == 0 || length >= 1024) throw Win32("Unable to identify pinned volume");
+    var text = path.ToString(); var end = text.IndexOf("}\\", StringComparison.Ordinal);
+    if (!text.StartsWith("\\\\?\\Volume{", StringComparison.OrdinalIgnoreCase) || end < 0) throw new InvalidOperationException("Pinned volume identity unavailable");
+    ulong available, total, free;
+    if (!GetDiskFreeSpaceExW(text.Substring(0, end + 2), out available, out total, out free) || available > (ulong)9007199254740991)
+      throw Win32("Unable to query pinned volume free space");
+    return (long)available;
+  }
+
+  static object StatEntry(IntPtr parent, string name) {
+    IntPtr entry;
+    try { entry = OpenRelative(parent, name, true, false, false, false); }
+    catch { entry = OpenRelative(parent, name, false, false, false, false); }
+    try { return EntryInfo(entry); } finally { CloseHandle(entry); }
+  }
+
+  static object WriteAt(IntPtr parent, string name, long maximum, long offset, byte[] bytes, string expected) {
+    if (maximum < 0 || offset < 0 || offset > maximum || bytes.LongLength > 256 * 1024 || bytes.LongLength > maximum - offset)
+      throw new InvalidOperationException("Invalid bounded file write");
+    var file = OpenRelative(parent, name, false, expected == null, expected == null);
+    try {
+      BY_HANDLE_FILE_INFORMATION info;
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) > maximum || (expected != null && Identity(info) != expected))
+        throw new InvalidOperationException("Bounded file identity changed before write");
+      using (var safe = new SafeFileHandle(file, false))
+      using (var stream = new FileStream(safe, FileAccess.ReadWrite, 64 * 1024, false)) {
+        stream.Position = offset; stream.Write(bytes, 0, bytes.Length); stream.Flush();
+      }
+      if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) > maximum || (expected != null && Identity(info) != expected))
+        throw new InvalidOperationException("Bounded file identity changed during write");
+      return EntryInfo(file);
+    } finally { Array.Clear(bytes, 0, bytes.Length); CloseHandle(file); }
+  }
+
+  static object CopyRange(IntPtr parent, string sourceName, string sourceIdentity, long sourceBytes, long sourceOffset, string targetName, string targetIdentity, long targetOffset, long length) {
+    if (sourceName == targetName || sourceOffset < 0 || targetOffset < 0 || (targetIdentity == null && targetOffset != 0) || length <= 0 || length > 1024 * 1024 || sourceBytes < sourceOffset || length > sourceBytes - sourceOffset || targetOffset > 9007199254740991L - length)
+      throw new InvalidOperationException("Invalid bounded file copy");
+    var source = OpenRelative(parent, sourceName, false, false, false, false);
+    var target = IntPtr.Zero; var bytes = new byte[64 * 1024];
+    try {
+      BY_HANDLE_FILE_INFORMATION sourceInfo, targetInfo;
+      if (!GetFileInformationByHandle(source, out sourceInfo) || sourceInfo.NumberOfLinks != 1 || Identity(sourceInfo) != sourceIdentity || Size(sourceInfo) != sourceBytes)
+        throw new InvalidOperationException("Copy source identity changed");
+      target = OpenRelative(parent, targetName, false, targetIdentity == null, targetIdentity == null);
+      if (!GetFileInformationByHandle(target, out targetInfo) || targetInfo.NumberOfLinks != 1 || Size(targetInfo) != targetOffset || (targetIdentity != null && Identity(targetInfo) != targetIdentity))
+        throw new InvalidOperationException("Copy target identity changed");
+      var targetId = Identity(targetInfo);
+      if (targetId == Identity(sourceInfo)) throw new InvalidOperationException("Cannot copy a checkpoint file into itself");
+      using (var sourceSafe = new SafeFileHandle(source, false))
+      using (var targetSafe = new SafeFileHandle(target, false))
+      using (var input = new FileStream(sourceSafe, FileAccess.Read, 64 * 1024, false))
+      using (var output = new FileStream(targetSafe, FileAccess.ReadWrite, 64 * 1024, false)) {
+        input.Position = sourceOffset; output.Position = targetOffset;
+        for (long copied = 0; copied < length;) {
+          var count = (int)Math.Min(bytes.Length, length - copied);
+          var read = input.Read(bytes, 0, count); if (read == 0) throw new EndOfStreamException("Copy source range is truncated");
+          output.Write(bytes, 0, read); copied += read;
+        }
+        output.Flush();
+      }
+      if (!GetFileInformationByHandle(source, out sourceInfo) || sourceInfo.NumberOfLinks != 1 || Identity(sourceInfo) != sourceIdentity || Size(sourceInfo) != sourceBytes ||
+          !GetFileInformationByHandle(target, out targetInfo) || targetInfo.NumberOfLinks != 1 || Identity(targetInfo) != targetId || Size(targetInfo) != targetOffset + length)
+        throw new InvalidOperationException("Copy identity changed during transfer");
+      return EntryInfo(target);
+    } finally { Array.Clear(bytes, 0, bytes.Length); if (target != IntPtr.Zero) CloseHandle(target); CloseHandle(source); }
+  }
+
+  static void Rename(IntPtr sourceParent, string sourceName, IntPtr targetParent, string targetName, bool replace) {
+    ExactName(targetName);
     IntPtr entry;
     try { entry = OpenRelative(sourceParent, sourceName, true, false, false); }
     catch { entry = OpenRelative(sourceParent, sourceName, false, false, false); }
     var targetBytes = Encoding.Unicode.GetBytes(targetName); var size = (IntPtr.Size == 8 ? 24 : 16) + targetBytes.Length;
     var buffer = Marshal.AllocHGlobal(size); for (var i = 0; i < size; i++) Marshal.WriteByte(buffer, i, 0);
     try {
-      Marshal.WriteInt32(buffer, 0, 0);
+      BY_HANDLE_FILE_INFORMATION sourceInfo;
+      if (!GetFileInformationByHandle(entry, out sourceInfo) || ((sourceInfo.FileAttributes & 0x10) == 0 && sourceInfo.NumberOfLinks != 1))
+        throw new InvalidOperationException("Unsafe rename source identity");
+      if (replace) {
+        // Only proven absence permits a new name. Existing targets must pass
+        // the ordinary reparse/link checks before the destructive rename.
+        try { StatEntry(targetParent, targetName); }
+        catch (FileNotFoundException) { }
+      }
+      Marshal.WriteInt32(buffer, 0, replace ? 1 : 0);
       Marshal.WriteIntPtr(buffer, IntPtr.Size == 8 ? 8 : 4, targetParent);
       Marshal.WriteInt32(buffer, IntPtr.Size == 8 ? 16 : 8, targetBytes.Length);
       Marshal.Copy(targetBytes, 0, IntPtr.Add(buffer, IntPtr.Size == 8 ? 20 : 12), targetBytes.Length);
@@ -412,10 +551,11 @@ internal static class CheckpointChildBridge {
     } finally { Marshal.FreeHGlobal(buffer); CloseHandle(entry); }
   }
 
-  static void Unlink(IntPtr parent, string name, bool directory, string retiredIdentity) {
+  static void Unlink(IntPtr parent, string name, bool directory, string retiredIdentity, string expectedIdentity) {
     var entry = OpenRelative(parent, name, directory, false, false); var size = Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO)); var buffer = Marshal.AllocHGlobal(size);
     try {
       BY_HANDLE_FILE_INFORMATION identity;
+      if (expectedIdentity != null && Identity(entry) != expectedIdentity) throw new InvalidOperationException("Checkpoint entry identity changed before delete");
       if (!directory && (!GetFileInformationByHandle(entry, out identity) || identity.NumberOfLinks != 1)) throw new InvalidOperationException("Checkpoint file identity changed before delete");
       if (retiredIdentity != null) {
         if (directory || !GetFileInformationByHandle(entry, out identity) || identity.NumberOfLinks != 1 || Size(identity) != 0 || Identity(identity) != retiredIdentity) throw new InvalidOperationException("Retired file space is not confirmed");
