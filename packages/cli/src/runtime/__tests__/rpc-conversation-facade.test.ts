@@ -18,6 +18,44 @@ import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcConversationFacade · 方法域", () => {
+  it("history retains the transport consumer through asynchronous display work", async () => {
+    const fake = makeFakeHostLink();
+    const client = await fake.link.getClient();
+    const page = { runs: [], hasMore: false, inputsOutsideHistory: [], inputsOutsideHistoryTruncated: false };
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    let consumed = false;
+    client.consume = async (method, params, consumer) => {
+      expect(method).toBe("session.history");
+      expect(params).toEqual({ conversationId: "conv-1", limit: 4, before: undefined });
+      const result = await consumer(page as never);
+      consumed = true;
+      return result;
+    };
+    const facade = new RpcConversationFacade(fake.link);
+    const result = facade.consumeHistory("conv-1", { limit: 4 }, async received => {
+      expect(received).toBe(page); entered.resolve(); await release.promise; return "displayed";
+    });
+    await entered.promise;
+    expect(consumed).toBe(false);
+    expect(fake.requests).toHaveLength(0);
+    release.resolve();
+    expect(await result).toBe("displayed");
+    expect(consumed).toBe(true);
+  });
+
+  it("history preserves legacy ingress results without another request", async () => {
+    const fake = makeFakeHostLink();
+    const page = { runs: [], hasMore: false };
+    fake.setResponder(() => page);
+    const facade = new RpcConversationFacade(fake.link);
+    expect(await facade.consumeHistory("conv-1", { limit: 4 }, async received => {
+      expect(received).toBe(page); return "displayed";
+    })).toBe("displayed");
+    expect(fake.requests).toEqual([{ method: "session.history", params: {
+      conversationId: "conv-1", limit: 4, before: undefined,
+    } }]);
+  });
+
   it.each(["original-saved", "revision-saved", "not-saved"])("awaiting 的 %s 与原任务/当前提交身份无损传递", async disposition => {
     const fake = makeFakeHostLink();
     const result = { conversationId: "conv-1", sessionId: "conv-1", turnId: "original", status: "awaiting-rubric-confirmation", submission: { turnId: "current", disposition }, rubricDraftId: "draft", rubricDraft: { originalTurnId: "original" }, advancementSessionId: "adv" };

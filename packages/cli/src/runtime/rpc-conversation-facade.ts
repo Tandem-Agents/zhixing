@@ -160,6 +160,20 @@ export class RpcConversationFacade {
     });
   }
 
+  /** Retain the transport's response ownership through bounded display IO. */
+  async consumeHistory<T>(
+    conversationId: string,
+    opts: SessionHistoryOptions,
+    consume: (page: RunsPage) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.link.getClient();
+    const params = { conversationId, limit: opts.limit, before: opts.before };
+    if (client.consume) return client.consume<RunsPage, T>("session.history", params, consume);
+    // Existing non-WebSocket first-party ingress clients retain their own
+    // transport ownership; this callback still ends with the page consumer.
+    return consume(await client.request<RunsPage>("session.history", params));
+  }
+
   /** 对话改名;返回的 conversationId 保持入参全域键。 */
   async rename(conversationId: string, name: string): Promise<SessionRenameResult> {
     const client = await this.link.getClient();

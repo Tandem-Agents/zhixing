@@ -259,6 +259,31 @@ function makeController(
 }
 
 describe("ConversationController", () => {
+  it('projects an early complete before the send receipt can retain its full result', async () => {
+    const f = makeFakes();
+    let receipt!: () => void, sendingTurn = '';
+    f.conversation.send.mockImplementation((_input, _conversation, turnId) => {
+      sendingTurn = turnId;
+      return new Promise(resolve => { receipt = () => resolve({ conversationId: 'conv-1', sessionId: 'conv-1', turnId, runId: 'early' }); });
+    });
+    const projectOutcome = vi.fn((outcome: import('../conversation-controller.js').TurnOutcome) => outcome.result.reason);
+    const controller = new ConversationController({
+      conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn(), projectOutcome,
+    }, initial);
+    try {
+      const sending = controller.beginUserTurn('request');
+      f.emit.complete({ conversationId: 'conv-1', turnId: sendingTurn, result: {
+        reason: 'completed', usage: { inputTokens: 1, outputTokens: 2 },
+        message: { role: 'assistant', content: [{ type: 'text', text: 'large answer'.repeat(10_000) }] },
+      } });
+      await Promise.resolve(); expect(projectOutcome).toHaveBeenCalledOnce();
+      receipt(); const accepted = await sending;
+      expect(accepted.kind).toBe('accepted');
+      if (accepted.kind === 'accepted') await expect(accepted.turn.outcome).resolves.toBe('completed');
+    } finally { controller.dispose(); }
+  });
+
   it("releases the local waiter on uncertainty and points to explicit resolution", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
@@ -1185,6 +1210,31 @@ describe("ConversationController", () => {
       expect(result.submission?.turnId).not.toBe(result.turnId);
     }
     controller.dispose();
+  });
+
+  it("finishes history consumption before sending the subsequent background abort", async () => {
+    const f = makeFakes();
+    let consuming = false;
+    const consumeHistory = vi.fn(async (_id: string, _options: unknown, consume: (page: unknown) => Promise<unknown>) => {
+      consuming = true;
+      try {
+        return await consume({ runs: [], hasMore: false, get inputsOutsideHistory() {
+          if (!consuming) throw Error('history result accessed after consumption');
+          return [{ runId: 'remote-running', state: 'running', message: {
+            role: 'user', content: [{ type: 'text', text: 'large original'.repeat(1024) }],
+            inputIdentity: { id: 'input', source: { kind: 'conversation', conversationId: 'conv-1' } },
+          } }];
+        } });
+      } finally { consuming = false; }
+    });
+    Object.assign(f.conversation, { consumeHistory });
+    f.conversation.abort.mockImplementation(async () => { expect(consuming).toBe(false); });
+    const { controller } = makeController(f);
+    try {
+      expect(await controller.abortBackgroundTask()).toBe(true);
+      expect(consumeHistory).toHaveBeenCalledOnce(); expect(f.conversation.history).not.toHaveBeenCalled();
+      expect(f.conversation.abort).toHaveBeenCalledWith('conv-1', expect.stringMatching(/^cancel:/), 'remote-running');
+    } finally { controller.dispose(); }
   });
 
   it.each(["delta", "complete"] as const)("matching %s 先接纳，晚到 send 错误不恢复已交付草稿", async (kind) => {

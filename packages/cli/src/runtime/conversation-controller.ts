@@ -51,6 +51,7 @@ import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server/client";
 import type { RpcConversationFacade, ConversationStatusCursor } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 import type { ConversationOutputIdentity, ConversationOutputSource } from "./conversation-output.js";
+import { ObservedTextPrefix } from "./observed-text-prefix.js";
 
 /** 当前对话指针 + 模式视图(由全域键派生,场景显示名取自 enter 响应) */
 export interface ActiveConversation {
@@ -67,11 +68,11 @@ export interface TurnOutcome {
   postTurnControl?: PostTurnControlOutcome;
 }
 
-export interface AcceptedTurn {
+export interface AcceptedTurn<Outcome = TurnOutcome> {
   readonly conversationId: string;
   readonly turnId: string;
   readonly runId?: string;
-  readonly outcome: Promise<TurnOutcome>;
+  readonly outcome: Promise<Outcome>;
   /** 输入被分类为 active 推进的补充继续时附带——接入面据此告知用户。 */
   readonly advancementContinuation?: {
     readonly interruptedProxy: boolean;
@@ -108,13 +109,13 @@ export interface CancelledRubricTurn {
   readonly advancementSessionId: string;
 }
 
-export type BeginUserTurnResult =
-  | { readonly kind: "accepted"; readonly turn: AcceptedTurn }
+export type BeginUserTurnResult<Outcome = TurnOutcome> =
+  | { readonly kind: "accepted"; readonly turn: AcceptedTurn<Outcome> }
   | AwaitingRubricConfirmationTurn
   | ContractFailedTurn
   | CancelledRubricTurn;
 
-export type RubricContractCancelResult =
+export type RubricContractCancelResult<Outcome = TurnOutcome> =
   | {
       readonly kind: "cancelled";
       readonly conversationId: string;
@@ -123,7 +124,7 @@ export type RubricContractCancelResult =
   | {
       readonly kind: "direct-execution";
       readonly advancementSessionId: string;
-      readonly turn: AcceptedTurn;
+      readonly turn: AcceptedTurn<Outcome>;
     };
 
 export interface BeginTurnOptions {
@@ -172,7 +173,7 @@ export type SessionChangeReaction =
   | { kind: "cleared" }
   | { kind: "deleted" };
 
-export interface ConversationControllerOptions {
+export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   conversation: RpcConversationFacade;
   workscene: RpcWorksceneFacade;
   /** 主通道还原:当前对话的 AgentYield 流(渲染器 handleEvent 的喂入点) */
@@ -185,6 +186,10 @@ export interface ConversationControllerOptions {
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
   onActivity?: (activity: SessionActivityPayload) => void;
   onNotice?: (message: string) => void;
+  /** Consume the complete result synchronously, including when completion
+   * precedes the send receipt. Only this surface's projection remains in its
+   * waiter promise; legacy consumers retain the original outcome by default. */
+  projectOutcome?: (outcome: TurnOutcome) => Outcome;
 }
 
 export interface InitialConversationSelection {
@@ -280,7 +285,7 @@ export async function selectInitialConversation(
   };
 }
 
-export class ConversationController {
+export class ConversationController<Outcome = TurnOutcome> {
   private active: ActiveConversation;
   private observedConversationId: string | null = null;
   /**
@@ -301,12 +306,12 @@ export class ConversationController {
   private readonly finalLookups = new Map<string, Promise<void>>();
   private readonly continuationFinalLookups = new Map<string, Promise<void>>();
   private readonly continuationStatusLookups = new Map<string, Promise<void>>();
-  private readonly notificationHistoryBatches = new Map<string, ReturnType<RpcConversationFacade["history"]>>();
+  private readonly notificationHistoryBatches = new Map<string, { consume(page: RunsPage): void; reject(error: unknown): void }[]>();
   private readonly observedContinuations = new Map<string, {
     conversationId: string;
     communication?: boolean;
     sequences: Map<string, number>;
-    text: string;
+    text: ObservedTextPrefix;
     streamIncomplete?: boolean;
     settled: boolean;
     terminalInputsReconciled?: boolean;
@@ -329,7 +334,7 @@ export class ConversationController {
   private readonly focusedTaskByConversation = new Map<string, string>();
 
   constructor(
-    private readonly opts: ConversationControllerOptions,
+    private readonly opts: ConversationControllerOptions<Outcome>,
     initial: ActiveConversation,
   ) {
     this.active = initial;
@@ -457,7 +462,7 @@ export class ConversationController {
   async beginTurn(
     input: string | UserTurnInput,
     options: BeginTurnOptions = {},
-  ): Promise<AcceptedTurn> {
+  ): Promise<AcceptedTurn<Outcome>> {
     const result = await this.beginUserTurn(input, options);
     if (result.kind === "accepted") return result.turn;
     throw new Error(
@@ -469,19 +474,38 @@ export class ConversationController {
    * 发送用户输入。普通执行返回 accepted turn；推进准则确认等控制面结果
    * 不等待 session.complete，由接入面继续承接。
    */
-  async beginUserTurn(
+  beginUserTurn(
     input: string | UserTurnInput,
     options: BeginTurnOptions = {},
-  ): Promise<BeginUserTurnResult> {
+  ): Promise<BeginUserTurnResult<Outcome>> {
+    return this.beginPreparedUserTurn((target, turnId) => options.engage
+      ? this.opts.conversation.send(input, target, turnId, { engage: options.engage })
+      : this.opts.conversation.send(input, target, turnId), options);
+  }
+
+  /** The terminal can prepare a cold request from an input ID after the waiter
+   * is registered. This callback's hot preparation frame ends independently of
+   * the receipt wait; every send result still uses the same D06 decisions. */
+  beginPreparedUserTurn(
+    send: (conversationId: string, turnId: string) => Promise<SessionSendResult>,
+    options: BeginTurnOptions = {},
+  ): Promise<BeginUserTurnResult<Outcome>> {
     const target = this.active.conversationId;
     const turnId = generateTurnId();
-    let outcome = this.attachTurnWaiter(target, turnId, options);
+    const outcome = this.attachTurnWaiter(target, turnId, options);
+    let request: Promise<SessionSendResult>;
+    try { request = send(target, turnId); }
+    catch (error) { this.discardTurnWaiter(target, turnId); return Promise.reject(error); }
+    return this.finishUserTurn(request, target, turnId, outcome, options);
+  }
+
+  private async finishUserTurn(
+    request: Promise<SessionSendResult>, target: string, turnId: string,
+    initialOutcome: Promise<Outcome>, options: BeginTurnOptions,
+  ): Promise<BeginUserTurnResult<Outcome>> {
+    let outcome = initialOutcome;
     try {
-      const sendResult = options.engage
-        ? await this.opts.conversation.send(input, target, turnId, {
-            engage: options.engage,
-          })
-        : await this.opts.conversation.send(input, target, turnId);
+      const sendResult = await request;
       this.observedConversationId = target;
       if (isAwaitingRubricResult(sendResult)) {
         this.discardTurnWaiter(target, turnId);
@@ -549,7 +573,7 @@ export class ConversationController {
   }
 
   /** 发送一个 turn 并等待落定。 */
-  async sendTurn(input: string | UserTurnInput): Promise<TurnOutcome> {
+  async sendTurn(input: string | UserTurnInput): Promise<Outcome> {
     return (await this.beginTurn(input)).outcome;
   }
 
@@ -558,7 +582,7 @@ export class ConversationController {
     options: BeginTurnOptions & {
       readonly rubricPersistence?: SessionRubricPersistenceChoice;
     } = {},
-  ): Promise<AcceptedTurn> {
+  ): Promise<AcceptedTurn<Outcome>> {
     const outcome = this.attachTurnWaiter(
       pending.conversationId,
       pending.turnId,
@@ -604,7 +628,7 @@ export class ConversationController {
   async cancelRubricContract(
     pending: AwaitingRubricConfirmationTurn,
     opts: { executeOriginal?: boolean; onAccepted?: BeginTurnOptions["onAccepted"] } = {},
-  ): Promise<RubricContractCancelResult> {
+  ): Promise<RubricContractCancelResult<Outcome>> {
     const executeOriginal = opts.executeOriginal ?? false;
     const outcome = executeOriginal
       ? this.attachTurnWaiter(pending.conversationId, pending.turnId, {
@@ -708,7 +732,7 @@ export class ConversationController {
     conversationId: string,
     turnId: string,
     options: BeginTurnOptions = {},
-  ): Promise<TurnOutcome> {
+  ): Promise<Outcome> {
     const outcome = new Promise<TurnOutcome>((resolve) => {
       this.waiters.set(turnId, resolve);
     });
@@ -716,7 +740,7 @@ export class ConversationController {
     if (options.onAccepted) {
       this.localTurnAcceptances.set(turnId, options.onAccepted);
     }
-    return outcome;
+    return this.opts.projectOutcome ? outcome.then(this.opts.projectOutcome) : outcome as Promise<Outcome>;
   }
 
   private discardTurnWaiter(conversationId: string, turnId: string): void {
@@ -769,7 +793,7 @@ export class ConversationController {
     const runId = this.durableRunByTurn.get(turnId);
     if (runId && (result.reason === "aborted" || result.reason === "error")) {
       // 本地 waiter 已负责终态展示，重复状态不能再进入旁观展示。
-      rememberBounded(this.observedContinuations, runId, { conversationId, sequences: new Map(), text: "", settled: true });
+      rememberBounded(this.observedContinuations, runId, { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: true });
     }
     this.releaseDurableRun(turnId);
     waiter({ result, postTurnControl: intent });
@@ -919,17 +943,29 @@ export class ConversationController {
     void lookup.catch(() => {});
   }
 
-  private notificationHistory(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1]): ReturnType<RpcConversationFacade["history"]> {
+  private consumeHistory<T>(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1], consume: (page: RunsPage) => T): Promise<T> {
+    if (this.opts.conversation.consumeHistory) return this.opts.conversation.consumeHistory(conversationId, options ?? {}, async page => consume(page));
+    return this.opts.conversation.history(conversationId, options).then(consume);
+  }
+
+  private notificationHistory<T>(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1], consume: (page: RunsPage) => T): Promise<T> {
     const key = JSON.stringify([conversationId, options?.limit, options?.before?.shardId, options?.before?.runIndex]);
-    const pending = this.notificationHistoryBatches.get(key);
-    if (pending) return pending;
-    const page = new Promise<void>(resolve => setImmediate(resolve)).then(() => {
-      // Coalesce a notification burst, never reuse a snapshot for facts arriving during its read.
-      this.notificationHistoryBatches.delete(key);
-      return this.opts.conversation.history(conversationId, options);
+    return new Promise<T>((resolve, reject) => {
+      const pending = this.notificationHistoryBatches.get(key);
+      const reader = { consume: (page: RunsPage) => { resolve(consume(page)); }, reject };
+      if (pending) { pending.push(reader); return; }
+      const readers = [reader]; this.notificationHistoryBatches.set(key, readers);
+      setImmediate(() => {
+        // Share the synchronous consumption window, not a resolved Promise
+        // retaining the whole page across each reader's next RPC or retry.
+        this.notificationHistoryBatches.delete(key);
+        void this.consumeHistory(conversationId, options, page => {
+          for (const reader of readers) {
+            try { reader.consume(page); } catch (error) { reader.reject(error); }
+          }
+        }).catch(error => { for (const reader of readers) reader.reject(error); });
+      });
     });
-    this.notificationHistoryBatches.set(key, page);
-    return page;
   }
 
   /** 失败/取消没有成功 Final；任何起因的 Run 都可能包含追加来信。 */
@@ -939,20 +975,23 @@ export class ConversationController {
       const notice = this.pendingStatuses.get(runId);
       if (!notice || !terminalResultForStatus(notice) || this.observedContinuations.get(runId)?.terminalInputsReconciled) return;
       try {
-        const page = await this.notificationHistory(conversationId, { limit: 1 });
-        if (this.disposed || this.active.conversationId !== conversationId) return;
-        if (this.pendingStatuses.get(runId)?.statusRevision !== notice.statusRevision) continue;
-        const messages = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId).map(input => input.message);
-        let observed = this.observedContinuations.get(runId);
-        this.presentRecordedInputs(conversationId, runId, messages);
-        if (!observed) {
-          const communication = messages.some(message => message.inputIdentity?.source.kind === "conversation");
-          observed = { conversationId, communication, sequences: new Map(), text: "", settled: !communication };
-          rememberBounded(this.observedContinuations, runId, observed);
-        }
-        observed.terminalInputsReconciled = true;
-        this.finishObservedStatus(notice);
-        return;
+        const done = await this.notificationHistory(conversationId, { limit: 1 }, page => {
+          if (this.disposed || this.active.conversationId !== conversationId) return true;
+          if (this.pendingStatuses.get(runId)?.statusRevision !== notice.statusRevision) return false;
+          const messages = (page.inputsOutsideHistory ?? []).filter(input => input.runId === runId).map(input => input.message);
+          let observed = this.observedContinuations.get(runId);
+          this.presentRecordedInputs(conversationId, runId, messages);
+          if (!observed) {
+            const communication = messages.some(message => message.inputIdentity?.source.kind === "conversation");
+            observed = { conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: !communication };
+            rememberBounded(this.observedContinuations, runId, observed);
+          }
+          observed.terminalInputsReconciled = true;
+          this.finishObservedStatus(notice);
+          return true;
+        });
+        if (done) return;
+        continue;
       } catch {
         // 状态仍保留；短暂读取失败不丢终态，也不放行迟到输出。
       }
@@ -977,7 +1016,7 @@ export class ConversationController {
     if (!frame.meta.turnOrigin?.worksceneContinuation && !communication) return;
     let observed = this.observedContinuations.get(frame.ref.runId);
     if (!observed) {
-      observed = { conversationId: frame.ref.conversationId, communication, sequences: new Map(), text: "", settled: false };
+      observed = { conversationId: frame.ref.conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
       rememberBounded(this.observedContinuations, frame.ref.runId, observed);
     }
     const status = this.pendingStatuses.get(frame.ref.runId);
@@ -997,17 +1036,19 @@ export class ConversationController {
     // A reference, missing frame or replacement stream breaks the displayable prefix.
     // Keep only its contiguous prefix and let the committed history supply the rest.
     if (frame.seq !== previousSeq + 1 || (observed.sequences.size > 0 && !observed.sequences.has(sequenceKey))) observed.streamIncomplete = true;
-    observed.sequences.set(sequenceKey, frame.seq);
     if (observed.streamIncomplete) return;
+    // Once continuity is lost, committed history owns the remainder. Retain
+    // only the single displayable stream's cursor, not every later epoch.
+    observed.sequences.set(sequenceKey, frame.seq);
     if (frame.payload.kind !== "agent-yield") return;
     if ("ref" in frame.payload.yield) {
       observed.streamIncomplete = true;
       return;
     }
     const delta = frame.payload.yield;
-    if (delta.type === "text_delta") observed.text += delta.text;
+    if (delta.type === "text_delta") observed.text.append(delta.text);
     // Only the final assistant segment can be a prefix of the committed answer.
-    if (delta.type === "tool_start") observed.text = "";
+    if (delta.type === "tool_start") observed.text.reset();
     const identity = { conversationId: observed.conversationId, runId: frame.ref.runId };
     this.opts.onObservedTurnDelta?.(identity);
     this.opts.onYield(delta, { ...identity, kind: "stream", frame });
@@ -1018,37 +1059,38 @@ export class ConversationController {
     let delayMs = 25;
     while (!this.disposed && this.active.conversationId === frame.conversationId) {
       try {
-        const page = await this.notificationHistory(frame.conversationId, {
+        const next = await this.notificationHistory(frame.conversationId, {
           limit: 200, ...(before ? { before } : {}),
+        }, page => {
+          const match = page.runs.find((item) => "runId" in item.record && item.record.runId === frame.runId);
+          let observed = this.observedContinuations.get(frame.runId);
+          if (this.active.conversationId !== frame.conversationId || observed?.settled) return { done: true, before: undefined };
+          if (match) {
+            this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages);
+            const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation";
+            if (!observed && !match.record.worksceneContinuation && !communication) return { done: true, before: undefined };
+            if (!observed) {
+              observed = { conversationId: frame.conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
+              rememberBounded(this.observedContinuations, frame.runId, observed);
+            }
+            observed.settled = true;
+            const message = finalAssistantMessageOf(match.record.messages);
+            for (const remaining of observed.text.remaining(message)) {
+              const identity = { conversationId: frame.conversationId, runId: frame.runId };
+              this.opts.onObservedTurnDelta?.(identity);
+              this.opts.onYield({ type: "text_delta", text: remaining }, { ...identity, kind: "history", final: frame });
+            }
+            this.opts.onObservedTurnComplete?.({ conversationId: frame.conversationId, runId: frame.runId });
+            return { done: true, before: undefined };
+          }
+          const last = page.runs.at(-1);
+          if (page.hasMore && last) {
+            return { done: false, before: { shardId: last.shardId, runIndex: last.record.runIndex } };
+          }
+          return { done: false, before: undefined };
         });
-        const match = page.runs.find((item) => "runId" in item.record && item.record.runId === frame.runId);
-        let observed = this.observedContinuations.get(frame.runId);
-        if (this.active.conversationId !== frame.conversationId || observed?.settled) return;
-        if (match) {
-          this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages);
-          const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation";
-          if (!observed && !match.record.worksceneContinuation && !communication) return;
-          if (!observed) {
-            observed = { conversationId: frame.conversationId, communication, sequences: new Map(), text: "", settled: false };
-            rememberBounded(this.observedContinuations, frame.runId, observed);
-          }
-          observed.settled = true;
-          const message = finalAssistantMessageOf(match.record.messages);
-          const text = message?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-          const remaining = text?.startsWith(observed.text) ? text.slice(observed.text.length) : text;
-          if (remaining) {
-            const identity = { conversationId: frame.conversationId, runId: frame.runId };
-            this.opts.onObservedTurnDelta?.(identity);
-            this.opts.onYield({ type: "text_delta", text: remaining }, { ...identity, kind: "history", final: frame });
-          }
-          this.opts.onObservedTurnComplete?.({ conversationId: frame.conversationId, runId: frame.runId });
-          return;
-        }
-        const last = page.runs.at(-1);
-        if (page.hasMore && last) {
-          before = { shardId: last.shardId, runIndex: last.record.runIndex };
-          continue;
-        }
+        if (next.done) return;
+        if (next.before) { before = next.before; continue; }
       } catch {
         // A committed result may outlive a transient history projection/link failure.
       }
@@ -1059,7 +1101,7 @@ export class ConversationController {
   }
 
   private presentRecordedInputs(conversationId: string, runId: string, messages: readonly Message[]): void {
-    if (conversationId !== this.active.conversationId) return;
+    if (conversationId !== this.active.conversationId || !this.opts.onObservedInputs) return;
     const inputs = messages.flatMap(message => message.inputIdentity?.source.kind === "conversation"
       ? [{ text: extractText(message), identity: message.inputIdentity }] : []);
     if (inputs.length) this.opts.onObservedInputs?.({ conversationId, runId, inputs });
@@ -1086,28 +1128,31 @@ export class ConversationController {
     if (!watch) return false;
     let before: { shardId: string; runIndex: number } | undefined;
     while (this.durableRuns.get(runId) === watch) {
-      const page = await this.opts.conversation.history(watch.conversationId, {
+      const next = await this.consumeHistory(watch.conversationId, {
         limit: 200,
         ...(before ? { before } : {}),
-      });
-      const match = page.runs.find(
-        (item) => "runId" in item.record && item.record.runId === runId,
-      );
-      if (match) {
-        this.presentRecordedInputs(watch.conversationId, runId, match.record.messages);
-        if (match.record.postTurnControl) {
-          this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
+      }, page => {
+        const match = page.runs.find(
+          (item) => "runId" in item.record && item.record.runId === runId,
+        );
+        if (match) {
+          this.presentRecordedInputs(watch.conversationId, runId, match.record.messages);
+          if (match.record.postTurnControl) {
+            this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
+          }
+          this.finishTurn(watch.conversationId, watch.turnId, {
+            reason: "completed",
+            message: finalAssistantMessageOf(match.record.messages),
+            usage: match.record.usage ?? { inputTokens: 0, outputTokens: 0 },
+          });
+          return { resolved: true, before: undefined };
         }
-        this.finishTurn(watch.conversationId, watch.turnId, {
-          reason: "completed",
-          message: finalAssistantMessageOf(match.record.messages),
-          usage: match.record.usage ?? { inputTokens: 0, outputTokens: 0 },
-        });
-        return true;
-      }
-      const last = page.runs.at(-1);
-      if (!page.hasMore || !last) return false;
-      before = { shardId: last.shardId, runIndex: last.record.runIndex };
+        const last = page.runs.at(-1);
+        return { resolved: false, before: page.hasMore && last ? { shardId: last.shardId, runIndex: last.record.runIndex } : undefined };
+      });
+      if (next.resolved) return true;
+      if (!next.before) return false;
+      before = next.before;
     }
     return false;
   }
@@ -1135,15 +1180,17 @@ export class ConversationController {
   /** 自动运行没有本地 waiter；重连从当前 Owner 补齐断线期间的运行身份和状态。 */
   private async reconcileObservedRuns(): Promise<void> {
     const conversationId = this.active.conversationId;
-    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    const runIds = await this.consumeHistory(conversationId, { limit: 1 }, page => {
+      const result = new Set([...this.observedContinuations.entries()]
+        .filter(([, run]) => run.conversationId === conversationId && !run.settled)
+        .map(([runId]) => runId));
+      for (const input of page.inputsOutsideHistory ?? []) {
+        if (input.state === "uncertain" || input.message.inputIdentity?.source.kind === "conversation" &&
+            !this.observedContinuations.get(input.runId)?.terminalInputsReconciled) result.add(input.runId);
+      }
+      return result;
+    });
     if (this.disposed || this.active.conversationId !== conversationId) return;
-    const runIds = new Set([...this.observedContinuations.entries()]
-      .filter(([, run]) => run.conversationId === conversationId && !run.settled)
-      .map(([runId]) => runId));
-    for (const input of page.inputsOutsideHistory ?? []) {
-      if (input.state === "uncertain" || input.message.inputIdentity?.source.kind === "conversation" &&
-          !this.observedContinuations.get(input.runId)?.terminalInputsReconciled) runIds.add(input.runId);
-    }
     const pending = [...runIds].filter(runId => !this.durableRuns.has(runId));
     for (let offset = 0; offset < pending.length; offset += 64) {
       let cursors = pending.slice(offset, offset + 64).map(runId => ({
@@ -1205,17 +1252,20 @@ export class ConversationController {
   /** 无本地 waiter 时也从当前对话权威事实定位运行；不依赖是否见过实时帧。 */
   async abortBackgroundTask(): Promise<boolean> {
     const conversationId = this.active.conversationId;
-    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    const runId = await this.consumeHistory(conversationId, { limit: 1 }, page => {
+      if (this.active.conversationId !== conversationId) return undefined;
+      const runs = new Map((page.inputsOutsideHistory ?? [])
+        .filter(input => input.message.inputIdentity?.source.kind === "conversation" &&
+          ["queued", "dispatched", "running", "cancel-requested"].includes(input.state))
+        .map(input => [input.runId, input.state]));
+      const current = [...runs].filter(([, state]) => state !== "queued");
+      const candidates = current.length ? current : [...runs];
+      if (candidates.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");
+      return candidates[0]?.[0];
+    });
     if (this.active.conversationId !== conversationId) return false;
-    const runs = new Map((page.inputsOutsideHistory ?? [])
-      .filter(input => input.message.inputIdentity?.source.kind === "conversation" &&
-        ["queued", "dispatched", "running", "cancel-requested"].includes(input.state))
-      .map(input => [input.runId, input]));
-    const current = [...runs.values()].filter(input => input.state !== "queued");
-    const candidates = current.length ? current : [...runs.values()];
-    if (candidates.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");
-    if (candidates[0]) {
-      await this.opts.conversation.abort(conversationId, `cancel:${generateTurnId()}`, candidates[0].runId);
+    if (runId) {
+      await this.opts.conversation.abort(conversationId, `cancel:${generateTurnId()}`, runId);
       return true;
     }
     return this.abortWorksceneTask();
@@ -1238,10 +1288,11 @@ export class ConversationController {
 
   async uncertainRuns(): Promise<Extract<ConversationStatusNotice, { state: "uncertain" }>[]> {
     const conversationId = this.active.conversationId;
-    const page = await this.opts.conversation.history(conversationId, { limit: 1 });
+    const runIds = await this.consumeHistory(conversationId, { limit: 1 }, page =>
+      [...new Set((page.inputsOutsideHistory ?? []).filter(input => input.state === "uncertain").map(input => input.runId))]);
     if (this.active.conversationId !== conversationId) return [];
     const latest = new Map<string, ConversationStatusNotice>();
-    let cursors = [...new Set((page.inputsOutsideHistory ?? []).filter(input => input.state === "uncertain").map(input => input.runId))]
+    let cursors = runIds
       .map(runId => ({ conversationId, runId, afterStatusRevision: 0 }));
     while (cursors.length > 0) {
       const history = await this.opts.conversation.statusHistory(cursors);

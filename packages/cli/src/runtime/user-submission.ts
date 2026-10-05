@@ -16,7 +16,7 @@ export function createUserSubmission(draft: { commit(): void; reject(): void } |
   return {
     accept,
     reject,
-    settle(result: BeginUserTurnResult): string | undefined {
+    settle(result: BeginUserTurnResult<unknown>): string | undefined {
       if (result.kind === "accepted" || result.kind === "cancelled") {
         accept();
       } else if (result.kind === "contract-failed") {

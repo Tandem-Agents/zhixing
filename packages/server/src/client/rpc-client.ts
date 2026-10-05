@@ -17,6 +17,8 @@
  */
 
 import { WebSocket } from "ws";
+import { RpcMessagePump } from "./rpc-message-pump.js";
+import { RpcRequestSender } from "./rpc-request-sender.js";
 import {
   encodeRequest,
   parseMessage,
@@ -71,6 +73,8 @@ export interface RpcClient {
   authenticate(token: string, clientInfo?: { id?: string; version?: string }): Promise<AuthResult>;
   /** 发送 RPC 请求，返回 result（错误以 RpcClientError 抛出） */
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
+  /** 消费完成前保留接收背压，用于异步分页写入；不重发或重置请求超时。 */
+  consume?<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>): Promise<R>;
   /** 订阅特定方法名的通知 */
   onNotification<T = unknown>(method: string, handler: NotificationHandler<T>): Unsubscribe;
   /** 订阅所有通知（用于调试/监听全局事件） */
@@ -92,12 +96,17 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   const connectTimeout = opts.connectTimeout ?? 5_000;
 
   let ws: WebSocket | null = null;
+  let pump: RpcMessagePump | undefined;
+  let sender: RpcRequestSender | undefined;
   let nextId = 0;
   let closed = false;
+  let closing: Promise<void> | undefined;
   const closeHandlers = new Set<() => void>();
   const notifyClosed = () => {
     if (closed) return;
     closed = true;
+    pump?.close();
+    sender?.close(new RpcClientClosedError());
     for (const handler of [...closeHandlers]) {
       try { handler(); } catch { /* 与 notification listener 一样隔离订阅者。 */ }
     }
@@ -106,12 +115,14 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
 
   const pending = new Map<
     string | number,
-    { resolve: (value: unknown) => void; reject: (err: unknown) => void; timer: ReturnType<typeof setTimeout> }
+    { resolve: (value: unknown) => void; reject: (err: unknown) => void; timer: ReturnType<typeof setTimeout>;
+      consume?: (value: unknown) => unknown | Promise<unknown> }
   >();
+  const consuming = new Set<NonNullable<ReturnType<typeof pending.get>>>();
   const methodHandlers = new Map<string, Set<NotificationHandler>>();
   const wildcardHandlers = new Set<WildcardNotificationHandler>();
 
-  function dispatchMessage(raw: string): void {
+  function dispatchMessage(raw: string): void | Promise<void> {
     const parsed = parseMessage(raw);
 
     if (parsed.kind === "error") {
@@ -126,9 +137,10 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
       const entry = pending.get(id);
       if (!entry) return;
       pending.delete(id);
-      clearTimeout(entry.timer);
+      if (!entry.consume || !isSuccessResponse(parsed.message)) clearTimeout(entry.timer);
 
       if (isSuccessResponse(parsed.message)) {
+        if (entry.consume) return consumeResponse(parsed.message.result, entry);
         entry.resolve(parsed.message.result);
       } else if (isErrorResponse(parsed.message)) {
         const err = parsed.message.error;
@@ -162,12 +174,55 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
     // request from server → client：当前协议不存在这种情况，忽略
   }
 
+  // Keep the raw JSON dispatch frame out of an asynchronous consumer's closure.
+  function consumeResponse(result: unknown, entry: NonNullable<ReturnType<typeof pending.get>>): Promise<void> {
+    consuming.add(entry);
+    return Promise.resolve().then(() => {
+      if (closed) throw new RpcClientClosedError();
+      return entry.consume!(result);
+    }).then(entry.resolve, entry.reject).finally(() => {
+      clearTimeout(entry.timer);
+      consuming.delete(entry);
+    });
+  }
+
+  function request<T>(method: string, params?: unknown, consume?: (value: unknown) => unknown | Promise<unknown>): Promise<T> {
+    if (closed) return Promise.reject(new RpcClientClosedError());
+    if (!ws || ws.readyState !== ws.OPEN) return Promise.reject(new RpcClientClosedError("Not connected"));
+    const id = ++nextId;
+    return new Promise<T>((resolve, reject) => {
+      let entry: NonNullable<ReturnType<typeof pending.get>>;
+      let cancelSend: (() => boolean) | undefined;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        const partialSend = cancelSend?.();
+        reject(new Error(`RPC request timeout after ${timeout}ms: ${method}`));
+        // A held result cannot be discarded while its consumer still owns it.
+        // End this connection on the original deadline instead of admitting
+        // another large message or waiting indefinitely for consumer IO.
+        if (consuming.has(entry) || partialSend) {
+          notifyClosed();
+          rejectAllPending(new RpcClientClosedError("Response consumption timed out"));
+          ws?.terminate();
+        }
+      }, timeout);
+      entry = { resolve: resolve as (value: unknown) => void, reject, timer, consume };
+      pending.set(id, entry);
+      cancelSend = sender!.send(() => encodeRequest(id, method, params), () => pending.has(id), error => {
+        if (!error) return;
+        clearTimeout(timer); pending.delete(id); reject(error);
+      });
+    });
+  }
+
   function rejectAllPending(reason: unknown): void {
     for (const [, entry] of pending) {
       clearTimeout(entry.timer);
       entry.reject(reason);
     }
     pending.clear();
+    for (const entry of consuming) { clearTimeout(entry.timer); entry.reject(reason); }
+    consuming.clear();
   }
 
   return {
@@ -197,7 +252,29 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
         };
         const onOpen = () => {
           ws?.removeListener("error", onError);
-          resolve();
+          try {
+            pump = new RpcMessagePump(ws!, dispatchMessage, () => {
+              rejectAllPending(new RpcClientClosedError("Connection closed by server"));
+              notifyClosed();
+              ws?.terminate();
+            });
+            sender = new RpcRequestSender(ws!, () => {
+              rejectAllPending(new RpcClientClosedError("Request transmission failed"));
+              notifyClosed(); ws?.terminate();
+            });
+            ws!.on("message", data => pump!.accept(data));
+            ws!.on("close", () => {
+              rejectAllPending(new RpcClientClosedError("Connection closed by server"));
+              notifyClosed();
+            });
+            ws!.on("error", () => { /* close settles pending requests. */ });
+            resolve();
+          } catch (error) {
+            ws!.on("error", () => {});
+            ws!.terminate();
+            ws = null;
+            reject(error);
+          }
         };
         const timer = setTimeout(() => {
           ws?.removeAllListeners();
@@ -216,20 +293,6 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
         });
       });
 
-      // 进入正常工作状态：注册消息和关闭处理
-      ws.on("message", (data) => {
-        const text = typeof data === "string" ? data : (data as Buffer).toString("utf-8");
-        dispatchMessage(text);
-      });
-
-      ws.on("close", () => {
-        rejectAllPending(new RpcClientClosedError("Connection closed by server"));
-        notifyClosed();
-      });
-
-      ws.on("error", () => {
-        // 错误后通常会触发 close —— 让 close handler 处理 cleanup
-      });
     },
 
     async authenticate(token, clientInfo): Promise<AuthResult> {
@@ -237,32 +300,11 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
     },
 
     request<T = unknown>(method: string, params?: unknown): Promise<T> {
-      if (closed) return Promise.reject(new RpcClientClosedError());
-      if (!ws || ws.readyState !== ws.OPEN) {
-        return Promise.reject(new RpcClientClosedError("Not connected"));
-      }
+      return request<T>(method, params);
+    },
 
-      const id = ++nextId;
-      return new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error(`RPC request timeout after ${timeout}ms: ${method}`));
-        }, timeout);
-
-        pending.set(id, {
-          resolve: resolve as (value: unknown) => void,
-          reject,
-          timer,
-        });
-
-        try {
-          ws!.send(encodeRequest(id, method, params));
-        } catch (err) {
-          clearTimeout(timer);
-          pending.delete(id);
-          reject(err);
-        }
-      });
+    consume<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>): Promise<R> {
+      return request<R>(method, params, value => consumer(value as T));
     },
 
     onNotification<T = unknown>(method: string, handler: NotificationHandler<T>): Unsubscribe {
@@ -285,20 +327,24 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
       };
     },
 
-    async close(): Promise<void> {
-      if (closed) return;
-      notifyClosed();
-      rejectAllPending(new RpcClientClosedError("Client closed"));
-      if (ws) {
-        const w = ws;
-        ws = null;
-        if (w.readyState === w.OPEN || w.readyState === w.CONNECTING) {
-          await new Promise<void>((resolve) => {
-            w.once("close", () => resolve());
-            w.close();
+    close(): Promise<void> {
+      if (closing) return closing;
+      let resolve!: () => void, reject!: (error: unknown) => void;
+      closing = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+      // Install the shared close promise before close observers can re-enter.
+      // notifyClosed seals admission synchronously, as before.
+      void (async () => {
+        notifyClosed();
+        rejectAllPending(new RpcClientClosedError("Client closed"));
+        const w = ws; ws = null;
+        if (w && w.readyState !== WebSocket.CLOSED) {
+          await new Promise<void>(done => {
+            w.once("close", done);
+            if (w.readyState === WebSocket.OPEN || w.readyState === WebSocket.CONNECTING) w.close();
           });
         }
-      }
+      })().then(resolve, reject);
+      return closing;
     },
   };
 }
