@@ -39,6 +39,8 @@ export interface FileProviderOptions {
    * 默认 100。
    */
   readonly maxResults?: number;
+  /** Optional UTF-8 size of complete candidate records retained by this query. */
+  readonly maxResultBytes?: number;
 }
 
 // ─── 常量 ───
@@ -81,6 +83,7 @@ export class FileProvider implements SuggestionProvider {
 
   private readonly root: () => string;
   private readonly maxResults: number;
+  private readonly maxResultBytes: number;
 
   constructor(options: FileProviderOptions) {
     const root = options.root;
@@ -89,6 +92,7 @@ export class FileProvider implements SuggestionProvider {
         ? () => path.resolve(root())
         : () => path.resolve(root);
     this.maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS;
+    this.maxResultBytes = options.maxResultBytes ?? Infinity;
   }
 
   // ── Trigger 检测 ──
@@ -156,62 +160,70 @@ export class FileProvider implements SuggestionProvider {
     const resolved = this.resolvePath(query, root);
     if (signal.aborted) return [];
 
-    let entries: import("node:fs").Dirent[];
+    let entries: import("node:fs").Dir;
     try {
-      entries = await fs.readdir(resolved.resolvedDir, {
-        withFileTypes: true,
-      });
+      entries = await fs.opendir(resolved.resolvedDir, { bufferSize: 32 });
     } catch {
       // 目录不存在、无权限等 —— 静默返回空
       return [];
     }
 
-    if (signal.aborted) return [];
-
     const items: SuggestionItem[] = [];
+    let retainedBytes = 0;
 
-    for (const entry of entries) {
-      if (items.length >= this.maxResults) break;
+    // The iterator closes its OS directory on completion, cancellation and
+    // early break. Large directories never become one resident Dirent array.
+    try {
+      for await (const entry of entries) {
+        if (signal.aborted) return [];
+        if (items.length >= this.maxResults) break;
 
-      // 隐藏文件过滤：仅显式 @file: 前缀时显示
-      if (entry.name.startsWith(".") && !explicit) continue;
+        // 隐藏文件过滤：仅显式 @file: 前缀时显示
+        if (entry.name.startsWith(".") && !explicit) continue;
 
-      // 前缀过滤（大小写不敏感）
-      if (
-        resolved.prefix &&
-        !entry.name.toLowerCase().startsWith(resolved.prefix.toLowerCase())
-      ) {
-        continue;
-      }
+        // 前缀过滤（大小写不敏感）
+        if (
+          resolved.prefix &&
+          !entry.name.toLowerCase().startsWith(resolved.prefix.toLowerCase())
+        ) {
+          continue;
+        }
 
-      const isDir = entry.isDirectory();
-      const relativePath = resolved.relativeDir
-        ? `${resolved.relativeDir}/${entry.name}`
-        : entry.name;
-      const resolvedAbsPath = path.resolve(resolved.resolvedDir, entry.name);
-      const isOutsideWorkspace = !this.isInsideWorkspace(resolvedAbsPath, root);
+        const isDir = entry.isDirectory();
+        const relativePath = resolved.relativeDir
+          ? `${resolved.relativeDir}/${entry.name}`
+          : entry.name;
+        const resolvedAbsPath = path.resolve(resolved.resolvedDir, entry.name);
+        const isOutsideWorkspace = !this.isInsideWorkspace(resolvedAbsPath, root);
 
-      items.push({
-        id: `file:${relativePath}`,
-        providerId: this.id,
-        displayText: isDir ? `${entry.name}/` : entry.name,
-        description: relativePath,
-        icon: isDir ? "\u{1F4C1}" : "\u{1F4C4}",
-        tag: isOutsideWorkspace ? "external" : undefined,
-        acceptPayload: {
-          // 目录：尾 / 保留，继续触发子目录浏览
-          // 文件：加尾部空格，打断 trigger token，用户可直接输入后续文字
-          replacement: isDir
-            ? `@file:${relativePath}/`
-            : `@file:${relativePath} `,
-          execute: false, // 文件引用不立即执行，嵌入 draft 发给 agent
-          metadata: {
-            resolvedPath: normalizeToForwardSlash(resolvedAbsPath),
-            isDirectory: isDir,
-            isOutsideWorkspace,
+        const item: SuggestionItem = {
+          id: `file:${relativePath}`,
+          providerId: this.id,
+          displayText: isDir ? `${entry.name}/` : entry.name,
+          description: relativePath,
+          icon: isDir ? "\u{1F4C1}" : "\u{1F4C4}",
+          tag: isOutsideWorkspace ? "external" : undefined,
+          acceptPayload: {
+            // 目录：尾 / 保留，继续触发子目录浏览
+            // 文件：加尾部空格，打断 trigger token，用户可直接输入后续文字
+            replacement: isDir
+              ? `@file:${relativePath}/`
+              : `@file:${relativePath} `,
+            execute: false, // 文件引用不立即执行，嵌入 draft 发给 agent
+            metadata: {
+              resolvedPath: normalizeToForwardSlash(resolvedAbsPath),
+              isDirectory: isDir,
+              isOutsideWorkspace,
+            },
           },
-        },
-      });
+        };
+        const bytes = Number.isFinite(this.maxResultBytes) ? Buffer.byteLength(JSON.stringify(item)) : 0;
+        if (retainedBytes + bytes > this.maxResultBytes) continue;
+        retainedBytes += bytes;
+        items.push(item);
+      }
+    } catch {
+      return [];
     }
 
     // 排序：目录在前，然后按名称字母序

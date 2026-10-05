@@ -104,7 +104,7 @@ export {
   readCredentialBindingState,
   inspectMcpCredentialBinding,
 } from "./credentials-loader.js";
-export { editConfiguration, loadConfigurationSnapshot } from "./configuration-edit.js";
+export { editConfiguration, loadConfigurationSnapshot, ConfigurationEditPendingError } from "./configuration-edit.js";
 export type {
   CredentialMutationOptions,
   CredentialSnapshotOptions,

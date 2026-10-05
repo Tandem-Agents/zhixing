@@ -30,6 +30,17 @@ interface SavedEdit extends Snapshot {
   readonly secretUpdates: readonly SecretUpdate[];
 }
 
+/** The configuration owner reports its durable acceptance boundary. A surface
+ * must reopen through recovery, never retry a stale edit as an unsaved draft. */
+export class ConfigurationEditPendingError extends Error {
+  constructor(readonly acceptance: 'unknown' | 'accepted', cause: unknown) {
+    super(acceptance === 'accepted'
+      ? '配置修改已接纳，保存收尾尚未完成；重新打开配置入口或重启将继续恢复'
+      : '配置接纳结果尚未确认；重新打开配置入口将核对保存状态，未逆向覆盖', { cause });
+    this.name = 'ConfigurationEditPendingError';
+  }
+}
+
 /** Config/Secret own one recoverable local save. Only its random id goes to disk in plaintext. */
 export async function editConfiguration(expected: Snapshot, next: Snapshot, options: Options & {
   readonly scope?: "mcp";
@@ -62,12 +73,12 @@ export async function editConfiguration(expected: Snapshot, next: Snapshot, opti
       try { await writeJsonAtomic(markerPath(configPath), { id: edit.id }); }
       catch (cause) {
         options.records?.record({ event: "uncertain", refs: [{ kind: "configurationEdit", id: edit.id }], result: "unknown", data: { error: "配置接纳未确认" } });
-        throw new Error("配置接纳结果尚未确认；重新打开配置入口将核对保存状态，未逆向覆盖", { cause });
+        throw new ConfigurationEditPendingError('unknown', cause);
       }
       try { await applySavedEdit(edit, options.store); }
       catch (cause) {
         options.records?.record({ event: "uncertain", refs: [{ kind: "configurationEdit", id: edit.id }], result: "unknown", data: { error: "配置已接纳，保存收尾未确认" } });
-        throw new Error("配置修改已接纳，保存收尾尚未完成；重新打开配置入口或重启将继续恢复", { cause });
+        throw new ConfigurationEditPendingError('accepted', cause);
       }
       options.records?.record(() => { const context = runtimeConfigurationObservation(edit.config); return { event: "saved", refs: [{ kind: "configurationEdit", id: edit.id }, { kind: "configuration", id: context.selectionDigest }], result: "success", data: { scope: options.scope ?? "configuration", ...context } }; });
     });

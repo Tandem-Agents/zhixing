@@ -351,6 +351,22 @@ describe("FileProvider 边界情况", () => {
 // ─── maxResults ───
 
 describe("FileProvider maxResults", () => {
+  it("按完整 UTF-8 候选记录收费，恰好够用时保留，容量不足时不返回半个候选", async () => {
+    const root = tmpRootDir.getDir();
+    await fs.mkdir(path.join(root, 'byte-budget'));
+    await fs.writeFile(path.join(root, 'byte-budget', '汉字🦞.txt'), '');
+    const match = provider.matchTrigger(makeCtx('@file:byte-budget/'))!;
+    const [expected] = await provider.query(match, noAbort());
+    expect(expected).toBeDefined();
+    const bytes = Buffer.byteLength(JSON.stringify(expected));
+    const exact = new FileProvider({ root, maxResultBytes: bytes });
+    expect(await exact.query(match, noAbort())).toEqual([expected]);
+    const tooSmall = new FileProvider({ root, maxResultBytes: bytes - 1 });
+    expect(await tooSmall.query(match, noAbort())).toEqual([]);
+    // A rejected bounded query leaves ordinary path lookup available.
+    expect(await provider.query(match, noAbort())).toEqual([expected]);
+  });
+
   it("超过 maxResults 的条目被截断", async () => {
     const smallProvider = new FileProvider({ root: tmpRootDir.getDir(), maxResults: 2 });
     const match = smallProvider.matchTrigger(makeCtx("@file:"))!;
