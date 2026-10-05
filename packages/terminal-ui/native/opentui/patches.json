@@ -1,0 +1,284 @@
+{
+  "version": "0.5.14",
+  "upstreamCommit": "31a93fbe66992298d6d0f27481fa781f43d0c1e2",
+  "purpose": "External recovery ownership and synchronous current-frame write success",
+  "files": [
+    {
+      "file": "src/renderer-output.zig",
+      "baseSha256": "697aa0796bb4340b589a718506c082bf3f4e430aa11c65e03254840dfc314232",
+      "outputSha256": "64cac28316633a5b7bbcaf906b372b4611f1abf218a0da5b3172c8a323352fd8",
+      "edits": [
+        {
+          "at": 159,
+          "remove": 0,
+          "insert": [
+            "test \"synchronous current frame write finishes before success\" {",
+            "    var memory = MemoryOutput.init(std.testing.allocator);",
+            "    defer memory.deinit();",
+            "    var backend = try BufferedBackend.create(std.testing.allocator, memory.bufferedOutput());",
+            "    defer backend.deinit();",
+            "    try std.testing.expect(!backend.isUseThread());",
+            "    backend.beginFrame();",
+            "    try backend.writer().writeAll(\"current frame\");",
+            "    try std.testing.expectEqual(WriteStatus.ok, backend.endFrame());",
+            "    try std.testing.expectEqualStrings(\"current frame\", memory.bytes.items);",
+            "}",
+            "",
+            "test \"Windows current frame write failure cannot commit success\" {",
+            "    if (builtin.os.tag != .windows) return error.SkipZigTest;",
+            "    var backend = try BufferedBackend.createStdout(std.testing.allocator);",
+            "    defer backend.deinit();",
+            "    const output = backend.ownedStdoutOutput.?;",
+            "    output.stdout.handle = std.os.windows.INVALID_HANDLE_VALUE;",
+            "    output.windowsConsole = true;",
+            "    backend.beginFrame();",
+            "    try backend.writer().writeAll(\"failed current frame\");",
+            "    try std.testing.expectEqual(WriteStatus.failed, backend.endFrame());",
+            "    try std.testing.expect(output.failed.load(.acquire));",
+            "    try std.testing.expect(!backend.hasCommittedFrame);",
+            "}",
+            "",
+            "test \"Windows malformed current frame cannot commit success\" {",
+            "    if (builtin.os.tag != .windows) return error.SkipZigTest;",
+            "    var backend = try BufferedBackend.createStdout(std.testing.allocator);",
+            "    defer backend.deinit();",
+            "    backend.ownedStdoutOutput.?.windowsConsole = true;",
+            "    backend.beginFrame();",
+            "    try backend.writer().writeAll(\"\\xFF\");",
+            "    try std.testing.expectEqual(WriteStatus.failed, backend.endFrame());",
+            "    try std.testing.expect(!backend.hasCommittedFrame);",
+            "}",
+            ""
+          ]
+        },
+        {
+          "at": 221,
+          "remove": 1,
+          "insert": [
+            "        if (!std.unicode.utf8ValidateSlice(data)) {",
+            "            self.failed.store(true, .release);",
+            "            return;",
+            "        }"
+          ]
+        },
+        {
+          "at": 227,
+          "remove": 1,
+          "insert": [
+            "            if (!self.writeWindowsConsoleUtf16(self.utf16Buffer[0..chunk.output_len])) {",
+            "                self.failed.store(true, .release);",
+            "                return;",
+            "            }"
+          ]
+        },
+        {
+          "at": 740,
+          "remove": 0,
+          "insert": [
+            "            // Synchronous frame completion includes the current stdout write.",
+            "            // A failed or partial write must never publish a rendered frame.",
+            "            if (self.ownedStdoutOutput) |stdout_output| {",
+            "                if (stdout_output.failed.load(.acquire)) return .failed;",
+            "            }"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/renderer.zig",
+      "baseSha256": "79b317917fd91a954c0355dca5041e58fcc9712e1f8380742ecc9342d72b597c",
+      "outputSha256": "66dc7f55f77a9c9c919033cecd047c778f5e7252775c20e472a967da66adf586",
+      "edits": [
+        {
+          "at": 552,
+          "remove": 1,
+          "insert": [
+            "        // Optional graphics probes are outside this fixed UI effect set."
+          ]
+        },
+        {
+          "at": 562,
+          "remove": 1,
+          "insert": [
+            "        // R owns the main/alternate transition; no additional cursor save."
+          ]
+        },
+        {
+          "at": 586,
+          "remove": 1,
+          "insert": [
+            "        // Optional graphics probes are outside this fixed UI effect set."
+          ]
+        },
+        {
+          "at": 602,
+          "remove": 17,
+          "insert": []
+        },
+        {
+          "at": 620,
+          "remove": 0,
+          "insert": [
+            "        // Resource disposal emits no terminal reset; R remains sole final owner.",
+            "}"
+          ]
+        },
+        {
+          "at": 621,
+          "remove": 34,
+          "insert": []
+        },
+        {
+          "at": 1843,
+          "remove": 1,
+          "insert": [
+            "        // Unknown synchronized-output mode is never changed."
+          ]
+        },
+        {
+          "at": 2936,
+          "remove": 26,
+          "insert": []
+        },
+        {
+          "at": 2986,
+          "remove": 1,
+          "insert": [
+            "                    // Cursor colour is not owned or changed."
+          ]
+        },
+        {
+          "at": 2990,
+          "remove": 1,
+          "insert": [
+            "                    // Cursor shape is not owned or changed."
+          ]
+        },
+        {
+          "at": 3023,
+          "remove": 1,
+          "insert": [
+            "            // Pointer shape is not owned or changed."
+          ]
+        },
+        {
+          "at": 3030,
+          "remove": 1,
+          "insert": [
+            "            // Matching no-op: synchronized output was not enabled."
+          ]
+        },
+        {
+          "at": 3435,
+          "remove": 1,
+          "insert": [
+            "        // Optional graphics probes are outside this fixed UI effect set."
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/terminal.zig",
+      "baseSha256": "926cd56d99c2dac202d13082995815b3e2caa068714750ecb9e664d4e995c7b2",
+      "outputSha256": "09498b3c4b9d7f9ae6002ed835399fccaa54d3d088928ed3f12c4c7d3cc87e49",
+      "edits": [
+        {
+          "at": 282,
+          "remove": 52,
+          "insert": [
+            "    _ = self; _ = tty; // Original R restores after actual writer exit."
+          ]
+        },
+        {
+          "at": 337,
+          "remove": 2,
+          "insert": [
+            "    _ = tty; self.state.alt_screen = true; // Physical enter belongs to R."
+          ]
+        },
+        {
+          "at": 342,
+          "remove": 2,
+          "insert": [
+            "    _ = tty; self.state.alt_screen = false;"
+          ]
+        },
+        {
+          "at": 347,
+          "remove": 49,
+          "insert": [
+            "    _ = tty; self.graphics_enabled = false; self.skip_graphics_query = true; self.skip_explicit_width_query = true;",
+            "    self.caps = .{ .rgb = true, .ansi256 = true, .bracketed_paste = true, .focus_tracking = true, .unicode = .unicode };"
+          ]
+        },
+        {
+          "at": 399,
+          "remove": 41,
+          "insert": [
+            "    _ = use_kitty_keyboard;",
+            "    try self.setBracketedPaste(tty, true);",
+            "    try self.setFocusTracking(tty, true);"
+          ]
+        },
+        {
+          "at": 443,
+          "remove": 6,
+          "insert": [
+            "    _ = tty;"
+          ]
+        },
+        {
+          "at": 978,
+          "remove": 0,
+          "insert": [
+            "        try tty.writeAll(\"\\x1b[?1005l\");"
+          ]
+        },
+        {
+          "at": 1007,
+          "remove": 13,
+          "insert": [
+            "    _ = tty; _ = enable; _ = flags; self.state.kitty_keyboard = false; self.state.kitty_keyboard_flags = 0;"
+          ]
+        },
+        {
+          "at": 1023,
+          "remove": 3,
+          "insert": [
+            "    _ = tty; _ = enable; self.state.modify_other_keys = false;"
+          ]
+        },
+        {
+          "at": 1029,
+          "remove": 3,
+          "insert": [
+            "    _ = tty; _ = enable; self.state.color_scheme_updates = false;"
+          ]
+        },
+        {
+          "at": 1058,
+          "remove": 34,
+          "insert": [
+            "    if (self.state.mouse) { const movement = self.state.mouse_movement; self.state.mouse = false; try self.setMouseMode(tty, true, movement); }",
+            "    if (self.state.focus_tracking) try self.setFocusTracking(tty, true);",
+            "    if (self.state.bracketed_paste) try self.setBracketedPaste(tty, true);"
+          ]
+        },
+        {
+          "at": 1247,
+          "remove": 147,
+          "insert": [
+            "    _ = self; _ = response; // Late replies cannot widen the admitted effect set."
+          ]
+        },
+        {
+          "at": 1500,
+          "remove": 3,
+          "insert": [
+            "    _ = tty; _ = title;"
+          ]
+        }
+      ]
+    }
+  ]
+}

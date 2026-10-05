@@ -37,6 +37,7 @@
     "qrcode": "1.5.4"
   },
   "devDependencies": {
+    "@zhixing/terminal-ui": "workspace:*",
     "@zhixing/channel-feishu": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/qrcode": "1.5.6",

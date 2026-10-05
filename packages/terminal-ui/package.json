@@ -1,0 +1,22 @@
+{
+  "name": "@zhixing/terminal-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "知行独立终端表面与匹配恢复制品",
+  "type": "module",
+  "exports": { "./protocol": "./dist/shared/protocol.js", "./channel": "./dist/shared/channel.js", "./parent-transport": "./dist/shared/parent-transport.js" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run --maxWorkers=2"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.14",
+    "@opentui/solid": "0.5.14",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}

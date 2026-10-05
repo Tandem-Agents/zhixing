@@ -40,9 +40,12 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: "node24",
+  noExternal: ["@zhixing/terminal-ui"],
   banner: { js: "#!/usr/bin/env node" },
   onSuccess: async () => {
     await buildExtensionKit();
+    // The independent UI/native closure survives tsup's clean build.
+    await cp("../terminal-ui/dist", "dist/terminal", { recursive: true });
     // Independently built migration artifacts, never imported by the CLI process.
     await mkdir("dist/extensions", { recursive: true });
     for (const directory of await readdir("../channels", { withFileTypes: true })) {

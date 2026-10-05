@@ -1,0 +1,418 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <node_api.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <wchar.h>
+#include <string.h>
+
+/* In-process creation edge of S. No domain data, terminal writes, process
+   discovery, or supervision of S. A child cannot run before S admits its
+   returned process handle. Creation never blocks S's JavaScript event loop. */
+#define CHILDREN 32
+#define TEXT_LIMIT 32767
+typedef struct {
+  HANDLE job, creator, process, primary, verifiedTarget;
+  wchar_t *executable, *command, *environment, *directory;
+  wchar_t *privateEndpoint;
+  char privateToken[37];
+  ULONGLONG privateDeadline;
+  DWORD pid, error, identity;
+  LONG occupied, cancelled, ready, resumed, finished;
+  BOOL creatorObservedExited;
+  char birth[32];
+  BOOL console; DWORD scope;
+} Child;
+static Child children[CHILDREN];
+static SRWLOCK lock = SRWLOCK_INIT;
+static BOOL sealed = FALSE;
+static DWORD generation = 0;
+static HANDLE executionJob = NULL;
+
+static ULONGLONG epoch_ms(void) {
+  FILETIME now; GetSystemTimeAsFileTime(&now);
+  return ((((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime) / 10000) - 11644473600000ULL;
+}
+static BOOL private_cancelled(Child *child) {
+  return InterlockedCompareExchange(&child->cancelled, 0, 0) || epoch_ms() >= child->privateDeadline;
+}
+/* The gate alone knows these private lanes. S receives no command, environment
+   or payload. Open only the already-bound, unguessable owner endpoint. */
+static HANDLE private_stdio(Child *child, const char *kind, DWORD *error) {
+  SECURITY_ATTRIBUTES security = { sizeof security, NULL, TRUE };
+  HANDLE pipe = INVALID_HANDLE_VALUE;
+  while (!private_cancelled(child)) {
+    pipe = CreateFileW(child->privateEndpoint, GENERIC_READ | GENERIC_WRITE, 0,
+      &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (pipe != INVALID_HANDLE_VALUE) break;
+    *error = GetLastError();
+    if (*error != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
+    if (!WaitNamedPipeW(child->privateEndpoint, 20) && GetLastError() != ERROR_SEM_TIMEOUT) {
+      *error = GetLastError(); return INVALID_HANDLE_VALUE;
+    }
+  }
+  if (pipe == INVALID_HANDLE_VALUE || private_cancelled(child)) {
+    if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+    *error = ERROR_CANCELLED; return INVALID_HANDLE_VALUE;
+  }
+  char hello[64]; DWORD written = 0;
+  int length = snprintf(hello, sizeof hello, "%s %s\n", child->privateToken, kind);
+  if (length <= 0 || (size_t)length >= sizeof hello ||
+      !WriteFile(pipe, hello, (DWORD)length, &written, NULL) || written != (DWORD)length) {
+    *error = GetLastError(); if (!*error) *error = ERROR_WRITE_FAULT;
+    CloseHandle(pipe); return INVALID_HANDLE_VALUE;
+  }
+  *error = 0; return pipe;
+}
+
+static void free_arguments(Child *child) {
+  free(child->executable); free(child->command);
+  free(child->environment); free(child->directory);
+  free(child->privateEndpoint); child->privateEndpoint = NULL;
+  child->executable = child->command = child->environment = child->directory = NULL;
+}
+static DWORD WINAPI create_child(void *opaque) {
+  Child *child = opaque;
+  SIZE_T bytes = 0;
+  InitializeProcThreadAttributeList(NULL, 2, 0, &bytes);
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(bytes);
+  BOOL initialized = attributes && InitializeProcThreadAttributeList(attributes, 2, 0, &bytes);
+  HANDLE nullHandle = INVALID_HANDLE_VALUE;
+  HANDLE inherited[3] = {0}; DWORD inheritedCount = 0;
+  STARTUPINFOEXW startup = {0}; PROCESS_INFORMATION process = {0};
+  startup.StartupInfo.cb = sizeof startup;
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+  startup.StartupInfo.wShowWindow = SW_HIDE;
+  startup.lpAttributeList = attributes;
+  DWORD error = initialized ? 0 : GetLastError();
+  HANDLE jobs[2] = { child->scope == 1 ? executionJob : child->job, child->job };
+  if (!error && child->job && !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+      jobs, sizeof(HANDLE) * (child->scope == 1 ? 2 : 1), NULL, NULL)) error = GetLastError();
+  if (!error) {
+    if (child->scope == 3) {
+      BOOL inJob = FALSE;
+      if (!IsProcessInJob(GetCurrentProcess(), NULL, &inJob) || !inJob) error = ERROR_ACCESS_DENIED;
+      const char *kinds[] = { "input", "output", "error" };
+      for (int i = 0; i < 3 && !error; i++) {
+        inherited[i] = private_stdio(child, kinds[i], &error);
+        if (inherited[i] != INVALID_HANDLE_VALUE) inheritedCount++;
+      }
+      startup.StartupInfo.hStdInput = inherited[0];
+      startup.StartupInfo.hStdOutput = inherited[1];
+      startup.StartupInfo.hStdError = inherited[2];
+    } else if (child->console) {
+      const DWORD kinds[] = { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE };
+      for (int i = 0; i < 3 && !error; i++) {
+        if (!DuplicateHandle(GetCurrentProcess(), GetStdHandle(kinds[i]), GetCurrentProcess(), &inherited[i], 0, TRUE, DUPLICATE_SAME_ACCESS)) error = GetLastError();
+        else inheritedCount++;
+      }
+      startup.StartupInfo.hStdInput = inherited[0];
+      startup.StartupInfo.hStdOutput = inherited[1];
+      startup.StartupInfo.hStdError = inherited[2];
+    } else {
+      SECURITY_ATTRIBUTES security = { sizeof security, NULL, TRUE };
+      nullHandle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+      if (nullHandle == INVALID_HANDLE_VALUE) error = GetLastError();
+      startup.StartupInfo.hStdInput = startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = nullHandle;
+      if (!error) { inherited[0] = nullHandle; inheritedCount = 1; }
+    }
+  }
+  if (!error && !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+      inherited, inheritedCount * sizeof(HANDLE), NULL, NULL)) error = GetLastError();
+  /* Cancellation can precede or overlap CreateProcess. Even in the latter
+     case the initial thread is suspended and the job membership is atomic. */
+  if (!error && InterlockedCompareExchange(&child->cancelled, 0, 0)) error = ERROR_CANCELLED;
+  if (!error && child->scope == 3 && private_cancelled(child)) error = ERROR_CANCELLED;
+  if (!error && !CreateProcessW(child->executable, child->command, NULL, NULL, TRUE,
+      CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | (child->scope == 2 ? DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP : 0),
+      child->environment, child->directory, &startup.StartupInfo, &process)) error = GetLastError();
+  if (initialized) DeleteProcThreadAttributeList(attributes);
+  free(attributes);
+  for (DWORD i = 0; i < inheritedCount; i++) CloseHandle(inherited[i]);
+  AcquireSRWLockExclusive(&lock);
+  child->error = error;
+  if (!error) {
+    child->process = process.hProcess; child->primary = process.hThread; child->pid = process.dwProcessId;
+    if (sealed || child->cancelled) { child->cancelled = TRUE; TerminateProcess(child->process, ERROR_CANCELLED); }
+  }
+  free_arguments(child);
+  child->ready = TRUE;
+  ReleaseSRWLockExclusive(&lock);
+  InterlockedExchange(&child->finished, TRUE);
+  return 0;
+}
+
+static napi_value fail(napi_env env, const char *message) {
+  napi_throw_error(env, NULL, message); return NULL;
+}
+static napi_value undefined(napi_env env) { napi_value result; napi_get_undefined(env, &result); return result; }
+static wchar_t *text(napi_env env, napi_value value, BOOL block) {
+  size_t length = 0, written = 0;
+  if (napi_get_value_string_utf16(env, value, NULL, 0, &length) != napi_ok || !length || length > TEXT_LIMIT) return NULL;
+  wchar_t *result = calloc(length + 2, sizeof(wchar_t));
+  if (!result || napi_get_value_string_utf16(env, value, (char16_t *)result, length + 1, &written) != napi_ok || written != length) { free(result); return NULL; }
+  if ((!block && wcslen(result) != length) || (block && (length < 2 || result[length - 1] || result[length - 2]))) { free(result); return NULL; }
+  return result;
+}
+static Child *argument_child(napi_env env, napi_callback_info info) {
+  napi_value value; size_t count = 1; uint32_t id = 0;
+  if (napi_get_cb_info(env, info, &count, &value, NULL, NULL) != napi_ok || count != 1 || napi_get_value_uint32(env, value, &id) != napi_ok || !id || !children[id % CHILDREN].occupied || children[id % CHILDREN].identity != id) {
+    fail(env, "terminal-native-child-identity"); return NULL;
+  }
+  return &children[id % CHILDREN];
+}
+static napi_value create(napi_env env, napi_callback_info info) {
+  napi_value args[6], result; size_t count = 6; bool console = false; uint32_t scope = 1;
+  if (napi_get_cb_info(env, info, &count, args, NULL, NULL) != napi_ok || (count != 5 && count != 6) ||
+      napi_get_value_bool(env, args[4], &console) != napi_ok) return fail(env, "terminal-native-create-arguments");
+  if (count == 6 && (napi_get_value_uint32(env, args[5], &scope) != napi_ok || scope > 2)) return fail(env, "terminal-native-create-scope");
+  AcquireSRWLockExclusive(&lock);
+  int id = 0; while (id < CHILDREN && children[id].occupied) id++;
+  if (sealed || id == CHILDREN || generation >= 0x07FFFFFF) { ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-admission-closed"); }
+  Child *child = &children[id]; ZeroMemory(child, sizeof *child); child->occupied = TRUE; child->console = console; child->scope = scope;
+  child->identity = ++generation * CHILDREN + id;
+  child->executable = text(env, args[0], FALSE); child->command = text(env, args[1], FALSE);
+  child->environment = text(env, args[2], TRUE); child->directory = text(env, args[3], FALSE);
+  child->job = scope == 2 ? NULL : CreateJobObjectW(NULL, NULL);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+  /* No execution descendant may break away. R has a separate job; an
+     admitted independent Host is born outside both jobs. */
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!child->executable || !child->command || !child->environment || !child->directory || (scope != 2 && !child->job) ||
+      (scope != 2 && !SetInformationJobObject(child->job, JobObjectExtendedLimitInformation, &limits, sizeof limits))) {
+    free_arguments(child); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child);
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-create-preflight");
+  }
+  child->creator = CreateThread(NULL, 0, create_child, child, 0, NULL);
+  if (!child->creator) { free_arguments(child); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-create-thread"); }
+  ReleaseSRWLockExclusive(&lock);
+  napi_create_uint32(env, child->identity, &result); return result;
+}
+/* Used only inside the fixed Windows private gate. Inherited Job membership
+   is atomic at CreateProcess; no breakaway or alternate parent is permitted.
+   This creator does not open or duplicate any S Job handle. */
+static napi_value create_private(napi_env env, napi_callback_info info) {
+  napi_value args[7], result; size_t count = 7; double deadline = 0;
+  if (napi_get_cb_info(env, info, &count, args, NULL, NULL) != napi_ok || count != 7 ||
+      napi_get_value_double(env, args[6], &deadline) != napi_ok ||
+      !(deadline > (double)epoch_ms() && deadline <= (double)epoch_ms() + 5000)) return fail(env, "terminal-private-create-arguments");
+  AcquireSRWLockExclusive(&lock);
+  int id = 0; while (id < CHILDREN && children[id].occupied) id++;
+  if (sealed || id == CHILDREN || generation >= 0x07FFFFFF) { ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-admission-closed"); }
+  Child *child = &children[id]; ZeroMemory(child, sizeof *child);
+  child->occupied = TRUE; child->scope = 3; child->privateDeadline = (ULONGLONG)deadline;
+  child->identity = ++generation * CHILDREN + id;
+  child->executable = text(env, args[0], FALSE); child->command = text(env, args[1], FALSE);
+  child->environment = text(env, args[2], TRUE); child->directory = text(env, args[3], FALSE);
+  child->privateEndpoint = text(env, args[4], FALSE);
+  size_t length = 0, written = 0;
+  BOOL tokenValid = napi_get_value_string_utf8(env, args[5], NULL, 0, &length) == napi_ok && length == 36 &&
+    napi_get_value_string_utf8(env, args[5], child->privateToken, sizeof child->privateToken, &written) == napi_ok && written == 36;
+  for (size_t i = 0; tokenValid && i < 36; i++) {
+    char c = child->privateToken[i]; if (!(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) tokenValid = FALSE;
+  }
+  const wchar_t *prefix = L"\\\\.\\pipe\\zhixing-terminal-";
+  size_t prefixLength = wcslen(prefix);
+  BOOL endpointValid = child->privateEndpoint && wcslen(child->privateEndpoint) == prefixLength + 36 &&
+    wcsncmp(child->privateEndpoint, prefix, prefixLength) == 0;
+  for (size_t i = 0; endpointValid && i < 36; i++) {
+    wchar_t c = child->privateEndpoint[prefixLength + i];
+    if (!(c == L'-' || (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) endpointValid = FALSE;
+  }
+  if (!child->executable || !child->command || !child->environment || !child->directory || !endpointValid || !tokenValid) {
+    free_arguments(child); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock);
+    return fail(env, "terminal-private-create-preflight");
+  }
+  child->creator = CreateThread(NULL, 0, create_child, child, 0, NULL);
+  if (!child->creator) {
+    free_arguments(child); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock);
+    return fail(env, "terminal-private-create-thread");
+  }
+  ReleaseSRWLockExclusive(&lock);
+  napi_create_uint32(env, child->identity, &result); return result;
+}
+static napi_value resume(napi_env env, napi_callback_info info) {
+  Child *child = argument_child(env, info); if (!child) return NULL;
+  AcquireSRWLockExclusive(&lock);
+  BOOL allowed = !sealed && !child->cancelled && child->ready && child->process && !child->resumed &&
+    (child->scope != 3 || epoch_ms() < child->privateDeadline);
+  if (allowed && ResumeThread(child->primary) == 1) child->resumed = TRUE;
+  else allowed = FALSE;
+  ReleaseSRWLockExclusive(&lock);
+  if (!allowed) return fail(env, "terminal-native-resume-denied");
+  return undefined(env);
+}
+static napi_value stop(napi_env env, napi_callback_info info) {
+  Child *child = argument_child(env, info); if (!child) return NULL;
+  AcquireSRWLockExclusive(&lock);
+  child->cancelled = TRUE;
+  if (child->job && !TerminateJobObject(child->job, ERROR_CANCELLED)) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-branch-terminate-failed");
+  }
+  if (!child->job && child->process && WaitForSingleObject(child->process, 0) == WAIT_TIMEOUT && !TerminateProcess(child->process, ERROR_CANCELLED)) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-terminate-failed");
+  }
+  ReleaseSRWLockExclusive(&lock); return undefined(env);
+}
+static void number(napi_env env, napi_value object, const char *name, DWORD value) {
+  napi_value property; napi_create_uint32(env, value, &property); napi_set_named_property(env, object, name, property);
+}
+static void boolean(napi_env env, napi_value object, const char *name, BOOL value) {
+  napi_value property; napi_get_boolean(env, !!value, &property); napi_set_named_property(env, object, name, property);
+}
+/* S verifies the private gate's metadata against its own Job and a real held
+   target handle before publishing the writer identity. A PID string alone is
+   never a receipt, and a ticket can bind only one actual target. */
+static napi_value verify_target(napi_env env, napi_callback_info info) {
+  napi_value args[3]; size_t count = 3; uint32_t id = 0, pid = 0;
+  char expected[32] = {0}; size_t length = 0, written = 0;
+  if (napi_get_cb_info(env, info, &count, args, NULL, NULL) != napi_ok || count != 3 ||
+      napi_get_value_uint32(env, args[0], &id) != napi_ok || !id ||
+      napi_get_value_uint32(env, args[1], &pid) != napi_ok || !pid ||
+      napi_get_value_string_utf8(env, args[2], NULL, 0, &length) != napi_ok || !length || length >= sizeof expected ||
+      napi_get_value_string_utf8(env, args[2], expected, sizeof expected, &written) != napi_ok || written != length) return fail(env, "terminal-target-identity");
+  AcquireSRWLockExclusive(&lock);
+  Child *gate = &children[id % CHILDREN];
+  if (sealed || !gate->occupied || gate->identity != id || gate->cancelled || !gate->resumed ||
+      !gate->job || !gate->process || gate->pid == pid || WaitForSingleObject(gate->process, 0) != WAIT_TIMEOUT) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-target-gate-unavailable");
+  }
+  HANDLE target = gate->verifiedTarget;
+  BOOL newlyOpened = !target;
+  if (!target) target = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  BOOL inJob = FALSE; FILETIME born, end, kernel, user; char birth[32] = {0};
+  BOOL valid = target && GetProcessId(target) == pid && WaitForSingleObject(target, 0) == WAIT_TIMEOUT &&
+    IsProcessInJob(target, gate->job, &inJob) && inJob && GetProcessTimes(target, &born, &end, &kernel, &user);
+  if (valid) {
+    snprintf(birth, sizeof birth, "%llu", ((unsigned long long)born.dwHighDateTime << 32) | born.dwLowDateTime);
+    valid = strcmp(birth, expected) == 0;
+  }
+  if (!valid) {
+    if (newlyOpened && target) CloseHandle(target);
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-target-not-owned");
+  }
+  gate->verifiedTarget = target;
+  ReleaseSRWLockExclusive(&lock);
+  napi_value result, value; napi_create_object(env, &result); number(env, result, "pid", pid);
+  napi_create_string_utf8(env, birth, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "birth", value);
+  return result;
+}
+static napi_value snapshot_state(napi_env env, napi_callback_info info, BOOL inventory) {
+  Child *child = argument_child(env, info); if (!child) return NULL;
+  napi_value result; napi_create_object(env, &result);
+  AcquireSRWLockExclusive(&lock);
+  boolean(env, result, "ready", child->ready); boolean(env, result, "created", child->process != NULL);
+  boolean(env, result, "resumed", child->resumed); boolean(env, result, "cancelled", child->cancelled);
+  if (!child->creatorObservedExited && child->creator && WaitForSingleObject(child->creator, 0) == WAIT_OBJECT_0) child->creatorObservedExited = TRUE;
+  boolean(env, result, "creationExited", child->creatorObservedExited);
+  BOOL exited = child->process && WaitForSingleObject(child->process, 0) == WAIT_OBJECT_0;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION branch = {0};
+  /* Stable live roots need only an exit observation. Exact descendant counts
+     remain mandatory for every exit/cancellation and for explicit snapshots. */
+  if (inventory || exited || child->cancelled || !child->process) {
+    if (child->job && !QueryInformationJobObject(child->job, JobObjectBasicAccountingInformation, &branch, sizeof branch, NULL)) {
+      ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-branch-query-failed");
+    }
+    number(env, result, "branchActive", branch.ActiveProcesses);
+  }
+  number(env, result, "pid", child->pid); number(env, result, "error", child->error);
+  boolean(env, result, "exited", exited);
+  DWORD code = 0; if (exited && GetExitCodeProcess(child->process, &code)) number(env, result, "exitCode", code);
+  if (child->process && !child->birth[0]) {
+    FILETIME born, end, kernel, user;
+    if (GetProcessTimes(child->process, &born, &end, &kernel, &user)) {
+      snprintf(child->birth, sizeof child->birth, "%llu", ((unsigned long long)born.dwHighDateTime << 32) | born.dwLowDateTime);
+    }
+  }
+  if (child->birth[0]) {
+    napi_value value; napi_create_string_utf8(env, child->birth, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "birth", value);
+  }
+  ReleaseSRWLockExclusive(&lock); return result;
+}
+static napi_value snapshot(napi_env env, napi_callback_info info) { return snapshot_state(env, info, TRUE); }
+static napi_value observe(napi_env env, napi_callback_info info) { return snapshot_state(env, info, FALSE); }
+static napi_value seal(napi_env env, napi_callback_info info) {
+  (void)info; AcquireSRWLockExclusive(&lock); sealed = TRUE;
+  for (int i = 0; i < CHILDREN; i++) if (children[i].occupied && !children[i].resumed) {
+    children[i].cancelled = TRUE; if (children[i].process) TerminateProcess(children[i].process, ERROR_CANCELLED);
+  }
+  ReleaseSRWLockExclusive(&lock); return undefined(env);
+}
+static napi_value release(napi_env env, napi_callback_info info) {
+  Child *child = argument_child(env, info); if (!child) return NULL;
+  AcquireSRWLockExclusive(&lock);
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION branch = {0};
+  if (child->job && (!QueryInformationJobObject(child->job, JobObjectBasicAccountingInformation, &branch, sizeof branch, NULL) || branch.ActiveProcesses)) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-branch-not-reaped");
+  }
+  if (!child->finished || WaitForSingleObject(child->creator, 0) != WAIT_OBJECT_0 ||
+      (child->process && WaitForSingleObject(child->process, 0) != WAIT_OBJECT_0)) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-child-not-reaped");
+  }
+  if (child->primary) CloseHandle(child->primary);
+  if (child->process) CloseHandle(child->process);
+  if (child->verifiedTarget) CloseHandle(child->verifiedTarget);
+  CloseHandle(child->creator); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child);
+  ReleaseSRWLockExclusive(&lock); return undefined(env);
+}
+static void cleanup(void *unused) {
+  (void)unused; AcquireSRWLockExclusive(&lock); sealed = TRUE;
+  for (int i = 0; i < CHILDREN; i++) if (children[i].occupied) {
+    children[i].cancelled = TRUE;
+    if (children[i].process && !(children[i].scope == 2 && children[i].resumed)) TerminateProcess(children[i].process, ERROR_CANCELLED);
+    /* A creator still owns its slot and job until it returns. The enclosing
+       process releases those OS handles on exit; never free under its thread. */
+  }
+  ReleaseSRWLockExclusive(&lock);
+  if (executionJob) CloseHandle(executionJob);
+}
+static napi_value execution_state(napi_env env, napi_callback_info info) {
+  (void)info; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
+  if (!QueryInformationJobObject(executionJob, JobObjectBasicAccountingInformation, &accounting, sizeof accounting, NULL)) return fail(env, "terminal-execution-query-failed");
+  napi_value result; napi_create_object(env, &result); number(env, result, "active", accounting.ActiveProcesses);
+  DWORD pending = 0;
+  AcquireSRWLockShared(&lock);
+  for (int i = 0; i < CHILDREN; i++) if (children[i].occupied && WaitForSingleObject(children[i].creator, 0) != WAIT_OBJECT_0) pending++;
+  ReleaseSRWLockShared(&lock); number(env, result, "creating", pending); return result;
+}
+static napi_value terminate_execution(napi_env env, napi_callback_info info) {
+  (void)info; if (!TerminateJobObject(executionJob, ERROR_CANCELLED)) return fail(env, "terminal-execution-terminate-failed");
+  return undefined(env);
+}
+static napi_value detach(napi_env env, napi_callback_info info) {
+  Child *child = argument_child(env, info); if (!child) return NULL;
+  AcquireSRWLockExclusive(&lock);
+  if (child->scope != 2 || !child->resumed || !child->finished || WaitForSingleObject(child->creator, 0) != WAIT_OBJECT_0) {
+    ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-host-not-independent");
+  }
+  CloseHandle(child->primary); CloseHandle(child->process); CloseHandle(child->creator); ZeroMemory(child, sizeof *child);
+  ReleaseSRWLockExclusive(&lock); return undefined(env);
+}
+static napi_value initialize(napi_env env, napi_value exports) {
+  executionJob = CreateJobObjectW(NULL, NULL);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!executionJob || !SetInformationJobObject(executionJob, JobObjectExtendedLimitInformation, &limits, sizeof limits)) return fail(env, "terminal-execution-job-unavailable");
+  napi_property_descriptor methods[] = {
+    { "create", NULL, create, NULL, NULL, NULL, napi_default, NULL },
+    { "createPrivate", NULL, create_private, NULL, NULL, NULL, napi_default, NULL },
+    { "verifyTarget", NULL, verify_target, NULL, NULL, NULL, napi_default, NULL },
+    { "resume", NULL, resume, NULL, NULL, NULL, napi_default, NULL },
+    { "stop", NULL, stop, NULL, NULL, NULL, napi_default, NULL },
+    { "snapshot", NULL, snapshot, NULL, NULL, NULL, napi_default, NULL },
+    { "observe", NULL, observe, NULL, NULL, NULL, napi_default, NULL },
+    { "seal", NULL, seal, NULL, NULL, NULL, napi_default, NULL },
+    { "release", NULL, release, NULL, NULL, NULL, napi_default, NULL },
+    { "executionState", NULL, execution_state, NULL, NULL, NULL, napi_default, NULL },
+    { "terminateExecution", NULL, terminate_execution, NULL, NULL, NULL, napi_default, NULL },
+    { "detach", NULL, detach, NULL, NULL, NULL, napi_default, NULL },
+  };
+  napi_define_properties(env, exports, sizeof methods / sizeof methods[0], methods);
+  napi_add_env_cleanup_hook(env, cleanup, NULL); return exports;
+}
+NAPI_MODULE(NODE_GYP_MODULE_NAME, initialize)
