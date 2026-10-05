@@ -32,9 +32,10 @@ export interface LogWriterProcessObserver {
   observeNodeProcesses(): Promise<NodeProcessInventory>;
   readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
 }
+export type LogWriterCommandRunner = (command: string, args: string[], env: NodeJS.ProcessEnv, signal?: AbortSignal) => Promise<string>;
 
 /** Inventory and peer verification are one dependency; callers cannot omit half of admission. */
-export function createLogWriterProbe(home: string, processes: LogWriterProcessObserver, ownerPid = process.pid): (signal?: AbortSignal) => Promise<LogWriterObservation> {
+export function createLogWriterProbe(home: string, processes: LogWriterProcessObserver, ownerPid = process.pid, runCommand: LogWriterCommandRunner = execute): (signal?: AbortSignal) => Promise<LogWriterObservation> {
   let cached: LogWriterObservation | undefined;
   let cachedUntil = 0;
   const admitted = new Set<string>();
@@ -44,7 +45,7 @@ export function createLogWriterProbe(home: string, processes: LogWriterProcessOb
     if (cached && performance.now() < cachedUntil) return cached;
     const at = Date.now();
     try {
-      let result = process.platform === "win32" ? classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid);
+      let result = process.platform === "win32" ? classifyWindowsWriters(await processes.observeNodeProcesses(), home, ownerPid) : await isolatedPosix(home, signal, ownerPid, runCommand);
       if (process.platform === "win32" && result.complete) {
         const live = new Set(result.candidates.map(item => `${item.pid}:${item.birth}`));
         for (const key of admitted) if (!live.has(key)) admitted.delete(key);
@@ -86,8 +87,8 @@ function execute(command: string, args: string[], env: NodeJS.ProcessEnv, signal
   return new Promise((resolve, reject) => execFile(command, args, { signal, windowsHide: true, timeout: 2500, maxBuffer: 256 * 1024, encoding: "utf8", env }, (error, stdout) => error ? reject(error) : resolve(stdout)));
 }
 
-async function isolatedPosix(home: string, signal?: AbortSignal, ownerPid = process.pid): Promise<Omit<LogWriterObservation, "at">> {
+async function isolatedPosix(home: string, signal: AbortSignal | undefined, ownerPid: number, runCommand: LogWriterCommandRunner): Promise<Omit<LogWriterObservation, "at">> {
   const built = fileURLToPath(new URL("./logging-writers-worker.js", import.meta.url));
   const args = existsSync(built) ? [built] : ["--import=tsx/esm", fileURLToPath(new URL("./logging-writers-worker.ts", import.meta.url))];
-  return JSON.parse(await execute(process.execPath, [...args, home, String(ownerPid)], process.env, signal));
+  return JSON.parse(await runCommand(process.execPath, [...args, home, String(ownerPid)], process.env, signal));
 }

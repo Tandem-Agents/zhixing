@@ -15,6 +15,7 @@ import { toServerSpec } from "./mcp-config.js";
 export interface CreateMcpManagementAdapterOptions {
   readonly proxy?: NetworkPolicy["proxy"];
   readonly readStatusWire: () => Promise<unknown>;
+  readonly createStdioProcess?: import('@zhixing/mcp').McpStdioProcessFactory;
 }
 
 /** Host infrastructure edge for MCP status, one-shot probe and npm-backed discovery. */
@@ -38,7 +39,7 @@ export function createMcpManagementAdapter(
           },
           { ...draft.credentials },
         ),
-        { proxy: options.proxy, ...(signal === undefined ? {} : { signal }) },
+        { proxy: options.proxy, ...(options.createStdioProcess ? { createStdioProcess: options.createStdioProcess } : {}), ...(signal === undefined ? {} : { signal }) },
       );
       return result.ok
         ? Object.freeze({ ok: true as const })

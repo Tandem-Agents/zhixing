@@ -14,7 +14,7 @@ import {
 import { LogFilesProcess } from "./files-process.js";
 import { observeBackgroundOutput, STDIO_LOG_SOURCE } from "./stdio.js";
 import { createLogWriterProbe } from "./writers.js";
-import { IsolatedLogStore } from "./store-process.js";
+import { IsolatedLogStore, type LogStoreWorkerFactory } from "./store-process.js";
 import type { StartupCheckResult } from "../startup.js";
 
 import { createBootstrapLogging, takeEntryLogging } from "./bootstrap.js";
@@ -71,7 +71,7 @@ export interface RuntimeLogging {
   readonly capacity: DeviceCapacityRuntime;
   readonly records: LogRecordPort;
   readonly bind: BindLogSource;
-  finish(result: LogResult, reason: string): Promise<void>;
+  finish(result: LogResult, reason: string, flushTimeoutMs?: number): Promise<void>;
 }
 
 /** The entry owns this lifetime, before preflight and until after business cleanup. */
@@ -79,9 +79,12 @@ export function beginRuntimeLogging(
   home: string,
   mode: string,
   warn?: (message: string) => void,
+  createStoreWorker?: LogStoreWorkerFactory,
+  sharedCapacity?: DeviceCapacityRuntime,
+  options: { activityDriven?: boolean; requireCompleteClose?: boolean } = {},
 ): RuntimeLogging {
-  const capacity = createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false });
-  const store = new IsolatedLogStore(path.resolve(home), capacity.arbiter);
+  const capacity = sharedCapacity ?? createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false, activityDriven: options.activityDriven === true });
+  const store = new IsolatedLogStore(path.resolve(home), capacity.arbiter, createStoreWorker, capacity.retainActivity);
   const boot = takeEntryLogging() ?? createBootstrapLogging(mode);
   const { recorder, bind, records } = boot;
   void beginWriterDeclaration(home, (reason, failure) => records.record({ event: "writerDeclarationUnavailable", data: { reason, failure } }));
@@ -103,12 +106,18 @@ export function beginRuntimeLogging(
     capacity,
     records,
     bind,
-    finish: (result, reason) => {
+    finish: (result, reason, flushTimeoutMs = 5000) => {
       if (!finishing) {
         stopOutput?.();
         records.record({ event: "stopped", result, data: { reason } });
         // Include the bounded OS writer proof in a short-lived entry's drain window.
-        finishing = recorder.close(5000).finally(async () => { await closeWriterDeclaration(); return capacity.close(); });
+        finishing = recorder.close(Math.max(0, flushTimeoutMs)).then(() => {
+          const failure = recorder.health().lastFailure;
+          if (options.requireCompleteClose &&
+              (failure === "close-pending" || failure === "close-failed" || failure === "close-incomplete")) {
+            throw new Error(`Runtime logging ${failure}`);
+          }
+        }).finally(async () => { await closeWriterDeclaration(); if (!sharedCapacity) capacity.close(); });
       }
       return finishing;
     },

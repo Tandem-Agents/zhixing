@@ -2,6 +2,10 @@ import { CheckpointDirectoryHandle } from "@zhixing/mesh/filesystem";
 import path from "node:path";
 import { logFailureEvidence, logStorageFailure } from "@zhixing/core/logging";
 import { LegacyLogFiles, isLegacyLogFile, statLogFiles } from "./legacy-files.js";
+import { consumeLogWorkerStdio } from './terminal-worker.js';
+
+const parent = consumeLogWorkerStdio();
+const send = (message: unknown): void => { if (parent) parent.send(message, () => {}); else process.send?.(message); };
 
 // A dedicated process owns every native handle. It never loads product configuration,
 // records arbitrary stderr, or shares the checkpoint helper with business operations.
@@ -15,17 +19,17 @@ interface Request {
   op: string;
   args: unknown[];
 }
-process.on("message", (message: Request) => {
+(parent ?? process).on("message", (message: Request) => {
   if (active) {
-    process.send?.({ id: message.id, error: "filesystem-busy" });
+    send({ id: message.id, error: "filesystem-busy" });
     return;
   }
   active = true;
   void dispatch(message)
     .then(
-      (value) => process.send?.({ id: message.id, value }),
+      (value) => send({ id: message.id, value }),
       (error: unknown) => {
-        process.send?.({
+        send({
           id: message.id,
           error: "日志文件操作未完成",
           code: logStorageFailure(error),
@@ -37,9 +41,10 @@ process.on("message", (message: Request) => {
       active = false;
     });
 });
-process.on("disconnect", () => {
+(parent ?? process).on("disconnect", () => {
   process.exit(0);
 });
+parent?.on('error', () => process.exit(1));
 
 async function dispatch({ op, args }: Request): Promise<unknown> {
   if (op === "open") {

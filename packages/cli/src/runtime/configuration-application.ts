@@ -11,6 +11,7 @@ import { McpManagementApplication, type McpManagementEditorPort } from "@zhixing
 import type { NodeConfigurationEditor } from "./configuration-edit.js";
 
 export interface ConfigurationApplicationDeps {
+  readonly secretStore?: ReturnType<typeof createPlatformSecretStore>;
   readonly configurationRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
   readonly readExtensionLocalSetup?: () => Promise<Readonly<Record<string, string>>>;
@@ -120,7 +121,7 @@ async function captureConfigPostCommitEffect<T>(
 
 export async function editRuntimeConfiguration(deps: ConfigurationApplicationDeps, opts: ConfigurationInteractionOptions): Promise<ConfigurationApplicationResult> {
   const { zhixingHome: homeDir, configPath } = deps;
-  const secretStore = createPlatformSecretStore({ homeDir });
+  const secretStore = deps.secretStore ?? createPlatformSecretStore({ homeDir });
 
   // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
   const { config, credentials } = await loadConfigurationSnapshot({ configPath, store: secretStore, records: deps.configurationRecords });
@@ -237,6 +238,7 @@ export interface McpConfigurationDeps {
       signal?: AbortSignal,
     ) => Promise<string>;
     llmConsume?: <T>(prompt: string, consume: (text: string) => T, role?: 'main' | 'light', signal?: AbortSignal) => Promise<T>;
+    createStdioProcess?: import('@zhixing/mcp').McpStdioProcessFactory;
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
@@ -244,6 +246,7 @@ export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
   const management = createMcpManagementAdapter({
     proxy,
     readStatusWire: deps.readMcpStatusWire,
+    createStdioProcess: deps.createStdioProcess,
   });
 
   // 接入相关的 LLM——走 main 档：搜索引导的判断 / 从 README 抽启动方式的质量

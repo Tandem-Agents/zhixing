@@ -18,6 +18,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { getZhixingHome } from "@zhixing/core/paths";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import type { EventEmitter } from 'node:events';
 import { logFailureEvidence, type LogDraft, type LogRecordPort } from "@zhixing/core/logging";
 import chalk from "chalk";
 import {
@@ -36,6 +37,8 @@ import {
 } from "./self-exec.js";
 
 export interface SpawnDaemonOptions {
+  /** Terminal N retains startup policy while S performs its fixed OS launch. */
+  startAutomatic?: (handoff: string, deadline: number, signal?: AbortSignal) => Promise<DaemonChild>;
   records?: LogRecordPort;
   /** 本次启动与其发现、日志和 child 共用的数据根。 */
   zhixingHome?: string;
@@ -55,6 +58,7 @@ export interface SpawnDaemonOptions {
   /** 依赖注入（测试用）*/
   deps?: SpawnDaemonDeps;
 }
+export type DaemonChild = EventEmitter & { readonly pid?: number; readonly connected: boolean; unref(): unknown; disconnect(): void };
 
 export interface SpawnDaemonDeps {
   spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -129,8 +133,10 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   if (opts.automatic) spawnOpts.stdio = ["ignore", "ignore", "ignore", "ipc"];
   const spawnFn = deps.spawnFn ?? spawn;
   record({ event: "hostSpawnRequested", data: {} });
-  let child: ChildProcess;
-  try { child = spawnFn(execArgs.command, execArgs.args, spawnOpts); }
+  let child: DaemonChild;
+  try { child = opts.automatic && opts.startAutomatic
+    ? await opts.startAutomatic(handoff.id, opts.deadlineAt ?? Date.now() + handshakeTimeoutMs, opts.signal)
+    : spawnFn(execArgs.command, execArgs.args, spawnOpts); }
   catch (error) { record({ event: "hostSpawnFailed", result: "failure", data: { failure: logFailureEvidence(error) } }); throw error; }
   if (child.pid !== undefined) record({ event: "hostSpawned", data: { pid: child.pid } });
   let childExit: ChildExit | null = null;

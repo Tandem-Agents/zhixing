@@ -24,6 +24,7 @@ import {
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
 import { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure } from "../logging/runtime.js";
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -37,7 +38,9 @@ export async function runServeCommand(
 ): Promise<void> {
   const zhixingHome = getZhixingHome();
   const processMode = resolveHostProcessMode(options.managed);
-  if (options.autoStart && (processMode !== "on-demand" || !process.send)) {
+  const startupEndpoint = consumeTerminalParentEndpoint('ZHIXING_HOST_STARTUP_PIPE');
+  const startupParent = options.autoStart && startupEndpoint !== undefined ? new TerminalParentTransport(startupEndpoint, 1024) : undefined;
+  if (options.autoStart && (processMode !== "on-demand" || (!process.send && !startupParent))) {
     throw new Error("Automatic host preparation requires its parent startup channel");
   }
   const output = processMode === "managed" ? SILENT_WRITER : writer;
@@ -59,10 +62,11 @@ export async function runServeCommand(
         // An on-demand Host reuses this same unlocked store; managed/disabled plans
         // hand back only the plan kind, never credentials or a cached trust decision.
         const result = await observeStartupPhase(logging.records, "prepare-service", () => reconcile("host-missing"));
-        await new Promise<void>((resolve, reject) => process.send!(
-          { type: "host-launch-plan", mode: result.plan.mode },
-          (error: Error | null) => error ? reject(error) : resolve(),
-        ));
+        await new Promise<void>((resolve, reject) => {
+          const message = { type: "host-launch-plan", mode: result.plan.mode };
+          const done = (error?: Error | null) => error ? reject(error) : resolve();
+          if (startupParent) startupParent.send(message, done); else process.send!(message, done);
+        });
         if (result.plan.mode !== "on-demand") return;
       }
       if (processMode === "managed") {
@@ -120,6 +124,7 @@ export async function runServeCommand(
     recordRuntimeFailure(logging.records, error, "host-or-preflight-failed");
     throw error;
   } finally {
+    startupParent?.close();
     await logging.finish(failed ? "failure" : "success", failed ? "host-or-preflight-failed" : "completed");
   }
 }

@@ -6,6 +6,26 @@ import { LogAppendIndeterminateError, LogStorageError } from "@zhixing/core/logg
 
 vi.mock("node:child_process", async original => ({ ...await original<typeof import("node:child_process")>(), fork: vi.fn() }));
 
+it('retains the first Store call until its supervised private channel is connected', async () => {
+  let admit!: () => void;
+  const ready = new Promise<void>(resolve => { admit = resolve; });
+  const sent: unknown[] = [];
+  const child = Object.assign(new EventEmitter(), { connected: false, ref() {}, unref() {},
+    send(message: any, _callback: (error?: Error | null) => void) {
+      sent.push(message);
+      queueMicrotask(() => message.kind === 'close' ? child.emit('close', 0) : child.emit('message', { kind: 'result', id: message.id, value: { synthetic: true } }));
+    },
+    kill() { queueMicrotask(() => child.emit('close', 1)); return true; },
+  });
+  const store = new IsolatedLogStore('fixture-home', { acquire: vi.fn(), snapshot: vi.fn() }, () => ({ worker: child, ready }));
+  const pending = store.initialize();
+  expect(sent).toHaveLength(0);
+  child.connected = true; admit();
+  expect(await pending).toEqual({ synthetic: true });
+  expect(sent).toEqual([{ kind: 'call', id: 1, operation: 'initialize' }]);
+  await store.close();
+});
+
 it.each(["initialize", "append"] as const)("retains worker errors and fences before settling %s", async operation => {
   let closed = false;
   const child = Object.assign(new EventEmitter(), { connected: true, ref() {}, unref() {},

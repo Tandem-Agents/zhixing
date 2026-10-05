@@ -14,6 +14,7 @@ import {
 } from "./connect.js";
 import { createTransport as defaultCreateTransport } from "./transport.js";
 import type { McpServerSpec, McpToolDescriptor } from "./types.js";
+import type { McpStdioProcessFactory } from './owned-stdio.js';
 
 /** 探测超时 —— 给足首次 npx 下载的时间，独立于 hub 常驻连接超时。 */
 const DEFAULT_PROBE_TIMEOUT_MS = 60_000;
@@ -25,6 +26,7 @@ export interface ProbeOptions {
   proxy?: NetworkPolicy["proxy"];
   /** transport 构造注入点 —— 默认造真实 transport，测试注入内存传输。 */
   createTransport?: CreateTransportFn;
+  createStdioProcess?: McpStdioProcessFactory;
   /** 中断信号 —— abort 时探测立即失败并关闭连接（面板 loading 态按 Esc 取消用）。 */
   signal?: AbortSignal;
 }
@@ -48,6 +50,7 @@ export async function probeServer(
       proxy: options.proxy,
       timeoutMs,
       signal: options.signal,
+      createStdioProcess: options.createStdioProcess,
     });
     return { ok: true, tools: connected.tools };
   } catch (err) {

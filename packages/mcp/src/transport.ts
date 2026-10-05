@@ -15,10 +15,13 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createSafeFetch, type NetworkPolicy } from "@zhixing/network";
 import { filterDangerousEnv } from "./env-security.js";
 import type { McpServerSpec } from "./types.js";
+import { OwnedMcpStdioTransport, type McpStdioProcessFactory } from './owned-stdio.js';
 
 export interface CreateTransportOptions {
   /** 网络代理配置 —— http transport 的 SSRF-safe fetch 据此继承 network.proxy。 */
   proxy?: NetworkPolicy["proxy"];
+  createStdioProcess?: McpStdioProcessFactory;
+  signal?: AbortSignal;
 }
 
 /** transport 及其额外资源清理。 */
@@ -37,6 +40,10 @@ export function createTransport(
       throw new Error(
         `MCP server "${spec.serverId}" 声明为 stdio 但未提供 command`,
       );
+    }
+    if (options.createStdioProcess) {
+      const env = { ...getDefaultEnvironment(), ...(spec.env ? filterDangerousEnv(spec.env).safe : {}) };
+      return { transport: new OwnedMcpStdioTransport(() => options.createStdioProcess!(spec.command!, spec.args ?? [], env, options.signal)) };
     }
     return {
       transport: new StdioClientTransport({

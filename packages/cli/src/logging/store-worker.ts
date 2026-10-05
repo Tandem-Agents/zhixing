@@ -4,8 +4,15 @@ import type { DeviceCapacityAdmission, DeviceCapacityArbiterPort, DeviceCapacity
 import { LogFilesProcess } from "./files-process.js";
 import { createLogWriterProbe } from "./writers.js";
 import type { CapacityReply, StoreWorkerInput, StoreWorkerOutput } from "./store-worker-protocol.js";
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { LOG_STORE_FRAME_BYTES } from './store-process.js';
+import { consumeLogWorkerStdio, createTerminalLogWorker, runTerminalLogObserver } from './terminal-worker.js';
+import { createTerminalOwnedProcessFactory } from '../terminal/host-launch.js';
+import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
 
-const send = (message: StoreWorkerOutput): void => { if (process.connected) process.send!(message, () => {}); };
+const endpoint = consumeTerminalParentEndpoint('ZHIXING_LOG_STORE_PIPE');
+const parent = endpoint !== undefined ? new TerminalParentTransport(endpoint, LOG_STORE_FRAME_BYTES) : consumeLogWorkerStdio();
+const send = (message: StoreWorkerOutput): void => { if (parent?.connected) parent.send(message, () => {}); else if (process.connected) process.send!(message, () => {}); };
 let nextCapacity = 0;
 const pending = new Map<number, (reply: CapacityReply) => void>();
 const capacity: DeviceCapacityArbiterPort = {
@@ -49,18 +56,28 @@ const capacity: DeviceCapacityArbiterPort = {
 const [home, owner] = process.argv.slice(2) as [string, string];
 const ownerPid = Number(owner);
 if (!home || !Number.isSafeInteger(ownerPid) || ownerPid <= 0) throw Error("Log writer owner is required");
-const files = new LogFilesProcess(home);
-const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files, ownerPid) });
+const createFiles = parent ? createTerminalOwnedProcessFactory('log-files') : undefined;
+const files = new LogFilesProcess(home, 5000, parent ? {
+  createWorker: args => createTerminalLogWorker('log-files', args),
+  createWindowsSession: () => CheckpointDirectoryHandle.createWindowsSession(5000, (executable, args) =>
+    createFiles!(executable, args ?? [], { deadline: Date.now() + 5000 }).child),
+} : {});
+const store = new LocalLogStore({ files, capacity, observeWriters: createLogWriterProbe(home, files, ownerPid, parent ? runTerminalLogObserver : undefined) });
 let closing = false;
 const close = (): void => {
   if (closing) return;
   closing = true;
   for (const settle of pending.values()) settle({ kind: "cancelled" });
   pending.clear();
-  void store.close().catch(() => {}).finally(() => { if (process.connected) process.disconnect(); });
+  void store.close().then(() => { if (parent) parent.close(); else if (process.connected) process.disconnect(); }, () => {
+    // Unknown nested completion must not look like an ordinary worker exit.
+    // Keep the private parent lifetime until its existing supervisor deadline.
+    if (!parent && process.connected) process.disconnect();
+  });
 };
-process.once("disconnect", close);
-process.on("message", (message: StoreWorkerInput) => {
+(parent ?? process).once("disconnect", close);
+parent?.on('error', close);
+(parent ?? process).on("message", (message: StoreWorkerInput) => {
   if (message.kind === "capacity") {
     const settle = pending.get(message.id);
     pending.delete(message.id); settle?.(message.result); return;

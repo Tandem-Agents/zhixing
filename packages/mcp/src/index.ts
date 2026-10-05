@@ -9,6 +9,7 @@ export type {
 export { mapServerTools } from "./mapping.js";
 export { probeServer } from "./probe.js";
 export type { ProbeOptions, ProbeResult } from "./probe.js";
+export type { McpStdioProcessFactory } from './owned-stdio.js';
 export { fetchMcpServerSource } from "./source.js";
 export type {
   McpSourceResult,

@@ -17,7 +17,7 @@ export class WindowsLogFiles implements LogFileSystem {
   #readOnly = true;
   #closed = false;
   #legacy: LegacyLogFiles | undefined;
-  constructor(home: string, timeout: number) {
+  constructor(home: string, timeout: number, private readonly createSession?: () => CheckpointFilesystemSession) {
     this.#home = home;
     this.#timeout = timeout;
   }
@@ -31,7 +31,7 @@ export class WindowsLogFiles implements LogFileSystem {
       this.#legacy = undefined;
     }
     if (this.#closed) throw Error("日志文件进程已关闭");
-    this.#session ??= CheckpointDirectoryHandle.createWindowsSession(this.#timeout);
+    this.#session ??= this.createSession?.() ?? CheckpointDirectoryHandle.createWindowsSession(this.#timeout);
     if (this.#directory && this.#readOnly === readOnly) {
       await this.#directory.assertIdentity();
       return;

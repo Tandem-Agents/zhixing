@@ -42,11 +42,12 @@ export async function connectAndListTools(
     timeoutMs: number;
     /** 中断信号 —— abort 时连接 / 列工具立即失败，建链资源随 catch 释放（一次性探测的取消用）。 */
     signal?: AbortSignal;
+    createStdioProcess?: CreateTransportOptions['createStdioProcess'];
   },
 ): Promise<ConnectedClient> {
   let created: CreatedTransport | undefined;
   try {
-    created = opts.createTransport(spec, { proxy: opts.proxy });
+    created = opts.createTransport(spec, { proxy: opts.proxy, ...(opts.createStdioProcess ? { createStdioProcess: opts.createStdioProcess, signal: opts.signal } : {}) });
     const client = new Client(CLIENT_INFO, { capabilities: {} });
     const reqOptions = { timeout: opts.timeoutMs, signal: opts.signal };
     await client.connect(created.transport, reqOptions);

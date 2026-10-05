@@ -1,15 +1,29 @@
 import { WindowsLogFiles } from "./windows-files.js";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import type { EventEmitter } from 'node:events';
+import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { LogFileInfo, LogFileSystem } from "@zhixing/core/logging/storage";
 import { LogStorageError, logFailureEvidence, type LogFailureEvidence, type LogStorageFailure } from "@zhixing/core/logging";
 
+export type LogFilesWorker = EventEmitter & {
+  readonly connected: boolean;
+  send(message: unknown, done: (error?: Error | null) => void): unknown;
+  kill(): unknown; ref(): unknown; unref(): unknown;
+  readonly channel?: { ref(): void; unref(): void } | null;
+};
+export interface LogFilesProcessOptions {
+  readonly createWorker?: (args: readonly string[]) => { worker: LogFilesWorker; ready: Promise<void> };
+  readonly createWindowsSession?: () => CheckpointFilesystemSession;
+}
+
 /** Native operations are isolated from the event loop, including POSIX synchronous N-API. */
 class NodeFilesProcess implements LogFileSystem {
   readonly #home: string;
   readonly #timeoutMs: number;
-  #child: ChildProcess | undefined;
+  #child: LogFilesWorker | undefined;
+  #ready: Promise<void> = Promise.resolve();
   #exit: Promise<void> | undefined;
   #stopping: Promise<void> | undefined;
   #id = 0;
@@ -24,7 +38,7 @@ class NodeFilesProcess implements LogFileSystem {
   #broken = false;
   #failure: Error | undefined;
   #closed = false;
-  constructor(home: string, timeoutMs = 5000) {
+  constructor(home: string, timeoutMs = 5000, private readonly createWorker?: LogFilesProcessOptions['createWorker']) {
     this.#home = home;
     this.#timeoutMs = timeoutMs;
   }
@@ -37,6 +51,7 @@ class NodeFilesProcess implements LogFileSystem {
     }
     if (this.#closed) throw Error("日志文件进程已关闭");
     if (!this.#child) this.#spawn();
+    await this.#ready;
     await this.#call("open", [this.#home, readOnly]);
   }
   list(limit: number): Promise<readonly string[]> {
@@ -97,9 +112,12 @@ class NodeFilesProcess implements LogFileSystem {
     const built = new URL("./logging-files-worker.js", import.meta.url);
     const source = new URL("./logging-files-worker.ts", import.meta.url);
     const compiled = existsSync(fileURLToPath(built));
-    const child = spawn(
+    const args = [...(compiled ? [] : ["--import=tsx/esm"]), fileURLToPath(compiled ? built : source)];
+    const supplied = this.createWorker?.(args);
+    this.#ready = supplied?.ready ?? Promise.resolve();
+    const child = supplied?.worker ?? spawn(
       process.execPath,
-      [...(compiled ? [] : ["--import=tsx/esm"]), fileURLToPath(compiled ? built : source)],
+      args,
       {
         serialization: "advanced",
         stdio: ["ignore", "ignore", "ignore", "ipc"],
@@ -107,7 +125,10 @@ class NodeFilesProcess implements LogFileSystem {
       },
     );
     this.#child = child;
-    this.#exit = new Promise<void>((resolve) =>
+    this.#exit = new Promise<void>((resolve, reject) => {
+      child.once('completion-unknown', (error: Error) => {
+        this.#broken = true; this.#failure = error; this.#reject('日志文件进程退出未确认'); reject(error);
+      });
       child.once("close", (code, signal) => {
         this.#broken = true;
         this.#failure = new LogStorageError("owner-unavailable", "日志文件进程已退出", {
@@ -116,12 +137,13 @@ class NodeFilesProcess implements LogFileSystem {
         });
         this.#reject("日志文件进程已退出");
         resolve();
-      }),
-    );
+      });
+    });
+    void this.#exit.catch(() => {});
     child.on("error", (error) => {
       this.#failure ??= new LogStorageError("owner-unavailable", "日志文件进程错误", logFailureEvidence(error));
       this.#broken = true;
-      void this.#stop();
+      void this.#stop().catch(() => {});
     });
     child.on("message", (message: { id: number; value?: unknown; error?: string; code?: LogStorageFailure; evidence?: LogFailureEvidence }) => {
       if (this.#broken || this.#closed || this.#stopping) return;
@@ -161,7 +183,7 @@ class NodeFilesProcess implements LogFileSystem {
         if (error) {
           this.#failure ??= new LogStorageError("owner-unavailable", "日志文件请求发送失败", logFailureEvidence(error));
           this.#broken = true;
-          void this.#stop();
+          void this.#stop().catch(() => {});
         }
       });
     });
@@ -197,11 +219,11 @@ class NodeFilesProcess implements LogFileSystem {
 /** Windows has an asynchronous native owner; POSIX isolates synchronous N-API. */
 export class LogFilesProcess implements LogFileSystem {
   readonly #files: LogFileSystem;
-  constructor(home: string, timeoutMs = 5000) {
+  constructor(home: string, timeoutMs = 5000, options: LogFilesProcessOptions = {}) {
     this.#files =
       process.platform === "win32"
-        ? new WindowsLogFiles(home, timeoutMs)
-        : new NodeFilesProcess(home, timeoutMs);
+        ? new WindowsLogFiles(home, timeoutMs, options.createWindowsSession)
+        : new NodeFilesProcess(home, timeoutMs, options.createWorker);
   }
   observeNodeProcesses() {
     if (!(this.#files instanceof WindowsLogFiles)) throw Error("Windows process inventory required");

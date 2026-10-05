@@ -82,7 +82,7 @@ describe("spawnDaemon", () => {
     expect(JSON.stringify(entries)).not.toContain("private executable path");
   });
 
-  it.each(["managed", "on-demand", "none"] as const)("honors the child launch plan %s within the original deadline", async mode => {
+  it.each((["managed", "on-demand", "none"] as const).flatMap(mode => [false, true].map(delegated => ({ mode, delegated }))))("honors the child launch plan $mode within the original deadline (delegated=$delegated)", async ({ mode, delegated }) => {
     const events: LogDraft[] = [];
     const records: LogRecordPort = { record: value => { events.push(typeof value === "function" ? value() : value); } };
     const clock = mkFakeClock();
@@ -102,7 +102,10 @@ describe("spawnDaemon", () => {
       isProcessAliveFn: () => true,
       httpGetFn: async () => 200,
     });
-    const result = await spawnDaemon({ records, automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps });
+    const startAutomatic = vi.fn(async () => child);
+    const result = await spawnDaemon({ records, automatic: true, forwardedArgs: ["serve"], deadlineAt: 10_000, reportFailure: false, deps,
+      ...(delegated ? { startAutomatic: startAutomatic as any } : {}) });
+    if (delegated) { expect(startAutomatic).toHaveBeenCalledWith(expect.any(String), 10_000, undefined); expect(deps.spawnFn).not.toHaveBeenCalled(); }
     expect(events.some(event => event.result === "failure")).toBe(false);
     if (mode === "managed") {
       expect(events).toContainEqual(expect.objectContaining({ event: "coordinatorExited", result: "success" }));
@@ -113,7 +116,7 @@ describe("spawnDaemon", () => {
     expect(result).toMatchObject({ ok: mode !== "none", launchMode: mode });
     if (mode === "none") expect(result.reason).toBe("这台设备不需要后台运行");
     else expect(result).toMatchObject({ status: "ready", pid: 55555 });
-    expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining(["serve", "--auto-start"]), expect.objectContaining({ windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"] }));
+    if (!delegated) expect(deps.spawnFn).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining(["serve", "--auto-start"]), expect.objectContaining({ windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"] }));
     expect(child.listenerCount("message")).toBe(0);
   });
 

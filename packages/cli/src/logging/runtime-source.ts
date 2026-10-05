@@ -19,6 +19,9 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     hostReady: { message: "宿主已通过就绪握手", level: "info", tier: "critical", fields: { pid: "number", spawnedPid: "number", launchMode: "text" } },
     firstOutput: { message: "终端已首次输出启动内容", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
     interactionReady: { message: "终端输入已就绪", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
+    terminalLifecycle: { message: "终端生命周期阶段", level: "info", tier: "critical", fields: {
+      instance: "text", phase: "text", role: "text", pid: "number", spawnId: "text", createMs: "number", frameId: "number", reason: "text", exitCode: "number",
+    } },
     started: {
       message: "运行入口已开始",
       level: "info",

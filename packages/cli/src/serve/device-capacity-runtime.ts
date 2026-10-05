@@ -34,11 +34,11 @@ const WORKLOAD_PREFERRED: DeviceCapacityBudget = {
 
 export function createDeviceCapacityRuntime(
   temporaryRoot: string,
-  options: { createDirectory?: boolean } = {},
+  options: { createDirectory?: boolean; activityDriven?: boolean } = {},
 ) {
   if (options.createDirectory !== false) mkdirSync(temporaryRoot, { recursive: true });
   const stopped = new AbortController();
-  const filesystem = asyncFilesystemPressure(temporaryRoot);
+  const filesystem = asyncFilesystemPressure(temporaryRoot, options.activityDriven === true);
   const underlying = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: createNodeDeviceCapacityProbe(
@@ -51,12 +51,22 @@ export function createDeviceCapacityRuntime(
     acquire: async (request, abort) => {
       const signal = AbortSignal.any([abort, stopped.signal]);
       if (signal.aborted) return { kind: "cancelled" };
+      const releaseActivity = filesystem.retainActivity();
       const started = Date.now();
-      await filesystem.prepare(request.maxWaitMs, signal);
-      return underlying.acquire(
-        { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - (Date.now() - started)) },
-        signal,
-      );
+      let granted = false;
+      try {
+        await filesystem.prepare(request.maxWaitMs, signal);
+        const result = await underlying.acquire(
+          { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - (Date.now() - started)) }, signal,
+        );
+        if (result.kind !== 'granted') return result;
+        granted = true;
+        const permit = result.permit;
+        return { kind: 'granted', permit: {
+          granted: permit.granted, tryBegin: bound => permit.tryBegin(bound),
+          release: () => { try { permit.release(); } finally { releaseActivity(); } },
+        } };
+      } finally { if (!granted) releaseActivity(); }
     },
   };
   const storage = new DefaultStorageMaintenanceGovernor({
@@ -65,6 +75,9 @@ export function createDeviceCapacityRuntime(
   return {
     arbiter,
     storage,
+    // Owners with a recovery prefix retain sampling across that prefix and
+    // all its leaf admissions. This does not reserve capacity or extend TTL.
+    retainActivity: filesystem.retainActivity,
     close(): void {
       stopped.abort();
       filesystem.close();
@@ -86,16 +99,17 @@ export function createDeviceCapacityRuntime(
 export type DeviceCapacityRuntime = ReturnType<typeof createDeviceCapacityRuntime>;
 
 /** A single asynchronous disk sample feeds the existing synchronous arbiter contract. */
-function asyncFilesystemPressure(root: string) {
+function asyncFilesystemPressure(root: string, activityDriven: boolean) {
   const maxAgeMs = 250, refreshMs = 100;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let sampled: { bavail: number; bsize: number } | undefined,
     sampledAt = 0;
   let flight: Promise<void> | undefined;
+  let activities = 0;
   const fresh = (): boolean => !closed && sampled !== undefined && performance.now() - sampledAt < maxAgeMs;
   const schedule = (): void => {
-    if (closed || timer) return;
+    if (closed || timer || (activityDriven && activities === 0)) return;
     timer = setTimeout(() => { timer = undefined; void refresh(); }, refreshMs);
     timer.unref();
   };
@@ -120,10 +134,18 @@ function asyncFilesystemPressure(root: string) {
       flight = undefined;
       schedule();
     }));
-  // Probe progress belongs to this runtime's lifetime, not to a rejected leaf
-  // request. Slow recovery prefixes must not repeatedly outlive a one-shot sample.
-  void refresh();
+  if (!activityDriven) void refresh();
   return {
+    retainActivity: (): (() => void) => {
+      if (closed) return () => {};
+      activities++;
+      if (!fresh()) void refresh(); else schedule();
+      let released = false;
+      return () => {
+        if (released) return; released = true; activities--;
+        if (activityDriven && activities === 0) { clearTimeout(timer); timer = undefined; }
+      };
+    },
     close: (): void => { closed = true; clearTimeout(timer); timer = undefined; sampled = undefined; },
     read: () => {
       if (!fresh()) {

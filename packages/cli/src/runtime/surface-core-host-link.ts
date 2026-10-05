@@ -45,13 +45,14 @@ interface SurfaceBinding {
 export async function createCurrentAnchorSurfaceRpcClient(options: {
   readonly zhixingHome: string;
   readonly configuration?: Pick<RuntimeConfigurationProvider, "readTopology">;
+  readonly secretStore?: ReturnType<typeof createPlatformSecretStore>;
 }): Promise<CurrentAnchorSurfaceRpcClient> {
   const homeDir = options.zhixingHome;
   const configuration = (
     options.configuration ?? createRuntimeConfigurationProvider()
   ).readTopology({ homeDir }).mesh;
   if (!configuration) throw new CoreHostUnavailableError("这台设备尚未完成家庭配置");
-  const secretStore = createPlatformSecretStore({ homeDir, context: "foreground" });
+  const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir, context: "foreground" });
   if (await secretStore.unlockState() !== "unlocked") {
     throw new CoreHostUnavailableError("请先解锁本机凭据");
   }

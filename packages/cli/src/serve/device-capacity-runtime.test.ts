@@ -20,6 +20,56 @@ const budget = {
   quantum: { readBytes: 1, writeBytes: 1, ioOperations: 1 },
 };
 describe("asynchronous entry capacity sampling", () => {
+  it('keeps the Host default sampling across unrelated owner recovery prefixes', async () => {
+    const home = await createTempDir('capacity-host-default');
+    vi.mocked(filesystem.statfs).mockResolvedValue({ bavail: 1024 * 1024, bsize: 4096 } as StatsFs);
+    const logging = beginRuntimeLogging(home, 'on-demand');
+    try {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      const admission = await logging.capacity.arbiter.acquire({ admissionId: 'host-slow-prefix', serviceClass: 'storage-recovery', atomic: budget, preferred: budget, maxWaitMs: 0 }, new AbortController().signal);
+      expect(admission.kind).toBe('granted');
+      if (admission.kind === 'granted') admission.permit.release();
+    } finally { await logging.finish('success', 'host-prefix-complete', 1000); }
+  });
+
+  it('stops physical polling while idle and covers a slow owner prefix plus its outstanding permit', async () => {
+    const home = await createTempDir('capacity-activity');
+    const probe = vi.mocked(filesystem.statfs).mockResolvedValue({ bavail: 1024 * 1024, bsize: 4096 } as StatsFs);
+    const runtime = createDeviceCapacityRuntime(home, { createDirectory: false, activityDriven: true });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(probe).not.toHaveBeenCalled();
+    const finishPrefix = runtime.retainActivity();
+    await new Promise(resolve => setTimeout(resolve, 750));
+    const admission = await runtime.arbiter.acquire({ admissionId: 'owned-prefix', serviceClass: 'storage-recovery', atomic: budget, preferred: budget, maxWaitMs: 0 }, new AbortController().signal);
+    expect(admission.kind).toBe('granted');
+    if (admission.kind !== 'granted') throw Error('Expected admission');
+    finishPrefix();
+    const activeCount = probe.mock.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(probe.mock.calls.length).toBeGreaterThan(activeCount);
+    const step = admission.permit.tryBegin(budget); expect(step).toBeDefined(); step!.complete();
+    admission.permit.release();
+    const idleCount = probe.mock.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(probe).toHaveBeenCalledTimes(idleCount);
+    expect(runtime.arbiter.snapshot().devicePressure).toBeNull();
+    runtime.close();
+  });
+
+  it("shares an entry's existing capacity without closing it when its logger drains", async () => {
+    const home = await createTempDir("capacity-shared-owner");
+    vi.mocked(filesystem.statfs).mockResolvedValue({ bavail: 1024 * 1024, bsize: 4096 } as StatsFs);
+    const capacity = createDeviceCapacityRuntime(home, { createDirectory: false });
+    const close = vi.spyOn(capacity, "close");
+    const logging = beginRuntimeLogging(home, "probe-shared", undefined, undefined, capacity);
+    expect(logging.capacity).toBe(capacity);
+    await logging.finish("success", "logger-drained", 1000);
+    expect(close).not.toHaveBeenCalled();
+    const result = await capacity.arbiter.acquire({ admissionId: "owner-after-logger", serviceClass: "storage-recovery", atomic: budget, preferred: budget, maxWaitMs: 250 }, new AbortController().signal);
+    expect(result.kind).toBe("granted");
+    if (result.kind === "granted") result.permit.release();
+  }, 5000);
+
   it("keeps cold zero-wait requests nonblocking and cancellation does not duplicate an in-flight probe", async () => {
     const home = await createTempDir("capacity-async");
     let complete!: (value: StatsFs) => void;

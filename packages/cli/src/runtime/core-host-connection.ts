@@ -30,7 +30,7 @@ import {
   type RpcClient,
   type ServerEndpoint,
 } from "@zhixing/server/client";
-import { spawnDaemon } from "../serve/daemon.js";
+import { spawnDaemon, type SpawnDaemonOptions } from "../serve/daemon.js";
 import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
@@ -151,7 +151,7 @@ export interface CoreHostConnectionDeps {
 }
 
 /** 默认依赖：发现走 discoverServer、拉起走静默 spawnDaemon、client 走 createRpcClient。 */
-export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: LogRecordPort): CoreHostConnectionDeps {
+export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: LogRecordPort, startAutomatic?: SpawnDaemonOptions['startAutomatic']): CoreHostConnectionDeps {
   const discoveryPaths = {
     pidPath: getDefaultPidPath(zhixingHome),
     portPath: getDefaultPortPath(zhixingHome),
@@ -174,6 +174,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
         signal: attempt?.signal,
         reportFailure: false,
         automatic: true,
+        startAutomatic,
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
         // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP
