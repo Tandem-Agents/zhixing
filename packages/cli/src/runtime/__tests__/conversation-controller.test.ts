@@ -11,6 +11,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { AgentYield } from "@zhixing/core/loop";
+import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import {
   ConversationController,
@@ -20,6 +21,7 @@ import {
 import type { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
+import { TerminalOutputProjection } from '../../terminal/output.js';
 import { createUserSubmission } from "../user-submission.js";
 
 type Handler<T> = (p: T) => void;
@@ -161,6 +163,152 @@ function makeFakes() {
   };
   return { conversation, workscene, emit };
 }
+
+describe('bounded authoritative recovery consumer', () => {
+  const checkpoint = (lsn: number) => ({ logId: 'authority-test', lsn, frameEndOffset: lsn, prefixDigest: 'synthetic' });
+  const cursor = (lsn: number): ConversationControlCursor => ({ conversationId: 'conv-1', ownerEpoch: 1, clearedThroughLsn: 0, baseItem: 0, upper: checkpoint(100), after: checkpoint(lsn), item: 0 });
+  const inputCursor = (offset = 0): ConversationInputCursor => ({ conversationId: 'conv-1', runId: 'old-failed', ownerEpoch: 1, clearedThroughLsn: 0, upper: checkpoint(11), position: 1, part: 0, offset, contentOffset: offset });
+  const notice = (revision: number) => ({ v: 1 as const, ref: { execution: 'conversation' as const, conversationId: 'conv-1', ownerEpoch: 1, runId: `run-${revision}` }, state: 'cancelled' as const, statusRevision: revision, actions: [] as [], at: '2026-10-05T00:00:00.000Z' });
+
+  it('waits for the actual queued live prefix even when Final contains no missing tail', async () => {
+    const f = makeFakes(), shown: string[] = [];
+    const projection = new TerminalOutputProjection(async part => { shown.push(part.text); }, async () => {}, async () => {});
+    const release = projection.hold(); let ready = false, delivered = false, settled = false;
+    f.conversation.send.mockImplementation(async (_text, _id, turnId) => ({ conversationId: 'conv-1', sessionId: 'conv-1', turnId, runId: 'full-live' }));
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'whole-answer' }] };
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: 's', record: { type: 'run', runId: 'full-live', runIndex: 1, timestamp: '2026-10-05T00:00:00.000Z', messages: [message] } }], hasMore: false } as never);
+    const final = { v: 1 as const, conversationId: 'conv-1', runId: 'full-live', commitRevision: 1, digest: `sha256:${'b'.repeat(64)}` };
+    const pages = vi.fn(async (): Promise<ConversationControlPage> => {
+      const facts = ready && !delivered ? [{ kind: 'final' as const, frame: final }] : [];
+      if (facts.length) delivered = true;
+      return { facts, cursor: cursor(delivered ? 100 : 0), hasMore: false, reset: false };
+    });
+    const drain = vi.fn(() => projection.drain()), recovery = vi.fn(async (event, source) => { projection.accept(event, source); await projection.drain(); });
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true,
+      onYield: (event, source) => projection.accept(event, source!), onRecoveryYield: recovery, onRecoveryDrain: drain,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      const turn = await controller.beginTurn('original input'); void turn.outcome.then(() => { settled = true; });
+      f.emit.delta({ conversationId: 'conv-1', turnId: turn.turnId, delta: { type: 'text_delta', text: 'whole-answer' } });
+      ready = true; f.emit.complete({ conversationId: 'conv-1', turnId: turn.turnId, result: { reason: 'completed', message, usage: { inputTokens: 0, outputTokens: 0 } } });
+      await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+      expect(settled).toBe(false); expect(shown).toEqual([]); expect(recovery).not.toHaveBeenCalled();
+      release(); await expect(turn.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+      expect(shown).toEqual(['whole-answer']);
+    } finally { release(); controller.dispose(); await projection.close(); }
+  });
+
+  it.each([false, true])('binds an early completion to its receipt and settles after the actual Final consumer (already in history: %s)', async historyCovered => {
+    const f = makeFakes(); let turnId = '', accept!: () => void, bodyDone!: () => void;
+    f.conversation.send.mockImplementation((_text, _id, id) => {
+      turnId = id;
+      return new Promise(resolve => { accept = () => resolve({ conversationId: 'conv-1', sessionId: 'conv-1', turnId: id, runId: 'local-final' }); });
+    });
+    const final = { v: 1 as const, conversationId: 'conv-1', runId: 'local-final', commitRevision: 1, digest: `sha256:${'a'.repeat(64)}` };
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => ({ facts: after ? [] : [{ kind: 'final', frame: final }], cursor: { ...cursor(100), historyThroughCommitRevision: historyCovered ? 1 : 0 }, hasMore: false, reset: false }));
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'shown prefix, recovered tail' }] };
+    f.conversation.history.mockResolvedValue({ runs: [{ shardId: 's', record: { type: 'run', runId: 'local-final', runIndex: 1, timestamp: '2026-10-05T00:00:00.000Z', messages: [message] } }], hasMore: false } as never);
+    const consume = vi.fn(async () => new Promise<void>(resolve => { bodyDone = resolve; }));
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, onRecoveryYield: consume,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      const pending = controller.beginTurn('original input');
+      await vi.waitFor(() => expect(turnId).not.toBe(''));
+      f.emit.delta({ conversationId: 'conv-1', turnId, delta: { type: 'text_delta', text: 'shown prefix, ' } });
+      f.emit.complete({ conversationId: 'conv-1', turnId, result: { reason: 'completed', message, usage: { inputTokens: 0, outputTokens: 0 } } });
+      await vi.waitFor(() => expect(pages).toHaveBeenCalledOnce());
+      expect(f.conversation.history).not.toHaveBeenCalled(); expect(consume).not.toHaveBeenCalled();
+      accept(); const accepted = await pending;
+      let settled = false; void accepted.outcome.then(() => { settled = true; });
+      if (!historyCovered) {
+        await vi.waitFor(() => expect(consume).toHaveBeenCalledOnce());
+        expect(consume).toHaveBeenCalledWith({ type: 'text_delta', text: 'recovered tail' }, expect.objectContaining({ turnId, runId: 'local-final', kind: 'history' }));
+        expect(settled).toBe(false); bodyDone();
+      }
+      await expect(accepted.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+      if (historyCovered) expect(consume).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+
+  it('does not advance past an unconsumed fragment or trust a later live revision during overflow and reconnect', async () => {
+    const f = makeFakes();
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => {
+      if (!after) return { facts: [{ kind: 'input', cursor: inputCursor() }], cursor: cursor(11), hasMore: true, reset: false };
+      if (after.after.lsn === 11) return { facts: [{ kind: 'status', notice: notice(12), communication: true }, { kind: 'status', notice: notice(100), communication: true }], cursor: cursor(100), hasMore: false, reset: false };
+      return { facts: [], cursor: after, hasMore: false, reset: false };
+    });
+    let failSecond = true;
+    const inputs = vi.fn(async (_id: string, _run: string, after: ConversationInputCursor | undefined, consume: (page: ConversationInputPage) => Promise<unknown>) => {
+      const offset = after?.contentOffset ?? 0;
+      if (offset === 3 && failSecond) { failSecond = false; throw Error('transient RPC disconnect'); }
+      return consume({ input: { identity: { id: 'source-message', source: { kind: 'conversation', conversationId: 'origin' } }, text: offset ? 'second' : 'one', contentOffset: offset, final: !!offset }, cursor: inputCursor(offset ? 9 : 3), hasMore: true, reset: false });
+    });
+    let release!: () => void;
+    const consumed: string[] = [], statusRevisions: number[] = [];
+    const consumeInput = vi.fn(async (input: { text: string }) => {
+      if (input.text === 'one') await new Promise<void>(resolve => { release = resolve; });
+      consumed.push(input.text);
+    });
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage: inputs } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, onObservedInputFragment: consumeInput,
+      onRecoveryYield: async (_event, source) => { if (source.kind === 'status') statusRevisions.push(source.notice.statusRevision); },
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      await controller.start(); await vi.waitFor(() => expect(consumeInput).toHaveBeenCalledOnce());
+      for (let revision = 100; revision > 20; revision--) f.emit.final({ conversationId: 'conv-1', commitRevision: revision, runId: `run-${revision}` });
+      await controller.reattachActiveObserver();
+      expect(f.conversation.subscribe).toHaveBeenLastCalledWith('conv-1', 0, false);
+      expect(pages).toHaveBeenCalledOnce(); expect(consumed).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(statusRevisions).toEqual([12, 100]));
+      expect(consumed).toEqual(['one', 'second']); expect(inputs.mock.calls.map(call => call[2]?.contentOffset)).toEqual([0, 3, 3]);
+      expect(pages.mock.calls[1]?.[1]?.after.lsn).toBe(11);
+    } finally { controller.dispose(); }
+  });
+
+  it('discards an old generation after clear while its current consumer is still finishing', async () => {
+    const f = makeFakes(); let oldDone!: () => void;
+    const seen: number[] = [], display: string[] = [];
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => {
+      seen.push(after?.after.lsn ?? 0);
+      if (seen.length === 1) return { facts: [{ kind: 'input', cursor: inputCursor() }], cursor: cursor(11), hasMore: true, reset: false };
+      return { facts: [], cursor: { ...cursor(100), clearId: 'clear-new', clearedThroughLsn: 99 }, hasMore: false, reset: false };
+    });
+    const input = vi.fn(async (_id: string, _run: string, _cursor: unknown, consume: (page: ConversationInputPage) => Promise<unknown>) => consume({ input: { identity: { id: 'old', source: { kind: 'conversation', conversationId: 'origin' } }, text: 'old', contentOffset: 0, final: true }, cursor: inputCursor(3), hasMore: true, reset: false }));
+    const fragment = vi.fn(async () => { await new Promise<void>(resolve => { oldDone = resolve; }); display.push('old-visible'); });
+    const reset = vi.fn(async () => { display.length = 0; });
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage: input } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: () => {}, pagedRecovery: true, onObservedInputFragment: fragment, onRecoveryReset: reset,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      await controller.start(); await vi.waitFor(() => expect(fragment).toHaveBeenCalledOnce());
+      controller.applySessionChanged({ conversationId: 'conv-1', change: 'cleared' } as never); oldDone();
+      await vi.waitFor(() => expect(seen).toEqual([0, 0]));
+      expect(reset).toHaveBeenCalledOnce(); expect(display).toEqual([]);
+    } finally { controller.dispose(); }
+  });
+
+  it('ignores a late reset reply from an input request owned by the previous conversation', async () => {
+    const f = makeFakes(); let reply!: () => void;
+    const pages = vi.fn(async (id: string): Promise<ConversationControlPage> => ({ facts: id === 'conv-1' ? [{ kind: 'input', cursor: inputCursor() }] : [], cursor: { ...cursor(100), conversationId: id }, hasMore: false, reset: false }));
+    const inputs = vi.fn(async (_id: string, _run: string, _cursor: unknown, consume: (page: ConversationInputPage) => Promise<unknown>) => {
+      await new Promise<void>(resolve => { reply = resolve; });
+      return consume({ cursor: inputCursor(), hasMore: false, reset: true });
+    });
+    const reset = vi.fn(async () => {});
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage: inputs } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: () => {}, pagedRecovery: true, onRecoveryReset: reset,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      await controller.start(); await vi.waitFor(() => expect(inputs).toHaveBeenCalledOnce());
+      controller.setActive({ conversationId: 'conv-2', name: 'new', mode: { kind: 'main' } }); reply();
+      await vi.waitFor(() => expect(pages.mock.calls.some(([id]) => id === 'conv-2')).toBe(true));
+      expect(reset).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+});
 
 const initial: ActiveConversation = {
   conversationId: "conv-1",
@@ -1210,6 +1358,24 @@ describe("ConversationController", () => {
       expect(result.submission?.turnId).not.toBe(result.turnId);
     }
     controller.dispose();
+  });
+
+  it('starts a fresh query for a fact emitted inside an older page consumer', async () => {
+    const f = makeFakes(); let controller!: ConversationController;
+    const consumed: string[] = [];
+    const setup = makeController(f, vi.fn(), { onObservedInputs: turn => {
+      consumed.push(turn.runId!);
+      if (turn.runId === 'first') f.emit.status(statusNotice('during-consume', 1, 'failed'));
+    } });
+    controller = setup.controller;
+    const input = (runId: string) => ({ runId, state: 'failed', message: { role: 'user', content: [{ type: 'text', text: runId }], inputIdentity: { id: runId, source: { kind: 'conversation', conversationId: 'origin' } } } });
+    f.conversation.history.mockResolvedValueOnce({ runs: [], hasMore: false, inputsOutsideHistory: [input('first')] } as never)
+      .mockResolvedValueOnce({ runs: [], hasMore: false, inputsOutsideHistory: [input('during-consume')] } as never);
+    try {
+      f.emit.status(statusNotice('first', 1, 'failed'));
+      await vi.waitFor(() => expect(consumed).toEqual(['first', 'during-consume']));
+      expect(f.conversation.history).toHaveBeenCalledTimes(2);
+    } finally { controller.dispose(); }
   });
 
   it("finishes history consumption before sending the subsequent background abort", async () => {

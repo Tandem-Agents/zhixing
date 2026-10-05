@@ -304,6 +304,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly transferId: string;
     readonly ownerEpoch: number;
     readonly records: readonly ConversationTransferAuthorityRecord[];
+    readonly clearId?: string;
+    readonly clearedThroughLsn: number;
   }>();
   readonly #assignmentConversations = new Map<string, string>();
   readonly #assignmentIngress = new Map<string, IngressContext>();
@@ -484,10 +486,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     ) {
       throw new Error("Conversation already has another committed transfer generation");
     }
+    let clearId: string | undefined, clearedThroughLsn = 0;
+    for (const record of input.records) {
+      const body = record.body;
+      if (record.stream === `run:${conversationId}` && body && typeof body === 'object' && !Array.isArray(body) && body.t === 'session-lifecycle' && body.mutation === 'clear') {
+        clearId = body.requestId as string; clearedThroughLsn = record.lsn;
+      }
+    }
     const adopted = {
       transferId: input.manifest.transferId,
       ownerEpoch: input.manifest.nextOwnerEpoch,
       records: input.records.map((record) => structuredClone(record)),
+      clearId, clearedThroughLsn,
     };
     const journal = this.#createJournal(conversationId, adopted.ownerEpoch);
     await journal.primeRecoverySnapshot(
@@ -702,6 +712,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async messageInputsOutsideHistory(conversationId: string) {
     if (!(await this.sessionExists(conversationId))) return { inputs: [], truncated: false };
     return this.#journal(conversationId).messageInputsOutsideHistory();
+  }
+
+  async recoveryPage(request: import('@zhixing/core/contracts').ConversationRecoveryRequest) {
+    if (!this.#acceptsConversationId(request.conversationId) || !(await this.sessionExists(request.conversationId))) throw Error('Conversation recovery owner is unavailable');
+    const base = this.#adoptedConversations.get(request.conversationId);
+    return this.#journal(request.conversationId).recoveryPage(request, base && { id: base.transferId, records: base.records, clearId: base.clearId, clearedThroughLsn: base.clearedThroughLsn });
   }
 
   /**

@@ -2160,6 +2160,7 @@ export function buildSessionDeleteMethod(): MethodEntry {
 interface SessionSubscribeParams {
   conversationId?: string;
   afterCommitRevision?: number;
+  replayFinals?: boolean;
 }
 
 /**
@@ -2176,8 +2177,9 @@ export function buildSessionSubscribeMethod(): MethodEntry {
       if (
         typeof params.conversationId !== "string" ||
         Object.keys(params).some(
-          (key) => key !== "conversationId" && key !== "afterCommitRevision",
+          (key) => key !== "conversationId" && key !== "afterCommitRevision" && key !== 'replayFinals',
         ) ||
+        (params.replayFinals !== undefined && typeof params.replayFinals !== 'boolean') ||
         (params.afterCommitRevision !== undefined &&
           (!Number.isSafeInteger(params.afterCommitRevision) ||
             params.afterCommitRevision < 0))
@@ -2203,7 +2205,7 @@ export function buildSessionSubscribeMethod(): MethodEntry {
         String(ctx.connection.id),
         { allowInactive: true },
       );
-      if (subscribed) {
+      if (subscribed && params.replayFinals !== false) {
         const history = await ctx.server.conversationFinalHistory?.(
           params.conversationId,
           params.afterCommitRevision ?? 0,

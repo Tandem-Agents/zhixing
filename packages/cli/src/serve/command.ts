@@ -3161,6 +3161,10 @@ async function runServerProcess(
       conversationStatus: (after) =>
         boundConversationProtocol?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
+      conversationRecovery: request => {
+        if (!boundConversationProtocol) throw Error('Conversation recovery owner is unavailable');
+        return boundConversationProtocol.recoveryPage(request);
+      },
       jobStatus: (after) =>
         boundJobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),

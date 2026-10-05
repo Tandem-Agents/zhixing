@@ -3,6 +3,29 @@ import { buildBuiltinRegistry } from "../index.js";
 import { RPC_ERROR_CODES } from "../../protocol.js";
 
 describe("session.statusHistory", () => {
+  it('routes finite recovery reads through the authenticated current owner and validates checkpoint identities', async () => {
+    const read = vi.fn(async () => ({ facts: [], hasMore: false, reset: false }));
+    const registry = buildBuiltinRegistry();
+    const context = { connection: { authenticated: true }, server: { serverInfoRuntime: { conversationRecovery: read } } };
+    const point = { logId: 'authority-log', lsn: 11, frameEndOffset: 1024, prefixDigest: 'synthetic-proof' };
+    const request = { mode: 'control-page', conversationId: 'conversation-b', cursor: { conversationId: 'conversation-b', ownerEpoch: 2, clearedThroughLsn: 0, baseItem: 0, upper: point, after: point, item: 3 } };
+    await registry.dispatch('session.statusHistory', request, context as never);
+    expect(read).toHaveBeenCalledExactlyOnceWith(request);
+    for (const cursor of [{ ...request.cursor, item: -1 }, { ...request.cursor, baseItem: 0.5 }, { ...request.cursor, conversationId: 'another' }, { ...request.cursor, upper: { ...point, lsn: Infinity } }, { ...request.cursor, body: 'not metadata' }]) {
+      await expect(registry.dispatch('session.statusHistory', { ...request, cursor }, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+    expect(read).toHaveBeenCalledOnce();
+    const initial = { mode: 'control-page', conversationId: 'conversation-b', historyRunIds: ['shown-run'] };
+    await registry.dispatch('session.statusHistory', initial, context as never);
+    expect(read).toHaveBeenLastCalledWith(initial);
+    for (const invalid of [{ ...initial, historyRunIds: Array(5).fill('shown-run') }, { ...initial, historyRunIds: [''] },
+      { ...request, historyRunIds: ['shown-run'] }, { ...request, cursor: { ...request.cursor, historyThroughCommitRevision: -1 } }]) {
+      await expect(registry.dispatch('session.statusHistory', invalid, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+    expect(read).toHaveBeenCalledTimes(2);
+    context.connection.authenticated = false;
+    await expect(registry.dispatch('session.statusHistory', request, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.UNAUTHORIZED });
+  });
   const params = { conversationId: "conversation-b", cursors: [{ runId: "run-b", afterStatusRevision: 2 }] };
 
   it("projects the current owner's status and retained end cursor without opening finality", async () => {

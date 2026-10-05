@@ -24,6 +24,7 @@ import {
   RpcErrors,
   requireRpcSurfacePrincipal,
   parseConversationStatusRequest,
+  parseConversationRecoveryRequest,
   type FirstPartyConversationRpcRouter,
 } from "@zhixing/server";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
@@ -335,6 +336,7 @@ export class LocalConversationRpcRouter
       case "session.subscribe": {
         const conversationId = this.#conversationId(params, method);
         const revision = params.afterCommitRevision === undefined ? 0 : params.afterCommitRevision;
+        if (params.replayFinals !== undefined && typeof params.replayFinals !== 'boolean') throw RpcErrors.invalidParams('订阅重放选项无效。');
         if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
           throw RpcErrors.invalidParams("订阅修订号必须是非负整数。");
         }
@@ -344,7 +346,7 @@ export class LocalConversationRpcRouter
         if (exists) {
           this.#subscribe(conversationId, connection);
           // 先订阅再补读同一 Owner 的提交事实，覆盖断线期间完成的自动运行。
-          const history = await this.input.owner.finalHistory(conversationId, revision);
+          const history = params.replayFinals === false ? [] : await this.input.owner.finalHistory(conversationId, revision);
           for (const item of history) {
             if (connection.closed || !this.#observers.get(conversationId)?.has(connection.id)) break;
             connection.notify("session.final", item.frame);
@@ -365,8 +367,10 @@ export class LocalConversationRpcRouter
       }
       case "session.history":
         return this.#history(params);
-      case "session.statusHistory":
-        return this.input.owner.statusHistory(parseConversationStatusRequest(params));
+      case "session.statusHistory": {
+        const recovery = parseConversationRecoveryRequest(params);
+        return recovery ? this.input.owner.recoveryPage(recovery) : this.input.owner.statusHistory(parseConversationStatusRequest(params));
+      }
       case "session.send":
         return this.#send(params, connection);
       case "session.abort": {

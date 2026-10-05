@@ -4,6 +4,7 @@ import type { RunInputPort } from "@zhixing/core/loop";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
+import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
 import {
   applyAdvancementEvent,
   assertAdvancementEventBatchLegal,
@@ -2149,6 +2150,151 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const selected = [...unresolved, ...recent].slice(0, 200).sort((a, b) => a.position - b.position);
       return { inputs: selected.map((entry) => entry.status), truncated: inputs.length > 200 };
     });
+  }
+
+  /** Finite recovery reads use the original verified authority log and input
+   * projection. They neither consume facts nor create a second delivery queue. */
+  async recoveryPage(request: ConversationRecoveryRequest, base?: {
+    readonly id: string;
+    readonly records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[];
+    readonly clearId?: string;
+    readonly clearedThroughLsn: number;
+  }): Promise<ConversationRecoveryPage> {
+    if (request.conversationId !== this.#conversationId) throw new TypeError('Recovery cursor belongs to another conversation');
+    const head = await this.#log.checkpoint();
+    const lifecycleOf = (state: RunProjection) => {
+      let clearId: string | undefined;
+      for (const record of state.lifecycleByRequest.values()) if (record.mutation === 'clear') clearId = record.requestId;
+      return { cleared: state.clearedThroughLsn, clearId, deleted: state.deleted };
+    };
+    const lifecycle = await this.#select(lifecycleOf);
+    const baseVisible = !!base && lifecycle.clearId === base.clearId;
+    const targetClear = baseVisible ? 0 : lifecycle.cleared;
+    const supplied = request.cursor;
+    const reset = !!supplied && (supplied.conversationId !== this.#conversationId ||
+      supplied.clearedThroughLsn !== lifecycle.cleared || supplied.clearId !== lifecycle.clearId || supplied.baseId !== base?.id || supplied.upper.logId !== head.logId || supplied.upper.lsn > head.lsn);
+    if (supplied && !reset && supplied.upper.lsn > 0) await this.#log.readEnvelopeAt(supplied.upper);
+    if (request.mode === 'input-page') {
+      assertIdentifier(request.runId, 'Run input history id');
+      if (supplied && 'runId' in supplied && supplied.runId !== request.runId) throw new TypeError('Run input cursor identity changed');
+      const cursor: ConversationInputCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
+        conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch,
+        clearedThroughLsn: lifecycle.cleared, clearId: lifecycle.clearId, baseId: base?.id, upper: head, position: 0, part: 0, offset: 0, contentOffset: 0,
+      };
+      return this.#select(state => {
+        const currentLifecycle = lifecycleOf(state);
+        if (state.deleted || currentLifecycle.cleared !== cursor.clearedThroughLsn || currentLifecycle.clearId !== cursor.clearId || (cursor.imported && !baseVisible)) return { cursor, hasMore: false, reset: true };
+        let selected: { input: UserTurnInput; identity: NonNullable<Message['inputIdentity']>; position: number } | undefined;
+        const consider = (position: number, lsn: number, input: UserTurnInput, identity: Message['inputIdentity'], key: string): void => {
+          if (!identity || (cursor.inputKey && cursor.inputKey !== key) ||
+              (cursor.imported ? lsn <= (base?.clearedThroughLsn ?? 0) : lsn <= targetClear || lsn > cursor.upper.lsn) ||
+              position < cursor.position || (selected && selected.position <= position)) return;
+          selected = { input, identity, position };
+        };
+        const initial = state.admittedByRun.get(request.runId);
+        if (initial) consider(initial.record.queuedPosition, initial.lsn, initial.input, initial.record.ingress.turnOrigin?.messageIdentity, initial.record.ingressKey);
+        for (const entry of state.appendedInputs.values()) if (entry.record.runId === request.runId) {
+          consider(entry.record.position, entry.lsn, entry.input, entry.record.ingress.turnOrigin?.messageIdentity, entry.record.ingressKey);
+        }
+        if (!selected) return { cursor, hasMore: false, reset };
+        const { input, identity, position } = selected;
+        let part = position === cursor.position ? cursor.part : 0;
+        let offset = position === cursor.position ? cursor.offset : 0;
+        const contentOffset = position === cursor.position ? cursor.contentOffset : 0;
+        while (part < input.parts.length && (input.parts[part]!.type !== 'text' || offset >= (input.parts[part] as { text: string }).text.length)) { part++; offset = 0; }
+        const current = input.parts[part];
+        let text = '';
+        if (current?.type === 'text') {
+          let end = Math.min(current.text.length, offset + 8192);
+          if (end < current.text.length && /[\uD800-\uDBFF]/u.test(current.text[end - 1]!)) end--;
+          text = current.text.slice(offset, end); offset = end;
+          if (offset === current.text.length) { part++; offset = 0; }
+        }
+        while (part < input.parts.length && (input.parts[part]!.type !== 'text' || !(input.parts[part] as { text: string }).text.length)) part++;
+        const final = part >= input.parts.length;
+        const next: ConversationInputCursor = { ...cursor, position: final ? position + 1 : position,
+          part: final ? 0 : part, offset: final ? 0 : offset, contentOffset: final ? 0 : contentOffset + text.length };
+        const page: ConversationInputPage = { input: { identity: structuredClone(identity), text, contentOffset, final }, cursor: next, hasMore: true, reset };
+        return page;
+      });
+    }
+    if (request.historyRunIds && (request.historyRunIds.length > 4 || request.cursor)) throw new TypeError('Invalid consumed history boundary');
+    const historyThroughCommitRevision = request.historyRunIds?.length ? await this.#select(state => {
+      let revision = 0;
+      for (const runId of request.historyRunIds!) {
+        assertIdentifier(runId, 'Consumed history run id');
+        const commit = state.commits.find(record => record.runId === runId);
+        if (commit) revision = Math.max(revision, commit.commitRevision);
+      }
+      return revision;
+    }) : 0;
+    let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
+      conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
+      clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.records.length ?? 0,
+      historyThroughCommitRevision,
+      upper: head, after: await this.#log.originCheckpoint(), item: 0,
+    };
+    if (cursor.after.lsn === cursor.upper.lsn && cursor.item === 0) cursor = { ...cursor, upper: head };
+    if (cursor.after.logId !== head.logId || cursor.after.lsn > cursor.upper.lsn) throw new TypeError('Recovery cursor boundary is invalid');
+    const facts: ConversationControlFact[] = [];
+    const collect = async (record: LogicalRecord<unknown>, upper: ConversationControlCursor['upper'], imported = false) => {
+      if (!record.body || typeof record.body !== 'object' || !('t' in record.body)) return;
+      // Both sources have already passed the journal reducers; the transfer
+      // carrier deliberately exposes JSON rather than this journal's union.
+      const body = record.body as ConversationCommitLogRecord;
+      if (record.stream === runStream(this.#conversationId) && 't' in body && (body.t === 'admitted' || body.t === 'run-input-appended')) {
+        if (cursor.historyThroughCommitRevision && await this.#select(state => {
+          const assignment = state.assignmentByRun.get(body.runId);
+          const commit = assignment ? state.committedByAssignment.get(assignment) : undefined;
+          return !!commit && commit.commitRevision <= cursor.historyThroughCommitRevision!;
+        })) return;
+        if (body.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation') facts.push({ kind: 'input', cursor: {
+          conversationId: this.#conversationId, runId: body.runId, ownerEpoch: this.#ownerEpoch,
+          clearedThroughLsn: cursor.clearedThroughLsn, clearId: cursor.clearId, baseId: base?.id,
+          ...(imported ? { imported: true as const } : {}), inputKey: body.ingressKey, upper,
+          position: body.t === 'admitted' ? body.queuedPosition : body.position, part: 0, offset: 0, contentOffset: 0,
+        } });
+      } else if (record.stream === runStream(this.#conversationId) && 't' in body && body.t === 'state') {
+        const fact = await this.#select(state => {
+          const status = state.statusHistoryByRun.get(body.runId)?.at(-1);
+          if (!status || status.statusRevision !== body.statusRevision) return undefined;
+          let communication = state.admittedByRun.get(body.runId)?.record.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation';
+          if (!communication) for (const entry of state.appendedInputs.values()) {
+            if (entry.record.runId === body.runId && entry.record.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation') { communication = true; break; }
+          }
+          const notice = conversationStatusNotice(this.#conversationId, this.#ownerEpoch, body.runId, status);
+          if (!notice) return undefined;
+          return { kind: 'status' as const, notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication };
+        });
+        if (fact) facts.push(fact);
+      } else if (record.stream === 'final-outbox' && 't' in body && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
+        const assignmentId = await this.#select(state => state.assignmentByCommitRevision.get(body.commitRevision));
+        const conflicts = assignmentId ? await this.#selectPublish(state => state.conflictsByAssignment.get(assignmentId)?.length ?? 0) : 0;
+        facts.push({ kind: 'final', frame: finalFrame(body, conflicts) });
+      }
+    };
+    // Imported authority is the existing verified immutable prefix. Its source
+    // LSN space is distinct from this device's WAL; retain an index in that
+    // prefix rather than pretending it can be read through readTail here.
+    for (let scanned = 0; base && cursor.baseItem < base.records.length && scanned < 64 && facts.length < 32; scanned++) {
+      const record = base.records[cursor.baseItem]!;
+      if (baseVisible && record.lsn > base.clearedThroughLsn) await collect(record, cursor.upper, true);
+      cursor = { ...cursor, baseItem: cursor.baseItem + 1 };
+    }
+    // A bounded scan also yields on logs containing unrelated conversation facts.
+    for (let scanned = 0; scanned < 64 && facts.length < 32 && cursor.baseItem >= (base?.records.length ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted; scanned++) {
+      const tail = await this.#log.readTail<ConversationCommitLogRecord>(cursor.after, 1);
+      const envelope = tail.commits[0];
+      if (!envelope || envelope.lsn > cursor.upper.lsn || cursor.item > envelope.entries.length) throw new TypeError('Recovery cursor envelope is unavailable');
+      let item = cursor.item;
+      for (; item < envelope.entries.length && facts.length < 32; item++) {
+        if (envelope.lsn > targetClear) await collect(envelope.entries[item]!, tail.checkpoint);
+      }
+      cursor = item === envelope.entries.length ? { ...cursor, after: tail.checkpoint, item: 0 } : { ...cursor, item };
+    }
+    const current = await this.#select(lifecycleOf);
+    if (current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
+    return { facts, cursor, hasMore: cursor.baseItem < (base?.records.length ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
   }
 
   async assign(

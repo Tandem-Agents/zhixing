@@ -981,6 +981,7 @@ async function runExecutorProcess(
       serverInfoRuntime: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),
+        conversationRecovery: request => localConversationOwner!.port().recoveryPage(request),
       },
       conversationFinalHistory: (conversationId, afterCommitRevision) =>
         localConversationOwner!.port().finalHistory(

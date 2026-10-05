@@ -6,6 +6,19 @@ const source = { conversationId: 'synthetic', turnId: 'turn', kind: 'delta' } as
 afterEach(() => vi.useRealTimers());
 
 describe('terminal output projection', () => {
+  it.each([false, true])('resets output offsets only after actual append and while the captured generation is current (%s)', async current => {
+    vi.useFakeTimers(); let appendDone!: () => void;
+    const append = vi.fn(async () => { if (append.mock.calls.length === 1) await new Promise<void>(resolve => { appendDone = resolve; }); });
+    const projection = new TerminalOutputProjection(append, async () => {}, async () => {});
+    projection.accept({ type: 'text_delta', text: 'old' }, source);
+    let settled = false; const reset = projection.reset(() => current).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(50); expect(settled).toBe(false);
+    appendDone(); await reset;
+    projection.accept({ type: 'text_delta', text: 'new' }, source);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(append).toHaveBeenNthCalledWith(2, expect.objectContaining({ text: 'new', contentOffset: current ? 0 : 3 }));
+    await projection.close();
+  });
   it('keeps a recovery drain pending until actual append or explicit gap presentation completes', async () => {
     vi.useFakeTimers();
     let appendDone!: () => void;

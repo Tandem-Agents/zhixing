@@ -25,6 +25,10 @@ import type {
   ConversationStatusNotice,
   FinalFrame,
   StreamFrame,
+  ConversationControlCursor,
+  ConversationControlFact,
+  ConversationInputCursor,
+  ConversationInputFragment,
 } from "@zhixing/core/contracts";
 import type {
   SessionAdvancementCancelResult,
@@ -194,6 +198,14 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
    * precedes the send receipt. Only this surface's projection remains in its
    * waiter promise; legacy consumers retain the original outcome by default. */
   projectOutcome?: (outcome: TurnOutcome) => Outcome;
+  /** The terminal reads finite durable pages; live control frames only wake it. */
+  pagedRecovery?: boolean;
+  onObservedInputFragment?: (input: ConversationInputFragment & { conversationId: string; runId: string }) => Promise<void>;
+  onRecoveryYield?: (event: AgentYield, source: ConversationOutputSource) => Promise<void>;
+  /** Confirms the queued live prefix even when Final has no missing text. */
+  onRecoveryDrain?: () => Promise<void>;
+  onRecoveryReset?: (conversationId: string, current: () => boolean) => Promise<void>;
+  historyRunIds?: () => readonly string[];
 }
 
 export interface InitialConversationSelection {
@@ -219,6 +231,17 @@ interface DurableRunWatch {
   statusRevision: number;
   finalRequested?: boolean;
 }
+
+/** Only the current fact owns retry progress. A failed later fragment must not
+ * replay a fragment whose display consumer has already acknowledged it. */
+interface RecoveryProgress {
+  inputCursor?: ConversationInputCursor;
+  inputsDone?: boolean;
+  communication?: boolean;
+  before?: { shardId: string; runIndex: number };
+  localSettled?: boolean;
+}
+class RecoveryGenerationChanged extends Error {}
 
 /** 由全域键派生模式视图;场景名后补(enter 响应 / list 查询) */
 function deriveMode(
@@ -303,6 +326,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
   private readonly pendingPostTurnControls = new Map<string, PostTurnControlOutcome>();
   private readonly localTurnsByConversation = new Map<string, string>();
+  private readonly localOutput = new Map<string, { conversationId: string; text: ObservedTextPrefix; recovering: boolean; pendingReceipt: boolean }>();
+  private wakeReceipt?: () => void;
   private readonly durableRuns = new Map<string, DurableRunWatch>();
   private readonly durableRunByTurn = new Map<string, string>();
   private readonly pendingFinals = new Map<string, FinalFrame>();
@@ -313,6 +338,13 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly continuationStatusLookups = new Map<string, Promise<void>>();
   private readonly notificationHistoryBatches = new Map<string, { consume(page: RunsPage): void; reject(error: unknown): void }[]>();
   private lookupScheduled?: ReturnType<typeof setImmediate>;
+  private recoveryCursor?: ConversationControlCursor;
+  private recoveryRequested = false;
+  private recoveryWork?: Promise<void>;
+  private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private recoveryVersion = 0;
+  private recoveryResetRequested = false;
+  private recoveryDeleted = false;
   private readonly observedContinuations = new Map<string, {
     conversationId: string;
     communication?: boolean;
@@ -321,6 +353,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     streamIncomplete?: boolean;
     settled: boolean;
     terminalInputsReconciled?: boolean;
+    recovering?: boolean;
   }>();
   private readonly pendingAbortByTurn = new Map<
     string,
@@ -349,7 +382,10 @@ export class ConversationController<Outcome = TurnOutcome> {
       // 主通道:当前对话的产出流喂渲染(旁观帧同样可见——多端同看一个 turn)
       opts.conversation.onDelta((p) => {
         if (p.conversationId !== this.active.conversationId) return;
+        if (this.opts.pagedRecovery && (this.recoveryResetRequested || this.recoveryDeleted)) return;
         const localTurnId = this.localTurnsByConversation.get(p.conversationId);
+        const output = this.localOutput.get(p.turnId);
+        if (output?.recovering) return;
         if (localTurnId && p.turnId !== localTurnId) return;
         if (localTurnId && p.turnId === localTurnId) {
           this.markLocalTurnAccepted({
@@ -364,6 +400,16 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
         const runId = this.durableRunByTurn.get(p.turnId);
         this.opts.onYield(p.delta, { conversationId: p.conversationId, turnId: p.turnId, ...(runId ? { runId } : {}), kind: "delta", notification: p });
+        if (output) {
+          if (p.delta.type === 'text_delta') output.text.append(p.delta.text);
+          else if (p.delta.type === 'tool_start') output.text.reset();
+          else if (p.delta.type === 'assistant_message') {
+            output.text.reset(); let first = true;
+            for (const block of p.delta.message.content) if (block.type === 'text') {
+              if (!first) output.text.append('\n'); first = false; output.text.append(block.text);
+            }
+          }
+        }
       }),
       // 控制意图:仅发起连接可达,先于 complete;暂存到 turn 落定统一消费
       opts.conversation.onPostTurnControlIntent((p) => {
@@ -373,6 +419,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         });
       }),
       opts.conversation.onComplete((p) => {
+        if (this.opts.pagedRecovery) { if (p.conversationId === this.active.conversationId) this.wakeRecovery(); return; }
         if (!this.waiters.has(p.turnId)) {
           if (
             p.conversationId === this.active.conversationId &&
@@ -393,9 +440,11 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
       }),
       opts.conversation.onFinal((frame) => {
+        if (this.opts.pagedRecovery) { if (frame.conversationId === this.active.conversationId) this.wakeRecovery(); return; }
         this.consumeFinal(frame);
       }),
       opts.conversation.onStatus((notice) => {
+        if (this.opts.pagedRecovery) { if (notice.ref.conversationId === this.active.conversationId) this.wakeRecovery(); return; }
         this.consumeStatus(notice);
       }),
       opts.conversation.onActivity((p) => {
@@ -425,21 +474,27 @@ export class ConversationController<Outcome = TurnOutcome> {
    * 宿主换代后服务端 observer 名册已重建,但 cli 当前指针不变。这里强制
    * 重挂当前对话 observer,保持 conversation 领域订阅由 controller 单点维护。
    */
-  async reattachActiveObserver(): Promise<void> {
+  async reattachActiveObserver(options: { reloadHistory?: boolean } = {}): Promise<void> {
+    if (this.opts.pagedRecovery && options.reloadHistory) {
+      this.recoveryVersion++; this.recoveryResetRequested = true; this.wakeReceipt?.();
+    }
     this.observedConversationId = null;
     await this.subscribeActive();
+    if (this.opts.pagedRecovery) { this.wakeRecovery(); return; }
     await this.reconcileDurableRuns();
     await this.reconcileObservedRuns();
   }
 
   /** 切当前对话指针(纯 UI 态变更,无宿主副作用)。 */
   setActive(next: ActiveConversation): void {
+    if (next.conversationId !== this.active.conversationId) { this.recoveryVersion++; this.recoveryDeleted = false; this.recoveryResetRequested = false; }
     this.active = next;
+    this.wakeReceipt?.();
   }
 
   private async switchActive(next: ActiveConversation): Promise<void> {
     const prevObserved = this.observedConversationId;
-    this.active = next;
+    this.setActive(next);
     if (prevObserved && prevObserved !== next.conversationId) {
       await this.opts.conversation.unsubscribe(prevObserved).catch(() => {});
       this.observedConversationId = null;
@@ -453,9 +508,11 @@ export class ConversationController<Outcome = TurnOutcome> {
       .subscribe(
         this.active.conversationId,
         this.finalRevisionByConversation.get(this.active.conversationId) ?? 0,
+        ...(this.opts.pagedRecovery ? [false] as const : []),
       )
       .catch(() => false);
     this.observedConversationId = ok ? this.active.conversationId : null;
+    if (ok && this.opts.pagedRecovery) this.wakeRecovery();
   }
 
   // ─── turn 执行 ───
@@ -760,6 +817,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.waiters.set(turnId, resolve);
     });
     this.localTurnsByConversation.set(conversationId, turnId);
+    if (this.opts.pagedRecovery) this.localOutput.set(turnId, { conversationId, text: new ObservedTextPrefix(), recovering: false, pendingReceipt: true });
     if (options.onAccepted) {
       this.localTurnAcceptances.set(turnId, options.onAccepted);
     }
@@ -768,6 +826,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   private discardTurnWaiter(conversationId: string, turnId: string): void {
     this.waiters.delete(turnId);
+    this.localOutput.delete(turnId); this.wakeReceipt?.();
     this.pendingPostTurnControls.delete(turnId);
     this.localTurnAcceptances.delete(turnId);
     this.resolvePendingAbort(turnId);
@@ -802,6 +861,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     const waiter = this.waiters.get(turnId);
     if (!waiter) return;
     this.waiters.delete(turnId);
+    this.localOutput.delete(turnId); this.wakeReceipt?.();
     const intent = this.pendingPostTurnControls.get(turnId);
     this.pendingPostTurnControls.delete(turnId);
     if (this.localTurnsByConversation.get(conversationId) === turnId) {
@@ -827,6 +887,9 @@ export class ConversationController<Outcome = TurnOutcome> {
     turnId: string,
     runId: string | undefined,
   ): void {
+    const output = this.localOutput.get(turnId);
+    if (output) output.pendingReceipt = false;
+    this.wakeReceipt?.();
     const pendingAbort = this.pendingAbortByTurn.get(turnId);
     if (pendingAbort) {
       this.pendingAbortByTurn.delete(turnId);
@@ -851,7 +914,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.pendingFinals.delete(runId);
       this.consumeFinal(frame);
     }
-    void this.reconcileDurableRun(runId).catch(() => {});
+    if (this.opts.pagedRecovery) this.wakeRecovery();
+    else void this.reconcileDurableRun(runId).catch(() => {});
   }
 
   private releaseDurableRun(turnId: string): void {
@@ -992,6 +1056,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   private startTerminalInputLookup(notice: ConversationStatusNotice): void {
+    if (this.opts.pagedRecovery) return;
     const runId = notice.ref.runId;
     if (notice.ref.conversationId !== this.active.conversationId || this.observedContinuations.get(runId)?.terminalInputsReconciled || this.continuationStatusLookups.has(runId)) return;
     if (this.lookupCount >= 4) return;
@@ -1008,6 +1073,202 @@ export class ConversationController<Outcome = TurnOutcome> {
     return this.opts.conversation.history(conversationId, options).then(consume);
   }
 
+  private wakeRecovery(): void {
+    if (this.disposed || this.recoveryDeleted || !this.opts.pagedRecovery) return;
+    this.recoveryRequested = true;
+    if (this.recoveryWork || this.recoveryTimer) return;
+    const conversationId = this.active.conversationId;
+    const work = this.recoverControls(conversationId).finally(() => {
+      if (this.recoveryWork === work) this.recoveryWork = undefined;
+      if (!this.disposed && this.recoveryRequested) this.wakeRecovery();
+    });
+    this.recoveryWork = work; void work.catch(() => {});
+  }
+
+  private finishRecoveryReset(conversationId: string): void {
+    this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear();
+    for (const output of this.localOutput.values()) if (output.conversationId === conversationId) {
+      output.text.reset(); output.recovering = false;
+    }
+  }
+
+  private async recoverControls(conversationId: string): Promise<void> {
+    if (this.recoveryCursor?.conversationId !== conversationId) this.recoveryCursor = undefined;
+    const version = this.recoveryVersion;
+    const current = () => !this.disposed && !this.recoveryDeleted && this.active.conversationId === conversationId && this.recoveryVersion === version;
+    try {
+      while (current() && this.recoveryRequested) {
+        this.recoveryRequested = false;
+        if (this.recoveryResetRequested) {
+          await this.opts.onRecoveryReset?.(conversationId, current);
+          if (!current()) return;
+          this.finishRecoveryReset(conversationId);
+        }
+        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.());
+        if (!current()) return;
+        if (page.reset) {
+          this.recoveryResetRequested = true;
+          await this.opts.onRecoveryReset?.(conversationId, current);
+          if (!current()) return;
+          this.finishRecoveryReset(conversationId); this.recoveryRequested = true; continue;
+        }
+        // Only this bounded metadata page survives its receive consumer. One
+        // retry lifetime stays at the same fact; no failed fact is evicted.
+        for (const fact of page.facts) {
+          let delay = 25;
+          const progress: RecoveryProgress = {};
+          while (current()) {
+            try {
+              // Completion can precede the send receipt. Preserve the page
+              // until runId is bound, without holding its receive lease.
+              while (current() && [...this.localOutput.values()].some(output => output.conversationId === conversationId && output.pendingReceipt)) {
+                await new Promise<void>(resolve => { this.wakeReceipt = resolve; }); this.wakeReceipt = undefined;
+              }
+              if (!current()) break;
+              await this.consumeRecoveredFact(conversationId, fact, progress, current, page.cursor.historyThroughCommitRevision ?? 0); break;
+            }
+            catch (error) {
+              if (error instanceof RecoveryGenerationChanged) throw error;
+              await new Promise<void>(resolve => setTimeout(resolve, delay)); delay = Math.min(1000, delay * 2);
+            }
+          }
+        }
+        if (!current()) return;
+        this.recoveryCursor = page.cursor;
+        if (page.hasMore) this.recoveryRequested = true;
+        await new Promise<void>(setImmediate);
+      }
+    } catch (error) {
+      this.recoveryRequested = true;
+      if (error instanceof RecoveryGenerationChanged && current()) {
+        this.recoveryResetRequested = true;
+        try {
+          await this.opts.onRecoveryReset?.(conversationId, current);
+          if (!current()) return;
+          this.finishRecoveryReset(conversationId);
+        } catch { /* Retain the old cursor; reset is retried after the same finite backoff. */ }
+      }
+      if (!this.disposed) this.recoveryTimer = setTimeout(() => { this.recoveryTimer = undefined; this.wakeRecovery(); }, 250);
+    } finally { if (!current() && !this.disposed) this.recoveryRequested = true; }
+  }
+
+  private async consumeRecoveredFact(conversationId: string, fact: ConversationControlFact, progress: RecoveryProgress, current: () => boolean, historyThroughCommitRevision: number): Promise<void> {
+    if (fact.kind === 'input') {
+      progress.inputCursor ??= fact.cursor;
+      await this.presentRecoveredInputs(conversationId, fact.cursor.runId, progress, current);
+      return;
+    }
+    if (fact.kind === 'final') {
+      if (!current()) return;
+      const historyCovered = fact.frame.commitRevision <= historyThroughCommitRevision;
+      if (!historyCovered || this.durableRuns.has(fact.frame.runId)) await this.presentRecoveredFinal(fact.frame, progress, current, historyCovered);
+      if (!current()) return;
+      this.finalRevisionByConversation.set(conversationId, Math.max(this.finalRevisionByConversation.get(conversationId) ?? 0, fact.frame.commitRevision));
+      return;
+    }
+    const notice = fact.notice, runId = notice.ref.runId;
+    const result = terminalResultForStatus(notice), watch = this.durableRuns.get(runId);
+    if (watch && notice.statusRevision > watch.statusRevision) {
+      watch.statusRevision = notice.statusRevision;
+      if (result) { progress.localSettled = true; this.finishTurn(watch.conversationId, watch.turnId, result); }
+    }
+    if (notice.state === 'uncertain') this.opts.onNotice?.('本次运行结果待确认，输入 /resolve 选择处理方式；已发生的操作不会自动重做。');
+    if (!result) return;
+    if (!current()) return;
+    let observed = this.observedContinuations.get(runId);
+    if (!observed) {
+      observed = { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: !!progress.localSettled };
+      rememberBounded(this.observedContinuations, runId, observed);
+    }
+    observed.terminalInputsReconciled = true;
+    observed.communication ||= fact.communication;
+    if (!observed.settled) {
+      const identity = { conversationId, runId };
+      const label = observed.communication ? '来信处理' : '任务续接';
+      await this.emitRecoveredYield({ type: 'text_delta', text: result.reason === 'error' ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: 'status', notice });
+      if (!current()) return;
+      observed.settled = true;
+      this.opts.onObservedTurnComplete?.(identity);
+    }
+  }
+
+  private async presentRecoveredInputs(conversationId: string, runId: string, progress: RecoveryProgress, current: () => boolean): Promise<void> {
+    while (current() && !progress.inputsDone) {
+      await this.opts.conversation.consumeInputPage(conversationId, runId, progress.inputCursor, async page => {
+        if (!current()) return;
+        if (page.reset) throw new RecoveryGenerationChanged();
+        if (page.input?.identity.source.kind === 'conversation') {
+          await this.opts.onObservedInputFragment?.({ ...page.input, conversationId, runId });
+          progress.communication = true;
+        }
+        // Commit within the consumer, before the surrounding RPC retires. A
+        // transport error after this point cannot cause duplicate append.
+        progress.inputCursor = page.cursor;
+        progress.inputsDone = !page.hasMore || !!page.input?.final;
+      });
+    }
+  }
+
+  private async emitRecoveredYield(event: AgentYield, source: ConversationOutputSource): Promise<void> {
+    if (this.opts.onRecoveryYield) await this.opts.onRecoveryYield(event, source);
+    else this.opts.onYield(event, source);
+  }
+
+  private async presentRecoveredFinal(frame: FinalFrame, progress: RecoveryProgress, current: () => boolean, historyCovered = false): Promise<void> {
+    while (current()) {
+      const done = await this.consumeHistory(frame.conversationId, { limit: 4, ...(progress.before ? { before: progress.before } : {}) }, async page => {
+        if (!current()) return true;
+        const match = page.runs.find(item => 'runId' in item.record && item.record.runId === frame.runId);
+        if (!match) {
+          const last = page.runs.at(-1);
+          progress.before = page.hasMore && last ? { shardId: last.shardId, runIndex: last.record.runIndex } : undefined;
+          if (!progress.before) throw Error('Committed history is not yet available');
+          return false;
+        }
+        const watch = this.durableRuns.get(frame.runId);
+        if (watch) {
+          const output = this.localOutput.get(watch.turnId);
+          if (output && !historyCovered) {
+            output.recovering = true;
+            const message = finalAssistantMessageOf(match.record.messages); output.text.align(message);
+            for (const text of output.text.remaining(message)) {
+              if (!current()) return true;
+              await this.emitRecoveredYield({ type: 'text_delta', text }, { conversationId: frame.conversationId, turnId: watch.turnId, runId: frame.runId, kind: 'history', final: frame });
+              output.text.append(text);
+            }
+          }
+          await this.opts.onRecoveryDrain?.();
+          if (!current()) return true;
+          if (match.record.postTurnControl) this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
+          this.finishTurn(watch.conversationId, watch.turnId, { reason: 'completed', message: finalAssistantMessageOf(match.record.messages), usage: match.record.usage ?? { inputTokens: 0, outputTokens: 0 } });
+          return true;
+        }
+        let observed = this.observedContinuations.get(frame.runId);
+        const communication = match.record.messages.some(message => message.inputIdentity?.source.kind === 'conversation');
+        if (observed?.settled || (!observed && !match.record.worksceneContinuation && !communication)) return true;
+        if (!observed) {
+          observed = { conversationId: frame.conversationId, communication, sequences: new Map(), text: new ObservedTextPrefix(), settled: false };
+          rememberBounded(this.observedContinuations, frame.runId, observed);
+        }
+        observed.recovering = true;
+        const message = finalAssistantMessageOf(match.record.messages);
+        observed.text.align(message);
+        const identity = { conversationId: frame.conversationId, runId: frame.runId };
+        for (const text of observed.text.remaining(message)) {
+          if (!current()) return true;
+          await this.emitRecoveredYield({ type: 'text_delta', text }, { ...identity, kind: 'history', final: frame });
+          observed.text.append(text);
+        }
+        await this.opts.onRecoveryDrain?.();
+        if (!current()) return true;
+        observed.settled = true; observed.recovering = false;
+        this.opts.onObservedTurnComplete?.(identity);
+        return true;
+      });
+      if (done) return;
+    }
+  }
+
   private notificationHistory<T>(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1], consume: (page: RunsPage) => T): Promise<T> {
     const key = JSON.stringify([conversationId, options?.limit, options?.before?.shardId, options?.before?.runIndex]);
     return new Promise<T>((resolve, reject) => {
@@ -1016,9 +1277,11 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (pending) { pending.push(reader); return; }
       const readers = [reader]; this.notificationHistoryBatches.set(key, readers);
       setImmediate(() => {
-        // Share the synchronous consumption window, not a resolved Promise
-        // retaining the whole page across each reader's next RPC or retry.
-        this.notificationHistoryBatches.delete(key);
+        // This batch's fact watermark closes when its query starts. A fact
+        // arriving later cannot be covered by that older authority snapshot,
+        // even while its transport/consumer still owns the response lease.
+        if (this.notificationHistoryBatches.get(key) === readers) this.notificationHistoryBatches.delete(key);
+        if (this.disposed) { for (const reader of readers) reader.reject(Error('Conversation controller disposed')); return; }
         void this.consumeHistory(conversationId, options, page => {
           for (const reader of readers) {
             try { reader.consume(page); } catch (error) { reader.reject(error); }
@@ -1062,6 +1325,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   /** Automatically admitted work has no local send waiter or legacy delta producer. */
   private consumeContinuationFrame(frame: StreamFrame): void {
+    if (this.opts.pagedRecovery && (this.recoveryResetRequested || this.recoveryDeleted)) return;
     const communication = frame.meta.turnOrigin?.messageIdentity?.source.kind === "conversation";
     if (frame.ref.execution !== "conversation") return;
     if (frame.ref.conversationId !== this.active.conversationId) return;
@@ -1092,7 +1356,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     }
     const sequenceKey = `${frame.assignmentId}:${frame.streamEpoch}`;
     const previousSeq = observed.sequences.get(sequenceKey) ?? 0;
-    if (observed.settled || frame.seq <= previousSeq) return;
+    if (observed.settled || observed.recovering || frame.seq <= previousSeq) return;
     // A reference, missing frame or replacement stream breaks the displayable prefix.
     // Keep only its contiguous prefix and let the committed history supply the rest.
     if (frame.seq !== previousSeq + 1 || (observed.sequences.size > 0 && !observed.sequences.has(sequenceKey))) observed.streamIncomplete = true;
@@ -1188,10 +1452,13 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (!watch) return false;
     let before: { shardId: string; runIndex: number } | undefined;
     while (this.durableRuns.get(runId) === watch) {
-      const next = await this.consumeHistory(watch.conversationId, {
+      const next = await this.notificationHistory(watch.conversationId, {
         limit: 200,
         ...(before ? { before } : {}),
       }, page => {
+        // Another consumer of this page can finish the same local waiter.
+        // Its original watch must still own the result at consumption time.
+        if (this.durableRuns.get(runId) !== watch) return { resolved: true, before: undefined };
         const match = page.runs.find(
           (item) => "runId" in item.record && item.record.runId === runId,
         );
@@ -1611,8 +1878,12 @@ export class ConversationController<Outcome = TurnOutcome> {
       return { kind: "renamed", name: payload.name };
     }
     if (payload.change === "cleared") {
+      this.recoveryVersion++; this.recoveryResetRequested = true; this.wakeReceipt?.(); this.wakeRecovery();
       return { kind: "cleared" };
     }
+    this.recoveryVersion++; this.recoveryDeleted = true; this.wakeReceipt?.();
+    const turnId = this.localTurnsByConversation.get(payload.conversationId);
+    if (turnId) this.finishTurn(payload.conversationId, turnId, { reason: 'error', error: { name: 'ConversationDeleted', message: '当前对话已删除。' }, usage: { inputTokens: 0, outputTokens: 0 } });
     return { kind: "deleted" };
   }
 
@@ -1622,7 +1893,9 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   dispose(): void {
     this.disposed = true;
+    this.localOutput.clear(); this.wakeReceipt?.();
     clearImmediate(this.lookupScheduled); this.lookupScheduled = undefined;
+    clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
     this.observedContinuations.clear();
     for (const unsub of this.unsubscribes) unsub();
     for (const turnId of this.pendingAbortByTurn.keys()) {
@@ -1683,8 +1956,10 @@ function advancedStatusCursors(
 function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.set(key, value);
   if (map.size <= 64) return;
-  const oldest = map.keys().next().value as K | undefined;
-  if (oldest !== undefined) map.delete(oldest);
+  for (const [oldest, item] of map) {
+    if (item && typeof item === 'object' && 'recovering' in item && item.recovering) continue;
+    map.delete(oldest); break;
+  }
 }
 
 function isRpcNotFound(error: unknown): error is RpcClientError {

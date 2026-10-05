@@ -17,11 +17,21 @@ export class ConversationKernelExecution {
     // Cancellation may arrive while the assignment is still being prepared.
     signal.throwIfAborted();
     this.#running = true;
+    let kernel: ReturnType<SessionRuntime['run']> | undefined;
     try {
-      return yield* this.runtime.run(messages, { ...options, abortSignal: signal });
+      kernel = this.runtime.run(messages, { ...options, abortSignal: signal });
+      for (;;) {
+        signal.throwIfAborted();
+        const item = await kernel.next();
+        // A pending model/runtime step can return after cancellation. Join its
+        // real cleanup, but never publish that late value to the surface.
+        signal.throwIfAborted();
+        if (item.done) return item.value;
+        yield item.value;
+      }
     } finally {
-      // Delegation joins the runtime's return/finally before declaring quiescence.
-      this.#running = false;
+      try { await kernel?.return(undefined as never); }
+      finally { this.#running = false; }
     }
   }
 

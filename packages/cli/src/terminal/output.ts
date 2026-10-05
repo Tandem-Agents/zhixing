@@ -68,6 +68,9 @@ export class TerminalOutputProjection {
   end(conversationId: string, turnId?: string, runId?: string): void {
     this.#streams.delete(`${conversationId}:${turnId ?? runId ?? 'status'}`);
   }
+  async reset(current: () => boolean): Promise<void> {
+    await this.drain(); if (current()) this.#streams.clear();
+  }
   async close(): Promise<void> {
     this.#closed = true; clearTimeout(this.#timer); this.#queue.length = 0; this.#bytes = 0;
     this.#wakeDrain?.();

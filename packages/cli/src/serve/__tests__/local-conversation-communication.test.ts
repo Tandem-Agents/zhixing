@@ -11,10 +11,54 @@ import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js
 import { createConversationCommunicationAssemblyHandle } from "../conversation-tools.js";
 import { ConversationController } from "../../runtime/conversation-controller.js";
 import { createObservedTurnPresenter } from "../../runtime/observed-turn-presenter.js";
+import { projectHistorySegments } from '../../terminal/history-segments.js';
 
 type ConversationMessageReceipt = Awaited<ReturnType<ConversationCommunicationApplication["send"]>>;
 
 describe("local automatic communication notification chain", () => {
+  it('keeps the consumed history prefix once while recovering old failed inputs and commits arriving after that history page', async () => {
+    const fixture = await createLocalOwnerAssemblyFixture({ profile: 'executor-only', run: async function* (messages) {
+      const text = messages.at(-1)!.content.filter(block => block.type === 'text').map(block => block.text).join('');
+      if (text.includes('failed-source')) throw Error('synthetic failed input');
+      const assistant = { role: 'assistant' as const, content: [{ type: 'text' as const, text: text.includes('new-source') ? 'new-answer' : 'old-answer' }] };
+      return { agentResult: { reason: 'completed', message: assistant, usage: { inputTokens: 1, outputTokens: 1 } }, runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant] }, newMessages: [assistant], durationMs: 1 };
+    } });
+    let controller: ConversationController | undefined;
+    const handlers = new Map<string, (value: never) => void>();
+    const connection = { id: 93, closed: false, authenticated: true, loopback: true, clientInfo: { id: 'test', version: '1' }, surfacePrincipal: 'rpc:test', surfaceGeneration: 1,
+      notify: (method: string, value: unknown) => handlers.get(method)?.(value as never), onClose: () => () => {} };
+    try {
+      await fixture.assembly.start(); const conversationId = await fixture.port.createConversation();
+      const binding = createLocalConversationCommunicationBinding(fixture.port);
+      const send = (operationId: string, input: string) => binding.invoke('origin', { action: 'send', conversationId, operationId, input }) as Promise<ConversationMessageReceipt>;
+      const failed = await send('failed', 'failed-source');
+      await vi.waitFor(async () => expect((await fixture.port.statusHistory([{ conversationId, runId: failed.runId, afterStatusRevision: 0 }])).notices.some(notice => notice.state === 'failed')).toBe(true), { timeout: 20000 });
+      await send('old', 'old-source');
+      await vi.waitFor(async () => expect(await fixture.port.finalHistory(conversationId, 0)).toHaveLength(1), { timeout: 20000 });
+      const router = new LocalConversationRpcRouter({ deviceId: fixture.authority.deviceId, owner: fixture.port, remoteFor: () => { throw Error('not remote'); } });
+      const registry = buildBuiltinRegistry();
+      const request = (method: string, params: unknown) => registry.dispatch(method, params, { connection, server: { conversationRpc: router, serverInfoRuntime: { conversationStatus: fixture.port.statusHistory, conversationRecovery: fixture.port.recoveryPage } } } as never);
+      const conversation = new RpcConversationFacade({ getClient: async () => ({ request }), onNotification: (method: string, handler: (value: never) => void) => { handlers.set(method, handler); return () => { handlers.delete(method); }; } } as never);
+      const shown: string[] = [];
+      const historyIds = await conversation.consumeHistory(conversationId, { limit: 4 }, async page => {
+        for (const part of projectHistorySegments(page.runs)) shown.push(part.text);
+        return page.runs.flatMap(item => 'runId' in item.record ? [item.record.runId as string] : []);
+      });
+      await send('new', 'new-source');
+      await vi.waitFor(async () => expect(await fixture.port.finalHistory(conversationId, 0)).toHaveLength(2), { timeout: 20000 });
+      controller = new ConversationController({ conversation, workscene: {} as never, pagedRecovery: true, historyRunIds: () => historyIds,
+        onYield: event => { if (event.type === 'text_delta') shown.push(event.text); },
+        onRecoveryYield: async event => { if (event.type === 'text_delta') shown.push(event.text); },
+        onObservedInputFragment: async input => { shown.push(input.text); },
+      }, { conversationId, name: 'test', mode: { kind: 'main' } });
+      await controller.start();
+      await vi.waitFor(() => expect(shown.join('')).toContain('new-answer'), { timeout: 20000 });
+      for (const text of ['old-source', 'old-answer', 'failed-source', 'new-source', 'new-answer']) expect(shown.join('').split(text).length - 1).toBe(1);
+      expect(shown.join('')).toContain('来信处理未完成');
+      await controller.reattachActiveObserver();
+      expect(fixture.runtime.executions()).toBe(3);
+    } finally { controller?.dispose(); await fixture.assembly.close(); }
+  }, 60000);
   it.each(["completed", "failed"] as const)("replays offline %s through the real facade and owner routes exactly once", async ending => {
     const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only", run: async function* (messages) {
       if (ending === "failed") throw new Error("离线期间失败");

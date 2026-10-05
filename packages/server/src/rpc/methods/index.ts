@@ -13,7 +13,7 @@ import { buildLogMethods } from "./logs.js";
 import { buildAuthMethod } from "./auth.js";
 import { buildHealthMethod } from "./health.js";
 import { buildSessionStatusHistoryMethod } from "./conversation-status.js";
-export { parseConversationStatusRequest } from "./conversation-status.js";
+export { parseConversationStatusRequest, parseConversationRecoveryRequest } from "./conversation-status.js";
 import {
   buildSessionSendMethod,
   buildSessionAdvancementConfirmMethod,

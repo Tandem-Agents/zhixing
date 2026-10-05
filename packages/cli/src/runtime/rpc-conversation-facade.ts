@@ -59,6 +59,8 @@ import {
   type RpcEncodedJsonSource,
 } from "@zhixing/server/client";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
+import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
+import { boundedControlProjection } from './control-projection.js';
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface SessionHistoryOptions {
@@ -494,13 +496,30 @@ export class RpcConversationFacade {
   async subscribe(
     conversationId: string,
     afterCommitRevision = 0,
+    replayFinals?: boolean,
   ): Promise<boolean> {
     const client = await this.link.getClient();
     const result = await client.request<SessionSubscribeResult>(
       "session.subscribe",
-      { conversationId, afterCommitRevision },
+      { conversationId, afterCommitRevision, ...(replayFinals === undefined ? {} : { replayFinals }) },
     );
     return result.subscribed;
+  }
+
+  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[]): Promise<ConversationControlPage> {
+    const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}) };
+    const consume = (page: ConversationControlPage): ConversationControlPage => boundedControlProjection({ ...page,
+      facts: page.facts.map(fact => fact.kind === 'status' && 'reason' in fact.notice
+        ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact),
+    }, 512 * 1024);
+    return client.consume ? client.consume('session.statusHistory', params, consume)
+      : consume(await client.request<ConversationControlPage>('session.statusHistory', params));
+  }
+
+  async consumeInputPage<T>(conversationId: string, runId: string, cursor: ConversationInputCursor | undefined, consume: (page: ConversationInputPage) => Promise<T>): Promise<T> {
+    const client = await this.link.getClient(), params = { mode: 'input-page', conversationId, runId, cursor };
+    return client.consume ? client.consume('session.statusHistory', params, consume)
+      : consume(await client.request<ConversationInputPage>('session.statusHistory', params));
   }
 
   async unsubscribe(conversationId: string): Promise<void> {

@@ -171,6 +171,7 @@ export interface LocalConversationOwnerPort {
   discardDeferredIntent(intentId: string): Promise<void>;
   readonly sessionState: LocalConversationSessionReadPort;
   readonly statusHistory: ConversationProtocolRuntime["statusHistory"];
+  readonly recoveryPage: ConversationProtocolRuntime['recoveryPage'];
   readonly finalHistory: ConversationProtocolRuntime["finalHistory"];
   readonly pendingInteractions: DurableConversationInteractionObserver["pendingInteractions"];
   readonly rubricCatalog: Readonly<
@@ -767,6 +768,10 @@ export class LocalConversationOwnerAssembly {
           await this.#assertConversationCurrent(request.conversationId);
         }
         return this.#protocol.statusHistory(requests);
+      },
+      recoveryPage: async request => {
+        await this.#assertConversationCurrent(request.conversationId);
+        return this.#protocol.recoveryPage(request);
       },
       finalHistory: async (conversationId, afterCommitRevision) => {
         await this.#assertConversationCurrent(conversationId);

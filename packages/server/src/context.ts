@@ -216,6 +216,7 @@ export interface ServerInfoRuntimeBinding {
       readonly afterStatusRevision: number;
     }[];
   }>;
+  readonly conversationRecovery?: (request: import('@zhixing/core/contracts').ConversationRecoveryRequest) => Promise<import('@zhixing/core/contracts').ConversationRecoveryPage>;
   readonly jobStatus?: (
     after: readonly {
       readonly taskId: string;

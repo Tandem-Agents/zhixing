@@ -1,0 +1,986 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { createRpcClient } from '@zhixing/server/client';
+import { createPlatformSecretStore } from '@zhixing/secrets';
+import { createTerminalCredentialRunner } from './credential-command.js';
+import { isAbsolute } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { TerminalChannel } from '@zhixing/terminal-ui/channel';
+import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
+import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance } from '@zhixing/terminal-ui/protocol';
+import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { beginEntryLogging } from '../logging/bootstrap.js';
+import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
+import { createTerminalLogWorker } from '../logging/terminal-worker.js';
+import { terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
+import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError } from '../runtime/core-host-connection.js';
+import { connectReplHost } from '../runtime/repl-host-startup.js';
+import { checkStartupConfiguration } from '../runtime/startup-application.js';
+import { editRuntimeConfiguration, prepareMcpConfiguration, reloadCoreHostAfterConfig, waitForReloadStatus } from '../runtime/configuration-application.js';
+import type { HostReloadOptions } from '../runtime/configuration-application.js';
+import type { NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
+import type { ConfigEditorRuntime, SectionId } from '../config-editor/types.js';
+import { TerminalConfigurationEditor } from './configuration-editor.js';
+import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
+import { RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
+import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
+import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
+import { ReplLocalView } from '../runtime/repl-local-view.js';
+import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
+import { prepareCurrentManagedServiceConfigTurnover } from '../serve/managed-service-runtime.js';
+import type { AgentYield } from '@zhixing/core/loop';
+import type { ConversationOutputSource } from '../runtime/conversation-output.js';
+import { TerminalAssetClient } from './asset-client.js';
+import { TerminalDisplayStore } from './display-store.js';
+import { projectHistorySegmentsReverse, textFragments } from './history-segments.js';
+import { TerminalInputStore } from './input-store.js';
+import { TerminalManagedFiles } from './managed-files.js';
+import { TerminalInputHistoryReader } from './input-history.js';
+import { TerminalPendingSendStore } from './pending-send-store.js';
+import { prepareSessionSendSnapshot } from './prepare-session-send.js';
+import type { SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-facade.js';
+import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-material-registry.js';
+import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
+import { createUserSubmission } from '../runtime/user-submission.js';
+import { createReadOnlyConversationStorage } from '../serve/conversation-storage-infrastructure.js';
+import type { ConversationHistoryCursor } from '@zhixing/core/conversation/application';
+import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
+import { chooseTerminalSelection, type TerminalSelectionResponse } from './selection.js';
+import { TerminalOutputProjection } from './output.js';
+import { RpcConfirmationBroker } from '../runtime/rpc-confirmation-broker.js';
+import { projectTerminalConfirmation, resolveTerminalConfirmation } from './confirmation.js';
+import { TerminalCandidatesOwner } from './candidates.js';
+import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
+import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
+import { boundedControlProjection } from '../runtime/control-projection.js';
+
+type View = Omit<TerminalView, 'generation'>;
+class EmptyTerminalSubmission extends Error {}
+
+/** This private role is only admitted by S. It owns the single application
+ * connection and configuration transaction; it never opens a terminal reader. */
+export async function runTerminalApplication(): Promise<void> {
+  const instance = process.env.ZHIXING_TERMINAL_INSTANCE;
+  const home = process.env.ZHIXING_TERMINAL_HOME;
+  const directory = process.env.ZHIXING_TERMINAL_DIRECTORY;
+  const directoryIdentity = process.env.ZHIXING_TERMINAL_DIRECTORY_ID;
+  const endpoint = consumeTerminalParentEndpoint();
+  const identityPattern = process.platform === 'win32' ? /^[a-f0-9]+:[a-f0-9]{16}$/u : /^[0-9]+:[0-9]+$/u;
+  if (endpoint === undefined || !instance || !/^[a-f0-9-]{36}$/u.test(instance) || !home || !isAbsolute(home) || !directory || !isAbsolute(directory) || !directoryIdentity || !identityPattern.test(directoryIdentity)) throw Error('terminal-application-admission');
+  const transport = new TerminalParentTransport(endpoint);
+  // Host self-execution inherits environment: never forward a surface role.
+  for (const key of ['ZHIXING_TERMINAL_ROLE', 'ZHIXING_TERMINAL_INSTANCE', 'ZHIXING_TERMINAL_HOME', 'ZHIXING_TERMINAL_DIRECTORY', 'ZHIXING_TERMINAL_DIRECTORY_ID', 'ZHIXING_TERMINAL_PIPE']) delete process.env[key];
+  beginEntryLogging('repl');
+  const application = new TerminalApplication(instance, home, directory, transport, directoryIdentity);
+  await application.run();
+}
+
+class TerminalApplication {
+  readonly #files: TerminalManagedFiles;
+  readonly #channel: TerminalChannel;
+  readonly #hosts: TerminalHostLauncher;
+  readonly #logging: ReturnType<typeof beginRuntimeLogging>;
+  readonly #secretStore: ReturnType<typeof createPlatformSecretStore>;
+  readonly #connection: CoreHostConnection;
+  readonly #conversation: RpcConversationFacade;
+  readonly #workscene: RpcWorksceneFacade;
+  readonly #management: RpcManagementFacade;
+  readonly #localView: ReplLocalView;
+  readonly #assets: TerminalAssetClient;
+  readonly #display: TerminalDisplayStore;
+  readonly #inputs: TerminalInputStore;
+  readonly #pendingSend: TerminalPendingSendStore;
+  readonly #inputHistoryReader: TerminalInputHistoryReader;
+  readonly #outputProjection: TerminalOutputProjection;
+  #displayUnavailable = false;
+  readonly #confirmations: RpcConfirmationBroker;
+  readonly #pendingConfirmations = new Set<string>();
+  #confirmation?: { id: string; invalid: boolean };
+  #presentingConfirmation = false;
+  #selectionDepth = 0;
+  #confirmationBlocked = false;
+  readonly #materials = new InputMaterialRegistry(4 * 1024 * 1024);
+  readonly #candidates: TerminalCandidatesOwner;
+  readonly #inputHistory: string[] = [];
+  #pendingRubric?: AwaitingRubricConfirmationTurn;
+  #deferredRubric?: Omit<AwaitingRubricConfirmationTurn, 'rubricDraft'>;
+  #pendingRubricNotice?: string;
+  readonly #configPath: string;
+  readonly #abort = new AbortController();
+  readonly #requests = new Set<number>();
+  readonly #completion: Promise<void>;
+  readonly #state = { activeTurnPromise: null as Promise<unknown> | null };
+  #resolve!: () => void;
+  #controller?: ConversationController<string>;
+  #editor?: TerminalConfigurationEditor;
+  #selection?: { id: string; allowed: ReadonlySet<string>; field: boolean; resolve(selected?: TerminalSelectionResponse): void };
+  #history?: { conversationId: string; before?: ConversationHistoryCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[] };
+  #displayStart?: number;
+  #displayRevision = 0;
+  #closing?: Promise<void>;
+  #generation = 0;
+  #hello = false;
+  #started = false;
+  #operation?: Promise<void>;
+  #lastRequest = 0;
+  #mainView: View = { kind: 'conversation', title: '知行', message: '', connected: false };
+  #publishing?: Promise<void>;
+  #nextView?: View;
+
+  #closeDeadline = 0;
+  constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string) {
+    this.#completion = new Promise(resolve => { this.#resolve = resolve; });
+    this.#secretStore = createPlatformSecretStore({ homeDir: home, commandRunner: createTerminalCredentialRunner(this.#abort.signal) });
+    this.#logging = beginRuntimeLogging(home, 'repl', () => { /* finite UI notice is published by the application */ }, () => {
+      const built = new URL('./logging-store-worker.js', import.meta.url);
+      const compiled = existsSync(built);
+      return createTerminalLogWorker('log-store', [...(compiled ? [] : ['--import=tsx/esm']),
+        fileURLToPath(compiled ? built : new URL('../logging/store-worker.ts', import.meta.url)), home, String(process.pid)]);
+    }, undefined, { activityDriven: true, requireCompleteClose: true });
+    this.#configPath = getGlobalConfigPath(process.env, home);
+    this.#channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done),
+      message => this.#receive(message), reason => void this.#close(70, reason));
+    this.#hosts = new TerminalHostLauncher(this.#channel);
+    this.#connection = new CoreHostConnection({ ...defaultCoreHostConnectionDeps(home, this.#logging.records, this.#hosts.start),
+      createClient: url => createRpcClient({ url, maximumPendingRequests: 12, maximumQueuedRequestBytes: 1024 * 1024 }),
+      createSurfaceClient: async () => {
+        const { createCurrentAnchorSurfaceRpcClient } = await import('../runtime/surface-core-host-link.js');
+        return createCurrentAnchorSurfaceRpcClient({ zhixingHome: home, secretStore: this.#secretStore });
+      },
+    });
+    this.#conversation = new RpcConversationFacade(this.#connection);
+    this.#conversation.onChanged(payload => {
+      const reaction = this.#controller?.applySessionChanged(payload);
+      if (!reaction || reaction.kind === 'ignored') return;
+      if (reaction.kind === 'renamed') this.#mainView = { ...this.#mainView, title: reaction.name };
+      if (reaction.kind === 'cleared') this.#mainView = { ...this.#mainView, message: '对话内容已清空。' };
+      if (reaction.kind === 'deleted') {
+        this.#controller?.dispose(); this.#controller = undefined; this.#history = undefined;
+        this.#mainView = { kind: 'unavailable', title: '知行 · 对话已删除', message: '当前对话已删除，可以打开可用对话继续。', busy: false, connected: false,
+          choices: [{ id: 'retry', label: '打开可用对话' }, { id: 'exit', label: '退出终端' }] };
+      }
+      void (async () => {
+        if (reaction.kind === 'deleted') { await this.#outputProjection.drain(); await this.#display.reset(); this.#displayStart = undefined; await this.#displayPage(); }
+        await this.#publish(this.#mainView);
+      })().catch(() => this.#close(70, 'terminal-session-change-undelivered'));
+    });
+    this.#workscene = new RpcWorksceneFacade(this.#connection);
+    this.#management = new RpcManagementFacade(this.#connection);
+    this.#localView = new ReplLocalView({ management: this.#management,
+      configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath: this.#configPath })) });
+    this.#candidates = new TerminalCandidatesOwner(() => ({ sessionBusy: !!this.#state.activeTurnPromise, workspaceId: null,
+      cwd: this.#localView.workspaceRoot ?? process.cwd(), target: 'cli', features: { chrome: true }, now: Date.now() }));
+    this.#assets = new TerminalAssetClient(this.#channel, this.#abort.signal);
+    const createFilesystem = createTerminalOwnedProcessFactory('filesystem');
+    const filesystemSession = CheckpointDirectoryHandle.createSession(5000, (executable, args) =>
+      createFilesystem(executable, args ?? [], { signal: this.#abort.signal, deadline: Date.now() + 5000 }).child);
+    this.#files = new TerminalManagedFiles(directory, directoryIdentity, filesystemSession,
+      () => void this.#close(74, 'terminal-filesystem-unconfirmed'));
+    this.#display = new TerminalDisplayStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
+    this.#inputs = new TerminalInputStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
+    this.#pendingSend = new TerminalPendingSendStore(this.#files, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal);
+    this.#inputHistoryReader = new TerminalInputHistoryReader(this.#inputs);
+    this.#outputProjection = new TerminalOutputProjection(segment => this.#display.append(segment), () => this.#displayPage(), () => this.#displayGap());
+    this.#confirmations = new RpcConfirmationBroker({ link: this.#connection, onResolveError: () => {
+      this.#mainView = { ...this.#mainView, message: '确认应答未获得成功回执；正在重新核对请求状态，不会自动允许。' };
+      void this.#publish(this.#mainView).catch(() => {});
+    } });
+    this.#confirmations.onRequest(request => {
+      if (request.id.length > 512 || this.#pendingConfirmations.size >= 128) { void this.#close(70, 'terminal-confirmation-capacity'); return; }
+      this.#pendingConfirmations.add(request.id); this.#drainConfirmations();
+    });
+    this.#confirmations.onInvalidated(id => {
+      this.#pendingConfirmations.delete(id);
+      if (this.#confirmation?.id !== id) return;
+      this.#confirmation.invalid = true;
+      const selection = this.#selection; this.#selection = undefined;
+      if (selection) {
+        selection.resolve(); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {});
+      }
+    });
+    this.#connection.onDisconnect(() => {
+      this.#selection?.resolve(); this.#selection = undefined;
+      this.#mainView = { ...this.#mainView, connected: false, message: '连接已断开。可查看已有内容、编辑本机配置或显式重试。',
+        choices: [{ id: 'retry', label: '重试连接' }, { id: 'config', label: '本机配置' }, { id: 'exit', label: '退出终端' }] };
+      if (!this.#editor && !this.#operation) void this.#publish(this.#mainView).catch(() => this.#close(70, 'view-undelivered'));
+    });
+  }
+
+  async run(): Promise<void> {
+    this.transport.on('message', this.#message);
+    this.transport.once('disconnect', this.#disconnected);
+    process.on('SIGINT', this.#interrupted);
+    process.on('SIGTERM', this.#interrupted);
+    process.on('uncaughtException', this.#uncaught);
+    process.on('unhandledRejection', this.#uncaught);
+    // S may finish spawning while this module's dependency graph is loading.
+    // Announce only after the actual IPC consumer exists; no startup packet is lost.
+    await this.#channel.send({ type: 'hello', role: 'application' });
+    await this.#completion;
+  }
+  readonly #message = (value: unknown): void => { this.#channel.accept(value); };
+  readonly #disconnected = (): void => { void this.#close(70, 'supervisor-disconnected', false); };
+  readonly #interrupted = (): void => { void this.#close(0, 'application-interrupted'); };
+  readonly #uncaught = (error: unknown): void => {
+    // Seal work synchronously before recorder or resource cleanup.
+    this.#abort.abort(); void this.#close(71, 'application-failed');
+    recordRuntimeFailure(this.#logging.records, error, 'terminal-application-failed');
+  };
+
+  #receive(message: TerminalMessage): void {
+    if (message.type === 'close') {
+      if (!Number.isSafeInteger(message.deadline)) throw Error('terminal-close-deadline');
+      this.#closeDeadline = this.#closeDeadline ? Math.min(this.#closeDeadline, message.deadline) : message.deadline;
+      void this.#close(0, 'supervisor-close', false); return;
+    }
+    if (this.#abort.signal.aborted) return;
+    if (message.type === 'assets-result') { this.#assets.receive(message); return; }
+    if (message.type === 'host-state') { this.#hosts.accept(message); return; }
+    if (message.type === 'hello') {
+      if (this.#hello || message.role !== 'application') throw Error('terminal-application-hello');
+      this.#hello = true; return;
+    }
+    if (!this.#hello || message.type !== 'request' || !Number.isSafeInteger(message.id) || message.id <= this.#lastRequest ||
+      !message.action || typeof message.action.kind !== 'string') throw Error('terminal-application-request');
+    this.#lastRequest = message.id;
+    if (this.#requests.size >= TERMINAL_LIMITS.pendingRequests) throw Error('terminal-application-request-capacity');
+    this.#requests.add(message.id);
+    // Receipt acknowledges this finite operation, not its future business result.
+    this.#reply(message.id, ['input-history-next', 'input-window'].includes(message.action.kind) ? 'body' : 'control', this.#action(message.action));
+  }
+
+  #reply(id: number, lane: 'body' | 'control', result: Promise<unknown>): void {
+    // A reply blocked on transport retains only its ID/result, not the parsed
+    // request and all its already-consumed input-reference arrays.
+    void result.then(
+      value => this.#channel.send({ type: 'reply', id, value }, lane),
+      () => this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' }),
+    ).catch(() => this.#close(70, 'application-reply-undelivered')).finally(() => this.#requests.delete(id));
+  }
+
+  async #action(action: TerminalAction): Promise<unknown> {
+    switch (action.kind) {
+      case 'startup':
+        if (this.#started) throw Error('terminal-startup-already-requested');
+        this.#started = true; this.#background(() => this.#startup()); return { accepted: true };
+      case 'retry-connection': this.#background(() => this.#startup()); return { accepted: true };
+      case 'exit': void this.#close(0, 'user-exit'); return { accepted: true };
+      case 'configuration-action': case 'secret-value':
+        if (!this.#editor) throw Error('terminal-editor-not-open');
+        await this.#editor.act(action); return { accepted: true };
+      case 'configuration-open':
+        this.#background(() => this.#configuration(action.section === 'mcp' ? 'mcp' : 'config')); return { accepted: true };
+      case 'selection': {
+        const selection = this.#selection;
+        if (!selection || selection.id !== action.requestId) throw Error('terminal-selection-expired');
+        if (!action.cancelled && (!action.itemId || !selection.allowed.has(action.itemId))) throw Error('terminal-selection-invalid');
+        if (action.input !== undefined && (!selection.field || typeof action.input !== 'string' || Buffer.byteLength(action.input) > 8192)) throw Error('terminal-selection-input');
+        this.#selection = undefined; selection.resolve(action.cancelled ? undefined : { itemId: action.itemId!, input: action.input }); return { accepted: true };
+      }
+      case 'confirmation': {
+        const selection = this.#selection;
+        if (!this.#confirmation || this.#confirmation.invalid || !selection || selection.id !== action.requestId) throw Error('terminal-confirmation-expired');
+        if (!['reject', 'cancelled'].includes(action.action) && !selection.allowed.has(action.action)) throw Error('terminal-confirmation-option');
+        if (action.note !== undefined && (!selection.field || typeof action.note !== 'string' || Buffer.byteLength(action.note) > 8192)) throw Error('terminal-confirmation-input');
+        this.#selection = undefined;
+        selection.resolve(action.action === 'reject' ? undefined : { itemId: action.action, input: action.note }); return { accepted: true };
+      }
+      case 'display-page':
+        if (action.start !== undefined && !Number.isSafeInteger(action.start)) throw Error('terminal-display-cursor');
+        this.#displayStart = action.follow ? undefined : action.start;
+        await this.#displayPage(); return { accepted: true };
+      case 'history-previous':
+        this.#displayStart = this.#display.first - 4;
+        this.#background(() => this.#historyPage()); return { accepted: true };
+      case 'history-open': this.#background(() => this.#readOnly()); return { accepted: true };
+      case 'rubric-resume': this.#background(() => this.#resolveRubric()); return { accepted: true };
+      case 'confirmation-retry':
+        this.#confirmationBlocked = false; await this.#confirmations.refresh(); this.#drainConfirmations(); return { accepted: true };
+      case 'input-candidates': return this.#candidates.query(action.revision, action.text, action.cursor);
+      case 'candidate-accept': return this.#acceptCandidate(action.revision, action.id);
+      case 'input-begin': this.#inputs.begin(action.inputId, action.purpose, action.bytes); return { accepted: true };
+      case 'input-part': await this.#inputs.part(action.inputId, action.index, action.text, action.final); return { accepted: true };
+      case 'input-release': await this.#inputs.release(action.inputId); return { accepted: true };
+      case 'input-window': return this.#inputs.window(action.inputId, action.position);
+      case 'input-splice': {
+        return this.#inputs.editWindow(action.inputId, action.start, action.end, action.replacementId, action.replacePastes);
+      }
+      case 'input-references': {
+        return this.#inputs.reconcileReferences(action.version, action.ids, action.completed, action.cached).then(result => {
+          this.#cleanupMaterials(); return result;
+        });
+      }
+      case 'input-history': {
+        if (!Number.isSafeInteger(action.offset) || action.offset < 0 || action.offset >= this.#inputHistory.length) return { end: true };
+        const id = this.#inputHistory[this.#inputHistory.length - 1 - action.offset]!;
+        return this.#inputHistoryReader.open(id);
+      }
+      case 'input-history-next': return this.#inputHistoryReader.next(action.ticket);
+      case 'input-history-end': await this.#inputHistoryReader.close(action.ticket); return { accepted: true };
+      case 'paste-finish': return this.#finishPaste(action.inputId);
+      case 'input-submit':
+        if (!Number.isSafeInteger(action.version) || action.version < 0) throw Error('terminal-input-version');
+        if (!this.#controller || this.#connection.getStatus().kind !== 'connected' || this.#history?.offline || this.#operation) {
+          await this.#channel.send({ type: 'submission', inputId: action.inputId, version: action.version, accepted: false, message: '当前无法接纳输入，草稿已保留。' }); return { accepted: false };
+        }
+        this.#background(() => this.#submit(action.inputId, action.version)); return { accepted: true };
+      case 'abort': await this.#controller?.abort(); return { accepted: true };
+      case 'interrupt':
+        if (this.#state.activeTurnPromise) { await this.#controller?.abort(); return { accepted: true }; }
+        if (this.#controller && await this.#controller.abortBackgroundTask()) {
+          this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
+        } else void this.#close(0, 'user-interrupt');
+        return { accepted: true };
+      case 'status': this.#background(() => this.#status()); return { accepted: true };
+      case 'command': return this.#command(action.name, action.argument);
+      default: throw Error('terminal-action-unavailable');
+    }
+  }
+
+  #background(operation: () => Promise<void>): void {
+    if (this.#operation || this.#presentingConfirmation || this.#abort.signal.aborted) throw Error('terminal-operation-in-progress');
+    const work = operation().catch(async error => {
+      if (this.#abort.signal.aborted) return;
+      recordRuntimeFailure(this.#logging.records, error, 'terminal-operation-failed');
+      this.#mainView = { ...this.#mainView, busy: false, message: error instanceof ConfigurationEditPendingError
+        ? error.message : '操作未完成；原有草稿保留。请重试或查看运行记录。',
+        ...(error instanceof ConfigurationEditPendingError ? { choices: [{ id: 'config', label: '重新打开配置并核对状态' }, { id: 'exit', label: '退出终端' }] } : {}) };
+      if (!this.#editor) await this.#publish(this.#mainView);
+    }).finally(() => { if (this.#operation === work) this.#operation = undefined; });
+    this.#operation = work;
+    void work.catch(() => this.#close(70, 'application-operation-undelivered'));
+  }
+
+  async #startup(): Promise<void> {
+    await this.#publish({ kind: 'conversation', title: '知行', message: '正在连接本机服务…', busy: true, connected: false });
+    const result = await connectReplHost({ connection: this.#connection, starting: () => {}, settled: () => {},
+      checkConfiguration: () => checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
+        secretStore: this.#secretStore,
+        records: this.#logging.records,
+        edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
+          writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging']),
+      }),
+    });
+    this.#abort.signal.throwIfAborted();
+    if (result.kind === 'configuration') {
+      if (result.result.kind === 'cancelled') { void this.#close(0, 'startup-cancelled'); return; }
+      const message = result.result.kind === 'secret-store-error'
+        ? '本机凭据仓库当前不可用。请先恢复系统凭据访问，再重试。'
+        : '本机配置未就绪。请修复配置后重试，或退出查看运行记录。';
+      await this.#unavailable(message); return;
+    }
+    if (result.kind === 'unavailable') {
+      await this.#unavailable(result.error instanceof CoreHostUnavailableError ? result.error.publicReason : '本机服务连接失败。'); return;
+    }
+    if (this.#controller) {
+      const reloadHistory = !!this.#history?.offline;
+      if (reloadHistory) {
+        this.#mainView = { kind: 'conversation', title: this.#controller.current.name, connected: true };
+      }
+      await this.#controller.reattachActiveObserver({ reloadHistory }); await this.#localView.refresh();
+    } else {
+      const initial = await selectInitialConversation({
+        list: () => this.#conversation.list(), newConversation: () => this.#conversation.newConversation(),
+        pendingContinuationConfirmation: () => this.#conversation.pendingContinuationConfirmation(),
+        confirmContinuation: () => this.#conversation.confirmContinuation(),
+        resumeIfExists: id => this.#conversation.consumeResumeIfExists(id, result => {
+          const snapshot = result.advancement, draft = snapshot?.pendingRubricDraft;
+          if (snapshot?.status === 'awaiting-rubric-confirmation' && draft) {
+            this.#deferredRubric = boundedControlProjection({ kind: 'awaiting-rubric-confirmation', conversationId: id,
+              turnId: draft.originalTurnId, advancementSessionId: snapshot.advancementSessionId, rubricDraftId: draft.draftId }, 8192);
+          }
+          return boundedControlProjection({ ...result, advancement: undefined }, 256 * 1024);
+        }),
+      }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) });
+      this.#abort.signal.throwIfAborted();
+      this.#controller = new ConversationController({ conversation: this.#conversation, workscene: this.#workscene,
+        onYield: (event, source) => this.#output(event, source),
+        pagedRecovery: true,
+        historyRunIds: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.recoveryRunIds ?? [] : [],
+        onRecoveryDrain: () => this.#outputProjection.drain(),
+        onRecoveryYield: async (event, source) => {
+          this.#abort.signal.throwIfAborted();
+          if (this.#history?.offline) throw Error('terminal-recovery-offline');
+          this.#output(event, source);
+          await this.#outputProjection.drain();
+        },
+        onObservedInputFragment: async input => {
+          this.#abort.signal.throwIfAborted();
+          if (this.#history?.offline) throw Error('terminal-recovery-offline');
+          if (this.#displayUnavailable || this.#display.paused) { await this.#displayGap(); return; }
+          const identity = createHash('sha256').update(JSON.stringify([input.conversationId, input.runId, input.identity])).digest('hex');
+          try { await this.#display.append({ blockId: `received:${identity}`, role: 'user', text: input.text, contentOffset: input.contentOffset, final: input.final }); }
+          catch { await this.#displayGap(); return; }
+          // Display acknowledgement is the completed store append. Refresh
+          // failure cannot make this source fragment appear unconsumed.
+          void this.#displayPage().catch(() => this.#close(70, 'terminal-recovery-display-undelivered'));
+        },
+        onRecoveryReset: async (conversationId, current) => {
+          await this.#outputProjection.reset(current);
+          if (!current()) return;
+          this.#history = undefined;
+          await this.#display.reset(); this.#displayStart = undefined;
+          if (!current()) return;
+          this.#history = { conversationId, hasMore: true, offline: false };
+          await this.#historyPage();
+        },
+        projectOutcome: outcome => {
+          const error = outcome.result.reason === 'error' ? outcome.result.error.message : undefined;
+          return error === undefined ? outcome.result.reason === 'aborted' ? '本次运行已中止。' : '本次运行已结束。'
+            : `任务未完成：${Buffer.from(error.slice(0, 2048)).toString('utf8')}${error.length > 2048 ? '…（完整错误见运行记录）' : ''}`;
+        },
+        onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
+        onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
+      }, initial.active);
+      await this.#localView.refresh();
+      this.#mainView = { kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true };
+      this.#history = { conversationId: initial.active.conversationId, hasMore: true, offline: false };
+      await this.#historyPage();
+      await this.#controller.start();
+      if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
+    }
+    this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined };
+    await this.#publish(this.#mainView);
+    if (this.#pendingRubric || this.#deferredRubric) await this.#resolveRubric();
+    await this.#confirmations.refresh();
+  }
+
+  async #unavailable(message: string): Promise<void> {
+    this.#mainView = { kind: 'unavailable', title: '知行 · 连接暂不可用', message,
+      connected: false, choices: [{ id: 'retry', label: '重试连接' }, { id: 'history-open', label: '查看本机历史' },
+        { id: 'config', label: '编辑本机配置' }, { id: 'exit', label: '退出终端' }] };
+    await this.#publish(this.#mainView);
+  }
+
+  async #confirmLimited(capabilities: readonly string[]): Promise<boolean> {
+    return await this.#choose({ kind: 'selection', title: '当前会话能力受限',
+      message: capabilities.join('\n'), choices: [{ id: 'continue', label: '接受以上限制并继续' }, { id: 'cancel', label: '暂不继续' }] }) === 'continue';
+  }
+
+  async #choose(view: View): Promise<string | undefined> {
+    return (await this.#choosePage(view))?.itemId;
+  }
+
+  async #choosePage(view: View): Promise<TerminalSelectionResponse | undefined> {
+    if (this.#selection) throw Error('terminal-selection-capacity');
+    const id = randomUUID();
+    const response = new Promise<TerminalSelectionResponse | undefined>(resolve => { this.#selection = { id, resolve, field: !!view.field, allowed: new Set(view.choices?.filter(choice => !choice.disabled).map(choice => choice.id)) }; });
+    await this.#publish({ ...view, kind: view.kind === 'confirmation' ? 'confirmation' : 'selection', requestId: id });
+    return response;
+  }
+
+  async #selectionFlow<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#presentingConfirmation) throw Error('terminal-selection-occupied');
+    this.#selectionDepth++;
+    try { return await operation(); }
+    finally { this.#selectionDepth--; this.#drainConfirmations(); }
+  }
+
+  async #readOnly(): Promise<void> {
+    const storage = createReadOnlyConversationStorage(this.home);
+    let offset = 0;
+    for (;;) {
+      // Retain only the visible menu during user waiting. Re-query the read-only
+      // authority for another page instead of accumulating all list metadata.
+      const entries = (await storage.list()).slice(offset, offset + 25);
+      this.#abort.signal.throwIfAborted();
+      if (!entries.length && offset === 0) { await this.#publish({ ...this.#mainView, message: '本机还没有可查看的对话历史。' }); return; }
+      const choices = entries.slice(0, 24).map(entry => ({ id: entry.conversationId, label: entry.name }));
+      if (offset) choices.push({ id: 'previous', label: '上一页' });
+      if (entries.length > 24) choices.push({ id: 'next', label: '下一页' });
+      choices.push({ id: 'cancel', label: '返回' });
+      const selected = await this.#choose({ kind: 'selection', title: '本机历史 · 只读', message: '只读取已保存内容，不会启动或重发任务。', choices });
+      if (!selected || selected === 'cancel') { await this.#publish(this.#mainView); return; }
+      if (selected === 'next' || selected === 'previous') { offset += selected === 'next' ? 24 : -24; continue; }
+      const entry = entries.find(value => value.conversationId === selected)!;
+      if (this.#history?.conversationId !== selected && this.#display.first !== this.#display.last) {
+        await this.#display.reset(); this.#displayStart = undefined;
+      }
+      this.#history = this.#history?.conversationId === selected ? { ...this.#history, offline: true } : { conversationId: selected, hasMore: true, offline: true };
+      this.#mainView = { kind: 'conversation', title: `${entry.name} · 只读`, connected: false, message: '正在读取本机历史…' };
+      await this.#publish(this.#mainView);
+      if (this.#display.first === this.#display.last) await this.#historyPage(); else await this.#displayPage(); return;
+    }
+  }
+
+  async #historyPage(): Promise<void> {
+    const history = this.#history;
+    if (!history || !history.hasMore) { await this.#publish({ ...this.#mainView, message: '已到达最早的可用历史。' }); return; }
+    const options = { limit: 4, before: history.before };
+    const consume = async (page: Pick<Awaited<ReturnType<RpcConversationFacade['history']>>, 'runs' | 'hasMore'>) => {
+      this.#abort.signal.throwIfAborted();
+      if (this.#history !== history) return;
+      try {
+        for (const segment of projectHistorySegmentsReverse(page.runs)) {
+          if (this.#history !== history) return;
+          await this.#display.append(segment, true);
+        }
+      } catch {
+        await this.#displayGap(); return;
+      }
+      if (this.#history !== history) return;
+      // The finite, actually accepted first history page proves the completed
+      // prefix owned by history. Later commits and every uncommitted input
+      // remain the recovery worker's responsibility.
+      if (!options.before) history.recoveryRunIds = page.runs.flatMap(item => 'runId' in item.record && typeof item.record.runId === 'string' ? [item.record.runId] : []);
+      const oldest = page.runs.at(-1);
+      history.hasMore = page.hasMore;
+      if (oldest) history.before = { shardId: oldest.shardId, runIndex: oldest.record.runIndex };
+      this.#mainView = { ...this.#mainView, message: page.runs.length
+        ? 'PageUp / PageDown 回看，翻到顶部读取更早历史 · Ctrl+End 回到最新内容'
+        : '还没有已保存的对话内容。', busy: false };
+      await this.#displayPage(); await this.#publish(this.#mainView);
+    };
+    if (history.offline) await consume(await createReadOnlyConversationStorage(this.home).readHistory(history.conversationId, options));
+    else await this.#conversation.consumeHistory(history.conversationId, options, consume);
+  }
+
+  async #displayPage(): Promise<void> {
+    const revision = ++this.#displayRevision;
+    const page = await this.#display.page(this.#displayStart);
+    if (revision === this.#displayRevision && !this.#abort.signal.aborted) await this.#channel.send({ type: 'display-page', page }, 'body');
+  }
+
+  async #displayGap(): Promise<void> {
+    this.#displayUnavailable = true;
+    await this.#publish(this.#mainView);
+  }
+
+  async #collectInputs(): Promise<readonly string[]> {
+    const removed = await this.#inputs.collect();
+    this.#cleanupMaterials(); return removed;
+  }
+
+  #cleanupMaterials(): void {
+    const materialIds = new Set<number>();
+    for (const token of this.#inputs.handles) for (const match of token.matchAll(createMaterialTokenPattern())) materialIds.add(Number(match[2]));
+    this.#materials.cleanup(materialIds);
+  }
+
+  async #finishPaste(inputId: string): Promise<{ text: string; handles: readonly { token: string; id: string }[]; paste: boolean; replacePastes: boolean }> {
+    // Path intent is inspected only for bounded path-sized input. Large original
+    // text is folded without materializing it or probing its contents as paths.
+    const paste = this.#inputs.completePaste(inputId);
+    if (paste.bytes <= 64 * 1024) {
+      const text = await this.#inputs.text(inputId, 1024 * 1024 * 2);
+      const material = ingestPastedMaterials(text, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), maxWorkspaceBytes: 2 * 1024 * 1024 });
+      if (material.kind === 'ingested') {
+        if (Buffer.byteLength(material.insertText) > 128 * 1024) throw Error('材料引用工作区不足，原有草稿和材料保留。');
+        const handles = this.#inputs.registerHandles(inputId, material.insertText);
+        const result = { text: material.insertText, handles, paste: false, replacePastes: false };
+        // Fail this complete paste through the ordinary request error path,
+        // before an oversized control reply could close the terminal channel.
+        if (Buffer.byteLength(JSON.stringify(result)) > TERMINAL_LIMITS.frameBytes - 4096) throw Error('材料引用工作区不足，原有草稿和材料保留。');
+        return result;
+      }
+      if (text.length < 400 && (text.match(/\n/gu)?.length ?? 0) < 5) return { text, handles: [], paste: false, replacePastes: true };
+    }
+    return { text: paste.token, handles: [{ token: paste.token, id: inputId }], paste: true, replacePastes: true };
+  }
+
+  async #acceptCandidate(revision: number, id: string): Promise<TerminalCandidateAcceptance> {
+    const item = this.#candidates.accept(revision, id), payload = item.acceptPayload;
+    const filePath = payload.metadata?.resolvedPath;
+    if (item.providerId !== 'file' || payload.metadata?.isDirectory || typeof filePath !== 'string') {
+      return { text: payload.replacement, execute: payload.execute };
+    }
+    const token = ingestSelectedMaterial(filePath, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd() });
+    const inputId = randomUUID(); this.#inputs.begin(inputId, 'paste');
+    await this.#inputs.part(inputId, 0, filePath, true);
+    return { text: `${token} `, execute: false, inputId, handles: this.#inputs.registerHandles(inputId, token) };
+  }
+
+  async #submit(inputId: string, version: number): Promise<void> {
+    let settled = false;
+    const settle = (accepted: boolean) => {
+      if (settled) return; settled = true;
+      void this.#channel.send({ type: 'submission', inputId, version, accepted }).catch(() => this.#close(70, 'terminal-submission-undelivered'));
+      if (accepted) {
+        this.#inputs.transfer(`frozen:${inputId}`, `history:${inputId}`);
+        this.#inputHistory.push(inputId);
+        if (this.#inputHistory.length > 100) this.#inputs.forget(`history:${this.#inputHistory.shift()!}`);
+      }
+    };
+    const submission = createUserSubmission({ commit: () => settle(true), reject: () => settle(false) });
+    const releaseOutput = this.#outputProjection.hold();
+    try {
+      if (this.#displayUnavailable || this.#display.paused || this.#outputProjection.paused) throw Error('正文保留已暂停，当前不能接纳新输入；草稿已保留。可处理确认、中止工作或退出后重试。');
+      await this.#inputs.retainDraft(`frozen:${inputId}`, inputId);
+      const completed = await this.#submitPrepared(inputId, submission);
+      if (!completed) return;
+      releaseOutput();
+      const { result, notice } = completed;
+      if (result.kind === 'accepted') this.#followTurn(result.turn);
+      else if (result.kind === 'awaiting-rubric-confirmation') {
+        this.#pendingRubric = undefined;
+        this.#deferredRubric = result;
+        this.#pendingRubricNotice = notice;
+        this.#mainView = { ...this.#mainView, busy: false, message: notice ?? '任务等待确认。' };
+        await this.#publish(this.#mainView);
+        await this.#resolveRubric();
+      } else {
+        if (result.kind === 'cancelled') {
+          this.#pendingRubric = undefined;
+          this.#deferredRubric = undefined;
+          this.#pendingRubricNotice = undefined;
+          this.#mainView = { ...this.#mainView, choices: this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume') };
+        }
+        this.#mainView = { ...this.#mainView, busy: false, message: result.kind === 'contract-failed' ? '推进准则生成失败；输入已保留。' : '已取消这次任务。' };
+        await this.#publish(this.#mainView);
+      }
+    } catch (error) {
+      submission.reject();
+      this.#mainView = { ...this.#mainView, busy: false };
+      throw error;
+    } finally {
+      releaseOutput();
+      await this.#display.cancelAdmission();
+      this.#inputs.forget(`frozen:${inputId}`); this.#inputs.published([inputId]);
+      await this.#collectInputs();
+    }
+  }
+
+  /** Large expansion/materials belong to the pending send only. Return from
+   * this frame before opening a user-paced confirmation; its cold draft and
+   * history owners, not the preparation strings, retain the original input. */
+  async #submitPrepared(inputId: string, submission: ReturnType<typeof createUserSubmission>): Promise<{ result: BeginReferencedUserTurnResult<string>; notice?: string } | undefined> {
+    const result = await this.#beginPrepared(inputId, submission);
+    if (!result) return;
+    const notice = submission.settle(result);
+    if (notice) this.#mainView = { ...this.#mainView, message: notice };
+    if (result.kind === 'accepted' || (result.kind === 'awaiting-rubric-confirmation' && ['original-saved', 'revision-saved'].includes(result.submission?.disposition ?? ''))) {
+      try {
+        let offset = 0;
+        let pending: { text: string; contentOffset: number } | undefined;
+        for await (const page of this.#inputs.expandedPages(inputId)) {
+          for (const fragment of textFragments(page)) {
+            if (pending) await this.#display.append({ blockId: `input:${inputId}`, role: 'user', ...pending, final: false });
+            pending = { contentOffset: offset + fragment.offset, text: fragment.text };
+          }
+          offset += page.length;
+        }
+        if (pending) await this.#display.append({ blockId: `input:${inputId}`, role: 'user', ...pending, final: true });
+        await this.#displayPage();
+      } catch { await this.#displayGap(); }
+    }
+    return { result, notice };
+  }
+
+  async #beginPrepared(inputId: string, submission: ReturnType<typeof createUserSubmission>): Promise<BeginReferencedUserTurnResult<string> | undefined> {
+    await this.#display.admit();
+    this.#mainView = { ...this.#mainView, busy: true, message: '正在提交…' };
+    await this.#publish(this.#mainView);
+    try {
+      return await this.#controller!.beginReferencedUserTurn((conversationId, turnId) =>
+        this.#conversation.sendPrepared((identity, signal, maximum) => this.#prepareSendSource(inputId, identity, signal, maximum),
+          conversationId, turnId, this.#abort.signal, (result): SessionSendReferenceResult => {
+            if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
+              const { rubricDraft: _draft, ...identity } = result;
+              return boundedControlProjection(identity, 8192);
+            }
+            return boundedControlProjection(result, 256 * 1024);
+          }), { onAccepted: submission.accept });
+    } catch (error) {
+      if (!(error instanceof EmptyTerminalSubmission)) throw error;
+      submission.reject(); this.#mainView = { ...this.#mainView, busy: false };
+      await this.#publish(this.#mainView); return;
+    }
+  }
+
+  async #prepareSendSource(inputId: string, identity: SessionSendSnapshotIdentity, signal: AbortSignal, maximumParamsBytes: number) {
+    signal.throwIfAborted();
+    // Expansion's two carriers have their own phase. Leave 4 MiB for its
+    // finite file owner/IPC/page scratch before entering material preparation.
+    const text = await this.#inputs.expand(inputId, TERMINAL_LIMITS.rpcWorkspaceBytes - 4 * 1024 * 1024);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const source = await this.#pendingSend.prepare(write => prepareSessionSendSnapshot(text, identity, {
+      workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), materialRegistry: this.#materials,
+      signal, maximumParamsBytes,
+    }, write), signal);
+    if (!source) throw new EmptyTerminalSubmission();
+    return source;
+  }
+
+  async #resolveRubric(): Promise<void> {
+    await this.#selectionFlow(() => this.#rubricLoop());
+  }
+
+  async #loadPendingRubric(): Promise<void> {
+    if (!this.#pendingRubric && this.#deferredRubric) {
+      const identity = this.#deferredRubric;
+      this.#pendingRubric = await this.#conversation.consumeResume(identity.conversationId, result => {
+        const snapshot = result.advancement, draft = snapshot?.pendingRubricDraft;
+        if (snapshot?.status !== 'awaiting-rubric-confirmation' || !draft || draft.originalTurnId !== identity.turnId || snapshot.advancementSessionId !== identity.advancementSessionId) throw Error('待确认任务状态已变化，请重新连接后核对。');
+        return boundedControlProjection({ kind: 'awaiting-rubric-confirmation' as const, conversationId: identity.conversationId,
+          turnId: draft.originalTurnId, advancementSessionId: snapshot.advancementSessionId,
+          rubricDraftId: draft.draftId, rubricDraft: draft }, 256 * 1024);
+      });
+      this.#deferredRubric = undefined;
+    }
+  }
+
+  async #rubricLoop(): Promise<void> {
+    while ((this.#pendingRubric || this.#deferredRubric) && !this.#abort.signal.aborted) {
+      try { await this.#loadPendingRubric(); }
+      catch {
+        const identity = this.#deferredRubric;
+        if (!identity) throw Error('待确认任务身份不可用。');
+        const selection = await this.#choose({ kind: 'selection', title: '暂时无法完整显示验收方式',
+          message: '任务仍保持待确认，尚未开始执行。可以重试读取、收起页面或取消任务。',
+          choices: [{ id: 'retry', label: '重试读取' }, { id: 'return', label: '暂时收起' }, { id: 'cancel', label: '取消任务' }] });
+        if (selection === 'retry') continue;
+        if (selection === 'cancel') {
+          const confirmed = await this.#choose({ kind: 'selection', title: '取消这次任务？', message: '取消后不会执行原任务。', choices: [{ id: 'cancel', label: '确认取消' }, { id: 'return', label: '返回' }] });
+          if (confirmed !== 'cancel') continue;
+          await this.#controller!.cancelRubricContract(identity);
+          this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined;
+          this.#mainView = { ...this.#mainView, busy: false, message: '已取消这次任务。', choices: undefined };
+        } else this.#mainView = { ...this.#mainView, busy: false, message: '任务保持待确认，可以继续核对。', choices: [{ id: 'rubric-resume', label: '继续确认任务' }] };
+        await this.#publish(this.#mainView); return;
+      }
+      const pending = this.#pendingRubric!;
+      const selected = await chooseTerminalSelection(createAdvancementContractSelectionRequest(pending.rubricDraft), view => this.#choosePage({
+        ...view, message: [this.#pendingRubricNotice, view.message].filter(Boolean).join('\n'),
+      }));
+      if (!selected) {
+        const { rubricDraft: _draft, ...identity } = pending;
+        this.#deferredRubric = boundedControlProjection(identity, 8192);
+        this.#pendingRubric = undefined;
+        this.#mainView = { ...this.#mainView, busy: false, message: [this.#pendingRubricNotice, '已收起确认面；任务保持待确认，可点击下方继续处理。'].filter(Boolean).join('\n'), choices: [{ id: 'rubric-resume', label: '继续确认任务' }] };
+        await this.#publish(this.#mainView); return;
+      }
+      const controller = this.#controller!;
+      if (selected.value === 'edit') {
+        if (!('input' in selected) || !selected.input.trim()) continue;
+        await this.#publish({ ...this.#mainView, busy: true, message: '正在更新验收方式…' });
+        try {
+          this.#deferredRubric = await this.#conversation.consumeReviseAdvancement(pending.conversationId, pending.advancementSessionId, selected.input, result => {
+            if (result.conversationId !== pending.conversationId || result.advancementSessionId !== pending.advancementSessionId ||
+                result.rubricDraft.originalTurnId !== pending.turnId || result.rubricDraftId !== result.rubricDraft.draftId) throw Error('修订结果身份不一致，请重新核对任务。');
+            return boundedControlProjection({ kind: 'awaiting-rubric-confirmation' as const, conversationId: result.conversationId,
+              turnId: pending.turnId, advancementSessionId: result.advancementSessionId, rubricDraftId: result.rubricDraftId }, 8192);
+          });
+          this.#pendingRubric = undefined;
+          this.#pendingRubricNotice = '准则修订已保存，等待确认。';
+        }
+        catch {
+          const { rubricDraft: _draft, ...identity } = pending;
+          this.#pendingRubric = undefined; this.#deferredRubric = identity;
+          await this.#choose({ kind: 'selection', title: '修订结果待核对', message: '尚未开始任务；返回后会重新读取当前验收方式，不会恢复旧快照。', choices: [{ id: 'return', label: '返回' }] });
+        }
+        continue;
+      }
+      let turn: AcceptedTurn<string> | undefined;
+      if (selected.value === 'cancel' || selected.value === 'direct') {
+        const result = await controller.cancelRubricContract(pending, { executeOriginal: selected.value === 'direct' });
+        if (result.kind === 'direct-execution') turn = result.turn;
+      } else {
+        const candidate = primaryNearbyCandidate(pending.rubricDraft);
+        if (selected.value === 'update-existing' && !candidate) continue;
+        turn = await controller.confirmRubricContract(pending, {
+          ...(selected.value === 'update-existing' ? { rubricPersistence: { kind: 'update-existing' as const, rubricId: candidate!.id } }
+            : selected.value === 'save-new' ? { rubricPersistence: { kind: 'save-new' as const } } : {}),
+        });
+      }
+      this.#pendingRubric = undefined;
+      this.#deferredRubric = undefined;
+      this.#pendingRubricNotice = undefined;
+      this.#mainView = { ...this.#mainView, choices: undefined, message: turn ? '开始执行…' : '已取消这次任务。', busy: !!turn };
+      if (turn) this.#followTurn(turn); else await this.#publish(this.#mainView);
+    }
+  }
+
+  #followTurn(turn: AcceptedTurn<string>): void {
+    const { conversationId, turnId, runId } = turn;
+    // The controller already consumed the result, even for an early complete
+    // notification. Waiting for send acceptance retains only this summary.
+    const completion = turn.outcome;
+    this.#state.activeTurnPromise = completion;
+    this.#mainView = { ...this.#mainView, busy: true, message: turn.advancementContinuation ? '已作为当前任务的补充继续推进。' : '正在处理…' };
+    void this.#publish(this.#mainView).catch(() => {});
+    void completion.then(async message => {
+      this.#outputProjection.end(conversationId, turnId, runId);
+      if (this.#abort.signal.aborted) return;
+      // The local waiter owns this terminal outcome; the controller suppresses
+      // its duplicate observer notice. Keep the authoritative error visible,
+      // bounded independently of the control frame and detached from its RPC.
+      this.#mainView = { ...this.#mainView, busy: false, message };
+      if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
+    }).catch(async () => {
+      if (!this.#abort.signal.aborted) {
+        this.#mainView = { ...this.#mainView, busy: false, message: '运行结果尚未确认；请重连后查看，不会自动重发。' };
+        if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
+      }
+    }).finally(() => { if (this.#state.activeTurnPromise === completion) this.#state.activeTurnPromise = null; }).catch(() => this.#close(70, 'terminal-outcome-undelivered'));
+  }
+
+  async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
+    if (this.#editor) throw Error('terminal-editor-already-open');
+    const editor = new TerminalConfigurationEditor({ session, title, sections, runtime, publish: view => this.#publish(view) });
+    this.#editor = editor;
+    try { return await editor.run(); }
+    finally { editor.dispose(); if (this.#editor === editor) this.#editor = undefined; }
+  }
+
+  async #configuration(kind: 'config' | 'mcp'): Promise<void> {
+    await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP', message: '正在读取本机配置…', busy: true });
+    const connected = this.#connection.getStatus().kind === 'connected';
+    const mcp = kind === 'mcp' ? await prepareMcpConfiguration({ configPath: this.#configPath,
+      createStdioProcess: (command, args, env, signal) => createTerminalOwnedProcessFactory('mcp-probe')(command, args, {
+        env, signal: signal ? AbortSignal.any([signal, this.#abort.signal]) : this.#abort.signal, deadline: Date.now() + 5000,
+      }),
+      readMcpStatusWire: async () => (await this.#management.serverInfoIfConnected())?.mcpServers ?? [],
+      readMcpPending: async () => connected && this.#controller ? this.#management.mcpPending(this.#controller.current.conversationId) : [],
+      llmComplete: (prompt, role, signal) => {
+        if (!connected) return Promise.reject(Error('当前离线，依赖模型的解析暂不可用。'));
+        return this.#management.llmComplete(prompt, role, signal);
+      },
+      llmConsume: (prompt, consume, role, signal) => {
+        if (!connected) return Promise.reject(Error('当前离线，依赖模型的解析暂不可用。'));
+        return this.#management.llmConsume(prompt, consume, role, signal);
+      },
+    }) : undefined;
+    const result = await editRuntimeConfiguration({ zhixingHome: this.home, configPath: this.#configPath,
+      secretStore: this.#secretStore,
+      configurationRecords: this.#logging.records, state: this.#state,
+      ...(connected ? { readExtensions: () => this.#management.extensions(), readExtensionLocalSetup: () => this.#management.extensionLocalSetup(),
+        applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); } } : {}),
+      requestHostReload: options => this.#reload(options),
+    }, { kind, edit: session => this.#edit(session, kind === 'config' ? '配置' : 'MCP 管理', kind === 'config' ? ['model', 'messaging'] : ['mcp'], mcp?.runtime),
+      mcpApplication: mcp?.mcpApplication });
+    this.#abort.signal.throwIfAborted();
+    let message = result.kind === 'cancelled' ? '已取消本次配置编辑。'
+      : result.kind === 'non-tty' ? '配置编辑未完成。'
+      : result.kind === 'mcp' ? result.result.message
+      : result.kind === 'saved-pending' ? '配置已保存，但消息通道尚未确认应用；重新打开配置可重试。'
+      : result.kind === 'local-applied' ? '配置已保存，本机变更已应用。'
+      : '配置已保存并完成服务重载。';
+    if (result.kind === 'reloaded' && (result.effects.reload.status === 'failed' || result.effects.reconcile.status === 'failed')) message = '配置已接纳，应用尚未完成；请重试连接，不要恢复旧快照。';
+    if (result.kind === 'reloaded' && result.pendingChannels) message += '\n消息通道尚未确认应用；重新打开配置可重试。';
+    const reconnected = this.#connection.getStatus().kind === 'connected';
+    this.#mainView = { ...this.#mainView, message, connected: reconnected, busy: false,
+      ...(reconnected ? { choices: undefined } : {}) };
+    await this.#publish(this.#mainView);
+  }
+
+  async #reload(options?: HostReloadOptions) {
+    this.#abort.signal.throwIfAborted();
+    return reloadCoreHostAfterConfig({ options,
+      requestDrainShutdown: () => this.#management.serverShutdown({ reason: 'config-reload', strategy: 'drain' }),
+      reconnect: input => this.#connection.reconnect(input),
+      prepareManagedServiceTurnover: () => prepareCurrentManagedServiceConfigTurnover(undefined, this.home),
+      refresh: async () => {
+        const status = await waitForReloadStatus(this.#management);
+        await this.#localView.refresh(); await this.#controller?.reattachActiveObserver();
+        await this.#confirmations.refresh();
+        return status ? { channels: status.channels } : undefined;
+      },
+    });
+  }
+
+  async #command(name: string, argument: string): Promise<unknown> {
+    if (typeof name !== 'string' || typeof argument !== 'string' || name.length > 128 || argument.length > 8192) throw Error('terminal-command-size');
+    const definition = this.#candidates.registry.findByName(name);
+    if (!definition) throw Error('该命令暂未迁移到此开发入口，请使用完整旧入口。');
+    name = definition.name;
+    if (name === 'exit') { void this.#close(0, 'user-exit'); return { accepted: true }; }
+    if (name === 'config' && argument.trim()) throw Error('带参数的配置命令尚未迁移到此开发入口；请在完整旧入口使用 /config logs。');
+    if (name === 'config' || name === 'mcp') { this.#background(() => this.#configuration(name)); return { accepted: true }; }
+    if (name === 'status') { this.#background(() => this.#status()); return { accepted: true }; }
+    if (name === 'stop') { this.#background(() => this.#stop()); return { accepted: true }; }
+    if (name === 'help') {
+      await this.#publish({ ...this.#mainView, message: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`).join('\n') });
+      return { accepted: true };
+    }
+    throw Error('该命令暂未迁移到此开发入口，请使用完整旧入口。');
+  }
+
+  async #stop(): Promise<void> {
+    const status = await this.#management.serverInfoIfConnected();
+    const choice = await this.#selectionFlow(() => chooseTerminalSelection(createStopSelectionRequest(status), view => this.#choosePage(view)));
+    if (!choice || choice.value === 'cancel') { await this.#publish(this.#mainView); return; }
+    await this.#management.serverShutdown({ reason: 'user-stop', strategy: shutdownStrategyForChoice(choice.value), timeoutMs: 30_000 });
+    void this.#close(0, 'user-stop');
+  }
+
+  async #status(): Promise<void> {
+    const status = await this.#management.serverInfoIfConnected();
+    await this.#publish({ ...this.#mainView, message: status ? `服务已连接 · ${status.activeConversations} 个对话 · ${status.busyConversations} 个运行中对话` : '本机服务未连接。' });
+  }
+
+  #output(event: AgentYield, source: ConversationOutputSource): void {
+    if (this.#history?.offline || this.#abort.signal.aborted) return;
+    this.#outputProjection.accept(event, source);
+  }
+
+  #drainConfirmations(): void {
+    if (this.#presentingConfirmation || this.#confirmationBlocked || this.#selectionDepth || this.#editor || this.#selection || !this.#mainView.connected || this.#abort.signal.aborted || !this.#pendingConfirmations.size) return;
+    this.#presentingConfirmation = true;
+    void (async () => {
+      while (this.#pendingConfirmations.size && !this.#abort.signal.aborted) {
+        const id = this.#pendingConfirmations.values().next().value!;
+        const current = { id, invalid: false }; this.#confirmation = current;
+        const projection = await this.#confirmations.readPending(id, projectTerminalConfirmation);
+        if (!projection || current.invalid) { this.#pendingConfirmations.delete(id); continue; }
+        const decision = await resolveTerminalConfirmation(projection, async view => {
+          if (current.invalid || this.#abort.signal.aborted) return;
+          return this.#choosePage(view);
+        });
+        if (!current.invalid && !this.#abort.signal.aborted) this.#confirmations.resolve(id, decision);
+        this.#pendingConfirmations.delete(id);
+      }
+    })().catch(() => {
+      this.#confirmationBlocked = true;
+      this.#mainView = { ...this.#mainView, message: '确认页面暂不可用；未允许此操作。可以重新核对、中止当前工作或退出。',
+        choices: [{ id: 'confirmation-retry', label: '重新核对待处理确认' }] };
+    }).finally(() => {
+      this.#confirmation = undefined; this.#presentingConfirmation = false;
+      if (!this.#abort.signal.aborted) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-confirmation-undelivered'));
+    });
+  }
+
+  #publish(view: View): Promise<void> {
+    if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
+    if (this.#presentingConfirmation && view.kind !== 'confirmation') return Promise.resolve();
+    this.#nextView = view;
+    if (!this.#publishing) this.#publishing = (async () => {
+      while (this.#nextView && !this.#abort.signal.aborted) {
+        const next = this.#nextView; this.#nextView = undefined;
+        await this.#channel.send({ type: 'view', view: { ...next, displayGap: this.#displayUnavailable, generation: ++this.#generation } });
+      }
+    })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
+    return this.#publishing;
+  }
+
+  #close(code: number, reason: string, notify = true): Promise<void> {
+    if (this.#closing) return this.#closing;
+    let resolveClosing!: () => void;
+    this.#closing = new Promise(resolve => { resolveClosing = resolve; });
+    this.#closeDeadline ||= Date.now() + (code === 0 ? 2000 : 8000);
+    this.#abort.abort(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve(); this.#selection = undefined;
+    void (async () => {
+      // A failed control lane cannot report its own exit. Closing the existing
+      // transport immediately lets S start its shared finite recovery deadline
+      // while this owner still attempts ordinary cleanup.
+      if (notify && this.transport.connected) void this.#channel.send({ type: 'exit', code, reason }).catch(() => this.transport.close());
+      this.#controller?.dispose();
+      this.#confirmations.dispose(); this.#pendingConfirmations.clear();
+      await this.#connection.dispose();
+      await this.#operation?.catch(() => {});
+      await this.#outputProjection.close();
+      await this.#display.close();
+      await this.#inputHistoryReader.close();
+      await this.#inputs.close(); this.#materials.clearAll();
+      await this.#files.close(terminalWriterDeadline(this.#closeDeadline));
+      await this.#logging.finish(code === 0 ? 'success' : 'failure', reason,
+        Math.max(0, terminalWriterDeadline(this.#closeDeadline) - Date.now() - TERMINAL_LOG_EXIT_RESERVE_MS));
+      this.#channel.close(); this.transport.removeListener('message', this.#message);
+      this.transport.removeListener('disconnect', this.#disconnected); process.removeListener('SIGINT', this.#interrupted); process.removeListener('SIGTERM', this.#interrupted);
+      process.removeListener('uncaughtException', this.#uncaught); process.removeListener('unhandledRejection', this.#uncaught);
+      this.transport.close();
+      process.exitCode = code;
+    })().catch(() => { process.exitCode = 71; this.transport.close(); }).finally(() => { resolveClosing(); this.#resolve(); });
+    return this.#closing;
+  }
+}
