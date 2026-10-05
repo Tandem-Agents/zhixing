@@ -1,4 +1,4 @@
-import { stringWidth } from "./tui/index.js";
+import { stringWidth } from "./tui/text-metrics.js";
 
 export const MATERIAL_TOKEN_PATTERN =
   /\[(Image|File) #(\d+) · [^\]\n]+\]/g;
@@ -39,9 +39,21 @@ export interface InputMaterialFormatOptions {
 
 export class InputMaterialRegistry {
   private nextId = 1;
+  private retainedMetadataBytes = 0;
   private readonly byId = new Map<number, InputMaterialEntry>();
   private readonly byFilePath = new Map<string, number>();
   private readonly formattedTokensById = new Map<number, Set<string>>();
+
+  constructor(private readonly maximumMetadataBytes = Infinity) {}
+
+  get metadataBytes(): number { return this.retainedMetadataBytes; }
+
+  private charge(bytes: number): void {
+    if (this.retainedMetadataBytes + bytes > this.maximumMetadataBytes) {
+      throw Error('材料引用工作区不足，原有草稿和材料保留。');
+    }
+    this.retainedMetadataBytes += bytes;
+  }
 
   registerLocalFile(input: RegisterLocalMaterialInput): number {
     const existingId = this.byFilePath.get(input.filePath);
@@ -57,8 +69,10 @@ export class InputMaterialRegistry {
       }
     }
 
-    const id = this.nextId++;
+    const id = this.nextId;
     const entry: InputMaterialEntry = { id, ...input };
+    this.charge(materialMetadataBytes(entry));
+    this.nextId++;
     this.byId.set(id, entry);
     this.byFilePath.set(input.filePath, id);
     return id;
@@ -74,6 +88,7 @@ export class InputMaterialRegistry {
     const label = entry.kind === "image" ? "Image" : "File";
     const token = formatMaterialToken(label, entry, options.maxWidth);
     let tokens = this.formattedTokensById.get(id);
+    if (!tokens?.has(token)) this.charge(materialTokenMetadataBytes(id, token));
     if (!tokens) {
       tokens = new Set<string>();
       this.formattedTokensById.set(id, tokens);
@@ -89,6 +104,8 @@ export class InputMaterialRegistry {
   cleanup(aliveIds: ReadonlySet<number>): void {
     for (const [id, entry] of this.byId) {
       if (aliveIds.has(id)) continue;
+      this.retainedMetadataBytes -= materialMetadataBytes(entry);
+      for (const token of this.formattedTokensById.get(id) ?? []) this.retainedMetadataBytes -= materialTokenMetadataBytes(id, token);
       this.byId.delete(id);
       this.formattedTokensById.delete(id);
       if (this.byFilePath.get(entry.filePath) === id) {
@@ -102,11 +119,21 @@ export class InputMaterialRegistry {
     this.byFilePath.clear();
     this.formattedTokensById.clear();
     this.nextId = 1;
+    this.retainedMetadataBytes = 0;
   }
 
   get size(): number {
     return this.byId.size;
   }
+}
+
+// UTF-8 shadow records include structure, indexes and tokens. Counting path
+// aliases again is conservative; no arbitrary per-object heap estimate is used.
+function materialMetadataBytes(entry: InputMaterialEntry): number {
+  return Buffer.byteLength(JSON.stringify({ entry, pathIndex: [entry.filePath, entry.id], tokens: [] }));
+}
+function materialTokenMetadataBytes(owner: number, token: string): number {
+  return Buffer.byteLength(JSON.stringify({ owner, token }));
 }
 
 export function extractAliveMaterialIds(draft: string): Set<number> {

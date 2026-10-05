@@ -12,6 +12,8 @@ import {
 export interface PasteMaterialIngestOptions {
   readonly workspaceRoot: string;
   readonly tokenMaxWidth?: number;
+  /** Combined UTF-8 shadow records retained while recognizing a path batch. */
+  readonly maxWorkspaceBytes?: number;
 }
 
 export type PastedMaterialIngestResult =
@@ -55,21 +57,40 @@ export function ingestPastedMaterials(
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
 ): PastedMaterialIngestResult {
-  const items = parsePastedMaterialItems(content);
+  let workspaceBytes = 0;
+  const charge = (value: unknown): void => {
+    if (!Number.isFinite(options.maxWorkspaceBytes)) return;
+    const bytes = Buffer.byteLength(JSON.stringify(value));
+    if (workspaceBytes + bytes > options.maxWorkspaceBytes!) throw Error('材料识别工作区不足，原有草稿和材料保留。');
+    workspaceBytes += bytes;
+  };
+  const items = parsePastedMaterialItems(content, charge);
   if (items.length === 0) return { kind: "not-material" };
   if (!isMaterialPathBatch(items)) return { kind: "not-material" };
 
-  return ingestMaterialPathBatch(items, registry, options);
+  return ingestMaterialPathBatch(items, registry, options, charge);
+}
+
+/** An explicitly selected file uses the same validation and material metadata
+ * as a pasted path, without reinterpreting a filename as shell syntax. */
+export function ingestSelectedMaterial(filePath: string, registry: InputMaterialRegistry, options: PasteMaterialIngestOptions): string {
+  const result = processMaterialItem({ raw: filePath, input: filePath, quoted: true, shellEscaped: false, intent: 'material-path' }, registry, options);
+  if (result.kind !== 'material') throw Error(result.kind === 'failure' ? result.diagnostic.message : '文件未接纳，草稿保留。');
+  return result.token;
 }
 
 function ingestMaterialPathBatch(
   items: readonly PastedMaterialItem[],
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
+  charge: (value: unknown) => void,
 ): PastedMaterialIngestResult {
-  const processed = items.map((item) =>
-    processMaterialItem(item, registry, options),
-  );
+  const processed: ProcessedMaterialItem[] = [];
+  for (const item of items) {
+    const result = processMaterialItem(item, registry, options);
+    // Charge before retaining another resolved path, diagnostic or token.
+    charge(result); processed.push(result);
+  }
   const hasMaterial = processed.some((item) => item.kind === "material");
   const hasFailure = processed.some((item) => item.kind === "failure");
   if (!hasMaterial && !hasFailure) return { kind: "not-material" };
@@ -77,7 +98,9 @@ function ingestMaterialPathBatch(
   const outputLines: string[] = [];
   const diagnostics: PastedMaterialIngestDiagnostic[] = [];
 
-  for (const item of processed) {
+  for (const [index, item] of processed.entries()) {
+    // Output/diagnostic arrays refer to already charged strings and records.
+    charge({ output: index, diagnostic: item.kind === 'failure' ? index : null });
     if (item.kind === "text") {
       outputLines.push(item.raw);
       continue;
@@ -104,10 +127,14 @@ export function formatMaterialIngestDiagnostic(
   return `${diagnostic.input} -> ${diagnostic.message}`;
 }
 
-function parsePastedMaterialItems(content: string): PastedMaterialItem[] {
+function parsePastedMaterialItems(content: string, charge: (value: unknown) => void): PastedMaterialItem[] {
   const rawLines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const lines = trimEmptyLineEdges(rawLines);
-  return lines.flatMap((raw) => parsePastedMaterialLineItems(raw));
+  const items: PastedMaterialItem[] = [];
+  for (const raw of lines) for (const item of parsePastedMaterialLineItems(raw)) {
+    charge(item); items.push(item);
+  }
+  return items;
 }
 
 function parsePastedMaterialLineItems(rawLine: string): PastedMaterialItem[] {

@@ -20,6 +20,19 @@ afterEach(async () => {
 });
 
 describe("input materials", () => {
+  it("bounds accumulated failed-path diagnostics without disturbing an accepted material", async () => {
+    const root = await makeTempDir(), imagePath = path.join(root, "kept.png");
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+    const kept = ingestMaterialToken(imagePath, registry, { workspaceRoot: root });
+    const batch = './missing.png\n'.repeat(80);
+    expect(() => ingestPastedMaterials(batch, registry, { workspaceRoot: root, maxWorkspaceBytes: 12 * 1024 })).toThrow('识别工作区不足');
+    expect(registry.size).toBe(1); expect(registry.isKnownToken(1, kept)).toBe(true);
+    const bounded = ingestPastedMaterials('./missing.png', registry, { workspaceRoot: root, maxWorkspaceBytes: 12 * 1024 });
+    expect(bounded.kind).toBe('ingested');
+    if (bounded.kind === 'ingested') { expect(bounded.insertText).toBe('./missing.png'); expect(bounded.diagnostics).toHaveLength(1); }
+  });
+
   it("把粘贴的图片路径转换为图片 chip", async () => {
     const root = await makeTempDir();
     const imagePath = path.join(root, "shot.png");

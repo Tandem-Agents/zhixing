@@ -84,7 +84,7 @@ export class PasteRegistry {
   format(id: number): string {
     const entry = this.byId.get(id);
     if (!entry) return `[Pasted #${id} +0 lines · 0B]`;
-    return `[Pasted #${entry.id} +${entry.lineCount} lines · ${formatByteSize(entry.byteSize)}]`;
+    return formatPasteToken(entry);
   }
 
   /**
@@ -112,6 +112,11 @@ export class PasteRegistry {
   get size(): number {
     return this.byId.size;
   }
+}
+
+/** The cold terminal registry shares the same visible handle contract. */
+export function formatPasteToken(entry: Pick<PasteEntry, 'id' | 'lineCount' | 'byteSize'>): string {
+  return `[Pasted #${entry.id} +${entry.lineCount} lines · ${formatByteSize(entry.byteSize)}]`;
 }
 
 /**
