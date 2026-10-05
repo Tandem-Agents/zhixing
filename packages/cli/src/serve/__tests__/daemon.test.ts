@@ -17,7 +17,8 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawnDaemon } from "../daemon.js";
-import type { LogDraft, LogRecordPort } from "@zhixing/core/logging";
+import { DEFAULT_LOG_POLICY, LogRecorder, type LogCapture, type LogDraft, type LogRecordPort, type LogSink, type LogStatus } from "@zhixing/core/logging";
+import { RUNTIME_LOG_SOURCE } from "../../logging/runtime-source.js";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
 const baseEnv = { HOME: "/h", PATH: "/bin" };
@@ -65,6 +66,59 @@ function mkFakeClock() {
 // 前提：测试进程的 process.argv[1] 是有效的 .js（vitest 跑的话确实是）。
 
 describe("spawnDaemon", () => {
+  const recordingRuntime = () => {
+    const stored: LogCapture[] = [];
+    const status = (): LogStatus => ({ layout: "zxlog/1", storeId: "synthetic-daemon-exit",
+      policy: { version: 1, effective: DEFAULT_LOG_POLICY }, bytes: 0, files: 0, retainedSegments: 0,
+      pendingReclaims: 0, overdue: false, upper: 0 });
+    const sink: LogSink = { initialize: async () => status(), maintain: async () => status(), close: async () => {},
+      append: async records => { stored.push(...structuredClone(records)); return status(); } };
+    const recorder = new LogRecorder(sink);
+    return { stored, recorder, records: recorder.bind(RUNTIME_LOG_SOURCE, { scope: "storage" }) };
+  };
+
+  it.each([
+    { code: 0, signal: null, mode: "on-demand", event: "childExited", result: "failure", data: { pid: 99999, exitCode: 0 } },
+    { code: 19, signal: null, mode: "on-demand", event: "childExited", result: "failure", data: { pid: 99999, exitCode: 19 } },
+    { code: null, signal: "SIGTERM", mode: "on-demand", event: "childExited", result: "failure", data: { pid: 99999, signal: "SIGTERM" } },
+    { code: 0, signal: null, mode: "managed", event: "coordinatorExited", result: "success", data: { pid: 99999, exitCode: 0, launchMode: "managed" } },
+  ] as const)("captures real exit fields through the strict recorder ($mode/$code/$signal)", async sample => {
+    const { stored, recorder, records } = recordingRuntime();
+    const clock = mkFakeClock(), child = Object.assign(new EventEmitter(), { pid: 99999, unref() {} });
+    try {
+      await spawnDaemon({ records, automatic: true, forwardedArgs: ["serve"], deadlineAt: 10000, reportFailure: false,
+        deps: makeDeps({ clock, spawnFn: () => child as any,
+          readLockFn: async () => clock() >= 4000 ? { pid: 55555, port: 23456 } as any : null,
+          isProcessAliveFn: () => true, httpGetFn: async () => 200,
+          sleep: async ms => {
+            clock.advance(ms);
+            if (clock() === 200) { child.emit("message", { type: "host-launch-plan", mode: sample.mode }); child.emit("exit", sample.code, sample.signal); }
+          },
+        }) });
+      await recorder.flush();
+      const exits = stored.filter(value => value.record.event === sample.event);
+      expect(exits).toHaveLength(1);
+      expect(exits[0]!.record).toMatchObject({ result: sample.result, data: sample.data });
+      expect(exits[0]!.record.data).toEqual(sample.data);
+      expect(exits[0]!.record.refs).toEqual(stored.find(value => value.record.event === "hostSpawnRequested")!.record.refs);
+      expect(recorder.health().captureFailures).toBe(0);
+      expect(stored.some(value => value.record.event === "degraded")).toBe(false);
+    } finally { await recorder.close(); }
+  });
+
+  it("keeps rejecting null exit scalars in the actual runtime schema", async () => {
+    const { stored, recorder, records } = recordingRuntime();
+    try {
+      records.record({ event: "childExited", data: { pid: 99999, exitCode: 0, signal: null } });
+      records.record({ event: "childExited", data: { pid: 99999, exitCode: null, signal: "SIGTERM" } });
+      await recorder.flush();
+      expect(recorder.health().captureFailures).toBe(2);
+      expect(stored.some(value => value.record.event === "childExited")).toBe(false);
+      expect(stored).toContainEqual(expect.objectContaining({ record: expect.objectContaining({ event: "degraded",
+        data: expect.objectContaining({ reason: "capture-failed", captureFailures: 2 }) }) }));
+    } finally { await recorder.close(); }
+  });
+
   it.each([false, true])("retains spawn failure evidence without pretending a child started (sync=%s)", async synchronous => {
     const entries: LogDraft[] = [];
     const child = Object.assign(new EventEmitter(), { pid: undefined, unref() {} });

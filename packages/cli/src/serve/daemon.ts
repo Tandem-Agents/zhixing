@@ -153,7 +153,11 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
     childExit = { code, signal };
     const coordinated = code === 0 && (launchMode === "managed" || launchMode === "none");
-    record({ event: coordinated ? "coordinatorExited" : "childExited", result: coordinated ? "success" : "failure", data: { pid: child.pid, exitCode: code, signal, launchMode } });
+    // ChildProcess reports the inapplicable exit field as null. The strict
+    // log schema omits absent fields, while preserving code 0 and real signals.
+    record({ event: coordinated ? "coordinatorExited" : "childExited", result: coordinated ? "success" : "failure", data: {
+      pid: child.pid, ...(code === null ? {} : { exitCode: code }), ...(signal === null ? {} : { signal }), launchMode,
+    } });
   };
   const onError = (error: Error) => {
     childExit = { code: null, signal: null };
