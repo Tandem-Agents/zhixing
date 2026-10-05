@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
-import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, TERMINAL_PROTOCOL } from '@zhixing/terminal-ui/protocol';
 
 describe('terminal independent control capacity', () => {
   it('keeps control and the reserved exit reachable when the body window is full', async () => {
@@ -33,5 +33,21 @@ describe('terminal independent control capacity', () => {
     await expect(channel.send({ type: 'view', view: { generation: 1, kind: 'confirmation', title: 'synthetic', message: 'x'.repeat(TERMINAL_LIMITS.frameBytes) } })).rejects.toThrow('frame-too-large');
     expect(failure).toHaveBeenCalledExactlyOnceWith('terminal-control-frame-too-large');
     expect(sent).not.toHaveBeenCalled();
+  });
+
+  it('closes receive admission in the same handoff as the last completed ACK', async () => {
+    let finishAck!: () => void;
+    const receive = vi.fn(), failure = vi.fn();
+    const channel = new TerminalChannel('synthetic', (_packet, done) => { finishAck = () => done(); }, receive, failure);
+    const packet = { protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 1, traffic: 'control' as const, payload: { type: 'hello' as const, role: 'ui' as const } };
+    channel.accept(packet);
+    const closing = channel.closeAfterReceived();
+    for (let index = 0; index < 4; index++) await Promise.resolve();
+    finishAck();
+    await closing;
+    channel.accept({ ...packet, sequence: 2 });
+    await Promise.resolve();
+    expect(receive).toHaveBeenCalledOnce(); expect(failure).not.toHaveBeenCalled();
+    await expect(channel.send({ type: 'exit', code: 0, reason: 'user-exit' })).rejects.toThrow('channel-closed');
   });
 });

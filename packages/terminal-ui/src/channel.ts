@@ -11,9 +11,11 @@ export class TerminalChannel {
   #sequence = 0;
   #received = 0;
   #closed = false;
+  #failure?: Error;
   #body = 0;
   #control = 0;
   #receiving = 0;
+  readonly #receivedWork = new Set<Promise<void>>();
 
   constructor(
     readonly instance: string,
@@ -23,6 +25,17 @@ export class TerminalChannel {
   ) {}
 
   get bodyAvailable(): boolean { return !this.#closed && this.#body < TERMINAL_LIMITS.bodyFrames; }
+
+  /** Retain every accepted ACK write, including arrivals during the drain.
+   * The empty check and close share one synchronous handoff: no new receive
+   * can slip between a completed drain and the caller releasing transport. */
+  async closeAfterReceived(): Promise<void> {
+    for (;;) {
+      if (this.#failure) throw this.#failure;
+      if (!this.#receivedWork.size) { this.close(); return; }
+      await Promise.all([...this.#receivedWork]);
+    }
+  }
 
   send(payload: TerminalMessage, traffic: TerminalTraffic = 'control'): Promise<void> {
     if (this.#closed) return Promise.reject(Error('terminal-channel-closed'));
@@ -68,13 +81,19 @@ export class TerminalChannel {
     }
     // A forwarder acknowledges only after its next hop acknowledges, keeping
     // the two-hop body window at eight retained batches, not eight per hop.
-    Promise.resolve().then(() => this.receiveMessage(message, value.traffic)).then(() => {
-      this.#receiving--;
-      if (this.#closed) return;
+    const work = Promise.resolve().then(() => this.receiveMessage(message, value.traffic)).then(() => {
+      if (this.#closed) throw Error('terminal-channel-closed');
       const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence: ++this.#sequence, traffic: 'control', payload: { type: 'ack', sequence: value.sequence } };
-      try { this.sender(packet, error => { if (error) this.#fail('terminal-ack-failed'); }); }
-      catch { this.#fail('terminal-ack-failed'); }
-    }, () => this.#fail('terminal-receive-failed'));
+      return new Promise<void>((resolve, reject) => {
+        try { this.sender(packet, error => {
+          if (error) { this.#fail('terminal-ack-failed'); reject(error); } else resolve();
+        }); }
+        catch (error) { this.#fail('terminal-ack-failed'); reject(error); }
+      });
+    }, error => { this.#fail('terminal-receive-failed'); throw error; })
+      .finally(() => { this.#receiving--; this.#receivedWork.delete(work); });
+    this.#receivedWork.add(work);
+    void work.catch(() => {});
   }
 
   close(reason = 'terminal-channel-closed'): void {
@@ -86,6 +105,7 @@ export class TerminalChannel {
 
   #fail(reason: string): void {
     if (this.#closed) return;
+    this.#failure = Error(reason);
     this.close(reason);
     this.failure(reason);
   }

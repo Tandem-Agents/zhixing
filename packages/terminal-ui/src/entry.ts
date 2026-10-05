@@ -61,7 +61,7 @@ function receive(message: TerminalMessage): void {
           // query reader relinquishes stdin. Keep that dependency at this edge.
           inputReady: renderer => input.handoff(renderer as unknown as { setupInput(): void }),
           exit: () => close('user-exit', 0) });
-        if (abort.signal.aborted) { root.dispose(); return; }
+        if (abort.signal.aborted) { await root.dispose(); return; }
         phase = 'active';
         await channel.send({ type: 'ready', frameId: root.firstFrameId });
         admitRequests();
@@ -90,14 +90,18 @@ function close(reason: string, code: number, notify = true): Promise<void> {
   for (const operation of pending.values()) { clearTimeout(operation.timer); operation.reject(Error('terminal-closed')); }
   pending.clear();
   void (async () => {
-    if (notify && transport.connected) void channel.send({ type: 'exit', code, reason }).catch(() => {});
+    const notified = notify && transport.connected ? channel.send({ type: 'exit', code, reason }) : undefined;
+    void notified?.catch(() => {});
     await initializing?.catch(() => {});
-    root?.dispose(); root = undefined;
+    await root?.dispose(); root = undefined;
     process.stdin.pause(); process.stdin.unref?.();
-    channel.close();
+    // S must retain our exit, and our accepted close must finish its ACK write,
+    // before the UI releases the same transport. S's deadline still bounds U.
+    await notified;
+    await channel.closeAfterReceived();
     transport.close();
     process.exitCode = code;
-  })().catch(() => { process.exitCode = 71; transport.close(); }).finally(resolveClosing);
+  })().catch(() => { process.exitCode = 71; channel.close(); transport.close(); }).finally(resolveClosing);
   return closing;
 }
 

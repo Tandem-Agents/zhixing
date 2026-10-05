@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createReadOnlyConversationStorage } from "../conversation-storage-infrastructure.js";
@@ -17,11 +17,21 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (previousHome === undefined) delete process.env.ZHIXING_HOME;
   else process.env.ZHIXING_HOME = previousHome;
 });
 
 describe("conversation storage infrastructure", () => {
+  it.each(['ENOENT', 'EACCES'])('classifies a read-only history directory failure without pretending unreadable data is absent (%s)', async code => {
+    const root = await createTempDir('readonly-history-error');
+    const failure = Object.assign(new Error('synthetic directory failure'), { code });
+    vi.spyOn(fs, 'readdir').mockRejectedValueOnce(failure);
+    const read = createReadOnlyConversationStorage(root).list();
+    if (code === 'ENOENT') expect(await read).toEqual([]);
+    else await expect(read).rejects.toBe(failure);
+  });
+
   it("keeps metadata, content, lazy scenes, naming and maintenance on the explicit home", async () => {
     const root = await createTempDir("storage-owner-root");
     const other = await createTempDir("storage-other-root");

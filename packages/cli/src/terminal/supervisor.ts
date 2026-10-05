@@ -24,6 +24,7 @@ interface OwnedProcess {
   readonly exit: Promise<void>; readonly drained: Promise<void>;
   readonly listening: Promise<void>; announceListening(): void; announced: boolean;
   created: boolean; exited: boolean; code: number | null; birth?: string;
+  exitRequested?: boolean;
   channel?: TerminalChannel;
 }
 interface NativeEvent {
@@ -449,7 +450,15 @@ class TerminalSupervisor {
                 await this.#assets!.bindWriter(writerIdentity, this.#abort.signal);
               },
               permit: identity => new Promise<void>((resolve, reject) => child.send({ type: 'permit', id, ...identity }, error => error ? reject(error) : resolve())),
-              ready: identity => { clearTimeout(creationTimer); send('created', undefined, identity); },
+              ready: identity => {
+                clearTimeout(creationTimer);
+                // Creation is now complete. N still needs this writer while
+                // draining its physical work and closing directory handles.
+                // Its control lane, owner exit and the shared close deadline
+                // retain termination duty after creation cancellation ends.
+                this.#abort.signal.removeEventListener('abort', cancel);
+                send('created', undefined, identity);
+              },
               stop: () => child.kill('SIGKILL'),
             });
             child.on('message', value => writerAdmission!.accept(value));
@@ -605,7 +614,13 @@ class TerminalSupervisor {
   }
 
   async #roleMessage(item: OwnedProcess, message: TerminalMessage, traffic: TerminalTraffic): Promise<void> {
-    if (message.type === 'exit') { void this.#close(message.code, message.reason); return; }
+    if (message.type === 'exit') {
+      // This owner has already begun closing. Acknowledge its exit request on
+      // the existing channel; do not send a second close across its shutdown.
+      // The request is not an actual-exit receipt or permission to release it.
+      item.exitRequested = true;
+      void this.#close(message.code, message.reason); return;
+    }
     if (this.#sealed) return;
     if (message.type === 'hello') {
       if (message.role !== item.role || item.announced) throw Error('terminal-listener-handshake');
@@ -652,6 +667,10 @@ class TerminalSupervisor {
     }
     if (item.role === 'ui' && message.type === 'request' && this.#uiReady) {
       await this.#applicationAdmitted;
+      // Admission can finish after a concurrent exit sealed this surface.
+      // No domain request has been sent yet; end this forwarding receipt
+      // without turning ordinary close cancellation into a channel failure.
+      if (this.#sealed) return;
       this.#live();
       await this.#application!.channel!.send(message, traffic); return;
     }
@@ -817,7 +836,7 @@ class TerminalSupervisor {
     // Failure cannot authorize R while an old writer remains unproved.
     this.#deadlineTimer = setTimeout(() => process.exit(this.#result || 75), Math.max(0, this.#deadline - Date.now()));
     void (async () => {
-      for (const item of [this.#application, this.#ui]) if (item && !item.exited) void item.channel?.send({ type: 'close', deadline: this.#deadline }).catch(() => {});
+      for (const item of [this.#application, this.#ui]) if (item && !item.exited && !item.exitRequested) void item.channel?.send({ type: 'close', deadline: this.#deadline }).catch(() => {});
       this.#loggingDrain = this.options.drain?.(terminalWriterDeadline(this.#deadline), this.#result) ?? Promise.resolve();
       void this.#loggingDrain.catch(() => {});
       const writers = this.#owned.filter(item => item.role !== 'recovery');

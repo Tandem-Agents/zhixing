@@ -86,7 +86,7 @@ class TerminalApplication {
   readonly #conversation: RpcConversationFacade;
   readonly #workscene: RpcWorksceneFacade;
   readonly #management: RpcManagementFacade;
-  readonly #localView: ReplLocalView;
+  #resolvedLocalView?: ReplLocalView;
   readonly #assets: TerminalAssetClient;
   readonly #display: TerminalDisplayStore;
   readonly #inputs: TerminalInputStore;
@@ -123,8 +123,13 @@ class TerminalApplication {
   #hello = false;
   #started = false;
   #operation?: Promise<void>;
+  #historyRead?: Promise<void>;
+  #nextHistoryRead = false;
+  #readOnlyNeedsReset = false;
+  #historySelection = false;
   #lastRequest = 0;
   #mainView: View = { kind: 'conversation', title: '知行', message: '', connected: false };
+  #historyReturn?: View;
   #publishing?: Promise<void>;
   #nextView?: View;
 
@@ -167,14 +172,25 @@ class TerminalApplication {
     });
     this.#workscene = new RpcWorksceneFacade(this.#connection);
     this.#management = new RpcManagementFacade(this.#connection);
-    this.#localView = new ReplLocalView({ management: this.#management,
-      configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath: this.#configPath })) });
     this.#candidates = new TerminalCandidatesOwner(() => ({ sessionBusy: !!this.#state.activeTurnPromise, workspaceId: null,
-      cwd: this.#localView.workspaceRoot ?? process.cwd(), target: 'cli', features: { chrome: true }, now: Date.now() }));
+      cwd: this.#resolvedLocalView?.workspaceRoot ?? process.cwd(), target: 'cli', features: { chrome: true }, now: Date.now() }));
     this.#assets = new TerminalAssetClient(this.#channel, this.#abort.signal);
     const createFilesystem = createTerminalOwnedProcessFactory('filesystem');
-    const filesystemSession = CheckpointDirectoryHandle.createSession(5000, (executable, args) =>
-      createFilesystem(executable, args ?? [], { signal: this.#abort.signal, deadline: Date.now() + 5000 }).child);
+    const filesystemSession = CheckpointDirectoryHandle.createSession(5000, (executable, args) => {
+      this.#abort.signal.throwIfAborted();
+      const creating = new AbortController();
+      const cancelCreation = () => creating.abort();
+      this.#abort.signal.addEventListener('abort', cancelCreation, { once: true });
+      try {
+        const owned = createFilesystem(executable, args ?? [], { signal: creating.signal, deadline: Date.now() + 5000 });
+        // Business cancellation seals new work. An established file owner must
+        // remain alive for ManagedFiles/session cleanup under the close deadline.
+        void owned.ready.finally(() => this.#abort.signal.removeEventListener('abort', cancelCreation)).catch(() => {});
+        return owned.child;
+      } catch (error) {
+        this.#abort.signal.removeEventListener('abort', cancelCreation); throw error;
+      }
+    });
     this.#files = new TerminalManagedFiles(directory, directoryIdentity, filesystemSession,
       () => void this.#close(74, 'terminal-filesystem-unconfirmed'));
     this.#display = new TerminalDisplayStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
@@ -205,6 +221,13 @@ class TerminalApplication {
         choices: [{ id: 'retry', label: '重试连接' }, { id: 'config', label: '本机配置' }, { id: 'exit', label: '退出终端' }] };
       if (!this.#editor && !this.#operation) void this.#publish(this.#mainView).catch(() => this.#close(70, 'view-undelivered'));
     });
+  }
+
+  // A malformed local configuration is a recoverable startup result. Do not
+  // read it while constructing the surface, before its IPC/lifecycle exists.
+  get #localView(): ReplLocalView {
+    return this.#resolvedLocalView ??= new ReplLocalView({ management: this.#management,
+      configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath: this.#configPath })) });
   }
 
   async run(): Promise<void> {
@@ -264,7 +287,7 @@ class TerminalApplication {
       case 'startup':
         if (this.#started) throw Error('terminal-startup-already-requested');
         this.#started = true; this.#background(() => this.#startup()); return { accepted: true };
-      case 'retry-connection': this.#background(() => this.#startup()); return { accepted: true };
+      case 'retry-connection': this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
       case 'exit': void this.#close(0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
         if (!this.#editor) throw Error('terminal-editor-not-open');
@@ -292,8 +315,15 @@ class TerminalApplication {
         await this.#displayPage(); return { accepted: true };
       case 'history-previous':
         this.#displayStart = this.#display.first - 4;
-        this.#background(() => this.#historyPage()); return { accepted: true };
+        if (this.#history?.offline) this.#loadOfflineHistory(); else this.#background(() => this.#historyPage());
+        return { accepted: true };
       case 'history-open': this.#background(() => this.#readOnly()); return { accepted: true };
+      case 'history-close':
+        this.#leaveHistoryRead();
+        if (this.#mainView.kind === 'history' && this.#historyReturn) {
+          this.#mainView = this.#historyReturn; await this.#publish(this.#mainView);
+        }
+        return { accepted: true };
       case 'rubric-resume': this.#background(() => this.#resolveRubric()); return { accepted: true };
       case 'confirmation-retry':
         this.#confirmationBlocked = false; await this.#confirmations.refresh(); this.#drainConfirmations(); return { accepted: true };
@@ -394,6 +424,11 @@ class TerminalApplication {
         }),
       }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) });
       this.#abort.signal.throwIfAborted();
+      if (this.#history?.offline) {
+        this.#history = undefined;
+        await this.#outputProjection.drain();
+        await this.#display.reset(); this.#displayStart = undefined;
+      }
       this.#controller = new ConversationController({ conversation: this.#conversation, workscene: this.#workscene,
         onYield: (event, source) => this.#output(event, source),
         pagedRecovery: true,
@@ -441,6 +476,7 @@ class TerminalApplication {
       if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
     }
     this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined };
+    this.#historyReturn = undefined;
     await this.#publish(this.#mainView);
     if (this.#pendingRubric || this.#deferredRubric) await this.#resolveRubric();
     await this.#confirmations.refresh();
@@ -478,35 +514,80 @@ class TerminalApplication {
   }
 
   async #readOnly(): Promise<void> {
-    const storage = createReadOnlyConversationStorage(this.home);
-    let offset = 0;
-    for (;;) {
-      // Retain only the visible menu during user waiting. Re-query the read-only
-      // authority for another page instead of accumulating all list metadata.
-      const entries = (await storage.list()).slice(offset, offset + 25);
-      this.#abort.signal.throwIfAborted();
-      if (!entries.length && offset === 0) { await this.#publish({ ...this.#mainView, message: '本机还没有可查看的对话历史。' }); return; }
-      const choices = entries.slice(0, 24).map(entry => ({ id: entry.conversationId, label: entry.name }));
-      if (offset) choices.push({ id: 'previous', label: '上一页' });
-      if (entries.length > 24) choices.push({ id: 'next', label: '下一页' });
-      choices.push({ id: 'cancel', label: '返回' });
-      const selected = await this.#choose({ kind: 'selection', title: '本机历史 · 只读', message: '只读取已保存内容，不会启动或重发任务。', choices });
-      if (!selected || selected === 'cancel') { await this.#publish(this.#mainView); return; }
-      if (selected === 'next' || selected === 'previous') { offset += selected === 'next' ? 24 : -24; continue; }
-      const entry = entries.find(value => value.conversationId === selected)!;
-      if (this.#history?.conversationId !== selected && this.#display.first !== this.#display.last) {
+    this.#historySelection = true;
+    try {
+      if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
+      const storage = createReadOnlyConversationStorage(this.home);
+      let offset = 0;
+      for (;;) {
+        // Retain only the visible menu during user waiting. Re-query the read-only
+        // authority for another page instead of accumulating all list metadata.
+        const entries = (await storage.list()).slice(offset, offset + 25);
+        this.#abort.signal.throwIfAborted();
+        if (!entries.length && offset === 0) { this.#mainView = { ...this.#mainView, message: '本机还没有可查看的对话历史。' }; return; }
+        const choices = entries.slice(0, 24).map(entry => ({ id: entry.conversationId, label: entry.name }));
+        if (offset) choices.push({ id: 'previous', label: '上一页' });
+        if (entries.length > 24) choices.push({ id: 'next', label: '下一页' });
+        choices.push({ id: 'cancel', label: '返回' });
+        const selected = await this.#choose({ kind: 'selection', title: '本机历史 · 只读', message: '只读取已保存内容，不会启动或重发任务。', choices });
+        if (!selected || selected === 'cancel') return;
+        if (selected === 'next' || selected === 'previous') { offset += selected === 'next' ? 24 : -24; continue; }
+        const entry = entries.find(value => value.conversationId === selected)!;
+        const continuing = !this.#readOnlyNeedsReset && this.#mainView.kind === 'history' && this.#history?.offline && this.#history.conversationId === selected;
+        if (continuing) { await this.#displayPage(); return; }
+        this.#nextHistoryRead = false;
+        this.#history = { conversationId: selected, hasMore: true, offline: true };
+        // A committed-empty display may still own an in-flight first append.
+        // Replacing history always waits for that write before resetting it.
+        await this.#outputProjection.drain();
         await this.#display.reset(); this.#displayStart = undefined;
+        this.#readOnlyNeedsReset = false;
+        this.#mainView = { kind: 'history', title: `${entry.name} · 只读`, connected: false, message: '正在读取本机历史…',
+          choices: [{ id: 'retry', label: '重试连接' }, { id: 'history-open', label: '选择其他历史' },
+            { id: 'history-close', label: '返回连接页 · Esc' }, { id: 'exit', label: '退出终端' }] };
+        if (this.#display.first === this.#display.last) this.#loadOfflineHistory(); else await this.#displayPage(); return;
       }
-      this.#history = this.#history?.conversationId === selected ? { ...this.#history, offline: true } : { conversationId: selected, hasMore: true, offline: true };
-      this.#mainView = { kind: 'conversation', title: `${entry.name} · 只读`, connected: false, message: '正在读取本机历史…' };
-      await this.#publish(this.#mainView);
-      if (this.#display.first === this.#display.last) await this.#historyPage(); else await this.#displayPage(); return;
+    } finally { this.#historySelection = false; await this.#publishHistoryView(); }
+  }
+
+  #publishHistoryView(): Promise<void> {
+    return this.#historySelection || this.#abort.signal.aborted ? Promise.resolve() : this.#publish(this.#mainView);
+  }
+
+  #leaveHistoryRead(): void {
+    this.#nextHistoryRead = false;
+    if (this.#history?.offline) {
+      // Invalidate the consumer immediately. The one physical read still owns
+      // its lifetime; a newer navigation never spawns another concurrent read.
+      this.#history = { conversationId: this.#history.conversationId, hasMore: true, offline: true };
+      this.#readOnlyNeedsReset = true;
     }
+  }
+
+  #loadOfflineHistory(): void {
+    if (this.#abort.signal.aborted || !this.#history?.offline) return;
+    if (this.#historyRead) { this.#nextHistoryRead = true; return; }
+    const history = this.#history;
+    const work = this.#historyPage().catch(async error => {
+      if (this.#abort.signal.aborted || this.#history !== history) return;
+      recordRuntimeFailure(this.#logging.records, error, 'terminal-history-read-failed');
+      this.#mainView = { ...this.#mainView, busy: false, message: '本机历史暂时无法读取。可返回连接页、重试或选择其他历史。' };
+      await this.#publishHistoryView();
+    }).finally(() => {
+      if (this.#historyRead === work) this.#historyRead = undefined;
+      const next = this.#nextHistoryRead; this.#nextHistoryRead = false;
+      if (next && this.#mainView.kind === 'history') this.#loadOfflineHistory();
+    });
+    this.#historyRead = work;
+    void work.catch(() => this.#close(70, 'terminal-history-read-undelivered'));
   }
 
   async #historyPage(): Promise<void> {
     const history = this.#history;
-    if (!history || !history.hasMore) { await this.#publish({ ...this.#mainView, message: '已到达最早的可用历史。' }); return; }
+    if (!history || !history.hasMore) {
+      this.#mainView = { ...this.#mainView, message: '已到达最早的可用历史。' };
+      await this.#publishHistoryView(); return;
+    }
     const options = { limit: 4, before: history.before };
     const consume = async (page: Pick<Awaited<ReturnType<RpcConversationFacade['history']>>, 'runs' | 'hasMore'>) => {
       this.#abort.signal.throwIfAborted();
@@ -530,7 +611,8 @@ class TerminalApplication {
       this.#mainView = { ...this.#mainView, message: page.runs.length
         ? 'PageUp / PageDown 回看，翻到顶部读取更早历史 · Ctrl+End 回到最新内容'
         : '还没有已保存的对话内容。', busy: false };
-      await this.#displayPage(); await this.#publish(this.#mainView);
+      await this.#displayPage();
+      await this.#publishHistoryView();
     };
     if (history.offline) await consume(await createReadOnlyConversationStorage(this.home).readHistory(history.conversationId, options));
     else await this.#conversation.consumeHistory(history.conversationId, options, consume);
@@ -544,7 +626,7 @@ class TerminalApplication {
 
   async #displayGap(): Promise<void> {
     this.#displayUnavailable = true;
-    await this.#publish(this.#mainView);
+    await this.#publishHistoryView();
   }
 
   async #collectInputs(): Promise<readonly string[]> {
@@ -963,11 +1045,13 @@ class TerminalApplication {
       // A failed control lane cannot report its own exit. Closing the existing
       // transport immediately lets S start its shared finite recovery deadline
       // while this owner still attempts ordinary cleanup.
-      if (notify && this.transport.connected) void this.#channel.send({ type: 'exit', code, reason }).catch(() => this.transport.close());
+      const notified = notify && this.transport.connected ? this.#channel.send({ type: 'exit', code, reason }) : undefined;
+      void notified?.catch(() => this.transport.close());
       this.#controller?.dispose();
       this.#confirmations.dispose(); this.#pendingConfirmations.clear();
       await this.#connection.dispose();
       await this.#operation?.catch(() => {});
+      await this.#historyRead?.catch(() => {});
       await this.#outputProjection.close();
       await this.#display.close();
       await this.#inputHistoryReader.close();
@@ -975,12 +1059,14 @@ class TerminalApplication {
       await this.#files.close(terminalWriterDeadline(this.#closeDeadline));
       await this.#logging.finish(code === 0 ? 'success' : 'failure', reason,
         Math.max(0, terminalWriterDeadline(this.#closeDeadline) - Date.now() - TERMINAL_LOG_EXIT_RESERVE_MS));
-      this.#channel.close(); this.transport.removeListener('message', this.#message);
+      await notified;
+      await this.#channel.closeAfterReceived();
+      this.transport.removeListener('message', this.#message);
       this.transport.removeListener('disconnect', this.#disconnected); process.removeListener('SIGINT', this.#interrupted); process.removeListener('SIGTERM', this.#interrupted);
       process.removeListener('uncaughtException', this.#uncaught); process.removeListener('unhandledRejection', this.#uncaught);
       this.transport.close();
       process.exitCode = code;
-    })().catch(() => { process.exitCode = 71; this.transport.close(); }).finally(() => { resolveClosing(); this.#resolve(); });
+    })().catch(() => { process.exitCode = 71; this.#channel.close(); this.transport.close(); }).finally(() => { resolveClosing(); this.#resolve(); });
     return this.#closing;
   }
 }

@@ -58,7 +58,7 @@ export type TerminalMessage =
 
 /** Finite user intents; neither arbitrary RPC methods nor filesystem paths. */
 export type TerminalAction =
-  | { readonly kind: "startup" | "retry-connection" | "history-open" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
+  | { readonly kind: "startup" | "retry-connection" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean }
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
@@ -118,7 +118,7 @@ export interface TerminalDisplayPage {
 }
 export interface TerminalView {
   readonly generation: number;
-  readonly kind: "conversation" | "configuration" | "selection" | "confirmation" | "unavailable";
+  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable";
   readonly title: string;
   readonly message?: string;
   readonly displayGap?: boolean;

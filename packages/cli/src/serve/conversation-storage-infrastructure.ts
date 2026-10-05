@@ -203,8 +203,9 @@ export function createReadOnlyConversationStorage(zhixingHome: string): Pick<
       let entries: string[];
       try {
         entries = await fs.readdir(root);
-      } catch {
-        return [];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
       }
       const conversations: Conversation[] = [];
       for (const entry of entries) {

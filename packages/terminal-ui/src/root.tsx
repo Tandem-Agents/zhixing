@@ -97,7 +97,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const displayText = (value: string) => value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu,
     char => String.fromCharCode(char.charCodeAt(0) === 127 ? 0x2421 : 0x2400 + char.charCodeAt(0)));
   const pageHistory = async (direction: -1 | 1) => {
-    if (paging || view().kind !== 'conversation' || !historyBox) return;
+    if (paging || !['conversation', 'history'].includes(view().kind) || !historyBox) return;
     const page = display();
     const atEdge = direction < 0 ? historyBox.scrollTop <= 0 : historyBox.scrollTop + historyBox.viewport.height >= historyBox.scrollHeight;
     if (!atEdge) { historyBox.scrollBy(direction * Math.max(1, historyBox.viewport.height - 2)); return; }
@@ -144,7 +144,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: choice.id });
       else if (choice.id === 'retry') await action({ kind: 'retry-connection' });
       else if (choice.id === 'exit') await options.exit();
-      else if (choice.id === 'history-open' || choice.id === 'rubric-resume' || choice.id === 'confirmation-retry') await action({ kind: choice.id });
+      else if (choice.id === 'history-open' || choice.id === 'history-close' || choice.id === 'rubric-resume' || choice.id === 'confirmation-retry') await action({ kind: choice.id });
       else await action({ kind: 'command', name: choice.id, argument: '' });
       return;
     }
@@ -171,7 +171,8 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   };
   const cancelPage = async () => {
     const current = view(); releaseSecret();
-    if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
+    if (current.kind === 'history') await action({ kind: 'history-close' });
+    else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
     else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'reject' });
     else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true });
   };
@@ -182,9 +183,9 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       <text fg={teal}>▌●●▐    {view().connected === false ? '离线 · 本机配置与历史仍可用' : '知行 · 伴你行动'}</text>
       <text fg={teal}> ▀▀</text>
     </box>
-    <scrollbox ref={value => { historyBox = value; }} flexGrow={1} backgroundColor="#202626" stickyScroll={view().kind === 'conversation' && display().follow} stickyStart="bottom"
+    <scrollbox ref={value => { historyBox = value; }} flexGrow={1} backgroundColor="#202626" stickyScroll={['conversation', 'history'].includes(view().kind) && display().follow} stickyStart="bottom"
       onMouseScroll={event => {
-        if (view().kind !== 'conversation') return;
+        if (!['conversation', 'history'].includes(view().kind)) return;
         const direction = event.scroll?.direction;
         if (direction === 'up' && display().follow) {
           setDisplay({ ...display(), follow: false });
@@ -193,14 +194,14 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         if (direction === 'up' && historyBox?.scrollTop === 0) void pageHistory(-1);
         else if (direction === 'down' && historyBox && historyBox.scrollTop + historyBox.viewport.height >= historyBox.scrollHeight) void pageHistory(1);
       }}>
-      <Show when={view().kind === 'conversation'}><For each={display().segments}>{segment => <box flexDirection="column">
+      <Show when={['conversation', 'history'].includes(view().kind)}><For each={display().segments}>{segment => <box flexDirection="column">
         <Show when={segment.contentOffset === 0}><text fg={segment.role === 'user' ? '#a7b6db' : teal}>◆ {segment.role === 'user' ? '你' : segment.role === 'assistant' ? '知行' : segment.role}</text></Show>
         <text selectable>{displayText(segment.text)}</text>
       </box>}</For></Show>
       <text selectable>{displayText(view().message ?? '')}</text>
       <Show when={view().choices?.[selected()]?.detail}><text fg="#9aa8a1">{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
     </scrollbox>
-    <Show when={view().kind === 'conversation' && view().displayGap}>
+    <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
       <text fg="#e7ba70">正文保留已暂停，后续内容存在缺口。草稿保留；可处理确认、中止工作或退出后重试。</text>
     </Show>
     <box flexDirection="column" flexShrink={0}>
@@ -273,7 +274,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     if (event.ctrl && event.name === 'c') {
       consume();
       if (view().kind === 'confirmation') { void action({ kind: 'confirmation', requestId: view().requestId!, action: 'cancelled' }); return; }
-      if (view().kind === 'unavailable' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
+      if (view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
       if (view().editId) { releaseSecret(); void action({ kind: 'configuration-action', editId: view().editId!, action: 'cancel' }); ctrlC = 0; return; }
       if (view().kind !== 'conversation') { void cancelPage(); ctrlC = 0; return; }
       const now = performance.now();
@@ -313,11 +314,11 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     if (event.name === 'pageup' || event.name === 'pagedown') {
       consume();
       const direction = event.name === 'pageup' ? -1 : 1;
-      if (view().kind === 'conversation') void pageHistory(direction);
+      if (['conversation', 'history'].includes(view().kind)) void pageHistory(direction);
       else if (historyBox) historyBox.scrollBy(direction * Math.max(1, historyBox.viewport.height - 2));
       return;
     }
-    if (view().kind === 'conversation' && event.ctrl && event.name === 'end') {
+    if (['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'end') {
       consume(); alignPage = 'bottom'; void action({ kind: 'display-page', follow: true }); return;
     }
     if (event.name === 'return' && !event.shift) { consume(); void submit(); return; }
@@ -376,8 +377,8 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           preserveDraft(); releaseSecret(); setSelected(0); setStatus(''); setView(message.view);
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');
-          if (message.view.kind !== 'conversation') renderer.once('frame', () => {
-            if (!disposed && historyBox) historyBox.scrollTo(0);
+          if (!['conversation', 'history'].includes(message.view.kind)) renderer.once('frame', () => {
+            if (!disposed && historyBox && !historyBox.isDestroyed) historyBox.scrollTo(0);
           });
         } else if (message.type === 'submission') {
           preserveDraft();
