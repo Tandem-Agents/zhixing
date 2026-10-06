@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { collectArtifactRefs } from "@zhixing/core/authority";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
@@ -84,6 +85,17 @@ export class GlobalMutationCommitCoordinator {
       SCHEDULE_AUTHORITY_PROJECTION_ID,
       ...this.#participants.map((participant) => participant.stagedProjectionId),
     ].sort((left, right) => left.localeCompare(right, "en-US"));
+  }
+
+  async collectStagedReferences(records: readonly GlobalMutationCommitRecord[]) {
+    const references = [];
+    for (const participant of this.#participants) {
+      const owned = records.filter((record) => participant.ownsStagedMutation(record.mutation));
+      if (owned.length && participant.collectStagedReferences) {
+        references.push(...await participant.collectStagedReferences(owned));
+      }
+    }
+    return collectArtifactRefs(references);
   }
 
   async prepare(input: {

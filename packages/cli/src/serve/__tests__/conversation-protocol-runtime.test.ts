@@ -31,6 +31,8 @@ import {
   protocolDigest,
 } from "@zhixing/core/protocol";
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
+import { SchedulerConversationMutationPublisher } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
 import {
   ConversationRunJournal,
   type ConversationMutationPublisher,
@@ -530,7 +532,7 @@ describe("ConversationProtocolRuntime", () => {
     }
   }, 30000);
 
-  it("loads the extension skill with the durable local assignment context", async () => {
+  it("commits a builtin skill load with no global mutations or bound mutation publisher", async () => {
     const home = await createTempDir("extension-skill-context");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
@@ -567,6 +569,50 @@ describe("ConversationProtocolRuntime", () => {
       expect(issuedAt).toBe(envelope.issuedAt);
       expect(issuedAt).not.toBe("2000-01-01T00:00:00.000Z");
     } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, 30000);
+
+  it("commits durable skill usage through the real Host publisher and replays the same submission once", async () => {
+    const home = await createTempDir("host-skill-usage");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
+    const context = () => ({ principal: { kind: "host" as const, component: "test" }, requestId: crypto.randomUUID(),
+      authority: { domain: "global" as const, anchorEpoch: authority.anchorEpoch }, deadlineAt: new Date(Date.now() + 30000).toISOString() });
+    const content = await authority.artifacts.put(Buffer.from("Host skill durable body"));
+    await authority.globalState!.mutate({ kind: "skill-create", mode: "main", record: { name: "host-usage", description: "Host usage fixture", content } }, context());
+    const coordinator = new GlobalMutationCommitCoordinator({ log: authority.authorityLog, artifacts: authority.artifacts,
+      participants: authority.globalMutationParticipants, refreshSchedule: async () => {}, scheduleDefinitionFor: () => undefined });
+    const publisher = new SchedulerConversationMutationPublisher({ anchorEpoch: authority.anchorEpoch, coordinator, sourceForAssignment: () => ({}) });
+    const skills = createAssignmentSkillPorts(authority.artifacts, { admissionLlm: async () => { throw Error("not needed"); } });
+    let loaded: string | undefined;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "host-usage",
+      async *run(messages, options) {
+        loaded = (await runContextStorage.run({ bus: createEventBus(), lineage: "main", assignmentMutations: options?.assignmentMutations,
+          globalQuery: options?.globalQuery, assignmentIssuedAt: options?.assignmentIssuedAt },
+        () => skills.loadApplication.load({ id: skillNameToId("host-usage"), operationId: "load-host-usage" }))).body;
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "loaded" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage }, newMessages: [assistant], durationMs: 1 };
+      }, abort: () => false, async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    const unbind = protocol.bindMutationPublisher(publisher);
+    const submit = vi.spyOn(ConversationRunJournal.prototype, "submitBundle");
+    manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, "host-usage");
+      expectSettled(await projectSessionTurn({ manager, managed, text: "load", turnId: "host-usage-turn", notify: () => {}, runOptions: { source: "interactive" } }));
+      expect(loaded).toBe("Host skill durable body");
+      const read = () => authority.globalState!.read({ kind: "skill-get", skillId: skillNameToId("host-usage") }, context());
+      expect(await read()).toMatchObject({ kind: "skill-get", entry: { contentRef: content, usage: { hitCount: 1 } } });
+      const [bundle, call] = submit.mock.calls.at(-1)!;
+      const before = (await authority.authorityLog.readAll()).length;
+      const first = await submit.mock.results.at(-1)!.value;
+      expect(await protocol.submissionMeshRole().submission.submitBundle(bundle, call)).toEqual(first);
+      expect((await authority.authorityLog.readAll()).length).toBe(before);
+      expect(await read()).toMatchObject({ kind: "skill-get", entry: { contentRef: content, usage: { hitCount: 1 } } });
+    } finally { submit.mockRestore(); unbind(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
   }, 30000);
 
   it.each(["preparing", "ready"] as const)("retains the original APP identity and return target for %s maintenance", async phase => {

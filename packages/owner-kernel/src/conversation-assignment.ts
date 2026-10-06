@@ -16,6 +16,7 @@ import {
 } from "@zhixing/core/advancement";
 import {
   AuthorityStorageError,
+  TransactionArtifactReferenceError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   resolveDispatchArtifactClosure,
@@ -488,6 +489,11 @@ export type ConversationGlobalMutationDecision = ReadonlyArray<{
 
 export interface ConversationMutationPublisher {
   readonly readProjectionIds?: readonly string[];
+  collectStagedReferences?(records: readonly {
+    readonly seq: number;
+    readonly requestId: string;
+    readonly mutation: GlobalStagedMutation;
+  }[]): Promise<readonly ArtifactRef[]>;
   decideGlobalBatchAtPrefix(input: {
     readonly assignmentId: string;
     readonly authorityPrefixLsn: number;
@@ -4655,6 +4661,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       this.#artifacts,
       guardIngress,
     );
+    const globalStagedRecords = (batch?.records ?? []).flatMap((record) =>
+        record.domain === "global" && record.mutation.kind !== "delivery-enqueue"
+          ? [{ seq: record.seq, requestId: record.requestId, mutation: record.mutation as GlobalStagedMutation }]
+          : []);
+    const stagedReferences = globalStagedRecords.length
+      ? await this.#publisher?.collectStagedReferences?.(globalStagedRecords) ?? []
+      : [];
 
     const transaction = await this.#transact<
         | { readonly committed: true; readonly commitRevision: number }
@@ -5069,9 +5082,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: { committed: true, commitRevision },
         };
         },
-        [...references, ...compiledDelivery.references],
+        [...references, ...compiledDelivery.references, ...stagedReferences],
         this.#publisher?.readProjectionIds ?? [],
       ).catch((error: unknown) => {
+        if (error instanceof TransactionArtifactReferenceError) {
+          return { value: rejected("missing-base", "Staged artifact dependencies changed; resubmit the bundle", true) };
+        }
         if (error instanceof AuthorityStorageError && error.code === "artifact-missing") {
           return undefined;
         }

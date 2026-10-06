@@ -367,6 +367,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       get readProjectionIds() {
         return runtime.#mutationPublisher?.readProjectionIds ?? [];
       },
+      collectStagedReferences: async (records) =>
+        await this.#requiredMutationPublisher().collectStagedReferences?.(records) ?? [],
       decideGlobalBatchAtPrefix: (input) =>
         this.#requiredMutationPublisher().decideGlobalBatchAtPrefix(input),
       prepareGlobalBatchAtPrefix: async (input) => {

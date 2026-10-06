@@ -1,5 +1,6 @@
 import type { DurableProjectionReadContext } from "@zhixing/core/authority";
 import type {
+  ArtifactRef,
   AuthorityError,
   GlobalStagedMutation,
   LogicalRecord,
@@ -28,6 +29,9 @@ export interface GlobalMutationCommitParticipant {
   /** Durable primary read model used for exact-prefix staged planning. */
   readonly stagedProjectionId: string;
   ownsStagedMutation(mutation: GlobalStagedMutation): boolean;
+  collectStagedReferences?(
+    records: readonly GlobalMutationCommitRecord[],
+  ): Promise<readonly ArtifactRef[]>;
   prepareStagedMutations(input: {
     readonly assignmentId: string;
     readonly records: readonly GlobalMutationCommitRecord[];

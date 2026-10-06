@@ -97,6 +97,7 @@ export {
 export {
   decodeCommitEnvelope,
   FileAuthorityCommitLog,
+  TransactionArtifactReferenceError,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type FileAuthorityCommitLogOptions,
   type PlannedAnchorPrefixInstallation,

@@ -2702,6 +2702,14 @@ function assertReplayLsn(value: number): void {
   }
 }
 
+/** No records were appended; callers may recollect dependencies outside the lock. */
+export class TransactionArtifactReferenceError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransactionArtifactReferenceError";
+  }
+}
+
 function assertTransactionReferencesProtected(
   references: readonly ArtifactRef[],
   candidateDigests: ReadonlyMap<string, number>,
@@ -2709,12 +2717,12 @@ function assertTransactionReferencesProtected(
   for (const reference of references) {
     const protectedBytes = candidateDigests.get(reference.digest);
     if (protectedBytes === undefined) {
-      throw new TypeError(
+      throw new TransactionArtifactReferenceError(
         `Transaction introduced an undeclared artifact reference: ${reference.digest}`,
       );
     }
     if (protectedBytes !== reference.bytes) {
-      throw new TypeError(
+      throw new TransactionArtifactReferenceError(
         `Transaction changed the byte count for artifact reference: ${reference.digest}`,
       );
     }

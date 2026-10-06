@@ -1,5 +1,6 @@
 import path from "node:path";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
 import type {
   MutationBatch,
   PublishRecord,
@@ -135,6 +136,35 @@ describe("scheduler mutation commit planning", () => {
 });
 
 describe("scheduler mutation owners", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("protects skill usage dependencies through both production publisher ports", async () => {
+    const root = await createTempDir("skill-publisher-references");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const now = "2026-08-05T00:00:00.000Z";
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock: () => now }));
+    const skill = new AnchorSkillGlobalStateAdapter({ log, anchorEpoch: 7, clock: () => now });
+    const content = await artifacts.put(Buffer.from("skill body"));
+    await skill.mutate({ kind: "skill-create", mode: "main", record: { name: "Skill", description: "Useful", content } }, {
+      principal: { kind: "host", component: "test" }, requestId: "create", authority: { domain: "global", anchorEpoch: 7 }, deadlineAt: "2026-08-05T01:00:00.000Z",
+    });
+    const coordinator = new GlobalMutationCommitCoordinator({ log, artifacts, participants: [skill], refreshSchedule: async () => {}, scheduleDefinitionFor: () => undefined });
+    const conversation = new SchedulerConversationMutationPublisher({ anchorEpoch: 7, coordinator, sourceForAssignment: () => ({}) });
+    const job = new SchedulerJobCommitParticipant({ coordinator, log, artifacts });
+    for (const [index, publisher] of [conversation, job].entries()) {
+      const batch = createMutationBatch(`assignment-${index}`, [{ v: 1, t: "staged-mutation", seq: 1, domain: "global", requestId: `usage-${index}`, expected: { anchorEpoch: 7 }, mutation: { kind: "skill-usage", record: { skillId: "skill", occurredAt: now, hitDelta: 1 } } }]);
+      const records = batch.records as Parameters<typeof coordinator.collectStagedReferences>[0];
+      const candidateReferences = publisher instanceof SchedulerConversationMutationPublisher
+        ? await publisher.collectStagedReferences(records)
+        : await publisher.collectStagedReferences(batch);
+      expect(candidateReferences).toEqual([content]);
+      const result = await log.transactProjection({}, (state) => state, async (_state, context) => {
+        const plan = await coordinator.prepare({ assignmentId: batch.assignmentId, records, context, source: {} });
+        return { kind: "append" as const, entries: plan.records, value: plan.outcomes };
+      }, { candidateReferences, readProjectionIds: coordinator.readProjectionIds });
+      expect(result.value.get(1)).toMatchObject({ t: "granted" });
+    }
+    const current = await skill.read({ kind: "skill-get", skillId: "skill" }, { principal: { kind: "host", component: "test" }, requestId: "read", authority: { domain: "global", anchorEpoch: 7 }, deadlineAt: "2026-08-05T01:00:00.000Z" });
+    expect(current.kind === "skill-get" && current.entry).toMatchObject({ contentRef: content, usage: { hitCount: 2 } });
+  });
   it("plans competing schedule writes against the exact locked prefix", async () => {
     const root = await createTempDir("schedule-exact-prefix");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));

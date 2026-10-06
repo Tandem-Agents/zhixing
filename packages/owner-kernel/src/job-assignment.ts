@@ -14,6 +14,7 @@ import {
 } from "@zhixing/core/scheduler/application";
 import {
   AuthorityStorageError,
+  TransactionArtifactReferenceError,
   collectArtifactRefs,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   resolveDispatchArtifactClosure,
@@ -556,6 +557,7 @@ export interface JobCompatibilityProjection {
 
 export interface JobCommitParticipant {
   readonly readProjectionIds?: readonly string[];
+  collectStagedReferences?(batch: MutationBatch): Promise<readonly ArtifactRef[]>;
   prepare(input: {
     readonly authorityPrefixLsn: number;
     readonly authorityContext: ProjectionTransactionContext;
@@ -4123,6 +4125,9 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       this.#artifacts,
       guardOccurrence.deliveryRequired,
     );
+    const stagedReferences = closure.batch
+      ? await this.#commitParticipant?.collectStagedReferences?.(closure.batch) ?? []
+      : [];
     const transaction = await this.#transact<
       | { readonly committed: true; readonly commitRevision: number }
       | { readonly committed: false; readonly error: AuthorityError }
@@ -4374,9 +4379,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           value: { committed: true, commitRevision: jobRevision },
         };
       },
-      [...closure.references, ...compiledDelivery.references],
+      [...closure.references, ...compiledDelivery.references, ...stagedReferences],
       this.#commitParticipant?.readProjectionIds ?? [],
-    );
+    ).catch((error: unknown) => {
+      if (error instanceof TransactionArtifactReferenceError) {
+        return { value: rejected("missing-base", "Staged artifact dependencies changed; resubmit the bundle", true) };
+      }
+      throw error;
+    });
     if (transaction.value.committed) {
       this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
       await this.resumeCompatibilityProjection();

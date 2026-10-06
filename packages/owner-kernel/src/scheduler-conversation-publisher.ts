@@ -23,6 +23,12 @@ export class SchedulerConversationMutationPublisher
     return this.#options.coordinator.readProjectionIds;
   }
 
+  collectStagedReferences(
+    records: Parameters<NonNullable<ConversationMutationPublisher["collectStagedReferences"]>>[0],
+  ) {
+    return this.#options.coordinator.collectStagedReferences(records);
+  }
+
   async decideGlobalBatchAtPrefix(
     input: Parameters<ConversationMutationPublisher["decideGlobalBatchAtPrefix"]>[0],
   ): Promise<Awaited<ReturnType<ConversationMutationPublisher["decideGlobalBatchAtPrefix"]>>> {

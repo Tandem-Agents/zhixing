@@ -97,6 +97,27 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     return isStagedSkillMutation(mutation);
   }
 
+  /** Read only this batch's dependencies before the outer artifact/log lock. */
+  async collectStagedReferences(
+    records: readonly { readonly requestId: string; readonly mutation: GlobalStagedMutation }[],
+  ): Promise<readonly ArtifactRef[]> {
+    const mutations = records.map((record) => ({
+      requestId: record.requestId,
+      mutation: requireStagedSkillMutation(record.mutation),
+    }));
+    const transaction = await this.#log.transactDurableProjection(
+      SKILL_AUTHORITY_PROJECTION_ID,
+      async (projection) => {
+        const state = await loadSkillProjectionForMutations(projection, mutations);
+        return {
+          kind: "return" as const,
+          value: mutations.flatMap(({ mutation }) => skillCandidateReferences(state, mutation)),
+        };
+      },
+    );
+    return transaction.value;
+  }
+
   async prepareStagedMutations(input: {
     readonly records: ReadonlyArray<{
       readonly seq: number;

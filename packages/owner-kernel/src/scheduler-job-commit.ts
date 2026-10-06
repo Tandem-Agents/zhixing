@@ -97,6 +97,13 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
     return this.#coordinator.readProjectionIds;
   }
 
+  collectStagedReferences(batch: MutationBatch) {
+    return this.#coordinator.collectStagedReferences(batch.records.flatMap((record) =>
+      record.domain === "global" && record.mutation.kind !== "delivery-enqueue"
+        ? [{ seq: record.seq, requestId: record.requestId, mutation: record.mutation as GlobalStagedMutation }]
+        : []));
+  }
+
   async prepare(input: Parameters<JobCommitParticipant["prepare"]>[0]) {
     const outcomes = new Map<number, PublishOutcome>();
     const records: Array<{

@@ -8,6 +8,9 @@ import {
   type ArtifactStore,
 } from "@zhixing/core/authority";
 import { DeliveryAuthority } from "@zhixing/core/delivery";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
+import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mutation-commit-coordinator";
+import { SchedulerJobCommitParticipant } from "@zhixing/owner-kernel/scheduler-job-commit";
 import type {
   AssignmentEntry,
   AuthorityCallContext,
@@ -440,6 +443,10 @@ async function createUserHarness(
     };
     schedulerFailureThreshold?: number;
     schedulerNotices?: boolean;
+    commitParticipant?: (
+      log: FileAuthorityCommitLog,
+      artifacts: FileArtifactStore,
+    ) => NonNullable<ConstructorParameters<typeof JobJournal>[0]["commitParticipant"]>;
   } = {},
 ) {
   const trackLog = trackTestAuthorityLogs();
@@ -495,6 +502,7 @@ async function createUserHarness(
     snapshotFor: options.ownerSnapshotFor ?? matchingSnapshotFor,
     schedulerFailureThreshold: options.schedulerFailureThreshold,
     schedulerNotices,
+    commitParticipant: options.commitParticipant?.(log, artifacts),
   });
   const ledger = new ConversationAssignmentLedger({
     log,
@@ -1948,6 +1956,116 @@ describe("user job durable protocol", {
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
   });
+
+  it("recollects changed skill usage dependencies outside the Job submitBundle transaction and replays exactly once", async () => {
+    let skill!: AnchorSkillGlobalStateAdapter;
+    let participant!: SchedulerJobCommitParticipant;
+    const harness = await createUserHarness({ commitParticipant: (log, artifacts) => {
+      skill = new AnchorSkillGlobalStateAdapter({ log, anchorEpoch: 3, clock: () => NOW });
+      const coordinator = new GlobalMutationCommitCoordinator({
+        log, artifacts, participants: [skill],
+        refreshSchedule: async () => {}, scheduleDefinitionFor: () => undefined,
+      });
+      participant = new SchedulerJobCommitParticipant({ coordinator, log, artifacts });
+      return participant;
+    } });
+    const journal = harness.journal;
+    const contextForSkill = (requestId: string) => ({
+      principal: { kind: "host" as const, component: "job-usage-test" },
+      requestId, authority: { domain: "global" as const, anchorEpoch: 3 }, deadlineAt: EXPIRY,
+    });
+    const contentA = await harness.artifacts.put(Buffer.from("skill body A"));
+    const contentB = await harness.artifacts.put(Buffer.from("skill body B updated"));
+    await skill.mutate({ kind: "skill-create", mode: "main",
+      record: { name: "Skill", description: "Original", content: contentA },
+    }, contextForSkill("create-existing-skill"));
+
+    await start(harness);
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global", requestId: "job-existing-skill-usage", expected: { anchorEpoch: 3 },
+      mutation: { kind: "skill-usage", record: { skillId: "skill", occurredAt: NOW, hitDelta: 1 } },
+    });
+    const bundle = await seal(harness);
+    const context = submissionContext(harness.unsigned);
+    const order: string[] = [];
+    let commitsAfterUpdate: number | undefined;
+    const actualCollect = participant.collectStagedReferences.bind(participant);
+    const collect = vi.spyOn(participant, "collectStagedReferences").mockImplementation(async (batch) => {
+      // The real collector takes the durable projection's lock. The real update
+      // below also needs the Authority lock: neither may run inside Job's final transaction.
+      const references = await actualCollect(batch);
+      if (commitsAfterUpdate === undefined) {
+        expect(references).toEqual([contentA]);
+        order.push("collect:A");
+        await skill.mutate({ kind: "skill-update", mode: "main", skillId: "skill", expectedRevision: 1,
+          record: { name: "Skill", description: "Changed", content: contentB },
+        }, contextForSkill("replace-existing-skill"));
+        commitsAfterUpdate = (await harness.log.readAll()).length;
+        order.push("update:B");
+      } else {
+        expect(references).toEqual([contentB]);
+        order.push("collect:B");
+      }
+      return references;
+    });
+    const actualPrepare = participant.prepare.bind(participant);
+    const prepare = vi.spyOn(participant, "prepare").mockImplementation(async (input) => {
+      order.push("prepare");
+      return actualPrepare(input);
+    });
+    try {
+      await expect(journal.submitBundle(bundle, context)).resolves.toMatchObject({
+        committed: false, error: { code: "missing-base", retryable: true },
+      });
+      expect(commitsAfterUpdate).toBeDefined();
+      expect(await harness.log.readAll()).toHaveLength(commitsAfterUpdate!);
+      expect(await journal.currentState(JOB_RUN_ID)).toBe("running");
+      expect(collect).toHaveBeenCalledTimes(1);
+      expect(prepare).toHaveBeenCalledTimes(1);
+      const afterRejected = await skill.read({ kind: "skill-get", skillId: "skill" }, contextForSkill("after-rejected"));
+      expect(afterRejected.kind === "skill-get" && afterRejected.entry).toMatchObject({
+        contentRef: contentB, revision: 2, usage: null,
+      });
+
+      const committed = await journal.submitBundle(bundle, context);
+      expect(committed).toEqual({ committed: true, commitRevision: 1 });
+      expect(await journal.currentState(JOB_RUN_ID)).toBe("committed");
+      expect(order).toEqual(["collect:A", "update:B", "prepare", "collect:B", "prepare"]);
+      const commits = await harness.log.readAll();
+      expect(commits).toHaveLength(commitsAfterUpdate! + 1);
+      expect(commits.at(-1)!.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ stream: `job:${TASK_ID}`, body: expect.objectContaining({
+          t: "committed", assignmentId: ASSIGNMENT_ID, jobRunId: JOB_RUN_ID,
+        }) }),
+        expect.objectContaining({ stream: "intent:skill-authority", body: expect.objectContaining({
+          t: "skill-mutation-applied", requestId: "job-existing-skill-usage", targetRevision: 3,
+          entry: expect.objectContaining({ contentRef: contentB, revision: 3,
+            usage: { hitCount: 1, lastHitAt: NOW } }),
+        }) }),
+        expect.objectContaining({ stream: "publish", body: expect.objectContaining({
+          t: "publish-decision", assignmentId: ASSIGNMENT_ID,
+          outcomes: [{ seq: 1, outcome: { t: "granted", targetRevision: 3 } }],
+        }) }),
+      ]));
+
+      await expect(journal.submitBundle(bundle, context)).resolves.toEqual(committed);
+      expect(await harness.log.readAll()).toHaveLength(commits.length);
+      expect(collect).toHaveBeenCalledTimes(2);
+      expect(prepare).toHaveBeenCalledTimes(2);
+      const recovered = new AnchorSkillGlobalStateAdapter({
+        log: harness.trackLog(new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+          clock: () => NOW, lockWaitMs: 2_000,
+        })), anchorEpoch: 3, clock: () => NOW,
+      });
+      const durable = await recovered.read({ kind: "skill-get", skillId: "skill" }, contextForSkill("reopen-usage"));
+      expect(durable.kind === "skill-get" && durable.entry).toMatchObject({
+        contentRef: contentB, revision: 3, usage: { hitCount: 1, lastHitAt: NOW },
+      });
+      expect(Buffer.from(await harness.artifacts.get(contentB)).toString("utf8")).toBe("skill body B updated");
+    } finally {
+      collect.mockRestore(); prepare.mockRestore();
+    }
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("atomically derives result and staged deliveries without intermediate status noise", async () => {
     const base = userDefinition();
