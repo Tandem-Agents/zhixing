@@ -28,6 +28,17 @@ export interface ScheduleFailureFact {
   readonly jobRunId: string;
   readonly scheduledFor: string;
   readonly state: string | undefined;
+  readonly outcome?: { readonly status: "completed" | "failed" };
+}
+
+/** Product result projected from the committed bundle, separate from commit state. */
+export interface ScheduleOccurrence extends JobOccurrence {
+  readonly outcome?: { readonly status: "completed" | "failed"; readonly summary: string };
+}
+
+export function isScheduleFailure(fact: Pick<ScheduleFailureFact, "state" | "outcome">): boolean {
+  return fact.state === "failed" || fact.state === "expired" ||
+    (fact.state === "committed" && fact.outcome?.status === "failed");
 }
 
 export interface ScheduleFailurePolicyDecision {
@@ -131,14 +142,13 @@ export function deriveScheduleNextRun(
 
 /** Domain-owned failure streak used by runtime projection and auto-disable. */
 export function countScheduleConsecutiveFailures(
-  occurrences: readonly JobOccurrence[],
+  occurrences: readonly ScheduleOccurrence[],
 ): number {
   let count = 0;
   for (let index = occurrences.length - 1; index >= 0; index -= 1) {
-    const state = occurrences[index]!.state;
-    if (state === "committed") break;
-    if (state === "failed" || state === "expired") count += 1;
-    else if (state !== "missed") break;
+    const occurrence = occurrences[index]!;
+    if (isScheduleFailure(occurrence)) count += 1;
+    else if (occurrence.state !== "missed") break;
   }
   return count;
 }
@@ -170,9 +180,9 @@ export function decideScheduleFailurePolicy(input: {
   }
   let failureCount = 1;
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const previous = ordered[cursor]!.state;
-    if (previous === "failed" || previous === "expired") failureCount += 1;
-    else if (previous !== "missed") break;
+    const previous = ordered[cursor]!;
+    if (isScheduleFailure(previous)) failureCount += 1;
+    else if (previous.state !== "missed") break;
   }
   const nextFire = frozenScheduleFailureNextFire({
     taskId: input.taskId,

@@ -1,5 +1,8 @@
 import type { SchedulerEventMap } from "@zhixing/core/scheduler";
+import type { ScheduleOccurrence } from "@zhixing/core/scheduler/application";
 import { createEventBus } from "@zhixing/core";
+import { currentDeviceCapacityStep, currentMaintenanceAbortSignal, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
+  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, withDeviceCapacityStep } from "@zhixing/core/resources";
 import type {
   JobOccurrence,
   JobRunState,
@@ -13,7 +16,7 @@ import { AnchorScheduler } from "../scheduler-authority.js";
 
 class MemoryJobJournal {
   definition: TaskDefinition | undefined;
-  runs: JobOccurrence[] = [];
+  runs: ScheduleOccurrence[] = [];
   readonly resumeSystemJobs = vi.fn(async () => {});
   readonly statusListeners = new Set<() => void>();
   readonly lifecycleListeners = new Set<
@@ -224,6 +227,84 @@ function fixture(input: {
 }
 
 describe("AnchorScheduler authority", () => {
+  it.each([
+    ['activate', false], ['activate', true],
+    ['resumeAfterAuthorityTransfer', false], ['resumeAfterAuthorityTransfer', true],
+  ] as const)("%s owns recovery after the previous caller ends (permit=%s)", async (entry, withPermit) => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: 'task-1', taskRevision: 1, state: 'enabled',
+      definition: { kind: 'user', spec: { name: 'daily', enabled: true, priority: 'normal',
+        schedule: { kind: 'interval', everyMs: 60_000 }, action: { kind: 'agent-turn', prompt: 'summarize' } } },
+    };
+    const reached = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const callerAbort = new AbortController(), onError = vi.fn();
+    let observing = false, observed: unknown;
+    const recoverUserJobs = vi.fn(async () => {
+      if (!observing) return;
+      reached.resolve();
+      await release.promise;
+      observed = { capacity: currentDeviceCapacityStep(), exclusion: isHoldingMaintenanceExclusion(),
+        urgency: currentMaintenanceUrgency(), aborted: currentMaintenanceAbortSignal().aborted };
+    });
+    const { scheduler } = fixture({ journals: new Map([['task-1', journal]]), recoverUserJobs, onError });
+    try {
+      await scheduler.start();
+      await scheduler.pauseForAuthorityTransfer();
+      observing = true;
+      const caller = () => runWithMaintenanceUrgency(() => 'foreground', callerAbort.signal, async () => {
+        scheduler[entry]();
+        scheduler[entry](); // A repeated resume must not launch a second recovery owner.
+      });
+      if (withPermit) {
+        const bound = emptyDeviceCapacityBudget();
+        await withDeviceCapacityStep({ granted: bound, release() {}, tryBegin: () => ({ claim() {}, complete() {} }) },
+          bound, () => runHoldingMaintenanceExclusion(caller));
+      } else await caller();
+      await reached.promise;
+      callerAbort.abort(new Error('Previous transfer owner ended'));
+      let paused = false;
+      const pause = scheduler.pauseForAuthorityTransfer().then(() => { paused = true; });
+      await Promise.resolve();
+      expect(paused).toBe(false);
+      release.resolve();
+      await pause;
+      expect(onError).not.toHaveBeenCalled();
+      expect(observed).toEqual({ capacity: undefined, exclusion: false, urgency: 'background', aborted: false });
+      expect(recoverUserJobs).toHaveBeenCalledTimes(2);
+    } finally {
+      release.resolve();
+      await scheduler.stop();
+    }
+  });
+
+  it("detaches timer and queued wakeups from released caller permits and reports background failures", async () => {
+    vi.useFakeTimers();
+    const onError = vi.fn();
+    const { scheduler } = fixture({ onError });
+    const observed: unknown[] = [];
+    const failure = new Error("background failure");
+    const tick = vi.spyOn(scheduler, "tick").mockImplementation(async () => {
+      observed.push({ capacity: currentDeviceCapacityStep(), excluded: isHoldingMaintenanceExclusion(),
+        urgency: currentMaintenanceUrgency() });
+      throw failure;
+    });
+    const bound = emptyDeviceCapacityBudget();
+    try {
+      await withDeviceCapacityStep({ granted: bound, release() {}, tryBegin: () => ({ claim() {}, complete() {} }) },
+        bound, () => runHoldingMaintenanceExclusion(() => scheduler.start()));
+      await vi.advanceTimersByTimeAsync(60_000);
+      scheduler.wakeQueuedUserJobs();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tick).toHaveBeenCalledTimes(2);
+      expect(observed).toEqual(Array.from({ length: 2 }, () => ({ capacity: undefined, excluded: false, urgency: "background" })));
+      expect(onError).toHaveBeenCalledTimes(2);
+      expect(onError).toHaveBeenCalledWith(failure);
+    } finally {
+      await scheduler.stop();
+      vi.useRealTimers();
+    }
+  });
   it("freezes the exact active scheduler run before lifecycle settlement", async () => {
     let release!: () => void;
     let markStarted!: () => void;
@@ -366,10 +447,13 @@ describe("AnchorScheduler authority", () => {
     await scheduler.stop();
   });
 
-  it("publishes the durable manual job identity before returning its result", async () => {
+  it.each(["completed", "failed"] as const)("publishes the durable identity and actual committed %s result", async (status) => {
     const journal = new MemoryJobJournal();
     let accepted: { taskId: string; jobRunId: string; name: string } | undefined;
     const activateUserJob = vi.fn(async ({ occurrence }: { occurrence: JobOccurrence }) => {
+      Object.assign(journal.runs.find(run => run.jobRunId === occurrence.jobRunId)!, {
+        outcome: { status, summary: "actual job result" },
+      });
       journal.setState(occurrence.jobRunId, "committed");
     });
     const { scheduler, eventBus } = fixture({
@@ -395,20 +479,32 @@ describe("AnchorScheduler authority", () => {
     eventBus.on("scheduler:task-accepted", (event) => {
       accepted = event;
     });
+    const observationContext: unknown[] = [];
+    const observe = () => { observationContext.push(currentDeviceCapacityStep()); };
+    const completed = vi.fn(observe), failed = vi.fn(observe);
+    eventBus.on("scheduler:task-completed", completed);
+    eventBus.on("scheduler:task-failed", failed);
     await scheduler.start();
     expect(journal.lifecycleListeners.size).toBe(1);
     expect(journal.statusListeners.size).toBe(0);
-    const result = await scheduler.runTask(
-      "task-1",
-      "manual-1",
-    );
+    const bound = emptyDeviceCapacityBudget();
+    const result = await withDeviceCapacityStep({ granted: bound, release() {},
+      tryBegin: () => ({ claim() {}, complete() {} }) }, bound,
+      () => scheduler.runTask("task-1", "manual-1"));
 
     expect(accepted).toEqual({
       taskId: "task-1",
       jobRunId: "job:manual-1",
       name: "daily",
     });
-    expect(result.status).toBe("ok");
+    expect(result.status).toBe(status === "completed" ? "ok" : "error");
+    expect(status === "completed" ? result.output : result.error).toBe("actual job result");
+    await vi.waitFor(() => expect(status === "completed" ? completed : failed).toHaveBeenCalledOnce());
+    expect(status === "completed" ? failed : completed).not.toHaveBeenCalled();
+    expect(observationContext).toEqual([undefined]);
+    expect(scheduler.getTask("task-1")!.state).toMatchObject({
+      lastStatus: status === "completed" ? "ok" : "error", consecutiveErrors: status === "completed" ? 0 : 1,
+    });
     await expect(scheduler.runTask("task-1", "manual-1")).resolves.toEqual(result);
     expect(journal.controlRuns).toEqual(new Map([["manual-1", "job:manual-1"]]));
     expect(journal.triggerCalls).toHaveLength(1);

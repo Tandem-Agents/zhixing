@@ -14,6 +14,7 @@ import type { AgentTurnResult, TaskStatusSummary } from "./types.js";
 export {
   DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
   countScheduleConsecutiveFailures,
+  isScheduleFailure,
   decideScheduleFailurePolicy,
   decideScheduleTrigger,
   deriveScheduleNextRun,
@@ -26,6 +27,7 @@ export {
 export type { ScheduleTriggerDecision } from "./runtime-policy.js";
 export type {
   ScheduleFailureFact,
+  ScheduleOccurrence,
   ScheduleFailurePolicyDecision,
 } from "./runtime-policy.js";
 export { ScheduleRuntimePolicyError } from "./runtime-policy.js";

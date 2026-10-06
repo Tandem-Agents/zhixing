@@ -480,7 +480,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     string,
     AssignmentArtifactAuthority
   >();
-  readonly #relayDisposers = new Map<string, () => void>();
+  readonly #ownerDisposers = new Map<string, () => void>();
   readonly #statusDisposers = new Map<string, () => void>();
   readonly #journalLifecycleDisposers = new Map<string, () => void>();
   readonly #mutationPublisher: SchedulerConversationMutationPublisher;
@@ -664,11 +664,11 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     for (const dispatcher of this.#dispatchers.values()) {
       await dispatcher.stopRecoveryLoop();
     }
-    for (const dispose of this.#relayDisposers.values()) dispose();
+    for (const dispose of this.#ownerDisposers.values()) dispose();
     for (const dispose of this.#statusDisposers.values()) dispose();
     for (const dispose of this.#journalLifecycleDisposers.values()) dispose();
     this.#dispatchers.clear();
-    this.#relayDisposers.clear();
+    this.#ownerDisposers.clear();
     this.#statusDisposers.clear();
     this.#journalLifecycleDisposers.clear();
     this.#journals.clear();
@@ -727,10 +727,10 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         dispatcher.stopRecoveryLoop(),
       ),
     );
-    for (const dispose of this.#relayDisposers.values()) dispose();
+    for (const dispose of this.#ownerDisposers.values()) dispose();
     for (const dispose of this.#statusDisposers.values()) dispose();
     for (const dispose of this.#journalLifecycleDisposers.values()) dispose();
-    this.#relayDisposers.clear();
+    this.#ownerDisposers.clear();
     this.#statusDisposers.clear();
     this.#journalLifecycleDisposers.clear();
     this.#dispatchers.clear();
@@ -912,9 +912,12 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     });
     const route = await journal.interactionRoute(pending.assignmentId);
     if (route.kind === "surface-ticket") {
-      const dispose = this.#relayDisposers.get(pending.assignmentId);
-      dispose?.();
-      this.#relayDisposers.delete(pending.assignmentId);
+      // Submission ownership is required before local dispatch, independently
+      // of whether interaction flows through a channel relay or a terminal.
+      if (!this.#ownerDisposers.has(pending.assignmentId)) {
+        this.#ownerDisposers.set(pending.assignmentId,
+          this.#options.jobRelays.registerSubmission(pending.assignmentId, journal));
+      }
       const state = await journal.currentState(pending.envelope.work.jobRunId);
       if (state && TERMINAL_JOB_STATES.has(state as never)) {
         await this.#manualSurfaces.markJobTerminal(
@@ -929,7 +932,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       });
       return;
     }
-    if (!this.#relayDisposers.has(pending.assignmentId)) {
+    if (!this.#ownerDisposers.has(pending.assignmentId)) {
       const opening: JobRelayOpening = {
         assignmentId: pending.assignmentId,
         sourceRevision: dispatchEnvelopeDigest(pending.envelope),
@@ -944,7 +947,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         journal,
         answers: this.#answersFor(pending.envelope.executorId),
       };
-      this.#relayDisposers.set(
+      this.#ownerDisposers.set(
         pending.assignmentId,
         this.#options.jobRelays.register(opening),
       );
@@ -1114,9 +1117,9 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       const dispatcher = this.#dispatchers.get(assignmentId);
       await dispatcher?.stopRecoveryLoop();
       this.#dispatchers.delete(assignmentId);
-      const disposeRelay = this.#relayDisposers.get(assignmentId);
-      disposeRelay?.();
-      this.#relayDisposers.delete(assignmentId);
+      const disposeOwner = this.#ownerDisposers.get(assignmentId);
+      disposeOwner?.();
+      this.#ownerDisposers.delete(assignmentId);
       this.#executorByAssignment.delete(assignmentId);
       this.#artifactAuthorityByAssignment.delete(assignmentId);
     })().finally(() => {
@@ -1319,7 +1322,7 @@ function resourceContext(
   now: string,
 ): AuthorityCallContext {
   return {
-    principal: { kind: "host", component: "anchor-scheduler" },
+    principal: { kind: "host", component: "resource-governor" },
     requestId: `resource:${assignmentId}`,
     deadlineAt: new Date(Date.parse(now) + OWNER_CONTEXT_RENEWAL_MS).toISOString(),
   };

@@ -11,6 +11,7 @@ import {
   ScheduleRuntimePolicyError,
   selectPendingScheduleAutoDisable,
   type ScheduleFailurePolicyDecision,
+  type ScheduleOccurrence,
 } from "@zhixing/core/scheduler/application";
 import {
   AuthorityStorageError,
@@ -448,6 +449,7 @@ interface JobProjection {
   readonly resolutions: Map<string, JobResolutionFact>;
   readonly statusHistoryByRun: Map<string, JobStatusHistoryEntry[]>;
   readonly committed: Map<string, Extract<JobJournalRecord, { t: "committed" }>>;
+  readonly outcomeByRun: Map<string, JobBundle["body"]["outcome"]>;
   readonly bundleAcknowledgements: Map<
     string,
     Extract<JobJournalRecord, { t: "bundle-ack-observed" }>
@@ -4794,15 +4796,17 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   }
 
   /** Rebuildable task-local occurrence projection for scheduler/query recovery. */
-  async occurrences(): Promise<readonly JobOccurrence[]> {
+  async occurrences(): Promise<readonly ScheduleOccurrence[]> {
     return this.#select((state) =>
       [...state.occurrences.values()]
         .map((occurrence) => {
           const current = state.states.get(occurrence.jobRunId);
-          return validateJobOccurrence({
+          const projected = validateJobOccurrence({
             ...snapshot(occurrence),
             state: current?.state ?? occurrence.state,
           });
+          const outcome = state.outcomeByRun.get(occurrence.jobRunId);
+          return { ...projected, ...(outcome ? { outcome: snapshot(outcome) } : {}) };
         })
         .sort(
           (left, right) =>
@@ -5286,7 +5290,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               state,
               decision.entries,
             );
-            const policyRecords = this.#prepareSchedulerPolicyRecords(
+            const policyRecords = await this.#prepareSchedulerPolicyRecords(
               state,
               decision.entries,
               context.at,
@@ -5622,7 +5626,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           (record) =>
             record.t === "state" &&
             record.jobRunId === body.jobRunId &&
-            (record.state === "failed" || record.state === "expired") &&
+            (record.state === "failed" || record.state === "expired" ||
+              (record.state === "committed" && state.outcomeByRun.get(body.jobRunId)?.status === "failed")) &&
             record.statusRevision === body.statusRevision,
         );
         const occurrence = state.occurrences.get(body.jobRunId);
@@ -6738,6 +6743,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             throw new Error("bundle identity does not match");
           }
           this.#assertAssignmentUsageFinal(assigned.record, bundle.usageFinal);
+          state.outcomeByRun.set(body.jobRunId, snapshot(bundle.body.outcome));
           this.#delivery.assertJobCommit(
             {
               at: envelope.at,
@@ -8363,11 +8369,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     }
   };
 
-  #prepareSchedulerPolicyRecords(
+  async #prepareSchedulerPolicyRecords(
     state: JobProjection,
     entries: readonly LogicalRecord<unknown>[],
     at: string,
-  ): readonly LogicalRecord<unknown>[] {
+  ): Promise<readonly LogicalRecord<unknown>[]> {
     const definition = state.definition;
     if (!definition || definition.definition.kind !== "user") return [];
     const result: LogicalRecord<unknown>[] = [];
@@ -8376,11 +8382,21 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       const body = entry.body as Partial<JobJournalRecord>;
       if (
         body.t !== "state" ||
-        (body.state !== "failed" && body.state !== "expired") ||
+        (body.state !== "failed" && body.state !== "expired" && body.state !== "committed") ||
         typeof body.jobRunId !== "string" ||
         typeof body.statusRevision !== "number"
       ) {
         continue;
+      }
+      if (body.state === "committed") {
+        const committed = entries.find((item) => item.stream === jobStream(this.#taskId) &&
+          (item.body as Partial<JobJournalRecord>).t === "committed" &&
+          (item.body as { jobRunId?: string }).jobRunId === body.jobRunId)?.body as
+          Extract<JobJournalRecord, { t: "committed" }> | undefined;
+        if (!committed) continue; // System jobs have their own terminal state.
+        const bundle = validateJobSealedBundle(JSON.parse(Buffer.from(
+          await this.#artifacts.get(committed.bundle.ref)).toString("utf8")) as SealedBundle);
+        if (bundle.body.outcome.status !== "failed") continue;
       }
       const occurrence = state.occurrences.get(body.jobRunId);
       if (!occurrence) {
@@ -8396,6 +8412,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
             jobRunId: item.jobRunId,
             scheduledFor: item.scheduledFor,
             state: state.states.get(item.jobRunId)?.state,
+            outcome: state.outcomeByRun.get(item.jobRunId),
           })),
           threshold: this.#schedulerFailureThreshold,
           decidedAt: at,
@@ -9019,6 +9036,7 @@ function emptyProjection(): JobProjection {
     resolutions: new Map(),
     statusHistoryByRun: new Map(),
     committed: new Map(),
+    outcomeByRun: new Map(),
     bundleAcknowledgements: new Map(),
     recoveryAssignments: new Set(),
     bundleAcknowledgementOutbox: new Set(),

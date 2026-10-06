@@ -74,25 +74,37 @@ interface JobSubmissionWaiter {
  */
 export class JobRelayObligationDirectory {
   readonly #openings = new Map<string, JobRelayOpening>();
+  readonly #submissions = new Map<string, JobChannelObligationJournal>();
   readonly #waiters = new Map<string, Set<JobSubmissionWaiter>>();
 
   register(opening: JobRelayOpening): () => void {
     if (this.#openings.has(opening.assignmentId)) {
       throw new Error("Job relay assignment is already registered");
     }
+    const releaseSubmission = this.registerSubmission(opening.assignmentId, opening.journal);
     this.#openings.set(opening.assignmentId, opening);
-    const waiters = this.#waiters.get(opening.assignmentId);
-    if (waiters) {
-      this.#waiters.delete(opening.assignmentId);
-      for (const waiter of waiters) {
-        waiter.signal.removeEventListener("abort", waiter.onAbort);
-        waiter.resolve(opening.journal);
-      }
-    }
     return once(() => {
       if (this.#openings.get(opening.assignmentId) === opening) {
         this.#openings.delete(opening.assignmentId);
+        releaseSubmission();
       }
+    });
+  }
+
+  /** Every job needs its submission owner, even when interaction uses a surface ticket. */
+  registerSubmission(assignmentId: string, journal: JobChannelObligationJournal): () => void {
+    if (this.#submissions.has(assignmentId)) throw new Error("Job submission owner is already registered");
+    this.#submissions.set(assignmentId, journal);
+    const waiters = this.#waiters.get(assignmentId);
+    if (waiters) {
+      this.#waiters.delete(assignmentId);
+      for (const waiter of waiters) {
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.resolve(journal);
+      }
+    }
+    return once(() => {
+      if (this.#submissions.get(assignmentId) === journal) this.#submissions.delete(assignmentId);
     });
   }
 
@@ -103,7 +115,7 @@ export class JobRelayObligationDirectory {
   }
 
   submissionFor(assignmentId: string): JobChannelObligationJournal | undefined {
-    return this.#openings.get(assignmentId)?.journal;
+    return this.#submissions.get(assignmentId);
   }
 
   waitForSubmission(

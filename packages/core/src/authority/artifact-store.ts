@@ -24,7 +24,7 @@ import {
   byteDigest,
   createByteDigestAccumulator,
 } from "../protocol/index.js";
-import { claimDeviceCapacity } from "../resources/index.js";
+import { claimDeviceCapacity, currentDeviceCapacityStep, runHoldingMaintenanceExclusion } from "../resources/index.js";
 import { artifactDigestHex, assertArtifactRef } from "./artifact-references.js";
 import { AuthorityStorageError } from "./errors.js";
 import type {
@@ -48,7 +48,7 @@ export const collectArtifactGarbage = Symbol("collectArtifactGarbage");
 export interface FileArtifactStoreOptions {
   readonly lockStaleMs?: number;
   readonly lockWaitMs?: number;
-  /** Caller reads only; write/GC verification retains its original physical owner. */
+  /** Caller reads and workload verification; write/GC physical plans retain ownership. */
   readonly runReadStep?: <T>(ref: ArtifactRef, operation: () => Promise<T>) => Promise<T>;
 }
 
@@ -439,6 +439,12 @@ export class FileArtifactStore implements MutableArtifactStore {
 
   async #verifyStoredReference(ref: ArtifactRef): Promise<void> {
     assertArtifactRef(ref);
+    return this.#runReadStep && currentDeviceCapacityStep()?.kind === "workload"
+      ? this.#runReadStep(ref, () => this.#verifyStoredBytes(ref))
+      : this.#verifyStoredBytes(ref);
+  }
+
+  async #verifyStoredBytes(ref: ArtifactRef): Promise<void> {
     claimDeviceCapacity("readBytes", ref.bytes);
     claimDeviceCapacity("ioOperations", 1);
     const digestAccumulator = createByteDigestAccumulator();
@@ -623,7 +629,7 @@ export class FileArtifactStore implements MutableArtifactStore {
         resourceName: "ArtifactStore",
       });
       try {
-        return await operation();
+        return await runHoldingMaintenanceExclusion(operation);
       } finally {
         await release();
       }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createScheduleManagementProductApiContribution,
   countScheduleConsecutiveFailures,
+  type ScheduleOccurrence,
   decideScheduleFailurePolicy,
   decideScheduleTrigger,
   deriveScheduleNextRun,
@@ -436,6 +437,17 @@ describe("Schedule runtime domain policy", () => {
       { state: "expired", scheduledFor: "2026-08-30T09:03:00.000Z" },
     ] as JobOccurrence[];
     expect(countScheduleConsecutiveFailures(occurrences)).toBe(2);
+    const businessFailures = Array.from({ length: 5 }, (_, index) => ({
+      ...occurrences[0]!, jobRunId: `business-${index}`,
+      scheduledFor: `2026-08-30T09:0${index}:00.000Z`,
+      outcome: { status: "failed" as const, summary: "model failed" },
+    })) satisfies ScheduleOccurrence[];
+    expect(countScheduleConsecutiveFailures(businessFailures)).toBe(5);
+    expect(decideScheduleFailurePolicy({ taskId: "task-a", jobRunId: "business-4",
+      schedule: { kind: "interval", everyMs: 60_000 }, occurrences: businessFailures,
+      threshold: 5, decidedAt: NOW })).toMatchObject({ failureCount: 5, autoDisableRequired: true });
+    expect(countScheduleConsecutiveFailures([...businessFailures,
+      { ...businessFailures[0]!, outcome: { status: "completed", summary: "recovered" } }])).toBe(0);
     expect(deriveScheduleNextRun(
       { kind: "interval", everyMs: 60_000 },
       occurrences,

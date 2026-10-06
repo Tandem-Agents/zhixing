@@ -8,6 +8,8 @@ import {
   DeviceCapacityStepError,
   emptyDeviceCapacityBudget,
   runWithDeviceCapacity,
+  runDetachedDeviceCapacity,
+  currentDeviceCapacityStep,
   withDeviceCapacityStep,
   type DeviceCapacityBudget,
   type DeviceCapacityPolicy,
@@ -95,6 +97,30 @@ function request(
 }
 
 describe("DefaultDeviceCapacityArbiter", () => {
+  it("separates durable work from the caller permit without releasing or extending it", async () => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
+    const signal = new AbortController().signal;
+    let resume!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    let detached!: Promise<void>;
+    await runWithDeviceCapacity(arbiter, request("caller", budget(1)), signal, async () => {
+      const owner = currentDeviceCapacityStep();
+      detached = runDetachedDeviceCapacity(async () => {
+        expect(currentDeviceCapacityStep()).toBeUndefined();
+        expect(arbiter.snapshot().occupancyInUse.slots).toBe(1);
+        await gate;
+        expect(currentDeviceCapacityStep()).toBeUndefined();
+        await runWithDeviceCapacity(arbiter, request("job", budget(1, { readBytes: 10 })), signal,
+          async () => { claimDeviceCapacity("readBytes", 10); });
+      });
+      expect(currentDeviceCapacityStep()).toBe(owner);
+    });
+    resume();
+    await detached;
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    expect(arbiter.snapshot().quantumAvailable.readBytes).toBe(90);
+  });
+
   it("requires an authentic current workload step for a nonwaiting borrowed slot", async () => {
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
     const other = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });

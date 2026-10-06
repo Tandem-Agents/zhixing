@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing/core/resources";
 import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing/core/scheduler";
 import type { IEventBus } from "@zhixing/core";
 import {
   countScheduleConsecutiveFailures,
+  isScheduleFailure,
   decideScheduleTrigger,
   deriveScheduleNextRun,
   scheduleAutoDisableOperationId,
@@ -10,6 +12,7 @@ import {
   selectDueScheduleEntries,
   schedulerNoticeGroupKey,
   type MissedSummaryGroup,
+  type ScheduleOccurrence,
 } from "@zhixing/core/scheduler/application";
 import type {
   AuthorityCallContext,
@@ -80,7 +83,7 @@ export interface AnchorSystemTaskSpec {
 
 interface TaskRuntimeProjection {
   readonly definition: TaskDefinition;
-  readonly occurrences: readonly JobOccurrence[];
+  readonly occurrences: readonly ScheduleOccurrence[];
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -160,11 +163,7 @@ export class AnchorScheduler {
     if (this.#accepting) return;
     this.#accepting = true;
     this.#arm();
-    this.#activationRecovery = this.#recoverAfterActivation().catch((error) => {
-      this.#options.onError?.(
-        error instanceof Error ? error : new Error(String(error)),
-      );
-    });
+    this.#activationRecovery = this.#background(() => this.#recoverAfterActivation());
   }
 
   async #recoverAfterActivation(): Promise<void> {
@@ -366,14 +365,8 @@ export class AnchorScheduler {
 
   /** Reopens the same owner only after the source has durably aborted before commit. */
   resumeAfterAuthorityTransfer(): void {
-    if (!this.#prepared || this.#accepting) return;
-    this.#accepting = true;
-    this.#activationRecovery = this.#recoverAfterActivation().catch((error) => {
-      this.#options.onError?.(
-        error instanceof Error ? error : new Error(String(error)),
-      );
-    });
-    this.#arm();
+    if (!this.#prepared) return;
+    this.activate();
   }
 
   /** Rebuilds every disposable scheduler projection after an authority base install. */
@@ -849,7 +842,7 @@ export class AnchorScheduler {
       const wakeAgain = this.#queuedWakeRequested;
       this.#queuedWakeRequested = false;
       this.#arm();
-      if (wakeAgain) queueMicrotask(() => void this.tick());
+      if (wakeAgain) queueMicrotask(() => void this.#background(() => this.tick()));
     }
   }
 
@@ -863,7 +856,7 @@ export class AnchorScheduler {
     this.#queuedWakeRequested = true;
     queueMicrotask(() => {
       this.#queuedWakeRequested = false;
-      void this.tick();
+      void this.#background(() => this.tick());
     });
   }
 
@@ -875,7 +868,7 @@ export class AnchorScheduler {
       this.#now(),
       this.#pollMs,
     );
-    this.#timer = setTimeout(() => void this.tick(), delay);
+    this.#timer = setTimeout(() => void this.#background(() => this.tick()), delay);
     this.#timer.unref?.();
   }
 
@@ -980,7 +973,7 @@ export class AnchorScheduler {
 
   #trackCompletion(taskId: string, jobRunId: string): void {
     if (this.#completionTrackers.has(jobRunId)) return;
-    const operation = this.#observeCompletion(taskId, jobRunId).finally(() => {
+    const operation = this.#background(() => this.#observeCompletion(taskId, jobRunId)).finally(() => {
       if (this.#completionTrackers.get(jobRunId) === operation) {
         this.#completionTrackers.delete(jobRunId);
       }
@@ -988,23 +981,32 @@ export class AnchorScheduler {
     this.#completionTrackers.set(jobRunId, operation);
   }
 
+  /** Durable scheduler work outlives whichever tool/transaction wakes it. */
+  #background(operation: () => Promise<void>): Promise<void> {
+    return runDetachedDeviceCapacity(() => runDetachedMaintenanceContext("background", operation))
+      .catch((error) => {
+        this.#options.onError?.(error instanceof Error ? error : new Error(String(error)));
+      });
+  }
+
   async #observeCompletion(taskId: string, jobRunId: string): Promise<void> {
     const state = await this.#waitForTerminalState(taskId, jobRunId);
     if (!state) return;
     await this.#refreshTask(taskId);
     const view = this.#requiredView(taskId);
-    if (state === "committed") {
+    const occurrence = (await this.#journal(taskId).occurrences()).find(item => item.jobRunId === jobRunId);
+    if (state === "committed" && !isScheduleFailure({ state, outcome: occurrence?.outcome })) {
       await this.#options.eventBus.emit("scheduler:task-completed", {
         taskId,
         name: view.name,
         durationMs: 0,
-        summary: view.state.lastSummary,
+        summary: occurrence?.outcome?.summary ?? view.state.lastSummary,
       });
     } else if (state !== "missed") {
       await this.#options.eventBus.emit("scheduler:task-failed", {
         taskId,
         name: view.name,
-        error: view.state.lastError ?? `Job ended as ${state}`,
+        error: occurrence?.outcome?.summary ?? view.state.lastError ?? `Job ended as ${state}`,
         consecutiveErrors: view.state.consecutiveErrors,
         nextRunAt: view.state.nextRunAt,
       });
@@ -1018,17 +1020,18 @@ export class AnchorScheduler {
     startedAt: number,
   ): Promise<AgentTurnResult> {
     const state = await this.#waitForTerminalState(taskId, jobRunId);
-    if (state === "committed") {
+    const occurrence = state && (await this.#journal(taskId).occurrences()).find(item => item.jobRunId === jobRunId);
+    if (state === "committed" && !isScheduleFailure({ state, outcome: occurrence?.outcome })) {
       return {
         status: "ok",
-        output: "Scheduled job completed.",
+        output: occurrence?.outcome?.summary ?? "Scheduled job completed.",
         durationMs: Math.max(0, this.#now().getTime() - startedAt),
       };
     }
     if (state) {
       return {
         status: "error",
-        error: `Scheduled job ended as ${state}.`,
+        error: occurrence?.outcome?.summary ?? `Scheduled job ended as ${state}.`,
         durationMs: Math.max(0, this.#now().getTime() - startedAt),
       };
     }
@@ -1147,11 +1150,7 @@ export class AnchorScheduler {
       this.#lifecycleUnsubscribers.set(
         taskId,
         journal.onLifecycle((event) => {
-          void this.#handleLifecycleEvent(event).catch((error) => {
-            this.#options.onError?.(
-              error instanceof Error ? error : new Error(String(error)),
-            );
-          });
+          void this.#background(() => this.#handleLifecycleEvent(event));
         }),
       );
     }
@@ -1186,7 +1185,7 @@ export class AnchorScheduler {
     const last = occurrences.at(-1);
     const frozen = last?.state === "missed"
       ? policy.missedNextFireByRun.get(last.jobRunId)?.nextFire
-      : last && (last.state === "failed" || last.state === "expired")
+      : last && isScheduleFailure(last)
         ? policy.failurePolicyByRun.get(last.jobRunId)?.nextFire
         : undefined;
     const pendingAutoDisable = policy.pendingAutoDisable.length > 0;
@@ -1417,12 +1416,12 @@ function projectUserTask(input: TaskRuntimeProjection): ScheduledTask {
       consecutiveErrors: failures,
       runCount: input.occurrences.filter((occurrence) => occurrence.state !== "missed").length,
       ...(last ? { lastRunAt: last.scheduledFor } : {}),
-      ...(last?.state === "committed"
-        ? { lastStatus: "ok" as const, lastSummary: "Scheduled job completed." }
+      ...(last?.state === "committed" && !isScheduleFailure(last)
+        ? { lastStatus: "ok" as const, lastSummary: last.outcome?.summary ?? "Scheduled job completed." }
         : last && TERMINAL_STATES.has(last.state as never)
           ? {
               lastStatus: last.state === "missed" ? "skipped" as const : "error" as const,
-              lastError: `Scheduled job ended as ${last.state}.`,
+              lastError: last.outcome?.summary ?? `Scheduled job ended as ${last.state}.`,
               ...(last.state === "missed"
                 ? { lastMissed: { scheduledFor: last.scheduledFor, detectedAt: input.updatedAt } }
                 : {}),

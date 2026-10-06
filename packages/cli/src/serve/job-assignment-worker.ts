@@ -16,6 +16,7 @@ import type {
   SessionEventProjection,
 } from "@zhixing/core/contracts";
 import { AuthorityStorageError } from "@zhixing/core/authority";
+import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing/core/resources";
 import {
   dispatchEnvelopeDigest,
   type StreamFrameProducer,
@@ -197,7 +198,10 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
     const executionAbort = new AbortController();
     this.#executionAborts.set(envelope.assignmentId, executionAbort);
     this.#executionStages.set(envelope.assignmentId, "waiting-owner");
-    const task = this.#execute(envelope, executionAbort.signal)
+    // Accepted jobs have an independent durable owner. A manual schedule tool
+    // must not lend its live permit, lock marker or cancellation to the job.
+    const task = runDetachedDeviceCapacity(() => runDetachedMaintenanceContext("background",
+      () => this.#execute(envelope, executionAbort.signal)))
       .catch((error) => {
         if (!this.#recoveryStopped || !executionAbort.signal.aborted) {
           this.options.onError?.(envelope.assignmentId, asError(error));
@@ -1042,7 +1046,10 @@ function jobResourceContext(
   return {
     principal: { kind: "assignment", capability },
     requestId: `resource:${envelope.assignmentId}:${requestId}`,
-    deadlineAt: capability.expiry,
+    deadlineAt:
+      Date.parse(capability.expiry) <= Date.parse(envelope.resourceLease.expiry)
+        ? capability.expiry
+        : envelope.resourceLease.expiry,
   };
 }
 

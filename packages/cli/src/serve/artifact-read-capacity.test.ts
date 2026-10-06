@@ -56,6 +56,20 @@ afterEach(async () => {
 });
 
 describe("artifact read capacity", () => {
+  it("publishes and verifies artifacts from an occupancy-only workload", async () => {
+    const { store, arbiter } = await fixture();
+    const bytes = Buffer.from("new job assignment");
+    await runWithDeviceCapacity(arbiter, {
+      serviceClass: "workload-interactive", atomic: workload, preferred: workload, maxWaitMs: 0,
+    }, abort, async () => {
+      const ref = await store.put(bytes);
+      expect(await store.put(bytes)).toEqual(ref);
+      expect(await store.get(ref)).toEqual(bytes);
+    });
+    expect(arbiter.snapshot().lastViolation).toBeUndefined();
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
   it("reads through the real Host arbiter and permit wrappers", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "artifact-read-capacity-")); roots.push(root);
     const runtime = createDeviceCapacityRuntime(root, { activityDriven: true });

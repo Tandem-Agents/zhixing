@@ -643,10 +643,11 @@ async function start(harness: Awaited<ReturnType<typeof createUserHarness>>) {
 async function seal(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
   summary = "done",
+  status: "completed" | "failed" = "completed",
 ) {
   return harness.ledger.sealJobBundle(ASSIGNMENT_ID, {
     fence: harness.unsigned.work.fence,
-    outcome: { status: "completed", summary },
+    outcome: { status, summary },
     contentAssets: [],
     streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
     usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
@@ -1947,14 +1948,23 @@ describe("user job durable protocol", {
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("uncertain");
   });
 
-  it("runs a user job through the shared ledger without conversation semantics", async () => {
+  it.each(["completed", "failed"] as const)("preserves committed job business outcome %s and its durable policy through replay", async (status) => {
     const harness = await createUserHarness();
     await start(harness);
-    const bundle = await seal(harness);
+    const bundle = await seal(harness, "model result", status);
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 1 });
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("committed");
+    for (const journal of [harness.journal, reopenUserJournal(harness)]) {
+      expect(await journal.occurrences()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ jobRunId: JOB_RUN_ID, state: "committed",
+          outcome: { status, summary: "model result" } }),
+      ]));
+      const policy = (await journal.schedulerPolicy()).failurePolicyByRun.get(JOB_RUN_ID);
+      if (status === "failed") expect(policy).toMatchObject({ failureCount: 1, autoDisableRequired: false });
+      else expect(policy).toBeUndefined();
+    }
   });
 
   it("recollects changed skill usage dependencies outside the Job submitBundle transaction and replays exactly once", async () => {

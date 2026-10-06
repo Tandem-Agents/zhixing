@@ -322,6 +322,26 @@ describe("ChannelInteractionCoordinator", () => {
     await expect(pending).rejects.toThrow(/owner closed/u);
   });
 
+  it("binds a manual job submission without creating a channel relay obligation", async () => {
+    const directory = new JobRelayObligationDirectory();
+    const registered = opening();
+    const waiting = directory.waitForSubmission(registered.assignmentId, new AbortController().signal);
+    const release = directory.registerSubmission(registered.assignmentId, registered.journal);
+    await expect(waiting).resolves.toBe(registered.journal);
+    expect(directory.submissionFor(registered.assignmentId)).toBe(registered.journal);
+    expect(await directory.listOpen()).toEqual([]);
+    expect(() => directory.register(registered)).toThrow("already registered");
+    expect(await directory.listOpen()).toEqual([]);
+    release();
+    expect(directory.submissionFor(registered.assignmentId)).toBeUndefined();
+    const next = directory.register(registered);
+    release(); // A stale release cannot remove the replacement generation.
+    expect(directory.submissionFor(registered.assignmentId)).toBe(registered.journal);
+    next();
+    expect(directory.submissionFor(registered.assignmentId)).toBeUndefined();
+    expect(await directory.listOpen()).toEqual([]);
+  });
+
   it("closes every session and refuses further callbacks after close", async () => {
     const { instance, relay } = coordinator();
     await instance.openJobRelay(opening());

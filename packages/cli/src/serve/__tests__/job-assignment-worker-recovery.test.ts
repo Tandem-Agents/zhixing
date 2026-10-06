@@ -4,10 +4,14 @@ import type {
   InteractionSettlementStreamProof,
 } from "@zhixing/core/contracts";
 import type { ConversationAssignmentLedger } from "@zhixing/executor";
+import { currentDeviceCapacityStep, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
+  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runInMaintenanceContext,
+  withDeviceCapacityStep } from "@zhixing/core/resources";
 import { describe, expect, it, vi } from "vitest";
 import {
   JobAssignmentWorker,
   type JobRunStream,
+  type JobRuntimeRunOptions,
   type JobSubmissionOwner,
 } from "../job-assignment-worker.js";
 
@@ -212,7 +216,17 @@ describe("job assignment audit-only recovery", () => {
     await worker.close();
   });
 
-  it("stops reconstructible recovery without aborting an accepted execution before its durable point", async () => {
+  it.each([-30_000, 30_000])("keeps accepted execution independent and bounds resource calls when lease expiry differs by %i ms", async (leaseOffset) => {
+    const capabilityExpiry = envelope.capabilities[0]!.expiry;
+    const resourceLease = { expiry: new Date(Date.parse(capabilityExpiry) + leaseOffset).toISOString() };
+    const accepted = { ...envelope, resourceLease } as typeof envelope;
+    const expectedDeadline = leaseOffset < 0 ? resourceLease.expiry : capabilityExpiry;
+    const reserveUsage = vi.fn(async (_lease, _usage, context) => {
+      expect(context.deadlineAt).toBe(expectedDeadline);
+    });
+    const consume = vi.fn(async (_lease, _usage, context) => {
+      expect(context.deadlineAt).toBe(expectedDeadline);
+    });
     let releaseRuntime!: () => void;
     const runtimeGate = new Promise<void>((resolve) => {
       releaseRuntime = resolve;
@@ -243,14 +257,18 @@ describe("job assignment audit-only recovery", () => {
     } as unknown as JobSubmissionOwner;
     const worker = new JobAssignmentWorker({
       ledger,
+      resources: { reserveUsage, consume } as never,
       runtime: {
         create: vi.fn(async ({ capabilities }) => {
           issuedCapabilities = capabilities;
           return {
           async *run(
             _instruction: unknown,
-            options: { readonly abortSignal: AbortSignal },
+            options: JobRuntimeRunOptions,
           ) {
+            expect(options.resourceReservation!.contextFor("child").deadlineAt).toBe(expectedDeadline);
+            const usage = await options.modelCallResourceMeter!.reserve({ callIndex: 1, tokenUpperBound: 10 });
+            await options.modelCallResourceMeter!.consume({ ...usage, tokens: 2 });
             runtimeSignal = options.abortSignal;
             await runtimeGate;
             return {
@@ -279,7 +297,7 @@ describe("job assignment audit-only recovery", () => {
       }) as unknown as JobRunStream),
     });
 
-    worker.accept(envelope);
+    worker.accept(accepted);
     await vi.waitFor(() => {
       expect(runtimeSignal).toBeDefined();
     });
@@ -298,11 +316,14 @@ describe("job assignment audit-only recovery", () => {
 
     expect(runtimeSignal!.aborted).toBe(false);
     expect(sealJobBundle).toHaveBeenCalledTimes(1);
+    expect(reserveUsage).toHaveBeenCalledTimes(1);
+    expect(consume).toHaveBeenCalledTimes(1);
     await expect(worker.close()).resolves.toBeUndefined();
   });
 
   it("cancels a pre-start owner wait at the durable received recovery point", async () => {
     let ownerWaitSignal: AbortSignal | undefined;
+    let inherited: unknown;
     const ledger = {
       recoverableJobObligations: vi.fn(async () => ({ entries: [] })),
       start: vi.fn(async () => ({ started: true })),
@@ -317,6 +338,8 @@ describe("job assignment audit-only recovery", () => {
       submissionFor: vi.fn(
         async (_envelope, signal) =>
           new Promise<JobSubmissionOwner>((_resolve, reject) => {
+            inherited = { capacity: currentDeviceCapacityStep(), exclusion: isHoldingMaintenanceExclusion(),
+              urgency: currentMaintenanceUrgency() };
             ownerWaitSignal = signal;
             signal.addEventListener(
               "abort",
@@ -333,13 +356,17 @@ describe("job assignment audit-only recovery", () => {
       createStream: vi.fn(),
     });
 
-    worker.accept(envelope);
+    const bound = emptyDeviceCapacityBudget();
+    await withDeviceCapacityStep({ granted: bound, release() {},
+      tryBegin: () => ({ claim() {}, complete() {} }) }, bound,
+    () => runHoldingMaintenanceExclusion(() => runInMaintenanceContext("foreground", async () => worker.accept(envelope))));
     await vi.waitFor(() => {
       expect(ownerWaitSignal).toBeDefined();
     });
     await worker.close();
 
     expect(ownerWaitSignal!.aborted).toBe(true);
+    expect(inherited).toEqual({ capacity: undefined, exclusion: false, urgency: "background" });
     expect(ledger.start).not.toHaveBeenCalled();
   });
 });

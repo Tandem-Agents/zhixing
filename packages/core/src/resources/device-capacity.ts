@@ -185,6 +185,12 @@ export function currentDeviceCapacityStep(): ActiveDeviceCapacityStep | undefine
   return context?.owner;
 }
 
+/** A durable work owner starts a new execution, not a child of its caller's
+ * physical/tool step. Its own leaf operations must still acquire permits. */
+export function runDetachedDeviceCapacity<T>(operation: () => Promise<T>): Promise<T> {
+  return capacityStepContext.exit(operation);
+}
+
 export class DefaultDeviceCapacityArbiter
   implements DeviceCapacityArbiterPort
 {
