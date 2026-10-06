@@ -12,6 +12,13 @@ import type {
 } from "@zhixing/core/skills/catalog";
 import { FileArtifactStore } from "@zhixing/core/authority";
 import {
+  createDefaultDeviceCapacityPolicy,
+  currentDeviceCapacityStep,
+  DefaultDeviceCapacityArbiter,
+  runWithDeviceCapacity,
+} from "@zhixing/core/resources";
+import { artifactReadCapacity } from "../serve/artifact-read-capacity.js";
+import {
   assignmentMutationRequestId,
   protocolDigest,
 } from "@zhixing/core/protocol";
@@ -35,9 +42,26 @@ describe("assignment skill ports", () => {
   it("stages save, reads its own artifact-backed write, and records stable usage", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-skills-"));
     try {
-      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const defaults = createDefaultDeviceCapacityPolicy();
+      const arbiter = new DefaultDeviceCapacityArbiter({
+        policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
+        probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 1024 ** 3,
+          processRssBytes: 1024 ** 2, temporaryBytesAvailable: 1024 ** 3 }),
+      });
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
+        runReadStep: artifactReadCapacity(arbiter),
+      });
       const overlay: AssignmentMutationOverlayRecord[] = [];
       const mutations = mutationPort(overlay);
+      const stage = mutations.stage;
+      mutations.stage = async (input) => {
+        if (input.mutation.kind === "skill-usage") {
+          // The read permit must have ended before the original write owner runs.
+          expect(currentDeviceCapacityStep()).toMatchObject({ kind: "workload" });
+          expect(arbiter.snapshot().occupancyInUse.memoryReservationBytes).toBe(32 * 1024 ** 2);
+        }
+        return stage(input);
+      };
       const query = skillQuery([]);
       const ports = createAssignmentSkillPorts(artifacts, admissionOptions());
 
@@ -60,10 +84,16 @@ describe("assignment skill ports", () => {
             "tool-save",
           );
           expect(saved.outcome).toBe("created");
-          const loaded = await ports.loadApplication.load({
+          const bound = {
+            occupancy: { memoryReservationBytes: 32 * 1024 ** 2, temporaryBytes: 0, slots: 1 },
+            quantum: { readBytes: 0, writeBytes: 0, ioOperations: 0 },
+          };
+          const loaded = await runWithDeviceCapacity(arbiter, {
+            serviceClass: "workload-interactive", atomic: bound, preferred: bound, maxWaitMs: 0,
+          }, new AbortController().signal, () => ports.loadApplication.load({
             id: saved.id,
             operationId: "tool-load",
-          });
+          }));
           expect(loaded).toMatchObject({
             id: skillNameToId("My Skill"),
             body: "Do the useful thing.",

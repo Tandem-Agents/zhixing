@@ -7,6 +7,7 @@ import {
   DefaultDeviceCapacityArbiter,
   DeviceCapacityStepError,
   emptyDeviceCapacityBudget,
+  runWithDeviceCapacity,
   withDeviceCapacityStep,
   type DeviceCapacityBudget,
   type DeviceCapacityPolicy,
@@ -94,6 +95,73 @@ function request(
 }
 
 describe("DefaultDeviceCapacityArbiter", () => {
+  it("requires an authentic current workload step for a nonwaiting borrowed slot", async () => {
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
+    const other = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
+    const leaf = request("leaf", budget(0, { readBytes: 10, ioOperations: 1 }));
+    const signal = new AbortController().signal;
+    expect(() => arbiter.acquire(leaf, signal)).toThrow("reserve a slot");
+    await runWithDeviceCapacity(arbiter, request("parent", budget(1)), signal, async () => {
+      expect(() => other.acquire(leaf, signal)).toThrow("reserve a slot");
+      expect(() => arbiter.acquire({ ...leaf, maxWaitMs: 1 }, signal)).toThrow("reserve a slot");
+      expect(() => arbiter.acquire({ ...leaf, serviceClass: "storage-foreground" }, signal)).toThrow("reserve a slot");
+      expect(() => arbiter.acquire({ ...leaf, preferred: budget(1) }, signal)).toThrow();
+      const admitted = await arbiter.acquire(leaf, signal);
+      if (admitted.kind !== "granted") throw Error("first physical read must fit");
+      expect(await arbiter.acquire(leaf, signal)).toMatchObject({ kind: "backpressured", blockedBy: "slots" });
+      admitted.permit.release();
+      const next = await arbiter.acquire(leaf, signal);
+      if (next.kind !== "granted") throw Error("released read must allow next read");
+      next.permit.release();
+    });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
+  it("retains the parent occupancy until its physical child releases, including wrapped permits", async () => {
+    const underlying = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: pressure });
+    const wrapper = {
+      snapshot: () => underlying.snapshot(),
+      acquire: async (...args: Parameters<typeof underlying.acquire>) => {
+        const result = await underlying.acquire(...args);
+        if (result.kind !== "granted") return result;
+        return { kind: "granted" as const, permit: { granted: result.permit.granted,
+          tryBegin: (bound: DeviceCapacityBudget) => result.permit.tryBegin(bound), release: () => result.permit.release() } };
+      },
+    };
+    const signal = new AbortController().signal;
+    const child = await runWithDeviceCapacity(wrapper, request("parent", budget(1)), signal,
+      () => wrapper.acquire(request("read", budget(0, { readBytes: 10 })), signal));
+    if (child.kind !== "granted") throw Error("wrapped read must fit");
+    expect(underlying.snapshot().occupancyInUse.slots).toBe(1);
+    expect(await underlying.acquire(request("next", budget(1)), signal)).toMatchObject({ kind: "backpressured", blockedBy: "slots" });
+    await withDeviceCapacityStep(child.permit, budget(0, { readBytes: 10 }), async () => claimDeviceCapacity("readBytes", 10));
+    child.permit.release(); child.permit.release();
+    expect(underlying.snapshot().occupancyInUse).toEqual(emptyDeviceCapacityBudget().occupancy);
+    expect(underlying.snapshot().lastViolation).toBeUndefined();
+  });
+
+  it("returns borrowed-slot ownership on cancelled, gap, blocked and failed-step admissions", async () => {
+    let current = pressure();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: () => current });
+    const signal = new AbortController().signal, cancelled = new AbortController(); cancelled.abort();
+    await runWithDeviceCapacity(arbiter, request("parent", budget(1)), signal, async () => {
+      const leaf = request("leaf", budget(0, { readBytes: 10 }));
+      expect(await arbiter.acquire(leaf, cancelled.signal)).toEqual({ kind: "cancelled" });
+      expect(await arbiter.acquire(request("gap", budget(0, { readBytes: 101 })), signal)).toMatchObject({ kind: "capacity-gap" });
+      current = { ...pressure(), availableMemoryBytes: MIB };
+      expect(await arbiter.acquire(leaf, signal)).toMatchObject({ kind: "backpressured", blockedBy: "memoryReservationBytes" });
+      current = pressure();
+      const admitted = await arbiter.acquire(leaf, signal);
+      if (admitted.kind !== "granted") throw Error("backpressure must release borrowed slot");
+      await expect(withDeviceCapacityStep(admitted.permit, budget(0, { readBytes: 11 }), async () => {})).rejects.toThrow("cannot cover");
+      admitted.permit.release();
+      const next = await arbiter.acquire(leaf, signal);
+      if (next.kind !== "granted") throw Error("failed step must release borrowed slot");
+      next.permit.release();
+    });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+  });
+
   it("distinguishes an unavailable pressure probe from real memory and disk pressure", async () => {
     let current: DeviceCapacityPressure | undefined;
     const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(), probe: () => { if (!current) throw Error("disk probe not ready"); return current; } });

@@ -11,6 +11,7 @@
  */
 
 import { type RuntimeExecutionProfile, createEventBus } from "@zhixing/core";
+import { artifactReadCapacity } from "./serve/artifact-read-capacity.js";
 import { type PermissionRule } from "@zhixing/core/security";
 import {
   AuthorityDeliveryPipeline,
@@ -562,6 +563,7 @@ export async function setupAuthorityRuntime(
     const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
     const artifacts = new FileArtifactStore(
       path.join(authorityRoot, "artifacts"),
+      { runReadStep: artifactReadCapacity(options.deviceCapacity) },
     );
     const rubricArtifacts = projectAdvancementRubricArtifacts(artifacts);
     const anchorEnabled = options.enableAnchor ?? true;
@@ -964,6 +966,7 @@ export async function setupAuthorityRuntime(
         const bindingRoot = path.join(authorityRoot, "workspace-bindings");
         const bindingArtifacts = new FileArtifactStore(
           path.join(bindingRoot, "artifacts"),
+          { runReadStep: artifactReadCapacity(options.deviceCapacity) },
         );
         const bindingGenerationPersistence =
           new FileWorkspaceBindingGenerationPersistenceFactory({

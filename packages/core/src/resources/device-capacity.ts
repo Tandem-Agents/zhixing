@@ -142,6 +142,7 @@ interface PendingAdmission {
   readonly abort: AbortSignal;
   readonly resolve: (admission: DeviceCapacityAdmission) => void;
   readonly abortListener: () => void;
+  readonly releaseBorrowedSlot?: () => void;
   timeout: NodeJS.Timeout | undefined;
   settled: boolean;
 }
@@ -156,7 +157,33 @@ const QUANTUM_DIMENSIONS = [
   "writeBytes",
   "ioOperations",
 ] as const;
-const capacityStepContext = new AsyncLocalStorage<DeviceCapacityStepPermit>();
+export type ActiveDeviceCapacityStep =
+  | { readonly kind: "physical" }
+  | {
+      readonly kind: "workload";
+      readonly arbiter: DeviceCapacityArbiterPort;
+      readonly serviceClass: DeviceWorkloadCapacityRequest["serviceClass"];
+      readonly bound: DeviceCapacityBudget;
+      readonly abort: AbortSignal;
+    };
+
+const capacityStepContext = new AsyncLocalStorage<{
+  readonly permit: DeviceCapacityStepPermit;
+  readonly owner: ActiveDeviceCapacityStep;
+  active: boolean;
+}>();
+// The runtime can wrap arbiter and reservation objects; its tryBegin still
+// returns this authentic step. Keep its issuing reservation private to Core.
+const capacityStepReservations = new WeakMap<DeviceCapacityStepPermit, CapacityPermit>();
+
+/** Describes the active owner; it does not transfer or extend its permit. */
+export function currentDeviceCapacityStep(): ActiveDeviceCapacityStep | undefined {
+  const context = capacityStepContext.getStore();
+  if (context && !context.active) {
+    throw new DeviceCapacityStepError("Device capacity step is no longer usable");
+  }
+  return context?.owner;
+}
 
 export class DefaultDeviceCapacityArbiter
   implements DeviceCapacityArbiterPort
@@ -166,6 +193,7 @@ export class DefaultDeviceCapacityArbiter
   readonly #now: () => number;
   readonly #queues = new Map<DeviceCapacityClass, PendingAdmission[]>();
   readonly #schedule: DeviceCapacityClass[];
+  readonly #issuedPermits = new WeakSet<CapacityPermit>();
   readonly #occupancyInUse = {
     memoryReservationBytes: 0,
     temporaryBytes: 0,
@@ -200,12 +228,27 @@ export class DefaultDeviceCapacityArbiter
     request: DeviceCapacityRequest,
     abort: AbortSignal,
   ): Promise<DeviceCapacityAdmission> {
-    validateRequest(request);
+    const context = capacityStepContext.getStore();
+    const owner = context?.owner;
+    const reservation = context ? capacityStepReservations.get(context.permit) : undefined;
+    // An incremental physical read can use the slot of its actual running
+    // workload. No caller-supplied flag can manufacture that ownership.
+    const lender = request.atomic.occupancy.slots === 0 &&
+      request.preferred.occupancy.slots === 0 && request.maxWaitMs === 0 &&
+      context?.active && owner?.kind === "workload" &&
+      owner.serviceClass === request.serviceClass && owner.bound.occupancy.slots > 0 &&
+      QUANTUM_DIMENSIONS.every(dimension => owner.bound.quantum[dimension] === 0) &&
+      reservation && this.#issuedPermits.has(reservation) ? reservation : undefined;
+    validateRequest(request, lender !== undefined);
     if (abort.aborted) return Promise.resolve({ kind: "cancelled" });
     this.#refill();
     const pressure = this.#safePressure();
     const gap = this.#capacityGap(request.atomic);
     if (gap) return Promise.resolve(gap);
+    const releaseBorrowedSlot = lender?.borrowSlot();
+    if (lender && !releaseBorrowedSlot) {
+      return Promise.resolve({ kind: "backpressured", blockedBy: "slots", retryAfterMs: this.#policy.retryAfterMs });
+    }
 
     return new Promise<DeviceCapacityAdmission>((resolve) => {
       const pending: PendingAdmission = {
@@ -213,6 +256,7 @@ export class DefaultDeviceCapacityArbiter
         abort,
         resolve,
         abortListener: () => this.#settle(pending, { kind: "cancelled" }),
+        ...(releaseBorrowedSlot ? { releaseBorrowedSlot } : {}),
         timeout: undefined,
         settled: false,
       };
@@ -281,7 +325,7 @@ export class DefaultDeviceCapacityArbiter
         while (queue[0]?.settled) queue.shift();
         const pending = queue[0];
         if (!pending) continue;
-        const admission = this.#tryGrant(pending.request, pressure);
+        const admission = this.#tryGrant(pending.request, pressure, pending.releaseBorrowedSlot);
         if (!admission) continue;
         queue.shift();
         this.#cursor = (index + 1) % this.#schedule.length;
@@ -296,6 +340,7 @@ export class DefaultDeviceCapacityArbiter
   #tryGrant(
     request: DeviceCapacityRequest,
     pressure: DeviceCapacityPressure | undefined,
+    releaseBorrowedSlot?: () => void,
   ): Extract<DeviceCapacityAdmission, { kind: "granted" }> | undefined {
     const blockedBy = this.#blockedDimension(request.atomic, pressure);
     if (!this.#fits(request.atomic, pressure)) {
@@ -321,9 +366,7 @@ export class DefaultDeviceCapacityArbiter
       this.#quantumAvailable[dimension] -= granted.quantum[dimension];
     }
     this.#blockedBy = undefined;
-    return {
-      kind: "granted",
-      permit: new CapacityPermit(
+    const permit = new CapacityPermit(
         request.admissionId,
         request.atomic,
         granted,
@@ -338,10 +381,12 @@ export class DefaultDeviceCapacityArbiter
             );
           }
           if (violation) this.#lastViolation = violation;
+          releaseBorrowedSlot?.();
           this.#drain();
         },
-      ),
-    };
+      );
+    this.#issuedPermits.add(permit);
+    return { kind: "granted", permit };
   }
 
   #fits(
@@ -485,6 +530,7 @@ export class DefaultDeviceCapacityArbiter
     pending.settled = true;
     if (pending.timeout) clearTimeout(pending.timeout);
     pending.abort.removeEventListener("abort", pending.abortListener);
+    if (admission.kind !== "granted") pending.releaseBorrowedSlot?.();
     pending.resolve(admission);
   }
 
@@ -510,6 +556,8 @@ class CapacityPermit implements DeviceCapacityPermit {
   readonly #remainingQuantum: MutableDeviceCapacityBudget["quantum"];
   #activeStep = false;
   #released = false;
+  #slotBorrowed = false;
+  #returned = false;
   #violation: DeviceCapacityDiagnostics["lastViolation"];
 
   constructor(
@@ -560,7 +608,7 @@ class CapacityPermit implements DeviceCapacityPermit {
     this.#activeStep = true;
     let completed = false;
     const used = emptyDeviceCapacityBudget();
-    return {
+    const step: DeviceCapacityStepPermit = {
       claim: (dimension, amount) => {
         assertNonNegativeSafeInteger(amount, `Device capacity ${dimension} claim`);
         if (completed || this.#released || this.#violation) {
@@ -598,6 +646,21 @@ class CapacityPermit implements DeviceCapacityPermit {
         this.#activeStep = false;
       },
     };
+    capacityStepReservations.set(step, this);
+    return step;
+  }
+
+  /** One physical child at a time; retain occupancy if its caller ends first. */
+  borrowSlot(): (() => void) | undefined {
+    if (this.#released || this.#violation || !this.#activeStep || this.#slotBorrowed || this.granted.occupancy.slots < 1) return undefined;
+    this.#slotBorrowed = true;
+    let returned = false;
+    return () => {
+      if (returned) return;
+      returned = true;
+      this.#slotBorrowed = false;
+      this.#returnReservation();
+    };
   }
 
   release(): void {
@@ -607,6 +670,12 @@ class CapacityPermit implements DeviceCapacityPermit {
       this.#recordViolation("slots", 1, 2);
     }
     this.#activeStep = false;
+    this.#returnReservation();
+  }
+
+  #returnReservation(): void {
+    if (!this.#released || this.#slotBorrowed || this.#returned) return;
+    this.#returned = true;
     this.onRelease({ ...this.#remainingQuantum }, this.#violation);
   }
 
@@ -643,15 +712,26 @@ export async function withDeviceCapacityStep<T>(
   stepBound: DeviceCapacityBudget,
   operation: () => Promise<T>,
 ): Promise<T> {
+  return runCapacityStep(permit, stepBound, { kind: "physical" }, operation);
+}
+
+async function runCapacityStep<T>(
+  permit: DeviceCapacityPermit,
+  stepBound: DeviceCapacityBudget,
+  owner: ActiveDeviceCapacityStep,
+  operation: () => Promise<T>,
+): Promise<T> {
   const step = permit.tryBegin(stepBound);
   if (!step) {
     throw new DeviceCapacityStepError(
       "Device capacity permit cannot cover the next atomic step",
     );
   }
+  const context = { permit: step, owner: Object.freeze(owner), active: true };
   try {
-    return await capacityStepContext.run(step, operation);
+    return await capacityStepContext.run(context, operation);
   } finally {
+    context.active = false;
     step.complete();
   }
 }
@@ -660,7 +740,7 @@ export function claimDeviceCapacity(
   dimension: DeviceCapacityDimension,
   amount: number,
 ): void {
-  capacityStepContext.getStore()?.claim(dimension, amount);
+  capacityStepContext.getStore()?.permit.claim(dimension, amount);
 }
 
 export class DeviceCapacityStepError extends Error {
@@ -697,9 +777,19 @@ export async function runWithDeviceCapacity<T>(
     throw new DeviceCapacityAdmissionError(admission);
   }
   try {
-    return await withDeviceCapacityStep(
+    return await runCapacityStep(
       admission.permit,
       request.atomic,
+      {
+        kind: "workload",
+        arbiter,
+        serviceClass: request.serviceClass,
+        bound: Object.freeze({
+          occupancy: Object.freeze({ ...request.atomic.occupancy }),
+          quantum: Object.freeze({ ...request.atomic.quantum }),
+        }),
+        abort,
+      },
       operation,
     );
   } finally {
@@ -853,7 +943,7 @@ function validatePolicy(policy: DeviceCapacityPolicy): void {
   }
 }
 
-function validateRequest(request: DeviceCapacityRequest): void {
+function validateRequest(request: DeviceCapacityRequest, hasBorrowedSlot = false): void {
   if (!request.admissionId || request.admissionId.length > 256) {
     throw new TypeError("Device capacity admission id is invalid");
   }
@@ -873,7 +963,7 @@ function validateRequest(request: DeviceCapacityRequest): void {
       throw new TypeError(`Device capacity atomic ${dimension} exceeds preferred`);
     }
   }
-  if (request.atomic.occupancy.slots < 1) {
+  if (request.atomic.occupancy.slots < 1 && !hasBorrowedSlot) {
     throw new TypeError("Device capacity atomic budget must reserve a slot");
   }
 }

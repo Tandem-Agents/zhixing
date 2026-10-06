@@ -4,7 +4,6 @@ import type { Dir } from "node:fs";
 import {
   open,
   opendir,
-  readFile,
   readdir,
   rename,
   rm,
@@ -49,6 +48,8 @@ export const collectArtifactGarbage = Symbol("collectArtifactGarbage");
 export interface FileArtifactStoreOptions {
   readonly lockStaleMs?: number;
   readonly lockWaitMs?: number;
+  /** Caller reads only; write/GC verification retains its original physical owner. */
+  readonly runReadStep?: <T>(ref: ArtifactRef, operation: () => Promise<T>) => Promise<T>;
 }
 
 export class FileArtifactStore implements MutableArtifactStore {
@@ -57,12 +58,14 @@ export class FileArtifactStore implements MutableArtifactStore {
   readonly #lockStaleMs: number;
   readonly #lockWaitMs: number;
   readonly #operations = new SerialTaskQueue();
+  readonly #runReadStep: FileArtifactStoreOptions["runReadStep"];
 
   constructor(rootDir: string, options: FileArtifactStoreOptions = {}) {
     this.rootDir = path.resolve(rootDir);
     this.#lockPath = path.join(this.rootDir, ".artifact-store.lock");
     this.#lockStaleMs = options.lockStaleMs ?? 30_000;
     this.#lockWaitMs = options.lockWaitMs ?? 10_000;
+    this.#runReadStep = options.runReadStep;
   }
 
   async put(bytes: Uint8Array): Promise<ArtifactRef> {
@@ -104,7 +107,11 @@ export class FileArtifactStore implements MutableArtifactStore {
   }
 
   async get(ref: ArtifactRef): Promise<Uint8Array> {
-    return this.#readVerified(ref);
+    assertArtifactRef(ref);
+    const reference = Object.freeze({ digest: ref.digest, bytes: ref.bytes });
+    return this.#runReadStep
+      ? this.#runReadStep(reference, () => this.#readVerified(reference))
+      : this.#readVerified(reference);
   }
 
   async putVerifiedStream(
@@ -465,7 +472,33 @@ export class FileArtifactStore implements MutableArtifactStore {
     claimDeviceCapacity("ioOperations", 1);
     let bytes: Buffer;
     try {
-      bytes = await readFile(this.pathFor(ref));
+      const handle = await open(this.pathFor(ref), "r");
+      try {
+        // One bounded file-read operation. Never let a corrupt oversized file
+        // make readFile allocate/read beyond the admitted reference length.
+        const before = await handle.stat();
+        if (!before.isFile() || before.size !== ref.bytes) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            `Artifact content does not match its reference: ${ref.digest}`,
+          );
+        }
+        bytes = Buffer.allocUnsafe(ref.bytes);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+          if (read.bytesRead === 0) break;
+          offset += read.bytesRead;
+        }
+        if (offset !== ref.bytes || (await handle.stat()).size !== ref.bytes) {
+          throw new AuthorityStorageError(
+            "artifact-corrupt",
+            `Artifact content does not match its reference: ${ref.digest}`,
+          );
+        }
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       if (isNodeError(error, "ENOENT")) {
         throw new AuthorityStorageError(
