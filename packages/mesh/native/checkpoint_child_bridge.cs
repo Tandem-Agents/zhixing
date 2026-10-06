@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
-using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -57,6 +56,21 @@ internal static class CheckpointChildBridge {
   [DllImport("shell32.dll", SetLastError = true)]
   static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct PROCESSENTRY32 {
+    public uint Size, Usage, ProcessId;
+    public IntPtr DefaultHeap;
+    public uint ModuleId, Threads, ParentProcessId;
+    public int BasePriority;
+    public uint Flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Executable;
+  }
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool Process32FirstW(IntPtr snapshot, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool Process32NextW(IntPtr snapshot, ref PROCESSENTRY32 entry);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder image, ref uint size);
+  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int kind, IntPtr buffer, int length, out int required);
   static long NextHandle = 1;
   static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
 
@@ -159,52 +173,76 @@ internal static class CheckpointChildBridge {
 
   static object ObserveNodeProcesses() {
     var entries = new List<object>(); var complete = true; var characters = 0; object failure = null;
-    using (var search = new ManagementObjectSearcher("SELECT ProcessId, CreationDate, CommandLine FROM Win32_Process WHERE Name='node.exe' OR Name='node'")) {
-      search.Options.Timeout = TimeSpan.FromSeconds(2);
-      // This inventory is consumed once, forward only. Avoid retaining a
-      // rewindable COM enumeration and fetching each row in a separate batch.
-      // Freshness, identity sources and conservative completeness stay intact.
-      search.Options.Rewindable = false;
-      search.Options.BlockSize = 16;
-      using (var rows = search.Get()) foreach (ManagementObject row in rows) using (row) {
-        if (entries.Count >= 256) { complete = false; if (failure == null) failure = new { reason = "inventory-limit" }; break; }
-        var pid = Convert.ToInt32(row["ProcessId"]);
-        var creation = row["CreationDate"] as string;
-        if (creation == null) {
-          if (ProcessHasExited(pid)) continue;
-          complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; continue;
-        }
-        var birth = ManagementDateTimeConverter.ToDateTime(creation).ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var command = row["CommandLine"] as string; List<string> argv = null;
-        if (command != null && command.Length <= 32768 && characters + command.Length <= 65536) {
-          characters += command.Length;
-          int count; var memory = CommandLineToArgvW(command, out count);
-          try {
-            if (memory != IntPtr.Zero && count <= 1024) {
-              argv = new List<string>();
-              for (var i = 0; i < count; i++) argv.Add(Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size)));
+    // WMI can take an entire close budget even for a small process inventory.
+    // Enumerate the OS snapshot directly and bind identity, image and arguments
+    // to one process handle; a snapshot PID alone is never an identity proof.
+    var snapshot = CreateToolhelp32Snapshot(2, 0);
+    if (snapshot == new IntPtr(-1)) throw Win32("Unable to enumerate processes");
+    try {
+      var row = new PROCESSENTRY32 { Size = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+      var present = Process32FirstW(snapshot, ref row); var scanned = 0; var candidates = 0;
+      while (present) {
+        if (++scanned > 65536) { complete = false; failure = new { reason = "inventory-limit" }; break; }
+        if (IsNodeImage(row.Executable)) {
+          var pid = row.ProcessId;
+          if (++candidates > 256) { complete = false; failure = new { reason = "inventory-limit" }; break; }
+          var process = OpenProcess(0x1000 | SYNCHRONIZE, false, pid);
+          if (process == IntPtr.Zero) {
+            // ERROR_INVALID_PARAMETER means this snapshot PID no longer exists.
+            if (Marshal.GetLastWin32Error() != 87) { complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; }
+          } else try {
+            if (WaitForSingleObject(process, 0) != 0) {
+              long created, exited, kernel, user; uint size = 32768; var image = new StringBuilder((int)size);
+              if (!GetProcessTimes(process, out created, out exited, out kernel, out user) || !QueryFullProcessImageNameW(process, 0, image, ref size)) {
+                if (WaitForSingleObject(process, 0) != 0) { complete = false; if (failure == null) failure = new { reason = "identity-unavailable", pid }; }
+              } else if (IsNodeImage(Path.GetFileName(image.ToString()))) {
+                // Keep the previous WMI microsecond precision and UTC tick format
+                // so persisted writer identities remain comparable across upgrade.
+                var birth = DateTime.FromFileTimeUtc(created - created % 10).Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var command = ReadProcessCommandLine(process); List<string> argv = null;
+                if (command != null && command.Length > 0 && command.Length <= 32768 && characters + command.Length <= 65536) {
+                  characters += command.Length;
+                  int count; var memory = CommandLineToArgvW(command, out count);
+                  try {
+                    if (memory != IntPtr.Zero && count > 0 && count <= 1024) {
+                      argv = new List<string>();
+                      for (var i = 0; i < count; i++) argv.Add(Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size)));
+                    }
+                  } finally { if (memory != IntPtr.Zero) LocalFree(memory); }
+                }
+                if (WaitForSingleObject(process, 0) != 0) {
+                  if (argv == null) { complete = false; if (failure == null) failure = new { reason = "arguments-unavailable", pid }; }
+                  entries.Add(new Dictionary<string, object> { {"pid", pid}, {"birth", birth}, {"argv", argv} });
+                }
+              }
             }
-          } finally { if (memory != IntPtr.Zero) LocalFree(memory); }
+          } finally { CloseHandle(process); }
         }
-        if (argv == null) {
-          // WMI can retain a row after exit while CommandLine has already vanished.
-          // Only OS-proven exit permits exclusion; unreadable live peers still block.
-          if (ProcessHasExited(pid)) continue;
-          complete = false; if (failure == null) failure = new { reason = "arguments-unavailable", pid };
-        }
-        entries.Add(new Dictionary<string, object> { {"pid", pid}, {"birth", birth}, {"argv", argv} });
+        present = Process32NextW(snapshot, ref row);
       }
-    }
+      if (!present && Marshal.GetLastWin32Error() != 18) throw Win32("Unable to complete process inventory");
+    } finally { CloseHandle(snapshot); }
     var result = new Dictionary<string, object> { {"complete", complete}, {"entries", entries} };
     if (failure != null) result.Add("failure", failure);
     return result;
   }
 
-  static bool ProcessHasExited(int pid) {
-    try { using (var process = System.Diagnostics.Process.GetProcessById(pid)) return process.HasExited; }
-    catch (ArgumentException) { return true; }
-    catch (System.ComponentModel.Win32Exception error) { return error.NativeErrorCode == 87; }
-    catch (InvalidOperationException) { return true; }
+  static bool IsNodeImage(string name) {
+    return String.Equals(name, "node.exe", StringComparison.OrdinalIgnoreCase) || String.Equals(name, "node", StringComparison.OrdinalIgnoreCase);
+  }
+
+  static string ReadProcessCommandLine(IntPtr process) {
+    const int capacity = 65536 + 16;
+    var buffer = Marshal.AllocHGlobal(capacity);
+    try {
+      int required;
+      if (NtQueryInformationProcess(process, 60, buffer, capacity, out required) < 0) return null;
+      var text = (UNICODE_STRING)Marshal.PtrToStructure(buffer, typeof(UNICODE_STRING));
+      var offset = text.Buffer.ToInt64() - buffer.ToInt64();
+      if (text.Length == 0 || text.Length % 2 != 0 || text.MaximumLength < text.Length ||
+          offset < Marshal.SizeOf(typeof(UNICODE_STRING)) || offset > capacity - text.Length) return null;
+      return Marshal.PtrToStringUni(text.Buffer, text.Length / 2);
+    } finally { Marshal.FreeHGlobal(buffer); }
   }
 
   static IntPtr OpenPath(string input, bool create, bool readOnly) {

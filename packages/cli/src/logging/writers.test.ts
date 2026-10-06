@@ -8,6 +8,24 @@ import { managedHomeArgument, normalizeCliArgs } from "./entry-mode.js";
 import { spawn } from "node:child_process";
 
 describe("log writer OS observation", () => {
+  it.skipIf(process.platform !== "win32")("binds live quoted Unicode arguments and stable birth to the same process", async () => {
+    const home = await createTempDir("log-process-identity"), files = new LogFilesProcess(home);
+    const args = ["-e", "setInterval(() => {}, 1000)", "argument with spaces", "中文🙂", 'quote"slash\\'];
+    const child = spawn(process.execPath, args, { windowsHide: true, stdio: "ignore" });
+    const exited = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+    try {
+      await files.open(true);
+      const first = await files.observeNodeProcesses();
+      const second = await files.observeNodeProcesses();
+      expect(first.complete, JSON.stringify(first.failure)).toBe(true);
+      expect(second.complete, JSON.stringify(second.failure)).toBe(true);
+      const identity = first.entries.find(row => row.pid === child.pid);
+      expect(identity?.argv?.slice(1)).toEqual(args);
+      expect(identity?.birth).toMatch(/^[0-9]{1,32}$/u);
+      expect(second.entries.find(row => row.pid === child.pid)).toEqual(identity);
+    } finally { child.kill(); await exited; await files.close(); }
+  });
+
   it.skipIf(process.platform !== "win32")("does not turn exited unrelated processes into unavailable writer inventory", async () => {
     const home = await createTempDir("log-process-churn"), files = new LogFilesProcess(home);
     try {
