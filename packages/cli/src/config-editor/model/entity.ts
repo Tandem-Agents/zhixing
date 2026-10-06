@@ -13,7 +13,7 @@
  * 行/按钮统一接口：两者 `onEnter` 都返回 `OnEnterResult`，由 nav/pop/stay 组合子构造。
  * 这层统一让"按钮校验失败"和未来"行进入前 precondition 失败"用同一机制，无需扩接口。
  */
-import { ROLE_RECOMMENDATIONS } from "@zhixing/providers";
+import { ROLE_RECOMMENDATIONS } from "@zhixing/providers/configuration";
 import type { PanelAction, PanelDescriptor, Status, WorkingState } from "../types.js";
 import { disableMessaging, enableMessaging, isMessagingEnabled, messagingEnabledProjection, readChannelEntry, readModelRole, readProviderEntry, writeModelRole } from "../state.js";
 import { SUPPORTED_PROVIDERS, listSupportedChannels, findSupportedChannel } from "../../registries/index.js";

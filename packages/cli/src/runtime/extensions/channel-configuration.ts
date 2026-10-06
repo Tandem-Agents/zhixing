@@ -4,7 +4,7 @@ import type { ExtensionBinding, ExtensionInstance, ExtensionManifest } from "@zh
 import type { ChannelConfig } from "@zhixing/core/channels";
 import { channelDeclaration, validateChannelCredentials } from "@zhixing/core/channels/extension";
 import { canonicalize } from "@zhixing/core/protocol";
-import { loadConfig, loadConfigurationSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing/providers";
+import { loadConfig, loadConfigurationSnapshot, type CredentialStoreCoordinator, type ZhixingConfig, type ChannelCredentialProjection } from "@zhixing/providers/configuration";
 
 export interface ChannelProjection { readonly id: string; readonly config: ChannelConfig }
 interface ConfigurationPublication {

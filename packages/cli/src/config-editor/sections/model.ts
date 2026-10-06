@@ -16,7 +16,7 @@ import type {
   SectionEntry,
   WorkingState,
 } from "../types.js";
-import { ROLE_SPECS } from "@zhixing/providers";
+import { ROLE_SPECS } from "@zhixing/providers/configuration";
 import { readModelRole } from "../state.js";
 import { checkModel, hasApiKey, type ModelIssue } from "../checks/model.js";
 

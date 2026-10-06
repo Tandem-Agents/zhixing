@@ -10,8 +10,8 @@ const calls = vi.hoisted(() => ({
   editor: vi.fn(),
   reconcile: vi.fn(async () => undefined),
 }));
-vi.mock("@zhixing/providers", async (original) => ({
-  ...await original<typeof import("@zhixing/providers")>(),
+vi.mock("@zhixing/providers/configuration", async (original) => ({
+  ...await original<typeof import("@zhixing/providers/configuration")>(),
   loadConfig: calls.load,
   editConfiguration: calls.write,
   loadConfigurationSnapshot: calls.snapshot,
@@ -24,6 +24,16 @@ vi.mock("../../config-editor/index.js", () => ({
 }));
 vi.mock("../../serve/managed-service-runtime.js", () => ({
   reconcileCurrentManagedService: calls.reconcile,
+}));
+// These cases exercise the real MCP application save/activation owner. Discovery
+// and probe infrastructure are outside this boundary and must not turn its
+// ordering assertions into a cold module-loading deadline.
+vi.mock("../mcp-management-adapter.js", () => ({
+  createMcpManagementAdapter: (options: { readStatusWire(): Promise<unknown> }) => ({
+    snapshot: options.readStatusWire,
+    isServerIdValid: () => true,
+    probe: vi.fn(), search: vi.fn(), readSource: vi.fn(),
+  }),
 }));
 import { handleConfigCommand, handleMcpCommand } from "../config-command.js";
 import { ChannelConfiguration } from "../extensions/channel-configuration.js";
@@ -60,20 +70,34 @@ describe("REPL config command home binding", () => {
   it.each([false, true])("MCP owner 保存一次，等待当前轮再激活，激活失败=%s 保留已保存反馈", async failed => {
     const deps = makeDeps();
     const turn = Promise.withResolvers<void>();
+    const saved = Promise.withResolvers<void>();
+    const waitingForTurn = Promise.withResolvers<void>();
+    const catchTurn = turn.promise.catch.bind(turn.promise);
+    const turnSubscription = vi.spyOn(turn.promise, 'catch').mockImplementation(onRejected => {
+      const pending = catchTurn(onRejected);
+      waitingForTurn.resolve();
+      return pending;
+    });
     deps.state.activeTurnPromise = turn.promise;
     deps.requestHostReload.mockImplementation(async () => { if (failed) throw new Error("activation failed"); });
     calls.load.mockReturnValue({});
     calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
-    calls.write.mockImplementation(async () => undefined);
+    calls.write.mockImplementation(async () => { saved.resolve(); });
     calls.editor.mockImplementation(async input => {
       const result = { kind: "completed", config: { mcp: { servers: {} } }, credentials: { mcp: {} } };
       await input.writers.save(result);
       return result;
     });
     const run = handleMcpCommand({ ...deps, readMcpStatusWire: async () => [], llmComplete: vi.fn(async () => { throw new Error("no model"); }) });
-    await vi.waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
-    expect(deps.requestHostReload).not.toHaveBeenCalled();
-    turn.resolve(); await run;
+    try {
+      await Promise.race([saved.promise, run.then(() => { throw new Error('MCP command completed without saving'); })]);
+      // The real activation owner has now subscribed to the unresolved turn.
+      // Removing its wait must fail, even when saving still happens first.
+      await Promise.race([waitingForTurn.promise, run.then(() => { throw new Error('MCP command completed without waiting for the active turn'); })]);
+      expect(calls.write).toHaveBeenCalledOnce();
+      expect(turnSubscription).toHaveBeenCalledOnce();
+      expect(deps.requestHostReload).not.toHaveBeenCalled();
+    } finally { turn.resolve(); await run.finally(() => turnSubscription.mockRestore()); }
     expect(calls.write.mock.calls[0]?.[2]).toMatchObject({ scope: "mcp", configPath: deps.configPath });
     expect(deps.requestHostReload).toHaveBeenCalledOnce();
     expect(deps.writer.line.mock.calls.flat().join("\n")).toContain(failed ? "尚未确认生效" : "已保存并生效");

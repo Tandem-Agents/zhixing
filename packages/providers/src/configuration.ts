@@ -8,5 +8,6 @@ export * from "./configuration-logging.js";
 export * from "./presets.js";
 export * from "./resolve.js";
 export * from "./role-spec.js";
+export * from "./role-recommendations.js";
 export * from "./protocol-defaults.js";
 export * from "./model-capability.js";

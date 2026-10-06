@@ -1,12 +1,11 @@
 /** Node 配置保存/应用编排，复用 Configuration、Secret、Channel 与 MCP owners。 */
 import type { ChannelStatus } from "@zhixing/core/channels";
-import { loadConfig, loadConfigurationSnapshot, editConfiguration } from "@zhixing/providers";
+import { loadConfig, loadConfigurationSnapshot, editConfiguration } from "@zhixing/providers/configuration";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
 import { ChannelConfiguration } from "./extensions/channel-configuration.js";
 import { listSupportedChannels } from "../registries/channels.js";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
-import { createMcpManagementAdapter } from "./mcp-management-adapter.js";
 import { McpManagementApplication, type McpManagementEditorPort } from "@zhixing/core/mcp-management";
 import type { NodeConfigurationEditor } from "./configuration-edit.js";
 
@@ -242,6 +241,7 @@ export interface McpConfigurationDeps {
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {
+  const { createMcpManagementAdapter } = await import('./mcp-management-adapter.js');
   const proxy = loadConfig({ configPath: deps.configPath }).network?.proxy;
   const management = createMcpManagementAdapter({
     proxy,

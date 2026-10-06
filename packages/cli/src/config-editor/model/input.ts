@@ -12,7 +12,7 @@
  *   - Ctrl+C：退出整个编辑器
  */
 import type { PanelAction, PanelDescriptor, WorkingState } from "../types.js";
-import { getPreset } from "@zhixing/providers";
+import { getPreset } from "@zhixing/providers/configuration";
 import { addProviderModel, patchChannelEntry, patchProviderEntry, setInputBuffer, writeModelRole, writeModelThinking } from "../state.js";
 import { SUPPORTED_PROVIDERS, listSupportedChannels, findSupportedChannel } from "../../registries/index.js";
 import type { KeyEvent } from "../../tui/index.js";
