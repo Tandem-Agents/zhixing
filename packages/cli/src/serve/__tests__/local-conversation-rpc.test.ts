@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from 'node:events';
+import { createRpcConnection } from '../../../../server/src/rpc/connection.js';
+import { projectProcessYield } from '@zhixing/rpc/session-wire';
 import { localConversationId, type TaskListState } from "@zhixing/core/conversation";
 import { RPC_ERROR_CODES, RpcAppError } from "@zhixing/server";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
@@ -15,6 +18,93 @@ const CONVERSATION_ID = localConversationId(
 );
 
 describe("LocalConversationRpcRouter", () => {
+  it('negotiates real connection presentation and projects owner notifications through the shared egress', async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({ deviceId: DEVICE_ID, owner: port, remoteFor: () => { throw new Error('not remote'); } });
+    const plain = presentationConnection(), enhanced = presentationConnection();
+    const subscribe = (connection: typeof plain.connection, presentation?: 'default' | 'bounded-v1') => router.dispatch({
+      method: 'session.subscribe', params: { conversationId: CONVERSATION_ID, replayFinals: false, ...(presentation ? { presentation } : {}) }, connection,
+    });
+    expect(await subscribe(plain.connection)).toMatchObject({ result: { subscribed: true, presentation: 'default' } });
+    expect(await subscribe(enhanced.connection, 'bounded-v1')).toMatchObject({ result: { subscribed: true, presentation: 'bounded-v1' } });
+    await router.dispatch({ method: 'session.send', params: { conversationId: CONVERSATION_ID, turnId: 'turn-1', text: 'edit', acceptLimitedCapabilities: true }, connection: plain.connection });
+    const turnNotify = vi.mocked(port.createAgentTurnExecution).mock.calls[0]![0].notify;
+    plain.notifications.length = 0;
+    enhanced.notifications.length = 0;
+    const publish = vi.mocked(port.subscribeRunNotifications).mock.calls[0]![0];
+    const delta = { type: 'tool_end' as const, id: 'edit', name: 'edit', duration: 0, result: { content: 'saved', presentation: presentationDiff() } };
+    const value = projectProcessYield({ conversationId: CONVERSATION_ID, runId: 'run-1', assignmentId: 'assignment-1', streamEpoch: 1, sourceSeq: 1, observedAt: performance.now() }, delta);
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: value });
+    turnNotify('session.delta', { conversationId: CONVERSATION_ID, turnId: 'turn-1', delta });
+    turnNotify('session.assignmentStream', { ref: 'canonical-private' });
+    expect(plain.notifications).toHaveLength(2);
+    expect(enhanced.notifications).toHaveLength(2);
+    expect(JSON.stringify(plain.notifications)).not.toMatch(/file-diff|presentation|"ref"/u);
+    expect(JSON.stringify(enhanced.notifications)).toContain('file-diff');
+    await subscribe(enhanced.connection, 'default');
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: value });
+    expect(JSON.stringify(enhanced.notifications.at(-1))).not.toContain('file-diff');
+    await subscribe(enhanced.connection, 'bounded-v1');
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: value });
+    expect(JSON.stringify(enhanced.notifications.at(-1))).not.toContain('file-diff');
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: { ...value, source: { ...value.source, sourceSeq: 2, observedAt: performance.now() } } });
+    expect(JSON.stringify(enhanced.notifications.at(-1))).toContain('file-diff');
+    await router.dispatch({ method: 'session.unsubscribe', params: { conversationId: CONVERSATION_ID }, connection: enhanced.connection });
+    const count = enhanced.notifications.length;
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: value });
+    expect(enhanced.notifications).toHaveLength(count);
+    expect(enhanced.connection.presentationProfile!(CONVERSATION_ID)).toBe('default');
+    plain.connection.close();
+    const plainCount = plain.notifications.length;
+    turnNotify('session.complete', { conversationId: CONVERSATION_ID });
+    expect(plain.notifications).toHaveLength(plainCount);
+    const replacement = presentationConnection();
+    await subscribe(replacement.connection);
+    publish({ conversationId: CONVERSATION_ID, method: 'session.process', params: value });
+    expect(JSON.stringify(replacement.notifications)).not.toContain('file-diff');
+  });
+
+  it.each(['pause', 'resubscribe', 'close'] as const)('keeps replay bound to observation lifetime across %s', async action => {
+    const port = ownerPort();
+    let release!: (value: Awaited<ReturnType<typeof port.finalHistory>>) => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(port.finalHistory).mockImplementationOnce(() => { entered(); return new Promise(resolve => { release = resolve; }); });
+    const router = new LocalConversationRpcRouter({ deviceId: DEVICE_ID, owner: port, remoteFor: () => { throw new Error('not remote'); } });
+    const { connection, notifications } = presentationConnection();
+    const pending = router.dispatch({ method: 'session.subscribe', params: { conversationId: CONVERSATION_ID, presentation: 'bounded-v1' }, connection });
+    await waiting;
+    const revision = connection.observationRevision!(CONVERSATION_ID);
+    if (action === 'close') connection.close();
+    else {
+      if (action === 'resubscribe') await router.dispatch({ method: 'session.unsubscribe', params: { conversationId: CONVERSATION_ID }, connection });
+      await router.dispatch({ method: 'session.subscribe', params: { conversationId: CONVERSATION_ID, presentation: 'default', replayFinals: false }, connection });
+    }
+    release([{ frame: { conversationId: CONVERSATION_ID, runId: 'run-final', commitRevision: 4 }, publishResults: [{ conversationId: CONVERSATION_ID, runId: 'run-final', seq: 1, assignmentId: 'assignment-1' }] }] as never);
+    await pending;
+    if (action === 'pause') {
+      expect(connection.observationRevision!(CONVERSATION_ID)).toBe(revision);
+      expect(notifications.map(item => item.method)).toEqual(['session.final', 'session.event']);
+      expect(notifications[1]).toMatchObject({ params: { scope: 'control', event: 'publish:result' } });
+    } else expect(notifications).toEqual([]);
+  });
+
+  it('bounds real connection observations and rejects invalid presentation without consuming capacity', async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({ deviceId: DEVICE_ID, owner: port, remoteFor: () => { throw new Error('not remote'); } });
+    const { connection } = presentationConnection();
+    for (const presentation of ['unbounded', null, true, {}]) {
+      await expect(router.dispatch({ method: 'session.subscribe', params: { conversationId: CONVERSATION_ID, presentation }, connection })).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    }
+    expect(connection.observationRevision!(CONVERSATION_ID)).toBe(-1);
+    for (let n = 0; n < 128; n++) expect(connection.setPresentationProfile!('reserved-' + n, 'default')).toBe(true);
+    await expect(router.dispatch({ method: 'session.subscribe', params: { conversationId: CONVERSATION_ID }, connection })).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    connection.dropPresentationProfile!('reserved-0');
+    expect(await router.dispatch({ method: 'session.subscribe', params: { conversationId: CONVERSATION_ID }, connection })).toMatchObject({ result: { subscribed: true } });
+    connection.close();
+    expect(connection.setPresentationProfile!('closed', 'bounded-v1')).toBe(false);
+  });
+
   it("status history follows the current owner and refuses reads during takeover", async () => {
     const owner = ownerPort();
     const request = { method: "session.statusHistory", params: { conversationId: CONVERSATION_ID, cursors: [{ runId: "run-b", afterStatusRevision: 2 }] }, connection: fakeConnection() };
@@ -993,4 +1083,22 @@ function fakeConnection() {
     notify: vi.fn(),
     onClose: vi.fn(() => () => {}),
   };
+}
+
+function presentationConnection() {
+  const notifications: Array<{ method: string; params: unknown }> = [];
+  const socket = Object.assign(new EventEmitter(), { OPEN: 1, readyState: 1,
+    send: (wire: string) => { notifications.push(JSON.parse(wire)); },
+    close: () => { socket.readyState = 3; socket.emit('close'); },
+  });
+  const connection = createRpcConnection(socket as never, { loopback: true });
+  connection.authenticated = true;
+  connection.surfacePrincipal = 'rpc:test';
+  connection.surfaceGeneration = 1;
+  return { connection, notifications };
+}
+function presentationDiff() {
+  return { kind: 'file-diff' as const, path: 'file.ts', operation: 'modified' as const,
+    changeStats: { kind: 'exact' as const, addedLines: 1, removedLines: 0 },
+    hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: [{ type: 'added' as const, newLineNumber: 1, content: 'new' }] }] };
 }

@@ -1,5 +1,6 @@
 import type { ConversationStatusNotice, FinalFrame, StreamFrame } from "@zhixing/core/contracts";
 import type { SessionDeltaPayload } from "@zhixing/rpc";
+import type { SessionProcessProjection } from "@zhixing/rpc/session-wire";
 
 export interface ConversationOutputIdentity {
   readonly conversationId: string;
@@ -11,6 +12,7 @@ export interface ConversationOutputIdentity {
 export type ConversationOutputSource = ConversationOutputIdentity & (
   | { readonly kind: "delta"; readonly notification: SessionDeltaPayload }
   | { readonly kind: "stream"; readonly frame: StreamFrame }
+  | { readonly kind: "process"; readonly projection: SessionProcessProjection }
   | { readonly kind: "status"; readonly notice: ConversationStatusNotice }
   | { readonly kind: "history"; readonly final: FinalFrame }
 );

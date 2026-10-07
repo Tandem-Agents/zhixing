@@ -57,7 +57,7 @@ function createFactory(yields: readonly AgentYield[]): RuntimeFactory {
 }
 
 describe("projectSessionTurn", () => {
-  it("strips presentation from default session.delta payloads", async () => {
+  it.each([undefined, "server-bounded"] as const)("keeps explicit Server presentation separate from default (%s)", async presentation => {
     const manager = new ConversationManager(
       createFactory([
         {
@@ -94,12 +94,15 @@ describe("projectSessionTurn", () => {
       managed,
       text: "change file",
       turnId: "turn-1",
+      presentation,
       notify: (method, params) => notifications.push({ method, params }),
     });
 
     const delta = notifications.find((n) => n.method === "session.delta");
     expect(JSON.stringify(delta?.params)).toContain("Replaced text");
-    expect(JSON.stringify(delta?.params)).not.toContain("file-diff");
+    if (presentation) expect(JSON.stringify(delta?.params)).toContain("file-diff");
+    else expect(JSON.stringify(delta?.params)).not.toContain("file-diff");
+    await manager.disposeAll();
   });
 
   it("publishes the durable final only after the committed completion notification", async () => {

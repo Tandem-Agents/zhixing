@@ -5,6 +5,7 @@ import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAtt
 import { BODY_STYLE, sourceLineStarts, type BodyAnchor, type BodyPage } from './body-model.js';
 import { bodyCell, bodyRenderBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
+import { processBodyBlock, processBodyColor } from './process-model.js';
 
 export interface BodyViewHandle {
   page(direction: -1 | 1): Promise<void>;
@@ -28,7 +29,7 @@ const teal = RGBA.fromHex('#69b5a5'), gray = RGBA.fromHex('#9b9b9b'), codeBackgr
 function styled(block: BodyRenderBlock): StyledText {
   return new StyledText(block.runs.map(run => ({ __isChunk: true, text: run.text,
     link: run.href ? { url: run.href } : undefined,
-    fg: (run.style & BODY_STYLE.link) ? teal : block.role === 'user' ? gray : undefined,
+    fg: processBodyColor(block.role, run.text) ? RGBA.fromHex(processBodyColor(block.role, run.text)!) : (run.style & BODY_STYLE.link) ? teal : block.role === 'user' ? gray : undefined,
     bg: (run.style & BODY_STYLE.code) ? codeBackground : undefined,
     attributes: createTextAttributes({ bold: !!(run.style & BODY_STYLE.bold), italic: !!(run.style & BODY_STYLE.italic),
       strikethrough: !!(run.style & BODY_STYLE.strike), underline: !!(run.style & BODY_STYLE.link), dim: !!(run.style & BODY_STYLE.dim) }),
@@ -38,7 +39,7 @@ function styled(block: BodyRenderBlock): StyledText {
 /** The existing root remains the only input/screen owner. This component owns
  * only a finite body page, its native measurements and its reading position. */
 export function BodyView(props: BodyViewProps) {
-  const blocks = createMemo(() => bodyRenderBlocks(props.page));
+  const blocks = createMemo(() => bodyRenderBlocks(props.page).map(block => processBodyBlock(block, Math.max(1, props.width - 4))));
   const mounted = new Map<string, { block: BodyRenderBlock; view: TextRenderable }>();
   const [highlightRevision, setHighlightRevision] = createSignal(0);
   const highlighter = new BodyHighlighter(() => setHighlightRevision(value => value + 1), props.onError);

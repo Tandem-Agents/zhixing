@@ -8,6 +8,9 @@
  */
 
 import type { RpcNotificationConnection } from "./connection.js";
+import { stripPresentationFromAgentYield } from '@zhixing/core/loop';
+import { SESSION_PROCESS_METHOD, processForProfile, projectSessionArtifact, type SessionProcessProjection } from './session-presentation.js';
+import type { SessionDeltaPayload } from './session-wire.js';
 import {
   SESSION_NOTIFICATIONS,
   type SessionActivityPayload,
@@ -76,10 +79,36 @@ export function createObserverBroadcast(deps: {
         !conn.closed &&
         observerIds.has(String(conn.id))
       ) {
-        conn.notify(method, params);
+        notifySessionObserver(conn, conversationId, method, params);
       }
     }
   };
+}
+
+/** One egress for both multicast and the single-connection Server fallback. */
+export function notifySessionObserver(conn: RpcNotificationConnection, conversationId: string, method: string, params: unknown): void {
+  if (conn.closed) return;
+  const profile = conn.presentationProfile?.(conversationId) ?? 'default';
+  if (method === SESSION_NOTIFICATIONS.assignmentStream) {
+    // Canonical frames are internal ACK/digest inputs, never observer DTOs.
+    // The Host must replace this call with its bounded materialized projection.
+    return;
+  }
+  if (method === SESSION_PROCESS_METHOD) {
+    const value = params as SessionProcessProjection;
+    if (value.source.conversationId !== conversationId) return;
+    const eligible = value.source.observedAt === undefined || value.source.observedAt >= (conn.presentationSince?.(conversationId) ?? -Infinity);
+    conn.notify(method, processForProfile(value, eligible ? profile : 'default')); return;
+  }
+  if (method === SESSION_NOTIFICATIONS.delta) {
+    const value = params as SessionDeltaPayload;
+    const delta = stripPresentationFromAgentYield(value.delta);
+    const artifact = profile === 'bounded-v1' && value.delta.type === 'tool_end'
+      ? projectSessionArtifact(value.delta.result.presentation, value.delta.id) : undefined;
+    conn.notify(method, { ...value, delta: artifact && delta.type === 'tool_end'
+      ? { ...delta, result: { ...delta.result, presentation: artifact } } : delta }); return;
+  }
+  conn.notify(method, params);
 }
 
 export function createActivityBroadcast(deps: {

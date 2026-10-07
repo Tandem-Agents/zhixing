@@ -7,6 +7,66 @@ const body: TerminalOutputBody = { work: action => action(), amend: async () => 
 afterEach(() => vi.useRealTimers());
 
 describe('terminal output projection', () => {
+  it('waits for the old physical append before resuming with distinct retained block identities', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const projection = new TerminalOutputProjection(async segment => {
+      if (!parts.length) await new Promise<void>(resolve => { finish = resolve; });
+      parts.push(segment);
+    }, async () => {}, async () => {}, body);
+    projection.accept({ type: 'text_delta', text: 'retained prefix' }, source);
+    await vi.advanceTimersByTimeAsync(50);
+    projection.pause();
+    expect(() => projection.resume()).toThrow('terminal-output-recovery-unavailable');
+    let settled = false;
+    const pending = projection.settlePaused().then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+    finish(); await pending;
+    projection.resume();
+    projection.accept({ type: 'text_delta', text: 'new content' }, source);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(parts.map(part => part.text)).toEqual(['retained prefix', 'new content']);
+    expect(parts[1]!.blockId).not.toBe(parts[0]!.blockId);
+    expect(parts[1]!.contentOffset).toBe(0);
+    await projection.close();
+  });
+  it('shares the actual run block across assignment-only identity, recovered turn identity and end', async () => {
+    vi.useFakeTimers();
+    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [], seal = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(async segment => { parts.push(segment); }, async () => {}, async () => {}, { ...body, seal });
+    const live: ConversationOutputSource = { conversationId: 'c', runId: 'r', kind: 'stream', frame: {
+      v: 1, ref: { execution: 'conversation', conversationId: 'c', runId: 'r', ownerEpoch: 0 },
+      assignmentId: 'a', streamEpoch: 1, seq: 1, payload: { kind: 'agent-yield', yield: { type: 'text_delta', text: 'live' } }, meta: {},
+    } };
+    const recovered: ConversationOutputSource = { conversationId: 'c', turnId: 'actual-turn', runId: 'r', kind: 'history',
+      final: { v: 1, conversationId: 'c', runId: 'r', commitRevision: 1, digest: `sha256:${'a'.repeat(64)}` } };
+    projection.accept({ type: 'text_delta', text: 'live' }, live); await vi.advanceTimersByTimeAsync(50);
+    projection.accept({ type: 'text_delta', text: ' tail' }, recovered);
+    projection.end('c', 'actual-turn', 'r'); await vi.advanceTimersByTimeAsync(100);
+    expect(parts.map(part => part.text).join('')).toBe('live tail');
+    expect(new Set(parts.map(part => part.blockId))).toEqual(new Set(['live:c:r:0']));
+    expect(parts.at(-1)?.contentOffset).toBe(4); expect(seal).toHaveBeenCalledWith('live:c:r:0');
+    await projection.close();
+  });
+  it('uses the existing body queue and seal lifecycle for process blocks, with one tool display owner', async () => {
+    vi.useFakeTimers();
+    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const seal = vi.fn(async () => {}), accept = vi.fn(), end = vi.fn();
+    const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, async () => {},
+      { ...body, seal }, { accept, end });
+    projection.accept({ type: 'tool_start', id: 't', name: 'edit', input: {} }, source);
+    projection.accept({ type: 'tool_end', id: 't', name: 'edit', duration: 1, result: { content: 'modified' } }, source);
+    projection.appendProcessBlock({ blockId: 'process:actual-tool', role: 'tool-diff', text: '◆ 已修改 a.ts\n+ 1  actual' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(accept).toHaveBeenCalledTimes(2);
+    expect(segments.map(segment => segment.text).join('')).toBe('◆ 已修改 a.ts\n+ 1  actual');
+    expect(segments.every(segment => segment.role === 'tool-diff' && segment.body?.kind === 'plain')).toBe(true);
+    expect(seal).toHaveBeenCalledWith('process:actual-tool');
+    projection.end(source.conversationId, source.turnId, source.runId);
+    expect(end).toHaveBeenCalledWith(source.conversationId, source.turnId, source.runId);
+    await projection.close();
+  });
   it('waits for logical EOF amendment and sealing before the completion drain resolves', async () => {
     vi.useFakeTimers();
     let release!: () => void;

@@ -1410,17 +1410,14 @@ async function runServerProcess(
           ref: input.ref,
           ticket: input.ticket,
           surfacePrincipal: input.surfacePrincipal,
-          adoptFrame: async (frame) => {
+          adoptFrame: async () => {
             const binding = serverCtx.rpcSurfaces?.current(
               input.surfacePrincipal,
             );
             if (
               !binding ||
               binding.connection.surfaceGeneration !== binding.generation ||
-              !binding.connection.tryNotify?.(
-                SESSION_NOTIFICATIONS.assignmentStream,
-                frame,
-              )
+              binding.connection.writable !== true
             ) {
               throw new AssignmentStreamPathUnavailableError(
                 "Manual job surface is disconnected",
@@ -3271,11 +3268,13 @@ async function runServerProcess(
       if (meshRuntime) {
         const firstPartyConversationMeshSurface =
           meshRuntime.createFirstPartyConversationSurfaceLifecycle({
-            dispatch: ({ method, params, connection }) =>
-              serverRegistry.dispatchCanonical(method, params, {
+            dispatch: ({ method, params, connection }) => {
+              openingRunner.server.registerConnection(connection);
+              return serverRegistry.dispatchCanonical(method, params, {
                 connection,
                 server: serverCtx,
-              }),
+              });
+            },
           });
         lifecycleContributions.acquire(
           "firstPartyConversationMeshSurface.close",

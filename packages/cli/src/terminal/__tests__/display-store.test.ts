@@ -46,6 +46,36 @@ async function setup() {
   return { root, account, store, counts: () => ({ active, outstanding, stored }) };
 }
 
+describe('display recovery retains the original cache', () => {
+  it('rejects unavailable capacity, then admits new content without deleting retained pages', async () => {
+    const h = await setup();
+    await h.store.append({ blockId: 'original', role: 'assistant', text: 'retained prefix', contentOffset: 0, final: false });
+    const before = await h.store.page(), charged = h.counts().stored;
+    h.account.reserve.mockRejectedValueOnce(Error('synthetic capacity full'));
+    await expect(h.store.append({ blockId: 'failed', role: 'assistant', text: 'unretained', contentOffset: 0, final: true })).rejects.toThrow();
+    h.account.reserve.mockRejectedValueOnce(Error('synthetic capacity still full'));
+    await expect(h.store.retry()).rejects.toThrow('synthetic capacity still full');
+    expect(await h.store.page()).toEqual(before);
+    await h.store.retry();
+    expect(h.account.released).not.toHaveBeenCalled();
+    expect(h.counts()).toEqual({ active: 0, outstanding: 0, stored: charged });
+    expect(await h.store.page()).toEqual(before);
+    await h.store.append({ blockId: 'new', role: 'assistant', text: 'new content', contentOffset: 0, final: true });
+    expect((await h.store.page()).segments.map(part => part.text)).toEqual(['retained prefix', 'new content']);
+  });
+
+  it('keeps an unconfirmed settlement paused while preserving its earlier page', async () => {
+    const h = await setup();
+    await h.store.append({ blockId: 'original', role: 'assistant', text: 'retained', contentOffset: 0, final: true });
+    const before = await h.store.page();
+    h.account.settle.mockRejectedValueOnce(Error('synthetic unknown settlement'));
+    await expect(h.store.append({ blockId: 'uncertain', role: 'assistant', text: 'uncertain', contentOffset: 0, final: true })).rejects.toThrow();
+    await expect(h.store.retry()).rejects.toThrow('terminal-display-recovery-unavailable');
+    expect(h.account.released).not.toHaveBeenCalled();
+    expect(await h.store.page()).toEqual(before);
+  });
+});
+
 describe('bounded terminal display projection', () => {
   const apply = async (store: TerminalDisplayStore, changes: Iterable<BodyProjectionChange>) => {
     for (const change of changes) {

@@ -43,6 +43,8 @@ interface ProjectSessionTurnBaseOptions {
   readonly hooks?: RunTurnHooks;
   readonly environment?: ExplicitEnvironmentSelection;
   readonly notify: SessionTurnNotify;
+  /** Only the Server-owned observer transport may receive presentation candidates. */
+  readonly presentation?: 'server-bounded';
   readonly abortSignal?: AbortSignal;
   readonly onPostTurnControlIntent?: (
     control: NonNullable<RunResult["pendingPostTurnControl"]>,
@@ -96,7 +98,7 @@ export async function projectSessionTurn(
         conversationId,
         sessionId: conversationId,
         turnId: opts.turnId,
-        delta: stripPresentationFromAgentYield(iter.value),
+        delta: opts.presentation === 'server-bounded' ? iter.value : stripPresentationFromAgentYield(iter.value),
       } satisfies SessionDeltaPayload);
     }
   } catch (err) {

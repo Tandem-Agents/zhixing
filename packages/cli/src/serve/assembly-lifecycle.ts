@@ -106,6 +106,12 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
     id: "ephemeralRuntime.dispose",
     stage: "runtime",
   },
+  {
+    owner: "anchor-host",
+    role: "surface",
+    id: "sessionProcess.dispose",
+    stage: "runtime",
+  },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];
 
 /**

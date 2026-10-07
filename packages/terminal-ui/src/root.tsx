@@ -1,7 +1,8 @@
 import { createSignal, For, Show, ErrorBoundary } from 'solid-js';
 import { createCliRenderer, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import type { TerminalAction, TerminalMessage, TerminalView, TerminalDisplayPage } from './protocol.js';
+import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalProcessStatus } from './protocol.js';
+import { ProcessView } from './process-view.js';
 import { TerminalInputSession } from './input-session.js';
 import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
@@ -26,6 +27,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', message: '正在连接…', busy: true });
   const [status, setStatus] = createSignal('');
+  const [processStatus, setProcessStatus] = createSignal<TerminalProcessStatus>();
   const [copyAvailable, setCopyAvailable] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
   const [size, setSize] = createSignal({ width: 80, height: 24 });
@@ -233,8 +235,11 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       </Show>
     </box>
     <Show when={isBody() && view().message}><text height={2} selectable>{displayText(view().message ?? '')}</text></Show>
+    <Show when={view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId && processStatus()}>
+      <ProcessView view={processStatus()!.view} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
+    </Show>
     <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
-      <text fg="#e7ba70">正文保留已暂停，后续内容存在缺口。草稿保留；可处理确认、中止工作或退出后重试。</text>
+      <text fg="#e7ba70">{view().displayPaused ? '正文保留已暂停，草稿和已有内容保留。Ctrl+R 重试展示；仍可处理确认、中止或退出。' : '展示已恢复；暂停期间的旧缺口仍保留，可查看权威历史与用量。'}</text>
     </Show>
     <box flexDirection="column" flexShrink={0}>
       <For each={choices()}>{(choice, index) => <box height={1} backgroundColor={selected() === index() + choiceStart() ? '#304c45' : undefined}>
@@ -317,6 +322,10 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const keypress = (event: KeyEvent) => {
     const consume = () => { event.preventDefault(); event.stopPropagation(); };
     if (view().kind === 'skills') { consume(); skillsView?.key(event); return; }
+    if (view().displayPaused && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
+      consume(); void action({ kind: 'display-retry' }); return;
+    }
+
     if (event.ctrl && event.name === 'c') {
       consume();
       if (view().kind === 'confirmation') { void action({ kind: 'confirmation', requestId: view().requestId!, action: 'cancelled' }); return; }
@@ -417,7 +426,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     });
     return {
       firstFrameId, dispose,
-      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' }>) {
+      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'process-status' }>) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
@@ -427,6 +436,9 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           if (!isBody()) renderer.once('frame', () => {
             if (!disposed && historyBox && !historyBox.isDestroyed) historyBox.scrollTo(0);
           });
+        } else if (message.type === 'process-status') {
+          if (message.status && !validateProcessView(message.status.view)) throw Error('terminal-process-view-invalid');
+          setProcessStatus(message.status);
         } else if (message.type === 'submission') {
           preserveDraft();
           if (input.settle(message)) setStatus(message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。');

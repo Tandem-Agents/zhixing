@@ -499,11 +499,21 @@ export class RpcConversationFacade {
     replayFinals?: boolean,
   ): Promise<boolean> {
     const client = await this.link.getClient();
+    const result = await client.request<SessionSubscribeResult>('session.subscribe',
+      { conversationId, afterCommitRevision, ...(replayFinals === undefined ? {} : { replayFinals }) });
+    return result.subscribed;
+  }
+
+  async subscribePresentation(
+    conversationId: string, presentation: import('@zhixing/rpc/session-wire').SessionPresentationProfile,
+    afterCommitRevision = 0, replayFinals?: boolean,
+  ): Promise<SessionSubscribeResult> {
+    const client = await this.link.getClient();
     const result = await client.request<SessionSubscribeResult>(
       "session.subscribe",
-      { conversationId, afterCommitRevision, ...(replayFinals === undefined ? {} : { replayFinals }) },
+      { conversationId, presentation, afterCommitRevision, ...(replayFinals === undefined ? {} : { replayFinals }) },
     );
-    return result.subscribed;
+    return result;
   }
 
   async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[]): Promise<ConversationControlPage> {
@@ -528,6 +538,10 @@ export class RpcConversationFacade {
   }
 
   // ─── 通知还原(持久订阅,跨重连) ───
+
+  onProcess(handler: (payload: import('@zhixing/rpc/session-wire').SessionProcessProjection) => void): () => void {
+    return this.link.onNotification('session.process', payload => handler(payload as import('@zhixing/rpc/session-wire').SessionProcessProjection));
+  }
 
   /** 主通道 turn 产出流(AgentYield 原样)——接入面还原为 onYield 喂主渲染。 */
   onDelta(handler: (payload: SessionDeltaPayload) => void): () => void {

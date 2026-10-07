@@ -49,6 +49,7 @@ import { WorksceneContinuationApplication, type WorksceneApplication, type Works
 import type { PostTurnControlOutcome } from "@zhixing/core/types";
 import { createWorksceneContinuationPort } from "../workscene-continuation-adapter.js";
 import { createTempDir } from "@zhixing/test-utils";
+import { ShardedTranscriptStore, readRunsReverse } from "@zhixing/core/transcript";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { SessionAdvancementStore } from "@zhixing/owner-services/advancement";
 import { LLMRubricDraftGenerationStrategy, RubricContractBuilder } from "@zhixing/core/advancement";
@@ -430,6 +431,46 @@ describe("ConversationProtocolRuntime", () => {
     } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); await authority.startupCleanup.run(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("establishes a locally created empty conversation before its first task-list control write", async () => {
+    const home = await createTempDir("task-list-empty-conversation");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const storage = createConversationStorageInfrastructure({ zhixingHome: home, optimalMaxTokens: 1000,
+      worksceneConversationStorageRemoval: { removeConversation: async () => {} } });
+    const manager = new ConversationManager({ create: async () => { throw new Error("Task mutation must not start a model"); } });
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      storedIdentityExists: id => storage.directory.exists(id) });
+    const cache = new TaskListService({ load: async () => { throw new Error("Legacy task state must not be read"); } });
+    const port = createAnchorConversationTaskListPort({ conversations: manager, exists: id => storage.directory.exists(id),
+      taskLists: cache, sessionState: protocol.sessionState,
+      readMutationBase: (id, requestId) => protocol.taskListBeforeMutation(id, requestId) });
+    const request = (conversationId: string) => ({ conversationId, operationId: "task:first-local-write",
+      decide: (current: { items: readonly import("@zhixing/core/conversation").TaskItem[] }) => ({
+        outcome: "added" as const, taskContent: "first task",
+        next: { items: [...current.items, { id: "first-task", content: "first task", status: "pending" as const }] },
+      }) });
+    try {
+      await expect(port.maintain(request("conversation-absent"))).resolves.toEqual({ status: "not-found" });
+      expect(await authority.controlAdmission.listCreatedConversationIds()).not.toContain("conversation-absent");
+      const created = await storage.directory.create();
+      expect(await protocol.sessionExists(created.conversationId)).toBe(false);
+      await expect(port.maintain(request(created.conversationId))).resolves.toMatchObject({ status: "done",
+        taskList: { items: [{ id: "first-task", content: "first task", status: "pending" }] } });
+      expect(await protocol.sessionExists(created.conversationId)).toBe(true);
+      await port.maintain(request(created.conversationId));
+      protocol.releaseConversation(created.conversationId);
+      expect(await port.read(created.conversationId)).toEqual({ items: [{ id: "first-task", content: "first task", status: "pending" }] });
+      await protocol.writeSession({ conversationId: created.conversationId, requestId: "task:delete-local",
+        mutation: { kind: "conversation-delete" },
+        principal: protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "task:delete" }),
+        conversationExists: () => storage.directory.exists(created.conversationId) });
+      // Local projection may still exist while the durable deletion is final.
+      expect(await storage.directory.exists(created.conversationId)).toBe(true);
+      await expect(port.maintain({ ...request(created.conversationId), operationId: "task:after-delete" }))
+        .rejects.toMatchObject({ code: "not-found" });
+      expect(await protocol.sessionExists(created.conversationId)).toBe(false);
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); await authority.startupCleanup.run(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("keeps task-list authority and late retries independent of legacy files and later list order", async () => {
     const home = await createTempDir("owner-task-list-retry");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
@@ -531,6 +572,52 @@ describe("ConversationProtocolRuntime", () => {
       await protocol.stopRecoveryLoop(); await manager.disposeAll();
     }
   }, 30000);
+
+  it("keeps committed transcript identity monotonic after clearing the visible conversation", async () => {
+    const home = await createTempDir("conversation-clear-sequence");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const conversationId = "clear-sequence";
+    const transcript = new ShardedTranscriptStore(resolve(home, "conversations"));
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run(messages) {
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "complete" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage },
+          newMessages: [assistant], durationMs: 1 };
+      }, abort: () => false, async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const finals: unknown[] = [];
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      onFinal: frame => { finals.push(frame); },
+      projectLifecycle: async () => { await manager.clear(conversationId, async () => { await transcript.appendClear(conversationId); return true; }); },
+    });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+      appendCommittedRun: (id, record) => transcript.appendCommittedRunRecord(id, record),
+    });
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, conversationId);
+      for (let index = 0; index < 3; index++) {
+        expect(managed.turnCount).toBe(0);
+        expectSettled(await projectSessionTurn({ manager, managed, text: `message-${index}`, turnId: `clear-turn-${index}`,
+          runOptions: { source: "interactive", turnContext: { turnId: `clear-turn-${index}` } }, notify: () => {} }));
+        manager.setBusy(conversationId, false);
+        await protocol.recoverConversation(conversationId);
+        expect(finals).toHaveLength(index + 1);
+        const visible = [];
+        for await (const item of readRunsReverse(transcript, conversationId)) visible.push(item.record);
+        expect(visible).toHaveLength(1);
+        expect(visible[0]).toMatchObject({ runIndex: index });
+        if (index < 2) {
+          expect(await protocol.writeSession({ conversationId, requestId: `clear-${index}`, mutation: { kind: "window-op", op: "clear" },
+            principal: protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "clear-test" }), conversationExists: async () => true })).toMatchObject({ status: "accepted" });
+          await protocol.completeLifecycleProjections(conversationId);
+        }
+      }
+    } finally { await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("commits a builtin skill load with no global mutations or bound mutation publisher", async () => {
     const home = await createTempDir("extension-skill-context");

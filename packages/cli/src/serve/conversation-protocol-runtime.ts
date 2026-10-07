@@ -164,6 +164,7 @@ export interface ConversationProtocolRuntimeOptions {
     notice: PublishResultNotice,
   ) => void | Promise<void>;
   readonly onFirstPartyFrame?: (frame: StreamFrame) => void | Promise<void>;
+  readonly onFirstPartyStreamEnd?: (source: { readonly conversationId: string; readonly runId: string; readonly assignmentId: string; readonly finalSeq: number }) => void;
   readonly createFirstPartyFinality?: (
     input: Omit<FirstPartyFinalitySessionOptions, "sources">,
   ) => FirstPartyFinalitySession;
@@ -326,6 +327,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   >();
   readonly #onStatus: ((notice: ConversationStatusNotice) => void | Promise<void>) | undefined;
   readonly #onFinal: ((frame: FinalFrame) => void | Promise<void>) | undefined;
+  readonly #onFirstPartyStreamEnd: ConversationProtocolRuntimeOptions['onFirstPartyStreamEnd'];
   readonly #onPublishResult:
     | ((notice: PublishResultNotice) => void | Promise<void>)
     | undefined;
@@ -420,6 +422,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#onFinal = options.onFinal;
     this.#onPublishResult = options.onPublishResult;
     this.#onFirstPartyFrame = options.onFirstPartyFrame;
+    this.#onFirstPartyStreamEnd = options.onFirstPartyStreamEnd;
     this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
     if (!options.recoverAuxiliary) {
@@ -1407,13 +1410,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const appendObservedFrame = async (...args: Parameters<typeof stream.append>) => {
         const frame = await stream.append(...args);
         // 本机 Owner 没有远端流读者，直接转发已耐久写入的同一帧。
-        if (this.#losslessDataPlane.kind === "absent" && this.#onFirstPartyFrame) {
+        if (executionIngress.kind === "first-party" && this.#losslessDataPlane.kind === "absent" && this.#onFirstPartyFrame) {
           await this.#onFirstPartyFrame(validateStreamFrame(frame));
         }
       };
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
+      const finishObservedStream = async () => {
+        const final = await stream.final(streamMeta);
+        if (executionIngress.kind === 'first-party' && this.#losslessDataPlane.kind === 'absent') {
+          this.#onFirstPartyStreamEnd?.({ conversationId: input.conversationId, runId, assignmentId, finalSeq: final.finalSeq });
+        }
+        return final;
+      };
       const yieldToDurableCancellation = async (): Promise<boolean> => {
         const state = await journal.runState(runId);
         if (state !== "cancel-requested" && state !== "cancelled") return false;
@@ -1461,7 +1471,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
                   await journal.failAssignedRun(runId, assignmentId, failure.reason, failure.usageFinal);
                 }
                 // Projection I/O must not prevent the durable failure above.
-                await stream.final(streamMeta);
+                await finishObservedStream();
                 await stream.markTerminal?.();
               }
             }
@@ -1560,7 +1570,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               { kind: "agent-yield", yield: item.value },
               streamMeta,
             );
-            yield item.value;
+            // First-party observers consume one verified assignment projection.
+            // Channel/internal callers still own their original generator output.
+            if (executionIngress.kind !== "first-party" || !this.#onFirstPartyFrame) yield item.value;
           }
         } finally {
           // A consumer can return while suspended at yield. Forward that close
@@ -1589,7 +1601,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               submissionContext,
               interactionScope,
             );
-            await stream.final(streamMeta);
+            await finishObservedStream();
             const failure = await effect.failExecution({
               reason: runFailureReason(runResult.agentResult),
               usageFinal,
@@ -1634,7 +1646,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ...runResult.runRecord,
           type: "run",
           runId,
-          runIndex: input.baseRevision,
+          // Visible turn count resets on /clear; the issued authority revision
+          // remains monotonic and owns transcript identity on every executor.
+          runIndex: dispatch.envelope.work.baseRevision,
           ...(sourceValue ? { source: sourceValue } : {}),
           ...(advancement ? { advancement } : {}),
         };
@@ -1645,7 +1659,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             ? { windowCompact: runResult.windowCompact }
             : {}),
           contentAssets: [...appliedAdmission.attachments],
-          streamFinal: await stream.final(streamMeta),
+          streamFinal: await finishObservedStream(),
           usage: {
             inputTokens: runResult.agentResult.usage.inputTokens,
             outputTokens: runResult.agentResult.usage.outputTokens,
@@ -2399,6 +2413,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               : undefined;
           if (!principal) {
             throw new Error("Session control mutation requires a surface or host principal");
+          }
+          // A local empty conversation has no owner fact until its first write.
+          // Establish only a known local identity; a durable tombstone stays final.
+          if (
+            !(await this.#journal(conversationId).authorityState()).hasDurableIdentity &&
+            (await this.#storedIdentityExists?.(conversationId)) === true
+          ) {
+            await this.ensureSession(conversationId);
           }
           const result = await this.writeSession({
             conversationId,

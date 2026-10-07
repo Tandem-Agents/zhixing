@@ -28,6 +28,7 @@ import {
   AdvancementEvidenceTopologyAdapter,
 } from "./advancement-evidence-topology.js";
 import type { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
+import { SessionProcessProjectionOwner } from "./session-process-projection.js";
 import {
   createAssignmentArtifactReceiverInfrastructure,
 } from "./assignment-artifact-receiver-infrastructure.js";
@@ -654,6 +655,11 @@ export async function createConversationServices(
         directory: topologyDirectory,
         clock: () => new Date().toISOString(),
       });
+  const processProjection = new SessionProcessProjectionOwner({
+    artifacts: input.meshBootstrap.bootstrapStore.artifactStore(),
+    publish: inputSessionBroadcast,
+  });
+  inputLifecycleContributions.acquire("sessionProcess.dispose", () => processProjection.dispose());
   const protocol = new ConversationProtocolRuntime({
     authority: inputAuthorityRuntime,
     storedIdentityExists: (conversationId) => inputConversationIdentityLifecycle.identityExists(conversationId),
@@ -691,6 +697,10 @@ export async function createConversationServices(
     },
     onStatus: (notice) => {
       input.onRunStatus?.(notice);
+      const state = notice.state === "uncertain-closed" ? notice.resultingState : notice.state;
+      if (["committed", "cancelled", "failed", "expired"].includes(state)) {
+        processProjection.finish(notice.ref.conversationId, notice.ref.runId);
+      }
       inputSessionBroadcast(
         notice.ref.conversationId,
         SESSION_NOTIFICATIONS.status,
@@ -698,6 +708,7 @@ export async function createConversationServices(
       );
     },
     onFinal: (frame) => {
+      processProjection.finish(frame.conversationId, frame.runId);
       inputSessionBroadcast(
         frame.conversationId,
         SESSION_NOTIFICATIONS.final,
@@ -717,14 +728,8 @@ export async function createConversationServices(
         }),
       );
     },
-    onFirstPartyFrame: (frame) => {
-      if (frame.ref.execution !== "conversation") return;
-      inputSessionBroadcast(
-        frame.ref.conversationId,
-        SESSION_NOTIFICATIONS.assignmentStream,
-        frame,
-      );
-    },
+    onFirstPartyFrame: (frame) => processProjection.accept(frame),
+    onFirstPartyStreamEnd: (source) => processProjection.streamEnded(source),
 
     projectLifecycle: async (input) => {
       if (input.mutation === "clear") {

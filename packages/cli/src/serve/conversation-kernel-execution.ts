@@ -23,10 +23,10 @@ export class ConversationKernelExecution {
       for (;;) {
         signal.throwIfAborted();
         const item = await kernel.next();
-        // A pending model/runtime step can return after cancellation. Join its
-        // real cleanup, but never publish that late value to the surface.
-        signal.throwIfAborted();
+        // Completion carries the real cleanup and final usage. The owner still
+        // decides cancellation vs commit; only late nonterminal yields are dropped.
         if (item.done) return item.value;
+        signal.throwIfAborted();
         yield item.value;
       }
     } finally {

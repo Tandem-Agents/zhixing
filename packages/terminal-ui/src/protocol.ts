@@ -1,5 +1,7 @@
 import type { BodyFragmentMetadata } from './body-model.js';
 import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
+import type { TerminalProcessView } from './process-model.js';
+export { validateProcessView } from './process-model.js';
 
 /** Private same-release terminal transport, not a second product API. */
 export const TERMINAL_PROTOCOL = "zhixing-terminal/1";
@@ -45,6 +47,7 @@ export type TerminalMessage =
   | { readonly type: "request"; readonly id: number; readonly action: TerminalAction }
   | { readonly type: "reply"; readonly id: number; readonly value?: unknown; readonly error?: string }
   | { readonly type: "view"; readonly view: TerminalView }
+  | { readonly type: 'process-status'; readonly status?: TerminalProcessStatus }
   | { readonly type: "chunk"; readonly stream: string; readonly index: number; readonly text: string; readonly final: boolean }
   | { readonly type: "invalidate"; readonly requestId: string }
   | { readonly type: "assets"; readonly id: number; readonly operation:
@@ -61,7 +64,7 @@ export type TerminalMessage =
 
 /** Finite user intents; neither arbitrary RPC methods nor filesystem paths. */
 export type TerminalAction =
-  | { readonly kind: "startup" | "retry-connection" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
+  | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'command-route'; readonly name: string }
   | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
@@ -122,12 +125,20 @@ export interface TerminalDisplayPage {
   readonly follow: boolean;
   readonly segments: readonly TerminalDisplaySegment[];
 }
+export interface TerminalProcessStatus {
+  readonly conversationId: string;
+  readonly runId?: string;
+  readonly turnId?: string;
+  readonly view: TerminalProcessView;
+}
 export interface TerminalView {
   readonly generation: number;
   readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills';
   readonly title: string;
+  readonly conversationId?: string;
   readonly message?: string;
   readonly displayGap?: boolean;
+  readonly displayPaused?: boolean;
   readonly requestId?: string;
   readonly editId?: string;
   readonly choices?: readonly TerminalChoice[];

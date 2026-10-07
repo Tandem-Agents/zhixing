@@ -159,6 +159,27 @@ export interface StreamDigestCheckpoint {
   readonly head: Digest;
 }
 
+/** Bounded display read of an already verified stream value. It never rewrites
+ * a canonical frame or its digest, and never grants the observer an artifact ref. */
+export async function readStreamDisplayPayload(input: StreamDataFramePayload, artifacts: ArtifactStore, maximumBytes = 2 * 1024 * 1024): Promise<StreamDataFramePayload> {
+  const payload = validateStreamDataPayload(input);
+  if (payload.kind === "agent-yield" && "ref" in payload.yield) {
+    const ref = payload.yield.ref;
+    if (ref.bytes > maximumBytes) throw Error("stream-display-capacity");
+    const item = await materializeStreamItem(ref, validateAgentYield, "Agent yield", artifacts, maximumBytes);
+    if (item.bytes.byteLength !== ref.bytes || byteDigest(item.bytes) !== ref.digest) throw Error("stream-display-digest");
+    return { kind: "agent-yield", yield: item.value };
+  }
+  if (payload.kind === "agent-event" && "ref" in payload.event) {
+    const ref = payload.event.ref;
+    if (ref.bytes > maximumBytes) throw Error("stream-display-capacity");
+    const item = await materializeStreamItem(ref, validateSessionEventProjection, "Agent event", artifacts, maximumBytes);
+    if (item.bytes.byteLength !== ref.bytes || byteDigest(item.bytes) !== ref.digest) throw Error("stream-display-digest");
+    return { kind: "agent-event", event: item.value };
+  }
+  return payload;
+}
+
 export interface StreamVerifierCheckpoint extends StreamDigestCheckpoint {
   readonly assignmentId: string;
   readonly finalSeq?: number;
@@ -616,8 +637,12 @@ async function materializeStreamItem<T>(
   validate: (value: T) => void,
   label: string,
   artifacts: ArtifactStore,
+  maximumBytes?: number,
 ): Promise<{ readonly value: T; readonly bytes: Uint8Array }> {
-  const bytes = await artifacts.get(ref);
+  const bytes = maximumBytes === undefined ? await artifacts.get(ref) : await artifacts.readRange(ref, 0, maximumBytes + 1);
+  if (maximumBytes !== undefined && (bytes.byteLength > maximumBytes || bytes.byteLength !== ref.bytes || byteDigest(bytes) !== ref.digest)) {
+    throw new TypeError(`${label} artifact exceeds its display limit or changed identity`);
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -691,7 +716,9 @@ function validateProvisionalFinal(
   assertDigest(payload.streamDigest, "Provisional final stream digest");
 }
 
-function validateAgentYield(value: AgentYield): void {
+/** Semantic validation only. Canonical stream and observer projections apply
+ * their distinct representation budgets at their own envelopes. */
+export function validateAgentYield(value: AgentYield): void {
   assertPlainObject(value, "Agent yield");
   switch (value.type) {
     case "text_delta":
@@ -739,10 +766,41 @@ function validateAgentYield(value: AgentYield): void {
   }
 }
 
-function validateSessionEventProjection(value: SessionEventProjection): void {
+export function validateSessionEventProjection(value: SessionEventProjection): void {
   assertPlainObject(value, "Session event projection");
   assertExactKeys(value, ["event", "payload"], "Session event projection");
   assertPlainObject(value.payload, "Session event projection payload");
+  if (value.event === "tool:call_start" || value.event === "tool:call_end") {
+    const p = value.payload;
+    assertExactKeys(p, value.event === "tool:call_start" ? ["id", "name"] : ["id", "name", "duration", "success", "resultSize"], value.event);
+    assertProtocolIdentifier(p.id, "Tool id"); assertProtocolIdentifier(p.name, "Tool name");
+    if (value.event === "tool:call_end") {
+      assertNonNegativeFinite(value.payload.duration, "Tool duration"); assertBoolean(value.payload.success, "Tool success");
+      assertNonNegativeInteger(value.payload.resultSize, "Tool result size");
+    }
+    return;
+  }
+  if (value.event === "tool:child_start" || value.event === "tool:child_end") {
+    const p = value.payload;
+    assertExactKeys(p, ["parentToolCallId", "childLineage", "childAgentId", ...(value.event === "tool:child_start" ? ["label"] : ["status", "duration"])], value.event);
+    assertProtocolIdentifier(p.parentToolCallId, "Parent tool id"); assertProtocolIdentifier(p.childAgentId, "Child agent id");
+    assertProtocolIdentifier(p.childLineage, "Child lineage");
+    if (value.event === "tool:child_start") {
+      assertString(value.payload.label, "Child label");
+      if (value.payload.label.length > 1024) throw new TypeError("Child label exceeds its bound");
+    } else {
+      assertOneOf(value.payload.status, ["succeeded", "failed", "aborted"], "Child status");
+      assertNonNegativeFinite(value.payload.duration, "Child duration");
+    }
+    return;
+  }
+  if (value.event === "llm:request_end") {
+    assertExactKeys(value.payload, ["model", "duration", "usage", "stopReason"], value.event);
+    assertProtocolIdentifier(value.payload.model, "LLM model"); assertNonNegativeFinite(value.payload.duration, "LLM duration");
+    validateTokenUsage(value.payload.usage);
+    assertOneOf(value.payload.stopReason, ["end_turn", "max_tokens", "tool_use", "stop_sequence"], "LLM stop reason");
+    return;
+  }
   if (isProjectedPassthroughEvent(value.event)) {
     validateProjectedPassthroughPayload(value.event, value.payload);
     return;

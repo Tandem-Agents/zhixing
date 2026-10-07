@@ -612,6 +612,11 @@ export type ProjectedPassthroughEvent =
 
 /** UI 数据面的封闭事件投影；白名单外事件不能进入 wire。 */
 export type SessionEventProjection =
+  | { event: "tool:call_start"; payload: Pick<AgentEventMap["tool:call_start"], "id" | "name"> }
+  | { event: "tool:call_end"; payload: AgentEventMap["tool:call_end"] }
+  | { event: "tool:child_start"; payload: AgentEventMap["tool:child_start"] }
+  | { event: "tool:child_end"; payload: AgentEventMap["tool:child_end"] }
+  | { event: "llm:request_end"; payload: AgentEventMap["llm:request_end"] }
   | {
       [K in ProjectedPassthroughEvent]: {
         event: K;
@@ -650,6 +655,31 @@ export function projectSessionEvent(
   event: keyof AgentEventMap & string,
   payload: AgentEventMap[keyof AgentEventMap],
 ): SessionEventProjection | undefined {
+  if (event === "tool:call_start") {
+    const p = payload as AgentEventMap["tool:call_start"];
+    return { event, payload: { id: p.id, name: p.name } };
+  }
+  if (event === "tool:call_end") {
+    const p = payload as AgentEventMap["tool:call_end"];
+    return { event, payload: { id: p.id, name: p.name, duration: p.duration, success: p.success, resultSize: p.resultSize } };
+  }
+  if (event === "tool:child_start") {
+    const p = payload as AgentEventMap["tool:child_start"];
+    return { event, payload: { parentToolCallId: p.parentToolCallId, childLineage: p.childLineage, childAgentId: p.childAgentId, label: p.label.slice(0, 1024) } };
+  }
+  if (event === "tool:child_end") {
+    const p = payload as AgentEventMap["tool:child_end"];
+    return { event, payload: { parentToolCallId: p.parentToolCallId, childLineage: p.childLineage, childAgentId: p.childAgentId, status: p.status, duration: p.duration } };
+  }
+  if (event === "llm:request_end") {
+    const p = payload as AgentEventMap["llm:request_end"], u = p.usage;
+    return { event, payload: { model: p.model, duration: p.duration, stopReason: p.stopReason, usage: {
+      inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+      ...(u.totalInputTokens === undefined ? {} : { totalInputTokens: u.totalInputTokens }),
+      ...(u.cacheReadTokens === undefined ? {} : { cacheReadTokens: u.cacheReadTokens }),
+      ...(u.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: u.cacheWriteTokens }),
+    } } };
+  }
   if (isProjectedPassthroughEvent(event)) {
     return { event, payload } as SessionEventProjection;
   }

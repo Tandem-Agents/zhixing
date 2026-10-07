@@ -9,6 +9,7 @@ import {
 } from "@zhixing/core/conversation/application";
 import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
+import { notifySessionObserver } from '@zhixing/rpc/session-broadcast';
 import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
 import type {
   SessionConversationEntry,
@@ -92,6 +93,9 @@ export class LocalConversationRpcRouter
         change: fact.kind === "conversation-cleared" ? "cleared" : "deleted",
       });
       if (fact.kind === "conversation-deleted") {
+        for (const connection of this.#observers.get(fact.conversationId)?.values() ?? []) {
+          connection.dropPresentationProfile?.(fact.conversationId);
+        }
         this.#observers.delete(fact.conversationId);
       }
     });
@@ -192,6 +196,7 @@ export class LocalConversationRpcRouter
       this.#subscribe(conversationId, connection);
     } else if (method === "session.unsubscribe") {
       this.#observers.get(conversationId)?.delete(connection.id);
+      connection.dropPresentationProfile?.(conversationId);
     }
     return { handled: true, result };
   }
@@ -329,26 +334,34 @@ export class LocalConversationRpcRouter
             !alreadySubscribed
           ) {
             this.#observers.get(conversationId)?.delete(connection.id);
+            connection.dropPresentationProfile?.(conversationId);
           }
           throw mapLocalConversationApplicationError(error, "resume");
         }
       }
       case "session.subscribe": {
         const conversationId = this.#conversationId(params, method);
+        if (params.presentation !== undefined && params.presentation !== 'default' && params.presentation !== 'bounded-v1') throw RpcErrors.invalidParams('订阅展示选项无效。');
+        const presentation = params.presentation ?? 'default';
         const revision = params.afterCommitRevision === undefined ? 0 : params.afterCommitRevision;
         if (params.replayFinals !== undefined && typeof params.replayFinals !== 'boolean') throw RpcErrors.invalidParams('订阅重放选项无效。');
         if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
           throw RpcErrors.invalidParams("订阅修订号必须是非负整数。");
         }
+        const accepted = connection.setPresentationProfile?.(conversationId, presentation);
+        if (accepted === false) throw RpcErrors.invalidParams('订阅展示容量已满。');
+        const observationRevision = connection.observationRevision?.(conversationId);
+        const current = () => !connection.closed && connection.observationRevision?.(conversationId) === observationRevision;
         const exists = (await this.input.owner.listConversations()).includes(
           conversationId,
         );
+        if (!current()) return { subscribed: false, presentation: 'default' };
         if (exists) {
           this.#subscribe(conversationId, connection);
           // 先订阅再补读同一 Owner 的提交事实，覆盖断线期间完成的自动运行。
           const history = params.replayFinals === false ? [] : await this.input.owner.finalHistory(conversationId, revision);
           for (const item of history) {
-            if (connection.closed || !this.#observers.get(conversationId)?.has(connection.id)) break;
+            if (!current() || !this.#observers.get(conversationId)?.has(connection.id)) break;
             connection.notify("session.final", item.frame);
             for (const notice of item.publishResults) {
               connection.notify("session.event", createControlSessionEventEnvelope({
@@ -357,12 +370,15 @@ export class LocalConversationRpcRouter
               }));
             }
           }
+        } else {
+          connection.dropPresentationProfile?.(conversationId);
         }
-        return { subscribed: exists };
+        return { subscribed: exists && current(), presentation: exists && current() && accepted ? connection.presentationProfile?.(conversationId) ?? 'default' : 'default' };
       }
       case "session.unsubscribe": {
         const conversationId = this.#conversationId(params, method);
         this.#observers.get(conversationId)?.delete(connection.id);
+        connection.dropPresentationProfile?.(conversationId);
         return { unsubscribed: true };
       }
       case "session.history":
@@ -670,6 +686,10 @@ export class LocalConversationRpcRouter
   }
 
   #subscribe(conversationId: string, connection: FirstPartyConnection): void {
+    if (connection.closed) return;
+    if (connection.observationRevision?.(conversationId) === -1 && connection.setPresentationProfile?.(conversationId, 'default') === false) {
+      throw RpcErrors.invalidParams('订阅展示容量已满。');
+    }
     let observers = this.#observers.get(conversationId);
     if (!observers) {
       observers = new Map();
@@ -680,16 +700,18 @@ export class LocalConversationRpcRouter
 
   #notify(conversationId: string, method: string, params: unknown): void {
     for (const connection of this.#observers.get(conversationId)?.values() ?? []) {
-      if (!connection.closed) connection.notify(method, params);
+      notifySessionObserver(connection, conversationId, method, params);
     }
   }
 
   #trackConnection(connection: FirstPartyConnection): void {
+    if (connection.closed) return;
     if (this.#connections.has(connection.id)) return;
     const remove = connection.onClose(() => {
       this.#connections.delete(connection.id);
-      for (const observers of this.#observers.values()) {
+      for (const [conversationId, observers] of this.#observers) {
         observers.delete(connection.id);
+        connection.dropPresentationProfile?.(conversationId);
       }
       for (const client of this.#remote.values()) void client.close(connection);
     });

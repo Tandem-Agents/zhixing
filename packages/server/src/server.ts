@@ -35,6 +35,8 @@ import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
 import { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 
+const connectionGenerations = new WeakMap<RpcConnection, object>();
+
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */
   readonly port: number;
@@ -50,6 +52,8 @@ export interface ZhixingServerInstance {
   readonly registry: HandlerRegistry;
   /** 当前活跃的 RPC 连接列表（用于推送事件、强制断开） */
   readonly connections: ReadonlySet<RpcConnection>;
+  /** Admit an existing first-party transport to this Server generation. */
+  registerConnection(connection: RpcConnection): void;
   /** 同一 prepared Server generation 拥有的会话组播传输。 */
   readonly sessionBroadcastTransport?: SessionBroadcastTransport;
 }
@@ -280,9 +284,25 @@ async function startServerWithOwner(
   // 用 noServer 模式：手动处理 upgrade，便于路径过滤
   const wss = new WebSocketServer({ noServer: true });
   const connections = new Set<RpcConnection>();
+  const connectionGeneration = {};
+  let activeClosed = false;
   const rpcSurfaces = new RpcSurfaceRegistry();
   ctx.rpcSurfaces = rpcSurfaces;
   const dispatcher = new RpcDispatcher({ registry, server: ctx, onError: opts.onError });
+
+  function registerConnection(connection: RpcConnection): void {
+    if (activeClosed || connection.closed) throw new Error("Server connection is closed");
+    const generation = connectionGenerations.get(connection);
+    if (generation && generation !== connectionGeneration) throw new Error("RPC connection belongs to another Server generation");
+    if (connections.has(connection)) return;
+    connectionGenerations.set(connection, connectionGeneration);
+    connections.add(connection);
+    connection.onClose(() => {
+      rpcSurfaces.unbind(connection);
+      connections.delete(connection);
+      ctx.conversation?.removeObserverFromAll(String(connection.id));
+    });
+  }
 
   const upgradeHandler: UpgradeHandler = (req, socket, head) => {
     const url = req.url ?? "/";
@@ -301,19 +321,11 @@ async function startServerWithOwner(
 
   function attachConnection(ws: WebSocket, loopback: boolean): void {
     const connection = createRpcConnection(ws, { loopback });
-    connections.add(connection);
+    registerConnection(connection);
 
     ws.on("message", (data) => {
       // ws 默认把 text frame 给 Buffer——dispatcher 内部统一转 string
       void dispatcher.handleMessage(connection, data as Buffer);
-    });
-
-    ws.on("close", () => {
-      rpcSurfaces.unbind(connection);
-      connections.delete(connection);
-      ctx.conversation?.removeObserverFromAll(
-        String(connection.id),
-      );
     });
 
     ws.on("error", (err) => {
@@ -353,7 +365,6 @@ async function startServerWithOwner(
     scheduleRuntimeEvents: opts.scheduleRuntimeEvents,
   });
 
-  let activeClosed = false;
   const cleanupActive = async () => {
     if (activeClosed) return;
     activeClosed = true;
@@ -379,6 +390,7 @@ async function startServerWithOwner(
     context: ctx,
     registry,
     connections,
+    registerConnection,
     ...(sessionBroadcastTransport ? { sessionBroadcastTransport } : {}),
     async close() {
       await boundServer.close();
@@ -389,6 +401,8 @@ async function startServerWithOwner(
     await opts.activationGate?.(server);
     boundServer.activate({ config, requestHandler, upgradeHandler, cleanup: cleanupActive });
   } catch (error) {
+    activeClosed = true;
+    for (const connection of connections) connection.close(1001, "Server activation failed");
     disposeBridge();
     wss.close();
     if (activationFailureOwner) {

@@ -12,13 +12,14 @@ import type {
   ExplicitEnvironmentSelection,
   FinalFrame,
   ConversationStatusNotice,
-  StreamFrame,
   ScheduleWriteMutation,
   SessionStatePort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
+import type { SessionProcessProjection } from '@zhixing/rpc/session-wire';
+import { SessionProcessProjectionOwner } from './session-process-projection.js';
 import {
   AdvancementAcceptedTurnApplicationService,
   AdvancementReviewResultProjectionApplicationService,
@@ -121,7 +122,7 @@ export async function verifyLocalConversationFinal(
 type LocalConversationRunListener = (notification:
   | { readonly conversationId: string; readonly method: "session.status"; readonly params: ConversationStatusNotice }
   | { readonly conversationId: string; readonly method: "session.final"; readonly params: FinalFrame }
-  | { readonly conversationId: string; readonly method: "session.assignmentStream"; readonly params: StreamFrame }
+  | { readonly conversationId: string; readonly method: "session.process"; readonly params: SessionProcessProjection }
 ) => void;
 
 export interface LocalConversationOwnerPort {
@@ -251,6 +252,7 @@ export class LocalConversationOwnerAssembly {
     (fact: ConversationLifecycleFact) => void
   >;
   readonly #runListeners: Set<LocalConversationRunListener>;
+  readonly #processProjection: SessionProcessProjectionOwner;
   readonly #transferAbort = new AbortController();
   #removalOperationId: string | undefined;
   #removalSnapshot: LocalConversationRemovalSnapshot | undefined;
@@ -271,6 +273,7 @@ export class LocalConversationOwnerAssembly {
       (fact: ConversationLifecycleFact) => void
     >;
     readonly runListeners: Set<LocalConversationRunListener>;
+    readonly processProjection: SessionProcessProjectionOwner;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
@@ -279,6 +282,7 @@ export class LocalConversationOwnerAssembly {
     this.#intents = input.intents;
     this.#conversationFactListeners = input.conversationFactListeners;
     this.#runListeners = input.runListeners;
+    this.#processProjection = input.processProjection;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
     this.#transferSource = new ConversationTransferSource({
       deviceId: this.#owner.deviceId,
@@ -808,6 +812,9 @@ export class LocalConversationOwnerAssembly {
     const publishRun: LocalConversationRunListener = (notification) => {
       for (const listener of runListeners) listener(notification);
     };
+    const processProjection = new SessionProcessProjectionOwner({ artifacts: owner.artifacts,
+      publish: (conversationId, _method, params) => publishRun({ conversationId, method: 'session.process', params }),
+    });
 
     let protocol!: ConversationProtocolRuntime;
     protocol = new ConversationProtocolRuntime({
@@ -823,14 +830,16 @@ export class LocalConversationOwnerAssembly {
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: options.assignmentStaging,
       onStatus: (notice) => {
+        const state = notice.state === 'uncertain-closed' ? notice.resultingState : notice.state;
+        if (['committed', 'cancelled', 'failed', 'expired'].includes(state)) processProjection.finish(notice.ref.conversationId, notice.ref.runId);
         publishRun({ conversationId: notice.ref.conversationId, method: "session.status", params: notice });
         options.onRunStatus?.(notice);
       },
-      onFirstPartyFrame: (frame) => {
-        if (frame.ref.execution === "conversation") publishRun({ conversationId: frame.ref.conversationId, method: "session.assignmentStream", params: frame });
-      },
+      onFirstPartyFrame: frame => processProjection.accept(frame),
+      onFirstPartyStreamEnd: source => processProjection.streamEnded(source),
       onFinal: async (frame) => {
         await verifyLocalConversationFinal(protocol, frame);
+        processProjection.finish(frame.conversationId, frame.runId);
         publishRun({ conversationId: frame.conversationId, method: "session.final", params: frame });
       },
       projectLifecycle: async ({ conversationId, mutation, requestId }) => {
@@ -1053,6 +1062,7 @@ export class LocalConversationOwnerAssembly {
       rubricCatalog,
       conversationFactListeners,
       runListeners,
+      processProjection,
     });
   }
 
@@ -1161,7 +1171,7 @@ export class LocalConversationOwnerAssembly {
    * 绝不伪造成功。重复与并发调用取得同一结果。
    */
   close(): Promise<void> {
-    if (!this.#closing) this.#closing = this.#settle();
+    if (!this.#closing) this.#closing = this.#settle().finally(() => this.#processProjection.dispose());
     return this.#closing;
   }
 

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { TERMINAL_LIMITS, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
@@ -49,6 +49,8 @@ import type { ConversationHistoryCursor } from '@zhixing/core/conversation/appli
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
 import { chooseTerminalSelection, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
+import { TerminalProcessSession } from './process-session.js';
+import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { RpcConfirmationBroker } from '../runtime/rpc-confirmation-broker.js';
 import { projectTerminalConfirmation, resolveTerminalConfirmation } from './confirmation.js';
 import { TerminalCandidatesOwner } from './candidates.js';
@@ -139,6 +141,41 @@ class TerminalApplication {
   #publishing?: Promise<void>;
   #nextView?: View;
 
+  readonly #processSession: TerminalProcessSession;
+  #processStatus?: TerminalProcessStatus;
+  #processStatusDirty = false;
+  #processStatusSending?: Promise<void>;
+  #displayHadGap = false;
+  async #retryDisplay(): Promise<void> {
+    const controller = this.#controller, conversationId = controller?.current.conversationId;
+    if (!this.#displayUnavailable || !controller || !conversationId) return;
+    const current = () => !this.#abort.signal.aborted && this.#controller === controller && controller.current.conversationId === conversationId;
+    try {
+      await this.#outputProjection.settlePaused();
+      if (!current()) return;
+      await this.#bodyWork.run(() => this.#display.retry());
+      if (!current()) return;
+      if (!await controller.setPresentationProfile('bounded-v1') || !current()) throw Error('terminal-presentation-not-accepted');
+      this.#outputProjection.resume(); this.#processSession.resume(); this.#displayUnavailable = false;
+      this.#mainView = { ...this.#mainView, message: '展示已恢复，仅接收新的过程内容；原有缺口仍保留。' };
+    } catch {
+      await controller.setPresentationProfile('default').catch(() => false);
+      if (current()) this.#mainView = { ...this.#mainView, message: '展示仍暂停，已保留的内容和草稿没有删除。请释放空间后重试，或退出重开。' };
+    }
+    if (current()) await this.#publishHistoryView();
+  }
+  #sendProcessStatus(): void {
+    this.#processStatusDirty = true;
+    if (this.#processStatusSending || this.#abort.signal.aborted) return;
+    this.#processStatusSending = (async () => {
+      while (this.#processStatusDirty && !this.#abort.signal.aborted) {
+        this.#processStatusDirty = false;
+        await this.#channel.send({ type: 'process-status', status: this.#processStatus });
+      }
+    })().catch(() => this.#close(70, 'terminal-process-status-undelivered'))
+      .finally(() => { this.#processStatusSending = undefined; if (this.#processStatusDirty && !this.#abort.signal.aborted) this.#sendProcessStatus(); });
+  }
+
   #closeDeadline = 0;
   constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string) {
     this.#completion = new Promise(resolve => { this.#resolve = resolve; });
@@ -165,8 +202,9 @@ class TerminalApplication {
       const reaction = this.#controller?.applySessionChanged(payload);
       if (!reaction || reaction.kind === 'ignored') return;
       if (reaction.kind === 'renamed') this.#mainView = { ...this.#mainView, title: reaction.name };
-      if (reaction.kind === 'cleared') this.#mainView = { ...this.#mainView, message: '对话内容已清空。' };
+      if (reaction.kind === 'cleared') { this.#processSession.reset(); this.#mainView = { ...this.#mainView, message: '对话内容已清空。' }; }
       if (reaction.kind === 'deleted') {
+        this.#processSession.reset();
         this.#controller?.dispose(); this.#controller = undefined; this.#history = undefined;
         this.#mainView = { kind: 'unavailable', title: '知行 · 对话已删除', message: '当前对话已删除，可以打开可用对话继续。', busy: false, connected: false,
           choices: [{ id: 'retry', label: '打开可用对话' }, { id: 'exit', label: '退出终端' }] };
@@ -204,11 +242,25 @@ class TerminalApplication {
     this.#pendingSend = new TerminalPendingSendStore(this.#files, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal);
     this.#inputHistoryReader = new TerminalInputHistoryReader(this.#inputs);
     this.#bodyWork = new TerminalBodyWork(this.#logging.capacity.arbiter, this.#abort.signal);
+    this.#processSession = new TerminalProcessSession({
+      currentConversation: () => this.#controller?.current.conversationId,
+      changed: status => { this.#processStatus = status; this.#sendProcessStatus(); },
+      block: block => this.#outputProjection.appendProcessBlock(block),
+      gap: () => { void this.#displayGap().catch(() => this.#close(70, 'terminal-process-gap-undelivered')); },
+      columns: () => 80, // U applies actual display-cell width to the retained source tail.
+    });
     this.#outputProjection = new TerminalOutputProjection(segment => this.#display.append(segment), () => this.#displayPage(), () => this.#displayGap(), {
       work: action => this.#bodyWork.run(action),
       amend: (blockId, change) => this.#display.amend(blockId, change),
       seal: blockId => this.#display.seal(blockId),
+    }, {
+      accept: (event, source) => this.#processSession.acceptYield(event, source),
+      end: (conversationId, turnId, runId) => this.#processSession.end(conversationId, turnId, runId),
     });
+    const releaseProcessEvents = this.#connection.onNotification('session.event', value => {
+      if (value && typeof value === 'object') this.#processSession.acceptEvent(value as SessionEventEnvelope);
+    });
+    this.#abort.signal.addEventListener('abort', releaseProcessEvents, { once: true });
     this.#confirmations = new RpcConfirmationBroker({ link: this.#connection, onResolveError: () => {
       this.#mainView = { ...this.#mainView, message: '确认应答未获得成功回执；正在重新核对请求状态，不会自动允许。' };
       void this.#publish(this.#mainView).catch(() => {});
@@ -227,6 +279,7 @@ class TerminalApplication {
       }
     });
     this.#connection.onDisconnect(() => {
+      this.#processSession.reset();
       this.#selection?.resolve(); this.#selection = undefined;
       this.#mainView = { ...this.#mainView, connected: false, message: '连接已断开。可查看已有内容、编辑本机配置或显式重试。',
         choices: [{ id: 'retry', label: '重试连接' }, { id: 'config', label: '本机配置' }, { id: 'exit', label: '退出终端' }] };
@@ -299,6 +352,7 @@ class TerminalApplication {
         if (this.#started) throw Error('terminal-startup-already-requested');
         this.#started = true; this.#background(() => this.#startup()); return { accepted: true };
       case 'retry-connection': this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
+      case 'display-retry': this.#background(() => this.#retryDisplay()); return { accepted: true };
       case 'exit': void this.#close(0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
         if (!this.#editor) throw Error('terminal-editor-not-open');
@@ -450,6 +504,8 @@ class TerminalApplication {
       }
       this.#controller = new ConversationController({ conversation: this.#conversation, workscene: this.#workscene,
         onYield: (event, source) => this.#output(event, source),
+        presentationProfile: 'bounded-v1',
+        onProcess: value => this.#processSession.accept(value),
         pagedRecovery: true,
         historyRunIds: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.recoveryRunIds ?? [] : [],
         onRecoveryDrain: source => {
@@ -474,13 +530,14 @@ class TerminalApplication {
           void this.#displayPage().catch(() => this.#close(70, 'terminal-recovery-display-undelivered'));
         },
         onRecoveryReset: async (conversationId, current) => {
+          this.#processSession.reset();
           await this.#outputProjection.reset(current);
           if (!current()) return;
           this.#history = undefined;
           await this.#display.reset(); this.#displayStart = undefined;
           if (!current()) return;
           this.#history = { conversationId, hasMore: true, offline: false };
-          await this.#historyPage();
+          await this.#historyPage(false);
         },
         projectOutcome: outcome => {
           const error = outcome.result.reason === 'error' ? outcome.result.error.message : undefined;
@@ -607,13 +664,14 @@ class TerminalApplication {
     void work.catch(() => this.#close(70, 'terminal-history-read-undelivered'));
   }
 
-  async #historyPage(): Promise<void> {
+  async #historyPage(updateStatus = true): Promise<void> {
     const history = this.#history;
     if (!history || !history.hasMore) {
       this.#mainView = { ...this.#mainView, message: '已到达最早的可用历史。' };
       await this.#publishHistoryView(); return;
     }
     const options = { limit: 4, before: history.before };
+    const previousMessage = this.#mainView.message, previousBusy = this.#mainView.busy;
     const consume = async (page: Pick<Awaited<ReturnType<RpcConversationFacade['history']>>, 'runs' | 'hasMore'>) => {
       this.#abort.signal.throwIfAborted();
       if (this.#history !== history) return;
@@ -635,9 +693,13 @@ class TerminalApplication {
       const oldest = page.runs.at(-1);
       history.hasMore = page.hasMore;
       if (oldest) history.before = { shardId: oldest.shardId, runIndex: oldest.record.runIndex };
-      this.#mainView = { ...this.#mainView, message: page.runs.length
-        ? 'PageUp / PageDown 回看，翻到顶部读取更早历史 · Ctrl+End 回到最新内容'
-        : '还没有已保存的对话内容。', busy: false };
+      // A later command receipt or running turn owns the current status.
+      // History can finish after /new or /clear has already published it.
+      if (updateStatus && this.#mainView.message === previousMessage && this.#mainView.busy === previousBusy) {
+        this.#mainView = { ...this.#mainView, message: page.runs.length
+          ? 'PageUp / PageDown 回看，翻到顶部读取更早历史 · Ctrl+End 回到最新内容'
+          : '还没有已保存的对话内容。', busy: false };
+      }
       await this.#displayPage();
       await this.#publishHistoryView();
     };
@@ -652,7 +714,12 @@ class TerminalApplication {
   }
 
   async #displayGap(): Promise<void> {
+    if (this.#displayUnavailable) return;
     this.#displayUnavailable = true;
+    this.#displayHadGap = true;
+    this.#outputProjection.pause();
+    this.#processSession.pause('过程展示已暂停；业务执行与确认仍可继续。');
+    await this.#controller?.setPresentationProfile('default').catch(() => {});
     await this.#publishHistoryView();
   }
 
@@ -908,21 +975,24 @@ class TerminalApplication {
     this.#state.activeTurnPromise = completion;
     this.#mainView = { ...this.#mainView, busy: true, message: turn.advancementContinuation ? '已作为当前任务的补充继续推进。' : '正在处理…' };
     void this.#publish(this.#mainView).catch(() => {});
-    void completion.then(async message => {
+    const settled = completion.then(async message => {
       this.#outputProjection.end(conversationId, turnId, runId);
       await this.#outputProjection.drain();
       if (this.#abort.signal.aborted) return;
       // The local waiter owns this terminal outcome; the controller suppresses
       // its duplicate observer notice. Keep the authoritative error visible,
       // bounded independently of the control frame and detached from its RPC.
+      if (this.#controller?.current.conversationId !== conversationId) return;
       this.#mainView = { ...this.#mainView, busy: false, message };
       if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
     }).catch(async () => {
-      if (!this.#abort.signal.aborted) {
+      if (!this.#abort.signal.aborted && this.#controller?.current.conversationId === conversationId) {
         this.#mainView = { ...this.#mainView, busy: false, message: '运行结果尚未确认；请重连后查看，不会自动重发。' };
         if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
       }
-    }).finally(() => { if (this.#state.activeTurnPromise === completion) this.#state.activeTurnPromise = null; }).catch(() => this.#close(70, 'terminal-outcome-undelivered'));
+    }).finally(() => { if (this.#state.activeTurnPromise === settled) this.#state.activeTurnPromise = null; });
+    this.#state.activeTurnPromise = settled;
+    void settled.catch(() => this.#close(70, 'terminal-outcome-undelivered'));
   }
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
@@ -1111,11 +1181,11 @@ class TerminalApplication {
     if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
     if (this.#presentingConfirmation && view.kind !== 'confirmation') return Promise.resolve();
     if (this.#skills && view.kind !== 'skills') return Promise.resolve();
-    this.#nextView = view;
+    this.#nextView = { ...view, conversationId: view.conversationId ?? this.#controller?.current.conversationId };
     if (!this.#publishing) this.#publishing = (async () => {
       while (this.#nextView && !this.#abort.signal.aborted) {
         const next = this.#nextView; this.#nextView = undefined;
-        await this.#channel.send({ type: 'view', view: { ...next, displayGap: this.#displayUnavailable, generation: ++this.#generation } });
+        await this.#channel.send({ type: 'view', view: { ...next, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation } });
       }
     })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
     return this.#publishing;
@@ -1134,6 +1204,7 @@ class TerminalApplication {
       const notified = notify && this.transport.connected ? this.#channel.send({ type: 'exit', code, reason }) : undefined;
       void notified?.catch(() => this.transport.close());
       this.#controller?.dispose();
+      this.#processSession.reset();
       this.#confirmations.dispose(); this.#pendingConfirmations.clear();
       await this.#connection.dispose();
       await this.#operation?.catch(() => {});

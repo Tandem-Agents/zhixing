@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { createSessionBroadcastTransport } from '@zhixing/rpc/session-broadcast';
+import { projectProcessYield, validateSessionProcessProjection } from '@zhixing/rpc/session-wire';
+import type { RpcConnection } from '../../../../server/src/rpc/connection.js';
+import { startServer, type ZhixingServerInstance } from '../../../../server/src/server.js';
+import { createServerContext } from '../../../../server/src/context.js';
+import { DEFAULT_SERVER_CONFIG } from '../../../../server/src/types.js';
+import { buildSessionSubscribeMethod, buildSessionUnsubscribeMethod } from '../../../../server/src/rpc/methods/session.js';
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   MeshProtocolError,
@@ -24,6 +31,218 @@ import {
 } from "../first-party-conversation-mesh.js";
 
 describe("first-party conversation mesh", () => {
+  it('sends a valid artifact burst and mixed controls through the real Mesh cap without losing the tail', async () => {
+    const harness = presentationRelayHarness(), surface = identity(1, 'large-burst');
+    const channel = await relayChannel(harness.target);
+    try {
+      expect(await channel.request({ v: 1, op: 'dispatch', surface, method: 'session.subscribe',
+        params: { conversationId: 'conv', presentation: 'bounded-v1', replayFinals: false } })).toMatchObject({ ok: true });
+      const expected: { method: string; params: unknown }[] = [];
+      for (let i = 0; i < 14; i++) {
+        const value = largeRelayProcess(i + 1);
+        validateSessionProcessProjection(value);
+        expected.push({ method: 'session.process', params: value });
+        harness.transport.session('conv', 'session.process', value);
+        if (i === 5) {
+          const control = { method: 'confirmation.pending', params: { requestId: 'mixed-control' } };
+          expected.push(control); harness.transport.session('conv', control.method, control.params);
+        }
+      }
+      const closed = { version: 1, source: largeRelayProcess(14).source, payload: { kind: 'closed' } };
+      expected.push({ method: 'session.process', params: closed });
+      harness.transport.session('conv', 'session.process', closed);
+      expect(encode({ v: 1, ok: true, notifications: expected }).byteLength).toBeGreaterThan(1024 * 1024);
+      const first = await channel.request({ v: 1, op: 'poll', surface });
+      expect(first.ok).toBe(true); expect(first.notifications.length).toBeLessThan(expected.length);
+      const received = [...first.notifications];
+      for (let attempt = 0; received.length < expected.length && attempt < 3; attempt++) {
+        const page = await channel.request({ v: 1, op: 'poll', surface });
+        expect(page.ok).toBe(true); received.push(...page.notifications);
+      }
+      expect(received).toEqual(expected);
+      expect(harness.connectionsByPrincipal.get(surface.surfacePrincipal)!.closed).toBe(false);
+    } finally { harness.target.close(); await channel.close(); }
+  });
+
+  it('reserves encoded reply space for dispatch results and leaves immutable notifications for poll', async () => {
+    let relay!: RpcConnection, result: unknown = null;
+    const target = new FirstPartyConversationMeshTarget({ surface: { dispatch: async input => {
+      relay = input.connection; return result;
+    } } });
+    const channel = await relayChannel(target), surface = identity(1, 'result-budget');
+    try {
+      const dispatch = () => channel.request({ v: 1, op: 'dispatch', surface, method: 'confirmation.list', params: {} });
+      await dispatch();
+      const params = { text: '汉'.repeat(80 * 1024) }, original = params.text;
+      expect(relay.tryNotify!('session.changed', params)).toBe(true);
+      params.text = 'mutated after admission';
+      result = { history: 'x'.repeat(900 * 1024) };
+      expect(await dispatch()).toEqual({ v: 1, ok: true, result, notifications: [] });
+      expect(await channel.request({ v: 1, op: 'poll', surface })).toMatchObject({
+        ok: true, notifications: [{ method: 'session.changed', params: { text: original } }],
+      });
+      result = { history: 'x'.repeat(1024 * 1024) };
+      expect(await dispatch()).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.INTERNAL_ERROR } });
+      expect(relay.closed).toBe(true);
+      expect(await channel.request({ v: 1, op: 'poll', surface })).toMatchObject({ ok: false });
+    } finally { target.close(); await channel.close(); }
+  });
+
+  it('closes an exhausted relay explicitly and wakes the client poll with a stable failure', async () => {
+    let relay!: RpcConnection;
+    const target = new FirstPartyConversationMeshTarget({ surface: { dispatch: async input => {
+      relay = input.connection; return null;
+    } } });
+    const channel = await relayChannel(target), errors: Error[] = [], connection = ingressConnection(91);
+    const client = new FirstPartyConversationMeshClient(channel.client, 'device-source', error => errors.push(error));
+    try {
+      await client.dispatch('confirmation.list', {}, connection);
+      const onClose = vi.fn(); relay.onClose(onClose);
+      // One synchronous burst cannot be drained by an interleaving poll handler.
+      const params = { text: 'x'.repeat(128 * 1024) };
+      let admitted = 0;
+      while (admitted < 40 && relay.tryNotify!('session.changed', params)) admitted++;
+      expect(admitted).toBeGreaterThan(0); expect(admitted).toBeLessThan(40);
+      expect(relay.closed).toBe(true); expect(onClose).toHaveBeenCalledOnce();
+      await waitUntil(() => errors.length === 1);
+      expect(errors[0]).toMatchObject({ code: RPC_ERROR_CODES.INTERNAL_ERROR });
+      expect(errors[0]!.message).toContain('capacity');
+      expect(relay.tryNotify!('session.changed', {})).toBe(false);
+    } finally { await client.close(connection); target.close(); await channel.close(); }
+  });
+
+  it('registers real relays in the running Server broadcast and closes observers at generation replacement and shutdown', async () => {
+    const observers = new Set<string>(), removeObserverFromAll = vi.fn((id: string) => { observers.delete(id); });
+    const context = createServerContext({ config: { ...DEFAULT_SERVER_CONFIG, port: 0 }, version: 'test', token: 'synthetic-test-token',
+      conversation: { has: () => true, addObserver: (_id: string, connectionId: string) => { observers.add(connectionId); return true; },
+        removeObserver: (_id: string, connectionId: string) => { observers.delete(connectionId); },
+        getObserverConnectionIds: () => observers, removeObserverFromAll, disposeAll: async () => {} } as never,
+    });
+    const server = await startServer({ context });
+    let other: ZhixingServerInstance | undefined;
+    const target = new FirstPartyConversationMeshTarget({ surface: { dispatch: ({ method, params, connection }) => {
+      server.registerConnection(connection);
+      return server.registry.dispatchCanonical(method, params, { connection, server: context });
+    } } });
+    const request = async (command: unknown) => decode(await target.handle(encode(command), { peer: { deviceId: 'device-source' } } as never, AbortSignal.abort()));
+    const dispatch = (surface: ReturnType<typeof identity>) => request({ v: 1, op: 'dispatch', surface, method: 'session.subscribe',
+      params: { conversationId: 'conv', presentation: 'bounded-v1', replayFinals: false } });
+    try {
+      const first = identity(1, 'first');
+      expect(await dispatch(first)).toMatchObject({ ok: true, result: { subscribed: true, presentation: 'bounded-v1' } });
+      const relay = [...server.connections][0]!;
+      expect(observers.has(String(relay.id))).toBe(true);
+      server.registerConnection(relay); expect(server.connections.size).toBe(1);
+      context.sessionBroadcast!('conv', 'session.process', relayProcess());
+      expect(JSON.stringify(await request({ v: 1, op: 'poll', surface: first }))).toContain('file-diff');
+      other = await startServer({ context: createServerContext({ config: { ...DEFAULT_SERVER_CONFIG, port: 0 }, version: 'test', token: 'synthetic-other-token' }) });
+      expect(() => other!.registerConnection(relay)).toThrow('another Server generation');
+      expect(other.connections.size).toBe(0);
+      const next = identity(2, 'replacement');
+      expect(await dispatch(next)).toMatchObject({ ok: true });
+      expect(relay.closed).toBe(true);
+      expect(removeObserverFromAll).toHaveBeenCalledWith(String(relay.id));
+      expect(observers.has(String(relay.id))).toBe(false);
+      expect(server.connections.size).toBe(1);
+      const current = [...server.connections][0]!;
+      await server.close();
+      expect(current.closed).toBe(true); expect(observers.size).toBe(0); expect(server.connections.size).toBe(0);
+      expect(await dispatch(identity(3, 'after-shutdown'))).toMatchObject({ ok: false });
+      expect(observers.size).toBe(0);
+    } finally { target.close(); await server.close(); await other?.close(); }
+  });
+  it('negotiates actual relays through canonical dispatch and the shared observer transport', async () => {
+    const harness = presentationRelayHarness();
+    const plain = { ...identity(1, 'plain'), surfacePrincipal: 'rpc:plain' };
+    const enhanced = identity(1, 'enhanced');
+    expect(await harness.dispatch(plain, 'session.subscribe', { conversationId: 'conv' })).toMatchObject({ ok: true, result: { subscribed: true, presentation: 'default' } });
+    expect(await harness.dispatch(enhanced, 'session.subscribe', { conversationId: 'conv', presentation: 'bounded-v1' })).toMatchObject({ ok: true, result: { subscribed: true, presentation: 'bounded-v1' } });
+    const relay = harness.connectionsByPrincipal.get(enhanced.surfacePrincipal)!;
+    const revision = relay.observationRevision!('conv');
+    const value = relayProcess();
+    harness.transport.session('conv', 'session.process', value);
+    harness.transport.session('conv', 'session.assignmentStream', { ref: 'canonical-private' });
+    const plainResult = await harness.poll(plain), enhancedResult = await harness.poll(enhanced);
+    expect(plainResult).toMatchObject({ notifications: [{ method: 'session.process' }] });
+    expect(JSON.stringify(plainResult)).not.toMatch(/file-diff|presentation|"ref"/u);
+    expect(JSON.stringify(enhancedResult)).toContain('file-diff');
+    expect(await harness.dispatch(enhanced, 'session.subscribe', { conversationId: 'conv', presentation: 'default', replayFinals: false })).toMatchObject({ result: { presentation: 'default' } });
+    expect(relay.observationRevision!('conv')).toBe(revision);
+    harness.transport.session('conv', 'session.process', relayProcess());
+    expect(JSON.stringify(await harness.poll(enhanced))).not.toContain('file-diff');
+    await harness.dispatch(enhanced, 'session.subscribe', { conversationId: 'conv', presentation: 'bounded-v1', replayFinals: false });
+    harness.transport.session('conv', 'session.process', value);
+    expect(JSON.stringify(await harness.poll(enhanced))).not.toContain('file-diff');
+    harness.transport.session('conv', 'session.process', relayProcess());
+    expect(JSON.stringify(await harness.poll(enhanced))).toContain('file-diff');
+    await harness.dispatch(enhanced, 'session.unsubscribe', { conversationId: 'conv' });
+    expect(relay.observationRevision!('conv')).toBe(-1);
+    harness.transport.session('conv', 'session.complete', { conversationId: 'conv' });
+    expect(await harness.poll(enhanced)).toMatchObject({ notifications: [] });
+    await harness.dispatch(enhanced, 'session.subscribe', { conversationId: 'conv', replayFinals: false });
+    expect(relay.observationRevision!('conv')).not.toBe(revision);
+    const next = identity(2, 'replacement');
+    await harness.dispatch(next, 'session.subscribe', { conversationId: 'conv', replayFinals: false });
+    expect(relay.closed).toBe(true);
+    expect(relay.observationRevision!('conv')).toBe(-1);
+    expect(harness.connections.has(relay)).toBe(false);
+    expect(harness.observers.has(String(relay.id))).toBe(false);
+    expect(await harness.dispatch(enhanced, 'session.subscribe', { conversationId: 'conv' })).toMatchObject({ ok: false });
+    harness.transport.session('conv', 'session.process', relayProcess());
+    expect(JSON.stringify(await harness.poll(next))).not.toContain('file-diff');
+    await harness.close(next);
+    expect(harness.observers.size).toBe(1); // Only the independent plain observer remains.
+    harness.target.close();
+    expect(harness.connections.size).toBe(0);
+    expect(harness.observers.size).toBe(0);
+    expect(await harness.dispatch(identity(3, 'closed-target'), 'session.subscribe', { conversationId: 'conv' })).toMatchObject({ ok: false });
+  });
+
+  it('preserves final and publish replay when a pause dispatch queues behind subscription', async () => {
+    let release!: (value: unknown[]) => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const harness = presentationRelayHarness(() => { entered(); return new Promise(resolve => { release = resolve; }); });
+    const surface = identity(1, 'replay');
+    const pending = harness.dispatch(surface, 'session.subscribe', { conversationId: 'conv', presentation: 'bounded-v1' });
+    await waiting;
+    const paused = harness.dispatch(surface, 'session.subscribe', { conversationId: 'conv', presentation: 'default', replayFinals: false });
+    release([{ frame: { conversationId: 'conv', runId: 'run', commitRevision: 4 }, publishResults: [{ conversationId: 'conv', runId: 'run', seq: 1, assignmentId: 'assignment' }] }]);
+    const replay = await pending;
+    expect(replay).toMatchObject({ ok: true, notifications: [{ method: 'session.final' }, { method: 'session.event', params: { event: 'publish:result', scope: 'control' } }] });
+    expect(await paused).toMatchObject({ ok: true, result: { presentation: 'default' }, notifications: [] });
+    harness.target.close();
+  });
+
+  it('closes real relay observers while history awaits and rejects queued stale-generation dispatch', async () => {
+    let release!: (value: unknown[]) => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const history = vi.fn(() => { entered(); return new Promise<unknown[]>(resolve => { release = resolve; }); });
+    const harness = presentationRelayHarness(history);
+    const first = identity(1, 'old');
+    const pending = harness.dispatch(first, 'session.subscribe', { conversationId: 'conv', presentation: 'bounded-v1' });
+    await waiting;
+    const queued = harness.dispatch(first, 'session.subscribe', { conversationId: 'conv', replayFinals: false });
+    const relay = harness.connectionsByPrincipal.get(first.surfacePrincipal)!;
+    const next = identity(2, 'next');
+    expect(await harness.dispatch(next, 'session.subscribe', { conversationId: 'conv', replayFinals: false })).toMatchObject({ result: { subscribed: true, presentation: 'default' } });
+    release([{ frame: { conversationId: 'conv', runId: 'run', commitRevision: 4 }, publishResults: [] }]);
+    // The relay was retired while its history read was pending. Its completion
+    // must not reopen a successful response path into the replacement generation.
+    const retired = await pending;
+    expect(retired).toMatchObject({ v: 1, ok: false, error: { code: RPC_ERROR_CODES.BUSY } });
+    expect(retired).not.toHaveProperty('result');
+    expect(retired).not.toHaveProperty('notifications');
+    expect(await queued).toMatchObject({ ok: false });
+    expect(relay.closed).toBe(true);
+    expect(harness.observers).not.toContain(String(relay.id));
+    expect(history).toHaveBeenCalledOnce();
+    harness.transport.session('conv', 'session.complete', { conversationId: 'conv' });
+    expect(await harness.poll(next)).toMatchObject({ notifications: [{ method: 'session.complete' }] });
+    harness.target.close();
+  });
+
   it("keeps MCP configuration pending device-local even while Anchor is offline", async () => {
     const { ExecutorFirstPartyRpcRouter } = await import("../local-conversation-rpc.js");
     const { buildMcpPendingMethod } = await import("../../../../server/src/rpc/methods/mcp.js");
@@ -558,4 +777,77 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<v
     if (Date.now() >= deadline) throw new Error("Timed out waiting for relay state");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+function presentationRelayHarness(history: () => Promise<unknown[]> = async () => []) {
+  const connections = new Set<RpcConnection>();
+  const connectionsByPrincipal = new Map<string, RpcConnection>();
+  const observers = new Set<string>();
+  const transport = createSessionBroadcastTransport({ connections, observerConnectionIds: () => observers });
+  const server = { conversation: {
+    has: () => true,
+    addObserver: (_conversationId: string, id: string) => { observers.add(id); return true; },
+    removeObserver: (_conversationId: string, id: string) => { observers.delete(id); },
+  }, conversationFinalHistory: history };
+  const target = new FirstPartyConversationMeshTarget({ surface: {
+    dispatch: async ({ method, params, connection }) => {
+      // The production Server registration seam owns this same set and cleanup.
+      if (!connections.has(connection)) {
+        connections.add(connection);
+        connectionsByPrincipal.set(connection.surfacePrincipal!, connection);
+        connection.onClose(() => { connections.delete(connection); observers.delete(String(connection.id)); });
+      }
+      const entry = method === 'session.subscribe' ? buildSessionSubscribeMethod() : buildSessionUnsubscribeMethod();
+      return entry.handler(params, { connection, server } as never);
+    },
+  } });
+  const request = async (command: unknown) => decode(await target.handle(encode(command), { peer: { deviceId: 'device-source' } } as never, AbortSignal.abort()));
+  return { target, connections, connectionsByPrincipal, observers, transport,
+    dispatch: (surface: ReturnType<typeof identity>, method: string, params: unknown) => request({ v: 1, op: 'dispatch', surface, method, params }),
+    poll: (surface: ReturnType<typeof identity>) => request({ v: 1, op: 'poll', surface }),
+    close: (surface: ReturnType<typeof identity>) => request({ v: 1, op: 'close', surface }),
+  };
+}
+function relayProcess() {
+  return projectProcessYield({ conversationId: 'conv', runId: 'run', assignmentId: 'assignment', streamEpoch: 1, sourceSeq: 1, observedAt: performance.now() }, {
+    type: 'tool_end', id: 'edit', name: 'edit', duration: 0,
+    result: { content: 'saved', presentation: { kind: 'file-diff', path: 'file.ts', operation: 'modified',
+      changeStats: { kind: 'exact', addedLines: 1, removedLines: 0 },
+      hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: [{ type: 'added', newLineNumber: 1, content: 'new' }] }] } },
+  });
+}
+
+function largeRelayProcess(seq: number) {
+  return projectProcessYield({ conversationId: 'conv', runId: 'run', assignmentId: 'assignment', streamEpoch: 1,
+    sourceSeq: seq, observedAt: performance.now() }, {
+    type: 'tool_end', id: `edit-${seq}`, name: 'edit', duration: 0,
+    result: { content: 'saved', presentation: { kind: 'file-diff', path: 'file.ts', operation: 'modified',
+      changeStats: { kind: 'exact', addedLines: 80, removedLines: 0 },
+      hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 80,
+        lines: Array.from({ length: 80 }, (_, i) => ({ type: 'added', newLineNumber: i + 1, content: '汉'.repeat(340) })) }] } },
+  });
+}
+
+async function relayChannel(target: FirstPartyConversationMeshTarget) {
+  const sessionModule = await import(/* @vite-ignore */ new URL('../../../../mesh/src/session.ts', import.meta.url).href);
+  const channelModule = await import(/* @vite-ignore */ new URL('../../../../mesh/src/request-channel.ts', import.meta.url).href);
+  const registryModule = await import(/* @vite-ignore */ new URL('../../../../mesh/src/service-registry.ts', import.meta.url).href);
+  const [sourceTransport, targetTransport] = memoryTransports(), range = { min: '1', max: '1' } as const;
+  const registry = new registryModule.MeshServiceRegistry();
+  registerFirstPartyConversationMeshService(registry, target, () => true);
+  const secure = (transport: MeshFrameTransport, peer: string) => sessionModule.createSecureMeshConnection({
+    transport, connectionId: peer, compatibility: { mode: 'read-write', protocolVersion: '1' },
+    localProtocolRange: range, peerProtocolRange: range, peer: deviceIdentity(peer),
+  });
+  const source = new channelModule.MeshRequestChannel(secure(sourceTransport, 'device-target'), new registryModule.MeshServiceRegistry());
+  const destination = new channelModule.MeshRequestChannel(secure(targetTransport, 'device-source'), registry);
+  return {
+    client: source as MeshServiceClient,
+    request: async (command: unknown) => {
+      const response: Uint8Array = await source.request(FIRST_PARTY_CONVERSATION_MESH_SERVICE, encode(command));
+      expect(response.byteLength).toBeLessThanOrEqual(1024 * 1024);
+      return decode(response) as { ok: boolean; notifications: { method: string; params: unknown }[]; result?: unknown };
+    },
+    close: () => Promise.all([source.close(), destination.close()]),
+  };
 }

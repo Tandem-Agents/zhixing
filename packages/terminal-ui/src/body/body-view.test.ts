@@ -3,6 +3,7 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import * as model from '../body-model.js';
 import * as layout from './layout.js';
+import * as processModel from '../process-model.js';
 import type { BodyViewHandle, BodyViewProps } from '../body-view.js';
 
 // Execute the production component's lifecycle with deterministic native
@@ -34,7 +35,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core,
-    './body-model.js': model, './body/layout.js': layout,
+    './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
   const jsx = (type: string | ((props: Record<string, unknown>) => unknown), props: Record<string, unknown> | null, ...children: unknown[]) => {
     const values = { ...props, children: children.length === 1 ? children[0] : children };

@@ -674,7 +674,7 @@ class TerminalSupervisor {
       this.#live();
       await this.#application!.channel!.send(message, traffic); return;
     }
-    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'submission'].includes(message.type)) {
+    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'submission', 'process-status'].includes(message.type)) {
       if (!this.#ui) throw Error('terminal-ui-unavailable');
       await this.#ui.channel!.send(message, traffic); return;
     }

@@ -1,7 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { textFragments, projectHistorySegments, projectRenderedHistoryReverse } from '../history-segments.js';
+import { textFragments, projectHistorySegments, projectHistorySegmentsReverse, projectRenderedHistoryReverse } from '../history-segments.js';
 
 describe('history segment projection', () => {
+  it('materializes only a thinking display tail with the original authority coordinates', async () => {
+    const thinking = '前文'.repeat(10_000) + '🦞最新尾部';
+    const messages = [{ role: 'assistant' as const, content: [{ type: 'thinking' as const, thinking }] }];
+    const runs = [{ shardId: 'own', record: { type: 'run' as const, runIndex: 3, timestamp: '2026-10-06', messages } }];
+    for (const segments of [[...projectHistorySegments(runs)], [...projectHistorySegmentsReverse(runs)]]) {
+      expect(segments).toHaveLength(1);
+      expect(segments[0]).toMatchObject({ blockId: 'own:3:0:0', role: 'thinking', contentOffset: thinking.length - 8192, final: true });
+      expect(segments[0]!.text).toBe(thinking.slice(-8192));
+    }
+    const rendered = [];
+    for await (const segment of projectRenderedHistoryReverse(runs)) rendered.push(segment);
+    for (const segment of rendered) {
+      expect(segment.role).toBe('thinking');
+      expect(thinking.slice(segment.contentOffset, segment.contentOffset + segment.text.length)).toBe(segment.text);
+      expect(segment.body!.context.nodes.every(node => node.from >= thinking.length - 8192)).toBe(true);
+    }
+    expect(messages[0]!.content[0]!.thinking).toBe(thinking);
+  });
   it('uses source kind and real logical EOF when restoring Markdown and literal user history', async () => {
     const assistant = '# 标题\r\n\r\n- 中文 🦞\r\n\r\n```ts\r\nconst n = 1;\r\n```\r\n';
     const messages = [

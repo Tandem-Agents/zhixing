@@ -13,6 +13,8 @@
  */
 
 import type { WebSocket } from "ws";
+import type { SessionPresentationProfile } from '@zhixing/rpc/session-wire';
+import { SessionPresentationState } from '@zhixing/rpc/connection';
 import {
   encodeError,
   encodeNotification,
@@ -51,6 +53,13 @@ export interface RpcConnection {
   close(code?: number, reason?: string): void;
   /** 是否已关闭 */
   readonly closed: boolean;
+  /** Actual socket state, without sending a probe; implemented by the real connection. */
+  readonly writable?: boolean;
+  presentationProfile?(conversationId: string): SessionPresentationProfile;
+  presentationSince?(conversationId: string): number;
+  observationRevision?(conversationId: string): number;
+  setPresentationProfile?(conversationId: string, profile: SessionPresentationProfile): boolean;
+  dropPresentationProfile?(conversationId: string): void;
   /** 注册关闭回调。返回取消注册的函数。 */
   onClose(callback: () => void): () => void;
 }
@@ -72,9 +81,11 @@ export function createRpcConnection(
   const loopback = opts?.loopback ?? false;
   let closed = false;
   const closeListeners = new Set<() => void>();
+  const profiles = new SessionPresentationState(() => closed);
 
   socket.on("close", () => {
     closed = true;
+    profiles.clear();
     for (const cb of closeListeners) cb();
     closeListeners.clear();
   });
@@ -95,6 +106,11 @@ export function createRpcConnection(
     id,
     authenticated: false,
     loopback,
+    presentationProfile(conversationId) { return profiles.presentationProfile(conversationId); },
+    presentationSince(conversationId) { return profiles.presentationSince(conversationId); },
+    observationRevision(conversationId) { return profiles.observationRevision(conversationId); },
+    setPresentationProfile(conversationId, profile) { return profiles.setPresentationProfile(conversationId, profile); },
+    dropPresentationProfile(conversationId) { profiles.dropPresentationProfile(conversationId); },
     sendSuccess(messageId, result) {
       safeSend(encodeSuccess(messageId, result));
     },
@@ -118,6 +134,7 @@ export function createRpcConnection(
     get closed() {
       return closed;
     },
+    get writable() { return !closed && socket.readyState === socket.OPEN; },
     onClose(callback) {
       if (closed) {
         callback();

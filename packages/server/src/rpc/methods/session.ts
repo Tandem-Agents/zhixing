@@ -99,6 +99,7 @@ import type {
   ServerConversationBinding,
 } from "../../context.js";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
+import { notifySessionObserver } from '@zhixing/rpc/session-broadcast';
 import {
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -1421,7 +1422,7 @@ async function runManagedTurn(
 ): Promise<void> {
   const push = (method: string, params: unknown): void => {
     if (broadcast) broadcast(conversationId, method, params);
-    else connection.notify(method, params);
+    else notifySessionObserver(connection, conversationId, method, params);
   };
   const abortController = new AbortController();
   const unsubClose = manager.usesDurableTurnProtocol()
@@ -1616,7 +1617,7 @@ function notifyPerspectiveDelta(
   if (input.broadcast) {
     input.broadcast(input.conversationId, SESSION_NOTIFICATIONS.delta, payload);
   } else {
-    input.connection.notify(SESSION_NOTIFICATIONS.delta, payload);
+    notifySessionObserver(input.connection, input.conversationId, SESSION_NOTIFICATIONS.delta, payload);
   }
 }
 
@@ -2161,6 +2162,7 @@ interface SessionSubscribeParams {
   conversationId?: string;
   afterCommitRevision?: number;
   replayFinals?: boolean;
+  presentation?: 'default' | 'bounded-v1';
 }
 
 /**
@@ -2176,10 +2178,12 @@ export function buildSessionSubscribeMethod(): MethodEntry {
       const params = (rawParams ?? {}) as SessionSubscribeParams;
       if (
         typeof params.conversationId !== "string" ||
+        params.conversationId.length > 1024 ||
         Object.keys(params).some(
-          (key) => key !== "conversationId" && key !== "afterCommitRevision" && key !== 'replayFinals',
+          (key) => key !== "conversationId" && key !== "afterCommitRevision" && key !== 'replayFinals' && key !== 'presentation',
         ) ||
         (params.replayFinals !== undefined && typeof params.replayFinals !== 'boolean') ||
+        (params.presentation !== undefined && params.presentation !== 'default' && params.presentation !== 'bounded-v1') ||
         (params.afterCommitRevision !== undefined &&
           (!Number.isSafeInteger(params.afterCommitRevision) ||
             params.afterCommitRevision < 0))
@@ -2189,6 +2193,12 @@ export function buildSessionSubscribeMethod(): MethodEntry {
         );
       }
       const manager = requireConversations(ctx.server);
+      const presentation = params.presentation ?? 'default';
+      const accepted = ctx.connection.setPresentationProfile?.(params.conversationId, presentation);
+      if (accepted === false) throw RpcErrors.invalidParams('session.subscribe presentation capacity exceeded');
+      const presentationRevision = ctx.connection.observationRevision?.(params.conversationId);
+      const currentSubscription = () => !ctx.connection.closed &&
+        ctx.connection.observationRevision?.(params.conversationId!) === presentationRevision;
       const active = manager.has(params.conversationId);
       const exists =
         active ||
@@ -2196,7 +2206,11 @@ export function buildSessionSubscribeMethod(): MethodEntry {
           ctx.server,
           params.conversationId,
         ));
-      if (!exists) return { subscribed: false };
+      if (!currentSubscription()) return { subscribed: false, presentation: 'default' };
+      if (!exists) {
+        ctx.connection.dropPresentationProfile?.(params.conversationId);
+        return { subscribed: false, presentation: 'default' };
+      }
 
       // observer 是 conversation 身份层名册;已落盘但未激活 runtime 的当前对话
       // 也必须能收到 rename/delete/clear 这类 run 外变更。
@@ -2211,6 +2225,7 @@ export function buildSessionSubscribeMethod(): MethodEntry {
           params.afterCommitRevision ?? 0,
         ) ?? [];
         for (const item of history) {
+          if (!currentSubscription()) break;
           ctx.connection.notify(SESSION_NOTIFICATIONS.final, item.frame);
           for (const notice of item.publishResults) {
             ctx.connection.notify(
@@ -2226,7 +2241,9 @@ export function buildSessionSubscribeMethod(): MethodEntry {
           }
         }
       }
-      return { subscribed };
+      if (!subscribed) ctx.connection.dropPresentationProfile?.(params.conversationId);
+      if (!currentSubscription()) return { subscribed: false, presentation: 'default' };
+      return { subscribed, presentation: subscribed && accepted ? ctx.connection.presentationProfile?.(params.conversationId) ?? 'default' : 'default' };
     },
   };
 }
@@ -2244,6 +2261,7 @@ export function buildSessionUnsubscribeMethod(): MethodEntry {
       }
       const manager = requireConversations(ctx.server);
       manager.removeObserver(params.conversationId, String(ctx.connection.id));
+      ctx.connection.dropPresentationProfile?.(params.conversationId);
       return { unsubscribed: true };
     },
   };

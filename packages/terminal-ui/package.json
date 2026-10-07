@@ -4,7 +4,7 @@
   "private": true,
   "description": "知行独立终端表面与匹配恢复制品",
   "type": "module",
-  "exports": { "./protocol": "./dist/shared/protocol.js", "./body-model": "./dist/shared/body-model.js", "./skills-model": "./dist/shared/skills-model.js", "./channel": "./dist/shared/channel.js", "./parent-transport": "./dist/shared/parent-transport.js" },
+  "exports": { "./protocol": "./dist/shared/protocol.js", "./body-model": "./dist/shared/body-model.js", "./process-model": "./dist/shared/process-model.js", "./skills-model": "./dist/shared/skills-model.js", "./channel": "./dist/shared/channel.js", "./parent-transport": "./dist/shared/parent-transport.js" },
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "vitest run --maxWorkers=2"

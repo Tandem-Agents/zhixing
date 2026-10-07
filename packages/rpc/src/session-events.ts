@@ -20,6 +20,8 @@ import type {
   AgentEventMap,
   TurnContext,
 } from "@zhixing/core/types";
+import { projectSessionEvent } from '@zhixing/core/types';
+import { projectProcessEvent } from './session-presentation.js';
 import type {
   EventMeta,
   IEventBus,
@@ -101,6 +103,11 @@ type Projector<K extends keyof AgentEventMap> = (
  * 值为 payload 裁剪函数(恒等 = 小 payload 全量)。
  */
 const UI_EVENT_PROJECTION: { [K in keyof AgentEventMap]?: Projector<K> } = {
+  "tool:call_start": (p) => projectSessionEvent('tool:call_start', p)!.payload,
+  "tool:call_end": (p) => projectSessionEvent('tool:call_end', p)!.payload,
+  "tool:child_start": (p) => projectSessionEvent('tool:child_start', p)!.payload,
+  "tool:child_end": (p) => projectSessionEvent('tool:child_end', p)!.payload,
+  "llm:request_end": (p) => projectSessionEvent('llm:request_end', p)!.payload,
   // agent loop 展示事件。投影生命周期由显式 closed 帧收束，不能用
   // agent:run_end 推断，否则嵌套子 agent 结束会误拆父 run 投影。
   "agent:run_start": (p) => p,
@@ -182,13 +189,23 @@ export function createRunEventForwarder(
       >
     ).map(([event, project]) =>
       bus.on(event, ((payload: unknown, meta?: EventMeta) => {
+        if (disposed) return;
+        let projected: unknown;
+        try {
+          const selected = projectSessionEvent(event, payload as never);
+          projected = selected ? projectProcessEvent(selected).payload : project(payload as never);
+        } catch {
+          broadcast(conversationId, { conversationId, scope: 'run', runId, seq: seq++, event: 'display:gap',
+            payload: { reason: '过程事件超出展示容量' }, meta: { lineage: meta?.lineage, turnOrigin } });
+          return;
+        }
         broadcast(conversationId, {
           conversationId,
           scope: "run",
           runId,
           seq: seq++,
           event,
-          payload: project(payload as never),
+          payload: projected,
           meta: { lineage: meta?.lineage, turnOrigin },
         });
       }) as never),

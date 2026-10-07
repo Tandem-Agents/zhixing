@@ -1,8 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRuntime } from "@zhixing/owner-kernel/types";
+import type { RunResult } from '@zhixing/core/loop';
 import { ConversationKernelExecution } from "./conversation-kernel-execution.js";
 
 describe("assignment kernel quiescence", () => {
+  it('preserves the real terminal result and usage after cancellation joins kernel cleanup', async () => {
+    const entered = Promise.withResolvers<void>(), cleanup = Promise.withResolvers<void>();
+    const result: RunResult = { agentResult: { reason: 'aborted', usage: { inputTokens: 5, outputTokens: 2 } },
+      runRecord: { timestamp: '2026-10-06T00:00:00.000Z', messages: [], usage: { inputTokens: 5, outputTokens: 2 } },
+      newMessages: [], durationMs: 1 };
+    const runtime = { async *run() { entered.resolve(); await cleanup.promise; return result; },
+      abort: vi.fn() } as unknown as SessionRuntime;
+    const execution = new ConversationKernelExecution(runtime), stream = execution.run([]);
+    const pending = stream.next(); void pending.catch(() => {});
+    await entered.promise;
+    expect(execution.stop()).toBe(false);
+    cleanup.resolve();
+    await expect(pending).resolves.toEqual({ done: true, value: result });
+    expect(execution.stop()).toBe(true);
+    expect(runtime.abort).toHaveBeenCalledOnce();
+  });
+
   it('discards a value returned after cancellation and waits for the real kernel cleanup', async () => {
     const started = Promise.withResolvers<void>(), produce = Promise.withResolvers<void>();
     const cleaning = Promise.withResolvers<void>(), cleaned = Promise.withResolvers<void>();

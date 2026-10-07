@@ -8,7 +8,7 @@
  *
  * 通知谱:
  * - session.delta / session.complete —— 主通道(turn 产出流),经 observer 组播
- * - session.assignmentStream —— assignment 无损数据面的规范帧
+ * - session.process —— assignment 的有限 observer 展示 DTO（不是规范 StreamFrame）
  * - session.event —— 带外通道,信封类型与转发器内聚在 session-events.ts
  * - session.changed —— 会话级变更(run 外发生),经同一组播名册
  * - session.activity —— 非当前对话的低噪活动提示,只给工作台类接入面
@@ -19,6 +19,7 @@ import type {
   AgentResult,
   AgentYield,
 } from "@zhixing/core/loop";
+export * from "./session-presentation.js";
 import type {
   AdvancementClosureFacts,
   AdvancementExit,
@@ -86,6 +87,7 @@ export function toWireAgentResult(result: AgentResult): WireAgentResult {
 
 /** 会话域全部推送通知的方法名——发射端与订阅端共用,字符串不两侧各写 */
 export const SESSION_NOTIFICATIONS = {
+  process: "session.process",
   delta: "session.delta",
   complete: "session.complete",
   final: "session.final",
@@ -314,6 +316,7 @@ export interface SessionRenameResult {
 
 export interface SessionSubscribeResult {
   subscribed: boolean;
+  presentation?: import("./session-presentation.js").SessionPresentationProfile;
 }
 
 export interface SessionUnsubscribeResult {

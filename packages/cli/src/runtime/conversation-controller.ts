@@ -18,6 +18,7 @@
  */
 
 import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
+import { validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource, type SessionPresentationProfile } from "@zhixing/rpc/session-wire";
 import { resolveWorksceneMainReturn } from "@zhixing/core/workscene/application";
 import { extractText, generateTurnId, type Message, type AgentEventMap, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core/types";
 import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
@@ -186,6 +187,9 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   workscene: RpcWorksceneFacade;
   /** 主通道还原:当前对话的 AgentYield 流(渲染器 handleEvent 的喂入点) */
   onYield: (event: AgentYield, source: ConversationOutputSource) => void;
+  /** Display projection is separate from durable completion and canonical frames. */
+  onProcess?: (projection: SessionProcessProjection) => void;
+  presentationProfile?: SessionPresentationProfile;
   /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
   onObservedInputs?: (turn: ObservedTurnNotification & AgentEventMap["agent:input_received"]) => void;
@@ -327,6 +331,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   private readonly pendingPostTurnControls = new Map<string, PostTurnControlOutcome>();
   private readonly localTurnsByConversation = new Map<string, string>();
   private readonly localOutput = new Map<string, { conversationId: string; text: ObservedTextPrefix; recovering: boolean; pendingReceipt: boolean }>();
+  private readonly processRuns = new Map<string, { source: SessionProcessSource; text: ObservedTextPrefix; lastSeq: number; closed: boolean; historyRendered: boolean }>();
+  private readonly processHistory = new Map<string, true>();
   private wakeReceipt?: () => void;
   private readonly durableRuns = new Map<string, DurableRunWatch>();
   private readonly durableRunByTurn = new Map<string, string>();
@@ -343,6 +349,9 @@ export class ConversationController<Outcome = TurnOutcome> {
   private recoveryWork?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private recoveryVersion = 0;
+  private presentationRevision = 0;
+  private acceptedPresentation: SessionPresentationProfile = 'default';
+  get presentationProfile(): SessionPresentationProfile { return this.acceptedPresentation; }
   private recoveryResetRequested = false;
   private recoveryDeleted = false;
   private readonly observedContinuations = new Map<string, {
@@ -378,6 +387,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   ) {
     this.active = initial;
     this.unsubscribes = [
+      opts.conversation.onProcess?.(value => this.consumeProcess(value)) ?? (() => {}),
       opts.conversation.onAssignmentStream((frame) => this.consumeContinuationFrame(frame)),
       // 主通道:当前对话的产出流喂渲染(旁观帧同样可见——多端同看一个 turn)
       opts.conversation.onDelta((p) => {
@@ -475,6 +485,8 @@ export class ConversationController<Outcome = TurnOutcome> {
    * 重挂当前对话 observer,保持 conversation 领域订阅由 controller 单点维护。
    */
   async reattachActiveObserver(options: { reloadHistory?: boolean } = {}): Promise<void> {
+    this.presentationRevision++;
+    this.processRuns.clear();
     if (this.opts.pagedRecovery && options.reloadHistory) {
       this.recoveryVersion++; this.recoveryResetRequested = true; this.wakeReceipt?.();
     }
@@ -487,7 +499,9 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   /** 切当前对话指针(纯 UI 态变更,无宿主副作用)。 */
   setActive(next: ActiveConversation): void {
-    if (next.conversationId !== this.active.conversationId) { this.recoveryVersion++; this.recoveryDeleted = false; this.recoveryResetRequested = false; }
+    if (next.conversationId !== this.active.conversationId) this.presentationRevision++;
+    if (next.conversationId !== this.active.conversationId) { this.processRuns.clear(); this.processHistory.clear(); }
+    if (next.conversationId !== this.active.conversationId) { this.recoveryVersion++; this.recoveryDeleted = false; this.recoveryResetRequested = this.opts.pagedRecovery === true; }
     this.active = next;
     this.wakeReceipt?.();
   }
@@ -504,15 +518,29 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   private async subscribeActive(): Promise<void> {
     if (this.observedConversationId === this.active.conversationId) return;
-    const ok = await this.opts.conversation
-      .subscribe(
-        this.active.conversationId,
-        this.finalRevisionByConversation.get(this.active.conversationId) ?? 0,
-        ...(this.opts.pagedRecovery ? [false] as const : []),
-      )
-      .catch(() => false);
-    this.observedConversationId = ok ? this.active.conversationId : null;
+    const conversationId = this.active.conversationId;
+    const revision = ++this.presentationRevision;
+    const after = this.finalRevisionByConversation.get(conversationId) ?? 0;
+    let accepted: SessionPresentationProfile = 'default';
+    const ok = this.opts.presentationProfile
+      ? await this.opts.conversation.subscribePresentation(conversationId, this.opts.presentationProfile, after, this.opts.pagedRecovery ? false : undefined).then(result => { accepted = result.presentation ?? 'default'; return result.subscribed; })
+        .catch(() => this.opts.conversation.subscribe(conversationId, after, ...(this.opts.pagedRecovery ? [false] as const : [])).catch(() => false))
+      : await this.opts.conversation.subscribe(conversationId, after, ...(this.opts.pagedRecovery ? [false] as const : [])).catch(() => false);
+    if (this.disposed || revision !== this.presentationRevision || conversationId !== this.active.conversationId) return;
+    this.acceptedPresentation = accepted;
+    this.observedConversationId = ok ? conversationId : null;
     if (ok && this.opts.pagedRecovery) this.wakeRecovery();
+  }
+
+  async setPresentationProfile(profile: SessionPresentationProfile): Promise<boolean> {
+    this.opts.presentationProfile = profile;
+    if (this.observedConversationId !== this.active.conversationId) return false;
+    const conversationId = this.active.conversationId, revision = ++this.presentationRevision;
+    const result = await this.opts.conversation.subscribePresentation(conversationId, profile,
+      this.finalRevisionByConversation.get(conversationId) ?? 0, false);
+    if (this.disposed || revision !== this.presentationRevision || conversationId !== this.active.conversationId) return false;
+    if (result.subscribed) this.acceptedPresentation = result.presentation ?? 'default';
+    return result.subscribed && this.acceptedPresentation === profile;
   }
 
   // ─── turn 执行 ───
@@ -904,6 +932,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       statusRevision: 0,
     });
     this.durableRunByTurn.set(turnId, runId);
+    const process = this.processRuns.get(runId);
+    if (output && process) output.text = process.text;
     const status = this.pendingStatuses.get(runId);
     if (status) {
       this.pendingStatuses.delete(runId);
@@ -1227,6 +1257,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           return false;
         }
         const watch = this.durableRuns.get(frame.runId);
+        this.markProcessHistoryRendered(frame.runId);
         if (watch) {
           const output = this.localOutput.get(watch.turnId);
           if (output && !historyCovered) {
@@ -1324,6 +1355,75 @@ export class ConversationController<Outcome = TurnOutcome> {
     }
   }
 
+  /** A display run can outlive the local business waiter. Its identity stays
+   * here until the independently drained process close/gap, never in an ACK. */
+  private markProcessHistoryRendered(runId: string): void {
+    rememberBounded(this.processHistory, runId, true);
+    const process = this.processRuns.get(runId);
+    if (process) process.historyRendered = true;
+  }
+
+  private consumeProcess(value: SessionProcessProjection): void {
+    if (this.disposed || value.source?.conversationId !== this.active.conversationId ||
+        (this.opts.pagedRecovery && (this.recoveryResetRequested || this.recoveryDeleted))) return;
+    try { validateSessionProcessProjection(value); }
+    catch { this.opts.onNotice?.('过程展示不可读取，请刷新正文。'); return; }
+    const { source, payload } = value, runId = source.runId;
+    if (!runId) return;
+    let process = this.processRuns.get(runId);
+    if (!process) {
+      if (this.processRuns.size >= 64) {
+        const closed = [...this.processRuns].find(([, item]) => item.closed);
+        if (closed) this.processRuns.delete(closed[0]);
+        else { this.opts.onNotice?.('过程展示超出容量，请刷新正文。'); return; }
+      }
+      process = { source, text: new ObservedTextPrefix(), lastSeq: -1, closed: false, historyRendered: this.processHistory.has(runId) };
+      this.processRuns.set(runId, process);
+    }
+    if (process.closed) return;
+    if (process.source.assignmentId !== source.assignmentId || process.source.streamEpoch !== source.streamEpoch) {
+      process.closed = true;
+      this.opts.onProcess?.({ ...value, payload: { kind: 'gap', reason: '过程来源已换代，请刷新正文。' } });
+      this.wakeRecovery(); return;
+    }
+    // closed intentionally reuses the last data sequence. It has its own
+    // idempotence bit and must not be swallowed by ordinary data deduplication.
+    if (payload.kind === 'closed' || payload.kind === 'gap') {
+      if (source.sourceSeq < process.lastSeq) return;
+      process.closed = true; this.opts.onProcess?.(value);
+      const observed = this.observedContinuations.get(runId);
+      if (payload.kind === 'gap' && observed) observed.streamIncomplete = true;
+      this.opts.onObservedTurnComplete?.({ conversationId: source.conversationId, runId });
+      this.wakeRecovery(); return;
+    }
+    if (source.sourceSeq <= process.lastSeq) return;
+    process.lastSeq = source.sourceSeq;
+    this.opts.onProcess?.(value);
+    const watch = this.durableRuns.get(runId);
+    const output = watch && this.localOutput.get(watch.turnId);
+    if (output) output.text = process.text;
+    let observed = this.observedContinuations.get(runId);
+    if (!observed) {
+      observed = { conversationId: source.conversationId, sequences: new Map(), text: process.text, settled: false,
+        communication: source.turnOrigin?.messageIdentity?.source.kind === 'conversation' };
+      rememberBounded(this.observedContinuations, runId, observed);
+    }
+    if (payload.kind !== 'yield' || process.historyRendered) return;
+    const identity = { conversationId: source.conversationId, runId };
+    if (watch) this.markLocalTurnAccepted({ conversationId: watch.conversationId, turnId: watch.turnId });
+    else this.opts.onObservedTurnDelta?.(identity);
+    const delta = payload.delta;
+    if (delta.type === 'text_delta') process.text.append(delta.text);
+    else if (delta.type === 'tool_start') process.text.reset();
+    else if (delta.type === 'assistant_message') {
+      process.text.reset(); let first = true;
+      for (const block of delta.message.content) if (block.type === 'text') {
+        if (!first) process.text.append('\n'); first = false; process.text.append(block.text);
+      }
+    }
+    this.opts.onYield(delta, { ...identity, kind: 'process', projection: value });
+  }
+
   /** Automatically admitted work has no local send waiter or legacy delta producer. */
   private consumeContinuationFrame(frame: StreamFrame): void {
     if (this.opts.pagedRecovery && (this.recoveryResetRequested || this.recoveryDeleted)) return;
@@ -1391,6 +1491,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           let observed = this.observedContinuations.get(frame.runId);
           if (this.active.conversationId !== frame.conversationId || observed?.settled) return { done: true, before: undefined };
           if (match) {
+            this.markProcessHistoryRendered(frame.runId);
             this.presentRecordedInputs(frame.conversationId, frame.runId, match.record.messages);
             const communication = match.record.messages[0]?.inputIdentity?.source.kind === "conversation";
             if (!observed && !match.record.worksceneContinuation && !communication) return { done: true, before: undefined };
@@ -1464,6 +1565,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           (item) => "runId" in item.record && item.record.runId === runId,
         );
         if (match) {
+          this.markProcessHistoryRendered(runId);
           this.presentRecordedInputs(watch.conversationId, runId, match.record.messages);
           if (match.record.postTurnControl) {
             this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
@@ -1879,6 +1981,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       return { kind: "renamed", name: payload.name };
     }
     if (payload.change === "cleared") {
+      this.processRuns.clear();
       this.recoveryVersion++; this.recoveryResetRequested = true; this.wakeReceipt?.(); this.wakeRecovery();
       return { kind: "cleared" };
     }
@@ -1893,6 +1996,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   dispose(): void {
+    this.processRuns.clear();
+    this.processHistory.clear();
     this.disposed = true;
     this.localOutput.clear(); this.wakeReceipt?.();
     clearImmediate(this.lookupScheduled); this.lookupScheduled = undefined;

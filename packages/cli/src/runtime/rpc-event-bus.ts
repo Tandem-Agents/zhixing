@@ -31,13 +31,15 @@ import type {
   WildcardListener,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
+import { SESSION_NOTIFICATIONS, validateSessionProcessProjection, type SessionProcessProjection } from "@zhixing/rpc/session-wire";
 import type { SessionEventEnvelope } from "@zhixing/rpc/session-events";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
 
 const AGENT_RUN_END_EVENT = "agent:run_end";
 
 export interface RpcEventBusOptions {
+  /** Choose one owner; never subscribe both legs for one run. */
+  source?: 'legacy' | 'process';
   /** 进程级共享的核心宿主连接。 */
   link: CoreHostNotificationLink;
   /** per-run 装饰钩子(渲染订阅挂载)——与本地 runtime 的 decorateRunBus 同形。 */
@@ -59,6 +61,7 @@ interface ProjectionEntry {
   bus: ProjectionBus;
   dispose: () => void;
   lastSeq: number;
+  sourceKey?: string;
 }
 
 export class RpcEventBus {
@@ -68,26 +71,52 @@ export class RpcEventBus {
 
   constructor(private readonly opts: RpcEventBusOptions) {
     this.unsubscribe = opts.link.onNotification(
-      SESSION_NOTIFICATIONS.event,
-      (params) => this.handleEnvelope(params as SessionEventEnvelope),
+      opts.source === 'process' ? SESSION_NOTIFICATIONS.process : SESSION_NOTIFICATIONS.event,
+      (params) => opts.source === 'process' ? this.handleProcess(params) : this.handleEnvelope(params as SessionEventEnvelope),
     );
   }
 
-  private handleEnvelope(envelope: SessionEventEnvelope): void {
+  private handleProcess(input: unknown): void {
+    if (this.disposed) return;
+    try { validateSessionProcessProjection(input); }
+    catch (error) { this.opts.onListenerError(error, 'process:invalid'); return; }
+    const value: SessionProcessProjection = input, source = value.source;
+    if (value.payload.kind === 'gap') {
+      const envelope: SessionEventEnvelope = { conversationId: source.conversationId, scope: 'run',
+        runId: source.runId ?? source.turnId ?? '', seq: source.sourceSeq, event: 'display:gap',
+        payload: value.payload, meta: { lineage: source.lineage, turnOrigin: source.turnOrigin } };
+      if (this.opts.filter && !this.opts.filter(envelope)) return;
+      const current = this.projections.get(source.conversationId);
+      if (current && (current.runId !== envelope.runId || current.sourceKey !== JSON.stringify([source.assignmentId, source.streamEpoch]))) return;
+      this.teardown(source.conversationId); this.opts.onListenerError(Error(value.payload.reason), 'process:gap'); return;
+    }
+    if (value.payload.kind !== 'event' && value.payload.kind !== 'closed') return;
+    this.handleEnvelope({ conversationId: source.conversationId, scope: 'run',
+      runId: source.runId ?? source.turnId ?? '', seq: source.sourceSeq,
+      ...(value.payload.kind === 'closed' ? { lifecycle: 'closed' as const } : {}),
+      event: value.payload.kind === 'event' ? value.payload.event.event : 'run:closed',
+      payload: value.payload.kind === 'event' ? value.payload.event.payload : null,
+      meta: { lineage: source.lineage, turnOrigin: source.turnOrigin } },
+      source.turnId ?? '', JSON.stringify([source.assignmentId, source.streamEpoch]));
+  }
+
+  private handleEnvelope(envelope: SessionEventEnvelope, turnId = envelope.runId, sourceKey?: string): void {
     if (this.disposed) return;
     if (envelope.scope !== "run") return;
     if (this.opts.filter && !this.opts.filter(envelope)) return;
 
     const current = this.projections.get(envelope.conversationId);
     if (envelope.lifecycle === "closed") {
-      if (!current || current.runId !== envelope.runId) return;
-      if (envelope.seq <= current.lastSeq) return;
+      if (!current || current.runId !== envelope.runId || current.sourceKey !== sourceKey) return;
+      // The display closure cites the last real source sequence; it does not
+      // manufacture an extra canonical frame or sequence for presentation.
+      if (sourceKey === undefined ? envelope.seq <= current.lastSeq : envelope.seq < current.lastSeq) return;
       current.lastSeq = envelope.seq;
       this.teardown(envelope.conversationId);
       return;
     }
 
-    if (current && current.runId === envelope.runId) {
+    if (current && current.runId === envelope.runId && current.sourceKey === sourceKey) {
       if (envelope.seq <= current.lastSeq) return;
       current.lastSeq = envelope.seq;
       this.dispatchTo(current, envelope);
@@ -100,16 +129,17 @@ export class RpcEventBus {
     // 孤立 agent:run_end(本端无投影在场):没看过该 run 的任何帧,建了即拆无意义
     if (envelope.event === AGENT_RUN_END_EVENT) return;
 
-    const entry = this.establish(envelope);
+    if (this.projections.size >= 128) { this.opts.onListenerError(Error('event-projection-capacity'), envelope.event); return; }
+    const entry = this.establish(envelope, turnId, sourceKey);
     this.projections.set(envelope.conversationId, entry);
     this.dispatchTo(entry, envelope);
   }
 
   /** 建立 per-run 投影:run_start 帧走此,中途加入的任意帧也走此(隐式建立) */
-  private establish(envelope: SessionEventEnvelope): ProjectionEntry {
+  private establish(envelope: SessionEventEnvelope, turnId: string, sourceKey?: string): ProjectionEntry {
     const bus = new ProjectionBus(this.opts.onListenerError);
     const turnContext: TurnContext = {
-      turnId: envelope.runId || undefined,
+      turnId: turnId || undefined,
       turnOrigin: envelope.meta.turnOrigin,
     };
     const dispose = this.opts.decorate({
@@ -117,7 +147,7 @@ export class RpcEventBus {
       conversationId: envelope.conversationId,
       turnContext,
     });
-    return { runId: envelope.runId, bus, dispose, lastSeq: envelope.seq };
+    return { runId: envelope.runId, bus, dispose, lastSeq: envelope.seq, sourceKey };
   }
 
   private dispatchTo(entry: ProjectionEntry, envelope: SessionEventEnvelope): void {

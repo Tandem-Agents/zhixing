@@ -120,7 +120,7 @@ describe("createRunEventForwarder", () => {
     dispose();
   });
 
-  it("白名单外事件不上 wire(llm:stream_event / tool:call_start / post-turn 控制意图)", () => {
+  it("仅有限 call_start 上 wire；stream 全文与 post-turn 控制意图不投影", () => {
     const bus = makeBus();
     const { out, forwarder } = collectEnvelopes();
     forwarder({ bus, conversationId: "c1", turnContext: TURN_CONTEXT });
@@ -129,7 +129,8 @@ describe("createRunEventForwarder", () => {
     bus.emit("tool:call_start", { id: "t1", name: "read", input: {} } as never);
     bus.emit("post_turn_control:requested", { kind: "exit" } as never);
 
-    expect(out).toHaveLength(0);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.payload).toEqual({ id: "t1", name: "read" });
   });
 
   it("大 payload 裁剪:llm:request_start 只投摘要字段,segment:new_started 去 windowCompact", () => {
@@ -230,10 +231,12 @@ describe("createObserverBroadcast", () => {
       connections: new Set([a, b, outside, unauthed, closed]),
       observerConnectionIds,
     });
-    broadcast("c1", "session.delta", { x: 1 });
+    const delta = { conversationId: "c1", sessionId: "c1", turnId: "turn-1",
+      delta: { type: "text_delta", text: "visible" } };
+    broadcast("c1", "session.delta", delta);
 
-    expect(a.notify).toHaveBeenCalledWith("session.delta", { x: 1 });
-    expect(b.notify).toHaveBeenCalledWith("session.delta", { x: 1 });
+    expect(a.notify).toHaveBeenCalledWith("session.delta", delta);
+    expect(b.notify).toHaveBeenCalledWith("session.delta", delta);
     expect(outside.notify).not.toHaveBeenCalled();
     expect(unauthed.notify).not.toHaveBeenCalled();
     expect(closed.notify).not.toHaveBeenCalled();

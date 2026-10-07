@@ -1,4 +1,5 @@
 import type { RunRecordWithRef } from '@zhixing/core/transcript';
+import type { BodyFragmentMetadata } from '@zhixing/terminal-ui/body-model';
 import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
 import { projectBodyHistory } from './body-projection.js';
 
@@ -34,10 +35,11 @@ export function* projectHistorySegments(runsNewestFirst: readonly RunRecordWithR
       for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking :
+        const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
+        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? `◆ ${block.name}` : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
-        for (const part of textFragments(text)) yield { blockId, role: message.role, text: part.text, contentOffset: part.offset, final: part.final };
+        for (const part of textFragments(text)) yield { blockId, role: tail ? 'thinking' : message.role, text: part.text, contentOffset: (tail?.offset ?? 0) + part.offset, final: part.final };
       }
     }
   }
@@ -53,14 +55,15 @@ export function* projectHistorySegmentsReverse(runsNewestFirst: readonly RunReco
       for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking :
+        const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
+        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? `◆ ${block.name}` : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         for (let end = text.length; end > 0;) {
           let start = Math.max(0, end - stride);
           if (start && text.charCodeAt(start) >= 0xdc00 && text.charCodeAt(start) <= 0xdfff &&
             text.charCodeAt(start - 1) >= 0xd800 && text.charCodeAt(start - 1) <= 0xdbff) start--;
-          yield { blockId, role: message.role, text: text.slice(start, end), contentOffset: start, final: end === text.length };
+          yield { blockId, role: tail ? 'thinking' : message.role, text: text.slice(start, end), contentOffset: (tail?.offset ?? 0) + start, final: end === text.length };
           end = start;
         }
       }
@@ -78,15 +81,30 @@ export async function* projectRenderedHistoryReverse(runsNewestFirst: readonly R
       for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
-        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking :
+        const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
+        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? `◆ ${block.name}` : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         const kind = block.type === 'text' && message.role === 'assistant' ? 'markdown' : 'plain';
         for await (const item of projectBodyHistory(text, kind, 'reverse')) {
-          yield { blockId, contentOffset: item.contentOffset, role: message.role, text: item.text,
-            final: item.body.end, body: item.body };
+          yield { blockId, contentOffset: (tail?.offset ?? 0) + item.contentOffset, role: tail ? 'thinking' : message.role, text: item.text,
+            final: item.body.end, body: tail ? shiftThinkingBody(item.body, tail.offset) : item.body };
         }
       }
     }
   }
+}
+
+/** History remains authoritative; only the bounded display tail is materialized. */
+export function historyThinkingTail(text: string): { text: string; offset: number } {
+  let offset = Math.max(0, text.length - 8192);
+  if (offset && /[\udc00-\udfff]/u.test(text[offset]!)) offset++;
+  return { text: text.slice(offset), offset };
+}
+function shiftThinkingBody(body: BodyFragmentMetadata, offset: number): BodyFragmentMetadata {
+  return { ...body, context: { nodes: body.context.nodes.map(node => ({ ...node,
+    from: node.from + offset, to: node.to + offset,
+    ...(node.origin === undefined ? {} : { origin: node.origin + offset }),
+    runs: node.runs.map(run => ({ ...run, from: run.from + offset, to: run.to + offset })),
+  })) } };
 }

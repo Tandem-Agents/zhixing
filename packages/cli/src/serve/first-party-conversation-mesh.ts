@@ -1,4 +1,6 @@
 import { canonicalize } from "@zhixing/core/protocol";
+import { SessionPresentationState } from '@zhixing/rpc/connection';
+import type { SessionPresentationProfile } from '@zhixing/rpc/session-wire';
 import { MeshProtocolError, type MeshServiceClient } from "@zhixing/mesh";
 import type {
   MeshServiceHandler,
@@ -22,6 +24,11 @@ export const CURRENT_ANCHOR_RELAY_METHODS = Object.freeze(
   captureCurrentAnchorRelayMethods(),
 );
 const METHODS = new Set(CURRENT_ANCHOR_RELAY_METHODS);
+// Keep each service payload within the production MeshRequestChannel default.
+// A finite burst may span replies; notifications leave the queue only after encoding.
+const RELAY_RESPONSE_BYTES = 1024 * 1024;
+const RELAY_QUEUE_BYTES = 4 * RELAY_RESPONSE_BYTES;
+const REPLY_PREFIX = Buffer.from('{"notifications":[');
 
 export function isCurrentAnchorRelayMethod(method: string): boolean {
   return METHODS.has(method);
@@ -52,6 +59,7 @@ export class FirstPartyConversationMeshTarget {
   readonly #currentByPrincipal = new Map<string, RelayConnection>();
   readonly #surface: CanonicalFirstPartyConversationSurface;
   readonly #isReady: (() => boolean) | undefined;
+  #closed = false;
 
   constructor(input: {
     readonly surface: CanonicalFirstPartyConversationSurface;
@@ -72,6 +80,7 @@ export class FirstPartyConversationMeshTarget {
     signal: AbortSignal,
   ): Promise<Uint8Array> {
     try {
+      if (this.#closed) throw RpcErrors.busy('First-party conversation surface is closed');
       const command = validateCommand(decode(payload), connection.peer.deviceId);
       if (this.#isReady?.() === false) {
         throw RpcErrors.busy(
@@ -90,7 +99,7 @@ export class FirstPartyConversationMeshTarget {
       }
       const relay = this.#relay(command.surface);
       if (command.op === "poll") {
-        return encode({ v: 1, ok: true, notifications: await relay.poll(signal) });
+        return await relay.poll(signal);
       }
       if (!METHODS.has(command.method)) throw new TypeError("First-party conversation method is not allowed");
       const result = await relay.serial(() => this.#surface.dispatch({
@@ -98,15 +107,10 @@ export class FirstPartyConversationMeshTarget {
         params: command.params,
         connection: relay,
       }));
-      return encode({
-        v: 1,
-        ok: true,
-        ...(result !== undefined ? { result } : {}),
-        notifications: relay.drain(),
-      });
+      return relay.reply(result);
     } catch (error) {
       const rpc = toJsonRpcError(error);
-      return encode({
+      const response = encode({
         v: 1,
         ok: false,
         error: {
@@ -115,10 +119,14 @@ export class FirstPartyConversationMeshTarget {
           ...(rpc.data !== undefined ? { data: rpc.data } : {}),
         },
       });
+      return response.byteLength <= RELAY_RESPONSE_BYTES ? response : encode({
+        v: 1, ok: false, error: { code: RPC_ERROR_CODES.INTERNAL_ERROR, message: 'First-party conversation error exceeds the relay response capacity' },
+      });
     }
   }
 
   close(): void {
+    this.#closed = true;
     for (const relay of this.#relays.values()) relay.close();
     this.#relays.clear();
     this.#currentByPrincipal.clear();
@@ -199,6 +207,11 @@ export interface FirstPartyIngressConnection {
   readonly clientInfo?: { readonly id?: string; readonly version?: string };
   readonly surfacePrincipal?: string;
   readonly surfaceGeneration?: number;
+  presentationProfile?(conversationId: string): SessionPresentationProfile;
+  presentationSince?(conversationId: string): number;
+  observationRevision?(conversationId: string): number;
+  setPresentationProfile?(conversationId: string, profile: SessionPresentationProfile): boolean;
+  dropPresentationProfile?(conversationId: string): void;
   notify(method: string, params: unknown): void;
   onClose(handler: () => void): () => void;
 }
@@ -412,7 +425,10 @@ class RelayConnection implements RpcConnection {
   readonly key: string;
   readonly principalKey: string;
   #closed = false;
-  #queue: Notification[] = [];
+  readonly #presentation = new SessionPresentationState(() => this.#closed);
+  #queue: Uint8Array[] = [];
+  #queueBytes = 0;
+  #failure?: RpcAppError;
   #waiters = new Set<() => void>();
   #closeHandlers = new Set<() => void>();
   #tail: Promise<void> = Promise.resolve();
@@ -427,13 +443,27 @@ class RelayConnection implements RpcConnection {
   }
 
   get closed(): boolean { return this.#closed; }
+  get writable(): boolean { return !this.#closed; }
+  presentationProfile(conversationId: string): SessionPresentationProfile { return this.#presentation.presentationProfile(conversationId); }
+  presentationSince(conversationId: string): number { return this.#presentation.presentationSince(conversationId); }
+  observationRevision(conversationId: string): number { return this.#presentation.observationRevision(conversationId); }
+  setPresentationProfile(conversationId: string, profile: SessionPresentationProfile): boolean { return this.#presentation.setPresentationProfile(conversationId, profile); }
+  dropPresentationProfile(conversationId: string): void { this.#presentation.dropPresentationProfile(conversationId); }
   sendSuccess(): void {}
   sendError(): void {}
   notify(method: string, params?: unknown): void { this.tryNotify(method, params); }
   tryNotify(method: string, params?: unknown): boolean {
     if (this.#closed) return false;
-    if (this.#queue.length >= 1024) throw new Error("First-party conversation notification relay overflowed");
-    this.#queue.push({ method, params: params ?? null });
+    let notification: Uint8Array;
+    try { notification = encode({ method, params: params ?? null }); }
+    catch { this.#fail('First-party conversation notification cannot be encoded'); return false; }
+    if (notification.byteLength + REPLY_PREFIX.byteLength + Buffer.byteLength('],"ok":true,"v":1}') > RELAY_RESPONSE_BYTES ||
+        this.#queue.length >= 1024 || this.#queueBytes + notification.byteLength > RELAY_QUEUE_BYTES) {
+      this.#fail('First-party conversation notification relay exceeded capacity; reconnect and reload conversation history');
+      return false;
+    }
+    this.#queue.push(notification);
+    this.#queueBytes += notification.byteLength;
     for (const wake of this.#waiters) wake();
     this.#waiters.clear();
     return true;
@@ -441,6 +471,9 @@ class RelayConnection implements RpcConnection {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#presentation.clear();
+    this.#queue = [];
+    this.#queueBytes = 0;
     for (const handler of this.#closeHandlers) handler();
     this.#closeHandlers.clear();
     for (const wake of this.#waiters) wake();
@@ -452,17 +485,43 @@ class RelayConnection implements RpcConnection {
     return () => this.#closeHandlers.delete(handler);
   }
   serial<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#tail.then(operation, operation);
+    const current = () => {
+      if (this.#failure) throw this.#failure;
+      if (this.#closed) throw RpcErrors.busy('First-party conversation surface is closed');
+      return operation();
+    };
+    const result = this.#tail.then(current, current);
     this.#tail = result.then(() => {}, () => {});
     return result;
   }
-  drain(): readonly Notification[] {
-    const notifications = this.#queue;
-    this.#queue = [];
-    return notifications;
+  #fail(message: string): void {
+    this.#failure ??= new RpcAppError(RPC_ERROR_CODES.INTERNAL_ERROR, message);
+    this.close();
   }
-  async poll(signal: AbortSignal): Promise<readonly Notification[]> {
-    if (this.#queue.length > 0 || this.#closed || signal.aborted) return this.drain();
+  reply(result?: unknown): Uint8Array {
+    if (this.#failure) throw this.#failure;
+    if (this.#closed) throw RpcErrors.busy('First-party conversation surface is closed');
+    const suffix = Buffer.from(`],"ok":true${result === undefined ? '' : `,"result":${canonicalize(result)}`},"v":1}`);
+    let bytes = REPLY_PREFIX.byteLength + suffix.byteLength;
+    if (bytes > RELAY_RESPONSE_BYTES) {
+      this.#fail('First-party conversation result exceeded relay capacity; reconnect and reload conversation history');
+      throw this.#failure;
+    }
+    const chunks: Uint8Array[] = [REPLY_PREFIX];
+    let count = 0, sentBytes = 0;
+    for (const item of this.#queue) {
+      const addition = item.byteLength + (count ? 1 : 0);
+      if (bytes + addition > RELAY_RESPONSE_BYTES) break;
+      if (count) chunks.push(Buffer.from(','));
+      chunks.push(item); bytes += addition; sentBytes += item.byteLength; count++;
+    }
+    chunks.push(suffix);
+    const reply = Buffer.concat(chunks, bytes);
+    this.#queue.splice(0, count); this.#queueBytes -= sentBytes;
+    return reply;
+  }
+  async poll(signal: AbortSignal): Promise<Uint8Array> {
+    if (this.#queue.length > 0 || this.#closed || signal.aborted) return this.reply();
     await new Promise<void>((resolve) => {
       let timeout: ReturnType<typeof setTimeout>;
       const done = () => {
@@ -475,7 +534,7 @@ class RelayConnection implements RpcConnection {
       this.#waiters.add(done);
       signal.addEventListener("abort", done, { once: true });
     });
-    return this.drain();
+    return this.reply();
   }
 }
 

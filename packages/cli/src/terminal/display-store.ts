@@ -226,6 +226,19 @@ export class TerminalDisplayStore {
   }
   async close(): Promise<void> { await this.#tail; if (this.#ownsFiles) await this.#files.close(); }
 
+  /** Retry admission without removing any retained prefix or old gap. */
+  async retry(): Promise<void> {
+    await this.#tail; this.signal.throwIfAborted();
+    if (this.#unsettled || this.#unpublished || this.#active.size >= 128 || this.#activeCount >= 4096 ||
+        this.#bytes + 2 * SLOT_BYTES >= 0xffffffff) throw Error('terminal-display-recovery-unavailable');
+    const token = await this.account.reserve('display', allocated(2 * SLOT_BYTES) + 4096);
+    try {
+      if (this.#first === this.#last) await terminalPhysicalStep(this.capacity, bound, this.signal, async () => {});
+      else await this.page();
+    } finally { await this.account.settle(token, 0); }
+    this.#failed = false;
+  }
+
   async reset(): Promise<void> {
     this.#generation++;
     await this.#tail; this.signal.throwIfAborted();

@@ -5,6 +5,7 @@ import { textFragments } from './history-segments.js';
 import { TerminalBodyProjection, type BodyAmend } from './body-projection.js';
 import { BODY_PROJECTION_WORK_BYTES } from '@zhixing/terminal-ui/body-model';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import type { ProcessBlock } from './process-presentation.js';
 
 interface Stream { readonly key: string; block: number; assistantUnits: number; role?: string }
 interface BodyCommand { readonly blockId: string; readonly role: string; readonly text: string; readonly end: boolean }
@@ -20,14 +21,22 @@ export class TerminalOutputProjection {
   readonly #queue: { command: BodyCommand; bytes: number }[] = [];
   readonly #parsers = new Map<string, TerminalBodyProjection>();
   #bytes = 0; #inflightBytes = 0; #paused = false; #held = 0; #closed = false;
+  #generation = 0;
   #timer?: ReturnType<typeof setTimeout>;
   #flushing?: Promise<void>;
   #draining?: Promise<void>;
   #wakeDrain?: () => void;
   #gapWork?: Promise<void>;
   constructor(readonly append: (segment: TerminalDisplaySegment) => Promise<void>, readonly updated: () => Promise<void>,
-    readonly gap: () => Promise<void>, readonly body: TerminalOutputBody) {}
+    readonly gap: () => Promise<void>, readonly body: TerminalOutputBody,
+    readonly process?: { accept(event: AgentYield, source: ConversationOutputSource): void; end(conversationId: string, turnId?: string, runId?: string): void }) {}
   get paused(): boolean { return this.#paused; }
+  pause(): void { this.#pause(); }
+  async settlePaused(): Promise<void> { await this.#flushing; await this.#gapWork; }
+  resume(): void {
+    if (this.#closed || this.#flushing) throw Error('terminal-output-recovery-unavailable');
+    this.#generation++; this.#streams.clear(); this.#disposeParsers(); this.#paused = false;
+  }
   hold(): () => void { this.#held++; let released = false; return () => { if (released) return; released = true; this.#held--; this.#schedule(); this.#wakeDrain?.(); }; }
   /** One recovery consumer can wait for actual append/gap acknowledgement.
    * Live notifications still use the bounded nonblocking prefix. */
@@ -46,7 +55,8 @@ export class TerminalOutputProjection {
   }
   accept(event: AgentYield, source: ConversationOutputSource): void {
     if (this.#closed || this.#paused) return;
-    const key = `${source.conversationId}:${source.turnId ?? source.runId ?? 'status'}`;
+    this.process?.accept(event, source);
+    const key = this.#streamKey(source.conversationId, source.runId ?? source.turnId);
     let stream = this.#streams.get(key);
     if (!stream) {
       if (this.#streams.size >= 128) { this.#pause(); return; }
@@ -64,9 +74,11 @@ export class TerminalOutputProjection {
       }
       case 'tool_start':
         this.#endBlock(stream);
+        if (this.process) break;
         this.#text(stream, 'tool', `${event.name} · 正在执行\n`); this.#endBlock(stream); break;
       case 'tool_end':
         this.#endBlock(stream);
+        if (this.process) break;
         this.#text(stream, 'tool', `${event.name} · ${event.result.isError ? '未完成' : '已完成'}\n`);
         if (typeof event.result.content === 'string') this.#text(stream, 'tool', event.result.content);
         this.#endBlock(stream); break;
@@ -77,11 +89,22 @@ export class TerminalOutputProjection {
     this.#schedule();
   }
   end(conversationId: string, turnId?: string, runId?: string): void {
-    const key = `${conversationId}:${turnId ?? runId ?? 'status'}`, stream = this.#streams.get(key);
+    this.process?.end(conversationId, turnId, runId);
+    const key = this.#streamKey(conversationId, runId ?? turnId), stream = this.#streams.get(key);
     if (stream) { this.#endBlock(stream); this.#streams.delete(key); this.#schedule(); }
+  }
+  /** Process text uses the same bounded queue, parser, disk cache and gap owner. */
+  appendProcessBlock(block: ProcessBlock): void {
+    if (this.#closed || this.#paused) return;
+    const blockId = this.#generation ? `${block.blockId}:display-${this.#generation}` : block.blockId;
+    for (const part of textFragments(block.text)) this.#enqueue({ blockId, role: block.role, text: part.text, end: false });
+    this.#enqueue({ blockId, role: block.role, text: '', end: true }); this.#schedule();
   }
   async reset(current: () => boolean): Promise<void> {
     await this.drain(); if (current()) { this.#streams.clear(); this.#disposeParsers(); }
+  }
+  #streamKey(conversationId: string, runId?: string): string {
+    return `${conversationId}:${runId ?? 'status'}${this.#generation ? `:display-${this.#generation}` : ''}`;
   }
   async close(): Promise<void> {
     this.#closed = true; clearTimeout(this.#timer); this.#queue.length = 0; this.#bytes = 0;

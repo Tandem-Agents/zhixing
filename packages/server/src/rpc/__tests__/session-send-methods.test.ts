@@ -380,7 +380,7 @@ describe("session.subscribe publish result history", () => {
         } as unknown as ServerContext,
         connection: { id: "connection-1", notify },
       } as never,
-    )).resolves.toEqual({ subscribed: true });
+    )).resolves.toEqual({ subscribed: true, presentation: "default" });
 
     expect(conversationFinalHistory).toHaveBeenCalledWith("conversation-1", 3);
     expect(notify).toHaveBeenNthCalledWith(1, "session.final", expect.objectContaining({
@@ -645,6 +645,8 @@ describe("session durable control 方法", () => {
   });
 
   it("disconnect removes only the observer while a durable run keeps executing", async () => {
+    const completedRuns: RunResult[] = [];
+    const abortRuntime = vi.fn(() => false);
     let started!: () => void;
     const startedGate = new Promise<void>((resolve) => {
       started = resolve;
@@ -679,7 +681,7 @@ describe("session durable control 方法", () => {
           durationMs: 1,
         };
       },
-      abort: () => false,
+      abort: abortRuntime,
       async dispose() {},
     };
     const durable: DurableConversationTurnExecutor = stubDurableTurnExecutor({
@@ -688,7 +690,7 @@ describe("session durable control 方法", () => {
         const generator = input.runtime.run(input.messages, input.options);
         while (true) {
           const item = await generator.next();
-          if (item.done) return item.value;
+          if (item.done) { completedRuns.push(item.value); return item.value; }
           yield item.value;
         }
       },
@@ -731,14 +733,20 @@ describe("session durable control 方法", () => {
       ),
     ).resolves.toMatchObject({ runId: "authority-run-1" });
     await startedGate;
+    const notificationsBeforeClose = [...notifications];
     connection.closed = true;
     for (const handler of [...closeHandlers]) handler();
     expect(observedSignal?.aborted).toBe(false);
     release();
     await vi.waitFor(() => {
-      expect(notifications.some((item) => item.method === "session.complete")).toBe(true);
+      expect(durable.publishPendingFinals).toHaveBeenCalledWith("conversation-1");
     });
+    expect(completedRuns).toHaveLength(1);
+    expect(completedRuns[0]!.agentResult).toMatchObject({ reason: "completed", message: assistant });
+    expect(completedRuns[0]!.newMessages).toEqual([assistant]);
+    expect(notifications).toEqual(notificationsBeforeClose);
     expect(observedSignal?.aborted).toBe(false);
+    expect(abortRuntime).not.toHaveBeenCalled();
     await manager.disposeAll();
   });
 });

@@ -23,6 +23,7 @@ import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 import { TerminalOutputProjection } from '../../terminal/output.js';
 import { createUserSubmission } from "../user-submission.js";
+import { projectProcessYield } from '@zhixing/rpc/session-wire';
 
 type Handler<T> = (p: T) => void;
 
@@ -35,6 +36,7 @@ function makeFakes() {
     activity: [] as Handler<never>[],
     intent: [] as Handler<never>[],
     assignment: [] as Handler<never>[],
+    process: [] as Handler<never>[],
   };
   const conversation = {
     send: vi.fn(async (_text: string, _id: string, turnId: string) => ({
@@ -103,6 +105,10 @@ function makeFakes() {
       handlers.assignment.push(h);
       return () => {};
     },
+    onProcess: (h: Handler<never>) => {
+      handlers.process.push(h);
+      return () => {};
+    },
     onStatus: (h: Handler<never>) => {
       handlers.status.push(h);
       return () => {};
@@ -160,6 +166,7 @@ function makeFakes() {
     activity: (p: unknown) => handlers.activity.forEach((h) => h(p as never)),
     intent: (p: unknown) => handlers.intent.forEach((h) => h(p as never)),
     assignment: (p: unknown) => handlers.assignment.forEach((h) => h(p as never)),
+    process: (p: unknown) => handlers.process.forEach((h) => h(p as never)),
   };
   return { conversation, workscene, emit };
 }
@@ -211,8 +218,9 @@ describe('bounded authoritative recovery consumer', () => {
     const message = { role: 'assistant', content: [{ type: 'text', text: 'shown prefix, recovered tail' }] };
     f.conversation.history.mockResolvedValue({ runs: [{ shardId: 's', record: { type: 'run', runId: 'local-final', runIndex: 1, timestamp: '2026-10-05T00:00:00.000Z', messages: [message] } }], hasMore: false } as never);
     const consume = vi.fn(async () => new Promise<void>(resolve => { bodyDone = resolve; }));
+    const onYield = vi.fn(), onProcess = vi.fn();
     const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
-      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, onRecoveryYield: consume,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield, onProcess, onRecoveryYield: consume,
     }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
     try {
       const pending = controller.beginTurn('original input');
@@ -230,6 +238,20 @@ describe('bounded authoritative recovery consumer', () => {
       }
       await expect(accepted.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
       if (historyCovered) expect(consume).not.toHaveBeenCalled();
+      onYield.mockClear();
+      const source = { conversationId: 'conv-1', runId: 'local-final', assignmentId: 'late-assignment', streamEpoch: 1, sourceSeq: 1, observedAt: performance.now() };
+      f.emit.process(projectProcessYield(source, { type: 'text_delta', text: 'shown prefix, recovered tail' }));
+      const artifact = projectProcessYield({ ...source, sourceSeq: 2 }, { type: 'tool_end', id: 'edit', name: 'edit', duration: 0,
+        result: { content: 'saved', presentation: { kind: 'file-diff', path: 'file.ts', operation: 'modified',
+          changeStats: { kind: 'exact', addedLines: 1, removedLines: 0 },
+          hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: [{ type: 'added', newLineNumber: 1, content: 'new' }] }] } } });
+      f.emit.process(artifact);
+      f.emit.process({ version: 1, source: { ...source, sourceSeq: 2 }, payload: { kind: 'closed' } });
+      f.emit.process(artifact);
+      expect(onYield).not.toHaveBeenCalled();
+      expect(onProcess).toHaveBeenCalledTimes(3);
+      expect(onProcess).toHaveBeenNthCalledWith(2, artifact);
+      expect(onProcess).toHaveBeenLastCalledWith(expect.objectContaining({ payload: { kind: 'closed' } }));
     } finally { controller.dispose(); }
   });
 
@@ -306,7 +328,8 @@ describe('bounded authoritative recovery consumer', () => {
       await controller.start(); await vi.waitFor(() => expect(inputs).toHaveBeenCalledOnce());
       controller.setActive({ conversationId: 'conv-2', name: 'new', mode: { kind: 'main' } }); reply();
       await vi.waitFor(() => expect(pages.mock.calls.some(([id]) => id === 'conv-2')).toBe(true));
-      expect(reset).not.toHaveBeenCalled();
+      expect(reset).toHaveBeenCalledOnce();
+      expect(reset).toHaveBeenCalledWith('conv-2', expect.any(Function));
     } finally { controller.dispose(); }
   });
 });
@@ -406,6 +429,71 @@ function makeController(
   );
   return { controller, onYield };
 }
+
+describe('assignment display completion is independent from business completion', () => {
+  it('accepts display recovery only on a current subscribed bounded profile receipt', async () => {
+    const f = makeFakes();
+    const subscribePresentation = vi.fn(async () => ({ subscribed: true, presentation: 'default' as 'default' | 'bounded-v1' }));
+    const controller = new ConversationController({ conversation: { ...f.conversation, subscribePresentation } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn() }, initial);
+    try {
+      await controller.start();
+      await expect(controller.setPresentationProfile('bounded-v1')).resolves.toBe(false);
+      subscribePresentation.mockResolvedValueOnce({ subscribed: false, presentation: 'bounded-v1' });
+      await expect(controller.setPresentationProfile('bounded-v1')).resolves.toBe(false);
+      subscribePresentation.mockResolvedValueOnce({ subscribed: true, presentation: 'bounded-v1' });
+      await expect(controller.setPresentationProfile('bounded-v1')).resolves.toBe(true);
+      let reply!: () => void;
+      subscribePresentation.mockImplementationOnce(() => new Promise(resolve => { reply = () => resolve({ subscribed: true, presentation: 'bounded-v1' }); }));
+      const old = controller.setPresentationProfile('bounded-v1');
+      controller.setActive({ conversationId: 'conv-2', name: 'replacement', mode: { kind: 'main' } });
+      reply(); await expect(old).resolves.toBe(false);
+    } finally { controller.dispose(); }
+  });
+  const projection = (runId: string, seq: number, payload: unknown) => ({ version: 1,
+    source: { conversationId: 'conv-1', runId, assignmentId: 'assignment-1', streamEpoch: 1, sourceSeq: seq }, payload });
+  it.each(['closed', 'gap'])('accepts a same-sequence %s once after the last yield', kind => {
+    const f = makeFakes(), onProcess = vi.fn(), onYield = vi.fn(), onObservedTurnComplete = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onProcess, onYield, onObservedTurnComplete }, initial);
+    try {
+      f.emit.process(projection('display-run', 7, { kind: 'yield', delta: { type: 'text_delta', text: 'visible' } }));
+      const closing = projection('display-run', 7, kind === 'gap' ? { kind, reason: 'display gap' } : { kind });
+      f.emit.process(closing); f.emit.process(closing);
+      expect(onYield).toHaveBeenCalledOnce();
+      expect(onProcess).toHaveBeenCalledTimes(2);
+      expect(onObservedTurnComplete).toHaveBeenCalledOnce();
+    } finally { controller.dispose(); }
+  });
+  it('settles the business waiter and retains the late display identity until closed', async () => {
+    const f = makeFakes(), onProcess = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn(), onProcess }, initial);
+    try {
+      const accepted = await controller.beginTurn('request');
+      f.emit.process(projection(accepted.runId!, 1, { kind: 'yield', delta: { type: 'text_delta', text: 'answer' } }));
+      f.emit.complete({ conversationId: 'conv-1', turnId: accepted.turnId, result: { reason: 'completed',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }, usage: { inputTokens: 1, outputTokens: 1 } } });
+      await expect(accepted.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+      const late = projection(accepted.runId!, 2, { kind: 'yield', delta: { type: 'thinking_delta', thinking: 'tail' } });
+      f.emit.process(late);
+      expect(onProcess).toHaveBeenLastCalledWith(late);
+      f.emit.process(projection(accepted.runId!, 2, { kind: 'closed' }));
+      f.emit.process(projection(accepted.runId!, 3, { kind: 'yield', delta: { type: 'text_delta', text: 'stale' } }));
+      expect(onProcess).toHaveBeenCalledTimes(3);
+    } finally { controller.dispose(); }
+  });
+  it('rejects old conversation display after the pointer changes', () => {
+    const f = makeFakes(), onProcess = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: vi.fn(), onProcess }, initial);
+    try {
+      controller.setActive({ conversationId: 'conv-2', name: 'other', mode: { kind: 'main' } });
+      f.emit.process(projection('old-run', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'old' } }));
+      expect(onProcess).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+});
 
 describe("ConversationController", () => {
   it('projects an early complete before the send receipt can retain its full result', async () => {
