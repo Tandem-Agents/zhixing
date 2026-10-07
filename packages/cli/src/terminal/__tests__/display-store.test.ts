@@ -5,10 +5,13 @@ import os from 'node:os';
 import type { DeviceCapacityArbiterPort, DeviceCapacityQuantum } from '@zhixing/core/resources';
 import { TerminalDisplayStore } from '../display-store.js';
 import { projectHistorySegmentsReverse } from '../history-segments.js';
+import { TerminalBodyProjection, type BodyProjectionChange } from '../body-projection.js';
+import { TerminalManagedFiles } from '../managed-files.js';
 
 const roots: string[] = [];
 const stores: TerminalDisplayStore[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const store of stores.splice(0)) await store.close();
   for (const root of roots.splice(0)) {
     if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) || !path.basename(root).startsWith('zhixing-terminal-display-')) throw Error('Invalid cleanup boundary');
@@ -44,6 +47,78 @@ async function setup() {
 }
 
 describe('bounded terminal display projection', () => {
+  const apply = async (store: TerminalDisplayStore, changes: Iterable<BodyProjectionChange>) => {
+    for (const change of changes) {
+      if (change.kind === 'amend') await store.amend('stream', change);
+      else await store.append({ blockId: 'stream', role: 'assistant', text: change.text,
+        contentOffset: change.contentOffset, final: change.body.end, body: change.body });
+    }
+  };
+
+  // Sixty separately acknowledged managed-file amendments need real I/O headroom.
+  it('keeps a readable multi-fragment stream and bounded physical versions while old fragments are repeatedly amended', async () => {
+    const h = await setup(), parser = new TerminalBodyProjection('markdown');
+    const prefix = '**' + 'a'.repeat(28_000);
+    await apply(h.store, parser.feed(prefix));
+    expect(h.store.last).toBeGreaterThan(1);
+    const bytesBefore = (await stat(path.join(h.root, 'display/data'))).size;
+    for (let index = 0; index < 60; index++) await apply(h.store, parser.feed('b'));
+    await apply(h.store, parser.feed('**')); await apply(h.store, parser.end()); await h.store.seal('stream');
+    const page = await h.store.page();
+    expect(page.segments.map(item => item.text).join('')).toBe(prefix + 'b'.repeat(60) + '**');
+    expect(page.segments.length).toBeLessThanOrEqual(4);
+    expect(page.segments.at(-1)?.body?.end).toBe(true);
+    for (const segment of page.segments) {
+      expect((prefix + 'b'.repeat(60) + '**').slice(segment.contentOffset, segment.contentOffset + segment.text.length)).toBe(segment.text);
+      expect(Buffer.byteLength(JSON.stringify(segment))).toBeLessThanOrEqual(48 * 1024);
+    }
+    expect((await stat(path.join(h.root, 'display/data'))).size).toBe(bytesBefore);
+    expect(bytesBefore).toBe(h.store.last * 2 * 48 * 1024);
+    expect((await h.store.page(h.store.first, false)).segments[0]?.text).toBe(page.segments[0]?.text);
+    expect(h.counts().active).toBe(0); expect(h.counts().outstanding).toBe(0);
+  }, 10_000);
+
+  it.each(['data', 'index', 'settlement'] as const)('preserves the confirmed page after a failed replacement at %s and seals later writes', async stage => {
+    const h = await setup(), parser = new TerminalBodyProjection('markdown');
+    await apply(h.store, parser.feed('before'));
+    const before = await h.store.page();
+    if (stage === 'settlement') h.account.settle.mockRejectedValueOnce(Error('synthetic replacement failure'));
+    else {
+      const write = TerminalManagedFiles.prototype.write;
+      let injected = false;
+      vi.spyOn(TerminalManagedFiles.prototype, 'write').mockImplementation(async function(this: TerminalManagedFiles, ...args) {
+        if (!injected && args[0] === `display/${stage}`) {
+          injected = true;
+          // This completed partial physical write is a known failure. The
+          // original ManagedFiles unknown-completion seal is not bypassed.
+          await write.call(this, args[0], args[1].subarray(0, 8), args[2], args[3], args[4], args[5]);
+          throw Error('synthetic replacement failure');
+        }
+        return write.apply(this, args);
+      });
+    }
+    await expect(apply(h.store, parser.feed(' after'))).rejects.toThrow('synthetic replacement failure');
+    expect(h.store.paused).toBe(true);
+    expect(await h.store.page()).toEqual(before);
+    await expect(h.store.append({ blockId: 'later', role: 'assistant', contentOffset: 0, text: 'rejected', final: true })).rejects.toThrow('paused');
+    await expect(h.store.reset()).rejects.toThrow('settlement-unknown');
+    expect(h.account.released).not.toHaveBeenCalled(); expect(h.counts().active).toBe(0);
+  });
+
+  it('resets both source identity and revisions before accepting the next generation', async () => {
+    const h = await setup(), old = new TerminalBodyProjection('markdown');
+    await apply(h.store, old.feed('old'));
+    const amendment = [...old.feed(' tail')].find(item => item.kind === 'amend')!;
+    // The complete old operation is queued before reset and made stale before
+    // it can acquire the file operation. It cannot mutate the next generation.
+    const late = h.store.amend('stream', amendment);
+    const reset = h.store.reset(); await Promise.all([late, reset]);
+    const current = new TerminalBodyProjection('markdown');
+    await apply(h.store, current.feed('new')); await apply(h.store, current.end());
+    expect((await h.store.page()).segments.map(item => item.text).join('')).toBe('new');
+    old.dispose();
+  });
+
   it('prepends original Unicode history and pages without truncating or reordering content', async () => {
     const h = await setup();
     const text = ' \r\n汉字🦞\t'.repeat(12_000);

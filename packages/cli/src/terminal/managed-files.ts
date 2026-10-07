@@ -70,11 +70,14 @@ export class TerminalManagedFiles {
       return parent.writeAt(name, maximum, position, bytes, identity);
     });
   }
-  async read(relative: string, declared: number, position: number, length: number, identity: string, step: DeviceCapacityStepPermit): Promise<Buffer> {
+  async read(relative: string, declared: number, position: number, length: number, identity: string, step: DeviceCapacityStepPermit, prefix = false): Promise<Buffer> {
     return this.#io(async () => {
       const { parent, name } = await this.#parent(relative, step);
       step.claim('ioOperations', 16); step.claim('readBytes', length);
-      return parent.readFile(name, declared, position, length, identity);
+      // A confirmed append-only prefix can remain readable after an unpublished
+      // tail grew. The pinned object's identity and declared prefix bound still
+      // apply; unknown physical completion continues to seal #parent above.
+      return parent.readFile(name, declared, position, length, identity, prefix);
     });
   }
   async copyInput(source: string, sourceIdentity: string, sourceBytes: number, sourceOffset: number, target: string, targetIdentity: string | undefined, targetOffset: number, length: number, step: DeviceCapacityStepPermit): Promise<CheckpointEntry> {

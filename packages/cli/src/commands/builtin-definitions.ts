@@ -3,6 +3,15 @@ import { chromeOnlyVisibility } from "./command-capabilities.js";
 
 /** Shared names, aliases, descriptions and visibility for every terminal surface. */
 export const BUILTIN_COMMANDS = {
+  "skills:repl": {
+    id: "skills:repl",
+    name: "skills",
+    description: "管理技能(浏览 / 置顶 / 禁用 / 改 mode / 归档)",
+    category: "tools",
+    execution: "local",
+    tag: "builtin",
+    visibility: chromeOnlyVisibility
+  },
   "resolve:repl": {
     id: "resolve:repl",
     name: "resolve",

@@ -4,16 +4,27 @@ export interface TerminalSender {
   (packet: TerminalEnvelope, done: (error?: Error | null) => void): void;
 }
 
+interface Delivery {
+  readonly payload: TerminalMessage;
+  readonly traffic: TerminalTraffic;
+  readonly closing: boolean;
+  readonly timer: ReturnType<typeof setTimeout>;
+  resolve(): void;
+  reject(error: Error): void;
+}
+
 /** Acknowledgement means the bounded receiving surface retained this message.
  * It never acknowledges a domain command or retries an unknown write. */
 export class TerminalChannel {
-  readonly #pending = new Map<number, { traffic: TerminalTraffic; timer: ReturnType<typeof setTimeout>; resolve(): void; reject(error: Error): void }>();
+  readonly #pending = new Map<number, Delivery>();
+  readonly #controlQueue: Delivery[] = [];
   #sequence = 0;
   #received = 0;
   #closed = false;
   #failure?: Error;
   #body = 0;
   #control = 0;
+  #closing = false;
   #receiving = 0;
   readonly #receivedWork = new Set<Promise<void>>();
 
@@ -40,25 +51,44 @@ export class TerminalChannel {
   send(payload: TerminalMessage, traffic: TerminalTraffic = 'control'): Promise<void> {
     if (this.#closed) return Promise.reject(Error('terminal-channel-closed'));
     const closing = payload.type === 'close' || payload.type === 'exit';
-    if (!closing && (traffic === 'body' ? this.#body >= TERMINAL_LIMITS.bodyFrames : this.#control >= TERMINAL_LIMITS.controlFrames)) {
+    // Producers share the same transport window. Waiting for a free slot is
+    // normal backpressure, not a failed delivery. Retention remains bounded by
+    // the existing request budget, and each retained frame has a byte limit.
+    if (!closing && (traffic === 'body' ? this.#body >= TERMINAL_LIMITS.bodyFrames : this.#controlQueue.length >= TERMINAL_LIMITS.pendingRequests)) {
       const reason = `terminal-${traffic}-capacity`;
       if (traffic === 'control') this.#fail(reason);
       return Promise.reject(Error(reason));
     }
-    if (closing && this.#pending.size >= TERMINAL_LIMITS.bodyFrames + TERMINAL_LIMITS.controlFrames + 1) return Promise.reject(Error('terminal-close-already-pending'));
-    const sequence = ++this.#sequence;
-    const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence, traffic, payload };
-    if (Buffer.byteLength(JSON.stringify(packet)) > TERMINAL_LIMITS.frameBytes) {
+    if (closing && this.#closing) return Promise.reject(Error('terminal-close-already-pending'));
+    // Snapshot before waiting: callers cannot mutate a retained message beyond
+    // its admitted byte budget. Sequence numbers are assigned only on send,
+    // so ACKs and reserved close messages can pass queued control messages.
+    const encoded = JSON.stringify({ protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence: Number.MAX_SAFE_INTEGER, traffic, payload });
+    if (Buffer.byteLength(encoded) > TERMINAL_LIMITS.frameBytes) {
       if (traffic === 'control') this.#fail('terminal-control-frame-too-large');
       return Promise.reject(Error('terminal-frame-too-large'));
     }
-    if (traffic === 'body') this.#body++; else this.#control++;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.#fail('terminal-delivery-timeout'), TERMINAL_LIMITS.deliveryTimeoutMs);
-      this.#pending.set(sequence, { traffic, timer, resolve, reject });
-      try { this.sender(packet, error => { if (error) this.#fail('terminal-send-failed'); }); }
-      catch { this.#fail('terminal-send-failed'); }
+      const delivery: Delivery = { payload: (JSON.parse(encoded) as TerminalEnvelope).payload, traffic, closing, timer, resolve, reject };
+      if (!closing && traffic === 'control' && (this.#control >= TERMINAL_LIMITS.controlFrames || this.#controlQueue.length)) this.#controlQueue.push(delivery);
+      else this.#send(delivery);
     });
+  }
+
+  #send(delivery: Delivery): void {
+    const sequence = ++this.#sequence;
+    if (delivery.closing) this.#closing = true;
+    else if (delivery.traffic === 'body') this.#body++;
+    else this.#control++;
+    this.#pending.set(sequence, delivery);
+    const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence, traffic: delivery.traffic, payload: delivery.payload };
+    try { this.sender(packet, error => { if (error) this.#fail('terminal-send-failed'); }); }
+    catch { this.#fail('terminal-send-failed'); }
+  }
+
+  #flushControl(): void {
+    while (!this.#closed && this.#control < TERMINAL_LIMITS.controlFrames && this.#controlQueue.length) this.#send(this.#controlQueue.shift()!);
   }
 
   accept(value: unknown): void {
@@ -73,7 +103,10 @@ export class TerminalChannel {
       if (!pending) { this.#fail('terminal-unmatched-ack'); return; }
       clearTimeout(pending.timer);
       this.#pending.delete(message.sequence);
-      if (pending.traffic === 'body') this.#body--; else this.#control--;
+      if (pending.closing) this.#closing = false;
+      else if (pending.traffic === 'body') this.#body--;
+      else this.#control--;
+      this.#flushControl();
       pending.resolve(); return;
     }
     if (++this.#receiving > TERMINAL_LIMITS.bodyFrames + TERMINAL_LIMITS.controlFrames + 1) {
@@ -100,7 +133,8 @@ export class TerminalChannel {
     if (this.#closed) return;
     this.#closed = true;
     for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(Error(reason)); }
-    this.#pending.clear(); this.#body = 0; this.#control = 0;
+    for (const waiting of this.#controlQueue) { clearTimeout(waiting.timer); waiting.reject(Error(reason)); }
+    this.#pending.clear(); this.#controlQueue.length = 0; this.#body = 0; this.#control = 0; this.#closing = false;
   }
 
   #fail(reason: string): void {

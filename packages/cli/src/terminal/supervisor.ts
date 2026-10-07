@@ -755,7 +755,9 @@ class TerminalSupervisor {
     const env: NodeJS.ProcessEnv = {};
     for (const key of ['SystemRoot', 'WINDIR', 'TERM', 'COLORTERM', 'TERM_PROGRAM', 'WT_SESSION', 'LANG', 'LC_ALL']) if (process.env[key]) env[key] = process.env[key];
     const library = process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so';
-    Object.assign(env, { ZHIXING_TERMINAL_INSTANCE: this.instance, ZHIXING_TERMINAL_RENDER_LIB: path.join(distribution, library), OTUI_ASSET_ROOT: path.join(distribution, 'assets') });
+    // Packaged parser workers are read-only distribution inputs. Bun otherwise
+    // writes a runtime transpiler cache when it loads the external worker.
+    Object.assign(env, { ZHIXING_TERMINAL_INSTANCE: this.instance, ZHIXING_TERMINAL_RENDER_LIB: path.join(distribution, library), OTUI_ASSET_ROOT: path.join(distribution, 'assets'), BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' });
     if (instancePath) {
       const runtime = path.join(instancePath, 'runtime');
       Object.assign(env, { TEMP: runtime, TMP: runtime, USERPROFILE: runtime, HOME: runtime, LOCALAPPDATA: runtime, APPDATA: runtime });

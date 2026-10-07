@@ -203,7 +203,7 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   onObservedInputFragment?: (input: ConversationInputFragment & { conversationId: string; runId: string }) => Promise<void>;
   onRecoveryYield?: (event: AgentYield, source: ConversationOutputSource) => Promise<void>;
   /** Confirms the queued live prefix even when Final has no missing text. */
-  onRecoveryDrain?: () => Promise<void>;
+  onRecoveryDrain?: (turn: ObservedTurnNotification) => Promise<void>;
   onRecoveryReset?: (conversationId: string, current: () => boolean) => Promise<void>;
   historyRunIds?: () => readonly string[];
 }
@@ -1186,6 +1186,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       const identity = { conversationId, runId };
       const label = observed.communication ? '来信处理' : '任务续接';
       await this.emitRecoveredYield({ type: 'text_delta', text: result.reason === 'error' ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: 'status', notice });
+      await this.opts.onRecoveryDrain?.(identity);
       if (!current()) return;
       observed.settled = true;
       this.opts.onObservedTurnComplete?.(identity);
@@ -1237,7 +1238,7 @@ export class ConversationController<Outcome = TurnOutcome> {
               output.text.append(text);
             }
           }
-          await this.opts.onRecoveryDrain?.();
+          await this.opts.onRecoveryDrain?.({ conversationId: frame.conversationId, turnId: watch.turnId, runId: frame.runId });
           if (!current()) return true;
           if (match.record.postTurnControl) this.pendingPostTurnControls.set(watch.turnId, match.record.postTurnControl);
           this.finishTurn(watch.conversationId, watch.turnId, { reason: 'completed', message: finalAssistantMessageOf(match.record.messages), usage: match.record.usage ?? { inputTokens: 0, outputTokens: 0 } });
@@ -1259,7 +1260,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           await this.emitRecoveredYield({ type: 'text_delta', text }, { ...identity, kind: 'history', final: frame });
           observed.text.append(text);
         }
-        await this.opts.onRecoveryDrain?.();
+        await this.opts.onRecoveryDrain?.(identity);
         if (!current()) return true;
         observed.settled = true; observed.recovering = false;
         this.opts.onObservedTurnComplete?.(identity);

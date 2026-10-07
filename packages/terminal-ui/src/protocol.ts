@@ -1,3 +1,6 @@
+import type { BodyFragmentMetadata } from './body-model.js';
+import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
+
 /** Private same-release terminal transport, not a second product API. */
 export const TERMINAL_PROTOCOL = "zhixing-terminal/1";
 export const TERMINAL_LIMITS = Object.freeze({
@@ -60,6 +63,8 @@ export type TerminalMessage =
 export type TerminalAction =
   | { readonly kind: "startup" | "retry-connection" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
+  | { readonly kind: 'command-route'; readonly name: string }
+  | { readonly kind: 'skills-action'; readonly action: TerminalSkillsAction }
   | { readonly kind: 'display-page'; readonly start?: number; readonly follow?: boolean }
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
   | { readonly kind: "configuration-action"; readonly editId: string; readonly action: string; readonly value?: string | number | boolean }
@@ -108,6 +113,7 @@ export interface TerminalDisplaySegment {
   readonly role: string;
   readonly text: string;
   readonly final: boolean;
+  readonly body?: BodyFragmentMetadata;
 }
 export interface TerminalDisplayPage {
   readonly first: number;
@@ -118,7 +124,7 @@ export interface TerminalDisplayPage {
 }
 export interface TerminalView {
   readonly generation: number;
-  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable";
+  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills';
   readonly title: string;
   readonly message?: string;
   readonly displayGap?: boolean;
@@ -128,6 +134,7 @@ export interface TerminalView {
   readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean };
   readonly connected?: boolean;
   readonly busy?: boolean;
+  readonly skills?: TerminalSkillsView;
 }
 
 export function terminalEnvelope(value: unknown, instance: string): value is TerminalEnvelope {

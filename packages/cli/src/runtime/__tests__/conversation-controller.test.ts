@@ -172,7 +172,8 @@ describe('bounded authoritative recovery consumer', () => {
 
   it('waits for the actual queued live prefix even when Final contains no missing tail', async () => {
     const f = makeFakes(), shown: string[] = [];
-    const projection = new TerminalOutputProjection(async part => { shown.push(part.text); }, async () => {}, async () => {});
+    const projection = new TerminalOutputProjection(async part => { shown.push(part.text); }, async () => {}, async () => {},
+      { work: action => action(), amend: async () => {}, seal: async () => {} });
     const release = projection.hold(); let ready = false, delivered = false, settled = false;
     f.conversation.send.mockImplementation(async (_text, _id, turnId) => ({ conversationId: 'conv-1', sessionId: 'conv-1', turnId, runId: 'full-live' }));
     const message = { role: 'assistant', content: [{ type: 'text', text: 'whole-answer' }] };

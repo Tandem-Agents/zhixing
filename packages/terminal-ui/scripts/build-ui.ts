@@ -1,8 +1,9 @@
 import solidPlugin from '@opentui/solid/bun-plugin';
 import { getNodeAssets } from '@opentui/core/node-assets';
-import { mkdir, readFile, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, copyFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { patchPasteParser, patchPasteRenderer } from './opentui-paste-patch.js';
+import { patchParserClient, patchParserWorker } from './opentui-parser-patch.js';
 
 const root = path.resolve(import.meta.dir, '..');
 const platform = process.platform, arch = process.arch;
@@ -30,6 +31,7 @@ const recoveryLifecycle = {
         source = replaceOnce(source, '    try {\n      this.setupInput();\n    } catch (error) {', '    try {\n      if (!config.externalRecoveryOwner) this.setupInput();\n    } catch (error) {');
       } else {
         source = patchPasteParser(source);
+        source = patchParserClient(source);
         const start = source.indexOf('async function resolveNativeLibraryPath() {');
         const end = source.indexOf('// src/lib/tree-sitter/default-parsers.ts', start);
         if (start < 0 || end < 0) throw Error('Fixed OpenTUI native loader changed');
@@ -48,7 +50,8 @@ for (const asset of getNodeAssets({ platform, arch })) {
   if (['/opentui.dll', '/libopentui.so', '/libopentui.dylib'].some(name => asset.key.endsWith(name))) continue;
   const destination = path.join(dist, 'assets', asset.key);
   await mkdir(path.dirname(destination), { recursive: true });
-  await copyFile(asset.source, destination);
+  if (asset.key.endsWith('/parser.worker.js')) await writeFile(destination, patchParserWorker(await readFile(asset.source, 'utf8')));
+  else await copyFile(asset.source, destination);
 }
 await mkdir(path.join(dist, 'notices'), { recursive: true });
 await copyFile(path.join(root, 'native/opentui/LICENSE'), path.join(dist, 'notices/OpenTUI-MIT.txt'));

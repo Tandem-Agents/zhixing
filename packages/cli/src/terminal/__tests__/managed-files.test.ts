@@ -41,9 +41,18 @@ describe.skipIf(process.platform !== 'win32')('terminal pinned input and display
     await writeFile(path.join(root, 'input', 'owned'), 'unknown!');
     await expect(files.write('input/owned', Buffer.from('changed!'), 0, 8, step, original.identity)).rejects.toThrow();
     await expect(files.read('input/owned', 8, 0, 8, original.identity, step)).rejects.toThrow();
+    await expect(files.read('input/owned', 8, 0, 8, original.identity, step, true)).rejects.toThrow();
     await expect(files.unlink('input/owned', original.identity, step)).rejects.toThrow();
     expect(await readFile(path.join(root, 'input', 'owned'), 'utf8')).toBe('unknown!');
     expect(await readFile(path.join(root, 'input', 'retired'), 'utf8')).toBe('original');
+  });
+  it('reads only a confirmed prefix of the same object after an unpublished append', async () => {
+    const { files } = await setup();
+    const original = await files.write('input/owned', Buffer.from('original'), 0, 8, step);
+    await files.write('input/owned', Buffer.from('-unpublished'), 8, 20, step, original.identity);
+    await expect(files.read('input/owned', 8, 0, 8, original.identity, step)).rejects.toThrow();
+    expect((await files.read('input/owned', 8, 0, 8, original.identity, step, true)).toString()).toBe('original');
+    await expect(files.read('input/owned', 8, 7, 2, original.identity, step, true)).rejects.toThrow();
   });
 });
 

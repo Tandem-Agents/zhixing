@@ -315,6 +315,58 @@ describe("DefaultCommandRegistry — 动态源", () => {
     reg.registerDynamicSource(source);
     expect(() => reg.registerDynamicSource(source)).toThrow(/duplicate dynamic source/);
   });
+
+  it("注销后迟到成功不能复活动态命令", async () => {
+    const reg = new DefaultCommandRegistry();
+    let finish!: (commands: CommandDef[]) => void;
+    const unregister = reg.registerDynamicSource(makeSource("skill", () => new Promise(resolve => { finish = resolve; })));
+    const refreshing = reg.refresh();
+    unregister(); finish([makeCmd({ id: "skill:late", name: "late" })]); await refreshing;
+    expect(reg.findByName("late")).toBeNull();
+  });
+
+  it("旧刷新与旧注销回调不能替换或移除同 id 新源", async () => {
+    const reg = new DefaultCommandRegistry();
+    let finish!: (commands: CommandDef[]) => void;
+    const oldUnregister = reg.registerDynamicSource(makeSource("skill", () => new Promise(resolve => { finish = resolve; })));
+    const oldRefresh = reg.refresh(); oldUnregister();
+    reg.registerDynamicSource(makeSource("skill", [makeCmd({ id: "skill:current", name: "current" })]));
+    await reg.refresh(); oldUnregister(); finish([makeCmd({ id: "skill:old", name: "old" })]); await oldRefresh;
+    expect(reg.findByName("current")?.id).toBe("skill:current");
+    expect(reg.findByName("old")).toBeNull();
+  });
+
+  it("旧源迟到失败不报告为当前源失败也不破坏后继缓存", async () => {
+    const onSourceError = vi.fn(), reg = new DefaultCommandRegistry({ onSourceError });
+    let fail!: (error: Error) => void;
+    const unregister = reg.registerDynamicSource(makeSource("skill", () => new Promise((_resolve, reject) => { fail = reject; })));
+    const oldRefresh = reg.refresh(); unregister();
+    reg.registerDynamicSource(makeSource("skill", [makeCmd({ id: "skill:current", name: "current" })]));
+    await reg.refresh(); fail(Error("old connection failed")); await oldRefresh;
+    expect(onSourceError).not.toHaveBeenCalled(); expect(reg.findByName("current")).not.toBeNull();
+  });
+
+  it("同一 source 对象再注册仍获得新的注册身份", async () => {
+    const reg = new DefaultCommandRegistry();
+    const pending: ((commands: CommandDef[]) => void)[] = [];
+    const source = makeSource("skill", () => new Promise(resolve => { pending.push(resolve); }));
+    const oldUnregister = reg.registerDynamicSource(source), oldRefresh = reg.refresh(); oldUnregister();
+    reg.registerDynamicSource(source); const currentRefresh = reg.refresh();
+    pending[1]!([makeCmd({ id: "skill:current", name: "current" })]); await currentRefresh;
+    oldUnregister(); pending[0]!([makeCmd({ id: "skill:old", name: "old" })]); await oldRefresh;
+    expect(reg.findByName("current")?.id).toBe("skill:current"); expect(reg.findByName("old")).toBeNull();
+  });
+
+  it("应用冲突回调中的注销释放本轮已加入条目并保留静态命令", async () => {
+    let unregister!: () => void;
+    const reg = new DefaultCommandRegistry({ onSourceError: () => unregister() });
+    reg.register(makeCmd({ id: "static", name: "help" }));
+    unregister = reg.registerDynamicSource(makeSource("skill", [
+      makeCmd({ id: "skill:first", name: "first" }), makeCmd({ id: "static", name: "conflict" }), makeCmd({ id: "skill:last", name: "last" }),
+    ]));
+    await reg.refresh();
+    expect(reg.findByName("first")).toBeNull(); expect(reg.findByName("last")).toBeNull(); expect(reg.findByName("help")).not.toBeNull();
+  });
 });
 
 // ─── onChange ───

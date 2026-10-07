@@ -1,11 +1,15 @@
 import { createSignal, For, Show, ErrorBoundary } from 'solid-js';
-import { createCliRenderer, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
+import { createCliRenderer, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
 import type { TerminalAction, TerminalMessage, TerminalView, TerminalDisplayPage } from './protocol.js';
 import { TerminalInputSession } from './input-session.js';
 import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
+import { BodyView, type BodyViewHandle } from './body-view.js';
+import { BODY_PAGE_BYTES, bodyWindows, type BodyAnchor } from './body-model.js';
+import { bodySelection } from './body-selection.js';
+import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 
 extend({ textarea: TerminalTextarea });
 
@@ -22,15 +26,28 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', message: '正在连接…', busy: true });
   const [status, setStatus] = createSignal('');
+  const [copyAvailable, setCopyAvailable] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
   const [size, setSize] = createSignal({ width: 80, height: 24 });
   const [animation, setAnimation] = createSignal('◆');
   const [secretLength, setSecretLength] = createSignal(0);
   const [display, setDisplay] = createSignal<TerminalDisplayPage>({ first: 0, last: 0, start: 0, follow: true, segments: [] });
   let historyBox: ScrollBoxRenderable | undefined;
-  let alignPage: 'top' | 'bottom' | undefined;
-  let paging = false;
+  let bodyView: BodyViewHandle | undefined;
+  let bodyBox: BoxRenderable | undefined;
+  const bodyClosures = new Set<Promise<void>>();
+  const [bodySize, setBodySize] = createSignal({ width: 78, height: 10 });
+  const [bodyAnchor, setBodyAnchor] = createSignal<BodyAnchor>();
+  const isBody = () => ['conversation', 'history'].includes(view().kind);
+  const bodyReady = (value: BodyViewHandle | undefined) => {
+    const previous = bodyView; bodyView = value;
+    if (!value && previous) {
+      const work = previous.close(); bodyClosures.add(work);
+      void work.then(() => bodyClosures.delete(work), () => {});
+    }
+  };
   let secret = '', editor: TextareaRenderable | undefined, disposed = false, ctrlC = 0;
+  let skillsView: SkillsViewHandle | undefined;
   let operationCount = 0;
   let changingDraft = false;
   let editorHistoryBytes = 0, editorHistoryEntries = 0;
@@ -97,17 +114,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const displayText = (value: string) => value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu,
     char => String.fromCharCode(char.charCodeAt(0) === 127 ? 0x2421 : 0x2400 + char.charCodeAt(0)));
   const pageHistory = async (direction: -1 | 1) => {
-    if (paging || !['conversation', 'history'].includes(view().kind) || !historyBox) return;
-    const page = display();
-    const atEdge = direction < 0 ? historyBox.scrollTop <= 0 : historyBox.scrollTop + historyBox.viewport.height >= historyBox.scrollHeight;
-    if (!atEdge) { historyBox.scrollBy(direction * Math.max(1, historyBox.viewport.height - 2)); return; }
-    paging = true; alignPage = direction < 0 ? 'bottom' : 'top';
-    try {
-      if (direction < 0 && page.start === page.first) await action({ kind: 'history-previous' });
-      else if (direction < 0) await action({ kind: 'display-page', start: Math.max(page.first, page.start - 4), follow: false });
-      else if (page.start + page.segments.length < page.last) await action({ kind: 'display-page', start: page.start + page.segments.length, follow: false });
-      else { alignPage = 'bottom'; await action({ kind: 'display-page', follow: true }); }
-    } finally { paging = false; }
+    if (isBody()) await bodyView?.page(direction);
   };
   const attach = (value: TextareaRenderable) => {
     editor = value;
@@ -156,6 +163,13 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(text);
         const version = draft.version;
         if (match) {
+          const route = await action({ kind: 'command-route', name: match[1]! }) as { route?: 'input' | 'local' } | undefined;
+          if (!route || disposed || draft.version !== version || view().kind !== 'conversation') return;
+          if (route?.route === 'input') {
+            try { setStatus('正在保存并提交输入…'); await input.submit(); }
+            catch (error) { if (!disposed) setStatus(error instanceof Error ? error.message : '提交未完成；草稿保留。'); }
+            return;
+          }
           const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean } | undefined;
           if (result?.accepted && draft.version === version) {
             input.clear(version);
@@ -176,6 +190,18 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'reject' });
     else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true });
   };
+  const refreshCopy = () => setCopyAvailable(!disposed && isBody() && !!bodySelection(renderer, bodyBox));
+  const copyBody = () => {
+    if (disposed || !isBody()) return;
+    const selection = bodySelection(renderer, bodyBox);
+    if (!selection) { setStatus('请重新选择要复制的正文。'); return; }
+    const text = selection.getSelectedText();
+    if (!text) return;
+    if (Buffer.byteLength(text) > BODY_PAGE_BYTES) { setStatus('选区过大，请分段复制。'); return; }
+    try {
+      setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求，选区已保留。');
+    } catch { setStatus('复制请求未完成，选区已保留。'); }
+  };
   const App = () => <box width="100%" height="100%" flexDirection="column" paddingX={1}>
     <box height={4} flexDirection="column">
       <text fg={teal}> ╲</text>
@@ -183,24 +209,30 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       <text fg={teal}>▌●●▐    {view().connected === false ? '离线 · 本机配置与历史仍可用' : '知行 · 伴你行动'}</text>
       <text fg={teal}> ▀▀</text>
     </box>
-    <scrollbox ref={value => { historyBox = value; }} flexGrow={1} backgroundColor="#202626" stickyScroll={['conversation', 'history'].includes(view().kind) && display().follow} stickyStart="bottom"
-      onMouseScroll={event => {
-        if (!['conversation', 'history'].includes(view().kind)) return;
-        const direction = event.scroll?.direction;
-        if (direction === 'up' && display().follow) {
-          setDisplay({ ...display(), follow: false });
-          void action({ kind: 'display-page', start: display().start, follow: false });
-        }
-        if (direction === 'up' && historyBox?.scrollTop === 0) void pageHistory(-1);
-        else if (direction === 'down' && historyBox && historyBox.scrollTop + historyBox.viewport.height >= historyBox.scrollHeight) void pageHistory(1);
+    <box ref={value => { bodyBox = value; }} flexGrow={1} minHeight={1} backgroundColor="#202626"
+      onSizeChange={function(this: BoxRenderable) {
+        bodyView?.beforeUpdate(); setBodySize({ width: this.width, height: this.height });
       }}>
-      <Show when={['conversation', 'history'].includes(view().kind)}><For each={display().segments}>{segment => <box flexDirection="column">
-        <Show when={segment.contentOffset === 0}><text fg={segment.role === 'user' ? '#a7b6db' : teal}>◆ {segment.role === 'user' ? '你' : segment.role === 'assistant' ? '知行' : segment.role}</text></Show>
-        <text selectable>{displayText(segment.text)}</text>
-      </box>}</For></Show>
-      <text selectable>{displayText(view().message ?? '')}</text>
-      <Show when={view().choices?.[selected()]?.detail}><text fg="#9aa8a1">{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
-    </scrollbox>
+      <Show when={view().kind === 'skills' && view().skills} fallback={<Show when={isBody()} fallback={<scrollbox ref={value => { historyBox = value; }} flexGrow={1}>
+        <text selectable>{displayText(view().message ?? '')}</text>
+        <Show when={view().choices?.[selected()]?.detail}><text fg="#9aa8a1">{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
+      </scrollbox>}>
+        <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
+          anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
+          requestPage={(start, follow) => action({ kind: 'display-page', start, follow })}
+          requestPrevious={() => action({ kind: 'history-previous' })}
+          onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : '正文暂不可用，已保留内容仍可回看。'); }} />
+      </Show>}>
+        <SkillsView view={view().skills!} width={bodySize().width} height={bodySize().height}
+          send={async value => {
+            const reply = await action({ kind: 'skills-action', action: value });
+            if (reply === undefined) throw Error('terminal-skills-action-unconfirmed');
+            return reply;
+          }} onError={setStatus}
+          onReady={value => { skillsView = value; }} />
+      </Show>
+    </box>
+    <Show when={isBody() && view().message}><text height={2} selectable>{displayText(view().message ?? '')}</text></Show>
     <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
       <text fg="#e7ba70">正文保留已暂停，后续内容存在缺口。草稿保留；可处理确认、中止工作或退出后重试。</text>
     </Show>
@@ -228,7 +260,14 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         </Show>
       </box>
     </Show>
-    <text height={1} fg={teal}>{view().busy ? animation() : '◆'} {status() || (view().busy ? '正在处理…' : view().kind === 'conversation' ? 'Enter 确认 · Esc 返回 · Ctrl+C 中止/退出' : 'Enter 确认 · Esc 返回 · PgUp/PgDn 阅读')}</text>
+    <box height={1} flexDirection="row">
+      <text flexGrow={1} height={1} fg={teal}>{view().busy ? animation() : '◆'} {status() || (view().busy ? '正在处理…' : view().kind === 'skills' ? 'Esc 返回 · ↑↓ 选择 · p/d/m/a 管理 · r 刷新' : view().kind === 'conversation' ? 'Enter 确认 · Esc 返回 · Ctrl+C 中止/退出' : 'Enter 确认 · Esc 返回 · PgUp/PgDn 阅读')}</text>
+      <Show when={copyAvailable()}><text width={12} selectable={false} fg={teal} bg="#304c45"
+        onMouseDown={event => {
+          if (event.button !== 0) return;
+          event.preventDefault(); event.stopPropagation(); copyBody();
+        }}> 复制选区 </text></Show>
+    </box>
   </box>;
   const externalPaste = (): TerminalPasteSink | undefined => {
     if (disposed) return;
@@ -260,17 +299,24 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     };
   };
   const renderer = await createCliRenderer({ exitOnCtrlC: false, consoleMode: 'disabled', useMouse: true, useKittyKeyboard: null, useThread: false, screenMode: 'alternate-screen', stdinParserMaxBufferBytes: 64 * 1024, externalRecoveryOwner: true, externalPaste } as Parameters<typeof createCliRenderer>[0]);
-  const dispose = () => {
-    if (disposed) return;
+  let disposing: Promise<void> | undefined;
+  const dispose = (): Promise<void> => {
+    if (disposing) return disposing;
     disposed = true; input.activate(false); releaseSecret(); clearInterval(animationTimer);
     candidates?.sync(false);
     renderer.off('resize', resize);
+    renderer.off('frame', refreshCopy);
     renderer.keyInput.off('keypress', keypress); renderer.keyInput.off('paste', paste);
-    renderer.destroy();
+    disposing = (async () => {
+      try { await bodyView?.close(); await Promise.all(bodyClosures); }
+      finally { renderer.destroy(); }
+    })();
+    return disposing;
   };
-  const resize = () => setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight });
+  const resize = () => { bodyView?.beforeUpdate(); setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight }); };
   const keypress = (event: KeyEvent) => {
     const consume = () => { event.preventDefault(); event.stopPropagation(); };
+    if (view().kind === 'skills') { consume(); skillsView?.key(event); return; }
     if (event.ctrl && event.name === 'c') {
       consume();
       if (view().kind === 'confirmation') { void action({ kind: 'confirmation', requestId: view().requestId!, action: 'cancelled' }); return; }
@@ -319,7 +365,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       return;
     }
     if (['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'end') {
-      consume(); alignPage = 'bottom'; void action({ kind: 'display-page', follow: true }); return;
+      consume(); void bodyView?.bottom(); return;
     }
     if (event.name === 'return' && !event.shift) { consume(); void submit(); return; }
     if (event.ctrl && event.name === 's' && view().editId) {
@@ -359,6 +405,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     await render(() => <ErrorBoundary fallback={(error: unknown) => { renderFailure = error; return <text>界面初始化失败</text>; }}><App /></ErrorBoundary>, renderer);
     if (renderFailure) throw renderFailure;
     resize(); renderer.on('resize', resize);
+    renderer.on('frame', refreshCopy);
     renderer.keyInput.on('keypress', keypress); renderer.keyInput.on('paste', paste);
     options.inputReady(renderer);
     const firstFrameId = await new Promise<number>((resolve, reject) => {
@@ -374,25 +421,23 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
-          preserveDraft(); releaseSecret(); setSelected(0); setStatus(''); setView(message.view);
+          preserveDraft(); releaseSecret(); bodyView?.beforeUpdate(); setSelected(0); setStatus(''); setView(message.view);
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');
-          if (!['conversation', 'history'].includes(message.view.kind)) renderer.once('frame', () => {
+          if (!isBody()) renderer.once('frame', () => {
             if (!disposed && historyBox && !historyBox.isDestroyed) historyBox.scrollTo(0);
           });
         } else if (message.type === 'submission') {
           preserveDraft();
           if (input.settle(message)) setStatus(message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。');
         } else if (message.type === 'display-page') {
+          bodyWindows(message.page); // Validate complete source/metadata/page before installing it.
+          bodyView?.beforeUpdate();
           setDisplay(message.page);
-          const align = alignPage; alignPage = undefined;
-          if (align || message.page.follow) renderer.once('frame', () => {
-            if (!disposed && historyBox) historyBox.scrollTo(align === 'top' ? 0 : historyBox.scrollHeight);
-          });
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
           releaseSecret(); setView({ generation: view().generation, kind: 'conversation', title: '知行', message: '该请求已由其他入口处理或已失效。' });
         }
       },
     };
-  } catch (error) { dispose(); throw error; }
+  } catch (error) { await dispose(); throw error; }
 }

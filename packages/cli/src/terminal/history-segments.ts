@@ -1,4 +1,6 @@
 import type { RunRecordWithRef } from '@zhixing/core/transcript';
+import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
+import { projectBodyHistory } from './body-projection.js';
 
 export interface TerminalHistorySegment {
   readonly blockId: string;
@@ -60,6 +62,29 @@ export function* projectHistorySegmentsReverse(runsNewestFirst: readonly RunReco
             text.charCodeAt(start - 1) >= 0xd800 && text.charCodeAt(start - 1) <= 0xdbff) start--;
           yield { blockId, role: message.role, text: text.slice(start, end), contentOffset: start, final: end === text.length };
           end = start;
+        }
+      }
+    }
+  }
+}
+
+/** Preserve the authoritative source and ordering while resolving Markdown
+ * with the same parser and logical EOF used by the live producer. The caller
+ * owns the single bounded parser workspace for this entire iterator. */
+export async function* projectRenderedHistoryReverse(runsNewestFirst: readonly RunRecordWithRef[]): AsyncGenerator<TerminalDisplaySegment> {
+  for (const { record, shardId } of runsNewestFirst) {
+    for (let messageIndex = record.messages.length - 1; messageIndex >= 0; messageIndex--) {
+      const message = record.messages[messageIndex]!;
+      for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
+        const block = message.content[blockIndex]!;
+        const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
+        const text = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking :
+          block.type === 'tool_use' ? `◆ ${block.name}` : block.type === 'tool_result' ? block.content : '[图像材料]';
+        if (typeof text !== 'string') continue;
+        const kind = block.type === 'text' && message.role === 'assistant' ? 'markdown' : 'plain';
+        for await (const item of projectBodyHistory(text, kind, 'reverse')) {
+          yield { blockId, contentOffset: item.contentOffset, role: message.role, text: item.text,
+            final: item.body.end, body: item.body };
         }
       }
     }

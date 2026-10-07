@@ -5,7 +5,7 @@ import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
 
 /** Commands delivered in this migration unit. Other command ownership stays in
  * the same catalog, without exposing an inoperative candidate. */
-const available = new Set(['help', 'status', 'stop', 'config', 'mcp', 'exit']);
+const available = new Set(['help', 'status', 'stop', 'config', 'mcp', 'skills', 'exit']);
 
 export class TerminalCandidatesOwner {
   readonly registry = new DefaultCommandRegistry();

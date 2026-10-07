@@ -15,7 +15,8 @@ import type * as readline from "node:readline/promises";
 import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core/typeahead";
 import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
 import type { CliWriter, ScreenController } from "../screen/index.js";
-import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";
+import { requireChrome } from "../commands/command-visibility.js";
+import { BUILTIN_COMMANDS } from "../commands/builtin-definitions.js";
 import { runSkillManager } from "./manager-screen.js";
 
 export interface SkillsCommandOptions {
@@ -35,15 +36,7 @@ export interface SkillsCommandOptions {
 }
 
 export function registerSkillsCommand(opts: SkillsCommandOptions): void {
-  opts.registry.register({
-    id: "skills:repl",
-    name: "skills",
-    description: "管理技能(浏览 / 置顶 / 禁用 / 改 mode / 归档)",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-    visibility: chromeOnlyVisibility,
-  });
+  opts.registry.register(BUILTIN_COMMANDS['skills:repl']);
 
   opts.dispatcher.registerHandler("skills:repl", async () => {
     if (!requireChrome(opts.screen, opts.writer, "技能管理器")) return {};

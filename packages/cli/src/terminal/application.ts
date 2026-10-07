@@ -16,24 +16,25 @@ import { createTerminalLogWorker } from '../logging/terminal-worker.js';
 import { terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError } from '../runtime/core-host-connection.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
-import { checkStartupConfiguration } from '../runtime/startup-application.js';
-import { editRuntimeConfiguration, prepareMcpConfiguration, reloadCoreHostAfterConfig, waitForReloadStatus } from '../runtime/configuration-application.js';
 import type { HostReloadOptions } from '../runtime/configuration-application.js';
 import type { NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigEditorRuntime, SectionId } from '../config-editor/types.js';
-import { TerminalConfigurationEditor } from './configuration-editor.js';
+import type { TerminalConfigurationEditor } from './configuration-editor.js';
+import type { TerminalSkillsOwner } from './skills.js';
+import type { TerminalSkillCommands } from './skill-commands.js';
+import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
 import { RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
-import { prepareCurrentManagedServiceConfigTurnover } from '../serve/managed-service-runtime.js';
 import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore } from './display-store.js';
-import { projectHistorySegmentsReverse, textFragments } from './history-segments.js';
+import { projectRenderedHistoryReverse, textFragments } from './history-segments.js';
+import { TerminalBodyWork } from './body-work.js';
 import { TerminalInputStore } from './input-store.js';
 import { TerminalManagedFiles } from './managed-files.js';
 import { TerminalInputHistoryReader } from './input-history.js';
@@ -56,6 +57,7 @@ import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-
 import { boundedControlProjection } from '../runtime/control-projection.js';
 
 type View = Omit<TerminalView, 'generation'>;
+type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
 class EmptyTerminalSubmission extends Error {}
 
 /** This private role is only admitted by S. It owns the single application
@@ -93,6 +95,7 @@ class TerminalApplication {
   readonly #pendingSend: TerminalPendingSendStore;
   readonly #inputHistoryReader: TerminalInputHistoryReader;
   readonly #outputProjection: TerminalOutputProjection;
+  readonly #bodyWork: TerminalBodyWork;
   #displayUnavailable = false;
   readonly #confirmations: RpcConfirmationBroker;
   readonly #pendingConfirmations = new Set<string>();
@@ -123,6 +126,9 @@ class TerminalApplication {
   #hello = false;
   #started = false;
   #operation?: Promise<void>;
+  #skills?: TerminalSkillsOwner;
+  #skillCommands?: TerminalSkillCommands;
+  #skillsBinding?: Promise<SkillsBinding>;
   #historyRead?: Promise<void>;
   #nextHistoryRead = false;
   #readOnlyNeedsReset = false;
@@ -197,7 +203,12 @@ class TerminalApplication {
     this.#inputs = new TerminalInputStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
     this.#pendingSend = new TerminalPendingSendStore(this.#files, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal);
     this.#inputHistoryReader = new TerminalInputHistoryReader(this.#inputs);
-    this.#outputProjection = new TerminalOutputProjection(segment => this.#display.append(segment), () => this.#displayPage(), () => this.#displayGap());
+    this.#bodyWork = new TerminalBodyWork(this.#logging.capacity.arbiter, this.#abort.signal);
+    this.#outputProjection = new TerminalOutputProjection(segment => this.#display.append(segment), () => this.#displayPage(), () => this.#displayGap(), {
+      work: action => this.#bodyWork.run(action),
+      amend: (blockId, change) => this.#display.amend(blockId, change),
+      seal: blockId => this.#display.seal(blockId),
+    });
     this.#confirmations = new RpcConfirmationBroker({ link: this.#connection, onResolveError: () => {
       this.#mainView = { ...this.#mainView, message: '确认应答未获得成功回执；正在重新核对请求状态，不会自动允许。' };
       void this.#publish(this.#mainView).catch(() => {});
@@ -363,6 +374,8 @@ class TerminalApplication {
         } else void this.#close(0, 'user-interrupt');
         return { accepted: true };
       case 'status': this.#background(() => this.#status()); return { accepted: true };
+      case 'command-route': return this.#commandRoute(action.name);
+      case 'skills-action': return { handled: await this.#skills?.act(action.action) ?? false };
       case 'command': return this.#command(action.name, action.argument);
       default: throw Error('terminal-action-unavailable');
     }
@@ -385,12 +398,18 @@ class TerminalApplication {
   async #startup(): Promise<void> {
     await this.#publish({ kind: 'conversation', title: '知行', message: '正在连接本机服务…', busy: true, connected: false });
     const result = await connectReplHost({ connection: this.#connection, starting: () => {}, settled: () => {},
-      checkConfiguration: () => checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
+      checkConfiguration: async () => {
+        // Configuration/identity backends belong to this operation. Loading
+        // them must not prevent the real IPC/close consumer from being installed.
+        const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
+        this.#abort.signal.throwIfAborted();
+        return checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
         secretStore: this.#secretStore,
         records: this.#logging.records,
         edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
           writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging']),
-      }),
+        });
+      },
     });
     this.#abort.signal.throwIfAborted();
     if (result.kind === 'configuration') {
@@ -433,7 +452,10 @@ class TerminalApplication {
         onYield: (event, source) => this.#output(event, source),
         pagedRecovery: true,
         historyRunIds: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.recoveryRunIds ?? [] : [],
-        onRecoveryDrain: () => this.#outputProjection.drain(),
+        onRecoveryDrain: source => {
+          this.#outputProjection.end(source.conversationId, source.turnId, source.runId);
+          return this.#outputProjection.drain();
+        },
         onRecoveryYield: async (event, source) => {
           this.#abort.signal.throwIfAborted();
           if (this.#history?.offline) throw Error('terminal-recovery-offline');
@@ -478,6 +500,9 @@ class TerminalApplication {
     this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined };
     this.#historyReturn = undefined;
     await this.#publish(this.#mainView);
+    // Discovery starts after the connected first page; it is not part of N's
+    // admission graph. A directly typed skill awaits this same refresh owner.
+    void this.#ensureSkillsBinding().then(binding => binding.commands.refresh()).catch(error => this.#skillsFailed(error));
     if (this.#pendingRubric || this.#deferredRubric) await this.#resolveRubric();
     await this.#confirmations.refresh();
   }
@@ -593,10 +618,12 @@ class TerminalApplication {
       this.#abort.signal.throwIfAborted();
       if (this.#history !== history) return;
       try {
-        for (const segment of projectHistorySegmentsReverse(page.runs)) {
-          if (this.#history !== history) return;
-          await this.#display.append(segment, true);
-        }
+        await this.#bodyWork.run(async () => {
+          for await (const segment of projectRenderedHistoryReverse(page.runs)) {
+            if (this.#history !== history) return;
+            await this.#display.append(segment, true);
+          }
+        });
       } catch {
         await this.#displayGap(); return;
       }
@@ -883,6 +910,7 @@ class TerminalApplication {
     void this.#publish(this.#mainView).catch(() => {});
     void completion.then(async message => {
       this.#outputProjection.end(conversationId, turnId, runId);
+      await this.#outputProjection.drain();
       if (this.#abort.signal.aborted) return;
       // The local waiter owns this terminal outcome; the controller suppresses
       // its duplicate observer notice. Keep the authoritative error visible,
@@ -898,6 +926,8 @@ class TerminalApplication {
   }
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
+    const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
+    this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
     const editor = new TerminalConfigurationEditor({ session, title, sections, runtime, publish: view => this.#publish(view) });
     this.#editor = editor;
@@ -907,6 +937,8 @@ class TerminalApplication {
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
     await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP', message: '正在读取本机配置…', busy: true });
+    const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');
+    this.#abort.signal.throwIfAborted();
     const connected = this.#connection.getStatus().kind === 'connected';
     const mcp = kind === 'mcp' ? await prepareMcpConfiguration({ configPath: this.#configPath,
       createStdioProcess: (command, args, env, signal) => createTerminalOwnedProcessFactory('mcp-probe')(command, args, {
@@ -947,17 +979,69 @@ class TerminalApplication {
   }
 
   async #reload(options?: HostReloadOptions) {
+    const { reloadCoreHostAfterConfig, waitForReloadStatus } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
     return reloadCoreHostAfterConfig({ options,
       requestDrainShutdown: () => this.#management.serverShutdown({ reason: 'config-reload', strategy: 'drain' }),
       reconnect: input => this.#connection.reconnect(input),
-      prepareManagedServiceTurnover: () => prepareCurrentManagedServiceConfigTurnover(undefined, this.home),
+      prepareManagedServiceTurnover: async () => {
+        const { prepareCurrentManagedServiceConfigTurnover } = await import('../serve/managed-service-runtime.js');
+        this.#abort.signal.throwIfAborted();
+        return prepareCurrentManagedServiceConfigTurnover(undefined, this.home);
+      },
       refresh: async () => {
         const status = await waitForReloadStatus(this.#management);
         await this.#localView.refresh(); await this.#controller?.reattachActiveObserver();
         await this.#confirmations.refresh();
         return status ? { channels: status.channels } : undefined;
       },
+    });
+  }
+
+  #skillsFailed(error: unknown): void {
+    if (this.#abort.signal.aborted) return;
+    recordRuntimeFailure(this.#logging.records, error, 'terminal-skills-refresh-failed');
+    this.#mainView = { ...this.#mainView, message: '技能命令刷新失败；原有命令和草稿保留。可打开 /skills 重试。' };
+    if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-skills-notice-undelivered'));
+  }
+
+  #ensureSkillsBinding(): Promise<SkillsBinding> {
+    return this.#skillsBinding ??= (async () => {
+      const [{ SkillCatalogRpcClient }, { TerminalSkillCommands, terminalSkillCommandRoute }] = await Promise.all([
+        import('@zhixing/rpc/skill-catalog-client'), import('./skill-commands.js'),
+      ]);
+      this.#abort.signal.throwIfAborted();
+      const client = new SkillCatalogRpcClient(this.#connection);
+      const commands = new TerminalSkillCommands({ client, registry: this.#candidates.registry,
+        onError: error => this.#skillsFailed(error), signal: this.#abort.signal });
+      this.#skillCommands = commands;
+      return { client, commands, route: (name: string) => terminalSkillCommandRoute(this.#candidates.registry, name) };
+    })().catch(error => { this.#skillsBinding = undefined; throw error; });
+  }
+
+  async #commandRoute(name: string): Promise<{ readonly route: 'input' | 'local' }> {
+    if (typeof name !== 'string' || !name.length || name.length > 480 || /\s/u.test(name)) throw Error('terminal-command-size');
+    const definition = this.#candidates.registry.findByName(name);
+    if (definition && definition.execution !== 'agent') return { route: 'local' };
+    const binding = await this.#ensureSkillsBinding();
+    await binding.commands.refresh();
+    this.#abort.signal.throwIfAborted();
+    return binding.route(name) ?? { route: 'local' };
+  }
+
+  async #showSkills(): Promise<void> {
+    await this.#selectionFlow(async () => {
+      const [binding, { TerminalSkillsOwner }] = await Promise.all([this.#ensureSkillsBinding(), import('./skills.js')]);
+      this.#abort.signal.throwIfAborted();
+      const owner = new TerminalSkillsOwner({ client: binding.client, signal: this.#abort.signal,
+        refreshCommands: () => binding.commands.refresh(),
+        publish: skills => this.#publish({ kind: 'skills', title: '技能管理', skills }) });
+      this.#skills = owner;
+      try { await owner.open(); }
+      finally {
+        owner.close(); if (this.#skills === owner) this.#skills = undefined;
+        if (!this.#abort.signal.aborted) await this.#publish(this.#mainView);
+      }
     });
   }
 
@@ -971,6 +1055,7 @@ class TerminalApplication {
     if (name === 'config' || name === 'mcp') { this.#background(() => this.#configuration(name)); return { accepted: true }; }
     if (name === 'status') { this.#background(() => this.#status()); return { accepted: true }; }
     if (name === 'stop') { this.#background(() => this.#stop()); return { accepted: true }; }
+    if (name === 'skills') { this.#background(() => this.#showSkills()); return { accepted: true }; }
     if (name === 'help') {
       await this.#publish({ ...this.#mainView, message: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`).join('\n') });
       return { accepted: true };
@@ -997,7 +1082,7 @@ class TerminalApplication {
   }
 
   #drainConfirmations(): void {
-    if (this.#presentingConfirmation || this.#confirmationBlocked || this.#selectionDepth || this.#editor || this.#selection || !this.#mainView.connected || this.#abort.signal.aborted || !this.#pendingConfirmations.size) return;
+    if (this.#presentingConfirmation || this.#confirmationBlocked || this.#selectionDepth || this.#editor || this.#skills || this.#selection || !this.#mainView.connected || this.#abort.signal.aborted || !this.#pendingConfirmations.size) return;
     this.#presentingConfirmation = true;
     void (async () => {
       while (this.#pendingConfirmations.size && !this.#abort.signal.aborted) {
@@ -1025,6 +1110,7 @@ class TerminalApplication {
   #publish(view: View): Promise<void> {
     if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
     if (this.#presentingConfirmation && view.kind !== 'confirmation') return Promise.resolve();
+    if (this.#skills && view.kind !== 'skills') return Promise.resolve();
     this.#nextView = view;
     if (!this.#publishing) this.#publishing = (async () => {
       while (this.#nextView && !this.#abort.signal.aborted) {
@@ -1040,7 +1126,7 @@ class TerminalApplication {
     let resolveClosing!: () => void;
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#closeDeadline ||= Date.now() + (code === 0 ? 2000 : 8000);
-    this.#abort.abort(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve(); this.#selection = undefined;
+    this.#abort.abort(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve(); this.#selection = undefined;
     void (async () => {
       // A failed control lane cannot report its own exit. Closing the existing
       // transport immediately lets S start its shared finite recovery deadline

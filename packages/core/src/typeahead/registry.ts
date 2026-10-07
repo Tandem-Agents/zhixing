@@ -36,6 +36,11 @@ export interface CommandRegistryOptions {
   readonly onSourceError?: (sourceId: string, error: Error) => void;
 }
 
+/** Identity belongs to a registration lifetime, even when a source instance is reused. */
+interface CommandSourceRegistration {
+  readonly source: DynamicCommandSource;
+}
+
 // ─── 实现 ───
 
 export class DefaultCommandRegistry implements ICommandRegistry {
@@ -43,7 +48,7 @@ export class DefaultCommandRegistry implements ICommandRegistry {
   private readonly commands = new Map<string, CommandDef>();
 
   /** 动态源的 id → source 实例 */
-  private readonly sources = new Map<string, DynamicCommandSource>();
+  private readonly sources = new Map<string, CommandSourceRegistration>();
 
   /** 动态源当前缓存的命令 id（key = sourceId, value = 该源贡献的 ids） */
   private readonly sourceCommands = new Map<string, Set<string>>();
@@ -95,11 +100,14 @@ export class DefaultCommandRegistry implements ICommandRegistry {
         `CommandRegistry: duplicate dynamic source id "${source.id}"`,
       );
     }
-    this.sources.set(source.id, source);
+    const registration: CommandSourceRegistration = { source };
+    this.sources.set(source.id, registration);
     this.sourceCommands.set(source.id, new Set());
     this.emitChange();
 
     return () => {
+      // A retained cleanup callback cannot remove a successor using the same id.
+      if (this.sources.get(source.id) !== registration) return;
       // 移除源 + 清理它贡献的所有命令
       const contributed = this.sourceCommands.get(source.id);
       if (contributed) {
@@ -117,11 +125,14 @@ export class DefaultCommandRegistry implements ICommandRegistry {
     // 所有源并发刷新；单个失败不影响其他源。
     // Promise.allSettled 保证我们总能处理所有结果，不会被第一个 reject 吞掉。
     const refreshJobs = Array.from(this.sources.values()).map(
-      async (source) => {
+      async (registration) => {
+        const { source } = registration;
         try {
           const newCommands = await source.list();
-          this.applySourceCommands(source.id, newCommands);
+          if (this.sources.get(source.id) !== registration) return;
+          this.applySourceCommands(registration, newCommands);
         } catch (err) {
+          if (this.sources.get(source.id) !== registration) return;
           const error =
             err instanceof Error ? err : new Error(String(err));
           this.onSourceError(source.id, error);
@@ -140,16 +151,21 @@ export class DefaultCommandRegistry implements ICommandRegistry {
    * - 冲突检测：如果新 id 已被静态注册或另一个源占用，跳过并记错
    */
   private applySourceCommands(
-    sourceId: string,
+    registration: CommandSourceRegistration,
     newCommands: readonly CommandDef[],
   ): void {
+    const sourceId = registration.source.id;
     const oldIds = this.sourceCommands.get(sourceId) ?? new Set<string>();
     for (const id of oldIds) {
       this.commands.delete(id);
     }
 
     const newIds = new Set<string>();
+    // Publish contribution ownership before callbacks: unregister invoked by an
+    // error hook also removes any entries installed earlier in this same batch.
+    this.sourceCommands.set(sourceId, newIds);
     for (const cmd of newCommands) {
+      if (this.sources.get(sourceId) !== registration) return;
       if (this.commands.has(cmd.id)) {
         // 冲突：静态注册或另一个源已经占用此 id。
         // 保守策略：跳过此命令（已存在的不动）+ 记错。
@@ -164,7 +180,6 @@ export class DefaultCommandRegistry implements ICommandRegistry {
       this.commands.set(cmd.id, cmd);
       newIds.add(cmd.id);
     }
-    this.sourceCommands.set(sourceId, newIds);
   }
 
   // ── 查询 ──
