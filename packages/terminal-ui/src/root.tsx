@@ -3,6 +3,7 @@ import { createCliRenderer, type CliRenderer, type TextareaRenderable, type Scro
 import { render, extend } from '@opentui/solid';
 import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
 import { ProcessView } from './process-view.js';
+import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
 import { TerminalInputSession } from './input-session.js';
 import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
@@ -30,6 +31,33 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const [status, setStatus] = createSignal('');
   const [taskStatus, setTaskStatus] = createSignal<TerminalTaskStatus>({});
   const [processStatus, setProcessStatus] = createSignal<TerminalProcessStatus>();
+  const [recoveryPage, setRecoveryPage] = createSignal({ page: 0, text: '' });
+  const [recoveryLength, setRecoveryLength] = createSignal(0);
+  let recoveryInput: RecoveryInputBuffer | undefined, recoverySubmitting = false;
+  const releaseRecovery = () => { recoveryInput?.close(); recoveryInput = undefined; setRecoveryLength(0); setRecoveryPage({ page: 0, text: '' }); };
+  const appendRecovery = (bytes: Uint8Array) => {
+    if (!recoveryInput || recoverySubmitting) return false;
+    try {
+      for (let offset = 0; offset < bytes.length; offset += RECOVERY_INPUT_PART_BYTES) recoveryInput.append(bytes.subarray(offset, offset + RECOVERY_INPUT_PART_BYTES));
+      setRecoveryLength(recoveryInput.length);
+      return true;
+    } catch { recoveryInput.close(); recoveryInput = new RecoveryInputBuffer(); setRecoveryLength(0); setStatus('恢复包超过允许长度，已清空保密输入。'); return false; }
+  };
+  const submitRecovery = async () => {
+    const current = view().recovery, buffer = recoveryInput;
+    if (!current?.input || !buffer || recoverySubmitting) return;
+    recoverySubmitting = true;
+    try {
+      for (let index = 0, offset = 0; ; index++, offset += RECOVERY_INPUT_PART_BYTES) {
+        if (disposed || view().recovery?.requestId !== current.requestId) return;
+        const bytes = buffer.part(offset), final = offset + bytes.length === buffer.length;
+        try { await options.request({ kind: 'recovery-part', requestId: current.requestId, index, encoded: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64'), final }); }
+        finally { bytes.fill(0); }
+        if (final) break;
+      }
+    } catch { if (!disposed) setStatus('保密回读未完成，请重新打开输入。'); }
+    finally { buffer.close(); if (recoveryInput === buffer) { recoveryInput = undefined; setRecoveryLength(0); } recoverySubmitting = false; }
+  };
   const [copyAvailable, setCopyAvailable] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
   const [size, setSize] = createSignal({ width: 80, height: 24 });
@@ -215,6 +243,14 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求，选区已保留。');
     } catch { setStatus('复制请求未完成，选区已保留。'); }
   };
+  const copyRecovery = () => {
+    if (disposed || view().kind !== 'recovery') return;
+    const text = bodySelection(renderer, bodyBox)?.getSelectedText();
+    if (!text) { setStatus('请选择本页要复制的保密内容。'); return; }
+    if (Buffer.byteLength(text) > 32 * 1024) { setStatus('请分段复制。'); return; }
+    try { setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求。'); }
+    catch { setStatus('复制请求未完成。'); }
+  };
   const App = () => <box width="100%" height="100%" flexDirection="column" paddingX={1}>
     <box height={4} flexDirection="column">
       <text fg={teal}> ╲</text>
@@ -228,6 +264,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       }}>
       <Show when={view().kind === 'skills' && view().skills} fallback={<Show when={isBody()} fallback={<scrollbox ref={value => { historyBox = value; }} flexGrow={1}>
         <text selectable>{displayText(view().message ?? '')}</text>
+        <Show when={view().kind === 'recovery'}><text selectable fg="#111111" bg="#ffffff">{displayText(recoveryPage().text)}</text></Show>
         <Show when={view().choices?.[selected()]?.detail}><text fg="#9aa8a1">{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
       </scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
@@ -246,6 +283,10 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       </Show>
     </box>
     <Show when={isBody() && view().message}><text height={2} selectable>{displayText(view().message ?? '')}</text></Show>
+    <Show when={view().kind === 'recovery'}>
+      <text height={1}>{`保密页 ${recoveryPage().page + 1}/${view().recovery?.pages ?? 1} · PgUp/PgDn 翻页 · Ctrl+Shift+C 复制选区`}</text>
+      <Show when={view().recovery?.input}><text height={1}>{`恢复包输入：${recoveryLength()} 字节 · Enter 回读 · Esc 取消`}</text></Show>
+    </Show>
     <Show when={view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId && processStatus()}>
       <ProcessView view={processStatus()!.view} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
     </Show>
@@ -296,6 +337,18 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const externalPaste = (): TerminalPasteSink | undefined => {
     if (disposed) return;
     const current = view();
+    if (current.kind === 'recovery') {
+      if (!current.recovery?.input || recoverySubmitting) return;
+      let active = true;
+      return { write: bytes => { if (active && view().recovery?.requestId === current.recovery?.requestId && !appendRecovery(bytes)) active = false; },
+        end: () => { active = false; }, abort: () => {
+          active = false;
+          if (view().recovery?.requestId === current.recovery?.requestId) {
+            recoveryInput?.close(); recoveryInput = new RecoveryInputBuffer(); setRecoveryLength(0);
+            setStatus('粘贴已中断，保密输入已清空；可以重新输入。');
+          }
+        } };
+    }
     if (current.kind === 'conversation') {
       preserveDraft();
       try {
@@ -326,7 +379,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   let disposing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {
     if (disposing) return disposing;
-    disposed = true; input.activate(false); releaseSecret(); clearInterval(animationTimer);
+    disposed = true; input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
     candidates?.sync(false);
     renderer.off('resize', resize);
     renderer.off('frame', refreshCopy);
@@ -340,6 +393,21 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const resize = () => { bodyView?.beforeUpdate(); setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight }); };
   const keypress = (event: KeyEvent) => {
     const consume = () => { event.preventDefault(); event.stopPropagation(); };
+    if (view().kind === 'recovery' && view().recovery) {
+      const current = view().recovery!;
+      if (event.ctrl && event.shift && event.name === 'c') { consume(); copyRecovery(); return; }
+      consume();
+      if (event.name === 'escape' || event.ctrl && event.name === 'c') { releaseRecovery(); void action({ kind: 'recovery-cancel', requestId: current.requestId }); if (!current.input && !current.settled) void options.exit(); return; }
+      if (event.name === 'pageup' || event.name === 'pagedown') {
+        const page = Math.max(0, Math.min(current.pages - 1, recoveryPage().page + (event.name === 'pageup' ? -1 : 1)));
+        void action({ kind: 'recovery-page', requestId: current.requestId, page }); return;
+      }
+      if (!current.input || recoverySubmitting) return;
+      if (event.name === 'return') { void submitRecovery(); return; }
+      if (event.name === 'backspace') { recoveryInput?.backspace(); setRecoveryLength(recoveryInput?.length ?? 0); return; }
+      if (!event.ctrl && !event.meta && event.sequence && !event.sequence.startsWith('\x1b')) appendRecovery(new TextEncoder().encode(event.sequence));
+      return;
+    }
     if (view().kind === 'skills') { consume(); skillsView?.key(event); return; }
     if (view().displayPaused && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
       consume(); void action({ kind: 'display-retry' }); return;
@@ -449,6 +517,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     }
   };
   const paste = (event: PasteEvent) => {
+    if (view().kind === 'recovery') { event.preventDefault(); event.stopPropagation(); appendRecovery(event.bytes); return; }
     if (!view().field?.secret && view().kind !== 'conversation') return;
     event.preventDefault(); event.stopPropagation();
     if (view().kind === 'conversation') {
@@ -478,11 +547,13 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     });
     return {
       firstFrameId, dispose,
-      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'task-status' | 'process-status' }>) {
+      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'task-status' | 'process-status' | 'recovery-page' }>) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
           const refreshCandidates = view().kind === 'conversation' && message.view.kind === 'conversation';
+          if (message.view.recovery?.requestId !== view().recovery?.requestId) releaseRecovery();
+          if (message.view.recovery?.input && !recoveryInput) recoveryInput = new RecoveryInputBuffer();
           candidates?.resetDelete(); trustControls.reset();
           preserveDraft(); releaseSecret(); bodyView?.beforeUpdate(); setSelected(0); setStatus(''); setView(message.view);
           input.activate(message.view.kind === 'conversation');
@@ -496,6 +567,10 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         } else if (message.type === 'process-status') {
           if (message.status && !validateProcessView(message.status.view)) throw Error('terminal-process-view-invalid');
           setProcessStatus(message.status);
+        } else if (message.type === 'recovery-page') {
+          if (message.requestId !== view().recovery?.requestId) return;
+          if (!Number.isSafeInteger(message.page) || message.page < 0 || message.page >= view().recovery!.pages || Buffer.byteLength(message.text) > 32 * 1024) throw Error('terminal-recovery-page-invalid');
+          setRecoveryPage({ page: message.page, text: message.text });
         } else if (message.type === 'submission') {
           preserveDraft();
           if (input.settle(message)) setStatus(message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。');

@@ -58,6 +58,7 @@ describe("paired recovery backup setup", () => {
         storageMaintenance: fixture.targetStorage,
       });
       let displayedPackage: string | undefined;
+      const ordinary: string[] = [];
       try {
         await runtime.start();
         await runBackupSetupCommand(
@@ -67,9 +68,8 @@ describe("paired recovery backup setup", () => {
             logging: { bind: logs.bind, capacity: createDeviceCapacityRuntime(fixture.sourceHome) },
             secretStore: fixture.sourceSecrets,
             storageMaintenance: fixture.sourceStorage,
-            writeLine: (line) => {
-              if (line.startsWith("恢复包：")) displayedPackage = line.slice("恢复包：".length);
-            },
+            writeLine: (line) => ordinary.push(line),
+            showRecoveryPackage: async (encoded) => { displayedPackage = encoded; },
             readRecoveryPackage: async () => {
               if (version === "v1") return fixture.legacyPackage!;
               if (!displayedPackage) throw new Error("recovery package was not displayed before read-back");
@@ -81,6 +81,10 @@ describe("paired recovery backup setup", () => {
       } finally {
         await runtime.stop();
       }
+
+      expect(displayedPackage).toBeDefined();
+      expect(ordinary.join("\n")).not.toContain(displayedPackage!);
+      if (fixture.legacyPackage) expect(ordinary.join("\n")).not.toContain(fixture.legacyPackage);
 
       const sourceTrust = await fixture.sourceBootstrap.bootstrapStore.loadTrustRecord();
       const targetTrust = await fixture.targetBootstrap.bootstrapStore.loadTrustRecord();
@@ -420,6 +424,7 @@ describe("recovery root public lifecycle", () => {
       storageMaintenance: fixture.targetStorage,
     });
     let currentCode: string | undefined;
+    const ordinary: string[] = [];
     try {
       await initialRuntime.start();
       await runBackupSetupCommand(
@@ -428,9 +433,8 @@ describe("recovery root public lifecycle", () => {
           zhixingHome: fixture.sourceHome,
           secretStore: fixture.sourceSecrets,
           storageMaintenance: fixture.sourceStorage,
-          writeLine: (line) => {
-            if (line.startsWith("恢复包：")) currentCode = line.slice("恢复包：".length);
-          },
+          writeLine: (line) => ordinary.push(line),
+          showRecoveryPackage: async (encoded) => { currentCode = encoded; },
           readRecoveryPackage: async () => {
             if (!currentCode) throw new Error("recovery code was not displayed");
             return currentCode;
@@ -449,9 +453,8 @@ describe("recovery root public lifecycle", () => {
           zhixingHome: fixture.sourceHome,
           secretStore: fixture.sourceSecrets,
           storageMaintenance: fixture.sourceStorage,
-          writeLine: (line) => {
-            if (line.startsWith("新的恢复码：")) currentCode = line.slice("新的恢复码：".length);
-          },
+          writeLine: (line) => ordinary.push(line),
+          showRecoveryPackage: async (encoded) => { currentCode = encoded; },
           readRecoveryPackage: async () => {
             reads += 1;
             if (reads === 1) return oldCode;
@@ -463,6 +466,8 @@ describe("recovery root public lifecycle", () => {
         },
       );
     expect(currentCode).not.toBe(oldCode);
+    expect(ordinary.join("\n")).not.toContain(oldCode);
+    expect(ordinary.join("\n")).not.toContain(currentCode!);
 
     await expect(runRecoveryRootInvalidateCommand(
       { userConfirmed: true },
@@ -520,14 +525,14 @@ describe("recovery root public lifecycle", () => {
     if (!before) throw new Error("source trust projection was not persisted");
 
     let approval: string | undefined;
+    const ordinary: string[] = [];
     await runRecoveryRootApproveResetCommand(
       { userConfirmed: true },
       {
         zhixingHome: fixture.targetHome,
         secretStore: fixture.targetSecrets,
-        writeLine: (line) => {
-          if (line.startsWith("重置确认码：")) approval = line.slice("重置确认码：".length);
-        },
+        writeLine: (line) => ordinary.push(line),
+        showResetApproval: async (encoded) => { approval = encoded; },
         now: () => "2026-08-10T00:20:00.000Z",
       },
     );
@@ -540,11 +545,8 @@ describe("recovery root public lifecycle", () => {
         zhixingHome: fixture.sourceHome,
         secretStore: fixture.sourceSecrets,
         storageMaintenance: fixture.sourceStorage,
-        writeLine: (line) => {
-          if (line.startsWith("新的恢复码：")) {
-            replacementCode = line.slice("新的恢复码：".length);
-          }
-        },
+        writeLine: (line) => ordinary.push(line),
+        showRecoveryPackage: async (encoded) => { replacementCode = encoded; },
         readRecoveryPackage: async () => {
           if (!replacementCode) throw new Error("replacement recovery code was not displayed");
           return replacementCode;
@@ -553,6 +555,10 @@ describe("recovery root public lifecycle", () => {
           openRootLifecycleTarget(fixture, recipientKeyId),
       },
     );
+
+    expect(replacementCode).toBeDefined();
+    expect(ordinary.join("\n")).not.toContain(replacementCode!);
+    expect(ordinary.join("\n")).not.toContain(approval);
 
     const source = await fixture.sourceBootstrap.bootstrapStore.loadTrustProjection();
     const target = await fixture.targetBootstrap.bootstrapStore.loadTrustProjection();

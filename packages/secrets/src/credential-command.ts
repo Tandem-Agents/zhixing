@@ -1,13 +1,17 @@
 import { existsSync } from "node:fs";
-import { fork } from "node:child_process";
+import { fork, type ForkOptions, type SpawnOptions } from "node:child_process";
 import type { CommandRunner } from "./platform-secret-store.js";
 
 /** Isolate slow CreateProcess and inheritable pipe handles from the application's process. */
 export const runCredentialCommand: CommandRunner = (command, args, input) => new Promise((resolve, reject) => {
   const built = new URL("./credential-command-worker.js", import.meta.url);
   const entry = existsSync(built) ? built : new URL("./credential-command-worker.ts", import.meta.url);
-  const worker = fork(entry, [], { execArgv: [], env: sanitizedCredentialCommandEnvironment(), windowsHide: true,
-    stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced" });
+  // Node's fork forwards these options to spawn, including windowsHide.
+  const options: ForkOptions & Pick<SpawnOptions, 'windowsHide'> = {
+    execArgv: [], env: sanitizedCredentialCommandEnvironment(), windowsHide: true,
+    stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced",
+  };
+  const worker = fork(entry, [], options);
   let result: { code: number; stdout: Uint8Array; stderr: Uint8Array } | undefined;
   let failure: Error | undefined;
   worker.on("message", (message: { error: string } | { code: number; stdout: Uint8Array; stderr: Uint8Array }) => {

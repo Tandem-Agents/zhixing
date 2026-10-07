@@ -8,7 +8,9 @@
  */
 
 import chalk from "chalk";
-import { Command, Help, InvalidArgumentError, Option } from "commander";
+import { Command, CommanderError, Help, InvalidArgumentError, Option } from "commander";
+import { terminalCommand, terminalCommandFor, commandUsesManagement } from "./terminal/command-route.js";
+import type { ManagedCommandPorts } from "./terminal/managed-command.js";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,7 +27,10 @@ import { peekEntryLogging } from "./logging/bootstrap.js";
 import { recordFirstSurfaceOutput } from "./logging/runtime-source.js";
 
 let commandLogging: RuntimeLogging | undefined;
-async function exitCommand(code: number): Promise<never> {
+let managedCommand: ManagedCommandPorts | undefined;
+let managedExitCode = 0;
+async function exitCommand(code: number): Promise<void> {
+  if (managedCommand) { managedExitCode = code; return; }
   await commandLogging?.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "command-failed");
   process.exit(code);
 }
@@ -43,6 +48,7 @@ async function renderActionError(error: unknown): Promise<void> {
   ) {
     return;
   }
+  if (managedCommand) { managedCommand.write("stderr", `${error instanceof Error ? error.message : String(error)}\n`); return; }
   const writer = createStdoutWriter();
   try {
     const { renderError } = await import("./render.js");
@@ -162,10 +168,10 @@ async function handleStopAction(options: { maintenance?: boolean } = {}): Promis
     }
     const exitCode =
       result.status === "error" || result.status === "refused" ? 1 : 0;
-    await exitCommand(exitCode);
+    return await exitCommand(exitCode);
   } catch (err) {
     await renderActionError(err);
-    await exitCommand(1);
+    return await exitCommand(1);
   }
 }
 
@@ -183,10 +189,10 @@ async function handleStatusAction(): Promise<void> {
           : report.status === "stopped"
             ? 2
             : 3;
-    await exitCommand(exitCode);
+    return await exitCommand(exitCode);
   } catch (err) {
     await renderActionError(err);
-    await exitCommand(1);
+    return await exitCommand(1);
   }
 }
 
@@ -276,7 +282,7 @@ program
         recordStartupFailure(logging.records, startupResult);
         await connection.dispose();
         await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
-        await exitCommand(startupExit);
+        return await exitCommand(startupExit);
         return;
       }
 
@@ -293,12 +299,13 @@ program
       recordRuntimeFailure(logging.records, err, "foreground-failed");
       await logging.finish("failure", "foreground-failed");
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
 program.hook("preAction", async (_root, action) => {
   if (action.name() !== "help") assertSupportedRuntime();
+  if (managedCommand) { commandLogging = managedCommand.logging; await managedCommand.prepare(commandUsesManagement(action)); return; }
   let top = action;
   const commandPath = [action.name()];
   while (top.parent && top.parent !== program) {
@@ -318,6 +325,7 @@ program.hook("preAction", async (_root, action) => {
 });
 
 program.hook("postAction", async () => {
+  if (managedCommand) return;
   await commandLogging?.finish("success", "completed");
   commandLogging = undefined;
 });
@@ -384,10 +392,10 @@ program
     try {
       const { inspectDefaultLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
       printDoctorReport(await inspectDefaultLocalHealth());
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -402,14 +410,14 @@ appCmd
       await prepareApplicationUninstall();
       console.log("已停止且不再自动启动，程序尚未卸载");
       console.log("下一步：运行 npm uninstall -g @zhixing/cli");
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
-program
+const pairCommand = program
   .command("pair")
   .description("配对另一台知行设备")
   .argument("[invitation]", "另一台设备显示的邀请内容")
@@ -434,6 +442,7 @@ program
       const { runPairCommand } = await import("./serve/mesh-pair-command.js");
       await runPairCommand({
         logging: commandLogging,
+        ...managedCommand?.pair,
         ...(invitation ? { invitation } : {}),
         ...(options.listen ? { listen: options.listen } : {}),
         ...(options.advertise ? { advertise: options.advertise } : {}),
@@ -443,13 +452,14 @@ program
           ? { executorAutoStart: options.executorAutoStart }
           : {}),
       });
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       const { pairingPublicError } = await import("./serve/mesh-pair-command.js");
       await renderActionError(pairingPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(pairCommand);
 
 function parseYesNo(value: string): boolean {
   if (value === "yes") return true;
@@ -475,14 +485,14 @@ deviceCmd
     try {
       const { listRemovableDevices } = await import("./runtime/device-removal-command.js");
       await listRemovableDevices();
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
-deviceCmd
+const deviceRemoveCommand = deviceCmd
   .command("remove")
   .description("永久移除设备及其本机数据")
   .argument("[device-name]", "设备名称；交互终端可省略后按序号选择")
@@ -510,8 +520,8 @@ deviceCmd
           ...(options.dutyDevice ? { targetName: options.dutyDevice } : {}),
           ...(options.recoveryBackup ? { recoveryBackup: true } : {}),
           ...(options.confirm ? { confirmed: true } : {}),
-        });
-        await exitCommand(0);
+        }, managedCommand?.uninstallIO, managedCommand?.uninstall);
+        return await exitCommand(0);
       }
       if (options.dutyDevice || options.recoveryBackup) {
         throw new TypeError("--duty-device 和 --recovery-backup 只可与 --current 同时使用");
@@ -523,15 +533,18 @@ deviceCmd
         ...(deviceName ? { targetName: deviceName } : {}),
         ...(options.mode ? { mode: options.mode } : {}),
         ...(options.confirm ? { confirmed: true } : {}),
-      });
-      await exitCommand(0);
+      }, managedCommand?.deviceIO, managedCommand?.device);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(deviceRemoveCommand, ({ operands, options }) => options.current === true
+  ? options.confirm !== true || options.recoveryBackup === true || !options.dutyDevice
+  : operands.length === 0 || options.confirm !== true || !options.mode, true);
 
-deviceCmd
+const deviceContinueCommand = deviceCmd
   .command("continue")
   .description("继续、取消或按失控设备收束已登记的移除操作")
   .argument("<device-name>", "设备名称")
@@ -547,13 +560,14 @@ deviceCmd
         targetName,
         mode: options.mode,
         ...(options.confirm ? { confirmed: true } : {}),
-      });
-      await exitCommand(0);
+      }, managedCommand?.deviceIO, managedCommand?.device);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(deviceContinueCommand, ({ options }) => options.mode !== "cancel" && options.confirm !== true, true);
 
 deviceCmd
   .command("status")
@@ -563,10 +577,10 @@ deviceCmd
     try {
       const { showDeviceRemovalStatus } = await import("./runtime/device-removal-command.js");
       await showDeviceRemovalStatus(targetName);
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -581,14 +595,14 @@ dutyCmd
     try {
       const { listDutyMigrationTargets } = await import("./runtime/duty-migration-command.js");
       await listDutyMigrationTargets();
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
-dutyCmd
+const dutyMigrateCommand = dutyCmd
   .command("migrate")
   .description("把值班职责迁移到指定设备")
   .argument("[device-name]", "目标设备名称；交互终端可省略后按序号选择")
@@ -596,13 +610,14 @@ dutyCmd
   .action(async (deviceName: string | undefined, options: { prepareOnly?: boolean }) => {
     try {
       const { prepareDutyMigration } = await import("./runtime/duty-migration-command.js");
-      await prepareDutyMigration(deviceName, options.prepareOnly !== true);
-      await exitCommand(0);
+      await prepareDutyMigration(deviceName, options.prepareOnly !== true, managedCommand?.duty);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(dutyMigrateCommand, ({ operands }) => operands.length === 0, true);
 
 dutyCmd
   .command("continue")
@@ -612,10 +627,10 @@ dutyCmd
     try {
       const { continueDutyMigration } = await import("./runtime/duty-migration-command.js");
       await continueDutyMigration(transferId);
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -627,10 +642,10 @@ dutyCmd
     try {
       const { cancelDutyMigration } = await import("./runtime/duty-migration-command.js");
       await cancelDutyMigration(transferId);
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -638,7 +653,7 @@ const backupCmd = program
   .command("backup")
   .description("管理恢复备份");
 
-backupCmd
+const backupSetupCommand = backupCmd
   .command("setup")
   .description("选择独立目录或配对设备并创建恢复备份")
   .option("--directory <path>", "使用物理独立目录")
@@ -649,27 +664,29 @@ backupCmd
       await runBackupSetupCommand({
         ...(options.directory ? { directory: options.directory } : {}),
         ...(options.device ? { pairedDeviceName: options.device } : {}),
-      }, { logging: commandLogging });
-      await exitCommand(0);
+      }, { logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(backupSetupCommand);
 
-backupCmd
+const backupVerifyCommand = backupCmd
   .command("verify")
   .description("从实际目标回读并验证恢复备份")
   .action(async () => {
     try {
       const { runBackupVerifyCommand } = await import("./serve/backup-command.js");
-      await runBackupVerifyCommand({ logging: commandLogging });
-      await exitCommand(0);
+      await runBackupVerifyCommand({ logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(backupVerifyCommand);
 
 backupCmd
   .command("status")
@@ -677,15 +694,15 @@ backupCmd
   .action(async () => {
     try {
       const { runBackupStatusCommand } = await import("./serve/backup-command.js");
-      await runBackupStatusCommand({ logging: commandLogging });
-      await exitCommand(0);
+      await runBackupStatusCommand({ logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
-backupCmd
+const backupRecoverCommand = backupCmd
   .command("recover")
   .description("值班设备丢失后，从完整恢复备份接管值班")
   .option("--directory <path>", "从指定备份目录恢复")
@@ -703,16 +720,17 @@ backupCmd
         ...(options.directory ? { directory: options.directory } : {}),
         ...(options.device ? { pairedDeviceName: options.device } : {}),
         ...(backupNumber !== undefined ? { backupNumber } : {}),
-      }, { logging: commandLogging });
-      await exitCommand(0);
+      }, { logging: commandLogging, ...managedCommand?.recovery });
+      return await exitCommand(0);
     } catch (err) {
       const { disasterRecoveryPublicError } = await import(
         "./serve/disaster-recovery-command.js"
       );
       await renderActionError(disasterRecoveryPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(backupRecoverCommand);
 
 backupCmd
   .command("recover-finish")
@@ -725,14 +743,14 @@ backupCmd
       );
       await runDisasterRecoveryFinishCommand({
         userConfirmedOldDeviceIsolated: options.confirmOldDeviceIsolated === true,
-      }, { logging: commandLogging });
-      await exitCommand(0);
+      }, { logging: commandLogging, ...managedCommand?.recovery });
+      return await exitCommand(0);
     } catch (err) {
       const { disasterRecoveryPublicError } = await import(
         "./serve/disaster-recovery-command.js"
       );
       await renderActionError(disasterRecoveryPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -740,7 +758,7 @@ const recoveryRootCmd = backupCmd
   .command("root")
   .description("轮换、停用或重置恢复码");
 
-recoveryRootCmd
+const rootRotateCommand = recoveryRootCmd
   .command("rotate")
   .description("验证当前恢复码并生成、回读和启用新的恢复码")
   .option("--confirm-save-new-code", "确认现在保存并回读新的恢复码")
@@ -749,14 +767,15 @@ recoveryRootCmd
       const { runRecoveryRootRotateCommand } = await import("./serve/backup-command.js");
       await runRecoveryRootRotateCommand({
         userConfirmed: options.confirmSaveNewCode === true,
-      }, { logging: commandLogging });
-      await exitCommand(0);
+      }, { logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(rootRotateCommand);
 
 recoveryRootCmd
   .command("invalidate")
@@ -765,32 +784,33 @@ recoveryRootCmd
   .action(async (options: { confirmDisable?: boolean }) => {
     try {
       const { runRecoveryRootInvalidateCommand } = await import("./serve/backup-command.js");
-      await runRecoveryRootInvalidateCommand({ userConfirmed: options.confirmDisable === true }, { logging: commandLogging });
-      await exitCommand(0);
+      await runRecoveryRootInvalidateCommand({ userConfirmed: options.confirmDisable === true }, { logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
-recoveryRootCmd
+const rootApproveCommand = recoveryRootCmd
   .command("approve-reset")
   .description("在另一台已加入设备上确认恢复码丢失")
   .option("--confirm-reset", "确认协助当前主设备重置恢复码")
   .action(async (options: { confirmReset?: boolean }) => {
     try {
       const { runRecoveryRootApproveResetCommand } = await import("./serve/backup-command.js");
-      await runRecoveryRootApproveResetCommand({ userConfirmed: options.confirmReset === true }, { logging: commandLogging });
-      await exitCommand(0);
+      await runRecoveryRootApproveResetCommand({ userConfirmed: options.confirmReset === true }, { logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(rootApproveCommand);
 
-recoveryRootCmd
+const rootResetCommand = recoveryRootCmd
   .command("reset")
   .description("由当前主设备使用另一台设备的确认码建立新的恢复码")
   .requiredOption("--approval <code>", "另一台已加入设备生成的重置确认码")
@@ -801,14 +821,15 @@ recoveryRootCmd
       await runRecoveryRootResetCommand({
         approval: options.approval,
         userConfirmed: options.confirmSaveNewCode === true,
-      }, { logging: commandLogging });
-      await exitCommand(0);
+      }, { logging: commandLogging, ...managedCommand?.backup });
+      return await exitCommand(0);
     } catch (err) {
       const { recoveryRootPublicError } = await import("./serve/backup-command.js");
       await renderActionError(recoveryRootPublicError(err));
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+terminalCommand(rootResetCommand);
 
 const workspaceCmd = program
   .command("workspace")
@@ -979,10 +1000,10 @@ const serveCmd = program
         ...(options.managed ? { managed: true } : {}),
         ...(options.autoStart ? { autoStart: true } : {}),
       });
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
 
@@ -1002,12 +1023,33 @@ serveCmd
 
       const { runLogsCommand } = await import("./serve/logs.js");
       await runLogsCommand({ tail: options.tail, lines: options.lines });
-      await exitCommand(0);
+      return await exitCommand(0);
     } catch (err) {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     }
   });
+
+
+export function usesInteractiveTerminal(args: readonly string[]): boolean {
+  return terminalCommandFor(program, args) !== undefined;
+}
+
+export async function runManagedCli(args: readonly string[], ports: ManagedCommandPorts): Promise<number> {
+  if (managedCommand || !terminalCommandFor(program, args)) throw Error('terminal-command-not-admitted');
+  managedCommand = ports; managedExitCode = 0; commandLogging = ports.logging;
+  program.exitOverride();
+  program.configureOutput({ writeOut: text => ports.write('stdout', text), writeErr: text => ports.write('stderr', text) });
+  try {
+    const argv = ['node', 'zhixing', ...args];
+    rejectUnknownCommandPath(argv, program);
+    await program.parseAsync(argv);
+    return managedExitCode;
+  } catch (error) {
+    if (error instanceof CommanderError) return error.exitCode;
+    await renderActionError(error); return 1;
+  } finally { managedCommand = undefined; commandLogging = undefined; }
+}
 
 function isExecutedAsMain(moduleUrl: string, argvEntry: string | undefined): boolean {
   if (!argvEntry) return false;
@@ -1027,7 +1069,7 @@ export async function runCli(progress?: StartupProgressPresenter): Promise<void>
 
     await program.parseAsync(argv).catch(async (err: unknown) => {
       await renderActionError(err);
-      await exitCommand(1);
+      return await exitCommand(1);
     });
   } finally { entryProgress = undefined; }
 }

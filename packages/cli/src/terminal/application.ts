@@ -58,6 +58,8 @@ import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } fro
 import { chooseTerminalSelection, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
 import { TerminalProcessSession } from './process-session.js';
+import { TerminalRecovery } from './recovery.js';
+import { normalizeCliArgs } from '../logging/entry-mode.js';
 import { RpcConfirmationBroker } from '../runtime/rpc-confirmation-broker.js';
 import { projectTerminalConfirmation, resolveTerminalConfirmation } from './confirmation.js';
 import { TerminalCandidatesOwner } from './candidates.js';
@@ -82,8 +84,9 @@ export async function runTerminalApplication(): Promise<void> {
   const transport = new TerminalParentTransport(endpoint);
   // Host self-execution inherits environment: never forward a surface role.
   for (const key of ['ZHIXING_TERMINAL_ROLE', 'ZHIXING_TERMINAL_INSTANCE', 'ZHIXING_TERMINAL_HOME', 'ZHIXING_TERMINAL_DIRECTORY', 'ZHIXING_TERMINAL_DIRECTORY_ID', 'ZHIXING_TERMINAL_PIPE']) delete process.env[key];
-  beginEntryLogging('repl');
-  const application = new TerminalApplication(instance, home, directory, transport, directoryIdentity);
+  const args = normalizeCliArgs(process.argv.slice(2));
+  beginEntryLogging(args.length ? 'independent-command' : 'repl');
+  const application = new TerminalApplication(instance, home, directory, transport, directoryIdentity, args);
   await application.run();
 }
 
@@ -105,6 +108,7 @@ class TerminalApplication {
   readonly #inputHistoryReader: TerminalInputHistoryReader;
   readonly #outputProjection: TerminalOutputProjection;
   readonly #processSession: TerminalProcessSession;
+  readonly #recovery: TerminalRecovery;
   #processStatus?: TerminalProcessStatus;
   #processStatusDirty = false;
   #processStatusSending?: Promise<void>;
@@ -172,10 +176,10 @@ class TerminalApplication {
   #nextView?: { readonly view: View; readonly current?: () => boolean };
 
   #closeDeadline = 0;
-  constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string) {
+  constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string, readonly args: readonly string[] = []) {
     this.#completion = new Promise(resolve => { this.#resolve = resolve; });
     this.#secretStore = createPlatformSecretStore({ homeDir: home, commandRunner: createTerminalCredentialRunner(this.#abort.signal) });
-    this.#logging = beginRuntimeLogging(home, 'repl', () => { /* finite UI notice is published by the application */ }, () => {
+    this.#logging = beginRuntimeLogging(home, args.length ? 'independent-command' : 'repl', () => { /* finite UI notice is published by the application */ }, () => {
       const built = new URL('./logging-store-worker.js', import.meta.url);
       const compiled = existsSync(built);
       return createTerminalLogWorker('log-store', [...(compiled ? [] : ['--import=tsx/esm']),
@@ -184,6 +188,8 @@ class TerminalApplication {
     this.#configPath = getGlobalConfigPath(process.env, home);
     this.#channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done),
       message => this.#receive(message), reason => void this.#close(70, reason));
+    this.#recovery = new TerminalRecovery({ signal: this.#abort.signal, publish: view => this.#publish(view),
+      send: message => this.#channel.send(message, 'body') });
     this.#hosts = new TerminalHostLauncher(this.#channel);
     this.#connection = new CoreHostConnection({ ...defaultCoreHostConnectionDeps(home, this.#logging.records, this.#hosts.start),
       createClient: url => createRpcClient({ url, maximumPendingRequests: 12, maximumQueuedRequestBytes: 1024 * 1024 }),
@@ -315,7 +321,7 @@ class TerminalApplication {
   }
   readonly #message = (value: unknown): void => { this.#channel.accept(value); };
   readonly #disconnected = (): void => { void this.#close(70, 'supervisor-disconnected', false); };
-  readonly #interrupted = (): void => { void this.#close(0, 'application-interrupted'); };
+  readonly #interrupted = (): void => { void this.#close(this.args.length ? 130 : 0, 'application-interrupted'); };
   readonly #uncaught = (error: unknown): void => {
     // Seal work synchronously before recorder or resource cleanup.
     this.#abort.abort(); void this.#close(71, 'application-failed');
@@ -326,7 +332,7 @@ class TerminalApplication {
     if (message.type === 'close') {
       if (!Number.isSafeInteger(message.deadline)) throw Error('terminal-close-deadline');
       this.#closeDeadline = this.#closeDeadline ? Math.min(this.#closeDeadline, message.deadline) : message.deadline;
-      void this.#close(0, 'supervisor-close', false); return;
+      void this.#close(this.args.length ? 130 : 0, 'supervisor-close', false); return;
     }
     if (this.#abort.signal.aborted) return;
     if (message.type === 'assets-result') { this.#assets.receive(message); return; }
@@ -354,13 +360,16 @@ class TerminalApplication {
   }
 
   async #action(action: TerminalAction): Promise<unknown> {
+    if (this.args.length && !['startup', 'exit', 'interrupt', 'configuration-action', 'secret-value', 'selection', 'recovery-part', 'recovery-page', 'recovery-cancel'].includes(action.kind)) throw Error('terminal-command-action-unavailable');
     switch (action.kind) {
       case 'startup':
         if (this.#started) throw Error('terminal-startup-already-requested');
-        this.#started = true; this.#background(() => this.#startup()); return { accepted: true };
+        this.#started = true; this.#background(() => this.args.length ? this.#independentCommand() : this.#startup()); return { accepted: true };
+      case 'recovery-part': case 'recovery-page': case 'recovery-cancel':
+        await this.#recovery.act(action); return { accepted: true };
       case 'retry-connection': this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
       case 'display-retry': this.#background(() => this.#retryDisplay()); return { accepted: true };
-      case 'exit': void this.#close(0, 'user-exit'); return { accepted: true };
+      case 'exit': void this.#close(this.args.length ? 130 : 0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
         if (!this.#editor) throw Error('terminal-editor-not-open');
         await this.#editor.act(action); return { accepted: true };
@@ -448,7 +457,7 @@ class TerminalApplication {
         if (this.#state.activeTurnPromise) { await this.#controller?.abort(); return { accepted: true }; }
         if (this.#controller && await this.#controller.abortBackgroundTask()) {
           this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
-        } else void this.#close(0, 'user-interrupt');
+        } else void this.#close(this.args.length ? 130 : 0, 'user-interrupt');
         return { accepted: true };
       case 'status': this.#background(() => this.#status()); return { accepted: true };
       case 'command-route': return this.#commandRoute(action.name);
@@ -470,6 +479,36 @@ class TerminalApplication {
     }).finally(() => { if (this.#operation === work) this.#operation = undefined; });
     this.#operation = work;
     void work.catch(() => this.#close(70, 'application-operation-undelivered'));
+  }
+
+  async #independentCommand(): Promise<void> {
+    let code = 1;
+    try {
+      await this.#publish({ kind: 'unavailable', title: '知行 · 执行命令', message: '正在执行命令…', busy: true });
+      const { runIndependentCommand } = await import('./independent-command.js');
+      code = await runIndependentCommand(this.args, {
+        home: this.home, signal: this.#abort.signal, logging: this.#logging, secretStore: this.#secretStore,
+        management: this.#management, recovery: this.#recovery,
+        ensureManagement: async () => { this.#abort.signal.throwIfAborted(); await this.#connection.ensure(); this.#abort.signal.throwIfAborted(); },
+        choose: view => this.#choosePage(view), send: message => this.#channel.send(message, 'body'),
+        completeConfiguration: async () => {
+          const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
+          const result = await checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
+            secretStore: this.#secretStore, records: this.#logging.records,
+            edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
+              writers: { save: async edit => { await session.save(edit); } } }, '设备初始配置', ['model', 'messaging']),
+          });
+          this.#abort.signal.throwIfAborted();
+          if (result.kind === 'ready' || result.kind === 'cancelled') return result.kind;
+          throw Error(result.kind === 'secret-store-error' ? '本机凭据仓库不可用。' : '设备配置尚未完成。');
+        },
+      });
+    } catch {
+      if (!this.#abort.signal.aborted) await this.#channel.send({ type: 'command-output', stream: 'stderr', text: '命令未能完成；已接受的操作请按原继续命令查询。\n' }, 'body');
+    } finally {
+      this.#recovery.close();
+      void this.#close(code, code === 0 ? 'command-completed' : 'command-failed');
+    }
   }
 
   async #startup(): Promise<void> {

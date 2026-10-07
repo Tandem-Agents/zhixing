@@ -57,13 +57,13 @@ class ProcessPort extends EventEmitter {
     this.emit('disconnect'); this.emit('exit', code); this.emit('close');
   }
 }
-function fixture(admitted = Promise.resolve()) {
+function fixture(admitted = Promise.resolve(), args: readonly string[] = []) {
   const timeoutExit = vi.fn(), peerFailures: string[] = [], children: ProcessPort[] = [];
   const processPort = { platform: 'win32', off: vi.fn(), exit: timeoutExit };
   const Owner = new Function('process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'terminalWriterDeadline', emitted + '\nreturn TerminalSupervisor;')(
     processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, terminalWriterDeadline,
   ) as new (options: unknown) => SupervisorPort;
-  const supervisor = new Owner({});
+  const supervisor = new Owner({ args });
   const processes = {
     children: new Set<ProcessPort>(), seal: vi.fn(), terminateExecution: vi.fn(), finish: vi.fn(),
     executionState: () => ({ active: 0, creating: 0 }),
@@ -88,6 +88,20 @@ describe('supervisor cooperative role close', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
+  it('preserves interruption when the UI closes an unfinished independent command', async () => {
+    const f = fixture(Promise.resolve(), ['pair']);
+    const sent = f.ui.peer.send({ type: 'exit', code: 0, reason: 'user-exit' });
+    await f.flush(); await sent;
+    expect(await f.finish()).toBe(130);
+  });
+
+  it.each([0, 1])('preserves application outcome %s after an independent result page is dismissed', async code => {
+    const f = fixture(Promise.resolve(), ['backup', 'root', 'approve-reset']);
+    const sent = f.application.peer.send({ type: 'exit', code, reason: 'command-completed' });
+    await f.flush(); await sent;
+    expect(await f.finish()).toBe(code);
+  });
+
   it.each(['ui', 'application'] as const)('acknowledges %s exit without sending that owner a redundant close', async role => {
     const f = fixture(), exiting = f[role], other = role === 'ui' ? f.application : f.ui;
     const acknowledged = exiting.peer.send({ type: 'exit', code: 0, reason: 'user-exit' });
@@ -105,6 +119,18 @@ describe('supervisor cooperative role close', () => {
     for (const child of [f.application, f.ui]) expect(child.received).toEqual([expect.objectContaining({ type: 'close' })]);
     let completed = false; void f.completion.then(() => { completed = true; });
     await f.flush(); expect(completed).toBe(false);
+    expect(await f.finish()).toBe(0);
+  });
+
+  it('forwards background task status without replacing an active confirmation page', async () => {
+    const f = fixture();
+    const confirmation: TerminalMessage = { type: 'view', view: { generation: 1, kind: 'confirmation', title: 'Confirm', requestId: 'confirmation-1', choices: [{ id: 'reject', label: 'Reject' }] } };
+    const task: TerminalMessage = { type: 'task-status', status: { summary: { conversationId: 'conversation-1', state: 'ready', text: 'Task (0/1)' } } };
+    const opening = f.application.peer.send(confirmation); await f.flush(); await opening;
+    const background = f.application.peer.send(task); await f.flush(); await background;
+    expect(f.ui.received).toEqual([confirmation, task]);
+    expect(f.peerFailures).toEqual([]);
+    void f.supervisor.fixtureClose(); await f.flush();
     expect(await f.finish()).toBe(0);
   });
 

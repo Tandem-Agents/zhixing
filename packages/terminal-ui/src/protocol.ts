@@ -49,6 +49,8 @@ export type TerminalMessage =
   | { readonly type: "view"; readonly view: TerminalView }
   | { readonly type: 'task-status'; readonly status: TerminalTaskStatus }
   | { readonly type: 'process-status'; readonly status?: TerminalProcessStatus }
+  | { readonly type: 'recovery-page'; readonly requestId: string; readonly page: number; readonly text: string }
+  | { readonly type: 'command-output'; readonly stream: 'stdout' | 'stderr'; readonly text: string }
   | { readonly type: "chunk"; readonly stream: string; readonly index: number; readonly text: string; readonly final: boolean }
   | { readonly type: "invalidate"; readonly requestId: string }
   | { readonly type: "assets"; readonly id: number; readonly operation:
@@ -65,6 +67,9 @@ export type TerminalMessage =
 
 /** Finite user intents; neither arbitrary RPC methods nor filesystem paths. */
 export type TerminalAction =
+  | { readonly kind: 'recovery-part'; readonly requestId: string; readonly index: number; readonly encoded: string; readonly final: boolean }
+  | { readonly kind: 'recovery-page'; readonly requestId: string; readonly page: number }
+  | { readonly kind: 'recovery-cancel'; readonly requestId: string }
   | { readonly kind: "startup" | "retry-connection" | "display-retry" | "history-open" | "history-close" | "history-previous" | "rubric-resume" | "confirmation-retry" | "abort" | "interrupt" | "exit" | "status" }
   | { readonly kind: "command"; readonly name: string; readonly argument: string }
   | { readonly kind: 'command-route'; readonly name: string }
@@ -146,7 +151,7 @@ export interface TerminalProcessStatus {
 }
 export interface TerminalView {
   readonly generation: number;
-  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills';
+  readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills' | 'recovery';
   readonly title: string;
   readonly conversationId?: string;
   readonly message?: string;
@@ -159,6 +164,7 @@ export interface TerminalView {
   readonly connected?: boolean;
   readonly busy?: boolean;
   readonly skills?: TerminalSkillsView;
+  readonly recovery?: { readonly requestId: string; readonly input: boolean; readonly pages: number; readonly settled?: boolean };
 }
 
 export function terminalEnvelope(value: unknown, instance: string): value is TerminalEnvelope {

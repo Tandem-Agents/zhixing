@@ -87,7 +87,7 @@ import {
 import type { BackupTargetConfigurationRepository } from "./backup-target-config.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
-import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import {
   createFileMeshPairingContinuationRepository,
 } from "./mesh-pairing-continuation.js";
@@ -113,6 +113,7 @@ class PairingPublicFacingError extends Error {
 }
 
 export interface PairCommandOptions {
+  readonly signal?: AbortSignal;
   readonly logging?: RuntimeLogContext;
   readonly invitation?: string;
   readonly listen?: string;
@@ -122,21 +123,28 @@ export interface PairCommandOptions {
   readonly roles?: readonly DeviceRole[];
   readonly zhixingHome?: string;
   readonly secretStore?: SecretStorePort;
+  /** Production callers may inject the platform store without skipping onboarding. */
+  readonly composition?: "production" | "isolated";
   readonly writeLine?: (line: string) => void;
+  readonly showPairingInvitation?: (display: {
+    readonly invitation: string;
+    readonly qr: string;
+  }) => Promise<void>;
+  /** Dedicated secret display and actual read-back, including an empty pending display. */
   readonly confirmRecoveryPackage?: (recoveryPackage: string) => Promise<string>;
   readonly executorAutoStart?: boolean;
   readonly promptExecutorAutoStart?: () => Promise<boolean>;
   readonly reconcileManagedService?: (
     trigger: "pairing-issuer-committed" | "pairing-joiner-committed",
   ) => Promise<void>;
-  /** Isolated composition seam for the target-device configuration step. */
+  /** Reuses the caller's target-device configuration interaction. */
   readonly completeDeviceConfiguration?: () => Promise<"ready" | "cancelled">;
-  /** Isolated composition seam for the final duty-device choice. */
+  /** Reuses the caller's final duty-device choice. */
   readonly selectDutyDevice?: (input: {
     readonly currentDeviceName: string;
     readonly pairedDeviceName: string;
   }) => Promise<"current" | "paired">;
-  /** Isolated composition seam for the existing planned migration command. */
+  /** Reuses the existing planned migration command and caller-owned connection. */
   readonly migrateDutyTo?: (deviceName: string) => Promise<void>;
 }
 
@@ -221,6 +229,8 @@ interface RecoveryOnboardingCompleteMessage {
 
 /** Runs the same executable as pairing issuer or joiner without loading the agent runtime. */
 export async function runPairCommand(options: PairCommandOptions = {}): Promise<void> {
+  options.signal?.throwIfAborted();
+  const composition = options.composition ?? (options.secretStore ? "isolated" : "production");
   const zhixingHome = options.zhixingHome ?? getZhixingHome();
   if (options.invitation) {
     assertProductionPairingInvitation(decodeInvitation(options.invitation));
@@ -259,7 +269,8 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     if (options.invitation || continuation?.side === "joiner") {
       await joinPairing({
         ...options,
-        isolatedComposition: options.secretStore !== undefined,
+        composition,
+        isolatedComposition: composition === "isolated",
         ...(options.invitation ? { invitation: options.invitation } : {}),
         zhixingHome,
         secretStore: routedSecretStore,
@@ -275,7 +286,8 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
     }
     await issuePairing({
       ...options,
-      isolatedComposition: options.secretStore !== undefined,
+      composition,
+      isolatedComposition: composition === "isolated",
       zhixingHome,
       backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
       secretStore: routedSecretStore,
@@ -302,9 +314,9 @@ async function reconcileAfterPairing(
     await options.reconcileManagedService(trigger);
     return;
   }
-  // A caller-supplied SecretStore denotes an isolated embedding/test composition.
-  // Production CLI pairing always uses the platform store and performs host reconcile.
-  if (!options.secretStore) await reconcileCurrentManagedService(trigger);
+  // Preserve existing isolated embeddings while allowing the production root to own its store.
+  const composition = options.composition ?? (options.secretStore ? "isolated" : "production");
+  if (composition === "production") await reconcileCurrentManagedService(trigger);
 }
 
 /** Renders the one invitation as both a scannable terminal QR and copyable text. */
@@ -317,11 +329,16 @@ export async function renderPairingInvitation(
       small: true,
       errorCorrectionLevel: "L",
     }),
+  showPairingInvitation?: PairCommandOptions["showPairingInvitation"],
 ): Promise<void> {
   const qr = await renderQr(invitation);
   writeLine("用另一台设备扫描下面的二维码，或复制二维码下方的邀请内容。");
-  writeLine(qr.trimEnd());
-  writeLine(`邀请内容：${invitation}`);
+  if (showPairingInvitation) {
+    await showPairingInvitation({ invitation, qr: qr.trimEnd() });
+  } else {
+    writeLine(qr.trimEnd());
+    writeLine(`邀请内容：${invitation}`);
+  }
 }
 
 /** Converts internal pairing failures into one safe, actionable public message. */
@@ -379,12 +396,16 @@ export async function activateInitialRecoveryRoot(input: {
   const recoveryPackage = recoveryRoot ? encodeRecoveryPackage(recoveryRoot) : "";
   if (recoveryPackage) {
     input.writeLine("这是你的恢复码，抄下来放在安全的地方：");
-    input.writeLine(recoveryPackage);
+    if (!input.confirmRecoveryPackage) input.writeLine(recoveryPackage);
   } else {
     input.writeLine("请粘贴上次已经保存的恢复码，继续完成设备配对。");
   }
-  const decoded = input.confirmRecoveryPackage
-    ? decodeRecoveryPackage(await input.confirmRecoveryPackage(recoveryPackage))
+  const readBack = input.confirmRecoveryPackage
+    ? await input.confirmRecoveryPackage(recoveryPackage)
+    : undefined;
+  if (readBack !== undefined) assertRecoveryPackageInputLimit(readBack);
+  const decoded = readBack !== undefined
+    ? decodeRecoveryPackage(readBack)
     : await readRecoveryPackageFromTty({
         prompt: "请粘贴完整恢复码，确认你已经保存：",
       });
@@ -651,7 +672,8 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       invitation = restoreInvitation(durableInvitation, material.secret);
     }
     assertProductionPairingOffer(material.offer);
-    await renderPairingInvitation(encodeInvitation(invitation), input.writeLine);
+    await renderPairingInvitation(encodeInvitation(invitation), input.writeLine,
+      undefined, input.showPairingInvitation);
 
     const acceptUntil = committedReplay
       ? new Date(Date.now() + PAIRING_TIMEOUT_MS).toISOString()
@@ -661,6 +683,7 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
       relay,
       invitation.rendezvousKey,
       acceptUntil,
+      input.signal,
     );
     const coordinator = new PairingCommitCoordinator(
       input.store.pairingAuthority(),
@@ -1003,7 +1026,7 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
   let peerDeviceId: string | undefined;
   let commitPossible = false;
   try {
-    socket = await connectPairingInvitation(invitation);
+    socket = await connectPairingInvitation(invitation, undefined, input.signal);
     peerDeviceId = invitation.issuer.deviceId;
     if (!invitation.qrSecret) throw new Error("High-entropy pairing invitation has no secret");
     const join: PairingJoin = createQrPairingJoin(invitation.offer, identity, invitation.qrSecret);
@@ -1177,6 +1200,7 @@ async function resumeJoinerPairing(input: {
   const socket = await connectPairingInvitation(
     input.invitation,
     new Date(Date.now() + PAIRING_TIMEOUT_MS).toISOString(),
+    input.input.signal,
   );
   try {
     await sendPairingFrame(
@@ -1241,7 +1265,8 @@ async function completeJoinerBootstrap(input: {
     explicit: input.input.executorAutoStart,
     persisted: config.mesh?.executorAutoStart,
     isolated: input.input.isolatedComposition,
-    interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    interactive: input.input.promptExecutorAutoStart !== undefined ||
+      (process.stdin.isTTY === true && process.stdout.isTTY === true),
     prompt: () => requestExecutorAutoStart(input.input),
   });
   const reachability = await resolveJoinerAnchorReachability({
@@ -1629,8 +1654,10 @@ async function acceptPairingConnection(
   relay: { host: string; port: number } | undefined,
   rendezvousKey: string,
   expiresAt: string,
+  cancellation?: AbortSignal,
 ): Promise<Socket> {
-  const deadline = AbortSignal.timeout(Math.max(1, Date.parse(expiresAt) - Date.now()));
+  const timeout = AbortSignal.timeout(Math.max(1, Date.parse(expiresAt) - Date.now()));
+  const deadline = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
   const candidates: PairingConnectionCandidate[] = [];
   if (server) {
     candidates.push(createPairingConnectionCandidate(async (signal) => {
@@ -1715,8 +1742,10 @@ function waitForPairingPeer(socket: Socket, signal: AbortSignal): Promise<void> 
 async function connectPairingInvitation(
   invitation: PairingInvitation,
   expiresAt = invitation.offer.expiresAt,
+  cancellation?: AbortSignal,
 ): Promise<Socket> {
-  const signal = AbortSignal.timeout(Math.max(1, Date.parse(expiresAt) - Date.now()));
+  const timeout = AbortSignal.timeout(Math.max(1, Date.parse(expiresAt) - Date.now()));
+  const signal = cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
   const errors: unknown[] = [];
   for (const transport of invitation.transports) {
     try {

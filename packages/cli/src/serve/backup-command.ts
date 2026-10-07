@@ -72,7 +72,7 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
-import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
 import type { PairedRecoveryRootActivation } from "./paired-checkpoint-target.js";
@@ -88,6 +88,9 @@ export interface BackupCommandOptions {
   readonly secretStore?: SecretStorePort;
   readonly writeLine?: (line: string) => void;
   readonly readRecoveryPackage?: () => Promise<string>;
+  /** Secret output is kept out of the ordinary command result sink. */
+  readonly showRecoveryPackage?: (encoded: string) => Promise<void>;
+  readonly showResetApproval?: (encoded: string) => Promise<void>;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly now?: () => string;
   readonly openRecoveryTarget?: (
@@ -154,7 +157,9 @@ export async function runRecoveryRootApproveResetCommand(
     throw new Error("恢复根共同确认返回了错误的产品结果");
   }
   const writeLine = options.writeLine ?? createStdoutWriter().line;
-  writeLine(`重置确认码：${encodeResetApproval(outcome.approval)}`);
+  const encoded = encodeResetApproval(outcome.approval);
+  if (options.showResetApproval) await options.showResetApproval(encoded);
+  else writeLine(`重置确认码：${encoded}`);
   writeLine("请把确认码交给当前主设备，并立即在那里完成恢复码重置。");
 }
 
@@ -290,7 +295,7 @@ function createBackupRecoveryAdministration(
             checkpointRevision: context.trust.chainHead.eventDigest,
           }
         : { kind: "missing" as const },
-    prepareInitialRoot: () => prepareInitialRoot(context, options.readRecoveryPackage),
+    prepareInitialRoot: () => prepareInitialRoot(context, options.readRecoveryPackage, options.showRecoveryPackage),
     preparedRootRecipientKeyId: (prepared) => prepared.checkpoint.envelope.recipientKeyId,
     selectTarget: (binding) => context.backupTargets.select(toBackupTargetBinding(binding)),
     withDirectoryTarget: async (directory, use) => {
@@ -335,6 +340,7 @@ function createBackupRecoveryAdministration(
         session.target,
         options.readRecoveryPackage,
         prepared,
+        options.showRecoveryPackage,
       );
       return { legacyTrustOnly: established.legacyTrustOnly };
     },
@@ -811,10 +817,12 @@ interface PreparedInitialRoot {
 async function prepareInitialRoot(
   context: BackupContext,
   readRecoveryPackage?: () => Promise<string>,
+  showRecoveryPackage?: (encoded: string) => Promise<void>,
 ): Promise<PreparedInitialRoot> {
   const root = RecoveryRoot.generate();
   const recoveryPackage = encodeRecoveryPackage(root);
-  context.writeLine(`恢复包：${recoveryPackage}`);
+  if (showRecoveryPackage) await showRecoveryPackage(recoveryPackage);
+  else context.writeLine(`恢复包：${recoveryPackage}`);
   const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
   if (decoded.version === 1) {
     if (decoded.checkpoint.envelope.manifest.purpose.kind !== "root-activation") {
@@ -868,8 +876,9 @@ async function establishInitialRoot(
   target: RetirablePublishedRecoveryCheckpointTarget,
   readRecoveryPackage?: () => Promise<string>,
   prepared?: PreparedInitialRoot,
+  showRecoveryPackage?: (encoded: string) => Promise<void>,
 ): Promise<PreparedInitialRoot> {
-  const initial = prepared ?? await prepareInitialRoot(context, readRecoveryPackage);
+  const initial = prepared ?? await prepareInitialRoot(context, readRecoveryPackage, showRecoveryPackage);
   await new RecoveryActivationCoordinator(context.store.bootstrapAuthority()).activatePrepared({
     current: context.projection,
     plan: initial.plan,
@@ -1089,7 +1098,10 @@ async function sourceDevice(store: FileMeshBootstrapStore): Promise<string> {
 async function readDecodedRecoveryPackage(
   injected?: () => Promise<string>,
 ): Promise<ReturnType<typeof decodeRecoveryPackage>> {
-  return injected ? decodeRecoveryPackage(await injected()) : readRecoveryPackageFromTty();
+  if (!injected) return readRecoveryPackageFromTty();
+  const encoded = await injected();
+  assertRecoveryPackageInputLimit(encoded);
+  return decodeRecoveryPackage(encoded);
 }
 
 function currentIssuerIdentity(context: BackupContext): DeviceIdentity {
@@ -1109,7 +1121,9 @@ async function prepareReplacementRoot(
   readonly readBack: ReturnType<typeof rootMaterial>;
 }> {
   const generated = RecoveryRoot.generate();
-  context.writeLine(`新的恢复码：${encodeRecoveryPackage(generated)}`);
+  const encoded = encodeRecoveryPackage(generated);
+  if (options.showRecoveryPackage) await options.showRecoveryPackage(encoded);
+  else context.writeLine(`新的恢复码：${encoded}`);
   const readBack = requireCurrentRecoveryPackage(
     await readDecodedRecoveryPackage(options.readRecoveryPackage),
   );

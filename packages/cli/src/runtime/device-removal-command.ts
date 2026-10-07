@@ -20,18 +20,29 @@ export interface DeviceRemovalSelectionIO {
   chooseMode(conversations: readonly string[]): Promise<"transfer" | "destroy" | "cancel">;
 }
 
-export async function listRemovableDevices(): Promise<void> {
+export type DeviceRemovalManagement = Pick<RpcManagementFacade,
+  "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus">;
+
+export interface DeviceRemovalCommandOptions {
+  /** Borrowed from the caller; this command never ensures or disposes it. */
+  readonly management?: DeviceRemovalManagement;
+  readonly writeLine?: (line: string) => void;
+  readonly signal?: AbortSignal;
+}
+
+export async function listRemovableDevices(options: DeviceRemovalCommandOptions = {}): Promise<void> {
+  const writeLine = options.writeLine ?? console.log;
   await withManagement(async (management) => {
     const devices = await management.deviceList();
     if (devices.length === 0) {
-      console.log("当前没有可移除的已配对设备。");
+      writeLine("当前没有可移除的已配对设备。");
       return;
     }
-    console.log("已配对设备：");
+    writeLine("已配对设备：");
     for (const device of devices) {
-      console.log(`- ${device.displayName}：${device.reachable ? "在线" : "当前离线"}`);
+      writeLine(`- ${device.displayName}：${device.reachable ? "在线" : "当前离线"}`);
     }
-  });
+  }, options);
 }
 
 export async function removeDevice(input: {
@@ -39,11 +50,12 @@ export async function removeDevice(input: {
   readonly mode?: Exclude<DeviceRemovalMode, "cancel">;
   readonly confirmed?: boolean;
   readonly permanent?: boolean;
-}, io: DeviceRemovalSelectionIO = defaultSelectionIO()): Promise<void> {
+}, io?: DeviceRemovalSelectionIO, options: DeviceRemovalCommandOptions = {}): Promise<void> {
   if (input.permanent !== true) {
     throw new TypeError("永久移除设备必须显式提供 --permanent");
   }
-  await withManagement((management) => removeDeviceWithManagement(management, input, io));
+  await withManagement((management) => removeDeviceWithManagement(management, input,
+    io ?? defaultSelectionIO(options.writeLine, options.signal), options), options);
 }
 
 export async function removeDeviceWithManagement(
@@ -58,8 +70,12 @@ export async function removeDeviceWithManagement(
     readonly permanent?: boolean;
   },
   io: DeviceRemovalSelectionIO,
+  options: Pick<DeviceRemovalCommandOptions, "writeLine" | "signal"> = {},
 ): Promise<void> {
+    options.signal?.throwIfAborted();
+    const writeLine = options.writeLine ?? console.log;
     const device = await selectRemovalTarget(management, input.targetName, io);
+    options.signal?.throwIfAborted();
     const operationId = createDeviceRemovalOperationId();
     const requestId = `request:${operationId}`;
     let acceptStarted = false;
@@ -71,7 +87,8 @@ export async function removeDeviceWithManagement(
         operationId,
         targetName: device.displayName,
       });
-      console.log(`“${device.displayName}”的移除操作已安全登记。`);
+      writeLine(`“${device.displayName}”的移除操作已安全登记。`);
+      options.signal?.throwIfAborted();
       let mode: DeviceRemovalMode | undefined = input.mode;
       if (!mode) {
         mode = preflight.conversations.length === 0
@@ -80,11 +97,12 @@ export async function removeDeviceWithManagement(
             ? await io.chooseMode(preflight.conversations)
             : undefined;
       }
+      options.signal?.throwIfAborted();
       if (!mode) {
         throw new TypeError("非交互环境必须用 --mode transfer、--mode destroy 或 --mode lost 明确处理方式");
       }
       if (mode === "cancel") {
-        renderState(await cancelAcceptedRemoval(management, device.displayName, operationId));
+        renderState(await cancelAcceptedRemoval(management, device.displayName, operationId), writeLine);
         return;
       }
       const work = preflight.conversations.length === 0
@@ -100,11 +118,12 @@ export async function removeDeviceWithManagement(
         input.confirmed,
         `永久移除设备“${device.displayName}”。${work}；${consequence}。继续吗？`,
       );
+      options.signal?.throwIfAborted();
       irreversibleDecisionStarted = true;
       await continueDeviceRemovalWithManagement(management, {
         targetName: device.displayName,
         mode,
-      }, true);
+      }, true, options);
     } catch (error) {
       if (acceptStarted && !irreversibleDecisionStarted) {
         try {
@@ -114,7 +133,7 @@ export async function removeDeviceWithManagement(
             operationId,
           );
           if (error instanceof DeviceRemovalCancelled) {
-            renderState(cancelled);
+            renderState(cancelled, writeLine);
             return;
           }
         } catch (cancelError) {
@@ -132,10 +151,13 @@ export async function continueDeviceRemoval(input: {
   readonly targetName: string;
   readonly mode: DeviceRemovalMode;
   readonly confirmed?: boolean;
-}, io: DeviceRemovalSelectionIO = defaultSelectionIO()): Promise<void> {
+}, io?: DeviceRemovalSelectionIO, options: DeviceRemovalCommandOptions = {}): Promise<void> {
+  options.signal?.throwIfAborted();
+  const selection = io ?? defaultSelectionIO(options.writeLine, options.signal);
+  const writeLine = options.writeLine ?? console.log;
   if (input.mode === "destroy" || input.mode === "lost") {
     await requireConfirmation(
-      io,
+      selection,
       input.confirmed,
       input.mode === "lost"
         ? "目标设备本地数据仍不可验证或擦除；只撤销访问。继续吗？"
@@ -144,14 +166,14 @@ export async function continueDeviceRemoval(input: {
   }
   await withManagement(async (management) => {
     if (input.mode === "cancel") {
-      renderState(await management.deviceContinue(input));
+      renderState(await management.deviceContinue(input), writeLine);
       return;
     }
     await continueDeviceRemovalWithManagement(management, {
       targetName: input.targetName,
       mode: input.mode,
-    }, false);
-  });
+    }, false, options);
+  }, options);
 }
 
 export async function continueDeviceRemovalWithManagement(
@@ -161,26 +183,31 @@ export async function continueDeviceRemovalWithManagement(
     readonly mode: Exclude<DeviceRemovalMode, "cancel">;
   },
   knownAccepted: boolean,
+  options: Pick<DeviceRemovalCommandOptions, "writeLine" | "signal"> = {},
 ): Promise<void> {
+  options.signal?.throwIfAborted();
+  const writeLine = options.writeLine ?? console.log;
   try {
-    renderState(await management.deviceContinue(input));
+    renderState(await management.deviceContinue(input), writeLine);
     return;
   } catch {
-    await renderDecisionDispatchFailure(management, input.targetName, input.mode, knownAccepted);
+    await renderDecisionDispatchFailure(management, input.targetName, input.mode, knownAccepted, writeLine);
   }
 }
 
 export async function showDeviceRemovalStatus(
   targetName: string,
+  options: DeviceRemovalCommandOptions = {},
 ): Promise<void> {
+  const writeLine = options.writeLine ?? console.log;
   await withManagement(async (management) => {
     const state = await management.deviceStatus({ targetName });
     if (!state) {
-      console.log("没有找到该设备移除操作。");
+      writeLine("没有找到该设备移除操作。");
       return;
     }
-    renderState(state);
-  });
+    renderState(state, writeLine);
+  }, options);
 }
 
 export async function selectRemovalTarget(
@@ -215,7 +242,7 @@ export function createDeviceRemovalOperationId(now = Date.now()): string {
   return `remove-${now.toString(36)}-${randomBytes(10).toString("base64url")}`;
 }
 
-function renderState(state: DeviceRemovalState): void {
+function renderState(state: DeviceRemovalState, writeLine: (line: string) => void): void {
   const label: Record<DeviceRemovalState["phase"], string> = {
     "waiting-for-device": "正在等待设备重新上线",
     "needs-conversation-decision": "需先处理目标设备上的本机对话",
@@ -227,11 +254,11 @@ function renderState(state: DeviceRemovalState): void {
       : "设备已安全移除",
     cancelled: "设备移除已取消，原有准入已恢复",
   };
-  console.log(label[state.phase]);
+  writeLine(label[state.phase]);
   if (state.conversations.length > 0) {
-    console.log(`本机对话：${state.conversations.join("、")}`);
+    writeLine(`本机对话：${state.conversations.join("、")}`);
   }
-  for (const action of state.credentialActions) console.log(`下一步：${action}`);
+  for (const action of state.credentialActions) writeLine(`下一步：${action}`);
 }
 
 async function renderDecisionDispatchFailure(
@@ -239,6 +266,7 @@ async function renderDecisionDispatchFailure(
   targetName: string,
   mode: Exclude<DeviceRemovalMode, "cancel">,
   knownAccepted: boolean,
+  writeLine: (line: string) => void,
 ): Promise<void> {
   let state: DeviceRemovalState | null;
   try {
@@ -251,7 +279,7 @@ async function renderDecisionDispatchFailure(
   }
   if (!state) {
     if (knownAccepted) {
-      renderPendingDecisionAction(targetName, mode);
+      renderPendingDecisionAction(targetName, mode, writeLine);
       return;
     }
     throw new Error(
@@ -264,17 +292,18 @@ async function renderDecisionDispatchFailure(
     state.phase === "waiting-for-device" ||
     state.phase === "needs-conversation-decision"
   ) {
-    renderPendingDecisionAction(targetName, mode);
+    renderPendingDecisionAction(targetName, mode, writeLine);
     return;
   }
-  renderState(state);
+  renderState(state, writeLine);
 }
 
 function renderPendingDecisionAction(
   targetName: string,
   mode: Exclude<DeviceRemovalMode, "cancel">,
+  writeLine: (line: string) => void,
 ): void {
-  console.log(
+  writeLine(
     `移除已登记，但处理方式尚未确认。请运行 ` +
       `\`zz device continue <设备名称> --mode ${mode}\` 继续，` +
       `或将 mode 改为 cancel 取消；<设备名称> 填写“${targetName}”。`,
@@ -318,12 +347,12 @@ async function cancelAcceptedRemoval(
   throw firstError;
 }
 
-function defaultSelectionIO(): DeviceRemovalSelectionIO {
+function defaultSelectionIO(writeLine: (line: string) => void = console.log, signal?: AbortSignal): DeviceRemovalSelectionIO {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   const question = async (prompt: string): Promise<string> => {
     const reader = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      return (await reader.question(prompt)).trim();
+      return (await reader.question(prompt, { signal })).trim();
     } finally {
       reader.close();
     }
@@ -331,16 +360,16 @@ function defaultSelectionIO(): DeviceRemovalSelectionIO {
   return {
     interactive,
     async selectIndex(devices) {
-      console.log("请选择要移除的设备：");
+      writeLine("请选择要移除的设备：");
       devices.forEach((device, index) =>
-        console.log(`${index + 1}. ${device.displayName}（${device.reachable ? "在线" : "离线"}）`));
+        writeLine(`${index + 1}. ${device.displayName}（${device.reachable ? "在线" : "离线"}）`));
       return Number(await question("序号：")) - 1;
     },
     async confirm(message) {
       return (await question(`${message} 输入“确认”继续：`)) === "确认";
     },
     async chooseMode(conversations) {
-      console.log(`目标设备仍有 ${conversations.length} 个本机对话：${conversations.join("、")}`);
+      writeLine(`目标设备仍有 ${conversations.length} 个本机对话：${conversations.join("、")}`);
       const answer = await question("输入 1 收编到当前值班设备，2 永久删除，0 取消：");
       if (answer === "1") return "transfer";
       if (answer === "2") return "destroy";
@@ -350,11 +379,15 @@ function defaultSelectionIO(): DeviceRemovalSelectionIO {
 }
 
 async function withManagement<T>(
-  operation: (management: RpcManagementFacade) => Promise<T>,
+  operation: (management: DeviceRemovalManagement) => Promise<T>,
+  options: DeviceRemovalCommandOptions,
 ): Promise<T> {
+  options.signal?.throwIfAborted();
+  if (options.management) return operation(options.management);
   const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps(getZhixingHome()));
   try {
     await coreHost.ensure();
+    options.signal?.throwIfAborted();
     return await operation(new RpcManagementFacade(coreHost));
   } finally {
     await coreHost.dispose();

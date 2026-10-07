@@ -31,7 +31,7 @@ function request(action: TerminalAction): Promise<unknown> {
     void admission.then(() => {
       abort.signal.throwIfAborted();
       if (!pending.has(id)) return;
-      return channel.send({ type: 'request', id, action }, action.kind === 'input-part' ? 'body' : 'control');
+      return channel.send({ type: 'request', id, action }, action.kind === 'input-part' || action.kind === 'recovery-part' ? 'body' : 'control');
     }).catch(error => {
       clearTimeout(timer); pending.delete(id); reject(error);
     });
@@ -76,7 +76,7 @@ function receive(message: TerminalMessage): void {
       if (message.error) operation.reject(Error(message.error)); else operation.resolve(message.value);
       return;
     }
-    case 'view': case 'chunk': case 'invalidate': case 'display-page': case 'submission': case 'task-status': case 'process-status': root?.receive(message); return;
+    case 'view': case 'chunk': case 'invalidate': case 'display-page': case 'submission': case 'task-status': case 'process-status': case 'recovery-page': root?.receive(message); return;
     default: throw Error('terminal-unexpected-message');
   }
 }

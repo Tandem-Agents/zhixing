@@ -52,7 +52,7 @@ import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
-import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
@@ -204,13 +204,18 @@ async function admitDisasterRecoveryCandidate(
         }
       },
       readRecoveryRoot: async () => {
+        signal.throwIfAborted();
         context.writeLine("请输入恢复包以验证备份；输入内容不会显示。");
         const recoveryPackages = await import("@zhixing/mesh/recovery-package");
+        const encoded = options.readRecoveryPackage ? await options.readRecoveryPackage() : undefined;
+        signal.throwIfAborted();
+        if (encoded !== undefined) assertRecoveryPackageInputLimit(encoded);
         const decoded = recoveryPackages.requireCurrentRecoveryPackage(
-          options.readRecoveryPackage
-            ? recoveryPackages.decodeRecoveryPackage(await options.readRecoveryPackage())
-            : await readRecoveryPackageFromTty(),
+          encoded !== undefined
+            ? recoveryPackages.decodeRecoveryPackage(encoded)
+            : await readRecoveryPackageFromTty({ signal }),
         );
+        signal.throwIfAborted();
         const identity = decoded.root.publicIdentity();
         return {
           root: decoded.root,

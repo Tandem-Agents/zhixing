@@ -25,6 +25,7 @@ const SECRET_KINDS = new Set<SecretRef["kind"]>([
   "mcp",
   "device-key",
   "webhook",
+  "rendezvous",
 ]);
 
 interface VaultEnvelope {

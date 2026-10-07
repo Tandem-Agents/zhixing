@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({
   calls: [] as string[],
   issuerDeviceId: "lost-issuer",
+  readAdmissionRoot: false,
   installation: undefined as undefined | {
     installation: {
       transferId: string;
@@ -36,8 +37,10 @@ vi.mock("@zhixing/core/backup-recovery/application", async () => {
   return {
     ...actual,
     BackupRecoveryDisasterAdmissionApplicationService: class {
+      constructor(_state: unknown, private readonly ports: { readRecoveryRoot(): Promise<unknown> }) {}
       async admit(): Promise<typeof fixture.admission> {
         fixture.calls.push("admit");
+        if (fixture.readAdmissionRoot) await this.ports.readRecoveryRoot();
         return fixture.admission;
       }
     },
@@ -127,8 +130,34 @@ describe("disaster recovery command lifecycle adapter", () => {
   beforeEach(() => {
     fixture.calls.length = 0;
     fixture.issuerDeviceId = "lost-issuer";
+    fixture.readAdmissionRoot = false;
     fixture.installation = undefined;
     fixture.signAbort.mockClear();
+  });
+
+  it("rejects oversized injected recovery input before preparing any recovery state", async () => {
+    fixture.readAdmissionRoot = true;
+    const target = { prepareAndImport: vi.fn(), commit: vi.fn() };
+    const lines: string[] = [];
+    await expect(runDisasterRecoveryCommand({ directory: "X:/backup" }, {
+      ...options(target, lines), readRecoveryPackage: async () => "x".repeat(16 * 1024 * 1024 + 1),
+    })).rejects.toThrow("超过允许长度");
+    expect(target.prepareAndImport).not.toHaveBeenCalled();
+    expect(target.commit).not.toHaveBeenCalled();
+    expect(lines).toEqual(["请输入恢复包以验证备份；输入内容不会显示。"]);
+  });
+
+  it("rejects a read from a closed caller before decoding or preparing recovery", async () => {
+    fixture.readAdmissionRoot = true;
+    const target = { prepareAndImport: vi.fn(), commit: vi.fn() };
+    const abort = new AbortController();
+    const reason = new Error("caller closed");
+    await expect(runDisasterRecoveryCommand({ directory: "X:/backup" }, {
+      ...options(target, []), signal: abort.signal,
+      readRecoveryPackage: async () => { abort.abort(reason); return "must-not-decode"; },
+    })).rejects.toBe(reason);
+    expect(target.prepareAndImport).not.toHaveBeenCalled();
+    expect(target.commit).not.toHaveBeenCalled();
   });
 
   it("binds fresh admission, prepare, commit, receipt and typed presentation to one application", async () => {

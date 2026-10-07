@@ -22,6 +22,25 @@ async function fixture() {
 }
 
 describe("EncryptedVaultSecretStore", () => {
+  it('persists pairing and peer rendezvous references across vault reopen and deletion', async () => {
+    const { vaultPath, store } = await fixture();
+    const refs = [
+      { kind: 'rendezvous' as const, bindingId: 'fixture-peer' },
+      { kind: 'rendezvous' as const, bindingId: 'pairing:fixture-offer' },
+    ];
+    for (const ref of refs) await store.put(ref, 'synthetic-rendezvous-material');
+    const reopened = new EncryptedVaultSecretStore({
+      vaultPath, masterKey: new MemoryMasterKeyProvider(Buffer.alloc(32, 7)),
+    });
+    expect(await reopened.list('rendezvous/')).toEqual(refs);
+    for (const ref of refs) {
+      expect(await reopened.get(ref)).toBe('synthetic-rendezvous-material');
+      await reopened.delete(ref);
+      expect(await store.get(ref)).toBeNull();
+    }
+    expect(await store.list('rendezvous/')).toEqual([]);
+  });
+
   it("serializes platform initialization reached through state checks", async () => {
     const directory = await createTempDir("platform-concurrent-state");
     const backend = fakeCredentialBackend();

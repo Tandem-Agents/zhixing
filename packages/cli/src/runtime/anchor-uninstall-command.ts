@@ -14,7 +14,7 @@ import {
   encodeRecoveryPackage,
   requireCurrentRecoveryPackage,
 } from "@zhixing/mesh/recovery-package";
-import { readRecoveryPackageFromTty } from "../serve/recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "../serve/recovery-package-input.js";
 
 export interface AnchorUninstallIO {
   readonly interactive: boolean;
@@ -26,30 +26,46 @@ export interface AnchorUninstallIO {
   readRecoveryPackage(): Promise<string>;
 }
 
+export type AnchorUninstallManagement = Pick<RpcManagementFacade,
+  "anchorUninstallPreflight" | "anchorUninstallBegin" | "anchorUninstallContinue">;
+
+export interface AnchorUninstallCommandOptions {
+  /** Borrowed from the caller; this command never ensures or disposes it. */
+  readonly management?: AnchorUninstallManagement;
+  readonly writeLine?: (line: string) => void;
+  readonly signal?: AbortSignal;
+}
+
 export async function uninstallCurrentDevice(input: {
   readonly targetName?: string;
   readonly recoveryBackup?: boolean;
   readonly confirmed?: boolean;
-}, io: AnchorUninstallIO = defaultUninstallIO()): Promise<void> {
+}, io?: AnchorUninstallIO, options: AnchorUninstallCommandOptions = {}): Promise<void> {
+  const selection = io ?? defaultUninstallIO(options.writeLine, options.signal);
   if (input.targetName && input.recoveryBackup) {
     throw new TypeError("只能选择另一台值班设备或恢复备份中的一种安全路径");
   }
   await withManagement(async (management) => {
     const preflight = await management.anchorUninstallPreflight();
-    const path = await selectPath(preflight, input, io);
+    const path = await selectPath(preflight, input, selection);
+    options.signal?.throwIfAborted();
     await requireConfirmation(
-      io,
+      selection,
       input.confirmed,
       path.path === "migration"
         ? `永久移除设备“${preflight.currentDeviceName}”。本机尚未转移的已接受工作会先安全收束，再把值班职责交给“${path.targetName}”；本机数据和设备身份随后永久删除，无法恢复。继续吗？`
         : `永久移除设备“${preflight.currentDeviceName}”。本机尚未转移的已接受工作会先安全收束，并只保留已验证的恢复备份；本机数据和设备身份随后永久删除，无法恢复。继续吗？`,
     );
 
+    options.signal?.throwIfAborted();
+
     const operationId = createOpaqueId("uninstall");
     const requestId = createOpaqueId("request");
     const recoveryPackage = path.path === "recovery-backup"
-      ? await io.readRecoveryPackage()
+      ? await selection.readRecoveryPackage()
       : undefined;
+    if (recoveryPackage !== undefined) assertRecoveryPackageInputLimit(recoveryPackage);
+    options.signal?.throwIfAborted();
     let state = path.path === "migration"
       ? await management.anchorUninstallBegin({
           path: "migration",
@@ -67,18 +83,19 @@ export async function uninstallCurrentDevice(input: {
 
     if (state.phase === "backup-verified") {
       await requireConfirmation(
-        io,
+        selection,
         input.confirmed,
         "恢复备份已完成实际回读验证。卸载后只能依靠该备份重新接管，确认继续吗？",
       );
+      options.signal?.throwIfAborted();
       state = await management.anchorUninstallContinue({
         operationId,
         confirmBackup: true,
         recoveryPackage: recoveryPackage!,
       });
     }
-    renderUninstallState(state);
-  });
+    renderUninstallState(state, options.writeLine);
+  }, options);
 }
 
 export async function selectPath(
@@ -112,7 +129,7 @@ export async function selectPath(
   return io.choosePath(preflight);
 }
 
-export function renderUninstallState(state: AnchorUninstallState): void {
+export function renderUninstallState(state: AnchorUninstallState, writeLine: (line: string) => void = console.log): void {
   const labels: Record<AnchorUninstallState["phase"], string> = {
     "choose-safe-path": "请先选择可用的接班设备或验证恢复备份",
     "moving-duty-device": "正在把值班职责交给另一台设备",
@@ -122,7 +139,7 @@ export function renderUninstallState(state: AnchorUninstallState): void {
     uninstalled: "这台设备已永久卸载",
     cancelled: "永久卸载已取消",
   };
-  console.log(labels[state.phase]);
+  writeLine(labels[state.phase]);
 }
 
 function createOpaqueId(prefix: string): string {
@@ -139,12 +156,12 @@ async function requireConfirmation(
   if (!await io.confirm(message)) throw new Error("操作已取消");
 }
 
-function defaultUninstallIO(): AnchorUninstallIO {
+function defaultUninstallIO(writeLine: (line: string) => void = console.log, signal?: AbortSignal): AnchorUninstallIO {
   const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true;
   const question = async (prompt: string): Promise<string> => {
     const reader = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      return (await reader.question(prompt)).trim();
+      return (await reader.question(prompt, { signal })).trim();
     } finally {
       reader.close();
     }
@@ -153,11 +170,11 @@ function defaultUninstallIO(): AnchorUninstallIO {
     interactive,
     async choosePath(preflight) {
       const targets = preflight.migrationTargets.filter((candidate) => candidate.ready);
-      console.log("请选择永久卸载前的安全路径：");
+      writeLine("请选择永久卸载前的安全路径：");
       targets.forEach((candidate, index) =>
-        console.log(`${index + 1}. 把值班职责交给 ${candidate.displayName}`));
+        writeLine(`${index + 1}. 把值班职责交给 ${candidate.displayName}`));
       if (preflight.recoveryBackupReady) {
-        console.log(`${targets.length + 1}. 使用已验证的恢复备份`);
+        writeLine(`${targets.length + 1}. 使用已验证的恢复备份`);
       }
       const selected = Number(await question("序号：")) - 1;
       if (selected >= 0 && selected < targets.length) {
@@ -173,7 +190,7 @@ function defaultUninstallIO(): AnchorUninstallIO {
     },
     async readRecoveryPackage() {
       const decoded = requireCurrentRecoveryPackage(
-        await readRecoveryPackageFromTty(),
+        await readRecoveryPackageFromTty({ signal }),
       );
       return encodeRecoveryPackage(decoded.root);
     },
@@ -181,11 +198,15 @@ function defaultUninstallIO(): AnchorUninstallIO {
 }
 
 async function withManagement<T>(
-  operation: (management: RpcManagementFacade) => Promise<T>,
+  operation: (management: AnchorUninstallManagement) => Promise<T>,
+  options: AnchorUninstallCommandOptions,
 ): Promise<T> {
+  options.signal?.throwIfAborted();
+  if (options.management) return operation(options.management);
   const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps(getZhixingHome()));
   try {
     await coreHost.ensure();
+    options.signal?.throwIfAborted();
     return await operation(new RpcManagementFacade(coreHost));
   } finally {
     await coreHost.dispose();

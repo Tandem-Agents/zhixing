@@ -7,10 +7,13 @@ if (process.env.ZHIXING_TERMINAL_ROLE === 'application' &&
   (process.env.ZHIXING_TERMINAL_PIPE || process.env.ZHIXING_TERMINAL_FD === '3')) {
   const { runTerminalApplication } = await import('./terminal/application.js');
   await runTerminalApplication();
-} else if (args.length === 0 && process.env.ZHIXING_TERMINAL_UI === 'opentui' &&
+} else if (process.env.ZHIXING_TERMINAL_UI === 'opentui' &&
   process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY) {
-  const { launchTerminal } = await import('./terminal/launch.js');
-  process.exit(await launchTerminal(args));
+  const interactive = args.length === 0 || (await import('./index.js')).usesInteractiveTerminal(args);
+  if (interactive) {
+    const { launchTerminal } = await import('./terminal/launch.js');
+    process.exit(await launchTerminal(args));
+  } else await import('./legacy-entry.js');
 } else {
   await import('./legacy-entry.js');
 }

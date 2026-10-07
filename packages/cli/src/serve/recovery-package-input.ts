@@ -2,13 +2,26 @@ import type { DecodedRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import { acquireStdinOwnership } from "../tui/_internal/stdin-ownership.js";
 
-const DEFAULT_MAX_RECOVERY_PACKAGE_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_MAX_RECOVERY_PACKAGE_BYTES = 16 * 1024 * 1024;
+
+/** The dedicated secret surface has the same byte budget as the original TTY reader. */
+export function assertRecoveryPackageInputLimit(
+  value: string | Uint8Array,
+  maxBytes = DEFAULT_MAX_RECOVERY_PACKAGE_BYTES,
+): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > DEFAULT_MAX_RECOVERY_PACKAGE_BYTES) {
+    throw new RangeError("恢复包输入上限无效");
+  }
+  const length = typeof value === "string" ? Buffer.byteLength(value, "utf8") : value.byteLength;
+  if (length > maxBytes) throw new Error("恢复包超过允许长度");
+}
 
 export interface RecoveryPackageInputOptions {
   readonly stdin?: NodeJS.ReadStream;
   readonly stdout?: Pick<NodeJS.WriteStream, "isTTY" | "write">;
   readonly prompt?: string;
   readonly maxBytes?: number;
+  readonly signal?: AbortSignal;
 }
 
 export async function readRecoveryPackageFromTty(
@@ -20,9 +33,8 @@ export async function readRecoveryPackageFromTty(
   if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
     throw new Error("恢复包只能通过交互式保密输入提供");
   }
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
-    throw new RangeError("恢复包输入上限无效");
-  }
+  assertRecoveryPackageInputLimit("", maxBytes);
+  options.signal?.throwIfAborted();
 
   const bytes = Buffer.alloc(maxBytes);
   let length = 0;
@@ -39,6 +51,7 @@ export async function readRecoveryPackageFromTty(
         if (settled) return;
         settled = true;
         stdin.off("keypress", onKeypress);
+        options.signal?.removeEventListener("abort", onAbort);
         if (error) {
           reject(error);
           return;
@@ -80,7 +93,10 @@ export async function readRecoveryPackageFromTty(
         }
         if (value && /^[\x20-\x7e]+$/u.test(value)) append(value);
       };
+      const onAbort = () => finish(new Error("恢复包输入已取消"));
       stdin.on("keypress", onKeypress);
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
     });
   } finally {
     stdin.setRawMode(Boolean(wasRaw));

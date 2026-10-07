@@ -17,6 +17,7 @@ import {
   buildManagedServiceSpec,
   createManagedServiceAdapter,
   managedServiceDefinitionDigest,
+  type ManagedServiceCommandRunner,
 } from "./managed-service.js";
 import {
   reconcileManagedService,
@@ -173,6 +174,7 @@ export async function reconcileCurrentManagedService(
   signal: AbortSignal = new AbortController().signal,
   homeDir: string = getZhixingHome(),
   secretStore?: SecretStorePort,
+  commandRunner?: ManagedServiceCommandRunner,
 ): Promise<ManagedServiceReconcileResult> {
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
@@ -181,7 +183,7 @@ export async function reconcileCurrentManagedService(
     homeKey: path.resolve(homeDir),
     trigger,
     loadCurrent: () => loadCurrentManagedServiceState("activate", homeDir, secretStore),
-    adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage }),
+    adapter: createManagedServiceAdapter({ storageGovernor: capacity.storage, commandRunner }),
     signal,
   }); } finally { capacity.close(); }
 }

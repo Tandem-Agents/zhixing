@@ -13,16 +13,44 @@ import {
   initializeTrustChain,
 } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
+import { EncryptedVaultSecretStore } from '@zhixing/secrets';
 import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
-import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
+import { createPairingTrustEvent, renderPairingInvitation, runPairCommand } from "./mesh-pair-command.js";
 
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
 
 describe("production mesh pairing command", () => {
+  it("cancels the real pending rendezvous without discarding its resumable offer", async () => {
+    const home = await createTempDir("mesh-pair-rendezvous-cancel");
+    const cancellation = new AbortController();
+    let published = false;
+    const secretStore = new EncryptedVaultSecretStore({ vaultPath: `${home}/pairing-vault.json`, masterKey: {
+      state: async () => 'unlocked', loadExisting: async () => Buffer.alloc(32, 7), loadOrCreate: async () => Buffer.alloc(32, 7),
+    } });
+    await expect(runPairCommand({ zhixingHome: home, secretStore,
+      listen: "127.0.0.1:0", advertise: "127.0.0.1:0", signal: cancellation.signal,
+      writeLine: () => {}, showPairingInvitation: async () => { published = true; cancellation.abort(); },
+    })).rejects.toThrow("Pairing invitation expired before a peer connected");
+    expect(published).toBe(true);
+    expect(await createFileMeshPairingContinuationRepository(home).load()).toMatchObject({ side: "issuer" });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("keeps the exact invitation and QR on the dedicated surface and propagates cancellation", async () => {
+    const lines: string[] = [];
+    const show = vi.fn(async (_display: { invitation: string; qr: string }) => undefined);
+    await renderPairingInvitation("secret-invitation", (line) => lines.push(line),
+      async () => "secret-qr\n", show);
+    expect(show).toHaveBeenCalledWith({ invitation: "secret-invitation", qr: "secret-qr" });
+    expect(lines.join("\n")).not.toContain("secret");
+    const cancelled = new Error("cancelled display");
+    await expect(renderPairingInvitation("secret-invitation", (line) => lines.push(line),
+      async () => "secret-qr", async () => { throw cancelled; })).rejects.toBe(cancelled);
+    expect(lines.join("\n")).not.toContain("secret");
+  });
   it("turns a fresh pairing transcript into reenroll for the same pending device", async () => {
     const issuerKey = await DeviceKey.generate();
     const peerKey = await DeviceKey.generate();
@@ -174,27 +202,31 @@ describe("production mesh pairing command", () => {
       const executorSecrets = new MemorySecretStore();
       const invitation = deferred<string>();
       const journey: string[] = [];
+      let recoveryCode = "";
+      const promptExecutorAutoStart = vi.fn(async () => true);
       const migrateDutyTo = vi.fn(async (deviceName: string) => {
         journey.push(`migrate:${deviceName}`);
       });
       const issuer = runPairCommand({
         zhixingHome: anchorHome,
         secretStore: anchorSecrets,
-        confirmRecoveryPackage: echoRecoveryPackage,
+        composition: "production",
+        confirmRecoveryPackage: async (encoded) => { recoveryCode = encoded; return encoded; },
+        showPairingInvitation: async (display) => { invitation.resolve(display.invitation); },
+        reconcileManagedService: async () => { journey.push("issuer:reconcile"); },
         advertise: "127.0.0.1:0",
         selectDutyDevice: async () => "paired",
         migrateDutyTo,
         writeLine: (line) => {
           journey.push(`issuer:${line}`);
-          if (line.startsWith("邀请内容：")) {
-            invitation.resolve(line.slice("邀请内容：".length));
-          }
         },
       });
       const encoded = await invitation.promise;
       await runPairCommand({
         zhixingHome: executorHome,
         secretStore: executorSecrets,
+        composition: "production",
+        promptExecutorAutoStart,
         invitation: encoded,
         completeDeviceConfiguration: async () => {
           journey.push("joiner:configure");
@@ -206,6 +238,12 @@ describe("production mesh pairing command", () => {
         writeLine: (line) => journey.push(`joiner:${line}`),
       });
       await issuer;
+      expect(promptExecutorAutoStart).toHaveBeenCalledOnce();
+      expect(loadConfig({ homeDir: executorHome }).mesh?.executorAutoStart).toBe(true);
+      expect(journey).toContain("issuer:reconcile");
+      expect(recoveryCode.length).toBeGreaterThan(0);
+      expect(journey.join("\n")).not.toContain(recoveryCode);
+      expect(journey.join("\n")).not.toContain(encoded);
 
       const anchorStore = new FileMeshBootstrapStore(anchorHome);
       const executorStore = new FileMeshBootstrapStore(executorHome);

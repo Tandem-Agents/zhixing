@@ -43,6 +43,7 @@ export interface TerminalSupervisorOptions {
   readonly records?: LogRecordPort;
   readonly admitted?: (createStore: LogStoreWorkerFactory, capacity: ReturnType<typeof createDeviceCapacityRuntime>) => Promise<void>;
   readonly drain?: (deadline: number, code: number) => Promise<void>;
+  readonly commandOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
 }
 
 /** Foreground lifetime owner. It forwards typed surface traffic but has no
@@ -314,7 +315,7 @@ class TerminalSupervisor {
           const { role, deadline } = message;
           const authorization = this.#creationOwners.get(owner);
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer'],
+            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
             credential: ['credential-command'], 'writer-observer': ['writer-observer'],
           };
@@ -405,7 +406,7 @@ class TerminalSupervisor {
           const { owner, id, role, endpoint, token, deadline } = message;
           const authorization = typeof owner === 'string' ? this.#creationOwners.get(owner) : undefined;
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer'],
+            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
             credential: ['credential-command'], 'writer-observer': ['writer-observer'],
           };
@@ -619,7 +620,8 @@ class TerminalSupervisor {
       // the existing channel; do not send a second close across its shutdown.
       // The request is not an actual-exit receipt or permission to release it.
       item.exitRequested = true;
-      void this.#close(message.code, message.reason); return;
+      const code = item.role === 'ui' && this.options.args.length && message.code === 0 ? 130 : message.code;
+      void this.#close(code, message.reason); return;
     }
     if (this.#sealed) return;
     if (message.type === 'hello') {
@@ -674,7 +676,11 @@ class TerminalSupervisor {
       this.#live();
       await this.#application!.channel!.send(message, traffic); return;
     }
-    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'submission', 'task-status', 'process-status'].includes(message.type)) {
+    if (item.role === 'application' && message.type === 'command-output') {
+      if ((message.stream !== 'stdout' && message.stream !== 'stderr') || typeof message.text !== 'string' || Buffer.byteLength(message.text) > 32 * 1024 || !this.options.commandOutput) throw Error('terminal-command-output-invalid');
+      this.options.commandOutput(message.stream, message.text); return;
+    }
+    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'submission', 'task-status', 'process-status', 'recovery-page'].includes(message.type)) {
       if (!this.#ui) throw Error('terminal-ui-unavailable');
       await this.#ui.channel!.send(message, traffic); return;
     }
