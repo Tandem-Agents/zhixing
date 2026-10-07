@@ -77,6 +77,42 @@ describe('display recovery retains the original cache', () => {
 });
 
 describe('bounded terminal display projection', () => {
+  it('keeps a superseded plain notice outside the visible range after asynchronous settlement', async () => {
+    const h = await setup();
+    let current = true;
+    const settle = h.account.settle.getMockImplementation()!;
+    h.account.settle.mockImplementationOnce(async (token, bytes) => {
+      await settle(token, bytes);
+      current = false;
+    });
+    await h.store.append({ blockId: 'old-notice', role: 'notice', text: 'Old conversation', contentOffset: 0, final: true }, false, () => current);
+    expect(h.store.last).toBe(0);
+    expect((await h.store.page()).segments).toEqual([]);
+    expect(h.counts().stored).toBeGreaterThan(0);
+    await h.store.append({ blockId: 'new-notice', role: 'notice', text: 'New conversation', contentOffset: 0, final: true });
+    expect((await h.store.page()).segments.map(segment => segment.text)).toEqual(['New conversation']);
+    await h.store.reset();
+    expect(h.counts()).toEqual({ active: 0, outstanding: 0, stored: 0 });
+  });
+
+  it('rechecks notice context after waiting for an earlier display write', async () => {
+    const h = await setup();
+    let finish!: () => void, entered!: () => void, current = true;
+    const blocked = new Promise<void>(resolve => { finish = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const settle = h.account.settle.getMockImplementation()!;
+    h.account.settle.mockImplementationOnce(async (token, bytes) => {
+      entered(); await blocked; await settle(token, bytes);
+    });
+    const first = h.store.append({ blockId: 'body', role: 'assistant', text: 'Current body', contentOffset: 0, final: true });
+    await started;
+    const second = h.store.append({ blockId: 'late-notice', role: 'notice', text: 'Stale notice', contentOffset: 0, final: true }, false, () => current);
+    current = false; finish();
+    await Promise.all([first, second]);
+    expect(h.account.reserve).toHaveBeenCalledTimes(1);
+    expect((await h.store.page()).segments.map(segment => segment.text)).toEqual(['Current body']);
+  });
+
   const apply = async (store: TerminalDisplayStore, changes: Iterable<BodyProjectionChange>) => {
     for (const change of changes) {
       if (change.kind === 'amend') await store.amend('stream', change);

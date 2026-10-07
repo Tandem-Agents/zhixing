@@ -16,6 +16,30 @@ function owner(root = process.cwd()) {
 const result = (revision: number): TerminalCandidates => ({ revision, start: 0, end: 2, items: [{ id: 'config:repl', label: '/config' }] });
 
 describe('terminal candidates and control commands', () => {
+  it('owns trust management immediately even behind an older query and preserves the draft through a failed revoke', async () => {
+    const pending: ((value: unknown) => void)[] = [], actions: TerminalAction[] = [];
+    const request = async (action: TerminalAction) => {
+      actions.push(action);
+      if (action.kind === 'input-candidates') return new Promise(resolve => pending.push(resolve));
+      if (action.kind === 'candidate-revoke') throw Error('synthetic offline');
+    };
+    const input = new TerminalInputSession(request, vi.fn()), surface = new TerminalCandidateSession(input, request, vi.fn());
+    input.edit('/t', 2); surface.sync();
+    input.edit('/trust abc', 10); surface.sync();
+    expect(surface.value?.mode).toBe('management'); expect(await surface.accept()).toBe(false);
+    pending.shift()!({ revision: 1, start: 0, end: 2, items: [] });
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    const revision = (actions.filter(action => action.kind === 'input-candidates').at(-1) as Extract<TerminalAction, { kind: 'input-candidates' }>).revision;
+    pending.shift()!({ revision, mode: 'management', canDelete: true, start: 7, end: 10, items: [{ id: 'rule-a', label: '允许读取' }] });
+    await vi.waitFor(() => expect(surface.value?.items).toHaveLength(1));
+    const original = { ...input.draft };
+    expect(await surface.revoke(revision, 'rule-a')).toContain('synthetic offline');
+    expect(input.draft).toEqual(original); expect(surface.value?.mode).toBe('management');
+    expect(await surface.accept()).toBe(false);
+    surface.escape(); expect(input.draft.text).toBe('/trust ');
+    surface.escape(); expect(input.draft.text).toBe('');
+    expect(actions.some(action => action.kind === 'candidate-accept' || action.kind === 'input-submit')).toBe(false);
+  });
   it('shares aliases and command priority while rejecting stale acceptances', async () => {
     const source = owner();
     const choices = await source.query(1, '/qui', 4);

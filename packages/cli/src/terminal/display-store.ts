@@ -76,11 +76,16 @@ export class TerminalDisplayStore {
     });
   }
 
-  append(segment: TerminalDisplaySegment, prepend = false): Promise<void> {
+  append(segment: TerminalDisplaySegment, prepend = false, current?: () => boolean): Promise<void> {
+    // Context cancellation is for independent plain notices. Streaming bodies
+    // retain their existing amendment/reset owner and cannot use this gate.
+    if (current && segment.body) return Promise.reject(Error('terminal-display-context-body'));
+    const isCurrent = current ?? (() => true);
     if (!segment.blockId || segment.blockId.length > 512 || segment.role.length > 32 ||
       !Number.isSafeInteger(segment.contentOffset) || segment.contentOffset < 0 || Buffer.byteLength(segment.text) > 32 * 1024 ||
       (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) return Promise.reject(Error('terminal-display-segment-size'));
     return this.#enqueue(async () => {
+      if (!isCurrent()) return;
       // Prepend takes the pieces in reverse while preserving source offsets.
       const parts: TerminalDisplaySegment[] = [];
       for (const part of carriers(segment)) {
@@ -88,10 +93,13 @@ export class TerminalDisplayStore {
         parts.push(part);
       }
       if (prepend) parts.reverse();
-      for (const part of parts) await this.#appendFragment(part, this.#encode(part), prepend);
+      for (const part of parts) {
+        if (!isCurrent()) return;
+        await this.#appendFragment(part, this.#encode(part), prepend, isCurrent);
+      }
     });
   }
-  async #appendFragment(segment: TerminalDisplaySegment, encoded: Buffer, prepend: boolean): Promise<void> {
+  async #appendFragment(segment: TerminalDisplaySegment, encoded: Buffer, prepend: boolean, current: () => boolean): Promise<void> {
       const ordinal = prepend ? this.#first - 1 : this.#last;
       const active = !prepend && segment.body ? this.#active.get(segment.blockId) : undefined;
       const tail = active?.at(-1);
@@ -115,6 +123,9 @@ export class TerminalDisplayStore {
       }
       if (!prepend && segment.body) this.#checkActive(segment.blockId);
       await this.#write(ordinal, encoded, undefined, !prepend && !!segment.body);
+      // The write remains accounted, but a notice from a superseded context
+      // must never advance the visible range. A later append reuses this index.
+      if (!current()) return;
       if (prepend) this.#first = ordinal; else this.#last = ordinal + 1;
       if (!prepend && segment.body) this.#remember(segment.blockId, { ordinal, offset: segment.contentOffset, length: segment.text.length });
   }

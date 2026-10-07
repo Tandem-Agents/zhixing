@@ -47,6 +47,7 @@ export type TerminalMessage =
   | { readonly type: "request"; readonly id: number; readonly action: TerminalAction }
   | { readonly type: "reply"; readonly id: number; readonly value?: unknown; readonly error?: string }
   | { readonly type: "view"; readonly view: TerminalView }
+  | { readonly type: 'task-status'; readonly status: TerminalTaskStatus }
   | { readonly type: 'process-status'; readonly status?: TerminalProcessStatus }
   | { readonly type: "chunk"; readonly stream: string; readonly index: number; readonly text: string; readonly final: boolean }
   | { readonly type: "invalidate"; readonly requestId: string }
@@ -84,12 +85,20 @@ export type TerminalAction =
   | { readonly kind: 'input-history-next' | 'input-history-end'; readonly ticket: string }
   | { readonly kind: 'input-candidates'; readonly revision: number; readonly text: string; readonly cursor: number }
   | { readonly kind: 'candidate-accept'; readonly revision: number; readonly id: string }
+  | { readonly kind: 'candidate-revoke'; readonly revision: number; readonly id: string }
+  | { readonly kind: 'candidate-manage'; readonly revision: number; readonly action: 'delete' | 'rename' | 'create'; readonly id?: string }
   | { readonly kind: 'paste-finish'; readonly inputId: string }
   | { readonly kind: "input-release"; readonly inputId: string }
   | { readonly kind: "clipboard-read" | "clipboard-write"; readonly inputId: string; readonly version: number; readonly text?: string };
 
 export interface TerminalCandidates {
   readonly revision: number;
+  readonly mode?: 'picker' | 'management';
+  readonly canDelete?: boolean;
+  readonly canRename?: boolean;
+  readonly canCreate?: boolean;
+  readonly hint?: string;
+  readonly error?: string;
   /** UTF-16 offsets within the bounded query window. */
   readonly start: number;
   readonly end: number;
@@ -124,6 +133,10 @@ export interface TerminalDisplayPage {
   readonly start: number;
   readonly follow: boolean;
   readonly segments: readonly TerminalDisplaySegment[];
+}
+export interface TerminalTaskStatus {
+  readonly summary?: { readonly conversationId: string; readonly state: 'loading' | 'ready' | 'error'; readonly text: string };
+  readonly noticeGap?: string;
 }
 export interface TerminalProcessStatus {
   readonly conversationId: string;

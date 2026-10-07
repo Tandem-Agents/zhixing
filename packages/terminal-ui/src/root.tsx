@@ -1,11 +1,12 @@
-import { createSignal, For, Show, ErrorBoundary } from 'solid-js';
+import { createEffect, createSignal, For, Show, ErrorBoundary } from 'solid-js';
 import { createCliRenderer, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalProcessStatus } from './protocol.js';
+import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { TerminalInputSession } from './input-session.js';
 import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
+import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
 import { BodyView, type BodyViewHandle } from './body-view.js';
 import { BODY_PAGE_BYTES, bodyWindows, type BodyAnchor } from './body-model.js';
@@ -27,6 +28,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', message: '正在连接…', busy: true });
   const [status, setStatus] = createSignal('');
+  const [taskStatus, setTaskStatus] = createSignal<TerminalTaskStatus>({});
   const [processStatus, setProcessStatus] = createSignal<TerminalProcessStatus>();
   const [copyAvailable, setCopyAvailable] = createSignal(false);
   const [selected, setSelected] = createSignal(0);
@@ -54,6 +56,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   let changingDraft = false;
   let editorHistoryBytes = 0, editorHistoryEntries = 0;
   const [candidateRevision, setCandidateRevision] = createSignal(0);
+  const trustControls = new TerminalTrustCandidateControls();
   let candidates: TerminalCandidateSession | undefined;
   const input = new TerminalInputSession(options.request, () => {
     if (view().kind === 'conversation' && editor && !editor.isDestroyed) {
@@ -63,12 +66,19 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         setEditorUtf16Cursor(editor, draft.text, draft.cursor, renderer.widthMethod);
       } finally { changingDraft = false; }
     }
+    if (candidates?.deleteArmed || trustControls.armedId) setStatus('');
     candidates?.sync(view().kind === 'conversation');
   });
   const draft = input.draft;
   candidates = new TerminalCandidateSession(input, options.request, () => setCandidateRevision(value => value + 1));
   const candidateItems = () => { candidateRevision(); return candidates?.value?.items ?? []; };
   const candidateStart = () => { candidateRevision(); return Math.max(0, (candidates?.selected ?? 0) - 4); };
+  const candidateValue = () => { candidateRevision(); return candidates?.value; };
+  const trustSnapshot = () => ({ mode: candidateValue()?.mode, revision: candidateValue()?.revision ?? 0,
+    items: candidateItems(), selected: candidates?.selected ?? 0, draftVersion: draft.version, cursor: draft.cursor,
+    pageKey: view().generation, canDelete: candidateValue()?.canDelete === true, busy: candidates?.busy,
+    error: candidateValue()?.error, safe: view().connected !== false && size().height >= 18 && size().width >= 40 });
+  createEffect(() => { if (trustControls.sync(trustSnapshot())) setStatus(''); });
   const editorValue = () => editor && !editor.isDestroyed ? editor.plainText : '';
   const preserveDraft = () => {
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
@@ -159,6 +169,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     }
     if (current.kind === 'conversation') {
       preserveDraft();
+      if (candidateValue()?.mode === 'management') return;
       const text = draft.text;
       if (input.completeWindow && !text.trim()) return;
       if (input.completeWindow && text.startsWith('/')) {
@@ -238,6 +249,12 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     <Show when={view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId && processStatus()}>
       <ProcessView view={processStatus()!.view} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
     </Show>
+    <Show when={view().kind === 'conversation' && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.text}>
+      <text height={1} fg={taskStatus().summary?.state === 'error' ? '#e7ba70' : '#9aa8a1'}>{displayText(taskStatus().summary?.text ?? '')}</text>
+    </Show>
+    <Show when={view().kind === 'conversation' && taskStatus().noticeGap}>
+      <text height={1} fg="#e7ba70">{displayText(taskStatus().noticeGap ?? '')}</text>
+    </Show>
     <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
       <text fg="#e7ba70">{view().displayPaused ? '正文保留已暂停，草稿和已有内容保留。Ctrl+R 重试展示；仍可处理确认、中止或退出。' : '展示已恢复；暂停期间的旧缺口仍保留，可查看权威历史与用量。'}</text>
     </Show>
@@ -247,20 +264,22 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       </box>}</For>
     </box>
     <Show when={!safeAction()}><text fg="#e7ba70">窗口较小：可取消；放大后继续确认。</text></Show>
-    <Show when={view().kind === 'conversation' && candidateItems().length > 0 && size().height >= 18}>
-      <box height={Math.min(6, candidateItems().length + 1)} flexDirection="column" backgroundColor="#263b34">
+    <Show when={view().kind === 'conversation' && (candidateItems().length > 0 || candidateValue()?.mode || candidateValue()?.error)}>
+      <box height={size().height >= 18 ? Math.min(6, candidateItems().length + 1) : 1} flexDirection="column" backgroundColor="#263b34">
+        <Show when={size().height >= 18}>
         <For each={candidateItems().slice(candidateStart(), candidateStart() + 5)}>{(item, index) =>
           <text height={1} fg={index() + candidateStart() === candidates?.selected ? teal : '#b8c7bf'}>
             {index() + candidateStart() === candidates?.selected ? '▌ ' : '  '}{displayText(item.label)}  {displayText(item.detail ?? '')}
           </text>}</For>
-        <text height={1} fg="#9aa8a1">↑↓ 选择 · Tab/Enter 接纳 · Esc 收起</text>
+        </Show>
+        <text height={1} fg="#9aa8a1">{displayText(candidateValue()?.error ?? candidateValue()?.hint ?? 'Esc 返回 · ↑↓ 选择 · Tab/Enter 接纳')}</text>
       </box>
     </Show>
     <Show when={view().kind === 'conversation' || view().field}>
       <box border borderStyle="rounded" borderColor={teal} height={5} paddingX={1}>
         <Show when={!view().field?.secret} fallback={<box flexDirection="column"><text>{view().field?.label} {'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 16)))}</text><Show when={view().field?.configured}><text fg="#9aa8a1">已设置，留空保留。</text></Show></box>}>
-          <Show when={view().kind === 'conversation' ? 'conversation' : view().editId ?? view().requestId} keyed>
-            {() => <textarea ref={attach} initialValue={view().field ? view().field?.value ?? '' : draft.text} flexGrow={1} height={3} placeholder={view().field?.label ?? '输入消息，或 / 查看命令'} onContentChange={preserveDraft} onCursorChange={preserveCursor} />}
+          <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
+            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} flexGrow={1} height={3} placeholder={view().field?.label ?? '输入消息，或 / 查看命令'} onContentChange={preserveDraft} onCursorChange={preserveCursor} />}
           </Show>
         </Show>
       </box>
@@ -325,7 +344,6 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     if (view().displayPaused && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
       consume(); void action({ kind: 'display-retry' }); return;
     }
-
     if (event.ctrl && event.name === 'c') {
       consume();
       if (view().kind === 'confirmation') { void action({ kind: 'confirmation', requestId: view().requestId!, action: 'cancelled' }); return; }
@@ -336,9 +354,43 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       if (ctrlC > 0 && now - ctrlC < 750) { void options.exit(); return; }
       ctrlC = now; void action({ kind: 'interrupt' }); return;
     }
+    if (view().kind === 'conversation') {
+      if (!(event.ctrl && event.name === 'd')) { if (candidates?.deleteArmed) setStatus(''); candidates?.resetDelete(); }
+      const value = candidateValue();
+      if (value?.mode === 'picker' && event.ctrl && !event.meta && !event.shift && ['d', 'r', 'n'].includes(event.name)) {
+        const operation = event.name === 'd' ? 'delete' : event.name === 'r' ? 'rename' : 'create';
+        const supported = operation === 'delete' ? value.canDelete : operation === 'rename' ? value.canRename : value.canCreate;
+        if (supported) {
+          consume();
+          if (size().height < 18 || size().width < 40) { candidates?.resetDelete(); setStatus('请放大窗口后管理；Esc 返回。'); return; }
+          if (operation === 'delete' && !candidates?.confirmDelete(view().generation)) { setStatus('再次按 Ctrl+D 删除当前候选；其他按键取消准备。'); return; }
+          void candidates?.manage(operation).catch(error => setStatus(error instanceof Error ? error.message : '操作未完成，请刷新。'));
+          return;
+        }
+      }
+      const snapshot = trustSnapshot();
+      if (snapshot.mode === 'management' && event.ctrl && event.name === 'r') {
+        consume(); trustControls.reset(); candidates?.refresh(); return;
+      }
+      const wasArmed = trustControls.armedId;
+      const intent = trustControls.key(snapshot, event);
+      if (wasArmed && intent.kind !== 'armed') setStatus('');
+      if (intent.kind !== 'unhandled') {
+        consume();
+        if (intent.kind === 'dismiss') { candidates?.escape(); setStatus(''); }
+        else if (intent.kind === 'move') {
+          for (let index = 0; index < (intent.page ? 5 : 1); index++) candidates?.move(intent.direction);
+        } else if (intent.kind === 'armed' || intent.kind === 'none') { if (intent.message) setStatus(intent.message); }
+        else if (intent.kind === 'revoke') {
+          void candidates?.revoke(intent.revision, intent.id).then(message => { if (message && !disposed) setStatus(message); });
+        }
+        return;
+      }
+    }
     if (event.name === 'escape') {
       consume();
-      if (candidateItems().length) { candidates?.dismiss(); return; }
+      if (candidateItems().length) { candidates?.escape(); return; }
+      if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
       if (view().kind === 'conversation' && view().busy) void action({ kind: 'abort' }); else void cancelPage(); return;
     }
     if (view().kind === 'conversation' && candidateItems().length && size().height >= 18 && !event.ctrl && !event.shift && !event.meta) {
@@ -426,16 +478,21 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     });
     return {
       firstFrameId, dispose,
-      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'process-status' }>) {
+      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'task-status' | 'process-status' }>) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
+          const refreshCandidates = view().kind === 'conversation' && message.view.kind === 'conversation';
+          candidates?.resetDelete(); trustControls.reset();
           preserveDraft(); releaseSecret(); bodyView?.beforeUpdate(); setSelected(0); setStatus(''); setView(message.view);
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');
+          if (refreshCandidates) candidates?.refresh();
           if (!isBody()) renderer.once('frame', () => {
             if (!disposed && historyBox && !historyBox.isDestroyed) historyBox.scrollTo(0);
           });
+        } else if (message.type === 'task-status') {
+          setTaskStatus(message.status);
         } else if (message.type === 'process-status') {
           if (message.status && !validateProcessView(message.status.view)) throw Error('terminal-process-view-invalid');
           setProcessStatus(message.status);
