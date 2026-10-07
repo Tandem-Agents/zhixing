@@ -1,0 +1,182 @@
+{
+  "versions": {
+    "node": "24.0.0",
+    "bun": "1.4.2",
+    "zig": "0.16.0",
+    "recoveryZig": "0.14.1",
+    "opentui": "0.5.14",
+    "solid": "1.9.12"
+  },
+  "opentui": {
+    "commit": "31a93fbe66992298d6d0f27481fa781f43d0c1e2",
+    "url": "https://codeload.github.com/anomalyco/opentui/zip/31a93fbe66992298d6d0f27481fa781f43d0c1e2",
+    "sha256": "b577ca8ba72c9f1ddfe94774da39db645ac435ea938c4a597c223f166614e28e",
+    "bytes": 30895901,
+    "root": "opentui-31a93fbe66992298d6d0f27481fa781f43d0c1e2",
+    "file": "opentui.zip",
+    "nativePath": "packages/native",
+    "dependencies": {
+      "file": "src/vendor/zig-deps.tar.gz",
+      "bytes": 4807960,
+      "sha256": "41df74dc52ec226e9610a2462054fab33e918ea950750f98d6cc0e26b0e9e04b"
+    }
+  },
+  "node": {
+    "headers": {
+      "url": "https://nodejs.org/dist/v24.0.0/node-v24.0.0-headers.tar.gz",
+      "sha256": "4605ee37eef345568f43de8c1843f3f7a243865654c1e942c50584de6bd59bb5",
+      "root": "node-v24.0.0",
+      "file": "node-headers.tar.gz"
+    },
+    "windowsLibrary": {
+      "url": "https://nodejs.org/dist/v24.0.0/win-x64/node.lib",
+      "sha256": "34882ca2bb450431047f2dd3bae1c3b8c1cd2b4cffd5c1a0bf079948846d2b83",
+      "file": "node.lib"
+    },
+    "headerFiles": [
+      "node_api.h",
+      "node_api_types.h",
+      "js_native_api.h",
+      "js_native_api_types.h"
+    ]
+  },
+  "requiredAssets": [
+    "assets/web-tree-sitter/tree-sitter.wasm",
+    "assets/@opentui/core/parser.worker.js",
+    "assets/@opentui/core/assets/zig/tree-sitter-zig.wasm",
+    "assets/@opentui/core/assets/zig/highlights.scm",
+    "assets/@opentui/core/assets/typescript/tree-sitter-typescript.wasm",
+    "assets/@opentui/core/assets/typescript/highlights.scm",
+    "assets/@opentui/core/assets/markdown_inline/tree-sitter-markdown_inline.wasm",
+    "assets/@opentui/core/assets/markdown_inline/highlights.scm",
+    "assets/@opentui/core/assets/markdown/tree-sitter-markdown.wasm",
+    "assets/@opentui/core/assets/markdown/highlights.scm",
+    "assets/@opentui/core/assets/javascript/tree-sitter-javascript.wasm",
+    "assets/@opentui/core/assets/javascript/highlights.scm",
+    "assets/@opentui/core/assets/markdown/injections.scm",
+    "notices/OpenTUI-MIT.txt"
+  ],
+  "targets": {
+    "win32-x64": {
+      "zig": "x86_64-windows-gnu",
+      "folder": "x86_64-windows",
+      "library": "opentui.dll",
+      "suffix": ".exe",
+      "bun": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-windows-x64.zip",
+        "sha256": "ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405",
+        "bytes": 39807510,
+        "root": "bun-windows-x64",
+        "file": "bun.zip"
+      },
+      "compiler": {
+        "url": "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip",
+        "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e",
+        "bytes": 97217739,
+        "root": "zig-x86_64-windows-0.16.0",
+        "file": "zig.zip"
+      },
+      "recoveryCompiler": {
+        "url": "https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.zip",
+        "sha256": "554f5378228923ffd558eac35e21af020c73789d87afeabf4bfd16f2e6feed2c",
+        "bytes": 82229343,
+        "root": "zig-x86_64-windows-0.14.1",
+        "file": "recovery-zig.zip"
+      }
+    },
+    "darwin-x64": {
+      "zig": "x86_64-macos.13.0",
+      "folder": "x86_64-macos",
+      "library": "libopentui.dylib",
+      "suffix": "",
+      "bun": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-darwin-x64.zip",
+        "sha256": "80520d7e17526308c9185d261679ac6d27798d3803a0e9f7ff9121ab8affb012",
+        "bytes": 28440507,
+        "root": "bun-darwin-x64",
+        "file": "bun.zip"
+      },
+      "compiler": {
+        "url": "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
+        "sha256": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7",
+        "bytes": 57396836,
+        "root": "zig-x86_64-macos-0.16.0",
+        "file": "zig.tar.xz"
+      }
+    },
+    "darwin-arm64": {
+      "zig": "aarch64-macos.13.0",
+      "folder": "aarch64-macos",
+      "library": "libopentui.dylib",
+      "suffix": "",
+      "bun": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-darwin-aarch64.zip",
+        "sha256": "90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f",
+        "bytes": 25377591,
+        "root": "bun-darwin-aarch64",
+        "file": "bun.zip"
+      },
+      "compiler": {
+        "url": "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
+        "sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
+        "bytes": 52238004,
+        "root": "zig-aarch64-macos-0.16.0",
+        "file": "zig.tar.xz"
+      }
+    },
+    "linux-x64": {
+      "zig": "x86_64-linux-gnu.2.35",
+      "folder": "x86_64-linux-gnu.2.35",
+      "library": "libopentui.so",
+      "suffix": "",
+      "bun": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip",
+        "sha256": "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913",
+        "bytes": 36646985,
+        "root": "bun-linux-x64",
+        "file": "bun.zip"
+      },
+      "compiler": {
+        "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
+        "sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
+        "bytes": 55478392,
+        "root": "zig-x86_64-linux-0.16.0",
+        "file": "zig.tar.xz"
+      },
+      "recoveryCompiler": {
+        "url": "https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz",
+        "sha256": "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c",
+        "bytes": 49086504,
+        "root": "zig-x86_64-linux-0.14.1",
+        "file": "recovery-zig.tar.xz"
+      }
+    },
+    "linux-arm64": {
+      "zig": "aarch64-linux-gnu.2.35",
+      "folder": "aarch64-linux-gnu.2.35",
+      "library": "libopentui.so",
+      "suffix": "",
+      "bun": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-aarch64.zip",
+        "sha256": "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7",
+        "bytes": 36602920,
+        "root": "bun-linux-aarch64",
+        "file": "bun.zip"
+      },
+      "compiler": {
+        "url": "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz",
+        "sha256": "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17",
+        "bytes": 51211944,
+        "root": "zig-aarch64-linux-0.16.0",
+        "file": "zig.tar.xz"
+      },
+      "recoveryCompiler": {
+        "url": "https://ziglang.org/download/0.14.1/zig-aarch64-linux-0.14.1.tar.xz",
+        "sha256": "f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b",
+        "bytes": 44954692,
+        "root": "zig-aarch64-linux-0.14.1",
+        "file": "recovery-zig.tar.xz"
+      }
+    }
+  }
+}

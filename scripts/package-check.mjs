@@ -12,6 +12,16 @@ const canonicalHomepage = "https://github.com/Tandem-Agents/zhixing#readme";
 const canonicalIssues = "https://github.com/Tandem-Agents/zhixing/issues";
 const skipBuild = process.argv.includes("--skip-build");
 const allTargets = process.argv.includes("--all-targets");
+// A single POSIX pack preserves executable modes for every target. Other
+// hosts install those exact npm tarballs instead of repacking them on NTFS.
+const inputTarballs = directoryOption("--tarballs");
+const outputTarballs = directoryOption("--pack-only");
+assert(!(inputTarballs && outputTarballs), "--tarballs 与 --pack-only 不可同时使用");
+assert(!(allTargets && process.platform === "win32" && !inputTarballs), "五目标 npm tarball 必须在 POSIX 打包以保留可执行位；Windows 使用 --tarballs <目录> 验证同一组包");
+const terminalInputBytes = await readFile(path.join(root, "packages/terminal-ui/native/build-inputs.json"));
+const terminalInputs = JSON.parse(terminalInputBytes);
+// Canonical JSON avoids checkout CRLF/LF differences between the five hosts.
+const terminalInputHash = createHash("sha256").update(JSON.stringify(terminalInputs)).digest("hex");
 const hostTarget = checkpointBridgeTarget();
 const command = process.platform === "win32" ? (name) => `${name}.cmd` : (name) => name;
 const temporary = await mkdtemp(path.join(root, ".zhixing-package-check-"));
@@ -31,43 +41,57 @@ try {
   if (!skipBuild) await run(command("pnpm"), ["build"], root);
   const rootManifest = await json(path.join(root, "package.json"));
   const packages = await publicPackages(rootManifest.version);
-  const tarballDir = path.join(temporary, "tarballs");
-  await mkdir(tarballDir);
+  const tarballDir = inputTarballs ?? outputTarballs ?? path.join(temporary, "tarballs");
+  if (!inputTarballs) await mkdir(tarballDir);
+  if (inputTarballs) {
+    const expected = packages.map(item => `${item.name.replace(/^@/u, "").replaceAll("/", "-")}-${rootManifest.version}.tgz`).sort();
+    assert(JSON.stringify((await readdir(tarballDir)).sort()) === JSON.stringify(expected), "预打包目录并非当前版本的完整公开包集合");
+  }
   const tarballs = [];
   for (const item of packages) {
-    const before = new Set(await readdir(tarballDir));
-    await run(command("pnpm"), ["pack", "--pack-destination", tarballDir], item.directory);
-    const added = (await readdir(tarballDir)).filter((name) => !before.has(name));
-    assert(added.length === 1 && added[0].endsWith(".tgz"), `${item.name} 未生成唯一 tarball`);
-    const tarball = path.join(tarballDir, added[0]);
+    let tarball;
+    if (inputTarballs) tarball = path.join(tarballDir, `${item.name.replace(/^@/u, "").replaceAll("/", "-")}-${rootManifest.version}.tgz`);
+    else {
+      const before = new Set(await readdir(tarballDir));
+      await run(command("pnpm"), ["pack", "--pack-destination", tarballDir], item.directory);
+      const added = (await readdir(tarballDir)).filter((name) => !before.has(name));
+      assert(added.length === 1 && added[0].endsWith(".tgz"), `${item.name} 未生成唯一 tarball`);
+      tarball = path.join(tarballDir, added[0]);
+    }
     await inspectTarball(item, tarball, rootManifest.version);
     tarballs.push({ ...item, tarball });
   }
   const tarballFingerprint = await fingerprintTarballs(tarballs);
 
-  const installRoot = path.join(temporary, "consumer");
-  const home = path.join(temporary, "user-home");
-  await mkdir(installRoot);
-  await mkdir(home);
-  await writeFile(path.join(home, "sentinel.txt"), "keep", "utf8");
-  await writeFile(path.join(installRoot, "package.json"), `${JSON.stringify({
-    name: "zhixing-package-consumer",
-    version: "1.0.0",
-    private: true,
-    type: "module",
-    dependencies: Object.fromEntries(tarballs.map(({ name, tarball }) => [name, `file:${tarball}`])),
-  }, null, 2)}\n`, "utf8");
-  await run(command("npm"), ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false"], installRoot, npmEnv);
-  await verifyInstalledClosure(installRoot, packages, rootManifest.version);
-  await verifyPublicEntrypoints(installRoot, packages);
-  await verifyInstalledBraceExpansionBoundary(installRoot);
-  await verifyCli(installRoot, home, rootManifest.version);
-  await verifyPlatformHelper(installRoot, home);
-  await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "@zhixing/cli"], installRoot, npmEnv);
-  assert(await exists(path.join(home, "sentinel.txt")), "npm 卸载影响了 ZHIXING_HOME");
-  console.log(
-    `package:check 通过：${packages.length} 个公开包，${hostTarget.id} 本地安装闭包可消费；tarball sha256 ${tarballFingerprint}`,
-  );
+  if (outputTarballs) {
+    console.log(`package:check pack-only：${packages.length} 个包已检查并保存至 ${outputTarballs}；tarball sha256 ${tarballFingerprint}；尚未执行安装或运行验证`);
+  } else {
+    const installRoot = path.join(temporary, "consumer");
+    const home = path.join(temporary, "user-home");
+    await mkdir(installRoot);
+    await mkdir(home);
+    await writeFile(path.join(home, "sentinel.txt"), "keep", "utf8");
+    await writeFile(path.join(installRoot, "package.json"), `${JSON.stringify({
+      name: "zhixing-package-consumer",
+      version: "1.0.0",
+      private: true,
+      type: "module",
+      dependencies: Object.fromEntries(tarballs.map(({ name, tarball }) => [name, `file:${tarball}`])),
+    }, null, 2)}\n`, "utf8");
+    await run(command("npm"), ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false"], installRoot, npmEnv);
+    await verifyInstalledClosure(installRoot, packages, rootManifest.version);
+    await verifyPublicEntrypoints(installRoot, packages);
+    await verifyInstalledBraceExpansionBoundary(installRoot);
+    await verifyCli(installRoot, home, rootManifest.version);
+    await verifyTerminalClosure(path.join(installRoot, "node_modules/@zhixing/cli"), rootManifest.version);
+    await verifyInstalledTerminalNative(installRoot, home);
+    await verifyPlatformHelper(installRoot, home);
+    await run(command("npm"), ["uninstall", "--ignore-scripts", "--no-audit", "--no-fund", "@zhixing/cli"], installRoot, npmEnv);
+    assert(await exists(path.join(home, "sentinel.txt")), "npm 卸载影响了 ZHIXING_HOME");
+    console.log(
+      `package:check 通过：${packages.length} 个公开包，${hostTarget.id} 本地安装闭包可消费；tarball sha256 ${tarballFingerprint}`,
+    );
+  }
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
@@ -127,6 +151,91 @@ async function inspectTarball(item, tarball, version) {
       if (allTargets || included || target.id === hostTarget.id) verifyCheckpointBridgeArtifact(packageRoot, target);
     }
   }
+  if (item.name === "@zhixing/cli") await verifyTerminalClosure(packageRoot, version);
+}
+
+function directoryOption(name) {
+  const index = process.argv.indexOf(name);
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  assert(typeof value === "string" && value.length > 0 && !value.startsWith("--"), `${name} 需要目录参数`);
+  return path.resolve(value);
+}
+
+async function verifyTerminalClosure(packageRoot, version) {
+  const directory = path.join(packageRoot, "dist/terminal");
+  const entries = await readdir(directory, { withFileTypes: true });
+  const targets = Object.keys(terminalInputs.targets);
+  assert(JSON.stringify([...targets].sort()) === JSON.stringify(CHECKPOINT_BRIDGE_TARGETS.map(target => target.id).sort()), "terminal 与平台五目标集合不一致");
+  for (const entry of entries) assert(entry.isDirectory() && (entry.name === "shared" || targets.includes(entry.name)), `未知 terminal 资产：${entry.name}`);
+  for (const name of ["protocol", "channel", "parent-transport", "body-model", "skills-model"]) {
+    for (const extension of ["js", "d.ts"]) assert((await stat(path.join(directory, `shared/${name}.${extension}`))).size > 0, `缺少 terminal shared/${name}.${extension}`);
+  }
+  for (const id of targets) {
+    if (!allTargets && id !== hostTarget.id && !entries.some(entry => entry.name === id)) continue;
+    const target = terminalInputs.targets[id], targetRoot = path.join(directory, id);
+    const manifest = await json(path.join(targetRoot, "manifest.json"));
+    assert(manifest.protocol === "zhixing-terminal/1" && manifest.packageVersion === version && `${manifest.platform}-${manifest.arch}` === id, `${id} terminal 版本/目标不匹配`);
+    for (const name of ["bun", "opentui", "solid"]) assert(manifest[name] === terminalInputs.versions[name], `${id} ${name} 版本不匹配`);
+    assert(manifest.nativeCommit === terminalInputs.opentui.commit && manifest.buildInputs?.definitionSha256 === terminalInputHash, `${id} terminal 固定输入身份不匹配`);
+    assert(manifest.buildInputs.zig === terminalInputs.versions.zig && typeof manifest.buildInputs.nativeCompilerVersion === "string" && manifest.buildInputs.nativeCompilerVersion.length > 0, `${id} 原生编译器记录缺失`);
+    assert(id.startsWith("darwin-") ? manifest.buildInputs.recoveryZig === null : ["0.14.1", "0.16.0"].includes(manifest.buildInputs.recoveryZig), `${id} 恢复编译器记录不正确`);
+    if (allTargets) {
+      assert(manifest.buildInputs.verifiedArchives === true && manifest.buildInputs.node === terminalInputs.versions.node &&
+        manifest.buildInputs.recoveryZig === (id.startsWith("darwin-") ? null : terminalInputs.versions.recoveryZig), `${id} 不是经固定 archive 校验的发布制品`);
+    }
+    const nodeFiles = manifest.buildInputs.nodeFiles;
+    const expectedNodeFiles = [...terminalInputs.node.headerFiles, ...(id === "win32-x64" ? ["node.lib"] : [])].sort();
+    assert(Array.isArray(nodeFiles) && JSON.stringify(nodeFiles.map(item => item.name).sort()) === JSON.stringify(expectedNodeFiles) &&
+      nodeFiles.every(item => /^[0-9a-f]{64}$/u.test(item.sha256)), `${id} Node 开发输入记录不完整`);
+    if (manifest.buildInputs.verifiedArchives && id === "win32-x64") assert(nodeFiles.find(item => item.name === "node.lib").sha256 === terminalInputs.node.windowsLibrary.sha256, "Windows node.lib 不属于固定 Node 24.0.0");
+    const binaries = [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, "foreground.node", ...(id.startsWith("win32-") ? [] : ["exec-gate"])];
+    const expectedFiles = [...binaries, ...terminalInputs.requiredAssets].sort();
+    const actualFiles = (await relativeFiles(targetRoot)).filter(name => name !== "manifest.json").sort();
+    assert(JSON.stringify(actualFiles) === JSON.stringify(expectedFiles), `${id} terminal worker/grammar/assets/notices 或二进制闭包不完整`);
+    assert(Array.isArray(manifest.artifacts) && JSON.stringify(manifest.artifacts.map(item => item.name).sort()) === JSON.stringify(expectedFiles), `${id} terminal manifest 未完整覆盖制品`);
+    for (const artifact of manifest.artifacts) {
+      const file = path.join(targetRoot, artifact.name), content = await readFile(file), metadata = await stat(file);
+      assert(Number.isSafeInteger(artifact.bytes) && artifact.bytes > 0 && artifact.bytes === content.length && /^[0-9a-f]{64}$/u.test(artifact.sha256) &&
+        createHash("sha256").update(content).digest("hex") === artifact.sha256, `${id}/${artifact.name} 大小/哈希不符`);
+      if (binaries.includes(artifact.name)) assertTerminalBinary(content, id, artifact.name);
+      if (process.platform !== "win32" && !id.startsWith("win32-") && ["ui", "recovery", "exec-gate"].includes(artifact.name)) {
+        assert((metadata.mode & 0o111) !== 0, `${id}/${artifact.name} 丢失可执行权限`);
+      }
+    }
+  }
+}
+
+function assertTerminalBinary(bytes, id, name) {
+  const [platform, arch] = id.split("-");
+  let valid = false;
+  if (bytes.length >= 64 && platform === "win32" && bytes.toString("ascii", 0, 2) === "MZ") {
+    const pe = bytes.readUInt32LE(0x3c);
+    valid = pe <= bytes.length - 6 && bytes.toString("binary", pe, pe + 4) === "PE\0\0" && bytes.readUInt16LE(pe + 4) === 0x8664;
+  } else if (bytes.length >= 64 && platform === "linux") {
+    valid = bytes.toString("binary", 0, 4) === "\x7fELF" && bytes[4] === 2 && bytes[5] === 1 && bytes.readUInt16LE(18) === (arch === "x64" ? 62 : 183);
+  } else if (bytes.length >= 32 && platform === "darwin") {
+    valid = bytes.readUInt32LE(0) === 0xfeedfacf && bytes.readUInt32LE(4) === (arch === "x64" ? 0x01000007 : 0x0100000c);
+  }
+  assert(valid, `${id}/${name} 不是匹配目标的 64 位原生制品`);
+}
+
+async function verifyInstalledTerminalNative(installRoot, home) {
+  const target = terminalInputs.targets[hostTarget.id];
+  const directory = path.join(installRoot, "node_modules/@zhixing/cli/dist/terminal", hostTarget.id);
+  const smoke = [
+    'const native = require(process.argv[1]);',
+    'for (const name of [process.platform === "win32" ? "create" : "createPosix", "observe", "seal", "executionState", "terminateExecution"]) if (typeof native[name] !== "function") throw Error(`Missing native operation: ${name}`);',
+    'const state = native.executionState(); if (state.active !== 0 || state.creating !== 0) throw Error("Unexpected native execution state");',
+    'native.seal(); native.terminateExecution();',
+  ].join("\n");
+  const env = { ...process.env, ZHIXING_HOME: home };
+  for (const key of Object.keys(env)) if (key.startsWith("ZHIXING_TERMINAL_")) delete env[key];
+  const native = await runOutcomeWithDeadline(process.execPath, ["--eval", smoke, "--", path.join(directory, "foreground.node")], installRoot, env, 15_000);
+  assert(native.code === 0 && native.signal === null && !native.timedOut, `安装后的 terminal Node-API 调用失败：${native.stderr}`);
+  const ui = await runOutcomeWithDeadline(path.join(directory, `ui${target.suffix}`), [], installRoot, env, 15_000);
+  assert(!ui.timedOut && ui.code !== 0 && ui.signal === null && ui.stderr.includes("The terminal UI requires its foreground supervisor."), `安装后的自足 UI 未到达监督者准入边界：${ui.stderr}`);
+  console.log(`terminal ${hostTarget.id}: installed Node-API executed; self-contained UI reached admission guard. Interactive S/N/U/R and host input remain separate journey evidence.`);
 }
 
 async function verifyInstalledClosure(installRoot, packages, version) {
@@ -198,9 +307,22 @@ async function verifyPublicEntrypoints(installRoot, packages) {
 async function verifyCli(installRoot, home, version) {
   const entry = path.join(installRoot, "node_modules", "@zhixing", "cli", "dist", "index.js");
   const env = { ...process.env, ZHIXING_HOME: home, NO_COLOR: "1" };
-  const metadata = await import(pathToFileURL(entry).href);
+  // First-run checks may create configuration. Each independent scenario must
+  // own its initial state; shared installation does not mean shared user state.
+  const scenarioEnv = (scenario) => ({ ...env, ZHIXING_HOME: path.join(home, "cli-scenarios", scenario) });
+  const metadata = await import(pathToFileURL(path.join(path.dirname(entry), "metadata.js")).href);
   const versionResult = await run(process.execPath, [entry, "--version"], installRoot, env, true);
   assert(versionResult.stdout.includes(version), "CLI --version 输出不正确");
+  const cliManifest = await json(path.join(installRoot, "node_modules/@zhixing/cli/package.json"));
+  const binDirectory = path.join(installRoot, "node_modules/.bin");
+  for (const name of ["zz", "zhixing"]) {
+    assert(["dist/index.js", "./dist/index.js"].includes(cliManifest.bin?.[name]), `${name} 未指向正式 CLI 入口`);
+    const executable = process.platform === "win32" ? command(name) : path.join(binDirectory, name);
+    const output = await run(executable, ["--version"], binDirectory, env, true);
+    assert(output.stdout.includes(version), `npm 安装的 ${name} bin 不可执行`);
+    const noTty = await runOutcome(executable, [], binDirectory, scenarioEnv(`non-tty-${name}`), true);
+    assert(noTty.code === 2 && noTty.signal === null && `${noTty.stdout}\n${noTty.stderr}`.includes("请在 TTY 终端中运行 `zhixing` 完成配置"), `${name} 非 TTY 入口不正确`);
+  }
   const help = await run(process.execPath, [entry, "--help"], installRoot, env, true);
   const helpCommand = await run(process.execPath, [entry, "help"], installRoot, env, true);
   const canonicalHelp = metadata.program.helpInformation().trim();
@@ -212,13 +334,13 @@ async function verifyCli(installRoot, home, version) {
   for (const command of hiddenTopLevel) {
     assert(!new RegExp(`^  ${command}(?: |$)`, "mu").test(canonicalHelp), `隐藏命令 ${command} 泄漏到 tarball 默认帮助`);
   }
-  const doctor = await run(process.execPath, [entry, "doctor"], installRoot, env, true);
+  const doctor = await run(process.execPath, [entry, "doctor"], installRoot, scenarioEnv("doctor-empty"), true);
   assert(doctor.stdout.includes("知行尚未完成首次设置") && doctor.stdout.includes("运行 zz 完成设置"), "空 home 的 doctor 未给出唯一设置行动");
-  const maintenance = await run(process.execPath, [entry, "stop", "--maintenance"], installRoot, env, true);
+  const maintenance = await run(process.execPath, [entry, "stop", "--maintenance"], installRoot, scenarioEnv("maintenance-empty"), true);
   assert(maintenance.stdout.includes("npm install -g @zhixing/cli@latest"), "maintenance stop 未给出显式 npm 行动");
-  const removal = await run(process.execPath, [entry, "app", "remove"], installRoot, env, true);
+  const removal = await run(process.execPath, [entry, "app", "remove"], installRoot, scenarioEnv("remove-empty"), true);
   assert(removal.stdout.includes("程序尚未卸载") && removal.stdout.includes("npm uninstall -g @zhixing/cli"), "应用停用未交接给 npm 卸载");
-  const firstRun = await runOutcome(process.execPath, [entry], installRoot, env, true);
+  const firstRun = await runOutcome(process.execPath, [entry], installRoot, scenarioEnv("first-run-empty"), true);
   assert(firstRun.code === 2 && firstRun.signal === null, "非交互首次运行未安全进入配置边界");
   assert(`${firstRun.stdout}\n${firstRun.stderr}`.includes("请在 TTY 终端中运行 `zhixing` 完成配置"), "首次运行未给出唯一交互配置行动");
 }

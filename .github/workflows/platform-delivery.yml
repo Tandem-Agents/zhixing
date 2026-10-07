@@ -32,7 +32,10 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import { appendFileSync } from 'node:fs';
+          import { readFileSync } from 'node:fs';
           import { CHECKPOINT_BRIDGE_TARGETS } from './packages/mesh/src/checkpoint-bridge-artifact.ts';
+          const terminal = JSON.parse(readFileSync('packages/terminal-ui/native/build-inputs.json', 'utf8'));
+          if (JSON.stringify(Object.keys(terminal.targets).sort()) !== JSON.stringify(CHECKPOINT_BRIDGE_TARGETS.map(target => target.id).sort())) throw Error('Terminal and checkpoint target sets disagree');
           const runners = { 'win32-x64': 'windows-2022', 'darwin-x64': 'macos-15-intel', 'darwin-arm64': 'macos-14', 'linux-x64': 'ubuntu-22.04', 'linux-arm64': 'ubuntu-22.04-arm' };
           const include = CHECKPOINT_BRIDGE_TARGETS.map(({ id }) => {
             if (!runners[id]) throw Error(`Missing build host for ${id}`);
@@ -47,7 +50,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,14 +67,102 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: node packages/mesh/scripts/build-checkpoint-child-bridge.mjs
+      - name: Fetch exact terminal build archives
+        shell: bash
+        env:
+          TARGET_ID: ${{ matrix.id }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFile, mkdir, writeFile, appendFile } from 'node:fs/promises';
+          import { createHash } from 'node:crypto';
+          import path from 'node:path';
+          const input = JSON.parse(await readFile('packages/terminal-ui/native/build-inputs.json', 'utf8'));
+          const target = input.targets[process.env.TARGET_ID];
+          const directory = path.join(process.env.RUNNER_TEMP, 'zhixing-terminal-inputs');
+          await mkdir(directory, { recursive: true });
+          const archives = [target.bun, target.compiler, ...(target.recoveryCompiler ? [target.recoveryCompiler] : []), input.opentui, input.node.headers,
+            ...(process.platform === 'win32' ? [input.node.windowsLibrary] : [])];
+          for (const item of archives) {
+            const response = await fetch(item.url, { signal: AbortSignal.timeout(180_000) });
+            if (!response.ok) throw Error(`Pinned input unavailable: ${item.file} (${response.status})`);
+            const bytes = Buffer.from(await response.arrayBuffer());
+            if (createHash('sha256').update(bytes).digest('hex') !== item.sha256 || (item.bytes !== undefined && bytes.length !== item.bytes)) throw Error(`Pinned input mismatch: ${item.file}`);
+            await writeFile(path.join(directory, item.file), bytes, { flag: 'wx' });
+            console.log(`${item.file}: ${bytes.length} bytes sha256 ${item.sha256}`);
+          }
+          await appendFile(process.env.GITHUB_ENV, `ZHIXING_TERMINAL_INPUT_ARCHIVES=${directory}\n`);
+          JS
+      - name: Build terminal on its matching host with verified inputs
+        run: node packages/terminal-ui/scripts/build.mjs
+      - name: Archive the complete terminal target and executable modes
+        shell: bash
+        run: tar -czf terminal-${{ matrix.id }}.tar.gz -C packages/terminal-ui/dist ${{ matrix.id }}
       - uses: actions/upload-artifact@v4
         with:
           name: checkpoint-${{ matrix.id }}
           path: packages/mesh/build/prebuilt
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminal-${{ matrix.id }}
+          path: terminal-${{ matrix.id }}.tar.gz
+          if-no-files-found: error
+
+  package:
+    needs: [targets, native]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      npm_config_workspace_concurrency: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.0.0'
+      - name: Verify exact candidate and runtime
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: >-
+          node -e "const cp=require('node:child_process'); const expected=process.env.EXPECTED_SHA; const actual=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(); if(!/^[0-9a-f]{40}$/.test(expected)||actual!==expected||process.env.GITHUB_SHA!==expected||process.version!=='v24.0.0'||process.platform!=='linux'||process.arch!=='x64') process.exit(1);"
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: checkpoint-*
+          merge-multiple: true
+          path: packages/mesh/build/prebuilt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: terminal-*
+          merge-multiple: true
+          path: terminal-artifacts
+      - name: Merge all five complete terminal targets
+        run: |
+          node --input-type=module <<'JS'
+          import { mkdir, readFile, readdir } from 'node:fs/promises';
+          import { execFileSync } from 'node:child_process';
+          const input = JSON.parse(await readFile('packages/terminal-ui/native/build-inputs.json', 'utf8'));
+          const expected = Object.keys(input.targets).map(id => `terminal-${id}.tar.gz`).sort();
+          if (JSON.stringify((await readdir('terminal-artifacts')).sort()) !== JSON.stringify(expected)) throw Error('Incomplete terminal target archives');
+          await mkdir('packages/terminal-ui/dist', { recursive: true });
+          for (const name of expected) execFileSync('tar', ['-xzf', `terminal-artifacts/${name}`, '-C', 'packages/terminal-ui/dist'], { stdio: 'inherit' });
+          JS
+      - run: node packages/terminal-ui/scripts/build-shared.mjs
+      - run: pnpm release:version:check
+      - run: pnpm -r --filter '!@zhixing/terminal-ui' run build
+      - name: Pack the one npm candidate with all POSIX executable modes intact
+        run: pnpm package:check -- --skip-build --all-targets --pack-only platform-tarballs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-candidate-${{ github.sha }}
+          path: platform-tarballs/*.tgz
+          if-no-files-found: error
 
   verify:
-    needs: [targets, native]
+    needs: [targets, native, package]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
@@ -100,18 +191,47 @@ jobs:
           pattern: checkpoint-*
           merge-multiple: true
           path: packages/mesh/build/prebuilt
-      - run: pnpm build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: terminal-*
+          merge-multiple: true
+          path: terminal-artifacts
+      - name: Merge all five complete terminal targets
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { mkdir, readFile, readdir } from 'node:fs/promises';
+          import { execFileSync } from 'node:child_process';
+          const input = JSON.parse(await readFile('packages/terminal-ui/native/build-inputs.json', 'utf8'));
+          const expected = Object.keys(input.targets).map(id => `terminal-${id}.tar.gz`).sort();
+          if (JSON.stringify((await readdir('terminal-artifacts')).sort()) !== JSON.stringify(expected)) throw Error('Incomplete terminal target archives');
+          await mkdir('packages/terminal-ui/dist', { recursive: true });
+          for (const name of expected) execFileSync('tar', ['-xzf', `terminal-artifacts/${name}`, '-C', 'packages/terminal-ui/dist'], { stdio: 'inherit' });
+          JS
+      # Build the shared DTOs first; preserve the verified host-built binaries.
+      # CLI's existing onSuccess copy brings the whole dist into the npm package.
+      - run: node packages/terminal-ui/scripts/build-shared.mjs
+      - run: pnpm release:version:check
+      - run: pnpm -r --filter '!@zhixing/terminal-ui' run build
       - run: pnpm --filter @zhixing/mesh exec node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
       - run: pnpm --filter @zhixing/mesh exec vitest run src/__tests__/checkpoint-bridge-artifact.test.ts src/__tests__/checkpoint-child-bridge.test.ts src/__tests__/checkpoint-filesystem-session.test.ts src/__tests__/checkpoint-posix-session.test.ts src/__tests__/checkpoint-posix-session-native.test.ts --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json "--outputFile=${{ github.workspace }}/packages/mesh/mesh-platform-tests.json"
       - run: pnpm --filter @zhixing/cli exec vitest run src/runtime-support.test.ts src/serve/managed-service.test.ts src/logging/store-process.integration.test.ts --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json "--outputFile=${{ github.workspace }}/packages/cli/cli-platform-tests.json"
-      - run: pnpm package:check -- --skip-build --all-targets
+      - name: Exercise the matching terminal native lifecycle and recovery
+        run: pnpm --filter @zhixing/cli exec vitest run src/terminal/__tests__/foreground-win32.test.ts src/terminal/__tests__/foreground-posix.test.ts src/terminal/__tests__/recovery-posix.test.ts --maxWorkers=1 --minWorkers=1 --fileParallelism=false --reporter=default --reporter=json "--outputFile=${{ github.workspace }}/packages/cli/terminal-platform-tests.json"
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-candidate-${{ github.sha }}
+          path: platform-tarballs
+      - run: pnpm package:check -- --skip-build --all-targets --tarballs platform-tarballs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mesh-results-${{ matrix.id }}-${{ github.sha }}
+          name: platform-results-${{ matrix.id }}-${{ github.sha }}
           path: |
             platform-identity.json
             packages/mesh/mesh-platform-tests.json
             packages/cli/cli-platform-tests.json
+            packages/cli/terminal-platform-tests.json
             packages/mesh/build/prebuilt/*/descriptor.json
+            packages/terminal-ui/dist/*/manifest.json
           if-no-files-found: warn
