@@ -1,5 +1,5 @@
-import { createEffect, createSignal, For, Show, ErrorBoundary } from 'solid-js';
-import { createCliRenderer, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
+import { createEffect, createMemo, createSignal, For, Show, ErrorBoundary } from 'solid-js';
+import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
 import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
 import { ProcessView } from './process-view.js';
@@ -9,12 +9,14 @@ import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
-import { BodyView, type BodyViewHandle } from './body-view.js';
+import { BodyView, TerminalScrollBox, type BodyViewHandle } from './body-view.js';
 import { BODY_PAGE_BYTES, bodyWindows, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
+import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
+import { interactionKey, inputRows, selectedLabel } from './surface-layout.js';
 
-extend({ textarea: TerminalTextarea });
+extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
 const teal = '#69b5a5';
 const frames = ['◇', '□', '◈', '▤', '◆', '▦', '◈', '▨', '◇', '▩'];
@@ -25,10 +27,41 @@ export interface TerminalRootOptions {
   readonly exit: () => Promise<void>;
 }
 
-export async function createTerminalRoot(options: TerminalRootOptions) {
+export async function createTerminalRoot(options: TerminalRootOptions, createRenderer = createCliRenderer) {
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', message: '正在连接…', busy: true });
-  const [status, setStatus] = createSignal('');
+  const [informationRevision, setInformationRevision] = createSignal(0);
+  const information = new InformationBoard(() => setInformationRevision(value => value + 1));
+  let statusSource = information.source(interactionKey(view()));
+  const statusSources = new Map([[interactionKey(view()), statusSource]]);
+  let conversationScope = interactionKey(view());
+  const activateInformation = (next: TerminalView) => {
+    const previous = interactionKey(view()), key = interactionKey(next);
+    const release = (scope: string) => { information.release(scope); statusSources.delete(scope); };
+    // A modal pauses the main input; it does not end that interaction.
+    if (previous !== key && view().kind !== 'conversation') release(previous);
+    if (next.kind === 'conversation' && conversationScope !== key) {
+      release(conversationScope); conversationScope = key;
+    }
+    statusSource = statusSources.get(key) ?? information.source(key);
+    statusSources.set(key, statusSource);
+  };
+  const setStatus = (text: string) => statusSource.set('left', 'status', text || null);
+  const fieldPastes = new Map<InformationSource, number>();
+  const beginFieldPaste = (source: InformationSource) => {
+    fieldPastes.set(source, (fieldPastes.get(source) ?? 0) + 1);
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      const left = (fieldPastes.get(source) ?? 1) - 1;
+      if (left) fieldPastes.set(source, left); else fieldPastes.delete(source);
+    };
+  };
+  const reportStatus = () => {
+    const source = statusSource;
+    return (error: unknown) => source.set('left', 'status', error instanceof Error ? error.message : String(error));
+  };
   const [taskStatus, setTaskStatus] = createSignal<TerminalTaskStatus>({});
   const [processStatus, setProcessStatus] = createSignal<TerminalProcessStatus>();
   const [recoveryPage, setRecoveryPage] = createSignal({ page: 0, text: '' });
@@ -46,6 +79,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const submitRecovery = async () => {
     const current = view().recovery, buffer = recoveryInput;
     if (!current?.input || !buffer || recoverySubmitting) return;
+    const report = reportStatus();
     recoverySubmitting = true;
     try {
       for (let index = 0, offset = 0; ; index++, offset += RECOVERY_INPUT_PART_BYTES) {
@@ -55,7 +89,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         finally { bytes.fill(0); }
         if (final) break;
       }
-    } catch { if (!disposed) setStatus('保密回读未完成，请重新打开输入。'); }
+    } catch { if (!disposed) report('保密回读未完成，请重新打开输入。'); }
     finally { buffer.close(); if (recoveryInput === buffer) { recoveryInput = undefined; setRecoveryLength(0); } recoverySubmitting = false; }
   };
   const [copyAvailable, setCopyAvailable] = createSignal(false);
@@ -63,6 +97,13 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const [size, setSize] = createSignal({ width: 80, height: 24 });
   const [animation, setAnimation] = createSignal('◆');
   const [secretLength, setSecretLength] = createSignal(0);
+  const [editorLines, setEditorLines] = createSignal(1);
+  const [editorEmpty, setEditorEmpty] = createSignal(true);
+  const syncEditor = () => {
+    if (!editor || editor.isDestroyed) return;
+    setEditorLines(editor.editorView.getTotalVirtualLineCount());
+    setEditorEmpty(editor.plainText.length === 0);
+  };
   const [display, setDisplay] = createSignal<TerminalDisplayPage>({ first: 0, last: 0, start: 0, follow: true, segments: [] });
   let historyBox: ScrollBoxRenderable | undefined;
   let bodyView: BodyViewHandle | undefined;
@@ -78,7 +119,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       void work.then(() => bodyClosures.delete(work), () => {});
     }
   };
-  let secret = '', editor: TextareaRenderable | undefined, disposed = false, ctrlC = 0;
+  let secret = '', editor: TextareaRenderable | undefined, disposed = false, ctrlC = 0, fieldEditVersion = 0;
   let skillsView: SkillsViewHandle | undefined;
   let operationCount = 0;
   let changingDraft = false;
@@ -93,6 +134,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         if (editor.plainText !== draft.text) { editor.setText(draft.text); editorHistoryBytes = 0; editorHistoryEntries = 0; }
         setEditorUtf16Cursor(editor, draft.text, draft.cursor, renderer.widthMethod);
       } finally { changingDraft = false; }
+      syncEditor();
     }
     if (candidates?.deleteArmed || trustControls.armedId) setStatus('');
     candidates?.sync(view().kind === 'conversation');
@@ -109,10 +151,12 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   createEffect(() => { if (trustControls.sync(trustSnapshot())) setStatus(''); });
   const editorValue = () => editor && !editor.isDestroyed ? editor.plainText : '';
   const preserveDraft = () => {
+    syncEditor();
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
       const text = editor.plainText, cursor = editorUtf16Cursor(editor);
       try {
         if (text !== draft.text) {
+          setStatus('');
           // A conservative finite bound on retained undo payload and entries.
           // setText rebuilds the native text store as well as clearing undo.
           editorHistoryBytes += Buffer.byteLength(text) + Buffer.byteLength(draft.text); editorHistoryEntries++;
@@ -123,7 +167,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           try { editor.setText(text); setEditorUtf16Cursor(editor, text, cursor, renderer.widthMethod); editorHistoryBytes = 0; editorHistoryEntries = 0; }
           finally { changingDraft = false; }
         }
-        void input.compact().catch(error => { if (!disposed) setStatus(error instanceof Error ? error.message : '输入保存未完成，草稿保留。'); });
+        void input.compact().catch(reportStatus());
       } catch (error) {
         changingDraft = true;
         try { editor.setText(draft.text); setEditorUtf16Cursor(editor, draft.text, draft.cursor, renderer.widthMethod); editorHistoryBytes = 0; editorHistoryEntries = 0; }
@@ -141,8 +185,9 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
   const action = async (value: TerminalAction) => {
     if (operationCount >= 8) { setStatus('操作处理中，请稍候。'); return; }
     operationCount++;
+    const report = reportStatus();
     try { return await options.request(value); }
-    catch (error) { if (!disposed) setStatus(error instanceof Error ? error.message : '操作失败'); }
+    catch (error) { if (!disposed) report(error); }
     finally { operationCount--; }
   };
   // Keep the current action visible while the independently scrollable body
@@ -163,10 +208,13 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         changingDraft = true; try { setEditorUtf16Cursor(value, draft.text, draft.cursor, renderer.widthMethod); } finally { changingDraft = false; }
       }
       value.focus();
+      syncEditor();
     } });
   };
   const submit = async () => {
     const current = view();
+    const report = reportStatus();
+    if (current.field && fieldPastes.has(statusSource)) { setStatus('粘贴仍在处理，请完成后再确认。'); return; }
     if (current.field && current.requestId) {
       if (!safeAction()) { setStatus('请放大窗口后提交；仍可按 Esc 取消。'); return; }
       const value = editorValue();
@@ -208,7 +256,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           if (!route || disposed || draft.version !== version || view().kind !== 'conversation') return;
           if (route?.route === 'input') {
             try { setStatus('正在保存并提交输入…'); await input.submit(); }
-            catch (error) { if (!disposed) setStatus(error instanceof Error ? error.message : '提交未完成；草稿保留。'); }
+            catch (error) { if (!disposed) report(error); }
             return;
           }
           const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean } | undefined;
@@ -220,7 +268,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
         }
       } else {
         try { setStatus('正在保存并提交输入…'); await input.submit(); }
-        catch (error) { if (!disposed) setStatus(error instanceof Error ? error.message : '提交未完成；草稿保留。'); }
+        catch (error) { if (!disposed) report(error); }
       }
     }
   };
@@ -231,7 +279,11 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'reject' });
     else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true });
   };
-  const refreshCopy = () => setCopyAvailable(!disposed && isBody() && !!bodySelection(renderer, bodyBox));
+  const refreshCopy = () => {
+    if (disposed) return;
+    syncEditor();
+    setCopyAvailable(isBody() && !!bodySelection(renderer, bodyBox));
+  };
   const copyBody = () => {
     if (disposed || !isBody()) return;
     const selection = bodySelection(renderer, bodyBox);
@@ -251,14 +303,83 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     try { setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求。'); }
     catch { setStatus('复制请求未完成。'); }
   };
-  const App = () => <box width="100%" height="100%" flexDirection="column" paddingX={1}>
-    <box height={4} flexDirection="column">
+  const fieldRows = () => view().field?.secret ? 1 : inputRows(editorLines(), size().height);
+  const computeInfo = () => {
+    informationRevision();
+    const current = view(), blocks = information.snapshot(interactionKey(current));
+    const candidate = current.kind === 'conversation' ? candidateValue() : undefined;
+    const left = [...blocks.left];
+    if (candidate?.error || candidate?.hint) left.push(candidate.error ?? candidate.hint ?? '');
+    else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
+    else if (current.kind === 'conversation' && editorEmpty()) left.push('输入消息或 / 查看命令');
+    const keys = candidate?.items.length || candidate?.mode ? '↑↓ 选择 · Tab/Enter 接纳 · Esc 返回'
+      : current.kind === 'skills' ? 'Esc 返回 · p/d/m/a 管理 · r 刷新'
+      : current.field ? 'Enter 确认 · Esc 返回'
+      : current.kind === 'conversation' ? 'Enter 发送 · Esc 清空 · Ctrl+C 中止/退出'
+      : 'Enter 确认 · Esc 返回 · PgUp/PgDn 阅读';
+    const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';
+    const copyWidth = copy ? measureInformation(copy) : 0;
+    return { ...informationLayout({ left, right: [...blocks.right, keys] }, size().width - (copy ? copyWidth + 2 : 0), measureInformation), copy, copyWidth };
+  };
+  let clipboardPending = false;
+  // A paste may arrive after more editing. Page identity alone cannot authorize
+  // applying an old result to a new cursor or selection in the same field.
+  const fieldPasteContext = () => {
+    const scope = statusSource, version = fieldEditVersion;
+    const target = view().field?.secret || editor?.isDestroyed ? undefined : editor;
+    const cursor = target?.cursorOffset, selected = target?.getSelection();
+    return () => {
+      if (disposed || scope !== statusSource || version !== fieldEditVersion) return false;
+      if (view().field?.secret) return true;
+      if (!editor || editor.isDestroyed || editor !== target) return false;
+      const selection = editor.getSelection();
+      return editor.cursorOffset === cursor && selected?.start === selection?.start && selected?.end === selection?.end;
+    };
+  };
+  const pasteClipboard = async () => {
+    const current = view(), scope = statusSource;
+    if (clipboardPending || current.kind !== 'conversation' && !current.field) return;
+    clipboardPending = true;
+    const report = reportStatus();
+    const finish = current.field ? beginFieldPaste(scope) : undefined;
+    const applicable = fieldPasteContext();
+    try {
+      if (current.kind === 'conversation') {
+        preserveDraft(); await input.pasteClipboard();
+      } else {
+        const value = await options.request({ kind: 'clipboard-read', inputId: crypto.randomUUID(), target: 'field' }) as { text?: unknown };
+        // Compare the mounted interaction, not refresh generations. A late read
+        // must never paste into another field or a reopened instance of this one.
+        if (disposed || scope !== statusSource) return;
+        if (typeof value?.text !== 'string' || Buffer.byteLength(value.text) > 8192) throw Error('字段粘贴未完成，请检查内容。');
+        if (!value.text) return;
+        if (!applicable()) {
+          report('字段已继续编辑，本次粘贴未应用。'); return;
+        }
+        if (current.field?.secret) {
+          if (Buffer.byteLength(secret) + Buffer.byteLength(value.text) > 8192) throw Error('字段输入过长，请检查内容。');
+          secret += value.text; fieldEditVersion++; setSecretLength(Array.from(secret).length);
+        } else if (editor && !editor.isDestroyed) {
+          if (Buffer.byteLength(editor.plainText) + Buffer.byteLength(value.text) > 8192) throw Error('字段输入过长，请检查内容。');
+          editor.insertText(value.text); syncEditor();
+        }
+      }
+    } catch { report('剪贴板粘贴未完成，原输入保留；可使用终端的粘贴快捷键。'); }
+    finally { finish?.(); clipboardPending = false; }
+  };
+  const shownProcess = () => view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId ? processStatus()?.view : undefined;
+  const App = () => <box width="100%" height="100%" flexDirection="column" onMouseDown={event => {
+    if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
+  }}>
+    <box height={size().height < 16 ? 1 : 4} marginX={1} flexShrink={0} overflow="hidden" flexDirection="column">
+      <Show when={size().height < 16} fallback={<>
       <text fg={teal}> ╲</text>
       <text fg={teal}> ▄▄▄    {displayText(view().title)}</text>
       <text fg={teal}>▌●●▐    {view().connected === false ? '离线 · 本机配置与历史仍可用' : '知行 · 伴你行动'}</text>
       <text fg={teal}> ▀▀</text>
+      </>}><text height={1} wrapMode="none" truncate fg={teal}>{displayText(view().title)}</text></Show>
     </box>
-    <box ref={value => { bodyBox = value; }} flexGrow={1} minHeight={1} backgroundColor="#202626"
+    <box ref={value => { bodyBox = value; }} marginX={1} flexGrow={1} minHeight={1}
       onSizeChange={function(this: BoxRenderable) {
         bodyView?.beforeUpdate(); setBodySize({ width: this.width, height: this.height });
       }}>
@@ -287,8 +408,8 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       <text height={1}>{`保密页 ${recoveryPage().page + 1}/${view().recovery?.pages ?? 1} · PgUp/PgDn 翻页 · Ctrl+Shift+C 复制选区`}</text>
       <Show when={view().recovery?.input}><text height={1}>{`恢复包输入：${recoveryLength()} 字节 · Enter 回读 · Esc 取消`}</text></Show>
     </Show>
-    <Show when={view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId && processStatus()}>
-      <ProcessView view={processStatus()!.view} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
+    <Show when={shownProcess()}>
+      <ProcessView view={shownProcess()!} indicator={view().busy ? animation() : '◆'} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
     </Show>
     <Show when={view().kind === 'conversation' && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.text}>
       <text height={1} fg={taskStatus().summary?.state === 'error' ? '#e7ba70' : '#9aa8a1'}>{displayText(taskStatus().summary?.text ?? '')}</text>
@@ -299,44 +420,42 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
       <text fg="#e7ba70">{view().displayPaused ? '正文保留已暂停，草稿和已有内容保留。Ctrl+R 重试展示；仍可处理确认、中止或退出。' : '展示已恢复；暂停期间的旧缺口仍保留，可查看权威历史与用量。'}</text>
     </Show>
-    <box flexDirection="column" flexShrink={0}>
-      <For each={choices()}>{(choice, index) => <box height={1} backgroundColor={selected() === index() + choiceStart() ? '#304c45' : undefined}>
-        <text fg={choice.disabled ? '#808b87' : selected() === index() + choiceStart() ? teal : '#d5ddd9'}>{selected() === index() + choiceStart() ? '▌ ' : '  '}{displayText(choice.label)}</text>
+    <box flexDirection="column" flexShrink={0} marginX={1}>
+      <For each={choices()}>{(choice, index) => <box height={1} backgroundColor={selected() === index() + choiceStart() ? choice.danger ? '#592c2c' : '#304c45' : undefined}>
+        <text height={1} wrapMode="none" truncate fg={choice.disabled ? '#808b87' : choice.danger ? '#ef9c9c' : selected() === index() + choiceStart() ? teal : '#d5ddd9'}>{selected() === index() + choiceStart() ? '▌ ' : '  '}{selectedLabel(displayText(choice.label), selected() === index() + choiceStart(), !!choice.danger, Math.max(0, size().width - 4), measureInformation)}</text>
       </box>}</For>
     </box>
     <Show when={!safeAction()}><text fg="#e7ba70">窗口较小：可取消；放大后继续确认。</text></Show>
-    <Show when={view().kind === 'conversation' && (candidateItems().length > 0 || candidateValue()?.mode || candidateValue()?.error)}>
-      <box height={size().height >= 18 ? Math.min(6, candidateItems().length + 1) : 1} flexDirection="column" backgroundColor="#263b34">
-        <Show when={size().height >= 18}>
-        <For each={candidateItems().slice(candidateStart(), candidateStart() + 5)}>{(item, index) =>
-          <text height={1} fg={index() + candidateStart() === candidates?.selected ? teal : '#b8c7bf'}>
-            {index() + candidateStart() === candidates?.selected ? '▌ ' : '  '}{displayText(item.label)}  {displayText(item.detail ?? '')}
-          </text>}</For>
-        </Show>
-        <text height={1} fg="#9aa8a1">{displayText(candidateValue()?.error ?? candidateValue()?.hint ?? 'Esc 返回 · ↑↓ 选择 · Tab/Enter 接纳')}</text>
-      </box>
-    </Show>
+    <Show when={view().busy && !shownProcess()}><text height={1} marginX={2} fg={teal}>{animation()} 正在处理…</text></Show>
     <Show when={view().kind === 'conversation' || view().field}>
-      <box border borderStyle="rounded" borderColor={teal} height={5} paddingX={1}>
-        <Show when={!view().field?.secret} fallback={<box flexDirection="column"><text>{view().field?.label} {'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 16)))}</text><Show when={view().field?.configured}><text fg="#9aa8a1">已设置，留空保留。</text></Show></box>}>
+      <box border borderStyle="rounded" borderColor={teal} height={fieldRows() + 2} flexShrink={0} marginX={1} paddingX={1} flexDirection="row">
+        <text width={2} selectable={false} fg={teal}>❯ </text>
+        <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 8)))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
-            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} flexGrow={1} height={3} placeholder={view().field?.label ?? '输入消息，或 / 查看命令'} onContentChange={preserveDraft} onCursorChange={preserveCursor} />}
+            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 8)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
           </Show>
         </Show>
       </box>
     </Show>
-    <box height={1} flexDirection="row">
-      <text flexGrow={1} height={1} fg={teal}>{view().busy ? animation() : '◆'} {status() || (view().busy ? '正在处理…' : view().kind === 'skills' ? 'Esc 返回 · ↑↓ 选择 · p/d/m/a 管理 · r 刷新' : view().kind === 'conversation' ? 'Enter 确认 · Esc 返回 · Ctrl+C 中止/退出' : 'Enter 确认 · Esc 返回 · PgUp/PgDn 阅读')}</text>
-      <Show when={copyAvailable()}><text width={12} selectable={false} fg={teal} bg="#304c45"
-        onMouseDown={event => {
-          if (event.button !== 0) return;
-          event.preventDefault(); event.stopPropagation(); copyBody();
-        }}> 复制选区 </text></Show>
+    <Show when={view().kind === 'conversation' && candidateItems().length > 0 && size().height >= 18}>
+      <box border borderStyle="rounded" borderColor="#63776e" marginX={1} flexShrink={0} height={Math.min(5, candidateItems().length) + 2} flexDirection="column">
+        <For each={candidateItems().slice(candidateStart(), candidateStart() + 5)}>{(item, index) =>
+          <text height={1} wrapMode="none" truncate bg={index() + candidateStart() === candidates?.selected ? (candidates?.deleteArmed ? '#592c2c' : '#304c45') : undefined} fg={index() + candidateStart() === candidates?.selected ? teal : '#b8c7bf'}>
+            {index() + candidateStart() === candidates?.selected ? '▌ ' : '  '}{selectedLabel(displayText(item.label) + '  ' + displayText(item.detail ?? ''), index() + candidateStart() === candidates?.selected, !!candidates?.deleteArmed, Math.max(0, size().width - 6), measureInformation)}
+          </text>}</For>
+      </box>
+    </Show>
+    <box height={1} flexShrink={0} flexDirection="row" paddingX={info().inset}>
+      <text height={1} wrapMode="none" fg="#9aa8a1">{info().left}</text>
+      <box width={info().gap} />
+      <text height={1} wrapMode="none" fg="#9aa8a1">{info().right}</text>
+      <Show when={info().copy}><box width={2} /><text height={1} width={info().copyWidth} selectable={false} fg={teal} bg="#304c45"
+        onMouseDown={event => { if (event.button === 0) { event.preventDefault(); event.stopPropagation(); copyBody(); } }}>{info().copy}</text></Show>
     </box>
   </box>;
   const externalPaste = (): TerminalPasteSink | undefined => {
     if (disposed) return;
-    const current = view();
+    const current = view(), scope = statusSource, report = reportStatus();
     if (current.kind === 'recovery') {
       if (!current.recovery?.input || recoverySubmitting) return;
       let active = true;
@@ -353,7 +472,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       preserveDraft();
       try {
         const stream = input.beginPaste();
-        void stream.done.catch(error => { if (!disposed) setStatus(error instanceof Error ? error.message : '粘贴未完成；草稿保留。'); });
+        void stream.done.catch(reportStatus());
         return stream;
       } catch (error) { setStatus(error instanceof Error ? error.message : '粘贴未完成；草稿保留。'); return; }
     }
@@ -361,32 +480,48 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     // Dedicated fields never enter ordinary draft storage, including secrets.
     // Replay this small complete paste through the original focused handler.
     let buffer = new Uint8Array(8192), used = 0, failed = false;
-    const abort = () => { buffer.fill(0); buffer = new Uint8Array(0); used = 0; failed = true; };
+    const finish = beginFieldPaste(scope);
+    const applicable = fieldPasteContext();
+    const abort = () => { buffer.fill(0); buffer = new Uint8Array(0); used = 0; failed = true; finish(); };
     return {
       write(bytes) {
         if (failed) return;
-        if (used + bytes.length > buffer.length) { abort(); setStatus('字段输入过长，请检查内容。'); return; }
+        if (used + bytes.length > buffer.length) { abort(); report('字段输入过长，请检查内容。'); return; }
         buffer.set(bytes, used); used += bytes.length;
       },
       end() {
-        try { if (!failed && !disposed && view().generation === current.generation) renderer.keyInput.processPaste(buffer.subarray(0, used)); }
+        try {
+          if (used && !failed && !disposed && statusSource === scope) {
+            if (applicable()) renderer.keyInput.processPaste(buffer.subarray(0, used));
+            else report('字段已继续编辑，本次粘贴未应用。');
+          }
+        }
         finally { abort(); }
       },
       abort,
     };
   };
-  const renderer = await createCliRenderer({ exitOnCtrlC: false, consoleMode: 'disabled', useMouse: true, useKittyKeyboard: null, useThread: false, screenMode: 'alternate-screen', stdinParserMaxBufferBytes: 64 * 1024, externalRecoveryOwner: true, externalPaste } as Parameters<typeof createCliRenderer>[0]);
+  const renderer = await createRenderer({ exitOnCtrlC: false, consoleMode: 'disabled', useMouse: true, useKittyKeyboard: null, useThread: false, screenMode: 'alternate-screen', stdinParserMaxBufferBytes: 64 * 1024, externalRecoveryOwner: true, externalPaste } as Parameters<typeof createCliRenderer>[0]);
+  const informationBuffer = TextBuffer.create(renderer.widthMethod);
+  const informationView = TextBufferView.create(informationBuffer);
+  informationView.setWrapMode('none');
+  const measureInformation = (text: string) => {
+    informationBuffer.setText(text);
+    return informationView.logicalLineInfo.lineWidthCols[0] ?? 0;
+  };
+  const info = createMemo(computeInfo);
   let disposing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {
     if (disposing) return disposing;
     disposed = true; input.activate(false); releaseSecret(); releaseRecovery(); clearInterval(animationTimer);
+    information.dispose();
     candidates?.sync(false);
     renderer.off('resize', resize);
     renderer.off('frame', refreshCopy);
     renderer.keyInput.off('keypress', keypress); renderer.keyInput.off('paste', paste);
     disposing = (async () => {
       try { await bodyView?.close(); await Promise.all(bodyClosures); }
-      finally { renderer.destroy(); }
+      finally { informationView.destroy(); informationBuffer.destroy(); renderer.destroy(); }
     })();
     return disposing;
   };
@@ -409,6 +544,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       return;
     }
     if (view().kind === 'skills') { consume(); skillsView?.key(event); return; }
+    if (event.ctrl && event.shift && event.name === 'c' && isBody()) { consume(); copyBody(); return; }
     if (view().displayPaused && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
       consume(); void action({ kind: 'display-retry' }); return;
     }
@@ -432,7 +568,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           consume();
           if (size().height < 18 || size().width < 40) { candidates?.resetDelete(); setStatus('请放大窗口后管理；Esc 返回。'); return; }
           if (operation === 'delete' && !candidates?.confirmDelete(view().generation)) { setStatus('再次按 Ctrl+D 删除当前候选；其他按键取消准备。'); return; }
-          void candidates?.manage(operation).catch(error => setStatus(error instanceof Error ? error.message : '操作未完成，请刷新。'));
+          void candidates?.manage(operation).catch(reportStatus());
           return;
         }
       }
@@ -450,7 +586,8 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           for (let index = 0; index < (intent.page ? 5 : 1); index++) candidates?.move(intent.direction);
         } else if (intent.kind === 'armed' || intent.kind === 'none') { if (intent.message) setStatus(intent.message); }
         else if (intent.kind === 'revoke') {
-          void candidates?.revoke(intent.revision, intent.id).then(message => { if (message && !disposed) setStatus(message); });
+          const report = reportStatus();
+          void candidates?.revoke(intent.revision, intent.id).then(message => { if (message && !disposed) report(message); }).catch(report);
         }
         return;
       }
@@ -464,7 +601,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     if (view().kind === 'conversation' && candidateItems().length && size().height >= 18 && !event.ctrl && !event.shift && !event.meta) {
       if (event.name === 'up' || event.name === 'down') { consume(); candidates?.move(event.name === 'up' ? -1 : 1); return; }
       if (event.name === 'tab' || event.name === 'return') {
-        consume(); void candidates?.accept().then(execute => { if (execute) return submit(); }).catch(error => setStatus(error instanceof Error ? error.message : '补全未完成，草稿保留。')); return;
+        consume(); void candidates?.accept().then(execute => { if (execute) return submit(); }).catch(reportStatus()); return;
       }
     }
     if (view().kind === 'conversation' && !event.ctrl && !event.shift && !event.meta && !editor?.hasSelection()) {
@@ -472,7 +609,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       if (['backspace', 'delete', 'left', 'right'].includes(event.name) && input.atomic(event.name as 'backspace' | 'delete' | 'left' | 'right')) { consume(); return; }
       if (((event.name === 'left' || event.name === 'backspace') && draft.cursor === 0 && input.beforeWindow) ||
           ((event.name === 'right' || event.name === 'delete') && draft.cursor === draft.text.length && input.afterWindow)) {
-        consume(); void input.navigate(event.name as 'left' | 'right' | 'backspace' | 'delete').catch(error => setStatus(error instanceof Error ? error.message : '输入窗口暂不可用。')); return;
+        consume(); void input.navigate(event.name as 'left' | 'right' | 'backspace' | 'delete').catch(reportStatus()); return;
       }
       if (editor && ((event.name === 'up' && editor.scrollY + editor.visualCursor.visualRow === 0) ||
           (event.name === 'down' && editor.scrollY + editor.visualCursor.visualRow === editor.editorView.getTotalVirtualLineCount() - 1))) {
@@ -483,7 +620,7 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
             if (event.name === 'up') editor.moveCursorUp(); else editor.moveCursorDown();
             preserveCursor();
           }
-        }) : input.history(event.name === 'up' ? -1 : 1)).catch(error => setStatus(error instanceof Error ? error.message : '历史输入暂不可用。')); return;
+        }) : input.history(event.name === 'up' ? -1 : 1)).catch(reportStatus()); return;
       }
     }
     if (event.name === 'pageup' || event.name === 'pagedown') {
@@ -499,17 +636,20 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     if (event.name === 'return' && !event.shift) { consume(); void submit(); return; }
     if (event.ctrl && event.name === 's' && view().editId) {
       consume();
-      if (!safeAction()) setStatus('请放大窗口后保存；仍可按 Esc 取消。');
+      if (fieldPastes.has(statusSource)) setStatus('粘贴仍在处理，请完成后再保存。');
+      else if (!safeAction()) setStatus('请放大窗口后保存；仍可按 Esc 取消。');
       else void action({ kind: 'configuration-action', editId: view().editId!, action: 'complete' });
       return;
     }
     if (view().field?.secret) {
       consume();
+      const previous = secret;
       if (event.name === 'backspace') secret = Array.from(secret).slice(0, -1).join('');
       else if (!event.ctrl && !event.meta && event.sequence && !event.sequence.startsWith('\x1b')) {
         if (Buffer.byteLength(secret) + Buffer.byteLength(event.sequence) <= 8192) secret += event.sequence;
         else setStatus('字段输入过长，请检查内容。');
       }
+      if (secret !== previous) fieldEditVersion++;
       setSecretLength(Array.from(secret).length); return;
     }
     if (view().choices?.length && (event.name === 'up' || event.name === 'down')) {
@@ -517,15 +657,16 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
     }
   };
   const paste = (event: PasteEvent) => {
+    if (!event.bytes.byteLength) { event.preventDefault(); event.stopPropagation(); return; }
     if (view().kind === 'recovery') { event.preventDefault(); event.stopPropagation(); appendRecovery(event.bytes); return; }
     if (!view().field?.secret && view().kind !== 'conversation') return;
     event.preventDefault(); event.stopPropagation();
     if (view().kind === 'conversation') {
       preserveDraft();
-      void input.paste(event.bytes).catch(error => { if (!disposed) setStatus(error instanceof Error ? error.message : '粘贴未完成；草稿保留。'); }); return;
+      void input.paste(event.bytes).catch(reportStatus()); return;
     }
     if (Buffer.byteLength(secret) + event.bytes.byteLength > 8192) { setStatus('字段输入过长，请检查内容。'); return; }
-    secret += new TextDecoder().decode(event.bytes); setSecretLength(Array.from(secret).length);
+    secret += new TextDecoder().decode(event.bytes); fieldEditVersion++; setSecretLength(Array.from(secret).length);
   };
   const animationTimer = setInterval(() => { if (view().busy) setAnimation(frames[Math.floor(performance.now() / 300) % frames.length]!); }, 300);
   try {
@@ -546,20 +687,27 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
       if (options.signal.aborted) abortFrame(); else renderer.requestRender();
     });
     return {
-      firstFrameId, dispose,
+      firstFrameId, dispose, information,
       receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'task-status' | 'process-status' | 'recovery-page' }>) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
+          const previous = view(), sameInteraction = interactionKey(previous) === interactionKey(message.view);
+          const selectedId = previous.choices?.[selected()]?.id;
           const refreshCandidates = view().kind === 'conversation' && message.view.kind === 'conversation';
           if (message.view.recovery?.requestId !== view().recovery?.requestId) releaseRecovery();
           if (message.view.recovery?.input && !recoveryInput) recoveryInput = new RecoveryInputBuffer();
           candidates?.resetDelete(); trustControls.reset();
-          preserveDraft(); releaseSecret(); bodyView?.beforeUpdate(); setSelected(0); setStatus(''); setView(message.view);
+          preserveDraft(); bodyView?.beforeUpdate();
+          if (!sameInteraction) {
+            activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
+          }
+          setSelected(sameInteraction && selectedId ? Math.max(0, message.view.choices?.findIndex(choice => choice.id === selectedId) ?? 0) : 0);
+          setView(message.view);
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');
           if (refreshCandidates) candidates?.refresh();
-          if (!isBody()) renderer.once('frame', () => {
+          if (!isBody() && !sameInteraction) renderer.once('frame', () => {
             if (!disposed && historyBox && !historyBox.isDestroyed) historyBox.scrollTo(0);
           });
         } else if (message.type === 'task-status') {
@@ -573,13 +721,16 @@ export async function createTerminalRoot(options: TerminalRootOptions) {
           setRecoveryPage({ page: message.page, text: message.text });
         } else if (message.type === 'submission') {
           preserveDraft();
-          if (input.settle(message)) setStatus(message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。');
+          if (input.settle(message) && view().kind === 'conversation') setStatus(message.message ?? (message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。'));
         } else if (message.type === 'display-page') {
           bodyWindows(message.page); // Validate complete source/metadata/page before installing it.
           bodyView?.beforeUpdate();
           setDisplay(message.page);
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
-          releaseSecret(); setView({ generation: view().generation, kind: 'conversation', title: '知行', message: '该请求已由其他入口处理或已失效。' });
+          releaseSecret();
+          const next: TerminalView = { generation: view().generation, kind: 'conversation', title: '知行', conversationId: view().conversationId, message: '该请求已由其他入口处理或已失效。' };
+          activateInformation(next); setView(next);
+          input.activate(true); candidates?.sync(true);
         }
       },
     };

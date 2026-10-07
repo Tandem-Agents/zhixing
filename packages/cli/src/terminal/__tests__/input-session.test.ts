@@ -3,6 +3,57 @@ import { TerminalInputSession } from '../../../../terminal-ui/src/input-session.
 import type { TerminalAction } from '../../../../terminal-ui/src/protocol.js';
 
 describe('terminal draft receipts and asynchronous paste', () => {
+  it.each(['clipboard', 'native'] as const)('empty %s preserves text, prior paste and material handles', async kind => {
+    const old = '[old paste]', material = '[material]';
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'clipboard-read') return { empty: true };
+      if (action.kind === 'paste-finish') return { text: '', handles: [], replacePastes: true };
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn());
+    session.candidate({ text: old + material, execute: false, handles: [
+      { token: old, id: crypto.randomUUID(), paste: true }, { token: material, id: crypto.randomUUID() },
+    ] }, { start: 0, end: 0 });
+    const original = `prefix ${session.draft.text} suffix`;
+    session.edit(original, original.length);
+    if (kind === 'clipboard') await session.pasteClipboard(); else await session.paste(new Uint8Array());
+    expect(session.draft.text).toBe(original);
+    session.edit(original, original.indexOf(material) + material.length);
+    expect(session.atomic('backspace')).toBe(true);
+    expect(session.draft.text).toBe(`prefix ${old} suffix`);
+    session.edit(session.draft.text, session.draft.text.indexOf(old) + old.length);
+    expect(session.atomic('backspace')).toBe(true);
+    expect(session.draft.text).toBe('prefix  suffix');
+    await session.submit();
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(true);
+  });
+  it('places an asynchronous clipboard result at its marker, preserving intervening edits and blocking early submit', async () => {
+    let ready!: () => void;
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'clipboard-read') return new Promise<void>(resolve => { ready = resolve; });
+      if (action.kind === 'paste-finish') return { text: '中文🙂', handles: [], replacePastes: true };
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn()); session.edit('AB', 1);
+    const paste = session.pasteClipboard();
+    await expect(session.submit()).rejects.toThrow('输入仍在处理');
+    session.edit(session.draft.text + 'C', session.draft.text.length + 1);
+    ready(); await paste;
+    expect(session.draft.text).toBe('A中文🙂BC');
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
+  });
+  it('drops clipboard results after the pending marker was cancelled', async () => {
+    let ready!: () => void;
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'clipboard-read') return new Promise<void>(resolve => { ready = resolve; });
+      if (action.kind === 'paste-finish') return { text: 'late', handles: [] };
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn());
+    const paste = session.pasteClipboard(); session.clear(session.draft.version);
+    session.edit('new', 3); ready(); await paste;
+    expect(session.draft.text).toBe('new');
+  });
   it('restores atomic handles supplied by a cold window', async () => {
     const ticket = crypto.randomUUID(), inputId = crypto.randomUUID(), pasteId = crypto.randomUUID();
     const text = '[Pasted #7 +1 lines · 9B]';

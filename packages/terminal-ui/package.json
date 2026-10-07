@@ -7,7 +7,8 @@
   "exports": { "./protocol": "./dist/shared/protocol.js", "./body-model": "./dist/shared/body-model.js", "./process-model": "./dist/shared/process-model.js", "./recovery-input": "./dist/shared/recovery-input.js", "./skills-model": "./dist/shared/skills-model.js", "./channel": "./dist/shared/channel.js", "./parent-transport": "./dist/shared/parent-transport.js" },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "vitest run --maxWorkers=2"
+    "test": "vitest run --maxWorkers=2",
+    "test:native": "bun scripts/test-root.ts"
   },
   "dependencies": {
     "@opentui/core": "0.5.14",

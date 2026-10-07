@@ -48,6 +48,14 @@ REPL 的 `InputController` 组织输入布局及候选投影；`layoutInputBuffe
 
 ## 实现与核查入口
 
+迁移中的新终端由 [`terminal-ui/root.tsx`](../../../packages/terminal-ui/src/root.tsx) 统一组织输入与公共信息行；旧默认入口的实现仍以本文上节为准。新表面的共同约束如下：
+
+- 主输入、配置字段和临时文本输入共用自适应完整框；空态说明、字段说明和候选帮助进入同一左右信息行。列宽由原生文本引擎计算，来源只管理内容与有效期。
+- [`InformationBoard`](../../../packages/terminal-ui/src/information-model.ts) 隔离发布来源和场景；共享公告保留，主输入暂停后可恢复，已结束页面的迟到发布失效。同页数据刷新不重置字段、光标或当前选项。
+- 候选与配置列表共用选中纹理规则；危险项以红色表达。用户历史使用整行灰底，消息与工具保留静态菱形，M1 保持十帧、每帧 300ms。
+- 正文按稳定源节点维护原生组件，阅读与选区使用源坐标。滚轮只由一个处理者消费；页面更新和尺寸变化按源位置恢复，不能从正在改变的布局反复重算锚点。选区保留原始文本范围，包括中英混排和跨节点选择；点击正文不抢占编辑焦点。
+- 优先消费宿主提供的粘贴；若鼠标模式下宿主把右键交给应用，由 N 经受管剪贴板读取器接入同一材料/草稿通路，不关闭滚轮。空粘贴不改变输入，读取及平台回退共用 1.5 秒命令预算并确认 helper 关闭。专用字段不进入普通草稿存储，粘贴完成前不提交；字段继续编辑、移动光标或改变选区后不应用迟到结果，同页状态刷新不取消仍适用的粘贴。复制保留明确的选区动作。
+
 - [输入控制](../../../packages/cli/src/typeahead-input.ts)、[输入布局](../../../packages/cli/src/input-layout.ts)、[候选面板](../../../packages/cli/src/tui/typeahead-panel.ts)、[屏幕控制](../../../packages/cli/src/screen/screen-controller.ts)。
 - [配置输入面板](../../../packages/cli/src/config-editor/panels/input.ts)。
 - [信息行模型](../../../packages/cli/src/bottom-info/model.ts)、[信息行渲染](../../../packages/cli/src/bottom-info/render.ts)。

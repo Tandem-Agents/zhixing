@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner } from './credential-command.js';
+import { TerminalClipboard } from './clipboard.js';
 import { isAbsolute } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -129,6 +130,7 @@ class TerminalApplication {
   #pendingRubricNotice?: string;
   readonly #configPath: string;
   readonly #abort = new AbortController();
+  readonly #clipboard = new TerminalClipboard(this.#abort.signal);
   readonly #requests = new Set<number>();
   readonly #completion: Promise<void>;
   readonly #state = { activeTurnPromise: null as Promise<unknown> | null };
@@ -360,7 +362,7 @@ class TerminalApplication {
   }
 
   async #action(action: TerminalAction): Promise<unknown> {
-    if (this.args.length && !['startup', 'exit', 'interrupt', 'configuration-action', 'secret-value', 'selection', 'recovery-part', 'recovery-page', 'recovery-cancel'].includes(action.kind)) throw Error('terminal-command-action-unavailable');
+    if (this.args.length && !['startup', 'exit', 'interrupt', 'configuration-action', 'secret-value', 'selection', 'recovery-part', 'recovery-page', 'recovery-cancel', 'clipboard-read'].includes(action.kind)) throw Error('terminal-command-action-unavailable');
     switch (action.kind) {
       case 'startup':
         if (this.#started) throw Error('terminal-startup-already-requested');
@@ -443,6 +445,22 @@ class TerminalApplication {
       case 'input-history-next': return this.#inputHistoryReader.next(action.ticket);
       case 'input-history-end': await this.#inputHistoryReader.close(action.ticket); return { accepted: true };
       case 'paste-finish': return this.#finishPaste(action.inputId);
+      case 'clipboard-read': {
+        if (action.target === 'field') {
+          let text = '';
+          await this.#clipboard.read(async part => { text += part; }, 8192);
+          return { text }; // Dedicated fields, including secrets, never enter draft storage.
+        }
+        if (action.target !== 'draft' || this.args.length) throw Error('terminal-clipboard-target');
+        this.#inputs.begin(action.inputId, 'paste');
+        try {
+          let index = 0;
+          const hasText = await this.#clipboard.read(text => this.#inputs.part(action.inputId, index++, text, false));
+          if (!hasText) { await this.#inputs.release(action.inputId); return { empty: true }; }
+          await this.#inputs.part(action.inputId, index, '', true);
+          return { accepted: true };
+        } catch (error) { await this.#inputs.release(action.inputId); throw error; }
+      }
       case 'input-submit':
         if (!Number.isSafeInteger(action.version) || action.version < 0) throw Error('terminal-input-version');
         if (!this.#controller || this.#connection.getStatus().kind !== 'connected' || this.#history?.offline || this.#operation) {
@@ -839,6 +857,7 @@ class TerminalApplication {
     // Path intent is inspected only for bounded path-sized input. Large original
     // text is folded without materializing it or probing its contents as paths.
     const paste = this.#inputs.completePaste(inputId);
+    if (!paste.bytes) return { text: '', handles: [], paste: false, replacePastes: false };
     if (paste.bytes <= 64 * 1024) {
       const text = await this.#inputs.text(inputId, 1024 * 1024 * 2);
       const material = ingestPastedMaterials(text, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), maxWorkspaceBytes: 2 * 1024 * 1024 });

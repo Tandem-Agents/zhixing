@@ -95,6 +95,19 @@ export class TerminalInputSession {
     const paste = this.beginPaste(bytes.byteLength);
     paste.write(bytes); paste.end(); return paste.done;
   }
+  async pasteClipboard(): Promise<void> {
+    if (this.#pastes.size >= 2) throw Error('前次粘贴仍在保存，原有草稿保留。');
+    const inputId = crypto.randomUUID(), marker = `[粘贴处理中 · ${++this.#marker}]`;
+    this.#pastes.set(inputId, marker);
+    try {
+      const cursor = this.draft.cursor;
+      this.edit(this.draft.text.slice(0, cursor) + marker + this.draft.text.slice(cursor), cursor + marker.length); this.changed();
+      const read = await this.request({ kind: 'clipboard-read', inputId, target: 'draft' }) as { empty?: boolean } | undefined;
+      if (read?.empty) { this.#replaceMarker(marker, ''); return; }
+      await this.#finishPaste(inputId, marker);
+    } catch (error) { this.#replaceMarker(marker, ''); throw error; }
+    finally { this.#pastes.delete(inputId); this.#completed.add(inputId); this.#syncReferences(); }
+  }
   beginPaste(expectedBytes?: number): TerminalPasteSink & { readonly done: Promise<void> } {
     if (this.#pastes.size >= 2) throw Error('前次粘贴仍在保存，原有草稿保留。');
     const stream = new TerminalPasteStream(bytes => {
@@ -114,17 +127,21 @@ export class TerminalInputSession {
   async #consumePaste(inputId: string, marker: string, stream: TerminalPasteStream, expectedBytes?: number): Promise<void> {
     try {
       await this.#upload(inputId, 'paste', decodePaste(stream), expectedBytes);
-      const result = await this.request({ kind: 'paste-finish', inputId }) as { text?: unknown; handles?: readonly { token: string; id: string }[]; paste?: boolean; replacePastes?: boolean };
-      if (typeof result?.text !== 'string' || result.text.length > 64 * 1024) throw Error('粘贴结果不可用，原有草稿保留。');
-      this.#registerHandles(result.handles ?? [], !!result.paste);
-      const applied = this.#replaceMarker(marker, result.text, !!result.replacePastes, inputId);
-      if (applied && result.replacePastes && !this.completeWindow) {
-        this.#replacePastes = inputId; this.#syncReferences();
-        await this.#persistWork;
-        await this.#persist();
-      }
+      await this.#finishPaste(inputId, marker);
     } catch (error) { this.#replaceMarker(marker, ''); throw error; }
     finally { stream.abort(); this.#pastes.delete(inputId); this.#completed.add(inputId); this.#syncReferences(); }
+  }
+  async #finishPaste(inputId: string, marker: string): Promise<void> {
+    const result = await this.request({ kind: 'paste-finish', inputId }) as { text?: unknown; handles?: readonly { token: string; id: string }[]; paste?: boolean; replacePastes?: boolean };
+    if (typeof result?.text !== 'string' || result.text.length > 64 * 1024) throw Error('粘贴结果不可用，原有草稿保留。');
+    if (!result.text) { this.#replaceMarker(marker, ''); return; }
+    this.#registerHandles(result.handles ?? [], !!result.paste);
+    const applied = this.#replaceMarker(marker, result.text, !!result.replacePastes, inputId);
+    if (applied && result.replacePastes && !this.completeWindow) {
+      this.#replacePastes = inputId; this.#syncReferences();
+      await this.#persistWork;
+      await this.#persist();
+    }
   }
   async history(direction: -1 | 1): Promise<void> {
     if (this.pending || !this.#active) return;

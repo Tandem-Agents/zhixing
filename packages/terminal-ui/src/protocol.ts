@@ -94,7 +94,7 @@ export type TerminalAction =
   | { readonly kind: 'candidate-manage'; readonly revision: number; readonly action: 'delete' | 'rename' | 'create'; readonly id?: string }
   | { readonly kind: 'paste-finish'; readonly inputId: string }
   | { readonly kind: "input-release"; readonly inputId: string }
-  | { readonly kind: "clipboard-read" | "clipboard-write"; readonly inputId: string; readonly version: number; readonly text?: string };
+  | { readonly kind: "clipboard-read"; readonly inputId: string; readonly target: 'draft' | 'field' };
 
 export interface TerminalCandidates {
   readonly revision: number;

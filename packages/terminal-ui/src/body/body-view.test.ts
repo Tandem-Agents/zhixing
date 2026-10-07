@@ -20,6 +20,8 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   const For = (props: { each: unknown[]; children: (value: unknown) => unknown }) => props.each.map(props.children);
   const Show = (props: { when: unknown; children: unknown; fallback: unknown }) => props.when ? props.children : props.fallback;
   const core = {
+    TextRenderable: class {},
+    ScrollBoxRenderable: class { protected onMouseEvent() {} },
     StyledText: class { constructor(readonly chunks: unknown[]) {} },
     createTextAttributes: () => 0, RGBA: { fromHex: (value: string) => value },
     TextBuffer: { create: () => ({ ptr: 1, setText: (text: string) => { measurement = text; }, destroy: vi.fn() }) },
@@ -30,11 +32,12 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
         new TextEncoder().encode(measurement.slice(0, column)) }),
   };
   const solid = {
+    untrack: (read: () => unknown) => read(),
     createMemo: (read: () => unknown) => read,
     createSignal: (initial: number) => { let value = initial; return [() => value, (update: (value: number) => number) => { value = update(value); }]; },
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
   };
-  const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core,
+  const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
   const jsx = (type: string | ((props: Record<string, unknown>) => unknown), props: Record<string, unknown> | null, ...children: unknown[]) => {
@@ -42,12 +45,12 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     if (typeof type === 'function') return type(values);
     const ref = props?.ref as ((value: unknown) => void) | undefined;
     if (type === 'scrollbox') ref?.(scroll);
-    else if (type === 'text') {
+    else if (type === 'text' || type === 'body_text') {
       // Match the pinned Solid adapter's text/content prop coercion. The
       // native TextRenderable setter itself accepts StyledText without it.
       const view = { content: props?.content === undefined ? '' : String(props.content),
         isDestroyed: false, x: 0, get y() { return -scroll.scrollTop; }, width: 20, height: 3,
-        lineInfo: { lineSources: [0, 1, 2], lineStartCols: [0, 0, 0] } };
+        lineInfo: { lineSources: [0, 1, 2], lineStartCols: [0, 5, 11] } };
       textViews.push(view); ref?.(view);
     }
     return undefined;
