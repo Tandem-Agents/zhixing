@@ -65,9 +65,9 @@ async function dispatch({ op, args }: Request): Promise<unknown> {
         true,
       ); } catch (error) { if (!(error instanceof Error) || error.message !== "checkpoint-child-missing") throw error; }
     } else {
-      // The existing product home is the ownership boundary. If it does not yet
-      // exist, logging retries after normal product initialization creates it.
-      const root = await CheckpointDirectoryHandle.openPath(home, false);
+      // Writable initialization owns its empty ancestors too; native traversal
+      // still rejects links and freezes the directory identity. Queries never create.
+      const root = await CheckpointDirectoryHandle.openPath(home, true);
       let logs: CheckpointDirectoryHandle | undefined;
       try {
         logs = await root.openDirectory("logs", true);

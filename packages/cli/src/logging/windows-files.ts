@@ -53,7 +53,9 @@ export class WindowsLogFiles implements LogFileSystem {
       ); } catch (error) { if (!(error instanceof Error) || error.message !== "checkpoint-child-missing") throw error; }
     }
     else {
-      const root = await this.#session.openPath(this.#home, false);
+      // Writable initialization owns its empty ancestors too; native traversal
+      // still rejects links and freezes the directory identity. Queries never create.
+      const root = await this.#session.openPath(this.#home, true);
       let logs: CheckpointDirectoryHandle | undefined;
       try {
         logs = await root.openDirectory("logs", true);
