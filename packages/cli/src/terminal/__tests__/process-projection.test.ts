@@ -17,6 +17,17 @@ const child = { parentToolCallId: 'task', childLineage: 'main/sub-child', childA
 const request = (inputTokens: number, extra = {}) => ({ event: 'llm:request_end' as const,
   payload: { model: 'model', duration: 1, usage: { inputTokens, outputTokens: 2, ...extra }, stopReason: 'end_turn' as const } });
 describe('terminal process fold', () => {
+  it('publishes changed activity and real termination without resending it for every text delta', () => {
+    const s = setup(); s.changed.mockClear();
+    for (let i = 0; i < 100; i++) s.yieldValue({ type: 'text_delta', text: `part-${i}` });
+    expect(s.changed).toHaveBeenCalledOnce();
+    expect(s.changed.mock.calls[0]![0].phase).toBe('正在回复');
+    s.event(request(5)); expect(s.changed).toHaveBeenCalledTimes(2);
+    s.p.end(1); expect(s.changed).toHaveBeenCalledTimes(3);
+    expect(s.changed.mock.calls.at(-1)![0].phase).toBe('本轮已结束');
+    s.p.begin({ conversationId: 'c', turnId: 't2', runId: 'r2', generation: 1, source: 'legacy' });
+    expect(s.changed).toHaveBeenCalledTimes(4);
+  });
   it('keeps only a finite thinking tail, seals once, and leaves resize to the pure U adapter', () => {
     const s = setup(); s.yieldValue({ type: 'thinking_block_start' });
     s.yieldValue({ type: 'thinking_delta', thinking: '汉字🦞'.repeat(10000) + '最新尾部' });

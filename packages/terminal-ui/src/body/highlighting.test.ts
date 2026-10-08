@@ -19,6 +19,28 @@ const block = (key: string): BodyRenderBlock => ({ key, blockId: key, role: 'ass
   node: { from: 0, to: key.length, kind: 'code', language: 'typescript', runs: [] } });
 afterEach(() => { vi.unstubAllEnvs(); state.requests.length = 0; vi.clearAllMocks(); });
 describe('body highlighter actual lifetime', () => {
+  it('keeps unchanged current-page code across streaming updates without parsing or repainting it again', async () => {
+    vi.stubEnv('OTUI_ASSET_ROOT', process.platform === 'win32' ? 'C:\\fixture\\assets' : '/fixture/assets');
+    const changed = vi.fn(), highlighter = new BodyHighlighter(changed, vi.fn());
+    const fixed = block('fixed'), tail = { ...block('tail'), node: { ...block('tail').node, kind: 'paragraph' as const } };
+    highlighter.setPage([fixed, tail]);
+    highlighter.setPage([structuredClone(fixed), { ...tail, text: 'longer' }]);
+    state.requests[0]!.resolve({ highlights: [] });
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    const rendered = highlighter.get('fixed');
+    expect(rendered).toBeDefined();
+    for (let i = 0; i < 20; i++) highlighter.setPage([structuredClone(fixed), { ...tail, text: String(i) }]);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(state.requests).toHaveLength(1); expect(changed).toHaveBeenCalledTimes(1);
+    expect(highlighter.get('fixed')).toBe(rendered);
+    highlighter.setPage([{ ...fixed, text: 'changed' }]);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(highlighter.get('fixed')).toBeUndefined(); expect(state.requests.at(-1)!.text).toBe('changed');
+    highlighter.setPage([]); state.requests.at(-1)!.resolve({ highlights: [] });
+    await Promise.resolve(); await Promise.resolve();
+    expect(highlighter.get('fixed')).toBeUndefined();
+    await highlighter.close();
+  });
   it('retains one active request and only the newest page, and ignores a late old result', async () => {
     vi.stubEnv('OTUI_ASSET_ROOT', process.platform === 'win32' ? 'C:\\fixture\\assets' : '/fixture/assets');
     const changed = vi.fn(), failed = vi.fn(), highlighter = new BodyHighlighter(changed, failed);

@@ -12,6 +12,15 @@ function connection(id: number, profile: SessionPresentationProfile) {
     presentationProfile: () => profile, presentationSince: () => 0 };
 }
 describe('one bounded Server presentation egress', () => {
+  it('omits an oversized persistence snapshot without dropping the live text or rewriting the original', () => {
+    const text = '中文长回答'.repeat(50_000);
+    const delta = { type: 'assistant_message' as const, message: { role: 'assistant' as const, content: [{ type: 'text' as const, text }] } };
+    const value = projectProcessYield(source, delta);
+    expect(value).toMatchObject({ truncated: true, payload: { kind: 'yield', delta: { type: 'assistant_message', message: { role: 'assistant', content: [] } } } });
+    expect(() => validateSessionProcessProjection(value)).not.toThrow();
+    expect(delta.message.content[0]!.text).toBe(text);
+    expect(processForProfile(value, 'bounded-v1')).toEqual(value);
+  });
   it.each([
     { content: 'edited' },
     { content: 'edited', isError: false },

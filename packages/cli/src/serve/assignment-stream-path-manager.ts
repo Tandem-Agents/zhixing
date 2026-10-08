@@ -10,6 +10,7 @@ import {
   streamConsumerKey,
   StreamFrameVerifier,
   materializeInteractionDisplayBytes,
+  readStreamDisplayPayload,
   validateInteractionDisplay,
   validateStreamConsumerAuth,
   validateStreamSubscribe,
@@ -54,6 +55,7 @@ export interface AssignmentStreamPathManagerOptions {
     frame: StreamFrame,
     checkpoint: StreamVerifierCheckpoint,
     signal: AbortSignal,
+    readDisplay: () => ReturnType<typeof readStreamDisplayPayload>,
   ) => void | Promise<void>;
   readonly initialCheckpoint?: StreamVerifierCheckpoint;
   readonly maxPathAttempts?: number;
@@ -214,7 +216,16 @@ export class AssignmentStreamPathManager {
             const after = this.#verifier.checkpoint();
             if (disposition === "accepted") {
               try {
-                await this.#adoptFrame(frame, after, signal);
+                await this.#adoptFrame(frame, after, signal, () => {
+                  if (frame.payload.kind === 'provisional-final') throw new TypeError('Final frame has no display payload');
+                  // The frame's bytes belong to the executor spool, not the
+                  // owner's global artifact store. Retain the consumer ticket
+                  // through this read; acknowledgment below permits reclamation.
+                  return readStreamDisplayPayload(frame.payload, {
+                    get: ref => this.#readArtifact(ref, signal),
+                    readRange: async (ref, offset, limit) => (await this.#readArtifact(ref, signal)).subarray(offset, offset + limit),
+                  });
+                });
               } catch (error) {
                 this.#verifier = new StreamFrameVerifier(before);
                 throw error;

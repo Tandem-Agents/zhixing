@@ -3,8 +3,8 @@ import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, RGBA, ScrollBoxRenderable,
   TextRenderable, type CliRenderer, type TextChunk, type MouseEvent,
 } from '@opentui/core';
-import { BODY_STYLE, sourceLineStarts, type BodyAnchor, type BodyPage } from './body-model.js';
-import { bodyCell, bodyRenderBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
+import { BODY_STYLE, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
+import { bodyCell, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
 
@@ -87,7 +87,11 @@ function styled(block: BodyRenderBlock): StyledText {
 /** The existing root remains the only input/screen owner. This component owns
  * only a finite body page, its native measurements and its reading position. */
 export function BodyView(props: BodyViewProps) {
-  const blocks = createMemo(() => bodyRenderBlocks(props.page).map(block => processBodyBlock(block, Math.max(1, props.width - 4))));
+  // Keep live range counters for navigation without reflowing unchanged text.
+  const contentPage = createMemo<BodyPage>(previous => previous && sameBodyPageContent(previous, props.page) ? previous : props.page);
+  const projected = new Map<BodySegment, readonly BodyRenderBlock[]>();
+  const blocks = createMemo<readonly BodyRenderBlock[]>(previous => retainBodyBlocks(
+    bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, Math.max(1, props.width - 4))), previous));
   const blockIndex = createMemo(() => new Map(blocks().map(block => [block.key, block])));
   const blockKeys = createMemo(() => [...blockIndex().keys()]);
   const mounted = new Map<string, { block: BodyRenderBlock; view: BodyTextRenderable }>();
@@ -96,6 +100,53 @@ export function BodyView(props: BodyViewProps) {
   const measure = TextBuffer.create(props.renderer.widthMethod);
   const measureView = TextBufferView.create(measure);
   measureView.setWrapMode('none');
+  const wrapMeasure = TextBufferView.create(measure);
+  wrapMeasure.setWrapMode('char');
+  const measured = new WeakMap<BodyRenderBlock, { width: number; height: number }>();
+  const [viewport, setViewport] = createSignal<{ page?: BodyPage; width: number; top: number; selecting: boolean }>({ width: 0, top: 0, selecting: false });
+  // Measure the finite page without allocating a native text buffer, selection
+  // store and reactive subtree for every offscreen paragraph. Fixed-height
+  // placeholders preserve the same scroll geometry and source page.
+  const geometry = createMemo(() => {
+    const width = props.width; let top = 0;
+    return blocks().map(block => {
+      let cached = measured.get(block);
+      if (!cached || cached.width !== width) {
+        const rows = (text: string, columns: number) => {
+          measure.setText(text); wrapMeasure.setWrapWidth(Math.max(1, columns));
+          return Math.max(1, wrapMeasure.getVirtualLineCount());
+        };
+        let height = 1;
+        if (block.node.kind === 'table') {
+          const columns = block.node.columns ?? 1, stacked = width < columns * 6;
+          const cellWidth = stacked ? width - 2 : Math.floor((width - 2) / columns);
+          const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, cellWidth - 1));
+          height = 1 + (stacked ? sizes.reduce((sum, size) => sum + size, 0) : Math.max(1, ...sizes));
+        } else if (!['rule', 'space'].includes(block.node.kind)) {
+          const indent = block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) : 0;
+          height = rows(block.text, width - 4 - indent);
+        }
+        cached = { width, height }; measured.set(block, cached);
+      }
+      const item = { key: block.key, top, height: cached.height }; top += cached.height; return item;
+    });
+  });
+  const visible = createMemo(() => {
+    const items = geometry(), state = viewport(), height = Math.max(1, props.height);
+    let top = state.top;
+    const page = contentPage();
+    if (state.page !== page || state.width !== props.width) {
+      top = page.follow ? Math.max(0, (items.at(-1)?.top ?? 0) + (items.at(-1)?.height ?? 0) - height) : 0;
+      const anchor = props.anchor;
+      if (!page.follow && anchor) {
+        const index = blocks().findIndex(block => sourceToRendered(block, anchor) !== undefined);
+        if (index >= 0) top = items[index]!.top;
+      }
+    }
+    // Keep the native selection owner intact throughout a gesture/reflow.
+    return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - height && item.top <= top + 2 * height)).map(item => item.key));
+  });
+  const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
   let box: ScrollBoxRenderable | undefined, disposed = false, paging = false, pauseRequested = false;
   let saved: BodyAnchor | undefined = props.page.follow ? undefined : props.anchor, align: 'top' | 'bottom' | undefined;
   let lastPage: BodyPage | undefined, lastWidth = 0, lastHeight = 0;
@@ -283,7 +334,7 @@ export function BodyView(props: BodyViewProps) {
     },
   };
   createEffect(() => {
-    const page = props.page, width = props.width, height = props.height;
+    const page = contentPage(), width = props.width, height = props.height;
     if (disposed) return;
     if (lastPage && (page !== lastPage || width !== lastWidth || height !== lastHeight)) {
       if (!page.follow && !align) saved = untrack(() => props.anchor ?? capture());
@@ -292,14 +343,21 @@ export function BodyView(props: BodyViewProps) {
     lastPage = page; lastWidth = width; lastHeight = height; restorePending = true;
     props.renderer.requestRender();
   });
-  createEffect(() => { if (!disposed) highlighter.setPage(blocks()); });
-  const postFrame = () => { restore(); };
+  createEffect(() => { if (!disposed) highlighter.setPage(blocks().filter(block => visible().has(block.key))); });
+  const postFrame = () => {
+    restore();
+    if (!box || disposed) return;
+    const state = viewport(), selecting = !!props.renderer.getSelection();
+    const page = contentPage();
+    if (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting)
+      setViewport({ page, width: props.width, top: box.scrollTop, selecting });
+  };
   props.renderer.addPostProcessFn(postFrame);
   props.onReady?.(handle);
   function release() {
     if (disposed) return;
     disposed = true; props.onReady?.(undefined);
-    props.renderer.removePostProcessFn(postFrame); mounted.clear(); measureView.destroy(); measure.destroy();
+    props.renderer.removePostProcessFn(postFrame); mounted.clear(); projected.clear(); wrapMeasure.destroy(); measureView.destroy(); measure.destroy();
   }
   onCleanup(() => {
     release();
@@ -312,13 +370,14 @@ export function BodyView(props: BodyViewProps) {
     let current: BodyTextRenderable | undefined;
     const key = value.block.key;
     onCleanup(() => { if (mounted.get(key)?.view === current) mounted.delete(key); });
+    const plain = createMemo(() => styled(value.block));
+    const content = createMemo(() => { highlightRevision(); return highlighter.get(value.block.key) ?? plain(); });
     createEffect(() => {
-      highlightRevision();
       if (disposed || !current) return;
       mounted.set(key, { block: value.block, view: current });
       // The Solid content prop coerces objects to strings. The native setter
       // accepts StyledText and retains its runs, links and selection offsets.
-      current.content = highlighter.get(value.block.key) ?? styled(value.block);
+      current.content = content();
     });
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
       width={value.width} wrapMode="char" selectable />;
@@ -339,9 +398,10 @@ export function BodyView(props: BodyViewProps) {
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
     <For each={blockKeys()}>{key => {
-      const block = () => blockIndex().get(key)!;
+      const block = createMemo(() => blockIndex().get(key)!);
       return <box flexDirection="column" flexShrink={0} paddingLeft={indent(block())} backgroundColor={block().role === 'user' ? '#303030' : undefined}
-      height={block().node.kind === 'space' ? 1 : undefined}>
+      height={heights().get(key)}>
+      <Show when={visible().has(key)}>
       <Show when={block().node.kind === 'rule'}><text content={'─'.repeat(Math.max(1, props.width - 2))} fg="#777777" selectable={false} /></Show>
       <Show when={!['rule', 'space'].includes(block().node.kind)}>
       <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0}>
@@ -356,6 +416,7 @@ export function BodyView(props: BodyViewProps) {
             </box>}
           </For>
         </box>
+      </Show>
       </Show>
       </Show>
     </box>; }}</For>

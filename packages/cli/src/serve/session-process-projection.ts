@@ -19,19 +19,22 @@ export interface SessionProcessStreamEnd {
   readonly assignmentId: string; readonly finalSeq: number;
 }
 
-/** A bounded display consumer of VERIFIED canonical frames. The protocol owner
- * continues its ACK/checkpoint work independently; this object owns neither.
+/** A bounded display consumer of VERIFIED canonical frames. Acceptance joins
+ * the bounded materialization before the protocol owner ACKs disposable bytes;
+ * it never waits for an observer connection or owns protocol checkpoints.
  * Dispose with the assignment/Server generation. Never replay old artifacts on
  * profile upgrades: the Server chooses the current profile at delivery time. */
 export class SessionProcessProjector {
-  readonly #queue: { frame: StreamFrame; source: SessionProcessSource; bytes: number }[] = [];
+  readonly #queue: { frame: StreamFrame; source: SessionProcessSource; bytes: number;
+    readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>; release: () => void }[] = [];
+  readonly #pending = new Set<() => void>();
   #bytes = 0; #running = false; #closed = false; #failed = false;
   #lastSeq = 0; #identity?: string; #latestSource?: SessionProcessSource;
   #parentFinished = false; #streamFinished = false; #closing = false;
   #completionTimer?: ReturnType<typeof setTimeout>;
   #idle?: Promise<void>; #resolveIdle?: () => void;
   constructor(readonly options: SessionProcessProjectionOptions, readonly settled: () => void = () => {}) {}
-  accept(frame: StreamFrame): void {
+  accept(frame: StreamFrame, readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>): void | Promise<void> {
     if (this.#closed || this.#failed || this.#closing || frame.ref.execution !== 'conversation') return;
     const identity = JSON.stringify([frame.ref.conversationId, frame.ref.runId, frame.assignmentId, frame.streamEpoch]);
     if (this.#identity && this.#identity !== identity) { this.#fail(frame, '过程来源已换代，请刷新正文。'); return; }
@@ -49,8 +52,16 @@ export class SessionProcessProjector {
     if (this.#queue.length + (this.#running ? 1 : 0) >= 32 || this.#bytes + bytes > 1024 * 1024) {
       this.#fail(frame, '过程展示跟不上输出，请刷新正文。'); return;
     }
-    this.#queue.push({ frame, source: processSource(frame)!, bytes }); this.#bytes += bytes;
+    let release!: () => void;
+    const accepted = new Promise<void>(resolve => {
+      const deadline = setTimeout(() => this.#fail(frame, '过程展示读取超时，请从历史恢复正文。'), PROCESS_COMPLETION_GRACE_MS);
+      deadline.unref?.();
+      release = () => { clearTimeout(deadline); this.#pending.delete(release); resolve(); };
+      this.#pending.add(release);
+    });
+    this.#queue.push({ frame, source: processSource(frame)!, bytes, readDisplay, release }); this.#bytes += bytes;
     void this.#flush();
+    return accepted;
   }
   async #flush(): Promise<void> {
     if (this.#running) return;
@@ -60,7 +71,7 @@ export class SessionProcessProjector {
         const item = this.#queue.shift()!;
         try {
           if (item.frame.payload.kind === 'provisional-final') continue;
-          const payload = await readStreamDisplayPayload(item.frame.payload, this.options.artifacts);
+          const payload = await (item.readDisplay?.() ?? readStreamDisplayPayload(item.frame.payload, this.options.artifacts));
           if (this.#closed || this.#failed) break;
           const source = item.source;
           if (!source) continue;
@@ -71,7 +82,7 @@ export class SessionProcessProjector {
           }
           if (value) this.options.publish(source.conversationId, SESSION_PROCESS_METHOD, value);
         } catch { this.#fail(item.frame, '过程展示读取失败，请刷新正文。'); }
-        finally { this.#bytes = Math.max(0, this.#bytes - item.bytes); }
+        finally { this.#bytes = Math.max(0, this.#bytes - item.bytes); item.release(); }
       }
     } finally {
       this.#running = false;
@@ -89,7 +100,7 @@ export class SessionProcessProjector {
     }
     this.dispose();
   }
-  /** Test/shutdown join; producers must not await this on the protocol path. */
+  /** Test/shutdown join; per-frame producers await accept, never this whole queue. */
   async idle(): Promise<void> {
     if (!this.#running) return;
     this.#idle ??= new Promise<void>(resolve => { this.#resolveIdle = resolve; });
@@ -130,6 +141,7 @@ export class SessionProcessProjector {
   dispose(): void {
     if (this.#closed) return;
     this.#closed = true; clearTimeout(this.#completionTimer); this.#queue.length = 0; this.#bytes = 0;
+    for (const release of this.#pending) release();
     // A stalled read still occupies its finite owner slot until it releases;
     // timing out display must not permit unbounded detached artifact reads.
     if (this.#running) void this.idle().then(this.settled); else this.settled();
@@ -143,7 +155,7 @@ export class SessionProcessProjectionOwner {
   #closed = false; #overflow = false;
   readonly #finished = new Set<string>();
   constructor(readonly options: SessionProcessProjectionOptions) {}
-  accept(frame: StreamFrame): void {
+  accept(frame: StreamFrame, readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>): void | Promise<void> {
     if (this.#closed || frame.ref.execution !== 'conversation') return;
     const key = JSON.stringify([frame.ref.conversationId, frame.ref.runId]);
     if (this.#finished.has(key)) return;
@@ -162,7 +174,7 @@ export class SessionProcessProjectionOwner {
       }
       entry = this.#create(frame.ref.conversationId, frame.ref.runId);
     }
-    entry.reader.accept(frame);
+    return entry.reader.accept(frame, readDisplay);
   }
   finish(conversationId: string, runId: string): void {
     const identity = JSON.stringify([conversationId, runId]);

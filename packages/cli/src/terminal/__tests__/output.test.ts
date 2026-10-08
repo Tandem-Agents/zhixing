@@ -7,6 +7,49 @@ const body: TerminalOutputBody = { work: action => action(), amend: async () => 
 afterEach(() => vi.useRealTimers());
 
 describe('terminal output projection', () => {
+  it('yields between finite batches without adding a coalescing delay to a backlog', async () => {
+    vi.useFakeTimers();
+    const append = vi.fn(async () => {}), published: number[] = [];
+    const updated = vi.fn(async () => { published.push(append.mock.calls.length); });
+    const projection = new TerminalOutputProjection(append, updated, async () => {}, body);
+    for (let i = 0; i < 12; i++) projection.appendProcessBlock({ blockId: `notice-${i}`, role: 'process', text: `${i}` });
+    await vi.advanceTimersByTimeAsync(39); expect(append).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5);
+    expect(append).toHaveBeenCalledTimes(12);
+    expect(published).toEqual([4, 12]); // All text retained; final frame cannot be skipped.
+    await projection.drain(); await projection.close();
+  });
+  it('retains completed process text once as immutable plain fragments with exact source offsets', async () => {
+    vi.useFakeTimers();
+    const text = '**literal** 中文🙂\r\n'.repeat(1800);
+    const parts: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const amend = vi.fn(), seal = vi.fn(), gap = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(async part => { parts.push(part); }, async () => {}, gap,
+      { work: action => action(), amend, seal });
+    projection.appendProcessBlock({ blockId: 'notice', role: 'process', text });
+    const done = projection.drain(); await vi.runAllTimersAsync(); await done;
+    expect(parts.map(part => part.text).join('')).toBe(text);
+    let offset = 0;
+    for (const [index, part] of parts.entries()) {
+      expect(part).toMatchObject({ blockId: 'notice', role: 'process', contentOffset: offset, final: index === parts.length - 1 });
+      expect(part.body).toBeUndefined(); expect(Buffer.byteLength(part.text)).toBeLessThanOrEqual(32 * 1024);
+      offset += part.text.length;
+    }
+    expect(amend).not.toHaveBeenCalled(); expect(seal).not.toHaveBeenCalled(); expect(gap).not.toHaveBeenCalled();
+    await projection.close();
+  });
+  it('preserves the first display failure for observation without retrying or blocking the producer', async () => {
+    vi.useFakeTimers();
+    const error = Object.assign(Error('synthetic IO failure'), { code: 'ENOSPC' });
+    const gap = vi.fn(async (_error?: unknown) => {}), append = vi.fn(async () => { throw error; });
+    const projection = new TerminalOutputProjection(append, async () => {}, gap, body);
+    projection.accept({ type: 'text_delta', text: 'first' }, source);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(projection.paused).toBe(true); expect(gap).toHaveBeenCalledExactlyOnceWith(error);
+    projection.accept({ type: 'text_delta', text: 'later' }, source);
+    await projection.drain(); expect(append).toHaveBeenCalledTimes(1);
+    await projection.close();
+  });
   it('waits for the old physical append before resuming with distinct retained block identities', async () => {
     vi.useFakeTimers();
     let finish!: () => void;
@@ -49,7 +92,7 @@ describe('terminal output projection', () => {
     expect(parts.at(-1)?.contentOffset).toBe(4); expect(seal).toHaveBeenCalledWith('live:c:r:0');
     await projection.close();
   });
-  it('uses the existing body queue and seal lifecycle for process blocks, with one tool display owner', async () => {
+  it('uses the existing body queue for immutable process blocks, with one tool display owner', async () => {
     vi.useFakeTimers();
     const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
     const seal = vi.fn(async () => {}), accept = vi.fn(), end = vi.fn();
@@ -61,8 +104,9 @@ describe('terminal output projection', () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(accept).toHaveBeenCalledTimes(2);
     expect(segments.map(segment => segment.text).join('')).toBe('◆ 已修改 a.ts\n+ 1  actual');
-    expect(segments.every(segment => segment.role === 'tool-diff' && segment.body?.kind === 'plain')).toBe(true);
-    expect(seal).toHaveBeenCalledWith('process:actual-tool');
+    expect(segments.every(segment => segment.role === 'tool-diff' && segment.body === undefined)).toBe(true);
+    expect(segments.at(-1)?.final).toBe(true);
+    expect(seal).not.toHaveBeenCalled();
     projection.end(source.conversationId, source.turnId, source.runId);
     expect(end).toHaveBeenCalledWith(source.conversationId, source.turnId, source.runId);
     await projection.close();
@@ -102,7 +146,7 @@ describe('terminal output projection', () => {
     appendDone(); await reset;
     projection.accept({ type: 'text_delta', text: 'new' }, source);
     await vi.advanceTimersByTimeAsync(50);
-    expect(append).toHaveBeenNthCalledWith(2, expect.objectContaining({ text: 'new', contentOffset: current ? 0 : 3 }));
+    expect(append).toHaveBeenNthCalledWith(2, expect.objectContaining({ text: 'new', contentOffset: current ? 0 : 3 }), false);
     await projection.close();
   });
   it('keeps a recovery drain pending until actual append or explicit gap presentation completes', async () => {
@@ -143,7 +187,7 @@ describe('terminal output projection', () => {
   it('accounts normalized UTF-8 at admission and stops a large producer without retaining its whole event', async () => {
     const gap = vi.fn(async () => {}), projection = new TerminalOutputProjection(async () => {}, async () => {}, gap, body);
     const release = projection.hold();
-    projection.accept({ type: 'text_delta', text: '汉'.repeat(400000) } as AgentYield, source);
+    projection.accept({ type: 'text_delta', text: '汉'.repeat(2000000) } as AgentYield, source);
     expect(gap).toHaveBeenCalledOnce(); release(); await projection.close();
   });
 });

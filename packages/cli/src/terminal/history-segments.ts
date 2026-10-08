@@ -20,6 +20,16 @@ export function* textFragments(text: string, bytes = 32 * 1024): Generator<{ tex
     let end = Math.min(text.length, offset + stride);
     const previous = text.charCodeAt(end - 1), next = text.charCodeAt(end);
     if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+    // The conservative three-byte stride is only a starting point. Pack the
+    // remaining UTF-8 capacity instead of tripling ASCII/mixed-text IO calls.
+    let used = Buffer.byteLength(text.slice(offset, end));
+    while (end < text.length) {
+      const code = text.charCodeAt(end), following = text.charCodeAt(end + 1);
+      const pair = code >= 0xd800 && code <= 0xdbff && following >= 0xdc00 && following <= 0xdfff;
+      const size = pair ? 4 : code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+      if (used + size > bytes) break;
+      used += size; end += pair ? 2 : 1;
+    }
     yield { text: text.slice(offset, end), offset, final: end === text.length };
     offset = end;
   }
@@ -74,25 +84,36 @@ export function* projectHistorySegmentsReverse(runsNewestFirst: readonly RunReco
 /** Preserve the authoritative source and ordering while resolving Markdown
  * with the same parser and logical EOF used by the live producer. The caller
  * owns the single bounded parser workspace for this entire iterator. */
-export async function* projectRenderedHistoryReverse(runsNewestFirst: readonly RunRecordWithRef[]): AsyncGenerator<TerminalDisplaySegment> {
+export interface TerminalHistoryPosition { readonly blockId: string; readonly contentOffset: number }
+export async function* projectRenderedHistoryReverse(runsNewestFirst: readonly RunRecordWithRef[], before?: TerminalHistoryPosition): AsyncGenerator<TerminalDisplaySegment> {
+  let reached = before === undefined;
   for (const { record, shardId } of runsNewestFirst) {
     for (let messageIndex = record.messages.length - 1; messageIndex >= 0; messageIndex--) {
       const message = record.messages[messageIndex]!;
       for (let blockIndex = message.content.length - 1; blockIndex >= 0; blockIndex--) {
         const block = message.content[blockIndex]!;
         const blockId = `${shardId}:${record.runIndex}:${messageIndex}:${blockIndex}`;
+        if (!reached) {
+          if (blockId !== before!.blockId) continue;
+          reached = true;
+          if (before!.contentOffset === 0) continue;
+        }
         const tail = block.type === 'thinking' ? historyThinkingTail(block.thinking) : undefined;
         const text = block.type === 'text' ? block.text : block.type === 'thinking' ? tail!.text :
           block.type === 'tool_use' ? `◆ ${block.name}` : block.type === 'tool_result' ? block.content : '[图像材料]';
         if (typeof text !== 'string') continue;
         const kind = block.type === 'text' && message.role === 'assistant' ? 'markdown' : 'plain';
         for await (const item of projectBodyHistory(text, kind, 'reverse')) {
-          yield { blockId, contentOffset: (tail?.offset ?? 0) + item.contentOffset, role: tail ? 'thinking' : message.role, text: item.text,
+          const contentOffset = (tail?.offset ?? 0) + item.contentOffset;
+          if (blockId === before?.blockId && contentOffset >= before.contentOffset) continue;
+          if (blockId === before?.blockId && contentOffset + item.text.length > before.contentOffset) throw Error('terminal-history-position-changed');
+          yield { blockId, contentOffset, role: tail ? 'thinking' : message.role, text: item.text,
             final: item.body.end, body: tail ? shiftThinkingBody(item.body, tail.offset) : item.body };
         }
       }
     }
   }
+  if (!reached) throw Error('terminal-history-position-missing');
 }
 
 /** History remains authoritative; only the bounded display tail is materialized. */

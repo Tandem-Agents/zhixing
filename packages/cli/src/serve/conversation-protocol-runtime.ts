@@ -40,6 +40,7 @@ import {
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
+  type StreamDataFramePayload,
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
@@ -163,7 +164,7 @@ export interface ConversationProtocolRuntimeOptions {
   readonly onPublishResult?: (
     notice: PublishResultNotice,
   ) => void | Promise<void>;
-  readonly onFirstPartyFrame?: (frame: StreamFrame) => void | Promise<void>;
+  readonly onFirstPartyFrame?: (frame: StreamFrame, readDisplay?: () => Promise<StreamDataFramePayload>) => void | Promise<void>;
   readonly onFirstPartyStreamEnd?: (source: { readonly conversationId: string; readonly runId: string; readonly assignmentId: string; readonly finalSeq: number }) => void;
   readonly createFirstPartyFinality?: (
     input: Omit<FirstPartyFinalitySessionOptions, "sources">,
@@ -331,9 +332,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #onPublishResult:
     | ((notice: PublishResultNotice) => void | Promise<void>)
     | undefined;
-  readonly #onFirstPartyFrame:
-    | ((frame: StreamFrame) => void | Promise<void>)
-    | undefined;
+  readonly #onFirstPartyFrame: ConversationProtocolRuntimeOptions['onFirstPartyFrame'];
   #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
@@ -1390,11 +1389,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             ref: streamRef,
             ticket,
             surfacePrincipal: executionIngress.surfacePrincipal,
-            adoptFrame: async (frame) => {
+            adoptFrame: async (frame, _checkpoint, _signal, readDisplay) => {
               if (frame.payload.kind === "provisional-final") {
                 await firstPartyFinalitySession?.acceptProvisionalFinal(frame);
               }
-              await this.#onFirstPartyFrame?.(frame);
+              await this.#onFirstPartyFrame?.(frame, readDisplay);
             },
           });
       }

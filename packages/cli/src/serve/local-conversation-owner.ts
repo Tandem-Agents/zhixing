@@ -835,7 +835,7 @@ export class LocalConversationOwnerAssembly {
         publishRun({ conversationId: notice.ref.conversationId, method: "session.status", params: notice });
         options.onRunStatus?.(notice);
       },
-      onFirstPartyFrame: frame => processProjection.accept(frame),
+      onFirstPartyFrame: (frame, readDisplay) => processProjection.accept(frame, readDisplay),
       onFirstPartyStreamEnd: source => processProjection.streamEnded(source),
       onFinal: async (frame) => {
         await verifyLocalConversationFinal(protocol, frame);

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { checkpointFilesystemCompletion, CheckpointDirectoryHandle, type CheckpointFilesystemProcess } from '@zhixing/mesh/filesystem';
 import type { LogRecordPort } from '@zhixing/core/logging';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
-import { TERMINAL_PROTOCOL, type TerminalMessage, type TerminalTraffic } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, TERMINAL_PROTOCOL, type TerminalMessage, type TerminalTraffic } from '@zhixing/terminal-ui/protocol';
 import { isTerminalPrivateEndpoint, TerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
 import { createServer, type Server, type Socket } from 'node:net';
 import { TerminalWindowsWriterAdmission, type TerminalHelperRole } from './host-launch.js';
@@ -669,7 +669,7 @@ class TerminalSupervisor {
       if (!this.#assets || !Number.isSafeInteger(message.id) || message.id <= this.#lastAssetRequest) throw Error('terminal-assets-request');
       this.#lastAssetRequest = message.id;
       const operation = message.operation;
-      if (!operation || !Number.isSafeInteger(operation.bytes) || operation.bytes < 0 || operation.bytes > 1024 * 1024) throw Error('terminal-assets-operation');
+      if (!operation || !Number.isSafeInteger(operation.bytes) || operation.bytes < 0 || operation.bytes > TERMINAL_LIMITS.storageReservationBytes) throw Error('terminal-assets-operation');
       if (operation.kind === 'settle' ? !/^[a-f0-9-]{36}$/u.test(operation.token) : !['display', 'input'].includes(operation.bucket)) throw Error('terminal-assets-operation');
       try {
         let token: string | undefined;
@@ -717,7 +717,7 @@ class TerminalSupervisor {
       if ((message.stream !== 'stdout' && message.stream !== 'stderr') || typeof message.text !== 'string' || Buffer.byteLength(message.text) > 32 * 1024 || !this.options.commandOutput) throw Error('terminal-command-output-invalid');
       this.options.commandOutput(message.stream, message.text); return;
     }
-    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'submission', 'task-status', 'process-status', 'recovery-page'].includes(message.type)) {
+    if (item.role === 'application' && ['reply', 'view', 'chunk', 'invalidate', 'display-page', 'display-patch', 'submission', 'task-status', 'process-status', 'recovery-page'].includes(message.type)) {
       if (!this.#ui) throw Error('terminal-ui-unavailable');
       await this.#ui.channel!.send(message, traffic); return;
     }

@@ -7,8 +7,14 @@ import { BODY_PROJECTION_WORK_BYTES } from '@zhixing/terminal-ui/body-model';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
 import type { ProcessBlock } from './process-presentation.js';
 
+// Part of the bounded hot prefix, before transport admission. Includes the
+// owned UTF-16 string and its encoded representation; IPC keeps its own limit.
+const OUTPUT_PREFIX_BYTES = 8 * 1024 * 1024;
+
 interface Stream { readonly key: string; block: number; assistantUnits: number; role?: string }
-interface BodyCommand { readonly blockId: string; readonly role: string; readonly text: string; readonly end: boolean }
+interface BodyCommand { readonly blockId: string; readonly role: string; readonly text: string; readonly end: boolean;
+  /** Complete plain display content, whose source can no longer be amended. */
+  readonly snapshotOffset?: number }
 export interface TerminalOutputBody {
   work(action: () => Promise<void>): Promise<void>;
   amend(blockId: string, change: BodyAmend): Promise<void>;
@@ -22,13 +28,14 @@ export class TerminalOutputProjection {
   readonly #parsers = new Map<string, TerminalBodyProjection>();
   #bytes = 0; #inflightBytes = 0; #paused = false; #held = 0; #closed = false;
   #generation = 0;
+  #publishedAt = -Infinity;
   #timer?: ReturnType<typeof setTimeout>;
   #flushing?: Promise<void>;
   #draining?: Promise<void>;
   #wakeDrain?: () => void;
   #gapWork?: Promise<void>;
-  constructor(readonly append: (segment: TerminalDisplaySegment) => Promise<void>, readonly updated: () => Promise<void>,
-    readonly gap: () => Promise<void>, readonly body: TerminalOutputBody,
+  constructor(readonly append: (segment: TerminalDisplaySegment, stable?: boolean) => Promise<void>, readonly updated: () => Promise<void>,
+    readonly gap: (error?: unknown) => Promise<void>, readonly body: TerminalOutputBody,
     readonly process?: { accept(event: AgentYield, source: ConversationOutputSource): void; end(conversationId: string, turnId?: string, runId?: string): void }) {}
   get paused(): boolean { return this.#paused; }
   pause(): void { this.#pause(); }
@@ -59,7 +66,7 @@ export class TerminalOutputProjection {
     const key = this.#streamKey(source.conversationId, source.runId ?? source.turnId);
     let stream = this.#streams.get(key);
     if (!stream) {
-      if (this.#streams.size >= 128) { this.#pause(); return; }
+      if (this.#streams.size >= 128) { this.#pause(Error('terminal-body-active-capacity')); return; }
       stream = { key, block: 0, assistantUnits: 0 }; this.#streams.set(key, stream);
     }
     switch (event.type) {
@@ -93,12 +100,14 @@ export class TerminalOutputProjection {
     const key = this.#streamKey(conversationId, runId ?? turnId), stream = this.#streams.get(key);
     if (stream) { this.#endBlock(stream); this.#streams.delete(key); this.#schedule(); }
   }
-  /** Process text uses the same bounded queue, parser, disk cache and gap owner. */
+  /** Complete process text shares the queue/cache/gap owner, but needs no
+   * speculative parser prefix or mutable disk slots. It is already plain text. */
   appendProcessBlock(block: ProcessBlock): void {
     if (this.#closed || this.#paused) return;
     const blockId = this.#generation ? `${block.blockId}:display-${this.#generation}` : block.blockId;
-    for (const part of textFragments(block.text)) this.#enqueue({ blockId, role: block.role, text: part.text, end: false });
-    this.#enqueue({ blockId, role: block.role, text: '', end: true }); this.#schedule();
+    for (const part of textFragments(block.text)) this.#enqueue({ blockId, role: block.role, text: part.text,
+      end: part.final, snapshotOffset: part.offset });
+    this.#schedule();
   }
   async reset(current: () => boolean): Promise<void> {
     await this.drain(); if (current()) { this.#streams.clear(); this.#disposeParsers(); }
@@ -119,7 +128,7 @@ export class TerminalOutputProjection {
       const tail = this.#queue.at(-1);
       if (tail?.command.blockId === blockId && !tail.command.end && Buffer.byteLength(tail.command.text) + Buffer.byteLength(part.text) <= 32 * 1024) {
         const command = { ...tail.command, text: tail.command.text + part.text }, bytes = this.#commandBytes(command);
-        if (this.#bytes + this.#inflightBytes - tail.bytes + bytes > 1024 * 1024) { this.#pause(); return; }
+        if (this.#bytes + this.#inflightBytes - tail.bytes + bytes > OUTPUT_PREFIX_BYTES) { this.#pause(Error('terminal-output-queue-capacity')); return; }
         this.#bytes += bytes - tail.bytes; this.#queue[this.#queue.length - 1] = { command, bytes };
       } else {
         // A short slice must not retain a much larger decoded RPC event.
@@ -132,7 +141,7 @@ export class TerminalOutputProjection {
   #enqueue(command: BodyCommand): void {
     if (this.#closed || this.#paused) return;
     const bytes = this.#commandBytes(command);
-    if (this.#bytes + this.#inflightBytes + bytes > 1024 * 1024 || this.#queue.length >= 128) { this.#pause(); return; }
+    if (this.#bytes + this.#inflightBytes + bytes > OUTPUT_PREFIX_BYTES || this.#queue.length >= 128) { this.#pause(Error('terminal-output-queue-capacity')); return; }
     this.#queue.push({ command, bytes }); this.#bytes += bytes;
   }
   #endBlock(stream: Stream): void {
@@ -144,14 +153,17 @@ export class TerminalOutputProjection {
     for (const parser of this.#parsers.values()) bytes += parser.retainedBytes;
     if (bytes + BODY_PROJECTION_WORK_BYTES > TERMINAL_LIMITS.parserBytes) throw Error('terminal-body-active-capacity');
   }
-  #schedule(): void {
+  #schedule(backlog = false): void {
     if (this.#closed || this.#held || this.#flushing || this.#timer || !this.#queue.length) return;
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      this.#flushing = this.#flush().catch(() => this.#pause()).finally(() => {
-        this.#flushing = undefined; if (this.#paused) this.#disposeParsers(); this.#schedule(); this.#wakeDrain?.();
+      this.#flushing = this.#flush().catch(error => this.#pause(error)).finally(() => {
+        this.#flushing = undefined; if (this.#paused) this.#disposeParsers(); this.#schedule(true); this.#wakeDrain?.();
       });
-    }, 40);
+    // Coalesce newly arriving text once. A finite batch already yielded for
+    // its IO/publication; do not impose a second quiet period on a backlog.
+    // The next timer still lets control/input callbacks run between batches.
+    }, backlog ? 0 : 40);
   }
   async #flush(): Promise<void> {
     let consumed = 0;
@@ -162,6 +174,11 @@ export class TerminalOutputProjection {
       try {
         await this.body.work(async () => {
           if (this.#closed || this.#paused) return;
+          if (command.snapshotOffset !== undefined) {
+            await this.append({ blockId: command.blockId, role: command.role, text: command.text,
+              contentOffset: command.snapshotOffset, final: command.end });
+            return;
+          }
           let parser = this.#parsers.get(command.blockId);
           if (!parser && command.end) return;
           if (!parser) {
@@ -174,19 +191,27 @@ export class TerminalOutputProjection {
             if (this.#closed || this.#paused) return;
             if (change.kind === 'amend') await this.body.amend(command.blockId, change);
             else await this.append({ blockId: command.blockId, role: command.role, contentOffset: change.contentOffset,
-              text: change.text, final: change.body.end, body: change.body });
+              text: change.text, final: change.body.end, body: change.body }, change.stable);
           }
           this.#parserCapacity();
           if (command.end) { await this.body.seal(command.blockId); this.#parsers.delete(command.blockId); }
         });
       } finally { this.#inflightBytes = 0; }
     }
-    if (!this.#closed) await this.updated();
+    // Storage must drain a burst without a second quiet-period delay, but
+    // publishing every intermediate batch needlessly reparses/reflows the
+    // same viewport. Coalesce only its display projection, never stored text.
+    // The last batch (and a hold boundary) always publishes before drain ends.
+    const now = performance.now();
+    if (!this.#closed && (!this.#queue.length || this.#held || now - this.#publishedAt >= 40)) {
+      this.#publishedAt = now;
+      await this.updated();
+    }
   }
-  #pause(): void {
+  #pause(error?: unknown): void {
     if (this.#paused || this.#closed) return;
     this.#paused = true; this.#queue.length = 0; this.#bytes = 0;
     if (!this.#flushing) this.#disposeParsers();
-    this.#gapWork = this.gap(); void this.#gapWork.catch(() => {}); this.#wakeDrain?.();
+    this.#gapWork = this.gap(error); void this.#gapWork.catch(() => {}); this.#wakeDrain?.();
   }
 }

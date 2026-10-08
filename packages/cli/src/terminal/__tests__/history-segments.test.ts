@@ -1,7 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { textFragments, projectHistorySegments, projectHistorySegmentsReverse, projectRenderedHistoryReverse } from '../history-segments.js';
+import { textFragments, projectHistorySegments, projectHistorySegmentsReverse, projectRenderedHistoryReverse, type TerminalHistoryPosition } from '../history-segments.js';
 
 describe('history segment projection', () => {
+  it('resumes bounded history pages by original position without dropping or repeating long-block text', async () => {
+    const text = '```text\n' + '中文🙂 long line\n'.repeat(18000) + '```';
+    const runs = [{ shardId: 'fixed', record: { type: 'run' as const, runIndex: 7, timestamp: '2026-10-08',
+      messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'original question' }] },
+        { role: 'assistant' as const, content: [{ type: 'text' as const, text }] }] } }];
+    const expected = []; for await (const part of projectRenderedHistoryReverse(runs)) expected.push(part);
+    const actual = []; let before: TerminalHistoryPosition | undefined;
+    for (let page = 0; page < 40; page++) {
+      let count = 0;
+      for await (const part of projectRenderedHistoryReverse(runs, before)) {
+        actual.push(part); before = { blockId: part.blockId, contentOffset: part.contentOffset };
+        if (++count === 4) break;
+      }
+      if (count < 4) break;
+    }
+    expect(actual).toEqual(expected);
+    expect(actual.filter(part => part.role === 'assistant').reverse().map(part => part.text).join('')).toBe(text);
+    const stale = projectRenderedHistoryReverse(runs, { blockId: 'missing', contentOffset: 1 });
+    await expect(stale.next()).rejects.toThrow('terminal-history-position-missing');
+  });
+  it('packs the byte budget without splitting Unicode or adding sparse ASCII fragments', () => {
+    expect([...textFragments('x'.repeat(32768))]).toHaveLength(1);
+    for (const text of ['ab🙂cd中éf', '🙂🙂🙂', 'abc中文xyz', '\ud800x\udc00']) {
+      const parts = [...textFragments(text, 4)];
+      expect(parts.map(part => part.text).join('')).toBe(text);
+      expect(parts.every(part => Buffer.byteLength(part.text) <= 4)).toBe(true);
+    }
+  });
   it('materializes only a thinking display tail with the original authority coordinates', async () => {
     const thinking = '前文'.repeat(10_000) + '🦞最新尾部';
     const messages = [{ role: 'assistant' as const, content: [{ type: 'thinking' as const, thinking }] }];

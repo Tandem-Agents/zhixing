@@ -41,6 +41,38 @@ export interface BodyPage {
   readonly first: number; readonly last: number; readonly start: number;
   readonly follow: boolean; readonly segments: readonly BodySegment[];
 }
+/** Same-release wire projection: reuse indexes refer only to the immediately
+ * preceding acknowledged-order page, never to a growing remote cache. */
+export interface BodyPagePatch extends Omit<BodyPage, 'segments'> {
+  readonly revision: number; readonly base?: number; readonly segments: readonly (BodySegment | number)[];
+}
+export interface BodyPageRevision { readonly revision: number; readonly page: BodyPage }
+/** Range counters may advance while an off-bottom reading page stays intact. */
+export function sameBodyPageContent(left: BodyPage | undefined, right: BodyPage): boolean {
+  return !!left && left.start === right.start && left.follow === right.follow &&
+    left.segments.length === right.segments.length && left.segments.every((segment, index) => segment === right.segments[index]);
+}
+export function encodeBodyPage(page: BodyPage, revision: number, previous?: BodyPageRevision): BodyPagePatch {
+  return { ...page, revision, base: previous?.revision, segments: page.segments.map(segment => {
+    const index = previous?.page.segments.indexOf(segment) ?? -1;
+    return index < 0 ? segment : index;
+  }) };
+}
+export function decodeBodyPage(patch: BodyPagePatch, previous?: BodyPageRevision): BodyPageRevision {
+  if (!integer(patch.revision) || (previous && patch.revision <= previous.revision) ||
+      (patch.base !== undefined && patch.base !== previous?.revision) || !Array.isArray(patch.segments) || patch.segments.length > BODY_PAGE_FRAGMENTS)
+    throw Error('terminal-body-page-revision');
+  if (![patch.first, patch.last, patch.start].every(Number.isSafeInteger) || patch.first > patch.start || patch.start > patch.last ||
+      patch.segments.length > patch.last - patch.start || typeof patch.follow !== 'boolean') throw Error('terminal-body-page-range');
+  const segments = patch.segments.map(segment => {
+    if (typeof segment !== 'number') return segment;
+    if (patch.base === undefined || !integer(segment) || !previous?.page.segments[segment]) throw Error('terminal-body-page-reference');
+    return previous.page.segments[segment]!;
+  });
+  const page = { first: patch.first, last: patch.last, start: patch.start, follow: patch.follow, segments };
+  bodyWindows(page);
+  return { revision: patch.revision, page };
+}
 export interface BodyWindow {
   readonly blockId: string; readonly role: string; readonly kind: BodyKind;
   readonly contentOffset: number; readonly text: string; readonly context: BodyContext;
@@ -50,7 +82,13 @@ const integer = (value: unknown): value is number => typeof value === 'number' &
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const keys = (value: object, allowed: readonly string[]) => Object.keys(value).every(key => allowed.includes(key));
 const kinds = ['paragraph', 'heading', 'quote', 'list', 'code', 'table', 'rule', 'space'];
+// Accepted projection DTOs are immutable snapshots. Weak caches disappear
+// with their pages and cannot turn into a second retained history.
+const validatedMetadata = new WeakMap<object, { offset: number; length: number }>();
+const projectedPages = new WeakMap<BodyPage, readonly BodyWindow[]>();
 export function validateBodyMetadata(value: unknown, contentOffset: number, sourceLength = BODY_FRAGMENT_BYTES): value is BodyFragmentMetadata {
+  const known = value && typeof value === 'object' ? validatedMetadata.get(value) : undefined;
+  if (known?.offset === contentOffset && known.length === sourceLength) return true;
   if (!integer(contentOffset) || !integer(sourceLength) || !Number.isSafeInteger(contentOffset + sourceLength) || !record(value) ||
       !keys(value, ['version', 'revision', 'kind', 'context', 'end']) || value.version !== 1 || !integer(value.revision) ||
       typeof value.kind !== 'string' || !['markdown', 'plain'].includes(value.kind) || typeof value.end !== 'boolean' || !record(value.context) ||
@@ -77,7 +115,14 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
       runEnd = run.to;
     }
   }
-  return Buffer.byteLength(JSON.stringify(value)) <= BODY_FRAGMENT_ENCODED_BYTES;
+  if (Buffer.byteLength(JSON.stringify(value)) > BODY_FRAGMENT_ENCODED_BYTES) return false;
+  for (const node of value.context.nodes) {
+    for (const run of node.runs) Object.freeze(run);
+    Object.freeze(node.runs); Object.freeze(node);
+  }
+  Object.freeze(value.context.nodes); Object.freeze(value.context); Object.freeze(value);
+  validatedMetadata.set(value, { offset: contentOffset, length: sourceLength });
+  return true;
 }
 /** Never inject synthetic fence/list/header/inline text into selection. */
 export function sliceBodyNodes(nodes: readonly BodyNode[], from: number, to: number): BodyNode[] {
@@ -97,16 +142,26 @@ export function sliceBodyNodes(nodes: readonly BodyNode[], from: number, to: num
   return result;
 }
 export function bodyWindows(page: BodyPage): readonly BodyWindow[] {
+  const known = projectedPages.get(page);
+  if (known) return known;
   if (page.segments.length > BODY_PAGE_FRAGMENTS || Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-body-page-capacity');
-  return page.segments.map(segment => {
+  const windows = page.segments.map(segment => {
     if (!segment.blockId || segment.blockId.length > 512 || !integer(segment.contentOffset) || Buffer.byteLength(segment.text) > BODY_FRAGMENT_BYTES ||
         (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) throw Error('terminal-body-source-invalid');
     const body = segment.body;
     const context = body?.context ?? { nodes: [{ from: segment.contentOffset, to: segment.contentOffset + segment.text.length,
-      kind: 'paragraph' as const, runs: [{ from: segment.contentOffset, to: segment.contentOffset + segment.text.length, text: segment.text, style: 0 }] }] };
-    return { blockId: segment.blockId, role: segment.role, kind: body?.kind ?? 'plain', contentOffset: segment.contentOffset,
-      text: segment.text, context, revision: body?.revision ?? 0, end: body?.end ?? segment.final };
+      origin: 0, kind: 'paragraph' as const, runs: [{ from: segment.contentOffset, to: segment.contentOffset + segment.text.length, text: segment.text, style: 0 }] }] };
+    if (!body) {
+      for (const node of context.nodes) { for (const run of node.runs) Object.freeze(run); Object.freeze(node.runs); Object.freeze(node); }
+      Object.freeze(context.nodes); Object.freeze(context);
+    }
+    Object.freeze(segment);
+    return Object.freeze({ blockId: segment.blockId, role: segment.role, kind: body?.kind ?? 'plain', contentOffset: segment.contentOffset,
+      text: segment.text, context, revision: body?.revision ?? 0, end: body?.end ?? segment.final });
   });
+  Object.freeze(page.segments); Object.freeze(page); Object.freeze(windows);
+  projectedPages.set(page, windows);
+  return windows;
 }
 export function sourceLineStarts(text: string): readonly number[] {
   const starts = [0];

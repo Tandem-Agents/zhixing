@@ -7,6 +7,8 @@ import {
 
 export interface BodyAppend {
   readonly kind: 'append'; readonly contentOffset: number; readonly text: string; readonly body: BodyFragmentMetadata;
+  /** Parser-proven committed prefix; not part of the surface protocol. */
+  readonly stable?: boolean;
 }
 export interface BodyAmend {
   readonly kind: 'amend'; readonly from: number; readonly to: number; readonly revision: number;
@@ -55,15 +57,16 @@ export class BodyProjectionCapacityError extends Error {
   constructor() { super('terminal-body-projection-capacity'); }
 }
 
-interface MappedText { readonly text: string; readonly at: (index: number) => number }
+interface MappedText { readonly text: string; readonly at: (index: number) => number; readonly linearStart?: number }
 interface BodyCheckpoint {
   readonly source: string; readonly start: number; readonly offset: number; readonly revision: number; readonly anchor: boolean;
   readonly fence?: { marker: string; count: number; language: string; origin: number; indent: number; atLineStart: boolean };
   readonly table?: { prefix: string; origin: number };
   readonly links: Links;
 }
-const identity = (text: string, start: number): MappedText => ({ text, at: index => start + index });
+const identity = (text: string, start: number): MappedText => ({ text, linearStart: start, at: index => start + index });
 function sub(input: MappedText, start: number, end: number): MappedText {
+  if (input.linearStart !== undefined) return identity(input.text.slice(start, end), input.linearStart + start);
   return { text: input.text.slice(start, end), at: index => input.at(start + index) };
 }
 /** Marked normalizes CRLF and lone CR before tokenizing. Normalize its working
@@ -95,7 +98,7 @@ function mappedToken(input: MappedText, token: Token, cursor: number): { value: 
   // '\n' to the preceding token for a one-unit space token, even when that
   // unit was a trailing space/tab. Only this exact raw-token transformation
   // maps to the original horizontal whitespace; inline text is unchanged.
-  if (token.raw.endsWith('\n') && /[ \t]$/u.test(input.text)) {
+  if (token.type === 'list' && token.raw.endsWith('\n') && /[ \t]$/u.test(input.text)) {
     const from = input.text.length - token.raw.length;
     if (from >= cursor && input.text.slice(from, -1) === token.raw.slice(0, -1)) {
       return { value: { text: token.raw, at: index => input.at(from + index) }, cursor: input.text.length };
@@ -176,6 +179,10 @@ function run(input: MappedText, text: string, style = 0): BodyRun {
 }
 function mappedRuns(input: MappedText, text: string, style = 0): BodyRun[] {
   if (text.length !== input.text.length) return [run(input, text, style)];
+  // Ordinary source and all exact slices retain affine coordinates. Avoid a
+  // chain of mapping calls for every character; transformed source still uses
+  // the precise CRLF/indent/tab/escape mapping below.
+  if (input.linearStart !== undefined) return [{ from: input.linearStart, to: input.linearStart + text.length, text, style }];
   const result: BodyRun[] = [];
   for (let start = 0; start < text.length;) {
     let end = start + 1;
@@ -270,8 +277,9 @@ function inlines(tokens: readonly Token[], input: MappedText, style = 0, depth =
 function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = false, open = false): BodyNode[] {
   if (depth > 64) throw new BodyProjectionCapacityError();
   const result: BodyNode[] = [];
-  let cursor = 0;
+  let cursor = 0, count = 0;
   for (const token of tokens) {
+    const before = result.length;
     const match = mappedToken(input, token, cursor); cursor = match.cursor;
     const source = match.value, from = source.at(0), to = source.at(source.text.length);
     if (token.type === 'blockquote') {
@@ -342,7 +350,8 @@ function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = 
     else if (token.type === 'hr') result.push({ from, to, kind: 'rule', runs: [] });
     else if (token.type === 'space') result.push({ from, to, kind: 'space', runs: [] });
     else result.push({ from, to, kind: quote ? 'quote' : 'paragraph', depth, runs: [run(source, source.text)] });
-    if (result.length + result.reduce((sum, node) => sum + node.runs.length, 0) > BODY_PARSE_NODES) throw new BodyProjectionCapacityError();
+    for (let index = before; index < result.length; index++) count += 1 + result[index]!.runs.length;
+    if (count > BODY_PARSE_NODES) throw new BodyProjectionCapacityError();
   }
   return result;
 }
@@ -380,16 +389,43 @@ export class TerminalBodyProjection {
     let completed = false;
     try {
       for (let position = 0; position < text.length;) {
-        let end = Math.min(text.length, position + 8192);
+        // Parse one admitted chunk once. Carrier splitting happens below and
+        // must not cause repeated parsing/amendment of the same old suffix.
+        let end = Math.min(text.length, position + BODY_FRAGMENT_BYTES);
+        const room = BODY_PARSE_BYTES - Buffer.byteLength(this.#source);
+        while (end > position && Buffer.byteLength(text.slice(position, end)) > room) end = position + Math.floor((end - position) / 2);
+        if (end === position) throw new BodyProjectionCapacityError();
         if (end < text.length && /[\ud800-\udbff]/u.test(text[end - 1]!)) end--;
-        const part = Buffer.from(text.slice(position, end), 'utf16le').toString('utf16le');
-        if (Buffer.byteLength(this.#source) + Buffer.byteLength(part) > BODY_PARSE_BYTES) throw new BodyProjectionCapacityError();
+        if (end === position) throw new BodyProjectionCapacityError();
         const previous = this.#offset;
-        this.#source += part; this.#offset += part.length; this.#revision++;
-        const { nodes, stable } = this.#parse(false);
+        const prefix = this.#source, revision = this.#revision;
+        const fence = this.#fence ? { ...this.#fence } : undefined, table = this.#table, links = this.#links;
+        let part: string, parsed: { nodes: BodyNode[]; stable: number };
+        for (;;) {
+          part = Buffer.from(text.slice(position, end), 'utf16le').toString('utf16le');
+          this.#source = prefix + part; this.#offset = previous + part.length; this.#revision = revision + 1;
+          this.#fence = fence ? { ...fence } : undefined; this.#table = table; this.#links = links;
+          try { parsed = this.#parse(false); break; }
+          catch (error) {
+            // Many short paragraphs can exceed the node quantum in a large
+            // input chunk. Retry a smaller *unpublished* step, restoring all
+            // grammar state. A genuinely overfull retained suffix still fails.
+            this.#source = prefix; this.#offset = previous; this.#revision = revision;
+            this.#fence = fence ? { ...fence } : undefined; this.#table = table; this.#links = links;
+            if (!(error instanceof BodyProjectionCapacityError) || end - position <= 512) throw error;
+            end = position + Math.floor((end - position) / 2);
+            if (/[\ud800-\udbff]/u.test(text[end - 1]!)) end--;
+          }
+        }
+        const { nodes, stable } = parsed;
         const make = this.#projector(nodes, false);
         if (previous > this.#start) yield { kind: 'amend', from: this.#start, to: previous, revision: this.#revision, project: make };
-        yield* this.#fragments(part, previous, make);
+        for (const fragment of this.#fragments(part, previous, make)) {
+          const until = fragment.contentOffset + fragment.text.length;
+          // Keep the current final carrier mutable for real logical EOF. A
+          // grammar-stable earlier carrier can never be amended again.
+          yield { ...fragment, stable: until <= this.#start + stable && until < this.#offset };
+        }
         if (stable > 0) {
           this.#anchor ||= nodes.some(node => node.anchor && node.to <= this.#start + stable);
           this.#source = this.#source.slice(stable); this.#start += stable;
@@ -482,7 +518,12 @@ export class TerminalBodyProjection {
       // Only ordinary Markdown contributes definitions. A carried code/table
       // prefix is never reinterpreted as definitions when its following tail
       // becomes stable in this same work step.
-      const links = this.#lex(normalized(identity(text.slice(0, stable), start)).text).links;
+      const definitions = new marked.Lexer();
+      definitions.tokens.links = Object.assign(Object.create(null) as Links, this.#links);
+      // Definitions are block grammar. Running inline tokenization again here
+      // would parse all committed visible text a second time on every chunk.
+      definitions.blockTokens(normalized(identity(text.slice(0, stable), start)).text);
+      const links = definitions.tokens.links;
       if (Object.keys(links).length > BODY_PARSE_NODES || Buffer.byteLength(JSON.stringify(links)) > BODY_PARSE_BYTES) throw new BodyProjectionCapacityError();
       this.#links = links;
     }
@@ -507,7 +548,9 @@ export class TerminalBodyProjection {
   }
   #parseFence(end: boolean): { nodes: BodyNode[]; stable: number } {
     const fence = this.#fence!;
-    const expression = new RegExp(`^ {0,3}${fence.marker === '`' ? '`' : '~'}{${fence.count},}[ \\t]*(?:\\r\\n|\\r${end ? '' : '(?!$)'}|\\n${end ? '|$' : ''})`, 'gmu');
+    // In multiline mode `$` also matches before the next CR. Only a CR at
+    // actual input EOF is ambiguous; a following blank line closes the fence.
+    const expression = new RegExp(`^ {0,3}${fence.marker === '`' ? '`' : '~'}{${fence.count},}[ \\t]*(?:\\r\\n|\\r${end ? '' : '(?=[\\s\\S])'}|\\n${end ? '|$' : ''})`, 'gmu');
     let closing = expression.exec(this.#source);
     if (closing?.index === 0 && !fence.atLineStart) closing = expression.exec(this.#source);
     const validClose = closing ?? undefined;
@@ -543,7 +586,7 @@ export class TerminalBodyProjection {
   *#fragments(text: string, offset: number, project: BodyAmend['project']): Generator<BodyAppend> {
     let start = 0;
     while (start < text.length) {
-      let end = Math.min(text.length, start + 8192), item: BodyAppend;
+      let end = Math.min(text.length, start + BODY_FRAGMENT_BYTES), item: BodyAppend;
       for (;;) {
         if (end < text.length && /[\ud800-\udbff]/u.test(text[end - 1]!)) end--;
         const part = text.slice(start, end);

@@ -30,10 +30,11 @@ export class TerminalProcessProjection {
   readonly #summarizedChildren = new Set<string>();
   #batch: ProcessToolSnapshot[] = [];
   #usage: TerminalProcessView['usage'] = {};
+  #published?: string;
   constructor(readonly ports: ProcessProjectionPorts) {}
   begin(scope: ProcessScope): void {
     this.#scope = { ...scope }; this.#closed = false; this.#paused = false; this.#block = 0;
-    this.#phase = '正在准备'; this.#notice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true;
+    this.#phase = '正在准备'; this.#notice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
     this.#seq.clear(); this.#tools.clear(); this.#children.clear(); this.#endedParents.clear(); this.#sealedChildren.clear(); this.#summarizedChildren.clear(); this.#batch = []; this.#usage = {}; this.#publish();
   }
   #matches(source: Pick<SessionProcessSource, 'conversationId' | 'turnId' | 'runId'>, generation: number): boolean {
@@ -256,7 +257,16 @@ export class TerminalProcessProjection {
     try { this.ports.block({ blockId: `process:${JSON.stringify([scope.conversationId, scope.runId ?? scope.turnId, scope.generation, id ?? this.#block++])}`, role, text }); }
     catch { this.pause('过程展示写入失败'); }
   }
-  #publish(): void { try { this.ports.changed(this.snapshot()); } catch { if (!this.#paused) this.pause('过程显示暂不可用'); } }
+  #publish(): void {
+    try {
+      const view = this.snapshot(), { revision: _revision, ...visible } = view;
+      // Text deltas often leave the activity area unchanged. Its own animation
+      // clock keeps running; unchanged content needs no extra IPC/render pass.
+      const encoded = JSON.stringify(visible);
+      if (encoded === this.#published) return;
+      this.ports.changed(view); this.#published = encoded;
+    } catch { if (!this.#paused) this.pause('过程显示暂不可用'); }
+  }
   snapshot(): TerminalProcessView {
     return { revision: ++this.#revision, phase: this.#phase,
       ...(this.#thinking ? { thinking: { text: this.#thinking, active: this.#thinkingActive } } : {}),

@@ -161,7 +161,7 @@ export class TerminalInstanceAssets {
   }
 
   reserve(bucket: Bucket, bytes: number, signal: AbortSignal): Promise<string> {
-    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > 1024 * 1024) return Promise.reject(Error('terminal-storage-step-size'));
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > TERMINAL_LIMITS.storageReservationBytes) return Promise.reject(Error('terminal-storage-step-size'));
     return this.#enqueue(() => this.#withInventory(signal, async (all, physical, step) => {
       const record = this.#ownRecord(all);
       if (Object.keys(record.reservations).length >= 32) throw Error('terminal-storage-reservation-slots');
@@ -277,25 +277,35 @@ export class TerminalInstanceAssets {
     }
     for (const folder of folders) {
       if (markers.includes(`cleanup-${folder.slice(9)}.json`)) continue;
-      step.claim('ioOperations', 14);
-      const directory = await (await this.#root(step)).openDirectory(folder, false);
-      try {
-        await this.#recoverPublication(directory, step, folder.slice('instance-'.length));
-        const info = await directory.statFile('owner.json');
-        if (info.bytes > RECORD_BYTES) throw Error('terminal-instance-record-size');
-        step.claim('readBytes', info.bytes);
-        const bytes = await directory.readFile('owner.json', info.bytes, 0, RECORD_BYTES, info.identity);
-        const value: unknown = JSON.parse(bytes.toString('utf8'));
-        if (!validRecord(value) || folder !== `instance-${value.id}` || value.directoryIdentity !== directory.identity) throw Error('terminal-instance-record-unknown');
-        this.#recordIdentities.set(value, info.identity);
-        records.push(value);
-      } finally { await directory.close(); }
+      records.push(await this.#readRecord(folder, step));
     }
     return records;
   }
 
+  async #readRecord(folder: string, step: DeviceCapacityStepPermit): Promise<InstanceRecord> {
+    step.claim('ioOperations', 14);
+    const directory = await (await this.#root(step)).openDirectory(folder, false);
+    try {
+      await this.#recoverPublication(directory, step, folder.slice('instance-'.length));
+      const info = await directory.statFile('owner.json');
+      if (info.bytes > RECORD_BYTES) throw Error('terminal-instance-record-size');
+      step.claim('readBytes', info.bytes);
+      const bytes = await directory.readFile('owner.json', info.bytes, 0, RECORD_BYTES, info.identity);
+      const value: unknown = JSON.parse(bytes.toString('utf8'));
+      if (!validRecord(value) || folder !== `instance-${value.id}` || value.directoryIdentity !== directory.identity) throw Error('terminal-instance-record-unknown');
+      this.#recordIdentities.set(value, info.identity);
+      return value;
+    } finally { await directory.close(); }
+  }
+
   async #own(step: DeviceCapacityStepPermit): Promise<InstanceRecord> {
-    return this.#ownRecord(await this.#records(step));
+    if (!this.#record) throw Error('terminal-instance-not-admitted');
+    // Settlement/identity updates cannot increase the admitted root budget.
+    // Verify the private durable record under the same root lock, without
+    // rescanning unrelated instances. New reservations still inventory all.
+    const record = await this.#readRecord(`instance-${this.#record.id}`, step);
+    if (record.directoryIdentity !== this.#record.directoryIdentity) throw Error('terminal-instance-directory-changed');
+    return this.#ownRecord([record]);
   }
 
   #ownRecord(records: InstanceRecord[]): InstanceRecord {

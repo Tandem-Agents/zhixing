@@ -56,6 +56,16 @@ async function setup() {
 }
 
 describe('terminal instance root admission', () => {
+  it('accounts an extent separately from physical work and rejects unbounded commitments', async () => {
+    const h = await setup();
+    const bytes = 8 * 1024 * 1024;
+    const token = await h.assets.reserve('display', bytes, h.signal);
+    expect((await h.record()).reservations[token].bytes).toBe(bytes);
+    expect(h.resources.counts().active).toBe(0);
+    await expect(h.assets.reserve('display', bytes + 1, h.signal)).rejects.toThrow('step-size');
+    await h.assets.settle(token, 0, h.signal);
+    expect((await h.record()).reservations[token]).toBeUndefined();
+  });
   it('reclaims the pinned root when its former pathname has been replaced with a junction', async () => {
     const h = await setup();
     const held = path.join(h.home, 'held-terminal');
@@ -77,6 +87,16 @@ describe('terminal instance root admission', () => {
     expect(h.resources.counts().completed).toBe(h.resources.counts().released);
     await h.assets.release(h.signal);
     await expect(readFile(path.join(h.directory, 'owner.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('settles its admitted budget despite foreign residue but refuses new root allocations', async () => {
+    const h = await setup();
+    const token = await h.assets.reserve('input', 4096, h.signal);
+    await writeFile(path.join(h.assets.root, 'foreign'), 'must not delete');
+    await h.assets.settle(token, 4096, h.signal);
+    expect((await h.record()).inputBytes).toBe(4096);
+    await expect(h.assets.reserve('input', 4096, h.signal)).rejects.toThrow('unknown-residue');
+    expect(await readFile(path.join(h.assets.root, 'foreign'), 'utf8')).toBe('must not delete');
   });
 
   it('does not release assets for an unbound creation intent or a mismatched exit receipt', async () => {

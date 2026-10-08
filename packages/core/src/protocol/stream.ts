@@ -161,7 +161,7 @@ export interface StreamDigestCheckpoint {
 
 /** Bounded display read of an already verified stream value. It never rewrites
  * a canonical frame or its digest, and never grants the observer an artifact ref. */
-export async function readStreamDisplayPayload(input: StreamDataFramePayload, artifacts: ArtifactStore, maximumBytes = 2 * 1024 * 1024): Promise<StreamDataFramePayload> {
+export async function readStreamDisplayPayload(input: StreamDataFramePayload, artifacts: Pick<ArtifactStore, 'get' | 'readRange'>, maximumBytes = 2 * 1024 * 1024): Promise<StreamDataFramePayload> {
   const payload = validateStreamDataPayload(input);
   if (payload.kind === "agent-yield" && "ref" in payload.yield) {
     const ref = payload.yield.ref;
@@ -636,7 +636,7 @@ async function materializeStreamItem<T>(
   ref: ArtifactRef,
   validate: (value: T) => void,
   label: string,
-  artifacts: ArtifactStore,
+  artifacts: Pick<ArtifactStore, 'get' | 'readRange'>,
   maximumBytes?: number,
 ): Promise<{ readonly value: T; readonly bytes: Uint8Array }> {
   const bytes = maximumBytes === undefined ? await artifacts.get(ref) : await artifacts.readRange(ref, 0, maximumBytes + 1);

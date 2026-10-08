@@ -348,6 +348,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   private recoveryRequested = false;
   private recoveryWork?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private recoveryFailures = 0;
   private recoveryVersion = 0;
   private presentationRevision = 0;
   private acceptedPresentation: SessionPresentationProfile = 'default';
@@ -1103,14 +1104,21 @@ export class ConversationController<Outcome = TurnOutcome> {
     return this.opts.conversation.history(conversationId, options).then(consume);
   }
 
-  private wakeRecovery(): void {
+  private wakeRecovery(retrying = false): void {
     if (this.disposed || this.recoveryDeleted || !this.opts.pagedRecovery) return;
+    // A real lifecycle/fact notification supersedes retry backoff. An empty
+    // new conversation has no durable owner yet; repeated read failure must
+    // not turn an idle surface into a permanent four-requests/second poller.
+    if (!retrying) {
+      clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
+      this.recoveryFailures = 0;
+    }
     this.recoveryRequested = true;
     if (this.recoveryWork || this.recoveryTimer) return;
     const conversationId = this.active.conversationId;
     const work = this.recoverControls(conversationId).finally(() => {
       if (this.recoveryWork === work) this.recoveryWork = undefined;
-      if (!this.disposed && this.recoveryRequested) this.wakeRecovery();
+      if (!this.disposed && this.recoveryRequested) this.wakeRecovery(true);
     });
     this.recoveryWork = work; void work.catch(() => {});
   }
@@ -1136,6 +1144,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
         const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.());
         if (!current()) return;
+        this.recoveryFailures = 0;
         if (page.reset) {
           this.recoveryResetRequested = true;
           await this.opts.onRecoveryReset?.(conversationId, current);
@@ -1170,6 +1179,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       }
     } catch (error) {
       this.recoveryRequested = true;
+      if (!current()) return;
       if (error instanceof RecoveryGenerationChanged && current()) {
         this.recoveryResetRequested = true;
         try {
@@ -1178,7 +1188,10 @@ export class ConversationController<Outcome = TurnOutcome> {
           this.finishRecoveryReset(conversationId);
         } catch { /* Retain the old cursor; reset is retried after the same finite backoff. */ }
       }
-      if (!this.disposed) this.recoveryTimer = setTimeout(() => { this.recoveryTimer = undefined; this.wakeRecovery(); }, 250);
+      if (current()) {
+        const delay = Math.min(5000, 250 * 2 ** Math.min(5, this.recoveryFailures++));
+        this.recoveryTimer = setTimeout(() => { this.recoveryTimer = undefined; this.wakeRecovery(true); }, delay);
+      }
     } finally { if (!current() && !this.disposed) this.recoveryRequested = true; }
   }
 
@@ -1415,7 +1428,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     const delta = payload.delta;
     if (delta.type === 'text_delta') process.text.append(delta.text);
     else if (delta.type === 'tool_start') process.text.reset();
-    else if (delta.type === 'assistant_message') {
+    else if (delta.type === 'assistant_message' && !value.truncated) {
       process.text.reset(); let first = true;
       for (const block of delta.message.content) if (block.type === 'text') {
         if (!first) process.text.append('\n'); first = false; process.text.append(block.text);

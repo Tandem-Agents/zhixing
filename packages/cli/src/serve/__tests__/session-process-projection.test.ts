@@ -7,6 +7,7 @@ import { prepareStreamDataPayload, validateStreamFrame } from '@zhixing/core/pro
 import type { StreamFrame } from '@zhixing/core/contracts';
 import { createSessionBroadcastTransport } from '@zhixing/rpc/session-broadcast';
 import { SessionProcessProjector, SessionProcessProjectionOwner, PROCESS_COMPLETION_GRACE_MS } from '../session-process-projection.js';
+import { AssignmentStreamPathManager } from '../assignment-stream-path-manager.js';
 const roots: string[] = [];
 afterEach(async () => { vi.useRealTimers(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
@@ -19,6 +20,41 @@ function frame(seq: number, payload: StreamFrame['payload']): StreamFrame {
     assignmentId: 'assignment', streamEpoch: 1, seq, payload, meta: { lineage: 'main' } });
 }
 describe('verified stream to observer projection', () => {
+  it('reads the executor-owned spool through its authenticated path before ACK permits reclamation', async () => {
+    const owner = await setup(), executor = await setup();
+    const prepared = await prepareStreamDataPayload({ kind: 'agent-yield', yield: { type: 'assistant_message',
+      message: { role: 'assistant', content: [{ type: 'text', text: '真实回答'.repeat(25_000) }] } } }, executor.artifacts);
+    const original = frame(1, prepared.payload);
+    const wrongStore = vi.spyOn(owner.artifacts, 'readRange');
+    let reclaimed = false;
+    const reads = vi.fn(async (request: import('../assignment-stream-mesh.js').AssignmentStreamArtifactRead) => {
+      expect(reclaimed).toBe(false);
+      const bytes = await executor.artifacts.readRange(request.ref, request.offset, request.limit);
+      return { ref: request.ref, offset: request.offset, bytes, complete: request.offset + bytes.length === request.ref.bytes };
+    });
+    const manager = new AssignmentStreamPathManager({ assignmentId: original.assignmentId, ref: original.ref,
+      consumer: { kind: 'surface-ticket', ticketId: 'surface' },
+      direct: { open: async () => ({ subscribe: async () => [original], readArtifact: reads,
+        acknowledge: async ack => { if (ack.ackSeq === 1) {
+          expect(owner.publish).toHaveBeenCalledOnce(); reclaimed = true;
+        } } }) },
+      adoptFrame: (value, _checkpoint, _signal, readDisplay) => owner.p.accept(value, readDisplay),
+    });
+    await manager.poll();
+    expect(reclaimed).toBe(true); expect(reads).toHaveBeenCalled(); expect(wrongStore).not.toHaveBeenCalled();
+    expect(owner.publish.mock.calls[0]![2]).toMatchObject({ truncated: true, payload: { kind: 'yield' } });
+    owner.p.dispose();
+  });
+  it('does not pause a long streamed answer when its final persistence snapshot exceeds the observer wire', async () => {
+    const s = await setup(), text = '中文长回答'.repeat(20_000);
+    const prepared = await prepareStreamDataPayload({ kind: 'agent-yield', yield: { type: 'assistant_message',
+      message: { role: 'assistant', content: [{ type: 'text', text }] } } }, s.artifacts);
+    s.p.accept(frame(1, prepared.payload)); await s.p.idle();
+    expect(s.publish.mock.calls[0]![2]).toMatchObject({ truncated: true, payload: { kind: 'yield', delta: { type: 'assistant_message' } } });
+    s.p.streamEnded({ conversationId: 'c', runId: 'r', assignmentId: 'assignment', finalSeq: 2 });
+    s.p.finish(); await Promise.resolve();
+    expect(s.publish.mock.calls.map(call => call[2].payload.kind)).toEqual(['yield', 'closed']);
+  });
   it('materializes a real externalized tool artifact through existing authority and publishes a separate bounded DTO', async () => {
     const s = await setup();
     const plain = { id: 1, authenticated: true, closed: false, loopback: true, notify: vi.fn(), presentationProfile: () => 'default' as const };
@@ -50,15 +86,28 @@ describe('verified stream to observer projection', () => {
     expect(enhanced.notify.mock.calls[0]![1].source).toEqual(plain.notify.mock.calls[0]![1].source);
     projection.dispose();
   });
-  it('keeps ACK-facing accept nonblocking and emits no late result after dispose', async () => {
+  it('holds the ACK-facing acceptance until its read completes, and releases it without late delivery on dispose', async () => {
     const s = await setup();
     const prepared = await prepareStreamDataPayload({ kind: 'agent-yield', yield: { type: 'text_delta', text: 'x'.repeat(40000) } }, s.artifacts);
     const actual = s.artifacts.readRange.bind(s.artifacts); let release!: () => void;
     vi.spyOn(s.artifacts, 'readRange').mockImplementation(async (...args) => {
       await new Promise<void>(resolve => { release = resolve; }); return actual(...args);
     });
-    expect(s.p.accept(frame(1, prepared.payload))).toBeUndefined();
-    s.p.dispose(); release(); await s.p.idle(); expect(s.publish).not.toHaveBeenCalled();
+    let acknowledged = false;
+    const accepted = Promise.resolve(s.p.accept(frame(1, prepared.payload))).then(() => { acknowledged = true; });
+    await Promise.resolve(); expect(acknowledged).toBe(false);
+    s.p.dispose(); await accepted; expect(acknowledged).toBe(true);
+    release(); await s.p.idle(); expect(s.publish).not.toHaveBeenCalled();
+  });
+  it('bounds an unavailable display read without indefinitely blocking protocol acknowledgment', async () => {
+    const s = await setup(); vi.useFakeTimers();
+    let release!: (value: { kind: 'agent-yield'; yield: { type: 'text_delta'; text: string } }) => void;
+    const accepted = s.p.accept(frame(1, { kind: 'agent-yield', yield: { type: 'text_delta', text: 'prefix' } }),
+      () => new Promise(resolve => { release = resolve; }));
+    await vi.advanceTimersByTimeAsync(PROCESS_COMPLETION_GRACE_MS);
+    await accepted; expect(s.publish.mock.calls.map(call => call[2].payload.kind)).toEqual(['gap']);
+    release({ kind: 'agent-yield', yield: { type: 'text_delta', text: 'late' } });
+    await s.p.idle(); expect(s.publish).toHaveBeenCalledOnce();
   });
   it('bounds queued frames and emits exactly one gap without failing the producer', async () => {
     const s = await setup();

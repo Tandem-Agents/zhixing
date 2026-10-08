@@ -43,7 +43,8 @@ import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore } from './display-store.js';
-import { projectRenderedHistoryReverse, textFragments } from './history-segments.js';
+import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
+import { projectRenderedHistoryReverse, textFragments, type TerminalHistoryPosition } from './history-segments.js';
 import { TerminalBodyWork } from './body-work.js';
 import { TerminalInputStore } from './input-store.js';
 import { TerminalManagedFiles } from './managed-files.js';
@@ -140,9 +141,10 @@ class TerminalApplication {
   #controller?: ConversationController<TerminalTurnOutcome>;
   #editor?: TerminalConfigurationEditor;
   #selection?: { id: string; allowed: ReadonlySet<string>; field: boolean; resolve(selected?: TerminalSelectionResponse): void };
-  #history?: { conversationId: string; before?: ConversationHistoryCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[] };
+  #history?: { conversationId: string; before?: ConversationHistoryCursor; position?: TerminalHistoryPosition; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[] };
   #displayStart?: number;
   #displayRevision = 0;
+  #displaySent?: BodyPageRevision;
   #closing?: Promise<void>;
   #generation = 0;
   #hello = false;
@@ -270,7 +272,7 @@ class TerminalApplication {
       gap: () => { void this.#displayGap().catch(() => this.#close(70, 'terminal-process-gap-undelivered')); },
       columns: () => 80, // U applies actual display-cell width to the retained source tail.
     });
-    this.#outputProjection = new TerminalOutputProjection(segment => this.#display.append(segment), () => this.#displayPage(), () => this.#displayGap(), {
+    this.#outputProjection = new TerminalOutputProjection((segment, stable) => this.#display.append(segment, false, undefined, stable), () => this.#displayPage(), error => this.#displayGap(error), {
       work: action => this.#bodyWork.run(action),
       amend: (blockId, change) => this.#display.amend(blockId, change),
       seal: blockId => this.#display.seal(blockId),
@@ -779,11 +781,17 @@ class TerminalApplication {
     const consume = async (page: Pick<Awaited<ReturnType<RpcConversationFacade['history']>>, 'runs' | 'hasMore'>) => {
       this.#abort.signal.throwIfAborted();
       if (this.#history !== history) return;
+      let position: TerminalHistoryPosition | undefined, projected = 0;
       try {
         await this.#bodyWork.run(async () => {
-          for await (const segment of projectRenderedHistoryReverse(page.runs)) {
+          for await (const segment of projectRenderedHistoryReverse(page.runs, history.position)) {
             if (this.#history !== history) return;
             await this.#display.append(segment, true);
+            position = { blockId: segment.blockId, contentOffset: segment.contentOffset };
+            // Opening a conversation prepares one bounded viewport, not every
+            // fragment of four arbitrarily long runs. The authority page is
+            // released now and resumed by stable source coordinates on demand.
+            if (++projected === 4) break;
           }
         });
       } catch {
@@ -795,8 +803,12 @@ class TerminalApplication {
       // remain the recovery worker's responsibility.
       if (!options.before) history.recoveryRunIds = page.runs.flatMap(item => 'runId' in item.record && typeof item.record.runId === 'string' ? [item.record.runId] : []);
       const oldest = page.runs.at(-1);
-      history.hasMore = page.hasMore;
-      if (oldest) history.before = { shardId: oldest.shardId, runIndex: oldest.record.runIndex };
+      history.hasMore = projected === 4 || page.hasMore;
+      history.position = projected === 4 ? position : undefined;
+      if (history.position) {
+        const newest = page.runs[0]!;
+        history.before = { shardId: newest.shardId, runIndex: newest.record.runIndex + 1 };
+      } else if (oldest) history.before = { shardId: oldest.shardId, runIndex: oldest.record.runIndex };
       // A later command receipt or running turn owns the current status.
       // History can finish after /new or /clear has already published it.
       if (updateStatus && this.#mainView.message === previousMessage && this.#mainView.busy === previousBusy) {
@@ -814,12 +826,25 @@ class TerminalApplication {
   async #displayPage(): Promise<void> {
     const revision = ++this.#displayRevision;
     const page = await this.#display.page(this.#displayStart);
-    if (revision === this.#displayRevision && !this.#abort.signal.aborted) await this.#channel.send({ type: 'display-page', page }, 'body');
+    if (revision === this.#displayRevision && !this.#abort.signal.aborted) {
+      const patch = encodeBodyPage(page, revision, this.#displaySent);
+      // Body delivery is FIFO. Publish this base before yielding so concurrent
+      // navigation can reference the already enqueued page in the same order.
+      this.#displaySent = { revision, page };
+      try { await this.#channel.send({ type: 'display-patch', patch }, 'body'); }
+      catch (error) { this.#displaySent = undefined; throw error; }
+    }
   }
 
-  async #displayGap(): Promise<void> {
+  async #displayGap(error?: unknown): Promise<void> {
     if (this.#displayUnavailable) return;
     this.#displayUnavailable = true;
+    // Fixed implementation codes only. Parser input, source paths and arbitrary
+    // exception text must not be copied into the runtime record.
+    const reason = error instanceof Error && ['terminal-body-source-map', 'terminal-body-active-capacity',
+      'terminal-body-projection-capacity', 'terminal-output-queue-capacity', 'terminal-display-encoding-size',
+      'terminal-display-page-size', 'terminal-frame-too-large'].includes(error.message) ? error.message : 'terminal-display-paused';
+    recordRuntimeFailure(this.#logging.records, error, reason);
     this.#displayHadGap = true;
     this.#outputProjection.pause();
     this.#processSession.pause('过程展示已暂停；业务执行与确认仍可继续。');

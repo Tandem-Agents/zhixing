@@ -177,6 +177,46 @@ describe('bounded authoritative recovery consumer', () => {
   const inputCursor = (offset = 0): ConversationInputCursor => ({ conversationId: 'conv-1', runId: 'old-failed', ownerEpoch: 1, clearedThroughLsn: 0, upper: checkpoint(11), position: 1, part: 0, offset, contentOffset: offset });
   const notice = (revision: number) => ({ v: 1 as const, ref: { execution: 'conversation' as const, conversationId: 'conv-1', ownerEpoch: 1, runId: `run-${revision}` }, state: 'cancelled' as const, statusRevision: revision, actions: [] as [], at: '2026-10-05T00:00:00.000Z' });
 
+  it('backs off unavailable recovery, wakes on a new fact, and stops retries after disposal', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = makeFakes(), pages = vi.fn().mockRejectedValue(Error('Owner is not durable yet'));
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {},
+    }, { conversationId: 'conv-1', name: 'new', mode: { kind: 'main' } });
+    const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+    try {
+      f.emit.status(notice(1)); await settle(); expect(pages).toHaveBeenCalledTimes(1);
+      for (const [index, delay] of [250, 500, 1000, 2000, 4000, 5000, 5000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1); expect(pages).toHaveBeenCalledTimes(index + 1);
+        await vi.advanceTimersByTimeAsync(1); await settle(); expect(pages).toHaveBeenCalledTimes(index + 2);
+      }
+      pages.mockResolvedValue({ facts: [], cursor: cursor(0), hasMore: false, reset: false });
+      f.emit.status(notice(2)); await settle(); expect(pages).toHaveBeenCalledTimes(9);
+      await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(9);
+      pages.mockRejectedValue(Error('Temporary read failure'));
+      f.emit.status(notice(3)); await settle();
+      await vi.advanceTimersByTimeAsync(250); await settle(); expect(pages).toHaveBeenCalledTimes(11);
+      controller.dispose(); await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(11);
+    } finally { controller.dispose(); vi.useRealTimers(); }
+  });
+
+  it('does not transfer an old conversation read failure into the next conversation retry delay', async () => {
+    const f = makeFakes(); let failOld!: (error: Error) => void;
+    const pages = vi.fn().mockImplementationOnce(() => new Promise((_, reject) => { failOld = reject; }))
+      .mockResolvedValue({ facts: [], cursor: { ...cursor(0), conversationId: 'conv-2' }, hasMore: false, reset: false });
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {},
+    }, { conversationId: 'conv-1', name: 'old', mode: { kind: 'main' } });
+    try {
+      f.emit.status(notice(1)); expect(pages).toHaveBeenCalledOnce();
+      controller.setActive({ conversationId: 'conv-2', name: 'new', mode: { kind: 'main' } });
+      f.emit.status({ ...notice(2), ref: { ...notice(2).ref, conversationId: 'conv-2' } });
+      failOld(Error('Old read failed'));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(pages).toHaveBeenCalledTimes(2); expect(pages.mock.calls[1]?.[0]).toBe('conv-2');
+    } finally { controller.dispose(); }
+  });
+
   it('waits for the actual queued live prefix even when Final contains no missing tail', async () => {
     const f = makeFakes(), shown: string[] = [];
     const projection = new TerminalOutputProjection(async part => { shown.push(part.text); }, async () => {}, async () => {},
@@ -431,6 +471,32 @@ function makeController(
 }
 
 describe('assignment display completion is independent from business completion', () => {
+  it('recovers only the unseen tail after an explicitly omitted large assistant snapshot', async () => {
+    const f = makeFakes(), prefix = '中文已显示'.repeat(20_000), onYield = vi.fn(), recovered = vi.fn();
+    let runId = '', ready = false;
+    const message = { role: 'assistant' as const, content: [{ type: 'text' as const, text: prefix + '最终尾部' }] };
+    const checkpoint = { logId: 'snapshot-recovery', lsn: 1, frameEndOffset: 1, prefixDigest: 'synthetic' };
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => ({
+      facts: ready && (after?.after.lsn ?? 0) < 2 ? [{ kind: 'final', frame: { v: 1, conversationId: 'conv-1', runId, commitRevision: 1, digest: `sha256:${'a'.repeat(64)}` } }] : [],
+      cursor: { conversationId: 'conv-1', ownerEpoch: 1, clearedThroughLsn: 0, baseItem: 0, upper: { ...checkpoint, lsn: 2 }, after: { ...checkpoint, lsn: ready ? 2 : 1 }, item: 0 },
+      hasMore: false, reset: false,
+    }));
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield, onRecoveryYield: recovered }, initial);
+    try {
+      const turn = await controller.beginTurn('request'); runId = turn.runId!;
+      f.conversation.history.mockResolvedValue({ runs: [{ shardId: 's', record: { type: 'run', runId, runIndex: 1,
+        timestamp: '2026-10-07T00:00:00.000Z', messages: [message] } }], hasMore: false } as never);
+      const source = { conversationId: 'conv-1', runId, assignmentId: 'a', streamEpoch: 1, sourceSeq: 0 };
+      for (let at = 0; at < prefix.length; at += 1000) f.emit.process(projectProcessYield({ ...source, sourceSeq: ++source.sourceSeq }, { type: 'text_delta', text: prefix.slice(at, at + 1000) }));
+      f.emit.process(projectProcessYield({ ...source, sourceSeq: ++source.sourceSeq }, { type: 'assistant_message', message }));
+      ready = true;
+      f.emit.complete({ conversationId: 'conv-1', turnId: turn.turnId, result: { reason: 'completed', message, usage: { inputTokens: 1, outputTokens: 1 } } });
+      await expect(turn.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+      expect(recovered).toHaveBeenCalledOnce();
+      expect(recovered.mock.calls[0]![0]).toEqual({ type: 'text_delta', text: '最终尾部' });
+    } finally { controller.dispose(); }
+  });
   it('accepts display recovery only on a current subscribed bounded profile receipt', async () => {
     const f = makeFakes();
     const subscribePresentation = vi.fn(async () => ({ subscribed: true, presentation: 'default' as 'default' | 'bounded-v1' }));

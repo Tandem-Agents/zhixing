@@ -21,6 +21,23 @@ const visible = (items: readonly BodyAppend[]) => items.flatMap(item => item.bod
 const noWait = async () => {};
 
 describe('terminal source body projection', () => {
+  it('replays an 8 MiB cold code block including a 1 MiB line without losing internal source anchors', async () => {
+    const prefix = '```ts\n' + 'x'.repeat(1024 * 1024) + '\n', suffix = '\n```';
+    const line = 'const value = "中文🙂";\n';
+    const remaining = 8 * 1024 * 1024 - Buffer.byteLength(prefix + suffix);
+    const repeat = Math.floor(remaining / Buffer.byteLength(line));
+    const source = prefix + line.repeat(repeat) + ' '.repeat(remaining - repeat * Buffer.byteLength(line)) + suffix;
+    expect(Buffer.byteLength(source)).toBe(8 * 1024 * 1024);
+    let end = source.length, parts = 0;
+    for await (const item of projectBodyHistory(source, 'markdown', 'reverse', noWait)) {
+      expect(item.contentOffset + item.text.length).toBe(end);
+      expect(item.text).toBe(source.slice(item.contentOffset, end));
+      expect(validateBodyMetadata(item.body, item.contentOffset, item.text.length)).toBe(true);
+      if (parts++ === 0) expect(item.body.end).toBe(true);
+      end = item.contentOffset;
+    }
+    expect(end).toBe(0); expect(parts).toBeGreaterThan(256);
+  }, 15000);
   it('keeps source and strong continuation through fragments and four-fragment pages', () => {
     const inner = '汉字ab'.repeat(12000), source = `开始 **${inner}** 收尾`;
     const items = live(source);
@@ -207,6 +224,23 @@ describe('terminal source body projection', () => {
       const ended = live(prefix, prefix.length);
       expect(visible(ended)).toBe('- 先项 继续- 尾项');
       expect(ended.map(item => item.text).join('')).toBe(prefix);
+    }
+  });
+  it.each(['\n', '\r\n', '\r'])('keeps real leading blank lines distinct from trailing horizontal whitespace (%j)', newline => {
+    const source = ['```ts', 'const value = 1;', '```', '', '| 项目 | 状态 |', '| --- | --- |',
+      '| 中文 | 完成 |', '', '> 引用', '', '尾部正文 '].join(newline);
+    const expected = visible(live(source, source.length));
+    // Every possible two-chunk boundary includes a code close followed by a
+    // partial table row. A real space token must not consume the row's space.
+    for (let boundary = 1; boundary < source.length; boundary++) {
+      const parser = new TerminalBodyProjection('markdown'), items: BodyAppend[] = [];
+      for (const part of [source.slice(0, boundary), source.slice(boundary)]) {
+        for (const change of parser.feed(part)) apply(items, change);
+      }
+      for (const change of parser.end()) apply(items, change);
+      expect(items.map(item => item.text).join('')).toBe(source);
+      expect(visible(items), `boundary ${boundary}: ${JSON.stringify(source.slice(0, boundary))}`).toBe(expected);
+      expect(items.every(item => validateBodyMetadata(item.body, item.contentOffset, item.text.length))).toBe(true);
     }
   });
   it('keeps list tab expansion and lazy continuation source ranges through a streamed Unicode item', () => {

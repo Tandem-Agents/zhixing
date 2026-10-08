@@ -25,7 +25,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     StyledText: class { constructor(readonly chunks: unknown[]) {} },
     createTextAttributes: () => 0, RGBA: { fromHex: (value: string) => value },
     TextBuffer: { create: () => ({ ptr: 1, setText: (text: string) => { measurement = text; }, destroy: vi.fn() }) },
-    TextBufferView: { create: () => ({ setWrapMode: vi.fn(), destroy: vi.fn(),
+    TextBufferView: { create: () => ({ setWrapMode: vi.fn(), setWrapWidth: vi.fn(), getVirtualLineCount: () => measurement.split('\n').length, destroy: vi.fn(),
       get logicalLineInfo() { return { lineWidthCols: [measurement.length] }; } }) },
     resolveRenderLib: () => ({ decoder: new TextDecoder(),
       textBufferGetTextRangeByCoords: (_ptr: number, _row: number, _from: number, _endRow: number, column: number) =>
@@ -34,7 +34,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   const solid = {
     untrack: (read: () => unknown) => read(),
     createMemo: (read: () => unknown) => read,
-    createSignal: (initial: number) => { let value = initial; return [() => value, (update: (value: number) => number) => { value = update(value); }]; },
+    createSignal: (initial: unknown) => { let value = initial; return [() => value, (update: unknown) => { value = typeof update === 'function' ? update(value) : update; }]; },
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },

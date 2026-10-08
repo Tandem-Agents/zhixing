@@ -43,7 +43,7 @@ const recoveryLifecycle = {
   },
 };
 await mkdir(dist, { recursive: true });
-const result = await Bun.build({ entrypoints: [path.join(root, 'src/entry.ts')], target: 'bun', plugins: [recoveryLifecycle, solidPlugin], compile: { target, outfile: path.join(dist, platform === 'win32' ? 'ui.exe' : 'ui') } });
+const result = await Bun.build({ entrypoints: [path.join(root, 'src/entry.ts')], target: 'bun', plugins: [recoveryLifecycle, solidPlugin], compile: { target, execArgv: ['--smol'], outfile: path.join(dist, platform === 'win32' ? 'ui.exe' : 'ui') } });
 if (!result.success) throw new AggregateError(result.logs, 'Terminal UI compile failed');
 for (const asset of getNodeAssets({ platform, arch })) {
   // The admitted patched library is the renderer, never the stock copy.

@@ -130,6 +130,18 @@ export function projectSessionArtifact(input: unknown, toolCallId: string): Sess
 export function projectProcessYield(source: SessionProcessSource, delta: AgentYield): SessionProcessProjection {
   const artifact = delta.type === 'tool_end' ? projectSessionArtifact(delta.result.presentation, delta.id) : undefined;
   let projected = stripPresentationFromAgentYield(delta), truncated = false;
+  // The live text has its own incremental path. A final persistence snapshot
+  // must not send that entire text a second time or exhaust the observer wire.
+  // Keep small snapshots (including provider-only final tails) unchanged. The
+  // explicit omitted snapshot leaves committed-history recovery responsible
+  // for any unseen suffix; it is not an empty authoritative assistant message.
+  if (projected.type === 'assistant_message') {
+    try { boundedProcessValue(projected, 128 * 1024); }
+    catch {
+      projected = { type: 'assistant_message', message: { role: 'assistant', content: [] } };
+      truncated = true;
+    }
+  }
   if (projected.type === 'thinking_delta') {
     let tail = projected.thinking.slice(-8192);
     if (/^[\udc00-\udfff]/u.test(tail)) tail = tail.slice(1);

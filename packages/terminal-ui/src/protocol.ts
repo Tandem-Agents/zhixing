@@ -1,4 +1,4 @@
-import type { BodyFragmentMetadata } from './body-model.js';
+import type { BodyFragmentMetadata, BodyPagePatch } from './body-model.js';
 import type { TerminalSkillsAction, TerminalSkillsView } from './skills-model.js';
 import type { TerminalProcessView } from './process-model.js';
 export { validateProcessView } from './process-model.js';
@@ -21,6 +21,8 @@ export const TERMINAL_LIMITS = Object.freeze({
   parserSegments: 4096,
   instanceBytes: 640 * 1024 * 1024,
   startupReservationBytes: 64 * 1024 * 1024,
+  // Durable disk commitment, not the size of a physical IO transaction.
+  storageReservationBytes: 8 * 1024 * 1024,
   rootBytes: 6 * 1024 * 1024 * 1024,
   rootDisplayBytes: 2 * 1024 * 1024 * 1024,
   rootInstances: 8,
@@ -62,6 +64,7 @@ export type TerminalMessage =
   | { readonly type: 'host-release'; readonly id: string }
   | { readonly type: 'host-state'; readonly id: string; readonly state: 'created' | 'failed' | 'exited'; readonly pid?: number; readonly code?: number }
   | { readonly type: "display-page"; readonly page: TerminalDisplayPage }
+  | { readonly type: 'display-patch'; readonly patch: BodyPagePatch }
   | { readonly type: 'submission'; readonly inputId: string; readonly version: number; readonly accepted: boolean; readonly message?: string }
   | { readonly type: "ack"; readonly sequence: number };
 

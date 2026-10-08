@@ -13,7 +13,7 @@ export class BodyHighlighter {
   readonly #failed: (error: unknown) => void;
   #generation = 0; #completed = 0; #disposed = false; #faulted = false; #running?: Promise<void>; #closing?: Promise<void>;
   #page: readonly BodyRenderBlock[] = [];
-  #results = new Map<string, StyledText>();
+  #results = new Map<string, { text: string; language: string; styled: StyledText }>();
   constructor(changed: () => void, failed: (error: unknown) => void) {
     const assets = process.env.OTUI_ASSET_ROOT;
     if (!assets || !path.isAbsolute(assets)) throw Error('terminal-body-parser-assets');
@@ -32,11 +32,15 @@ export class BodyHighlighter {
     this.#client.on('error', message => this.#fail(Error(message)));
     this.#client.on('warning', message => this.#fail(Error(message)));
   }
-  get(key: string): StyledText | undefined { return this.#results.get(key); }
+  get(key: string): StyledText | undefined { return this.#results.get(key)?.styled; }
   setPage(page: readonly BodyRenderBlock[]): void {
     if (this.#disposed || this.#faulted) return;
     this.#generation++; this.#page = page;
-    this.#results.clear();
+    const current = new Map(page.map(block => [block.key, block]));
+    for (const [key, result] of this.#results) {
+      const block = current.get(key);
+      if (!block || block.node.kind !== 'code' || block.text !== result.text || languages[block.node.language?.toLowerCase() ?? ''] !== result.language) this.#results.delete(key);
+    }
     this.#start();
   }
   #fail(error: unknown): void {
@@ -58,16 +62,19 @@ export class BodyHighlighter {
       for (const block of page) {
         if (this.#disposed || this.#faulted || generation !== this.#generation) break;
         const language = languages[block.node.language?.toLowerCase() ?? ''];
-        if (block.node.kind !== 'code' || !language || !block.text) continue;
+        if (block.node.kind !== 'code' || !language || !block.text || this.#results.has(block.key)) continue;
         const result = await this.#client.highlightOnce(block.text, language);
-        if (this.#disposed || this.#faulted || generation !== this.#generation) break;
+        if (this.#disposed || this.#faulted) break;
+        // A new page can keep this same code block while its streaming tail
+        // changes. Admit the completed work iff that exact source is current.
+        if (!this.#page.some(current => current.key === block.key && current.node.kind === 'code' && current.text === block.text && languages[current.node.language?.toLowerCase() ?? ''] === language)) break;
         if (result.error) throw Error(result.error);
         if (result.warning) throw Error(result.warning);
         if (!result.highlights) continue;
         if (result.highlights.length > 32768) throw Error('terminal-body-highlight-capacity');
         const chunks = treeSitterToTextChunks(block.text, result.highlights, this.#style, { enabled: false });
         if (chunks.map(chunk => chunk.text).join('') !== block.text) throw Error('terminal-body-highlight-source');
-        this.#results.set(block.key, new StyledText(chunks)); this.#changed();
+        this.#results.set(block.key, { text: block.text, language, styled: new StyledText(chunks) }); this.#changed();
       }
       this.#completed = generation;
     }

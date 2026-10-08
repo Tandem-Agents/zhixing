@@ -76,7 +76,7 @@ function receive(message: TerminalMessage): void {
       if (message.error) operation.reject(Error(message.error)); else operation.resolve(message.value);
       return;
     }
-    case 'view': case 'chunk': case 'invalidate': case 'display-page': case 'submission': case 'task-status': case 'process-status': case 'recovery-page': root?.receive(message); return;
+    case 'view': case 'chunk': case 'invalidate': case 'display-page': case 'display-patch': case 'submission': case 'task-status': case 'process-status': case 'recovery-page': root?.receive(message); return;
     default: throw Error('terminal-unexpected-message');
   }
 }

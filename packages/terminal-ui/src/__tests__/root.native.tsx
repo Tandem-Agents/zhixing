@@ -360,6 +360,25 @@ try {
     assert.ok(result.p95 <= (name.endsWith('/resize') ? 150 : 50) && result.max <= (name.endsWith('/resize') ? 300 : 150), JSON.stringify({ name, result }));
   }
   const active = { kind: 'conversation', title: '容量保护', conversationId: 'response' } as const;
+  test.renderer.clearSelection(); editor().setText(''); test.resize(80, 24); await flush();
+  const many: BodyPage = { first: 0, start: 0, last: 4, follow: true, segments: Array.from({ length: 4 }, (_, page) => {
+    let source = ''; const nodes: BodyNode[] = [];
+    for (let row = 0; row < 100; row++) {
+      const line = `viewport-${String(page * 100 + row).padStart(3, '0')} 中文🙂\n`, from = source.length; source += line;
+      nodes.push({ from, to: source.length, kind: 'paragraph', runs: [{ from, to: source.length, text: line, style: 0 }] });
+    }
+    return { blockId: `viewport-page-${page}`, contentOffset: 0, text: source, role: 'assistant', final: true,
+      body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } };
+  }) };
+  const descendants = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(descendants)];
+  root.receive({ type: 'display-page', page: many }); await flush();
+  assert.match(text(), /viewport-399/);
+  assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
+  const scroll = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(scroll);
+  scroll.scrollTo(0); await flush();
+  assert.match(text(), /viewport-000/);
+  assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);
+  checks.push('large semantic page keeps only viewport text leaves live and preserves first/last scroll reachability');
   const keptDraft = editor().plainText;
   await observe('paused-feedback', () => root!.receive({ type: 'view', view: { ...active, generation: ++generation, displayGap: true, displayPaused: true } }), () => text().includes('正文保留已暂停'));
   test.mockInput.pressKey('r', { ctrl: true }); await flush();

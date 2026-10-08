@@ -10,7 +10,7 @@ import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
 import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './editor-coordinates.js';
 import { BodyView, TerminalScrollBox, type BodyViewHandle } from './body-view.js';
-import { BODY_PAGE_BYTES, bodyWindows, type BodyAnchor } from './body-model.js';
+import { BODY_PAGE_BYTES, bodyWindows, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
@@ -105,6 +105,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     setEditorEmpty(editor.plainText.length === 0);
   };
   const [display, setDisplay] = createSignal<TerminalDisplayPage>({ first: 0, last: 0, start: 0, follow: true, segments: [] });
+  let displayReceived: BodyPageRevision | undefined;
   let historyBox: ScrollBoxRenderable | undefined;
   let bodyView: BodyViewHandle | undefined;
   let bodyBox: BoxRenderable | undefined;
@@ -668,7 +669,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (Buffer.byteLength(secret) + event.bytes.byteLength > 8192) { setStatus('字段输入过长，请检查内容。'); return; }
     secret += new TextDecoder().decode(event.bytes); fieldEditVersion++; setSecretLength(Array.from(secret).length);
   };
-  const animationTimer = setInterval(() => { if (view().busy) setAnimation(frames[Math.floor(performance.now() / 300) % frames.length]!); }, 300);
+  let animationTimer: ReturnType<typeof setInterval> | undefined;
+  const syncAnimation = () => {
+    if (!view().busy) { clearInterval(animationTimer); animationTimer = undefined; }
+    else if (!animationTimer) {
+      const tick = () => setAnimation(frames[Math.floor(performance.now() / 300) % frames.length]!);
+      tick(); animationTimer = setInterval(tick, 300);
+    }
+  };
+  syncAnimation();
   try {
     if (renderer.useThread) throw Error('Current-frame output must be synchronous');
     options.signal.throwIfAborted();
@@ -688,7 +697,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     });
     return {
       firstFrameId, dispose, information,
-      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'submission' | 'task-status' | 'process-status' | 'recovery-page' }>) {
+      receive(message: Extract<TerminalMessage, { type: 'view' | 'chunk' | 'invalidate' | 'display-page' | 'display-patch' | 'submission' | 'task-status' | 'process-status' | 'recovery-page' }>) {
         if (disposed) return;
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
@@ -704,6 +713,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           }
           setSelected(sameInteraction && selectedId ? Math.max(0, message.view.choices?.findIndex(choice => choice.id === selectedId) ?? 0) : 0);
           setView(message.view);
+          syncAnimation();
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');
           if (refreshCandidates) candidates?.refresh();
@@ -722,9 +732,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         } else if (message.type === 'submission') {
           preserveDraft();
           if (input.settle(message) && view().kind === 'conversation') setStatus(message.message ?? (message.accepted ? '输入已接纳。' : '本次输入未接纳；草稿已保留。'));
+        } else if (message.type === 'display-patch') {
+          const next = decodeBodyPage(message.patch, displayReceived);
+          if (!sameBodyPageContent(display(), next.page)) bodyView?.beforeUpdate();
+          displayReceived = next; setDisplay(next.page);
         } else if (message.type === 'display-page') {
           bodyWindows(message.page); // Validate complete source/metadata/page before installing it.
           bodyView?.beforeUpdate();
+          displayReceived = undefined;
           setDisplay(message.page);
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
           releaseSecret();

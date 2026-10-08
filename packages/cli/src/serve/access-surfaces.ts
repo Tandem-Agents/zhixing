@@ -728,7 +728,7 @@ export async function createConversationServices(
         }),
       );
     },
-    onFirstPartyFrame: (frame) => processProjection.accept(frame),
+    onFirstPartyFrame: (frame, readDisplay) => processProjection.accept(frame, readDisplay),
     onFirstPartyStreamEnd: (source) => processProjection.streamEnded(source),
 
     projectLifecycle: async (input) => {
