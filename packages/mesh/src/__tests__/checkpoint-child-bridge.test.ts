@@ -1,12 +1,72 @@
 import { createTempDir } from "@zhixing/test-utils";
-import { realpath, open, link, writeFile, readFile, readdir, stat, mkdir, symlink, lstat, readlink } from "node:fs/promises";
+import { realpath, open, link, writeFile, readFile, readdir, stat, mkdir, symlink, lstat, readlink, rename } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { freezeCheckpointDirectory } from "../checkpoint-target.js";
 import { CheckpointDirectoryHandle } from "../checkpoint-child-bridge.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { checkpointBridgeTarget, verifyCheckpointBridgeArtifactAsync } from '../checkpoint-bridge-artifact.js';
 
 describe("checkpoint child bridge", () => {
+  it.skipIf(process.platform !== 'win32')('ships a pipe-only Windows executable without a console subsystem', async () => {
+    const executable = await verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL('../../', import.meta.url)), checkpointBridgeTarget());
+    const image = await readFile(executable), pe = image.readUInt32LE(0x3c);
+    expect(image.toString('ascii', pe, pe + 4)).toBe('PE\0\0');
+    expect(image.readUInt16LE(pe + 24 + 68)).toBe(2); // IMAGE_SUBSYSTEM_WINDOWS_GUI: no console allocation.
+    const child = spawn(executable, [], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    child.stdout.resume(); child.stderr.resume();
+    const code = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    expect(code).toBe(0); // Redirected EOF works without a console or an error dialog.
+  });
+  it.skipIf(process.platform !== 'win32')('pins bounded write names, rejects stale identities, and releases pins for explicit mutation and close', async () => {
+    const root = await realpath(await createTempDir('checkpoint-pinned-writes'));
+    const session = CheckpointDirectoryHandle.createWindowsSession(5000, undefined, true);
+    const directory = await session.openPath(root, false);
+    try {
+      const first = await directory.writeAt('data', 32, 0, Buffer.from('first'));
+      for (let i = 0; i < 10; i++) expect((await directory.writeAt('data', 32, 0, Buffer.from('later'), first.identity)).identity).toBe(first.identity);
+      await expect(rename(path.join(root, 'data'), path.join(root, 'replaced'))).rejects.toThrow();
+      expect((await directory.readFile('data', 5, 0, 5, first.identity)).toString()).toBe('later');
+      await expect(directory.writeAt('data', 32, 0, Buffer.from('wrong'), 'wrong')).rejects.toThrow('identity');
+      expect(await readFile(path.join(root, 'data'), 'utf8')).toBe('later');
+      await directory.writeAt('data', 32, 0, Buffer.from('again'), first.identity);
+      await directory.unlink('data', false, first.identity);
+      for (let i = 0; i < 5; i++) await directory.writeAt(`file-${i}`, 32, 0, Buffer.from('held'));
+      // Inserting a fifth distinct name retires the finite old pin batch.
+      await rename(path.join(root, 'file-0'), path.join(root, 'old-0'));
+      await directory.close();
+      await rename(path.join(root, 'file-4'), path.join(root, 'closed-4'));
+    } finally { await directory.close(); await session.close(); }
+  });
+  it.skipIf(process.platform !== 'win32').each([-1, 8 * 1024 * 1024, 1.5, 5])('closes the native owner on malformed binary framing (%s)', async dataBytes => {
+    const executable = await verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL('../../', import.meta.url)), checkpointBridgeTarget());
+    const child = spawn(executable, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const output: Buffer[] = [];
+    child.stdout.on('data', chunk => output.push(chunk)); child.stderr.resume();
+    const closed = new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('close', () => resolve()); });
+    child.stdin.end(Buffer.concat([Buffer.from(JSON.stringify({ id: 1, op: 'writeAt', dataBytes }) + '\n'), Buffer.from([0, 10, 255])]));
+    await closed;
+    const replies = Buffer.concat(output).toString('utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(replies).toHaveLength(1); expect(replies[0]).toMatchObject({ id: 0, ok: false });
+  });
+  it('round-trips bounded binary ranges and a Unicode root through the native request codec', async () => {
+    const parent = await realpath(await createTempDir('checkpoint-range-codec'));
+    const root = path.join(parent, '中文🙂'); await mkdir(root);
+    const session = CheckpointDirectoryHandle.createSession();
+    const directory = await session.openPath(root, false);
+    const bytes = Buffer.from(Array.from({ length: 256 * 1024 }, (_, index) => index % 256));
+    const name = 'range';
+    try {
+      const file = await directory.writeAt(name, bytes.length, 0, bytes);
+      expect(await directory.readFile(name, bytes.length, 0, bytes.length, file.identity)).toEqual(bytes);
+      expect(await directory.listEntries(4)).toContain(name);
+      await expect(directory.writeAt(name, bytes.length, 0, bytes, 'foreign-identity')).rejects.toThrow();
+      expect(await directory.readFile(name, bytes.length, 0, bytes.length, file.identity)).toEqual(bytes);
+      await directory.unlink(name, false, file.identity);
+    } finally { await directory.close(); await session.close(); }
+  });
   it.skipIf(process.platform !== "win32")("reads finite ordinal directory pages across native buffers and fresh handles", async () => {
     const root = await realpath(await createTempDir('checkpoint-directory-pages'));
     const session = CheckpointDirectoryHandle.createWindowsSession();

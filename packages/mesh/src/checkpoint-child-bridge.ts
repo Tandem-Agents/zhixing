@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { assertCheckpointBridgeHost, checkpointBridgeTarget, currentGlibcVersion, verifyCheckpointBridgeArtifact, verifyCheckpointBridgeArtifactAsync } from "./checkpoint-bridge-artifact.js";
 
 import { ownedPosixFilesystem, POSIX_FILESYSTEM_LIMITS } from './checkpoint-posix-session.js';
-export { checkpointFilesystemCompletion } from './checkpoint-posix-session.js';
+import { retainCheckpointFilesystemCompletion } from './checkpoint-filesystem-completion.js';
+export { checkpointFilesystemCompletion } from './checkpoint-filesystem-completion.js';
 
 interface NativeCheckpointChildBridge {
   availableDiskBytes(handle: bigint): number;
@@ -104,10 +105,12 @@ export class CheckpointDirectoryHandle {
     return new CheckpointDirectoryHandle(value, await bridge.identity(value));
   }
 
-  /** Isolated asynchronous Windows owner. No automatic restart can reuse its handles. */
-  static createWindowsSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory): CheckpointFilesystemSession {
+  /** Isolated asynchronous Windows owner. No automatic restart can reuse its
+   * handles. Disposable storage may pin up to four bounded write names until
+   * a name mutation, eviction or close; pins prevent external replacement. */
+  static createWindowsSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory, pinWrites = false): CheckpointFilesystemSession {
     if (process.platform !== "win32") throw Error("Windows filesystem session required");
-    const owner = ownedWindowsBridge(timeoutMs, createProcess);
+    const owner = ownedWindowsBridge(timeoutMs, createProcess, pinWrites);
     return {
       get failed() { return owner.failed(); },
       observeNodeProcesses: () => owner.api.observeNodeProcesses(),
@@ -150,9 +153,9 @@ export class CheckpointDirectoryHandle {
     };
   }
 
-  static createSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory): CheckpointFilesystemSession {
+  static createSession(timeoutMs = 5000, createProcess?: CheckpointFilesystemProcessFactory, pinWrites = false): CheckpointFilesystemSession {
     return process.platform === 'win32'
-      ? this.createWindowsSession(timeoutMs, createProcess)
+      ? this.createWindowsSession(timeoutMs, createProcess, pinWrites)
       : this.createPosixSession(timeoutMs, createProcess);
   }
 
@@ -396,6 +399,17 @@ function nativeBridge(): BridgeApi {
   };
 }
 
+/** One owned frame: finite JSON metadata followed by exact binary bytes. Raw
+ * file data must not be expanded into base64 then parsed as a JSON string by
+ * the native owner. The public filesystem methods retain their original bounds. */
+function windowsRequest(id: number, op: string, input: Record<string, unknown>): Buffer {
+  const data = Buffer.isBuffer(input.data) ? input.data : undefined;
+  const fields = data ? { ...input, data: undefined, dataBytes: data.length } : input;
+  const header = Buffer.from(JSON.stringify({ id, op, ...fields }) + '\n');
+  if (header.length + (data?.length ?? 0) > 8 * 1024 * 1024) throw Error('Checkpoint request exceeds its bound');
+  return data ? Buffer.concat([header, data]) : header;
+}
+
 function windowsBridge(): BridgeApi {
   let nextId = 1;
   let process: ChildProcessWithoutNullStreams | undefined;
@@ -431,13 +445,14 @@ function windowsBridge(): BridgeApi {
       });
     }
     const id = nextId++;
+    const frame = windowsRequest(id, op, input);
     return new Promise<T>((resolve, reject) => {
       process!.ref();
       refStream(process!.stdin);
       refStream(process!.stdout);
       refStream(process!.stderr);
       pending.set(id, { resolve: (value) => resolve(value as T), reject });
-      process!.stdin.write(`${JSON.stringify({ id, op, ...input })}\n`, "utf8", (error) => {
+      process!.stdin.write(frame, (error) => {
         if (!error) return;
         pending.delete(id);
         releaseWindowsBridge(process, pending);
@@ -465,30 +480,64 @@ export interface CheckpointFilesystemSession {
   close(remainingMs?: number): Promise<void>;
 }
 
-function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesystemProcessFactory): { api: BridgeApi; failed(): boolean; stop(): Promise<void> } {
+function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesystemProcessFactory, pinWrites = false): { api: BridgeApi; failed(): boolean; stop(remainingMs?: number): Promise<void> } {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError('Invalid filesystem operation timeout');
   let child: CheckpointFilesystemProcess | undefined;
   let starting: Promise<void> | undefined, exited: Promise<void> | undefined, stopping: Promise<void> | undefined;
   let closed = false, broken = false, nextId = 0;
   let firstFailure: Error | undefined;
+  let closeDeadline = Infinity;
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  let closeReject: ((cause: Error) => void) | undefined;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
-  const settle = (): void => {
-    for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(firstFailure ?? Error("Filesystem owner stopped")); }
+  const settle = (completion?: Promise<void>): void => {
+    const cause = firstFailure ?? Error("Filesystem owner stopped");
+    if (completion) retainCheckpointFilesystemCompletion(cause, completion);
+    for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(cause); }
     pending.clear();
   };
-  const stop = (): Promise<void> => {
+  const armCloseDeadline = (): void => {
+    if (!closeReject) return;
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => closeReject!(Object.assign(Error('Filesystem owner exit was not confirmed before the close deadline'),
+      { code: 'ERR_CHECKPOINT_OWNER_EXIT_UNCONFIRMED' })), Math.max(0, closeDeadline - performance.now()));
+  };
+  const stop = (remainingMs = 1000): Promise<void> => {
+    if (!Number.isFinite(remainingMs) || remainingMs < 0) return Promise.reject(new TypeError('Invalid filesystem close budget'));
     closed = true;
+    const deadline = performance.now() + Math.min(remainingMs, 1000);
+    if (deadline < closeDeadline) { closeDeadline = deadline; armCloseDeadline(); }
     return stopping ??= (async () => {
-      try { await starting; } catch { /* No native owner was started. */ }
-      // An idle owner is unref'ed, but its explicit shutdown must finish before Node exits.
-      if (child) {
-        child.ref(); refStream(child.stdin); refStream(child.stdout); refStream(child.stderr);
+      const actualCompletion = (async () => {
+        try { await starting; } catch { /* No native owner was started. */ }
+        await exited;
+      })();
+      try {
+        const completion = (async () => {
+          try { await starting; } catch { /* No native owner was started. */ }
+          if (child) {
+            child.ref(); refStream(child.stdin); refStream(child.stdout); refStream(child.stderr);
+            child.kill('SIGKILL');
+          }
+          await exited;
+        })();
+        await new Promise<void>((resolve, reject) => {
+          closeReject = reject; armCloseDeadline();
+          void completion.then(resolve, reject);
+        });
+      } catch (cause) {
+        firstFailure ??= cause instanceof Error ? cause : Error('Filesystem owner termination failed');
+        retainCheckpointFilesystemCompletion(cause, actualCompletion);
+        throw cause;
+      } finally {
+        clearTimeout(closeTimer); closeReject = undefined;
+        // Broken control pipes may never yield close. Fail within the budget,
+        // but retain physical permits until the actual owner has ended.
+        settle(actualCompletion);
       }
-      child?.kill();
-      await exited;
-      settle();
     })();
   };
-  const fail = (error?: Error): void => { firstFailure ??= error ?? Object.assign(Error("Filesystem protocol failed"), { code: "ERR_CHILD_PROCESS_PROTOCOL" }); broken = true; void stop(); };
+  const fail = (error?: Error): void => { firstFailure ??= error ?? Object.assign(Error("Filesystem protocol failed"), { code: "ERR_CHILD_PROCESS_PROTOCOL" }); broken = true; void stop().catch(() => {}); };
   const start = (): Promise<void> => starting ??= Promise.resolve().then(async () => {
     if (closed) throw Error("Filesystem owner closed");
     const executable = await verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL("../", import.meta.url)), checkpointBridgeTarget());
@@ -517,22 +566,24 @@ function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesys
     });
     releaseWindowsBridge(current, pending);
   });
-  const request = async <T>(op: string, input: Record<string, unknown>): Promise<T> => {
-    if (closed || broken) { await stopping; throw firstFailure ?? Error("Filesystem owner unavailable"); }
-    await start();
-    if (closed || broken || !child) { await stopping; throw firstFailure ?? Error("Filesystem owner unavailable"); }
-    const current = child, id = ++nextId;
+  const request = <T>(op: string, input: Record<string, unknown>): Promise<T> => {
+    if (closed || broken) return Promise.reject(firstFailure ?? Error("Filesystem owner unavailable"));
+    const id = ++nextId;
     return new Promise<T>((resolve, reject) => {
-      current.ref(); refStream(current.stdin); refStream(current.stdout); refStream(current.stderr);
       const timer = setTimeout(() => fail(Object.assign(Error("Filesystem operation timed out"), { code: "ETIMEDOUT" })), timeoutMs);
       pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-      current.stdin.write(`${JSON.stringify({ id, op, ...input })}\n`, "utf8", (error) => { if (error) fail(error); });
+      void start().then(() => {
+        if (closed || broken || !child || !pending.has(id)) return;
+        const current = child;
+        current.ref(); refStream(current.stdin); refStream(current.stdout); refStream(current.stderr);
+        current.stdin.write(windowsRequest(id, op, input), (error) => { if (error) fail(error); });
+      }).catch(fail);
     });
   };
-  return { api: windowsApi(request), failed: () => closed || broken, stop };
+  return { api: windowsApi(request, pinWrites), failed: () => closed || broken, stop };
 }
 
-function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => Promise<T>): BridgeApi {
+function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => Promise<T>, pinWrites = false): BridgeApi {
   const id = (value: bigint): number => {
     const numeric = Number(value);
     if (!Number.isSafeInteger(numeric) || numeric <= 0) throw new TypeError("Checkpoint bridge handle is invalid");
@@ -545,7 +596,7 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     }),
     availableDiskBytes: (handle) => request<number>('availableDiskBytes', { handle: id(handle) }),
     writeAt: (parent, name, maximumBytes, offset, bytes, identity) => request<CheckpointEntry>('writeAt', {
-      parent: id(parent), name, maximumBytes, offset, data: bytes.toString('base64'), ...(identity ? { identity } : {}),
+      parent: id(parent), name, maximumBytes, offset, data: bytes, ...(identity ? { identity } : {}), ...(pinWrites ? { pin: true } : {}),
     }),
     observeNodeProcesses: () => request<NodeProcessInventory>("observeNodeProcesses", {}),
     readLocalProcessDeclaration: (endpoint, pid) => request<string>("readLocalProcessDeclaration", { endpoint, pid }),
@@ -557,7 +608,7 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     waitLock: async (parent, name, waitMs, shared) => BigInt(await request<number>("waitLock", { parent: id(parent), name, waitMs, shared })),
     openDirectory: async (parent, name, create) => BigInt(await request<number>("openDirectory", { parent: id(parent), name, create })),
     identity: (value) => request<string>("identity", { handle: id(value) }),
-    writeFile: (parent, name, bytes) => request<void>("writeFile", { parent: id(parent), name, data: bytes.toString("base64") }),
+    writeFile: (parent, name, bytes) => request<void>("writeFile", { parent: id(parent), name, data: bytes }),
     readFile: async (parent, name, declaredBytes, offset, limit, identity, prefix) => Buffer.from(
       await request<string>("readFile", { parent: id(parent), name, declaredBytes, offset, limit, prefix: prefix ?? false, ...(identity ? { identity } : {}) }),
       "base64",
@@ -567,7 +618,7 @@ function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => 
     }),
     listEntryPage: (parent, offset, limit) => request<{ names: readonly string[]; end: boolean }>('listEntryPage', { parent: id(parent), offset, limit }),
     writeRange: (parent, name, maximumBytes, offset, bytes, identity) => request<number>("writeRange", {
-      parent: id(parent), name, maximumBytes, offset, data: bytes.toString("base64"), ...(identity ? { identity } : {}),
+      parent: id(parent), name, maximumBytes, offset, data: bytes, ...(identity ? { identity } : {}),
     }),
     renameEntry: (sourceParent, sourceName, targetParent, targetName, replace) => request<void>("renameEntry", {
       sourceParent: id(sourceParent), sourceName, targetParent: id(targetParent), targetName, replace: replace ?? false,

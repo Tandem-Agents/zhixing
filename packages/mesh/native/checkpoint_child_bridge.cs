@@ -73,10 +73,31 @@ internal static class CheckpointChildBridge {
   [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr process, int kind, IntPtr buffer, int length, out int required);
   static long NextHandle = 1;
   static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
+  // Opt-in disposable display owner only. Denying delete sharing pins the
+  // name while retained; every use still checks size, identity and link count.
+  // Four handles suffice for data/index plus their finite replacement work.
+  static readonly Dictionary<string, IntPtr> PinnedWrites = new Dictionary<string, IntPtr>();
+  static void ClosePinnedWrites() {
+    foreach (var file in PinnedWrites.Values) CloseHandle(file);
+    PinnedWrites.Clear();
+  }
 
-  static void Main() {
-    Console.InputEncoding = new UTF8Encoding(false);
-    Console.OutputEncoding = new UTF8Encoding(false);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GetStdHandle(int kind);
+  static Stream StandardPipe(int kind, FileAccess access) {
+    var handle = GetStdHandle(kind);
+    if (handle == IntPtr.Zero || handle == new IntPtr(-1)) throw new InvalidOperationException("Checkpoint standard pipe missing");
+    // GUI-subsystem helpers have no console. Adopt only the redirected handles
+    // explicitly supplied by the owner; Console.OpenStandard* can return Null.
+    return new FileStream(new SafeFileHandle(handle, false), access, 4096, false);
+  }
+  static int Main() {
+    // No GUI/error dialog on an invalid bootstrap or a disconnected owner.
+    try { Run(); return 0; } catch { return 71; }
+  }
+  static void Run() {
+    // Private pipes are UTF-8 streams, not a console. Setting Console's code
+    // page requires a console even when all I/O is redirected, and breaks a
+    // correctly detached foreground helper before it can read its first call.
     // Only the containing foreground owner supplies this fixed private pipe.
     // Ordinary checkpoint/logging owners retain their existing stdio protocol.
     var endpoint = Environment.GetEnvironmentVariable("ZHIXING_CHECKPOINT_PIPE");
@@ -86,34 +107,74 @@ internal static class CheckpointChildBridge {
       if (!endpoint.StartsWith(prefix, StringComparison.Ordinal) || endpoint.Length > 160) throw new InvalidOperationException("Invalid filesystem owner pipe");
       transport = new NamedPipeClientStream(".", endpoint.Substring(9), PipeDirection.InOut);
       transport.Connect(5000);
-      Console.SetIn(new StreamReader(transport, new UTF8Encoding(false), false, 4096, true));
-      Console.SetOut(new StreamWriter(transport, new UTF8Encoding(false), 4096, true) { AutoFlush = true });
     }
-    string line;
-    while ((line = Console.ReadLine()) != null) {
+    var input = new BufferedStream(transport != null ? (Stream)transport : StandardPipe(-10, FileAccess.Read), 64 * 1024);
+    Console.SetOut(new StreamWriter(transport != null ? (Stream)transport : StandardPipe(-11, FileAccess.Write), new UTF8Encoding(false), 4096, true) { AutoFlush = true });
+    for (;;) {
       Dictionary<string, object> request = null;
       try {
-        request = Json.Deserialize<Dictionary<string, object>>(line);
+        request = ReadRequest(input);
+        if (request == null) break;
         var value = Dispatch(request);
         Reply(request, true, value, null);
       } catch (Exception error) {
         var native = error as System.ComponentModel.Win32Exception;
         Reply(request, false, null, native == null ? error.Message : error.Message + " (Win32 " + native.NativeErrorCode + ")");
+        // A malformed/truncated frame has no trustworthy next boundary. End
+        // this owner; never reinterpret leftover file bytes as another request.
+        if (request == null) break;
       }
     }
+    ClosePinnedWrites();
     foreach (var handle in Handles.Values) CloseHandle(handle);
-    if (transport != null) transport.Dispose();
+    input.Dispose();
+  }
+
+  static Dictionary<string, object> ReadRequest(Stream input) {
+    const int maximum = 8 * 1024 * 1024;
+    using (var header = new MemoryStream()) {
+      for (;;) {
+        int next = input.ReadByte();
+        if (next < 0) { if (header.Length == 0) return null; throw new EndOfStreamException("Checkpoint header is truncated"); }
+        if (next == 10) break;
+        if (header.Length >= maximum) throw new InvalidOperationException("Checkpoint request exceeds its bound");
+        header.WriteByte((byte)next);
+      }
+      var request = Json.Deserialize<Dictionary<string, object>>(new UTF8Encoding(false, true).GetString(header.GetBuffer(), 0, (int)header.Length));
+      if (request.ContainsKey("dataBytes")) {
+        var op = Text(request, "op");
+        if (!(request["dataBytes"] is int)) throw new InvalidOperationException("Invalid checkpoint binary length");
+        long length = (int)request["dataBytes"];
+        if (request.ContainsKey("data") || (op != "writeAt" && op != "writeFile" && op != "writeRange") ||
+            length < 0 || length + header.Length + 1 > maximum) throw new InvalidOperationException("Invalid checkpoint binary range");
+        var data = new byte[(int)length];
+        for (int offset = 0; offset < data.Length;) {
+          int count = input.Read(data, offset, data.Length - offset);
+          if (count == 0) throw new EndOfStreamException("Checkpoint binary range is truncated");
+          offset += count;
+        }
+        request["data"] = data;
+      }
+      return request;
+    }
+  }
+
+  static byte[] RequestBytes(Dictionary<string, object> r) {
+    var binary = r["data"] as byte[];
+    return binary ?? Convert.FromBase64String(Text(r, "data"));
   }
 
   static object Dispatch(Dictionary<string, object> r) {
     var op = Text(r, "op");
+    // Explicit mutations/close release pins before operating on their names.
+    if (op == "unlinkEntry" || op == "renameEntry" || op == "close" || op == "truncateFile" || op == "writeFile" || op == "writeRange" || op == "copyRange") ClosePinnedWrites();
     if (op == "observeNodeProcesses") return ObserveNodeProcesses();
     if (op == "readLocalProcessDeclaration") return ReadLocalProcessDeclaration(Text(r, "endpoint"), Number(r, "pid"));
     if (op == "openPath") return Register(OpenPath(Text(r, "path"), Flag(r, "create"), r.ContainsKey("readOnly") && Flag(r, "readOnly")));
     if (op == "statFile") return StatFile(Get(r, "parent"), Text(r, "name"));
     if (op == "statEntry") return StatEntry(Get(r, "parent"), Text(r, "name"));
     if (op == "availableDiskBytes") return AvailableDiskBytes(Get(r, "handle"));
-    if (op == "writeAt") return WriteAt(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")), r.ContainsKey("identity") ? Text(r, "identity") : null);
+    if (op == "writeAt") return WriteAt(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), RequestBytes(r), r.ContainsKey("identity") ? Text(r, "identity") : null, r.ContainsKey("pin") && Flag(r, "pin"));
     if (op == "copyRange") return CopyRange(Get(r, "parent"), Text(r, "source"), Text(r, "sourceIdentity"), Number(r, "sourceBytes"), Number(r, "sourceOffset"), Text(r, "target"), r.ContainsKey("targetIdentity") ? Text(r, "targetIdentity") : null, Number(r, "targetOffset"), Number(r, "length"));
     if (op == "statFiles") {
       var names = r["names"] as System.Collections.IList;
@@ -130,7 +191,7 @@ internal static class CheckpointChildBridge {
     if (op == "waitLock") return WaitLock(Get(r, "parent"), Text(r, "name"), Number(r, "waitMs"), r.ContainsKey("shared") && Flag(r, "shared"));
     if (op == "openDirectory") return Register(OpenRelative(Get(r, "parent"), Text(r, "name"), true, Flag(r, "create"), false));
     if (op == "identity") return Identity(Get(r, "handle"));
-    if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), Convert.FromBase64String(Text(r, "data"))); return true; }
+    if (op == "writeFile") { WriteFile(Get(r, "parent"), Text(r, "name"), RequestBytes(r)); return true; }
     if (op == "readFile") return Convert.ToBase64String(ReadFile(Get(r, "parent"), Text(r, "name"), Number(r, "declaredBytes"), Number(r, "offset"), Number(r, "limit"), r.ContainsKey("identity") ? Text(r, "identity") : null, r.ContainsKey("prefix") && Flag(r, "prefix")));
     if (op == "listEntries") return ListEntries(Get(r, "parent"), Number(r, "maximumEntries"));
     if (op == "listEntryPage") {
@@ -138,7 +199,7 @@ internal static class CheckpointChildBridge {
       if (offset < 0 || offset > 4096 || limit < 1 || limit > 32) throw new InvalidOperationException("Invalid directory page");
       return ReadEntries(Get(r, "parent"), offset, limit, false);
     }
-    if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), Convert.FromBase64String(Text(r, "data")), r.ContainsKey("identity") ? Text(r, "identity") : null);
+    if (op == "writeRange") return WriteRange(Get(r, "parent"), Text(r, "name"), Number(r, "maximumBytes"), Number(r, "offset"), RequestBytes(r), r.ContainsKey("identity") ? Text(r, "identity") : null);
     if (op == "renameEntry") { Rename(Get(r, "sourceParent"), Text(r, "sourceName"), Get(r, "targetParent"), Text(r, "targetName"), r.ContainsKey("replace") && Flag(r, "replace")); return true; }
     if (op == "unlinkEntry") { Unlink(Get(r, "parent"), Text(r, "name"), Flag(r, "directory"), r.ContainsKey("retiredIdentity") ? Text(r, "retiredIdentity") : null, r.ContainsKey("expectedIdentity") ? Text(r, "expectedIdentity") : null); return true; }
     if (op == "sync") { if (!FlushFileBuffers(Get(r, "handle"))) throw Win32("Unable to flush checkpoint handle"); return true; }
@@ -268,7 +329,7 @@ internal static class CheckpointChildBridge {
     } catch { CloseHandle(current); throw; }
   }
 
-  static IntPtr OpenRelative(IntPtr parent, string name, bool directory, bool create, bool exclusive, bool writable = true, bool asynchronous = false) {
+  static IntPtr OpenRelative(IntPtr parent, string name, bool directory, bool create, bool exclusive, bool writable = true, bool asynchronous = false, bool pin = false) {
     ExactName(name);
     var nameBuffer = Marshal.StringToHGlobalUni(name);
     var unicode = new UNICODE_STRING { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)(name.Length * 2)), Buffer = nameBuffer };
@@ -284,7 +345,7 @@ internal static class CheckpointChildBridge {
       uint disposition = create ? (exclusive ? FILE_CREATE : FILE_OPEN_IF) : FILE_OPEN;
       uint options = (asynchronous ? 0 : FILE_SYNCHRONOUS_IO_NONALERT) | FILE_OPEN_REPARSE_POINT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
       var result = NtCreateFile(out handle, access, ref attributes, out status, IntPtr.Zero, 0,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition, options, IntPtr.Zero, 0);
+        FILE_SHARE_READ | FILE_SHARE_WRITE | (pin ? 0 : FILE_SHARE_DELETE), disposition, options, IntPtr.Zero, 0);
       if (result < 0 || handle == IntPtr.Zero || handle == new IntPtr(-1)) {
         var code = unchecked((uint)result);
         if (code == 0xC0000034 || code == 0xC000003A) throw new FileNotFoundException("checkpoint-child-missing");
@@ -511,22 +572,38 @@ internal static class CheckpointChildBridge {
     try { return EntryInfo(entry); } finally { CloseHandle(entry); }
   }
 
-  static object WriteAt(IntPtr parent, string name, long maximum, long offset, byte[] bytes, string expected) {
+  static object WriteAt(IntPtr parent, string name, long maximum, long offset, byte[] bytes, string expected, bool pin) {
     if (maximum < 0 || offset < 0 || offset > maximum || bytes.LongLength > 256 * 1024 || bytes.LongLength > maximum - offset)
       throw new InvalidOperationException("Invalid bounded file write");
-    var file = OpenRelative(parent, name, false, expected == null, expected == null);
+    ExactName(name);
+    string key = parent.ToString() + ":" + name; IntPtr file = IntPtr.Zero;
+    bool retained = pin && expected != null && PinnedWrites.TryGetValue(key, out file);
+    if (!retained) {
+      if (PinnedWrites.TryGetValue(key, out file)) { PinnedWrites.Remove(key); CloseHandle(file); }
+      if (pin && PinnedWrites.Count == 4) ClosePinnedWrites();
+      file = OpenRelative(parent, name, false, expected == null, expected == null, true, false, pin);
+    }
+    bool confirmed = false;
     try {
       BY_HANDLE_FILE_INFORMATION info;
       if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) > maximum || (expected != null && Identity(info) != expected))
         throw new InvalidOperationException("Bounded file identity changed before write");
       using (var safe = new SafeFileHandle(file, false))
-      using (var stream = new FileStream(safe, FileAccess.ReadWrite, 64 * 1024, false)) {
+      // This operation already owns one finite byte buffer and performs one
+      // write. A second 64 KiB FileStream buffer per index/data write adds
+      // allocation/copying without combining any subsequent IO.
+      using (var stream = new FileStream(safe, FileAccess.ReadWrite, 1, false)) {
         stream.Position = offset; stream.Write(bytes, 0, bytes.Length); stream.Flush();
       }
       if (!GetFileInformationByHandle(file, out info) || info.NumberOfLinks != 1 || Size(info) > maximum || (expected != null && Identity(info) != expected))
         throw new InvalidOperationException("Bounded file identity changed during write");
-      return EntryInfo(file);
-    } finally { Array.Clear(bytes, 0, bytes.Length); CloseHandle(file); }
+      var result = EntryInfo(file);
+      if (pin) PinnedWrites[key] = file;
+      confirmed = true; return result;
+    } finally {
+      Array.Clear(bytes, 0, bytes.Length);
+      if (!pin || !confirmed) { PinnedWrites.Remove(key); CloseHandle(file); }
+    }
   }
 
   static object CopyRange(IntPtr parent, string sourceName, string sourceIdentity, long sourceBytes, long sourceOffset, string targetName, string targetIdentity, long targetOffset, long length) {
@@ -622,5 +699,18 @@ internal static class CheckpointChildBridge {
   static void ExactName(string name) { if (String.IsNullOrEmpty(name) || name.Length > 160 || name == "." || name == ".." || name.IndexOfAny(new[] {'/', '\\', '\0'}) >= 0) throw new InvalidOperationException("Checkpoint child name is invalid"); }
   static bool ValidName(string name) { return !String.IsNullOrEmpty(name) && name.Length <= 160 && name != "." && name != ".." && name.IndexOfAny(new[] {'/', '\\', '\0'}) < 0; }
   static Exception Win32(string message) { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), message); }
-  static void Reply(Dictionary<string, object> request, bool ok, object value, string error) { var response = new Dictionary<string, object> { {"id", request != null && request.ContainsKey("id") ? request["id"] : 0}, {"ok", ok} }; if (ok) response["value"] = value; else response["error"] = error; Console.WriteLine(Json.Serialize(response)); Console.Out.Flush(); }
+  static void Reply(Dictionary<string, object> request, bool ok, object value, string error) {
+    var id = request != null && request.ContainsKey("id") ? request["id"] : 0;
+    if (ok && request != null && Text(request, "op") == "readFile") {
+      // Dispatch alone creates this value using Convert.ToBase64String.
+      // Base64 has no JSON quote/control characters; never use this for paths,
+      // errors, caller-provided strings or other operation results.
+      Console.WriteLine("{\"id\":" + Json.Serialize(id) + ",\"ok\":true,\"value\":\"" + (string)value + "\"}");
+    } else {
+      var response = new Dictionary<string, object> { {"id", id}, {"ok", ok} };
+      if (ok) response["value"] = value; else response["error"] = error;
+      Console.WriteLine(Json.Serialize(response));
+    }
+    Console.Out.Flush();
+  }
 }

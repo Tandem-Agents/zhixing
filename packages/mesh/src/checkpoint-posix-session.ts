@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { CheckpointFilesystemProcess, CheckpointFilesystemProcessFactory } from './checkpoint-child-bridge.js';
+import { retainCheckpointFilesystemCompletion } from './checkpoint-filesystem-completion.js';
+export { checkpointFilesystemCompletion } from './checkpoint-filesystem-completion.js';
 
 // Private to the existing filesystem bridge. One operation is sent at a time;
 // these bounds include requests waiting for artifact verification or IO.
@@ -20,12 +22,6 @@ type Waiter = {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 };
-
-// A bounded error ends waiting, not necessarily the delegated physical work.
-// Only errors issued by this owner carry this local (never wire-provided) fence.
-const unsettled = new WeakMap<object, Promise<void>>();
-export const checkpointFilesystemCompletion = (cause: unknown): Promise<void> | undefined =>
-  cause !== null && typeof cause === 'object' ? unsettled.get(cause) : undefined;
 
 /** A synchronous addon must never execute on S/N's event loop. The private Node
  * child owns all fds; its actual close event is the successful shutdown proof.
@@ -63,7 +59,7 @@ export function ownedPosixFilesystem(
   };
   const settle = (completion?: Promise<void>): void => {
     const cause = failure ?? error('ERR_CHECKPOINT_OWNER_CLOSED', 'Filesystem owner closed; pending effects are unconfirmed');
-    if (completion) unsettled.set(cause, completion);
+    if (completion) retainCheckpointFilesystemCompletion(cause, completion);
     for (const waiter of pending.values()) {
       clearTimeout(waiter.timer);
       waiter.frame = '';
@@ -107,7 +103,7 @@ export function ownedPosixFilesystem(
         });
       } catch (cause) {
         failure ??= cause instanceof Error ? cause : Error('Filesystem owner termination failed');
-        if (cause !== null && typeof cause === 'object') unsettled.set(cause, actualCompletion);
+        retainCheckpointFilesystemCompletion(cause, actualCompletion);
         throw cause;
       } finally {
         clearTimeout(closeTimer); closeReject = undefined;

@@ -16,7 +16,8 @@ if (process.platform === "win32") {
   const result = spawnSync(compiler, [
     "/nologo",
     "/optimize+",
-    "/target:exe",
+    // This pipe-only helper must not allocate a hidden console per owner.
+    "/target:winexe",
     "/reference:System.Web.Extensions.dll",
     "/reference:System.Management.dll",
     `/out:${output}`,
