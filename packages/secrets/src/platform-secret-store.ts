@@ -5,7 +5,7 @@ import { chmod, link, lstat, mkdir, open, readFile, readdir, rm, unlink } from "
 import path from "node:path";
 import { EncryptedVaultSecretStore } from "./vault-secret-store.js";
 import type { MasterKeyProvider, MasterKeyState } from "./master-key.js";
-import { acquireFileLock } from "./file-lock.js";
+import { acquireFileLock, type FileLockOptions } from "./file-lock.js";
 
 const KEY_BYTES = 32;
 const KEYRING_SERVICE = "dev.zhixing.secret-vault";
@@ -25,6 +25,10 @@ export interface PlatformSecretStoreOptions {
   readonly platform?: NodeJS.Platform;
   readonly env?: NodeJS.ProcessEnv;
   readonly commandRunner?: CommandRunner;
+  /** Reuse a host's read-only native identity port without changing lock semantics. */
+  readonly processIdentityResolver?: FileLockOptions['processIdentityResolver'];
+  /** Same CurrentUser DPAPI bytes; the host may avoid a shell intermediary. */
+  readonly windowsProtection?: (mode: 'protect' | 'unprotect', input: Uint8Array) => Promise<Buffer>;
   /** 受管无头宿主提供的稳定机器身份；常规 Linux 主机自动读取 machine-id。 */
   readonly machineIdentity?: string;
   /** Managed startup may reopen an existing store but must never initialize one. */
@@ -77,13 +81,15 @@ export function createPlatformSecretStore(
     platform,
     env,
     run,
+    windowsProtection: options.windowsProtection,
     context: options.context ?? "foreground",
     machineIdentity: options.machineIdentity,
   });
-  masterKey = new SerializedMasterKeyProvider(masterKey, `${keyPath}.init.lock`);
+  masterKey = new SerializedMasterKeyProvider(masterKey, `${keyPath}.init.lock`, options.processIdentityResolver);
   return new EncryptedVaultSecretStore({
     vaultPath,
     masterKey,
+    processIdentityResolver: options.processIdentityResolver,
   });
 }
 
@@ -103,6 +109,7 @@ interface BoundPlatformMasterKeyProviderOptions {
   readonly platform: NodeJS.Platform;
   readonly env: NodeJS.ProcessEnv;
   readonly run: CommandRunner;
+  readonly windowsProtection?: PlatformSecretStoreOptions['windowsProtection'];
   readonly context: "foreground" | "managed";
   readonly machineIdentity?: string;
 }
@@ -219,7 +226,7 @@ function createBackendProvider(
 ): MasterKeyProvider {
   if (backend === "windows-dpapi") {
     if (options.platform !== "win32") throw new Error("SecretStore backend does not match this platform");
-    return new WindowsDpapiMasterKeyProvider(options.keyPath, options.run);
+    return new WindowsDpapiMasterKeyProvider(options.keyPath, options.run, options.windowsProtection);
   }
   if (backend === "macos-keychain") {
     if (options.platform !== "darwin") throw new Error("SecretStore backend does not match this platform");
@@ -289,6 +296,7 @@ class SerializedMasterKeyProvider implements MasterKeyProvider {
   constructor(
     private readonly delegate: MasterKeyProvider,
     private readonly lockPath: string,
+    private readonly processIdentityResolver?: FileLockOptions['processIdentityResolver'],
   ) {}
 
   async state(): Promise<MasterKeyState> {
@@ -316,6 +324,7 @@ class SerializedMasterKeyProvider implements MasterKeyProvider {
     const release = await acquireFileLock(this.lockPath, {
       staleMs: 30_000,
       waitMs: 15_000,
+      processIdentityResolver: this.processIdentityResolver,
     });
     try {
       if (!this.cached) {
@@ -335,6 +344,7 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
   constructor(
     private readonly keyPath: string,
     private readonly run: CommandRunner,
+    private readonly protection?: PlatformSecretStoreOptions['windowsProtection'],
   ) {}
 
   async state(): Promise<MasterKeyState> {
@@ -358,7 +368,7 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
     if (existing) return this.unlock(existing);
     const key = randomBytes(KEY_BYTES);
     try {
-      const result = await this.runPowerShell("protect", key);
+      const result = await this.runProtection("protect", key);
       if (result.code !== 0 || result.stdout.byteLength === 0) {
         throw new Error("Windows credential protection could not initialize SecretStore");
       }
@@ -384,7 +394,7 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
   }
 
   private async unlock(existing: Uint8Array): Promise<Buffer> {
-    const result = await this.runPowerShell("unprotect", existing);
+    const result = await this.runProtection("unprotect", existing);
     if (result.code !== 0) {
       result.stdout.fill(0);
       throw new ExistingMasterKeyUnavailableError(
@@ -402,10 +412,13 @@ class WindowsDpapiMasterKeyProvider implements MasterKeyProvider {
     return Buffer.from(this.cached);
   }
 
-  private runPowerShell(
+  private runProtection(
     mode: "protect" | "unprotect",
     input?: Uint8Array,
   ): Promise<CommandResult> {
+    if (this.protection && input) return this.protection(mode, input).then(
+      stdout => ({ code: 0, stdout, stderr: Buffer.alloc(0) }),
+      () => ({ code: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }));
     const script = [
       "$ErrorActionPreference='Stop'",
       "Add-Type -AssemblyName System.Security",

@@ -28,6 +28,7 @@ const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "./logging/entry-mode.js",
   "./logging/bootstrap.js",
   "./logging/runtime-source.js",
+  "./terminal/command-route.js",
 ]);
 
 function collectRuntimeStaticImports(sourceText: string): string[] {
@@ -89,5 +90,7 @@ describe("CLI entry import graph", () => {
     );
 
     expect(unexpected).toEqual([]);
+    const routes = await readFile(path.join(SRC_DIR, "terminal/command-route.ts"), "utf8");
+    expect(collectRuntimeStaticImports(routes)).toEqual([]);
   });
 });

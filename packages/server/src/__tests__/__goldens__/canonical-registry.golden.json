@@ -1322,6 +1322,7 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
           "cleanup:anchor-host:surface:sessionBroadcast.close",
+          "cleanup:anchor-host:surface:sessionProcess.dispose",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
@@ -1526,6 +1527,7 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
           "cleanup:anchor-host:surface:sessionBroadcast.close",
+          "cleanup:anchor-host:surface:sessionProcess.dispose",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
@@ -1727,6 +1729,7 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
           "cleanup:anchor-host:surface:sessionBroadcast.close",
+          "cleanup:anchor-host:surface:sessionProcess.dispose",
           "cli:zhixing",
           "cli:zhixing app",
           "cli:zhixing app remove",
@@ -1904,6 +1907,7 @@
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
           "cleanup:anchor-host:surface:sessionBroadcast.close",
+          "cleanup:anchor-host:surface:sessionProcess.dispose",
           "cli:zhixing",
           "cli:zhixing app",
           "cli:zhixing app remove",
@@ -2632,6 +2636,17 @@
         "id": "sessionBroadcast.close",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:surface:sessionBroadcast.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "surface",
+        "id": "sessionProcess.dispose",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:surface:sessionProcess.dispose",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

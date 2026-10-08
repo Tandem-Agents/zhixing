@@ -23,6 +23,7 @@ const emitted = ts.transpileModule(declaration.slice(0, -1) + `
     return this.#completion;
   }
   fixtureClose() { return this.#close(0, 'user-exit'); }
+  fixtureHelperLive(owner, role) { this.#helperLive(owner, role); }
   get fixtureResult() { return this.#result; }
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 
@@ -30,6 +31,7 @@ interface SupervisorPort {
   readonly instance: string;
   fixtureOpen(processes: unknown, admitted: Promise<void>): Promise<number>;
   fixtureClose(): Promise<void>;
+  fixtureHelperLive(owner: string, role: string): void;
   readonly fixtureResult: number;
 }
 class ProcessPort extends EventEmitter {
@@ -57,13 +59,13 @@ class ProcessPort extends EventEmitter {
     this.emit('disconnect'); this.emit('exit', code); this.emit('close');
   }
 }
-function fixture(admitted = Promise.resolve(), args: readonly string[] = []) {
+function fixture(admitted = Promise.resolve(), args: readonly string[] = [], drain?: () => Promise<void>) {
   const timeoutExit = vi.fn(), peerFailures: string[] = [], children: ProcessPort[] = [];
   const processPort = { platform: 'win32', off: vi.fn(), exit: timeoutExit };
   const Owner = new Function('process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'terminalWriterDeadline', emitted + '\nreturn TerminalSupervisor;')(
     processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, terminalWriterDeadline,
   ) as new (options: unknown) => SupervisorPort;
-  const supervisor = new Owner({ args });
+  const supervisor = new Owner({ args, drain });
   const processes = {
     children: new Set<ProcessPort>(), seal: vi.fn(), terminateExecution: vi.fn(), finish: vi.fn(),
     executionState: () => ({ active: 0, creating: 0 }),
@@ -87,6 +89,30 @@ function fixture(admitted = Promise.resolve(), args: readonly string[] = []) {
 describe('supervisor cooperative role close', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it('drains only the logging worker tree before sealing native creation', async () => {
+    let drained!: () => void;
+    const f = fixture(Promise.resolve(), [], () => new Promise<void>(resolve => { drained = resolve; }));
+    void f.supervisor.fixtureClose(); await f.flush();
+    for (const [owner, role] of [['supervisor', 'log-store'], ['application', 'log-store'], ['application', 'log-files'], ['application', 'writer-observer'], ['log-store', 'log-files'], ['log-files', 'filesystem'], ['log-store', 'writer-observer'], ['writer-observer', 'writer-observer']]) {
+      expect(() => f.supervisor.fixtureHelperLive(owner!, role!)).not.toThrow();
+    }
+    for (const role of ['filesystem', 'credential', 'clipboard', 'mcp-probe', 'managed-service']) {
+      expect(() => f.supervisor.fixtureHelperLive('application', role)).toThrow('terminal-admission-closed');
+    }
+    f.application.finish(); f.ui.finish(); await f.flush();
+    expect(f.processes.seal).not.toHaveBeenCalled();
+    drained(); await f.flush(); expect(await f.completion).toBe(0);
+    expect(f.processes.seal).toHaveBeenCalledOnce();
+    expect(() => f.supervisor.fixtureHelperLive('log-files', 'filesystem')).toThrow('terminal-admission-closed');
+  });
+
+  it('never extends the writer deadline for a late logging helper', async () => {
+    const f = fixture(); void f.supervisor.fixtureClose(); await f.flush();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(() => f.supervisor.fixtureHelperLive('log-store', 'log-files')).toThrow('terminal-admission-closed');
+    expect(await f.finish()).toBe(74);
+  });
 
   it('preserves interruption when the UI closes an unfinished independent command', async () => {
     const f = fixture(Promise.resolve(), ['pair']);

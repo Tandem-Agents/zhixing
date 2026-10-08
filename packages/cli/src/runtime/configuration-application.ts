@@ -8,8 +8,10 @@ import { listSupportedChannels } from "../registries/channels.js";
 import { reconcileCurrentManagedService } from "../serve/managed-service-runtime.js";
 import { McpManagementApplication, type McpManagementEditorPort } from "@zhixing/core/mcp-management";
 import type { NodeConfigurationEditor } from "./configuration-edit.js";
+import type { CreateMcpManagementAdapterOptions } from "./mcp-management-adapter.js";
 
 export interface ConfigurationApplicationDeps {
+  readonly processIdentityResolver?: import('@zhixing/core/persistence').FileLockOptions['processIdentityResolver'];
   readonly secretStore?: ReturnType<typeof createPlatformSecretStore>;
   readonly configurationRecords?: import("@zhixing/core/logging").LogRecordPort;
   readonly readExtensions?: () => Promise<import("@zhixing/core/extensions/contracts").ExtensionPublicSnapshot>;
@@ -123,7 +125,9 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   const secretStore = deps.secretStore ?? createPlatformSecretStore({ homeDir });
 
   // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
-  const { config, credentials } = await loadConfigurationSnapshot({ configPath, store: secretStore, records: deps.configurationRecords });
+  const sourceOptions = { configPath, store: secretStore, records: deps.configurationRecords,
+    processIdentityResolver: deps.processIdentityResolver };
+  const { config, credentials } = await loadConfigurationSnapshot(sourceOptions);
   const managed = opts.kind === "config" && deps.readExtensions ? await deps.readExtensions() : undefined;
   const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
   const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
@@ -164,7 +168,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
         const retryIds = ids.filter((id) => pendingIds.has(id) && result.channelIntents?.[id] === undefined &&
           canonicalize(config.messaging?.[id] ?? null) === canonicalize(result.config.messaging?.[id] ?? null) &&
           canonicalize(credentials.channels?.[id] ?? null) === canonicalize(result.credentials.channels?.[id] ?? null));
-        await editConfiguration({ config, credentials }, result, { configPath, store: secretStore, records: deps.configurationRecords,
+        await editConfiguration({ config, credentials }, result, { ...sourceOptions,
           prepare: channelStates ? (store, source) => configuration.preparePublications(store, ids,
             source.config, { channels: source.credentials.channels }, channelStates, result.channelIntents, retryIds) : undefined,
         });
@@ -178,7 +182,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
       save: async (edit) => {
         await editConfiguration({ config, credentials },
           { config: { mcp: { servers: edit.servers } }, credentials: { mcp: edit.credentials } },
-          { configPath, store: secretStore, records: deps.configurationRecords, scope: "mcp" });
+          { ...sourceOptions, scope: "mcp" });
       },
       activate: async () => {
         if (deps.state.activeTurnPromise) await deps.state.activeTurnPromise.catch(() => {});
@@ -237,7 +241,7 @@ export interface McpConfigurationDeps {
       signal?: AbortSignal,
     ) => Promise<string>;
     llmConsume?: <T>(prompt: string, consume: (text: string) => T, role?: 'main' | 'light', signal?: AbortSignal) => Promise<T>;
-    createStdioProcess?: import('@zhixing/mcp').McpStdioProcessFactory;
+    createStdioProcess?: CreateMcpManagementAdapterOptions['createStdioProcess'];
 }
 
 export async function prepareMcpConfiguration(deps: McpConfigurationDeps) {

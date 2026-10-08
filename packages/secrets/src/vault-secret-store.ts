@@ -14,7 +14,7 @@ import {
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { MasterKeyProvider } from "./master-key.js";
-import { acquireFileLock } from "./file-lock.js";
+import { acquireFileLock, type FileLockOptions } from "./file-lock.js";
 
 const VAULT_AAD = Buffer.from("zhixing-secret-vault:v1", "utf8");
 const LOCK_STALE_MS = 30_000;
@@ -44,6 +44,7 @@ export interface EncryptedVaultSecretStoreOptions {
   readonly vaultPath: string;
   readonly masterKey: MasterKeyProvider;
   readonly now?: () => number;
+  readonly processIdentityResolver?: FileLockOptions['processIdentityResolver'];
 }
 
 export class EncryptedVaultSecretStore implements SecretStorePort {
@@ -52,6 +53,7 @@ export class EncryptedVaultSecretStore implements SecretStorePort {
   private readonly exclusiveLockPath: string;
   private readonly masterKey: MasterKeyProvider;
   private readonly now: () => number;
+  private readonly processIdentityResolver?: FileLockOptions['processIdentityResolver'];
   private queue: Promise<void> = Promise.resolve();
 
   constructor(options: EncryptedVaultSecretStoreOptions) {
@@ -63,6 +65,7 @@ export class EncryptedVaultSecretStore implements SecretStorePort {
     this.exclusiveLockPath = `${options.vaultPath}.exclusive.lock`;
     this.masterKey = options.masterKey;
     this.now = options.now ?? Date.now;
+    this.processIdentityResolver = options.processIdentityResolver;
   }
 
   async put(ref: SecretRef, value: string): Promise<void> {
@@ -131,6 +134,7 @@ export class EncryptedVaultSecretStore implements SecretStorePort {
     const release = await acquireFileLock(this.exclusiveLockPath, {
       staleMs: 120_000,
       waitMs: 30_000,
+      processIdentityResolver: this.processIdentityResolver,
     });
     try {
       return await operation();
@@ -257,6 +261,7 @@ export class EncryptedVaultSecretStore implements SecretStorePort {
       staleMs: LOCK_STALE_MS,
       waitMs: LOCK_WAIT_MS,
       now: this.now,
+      processIdentityResolver: this.processIdentityResolver,
     });
   }
 }

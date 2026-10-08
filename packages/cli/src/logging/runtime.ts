@@ -5,6 +5,7 @@ import {
   type BindLogSource,
   type LogRecordPort,
   type LogResult,
+  type LogSink,
 } from "@zhixing/core/logging";
 import { LocalLogStore } from "@zhixing/core/logging/storage";
 import {
@@ -18,7 +19,7 @@ import { IsolatedLogStore, type LogStoreWorkerFactory } from "./store-process.js
 import type { StartupCheckResult } from "../startup.js";
 
 import { createBootstrapLogging, takeEntryLogging } from "./bootstrap.js";
-import { beginWriterDeclaration, closeWriterDeclaration } from "./writer-admission.js";
+import { beginWriterDeclaration } from "./writer-admission.js";
 export { RUNTIME_LOG_SOURCE } from "./runtime-source.js";
 
 /** Bounded phase timing for the actual entry; no configuration or credential payload. */
@@ -81,10 +82,20 @@ export function beginRuntimeLogging(
   warn?: (message: string) => void,
   createStoreWorker?: LogStoreWorkerFactory,
   sharedCapacity?: DeviceCapacityRuntime,
-  options: { activityDriven?: boolean; requireCompleteClose?: boolean } = {},
+  options: { activityDriven?: boolean; requireCompleteClose?: boolean; createStore?: (capacity: DeviceCapacityRuntime) => LogSink } = {},
 ): RuntimeLogging {
   const capacity = sharedCapacity ?? createDeviceCapacityRuntime(path.resolve(home), { createDirectory: false, activityDriven: options.activityDriven === true });
-  const store = new IsolatedLogStore(path.resolve(home), capacity.arbiter, createStoreWorker, capacity.retainActivity);
+  const local = options.createStore?.(capacity);
+  const active = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const release = capacity.retainActivity();
+    try { return await operation(); } finally { release(); }
+  };
+  const store: LogSink = local ? {
+    initialize: () => active(() => local.initialize()),
+    append: records => active(() => local.append(records)),
+    maintain: () => active(() => local.maintain()),
+    close: () => local.close(),
+  } : new IsolatedLogStore(path.resolve(home), capacity.arbiter, createStoreWorker, capacity.retainActivity);
   const boot = takeEntryLogging() ?? createBootstrapLogging(mode);
   const { recorder, bind, records } = boot;
   void beginWriterDeclaration(home, (reason, failure) => records.record({ event: "writerDeclarationUnavailable", data: { reason, failure } }));
@@ -117,7 +128,14 @@ export function beginRuntimeLogging(
               (failure === "close-pending" || failure === "close-failed" || failure === "close-incomplete")) {
             throw new Error(`Runtime logging ${failure}`);
           }
-        }).finally(async () => { await closeWriterDeclaration(); if (!sharedCapacity) capacity.close(); });
+        }).finally(() => {
+          // Compatibility describes the live process, not its recorder. S can
+          // finish its logger while it still owns N's drain: withdrawing S's
+          // proof here makes N classify S as an unknown legacy writer and wait
+          // for the very process that is waiting for N. The entry owns this
+          // unref'ed declaration until process teardown (or its final cleanup).
+          if (!sharedCapacity) capacity.close();
+        });
       }
       return finishing;
     },

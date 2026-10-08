@@ -14,7 +14,7 @@ export class TerminalManagedFiles {
   #pending = 0;
   #unconfirmed = false;
   readonly #operation = new AsyncLocalStorage<{ active: boolean }>();
-  constructor(readonly directory: string, readonly expectedIdentity?: string, session = CheckpointDirectoryHandle.createSession(), readonly onUnconfirmed?: (error: unknown) => void) {
+  constructor(readonly directory: string, readonly expectedIdentity?: string, session = CheckpointDirectoryHandle.createSession(5000, undefined, true), readonly onUnconfirmed?: (error: unknown) => void) {
     this.#session = session;
   }
   /** Enqueue the entire owning action, including quota/account settlement.

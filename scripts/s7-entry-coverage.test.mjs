@@ -261,11 +261,23 @@ test("Commander and slash capture consume the actual production registration gra
   assert.throws(
     () => collectSlashCommandsFromRegistrar(
       "packages/cli/src/commands/info-commands.ts",
-      info.replace('id: "help:repl"', "id: buildHelpId()"),
+      info.replace('BUILTIN_COMMANDS["help:repl"]', 'BUILTIN_COMMANDS[buildHelpId()]'),
       "registerInfoCommands",
     ),
     /non-literal command descriptor/,
   );
+  for (const replacement of [
+    'BUILTIN_COMMANDS["missing:repl"]',
+    '{ ...BUILTIN_COMMANDS["help:repl"], id: buildHelpId() }',
+    '{ ...BUILTIN_COMMANDS["help:repl"], ...unknownDescriptor }',
+  ]) assert.throws(() => collectSlashCommandsFromRegistrar(
+    "packages/cli/src/commands/info-commands.ts",
+    info.replace('BUILTIN_COMMANDS["help:repl"]', replacement), "registerInfoCommands",
+  ), /non-literal command descriptor/);
+  assert.throws(() => collectSlashCommandsFromRegistrar(
+    "packages/cli/src/commands/info-commands.ts",
+    info.replace('./builtin-definitions.js', './unrelated-definitions.js'), "registerInfoCommands",
+  ), /non-literal command descriptor/);
 });
 
 test("cleanup and channel coverage are bound to actual production calls", async () => {
@@ -2187,7 +2199,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/runtime/rpc-confirmation-broker.ts",
-      (text) => text.replace('"confirmation.list"', '"confirmation.missing"'),
+      (text) => text.replace(/(['"])confirmation\.list\1/gu, '"confirmation.missing"'),
     )).join("\n"),
     /must recover missed pending requests/,
   );
@@ -2226,7 +2238,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/core/src/authority/commit-log.ts",
     "packages/cli/src/serve/credential-exposure-authority.ts",
     "packages/cli/src/serve/credential-rotation-publication.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
@@ -3464,13 +3476,15 @@ test("planned duty migration stays bound to two production roots and a finite ow
     )).join("\n"),
     /stop gate or strict product identity drifted/,
   );
-  assert.match(
-    inspectPlannedAnchorTransferAssembly(mutate(
-      "packages/cli/src/runtime/duty-migration-command.ts",
-      (text) => text.replace("值班设备迁移完成", "anchor 迁移完成"),
-    )).join("\n"),
-    /leaks internal topology terms/,
-  );
+  for (const label of ["值班设备迁移完成", "值班设备迁移已取消"]) {
+    assert.match(
+      inspectPlannedAnchorTransferAssembly(mutate(
+        "packages/cli/src/runtime/duty-migration-command.ts",
+        (text) => text.replace(label, "anchor 迁移"),
+      )).join("\n"),
+      /leaks internal topology terms/,
+    );
+  }
 });
 
 test("managed host stays bound to the finite launch plans, triggers and one serve root", async () => {
@@ -3480,7 +3494,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/managed-service-runtime.ts",
     "packages/mesh/src/bootstrap.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
-    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/configuration-application.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -3835,7 +3849,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/runtime/config-command.ts",
+      "packages/cli/src/runtime/configuration-application.ts",
       (text) => text.replace(
         "const reconcile = input.launchSelectionChanged",
         "const reconcile = true",
@@ -5837,7 +5851,7 @@ test("Advancement model providers are concrete only at the Host edge", async () 
 test("runtime secrets cross the Host boundary only as frozen purpose projections", async () => {
   const paths = [
     "packages/cli/src/runtime/runtime-secret-projections.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/command.ts",
@@ -5910,7 +5924,7 @@ test("validated configuration crosses composition roots as finite frozen project
     "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/cli/src/repl.ts",
     "packages/cli/src/commands/info-commands.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/command.ts",
@@ -5942,7 +5956,7 @@ test("validated configuration crosses composition roots as finite frozen project
   );
   assert.match(
     inspectRuntimeConfigurationProjectionBoundary(mutate(
-      "packages/cli/src/startup.ts",
+      "packages/cli/src/runtime/startup-application.ts",
       (text) => text.replace(
         "runtimeConfiguration: RuntimeConfigurationSnapshot;",
         "config: ZhixingConfig;",
@@ -6269,7 +6283,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
     "packages/cli/src/config-editor/types.ts",
     "packages/cli/src/config-editor/panels/mcp.ts",
     "packages/cli/src/config-editor/sections/mcp.ts",
-    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/configuration-application.ts",
     "packages/cli/src/commands/config-commands.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -6311,7 +6325,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   );
   assert.match(
     inspectMcpManagementBoundary(mutate(
-      "packages/cli/src/runtime/config-command.ts",
+      "packages/cli/src/runtime/configuration-application.ts",
       (text) => `${text}\nvoid hub.applyConfig([]);`,
     )).join("\n"),
     /hot-applies config/,
@@ -9948,9 +9962,10 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/cli/src/serve/managed-service.ts",
     "packages/cli/src/logging/runtime.ts",
     "packages/cli/src/logging/bootstrap.ts",
-    "packages/cli/src/entry.ts",
+    "packages/cli/src/legacy-entry.ts",
+    "packages/cli/src/terminal/application.ts",
     "packages/core/src/logging/storage.ts",
-    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/configuration-application.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/cli/src/runtime/workspace-command.ts",
     "packages/cli/src/serve/backup-command.ts",
@@ -9958,7 +9973,7 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/cli/src/serve/managed-service-runtime.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
     "packages/cli/src/serve/topology-command.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
     "packages/runtime-host/src/runtime-host.ts",
     "packages/core/src/conversation/application.ts",
   ];
@@ -9979,7 +9994,7 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
   );
   assert.match(
     inspectStorageRemainderBoundary(mutate(
-      "packages/cli/src/runtime/config-command.ts",
+      "packages/cli/src/runtime/configuration-application.ts",
       (text) => `${text}\ncreatePlatformSecretStore({ homeDir: "duplicate" });`,
     )).join("\n"),
     /P01 SecretStore concrete factory production multiplicity/,
@@ -10175,7 +10190,7 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
 });
 
 test("runtime logging P15 rejects reverse reader dependencies and private writers", async () => {
-  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts", "packages/cli/src/logging/bootstrap.ts", "packages/cli/src/entry.ts"];
+  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts", "packages/cli/src/logging/bootstrap.ts", "packages/cli/src/legacy-entry.ts"];
   const records = await Promise.all(paths.map(async relative => ({ relative, text: await readFile(relative, "utf8") })));
   const inspect = (input) => inspectStorageRemainderBoundary(input).filter(failure => failure.includes("P15"));
   assert.deepEqual(inspect(records), []);

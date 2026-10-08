@@ -30,7 +30,7 @@ export interface FileLockOptions {
   readonly retryMs?: number;
   readonly now?: () => number;
   readonly resourceName?: string;
-  /** Narrow platform boundary; omitted in production. */
+  /** Narrow, read-only platform boundary; defaults to the portable resolver. */
   readonly processIdentityResolver?: ProcessIdentityResolver;
 }
 

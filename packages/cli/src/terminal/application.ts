@@ -1,11 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
-import { createTerminalCredentialRunner } from './credential-command.js';
+import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { isAbsolute } from 'node:path';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
@@ -14,7 +12,10 @@ import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
-import { createTerminalLogWorker } from '../logging/terminal-worker.js';
+import { LocalLogStore } from '@zhixing/core/logging/storage';
+import { LogFilesProcess } from '../logging/files-process.js';
+import { createLogWriterProbe } from '../logging/writers.js';
+import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
 import { terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError } from '../runtime/core-host-connection.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
@@ -97,6 +98,7 @@ class TerminalApplication {
   readonly #hosts: TerminalHostLauncher;
   readonly #logging: ReturnType<typeof beginRuntimeLogging>;
   readonly #secretStore: ReturnType<typeof createPlatformSecretStore>;
+  readonly #secretPlatform = terminalSecretPlatform();
   readonly #connection: CoreHostConnection;
   readonly #conversation: RpcConversationFacade;
   readonly #workscene: RpcWorksceneFacade;
@@ -180,13 +182,22 @@ class TerminalApplication {
   #closeDeadline = 0;
   constructor(readonly instance: string, readonly home: string, directory: string, readonly transport: TerminalParentTransport, directoryIdentity: string, readonly args: readonly string[] = []) {
     this.#completion = new Promise(resolve => { this.#resolve = resolve; });
-    this.#secretStore = createPlatformSecretStore({ homeDir: home, commandRunner: createTerminalCredentialRunner(this.#abort.signal) });
-    this.#logging = beginRuntimeLogging(home, args.length ? 'independent-command' : 'repl', () => { /* finite UI notice is published by the application */ }, () => {
-      const built = new URL('./logging-store-worker.js', import.meta.url);
-      const compiled = existsSync(built);
-      return createTerminalLogWorker('log-store', [...(compiled ? [] : ['--import=tsx/esm']),
-        fileURLToPath(compiled ? built : new URL('../logging/store-worker.ts', import.meta.url)), home, String(process.pid)]);
-    }, undefined, { activityDriven: true, requireCompleteClose: true });
+    this.#secretStore = createPlatformSecretStore({ homeDir: home, commandRunner: createTerminalCredentialRunner(this.#abort.signal),
+      ...this.#secretPlatform });
+    this.#logging = beginRuntimeLogging(home, args.length ? 'independent-command' : 'repl', undefined, undefined, undefined,
+      { activityDriven: true, requireCompleteClose: true, createStore: capacity => {
+        // N is already an independently supervised process. Keep the bounded
+        // async store here; only physical file operations need a separate
+        // killable owner. S retains its isolated store so logging cannot hold
+        // the foreground supervisor's lifecycle loop.
+        const createFiles = createTerminalOwnedProcessFactory('log-files');
+        const files = new LogFilesProcess(home, 5000, {
+          createWorker: args => createTerminalLogWorker('log-files', args),
+          createWindowsSession: () => CheckpointDirectoryHandle.createWindowsSession(5000, (executable, args) =>
+            createFiles(executable, args ?? [], { deadline: Date.now() + 5000 }).child),
+        });
+        return new LocalLogStore({ files, capacity: capacity.arbiter, observeWriters: createLogWriterProbe(home, files, process.pid, runTerminalLogObserver) });
+      } });
     this.#configPath = getGlobalConfigPath(process.env, home);
     this.#channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done),
       message => this.#receive(message), reason => void this.#close(70, reason));
@@ -244,7 +255,7 @@ class TerminalApplication {
       } catch (error) {
         this.#abort.signal.removeEventListener('abort', cancelCreation); throw error;
       }
-    });
+    }, true);
     this.#files = new TerminalManagedFiles(directory, directoryIdentity, filesystemSession,
       () => void this.#close(74, 'terminal-filesystem-unconfirmed'));
     this.#display = new TerminalDisplayStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
@@ -357,7 +368,10 @@ class TerminalApplication {
     // request and all its already-consumed input-reference arrays.
     void result.then(
       value => this.#channel.send({ type: 'reply', id, value }, lane),
-      () => this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' }),
+      error => {
+        recordRuntimeFailure(this.#logging.records, error, 'terminal-request-failed');
+        return this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' });
+      },
     ).catch(() => this.#close(70, 'application-reply-undelivered')).finally(() => this.#requests.delete(id));
   }
 
@@ -513,6 +527,7 @@ class TerminalApplication {
           const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
           const result = await checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
             secretStore: this.#secretStore, records: this.#logging.records,
+            processIdentityResolver: this.#secretPlatform.processIdentityResolver,
             edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
               writers: { save: async edit => { await session.save(edit); } } }, '设备初始配置', ['model', 'messaging']),
           });
@@ -544,6 +559,7 @@ class TerminalApplication {
         this.#abort.signal.throwIfAborted();
         return checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
         secretStore: this.#secretStore,
+        processIdentityResolver: this.#secretPlatform.processIdentityResolver,
         records: this.#logging.records,
         edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
           writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging']),
@@ -1190,6 +1206,7 @@ class TerminalApplication {
     }) : undefined;
     const result = await editRuntimeConfiguration({ zhixingHome: this.home, configPath: this.#configPath,
       secretStore: this.#secretStore,
+      processIdentityResolver: this.#secretPlatform.processIdentityResolver,
       configurationRecords: this.#logging.records, state: this.#state,
       ...(connected ? { readExtensions: () => this.#management.extensions(), readExtensionLocalSetup: () => this.#management.extensionLocalSetup(),
         applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); } } : {}),

@@ -2,7 +2,7 @@ import { runtimeConfigurationObservation } from "./configuration-logging.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { acquireFileLock, ensureDurableDirectory, syncDirectory } from "@zhixing/core/persistence";
+import { acquireFileLock, ensureDurableDirectory, syncDirectory, type FileLockOptions } from "@zhixing/core/persistence";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { applyConfigPatch, assertAbsoluteWorkspaceRoot, assertNoConfigurationCommit, loadConfig, writeConfigUnlocked } from "./config-loader.js";
@@ -22,7 +22,8 @@ import { validateConfigSemantics } from "./config-validator.js";
 
 type Snapshot = { config: ZhixingConfig; credentials: ZhixingCredentials };
 type SecretUpdate = { readonly ref: SecretRef; readonly value: string };
-type Options = CredentialSnapshotOptions & { readonly configPath: string; readonly records?: LogRecordPort };
+type Options = CredentialSnapshotOptions & { readonly configPath: string; readonly records?: LogRecordPort;
+  readonly processIdentityResolver?: FileLockOptions['processIdentityResolver'] };
 interface SavedEdit extends Snapshot {
   readonly v: 1;
   readonly id: string;
@@ -49,7 +50,7 @@ export async function editConfiguration(expected: Snapshot, next: Snapshot, opti
 }): Promise<void> {
   await recoverConfigurationEdit(options);
   const configPath = path.resolve(options.configPath);
-  const release = await lockConfiguration(configPath);
+  const release = await lockConfiguration(configPath, options);
   try {
     await mutationCoordinator(options).runExclusive(async () => {
       assertNoConfigurationCommit(configPath);
@@ -88,7 +89,7 @@ export async function editConfiguration(expected: Snapshot, next: Snapshot, opti
 /** Recover first, then issue the config and credentials from the same locked source pair. */
 export async function loadConfigurationSnapshot(options: Options): Promise<Snapshot & { generation: string | null }> {
   await recoverConfigurationEdit(options);
-  const release = await lockConfiguration(path.resolve(options.configPath));
+  const release = await lockConfiguration(path.resolve(options.configPath), options);
   try {
     return await mutationCoordinator(options).runExclusive(async () => {
       assertNoConfigurationCommit(path.resolve(options.configPath));
@@ -102,7 +103,7 @@ async function recoverConfigurationEdit(options: Options): Promise<void> {
   const encoded = await options.store.get(CONFIGURATION_EDIT_REF);
   if (!encoded) return;
   const observed = parseEdit(encoded);
-  const release = await lockConfiguration(observed.configPath);
+  const release = await lockConfiguration(observed.configPath, options);
   try {
     await mutationCoordinator(options).runExclusive(async () => {
       const current = await options.store.get(CONFIGURATION_EDIT_REF);
@@ -132,9 +133,10 @@ async function applySavedEdit(edit: SavedEdit, store: SecretStorePort): Promise<
 }
 
 function markerPath(configPath: string): string { return `${configPath}.edit.pending`; }
-async function lockConfiguration(configPath: string) {
+async function lockConfiguration(configPath: string, options: Options) {
   await ensureDurableDirectory(path.dirname(configPath));
-  return acquireFileLock(`${configPath}.write.lock`, { staleMs: 30_000, waitMs: 5_000, resourceName: "Configuration" });
+  return acquireFileLock(`${configPath}.write.lock`, { staleMs: 30_000, waitMs: 5_000, resourceName: "Configuration",
+    processIdentityResolver: options.processIdentityResolver });
 }
 async function readMarker(configPath: string): Promise<{ id: string } | undefined> {
   try { return JSON.parse(await fs.promises.readFile(markerPath(configPath), "utf8")) as { id: string }; }

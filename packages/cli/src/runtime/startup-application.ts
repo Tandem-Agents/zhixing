@@ -62,6 +62,7 @@ export type StartupCheckResult =
   | { kind: "non-tty"; missingLabels: string[] };
 
 export interface StartupApplicationOptions {
+  processIdentityResolver?: import('@zhixing/core/persistence').FileLockOptions['processIdentityResolver'];
   records?: import("@zhixing/core/logging").LogRecordPort;
   /** 入口固定的数据根；配置文件可单独指定。 */
   homeDir?: string;
@@ -130,6 +131,7 @@ export async function checkStartupConfiguration(
       configPath,
       store: secretStore,
       records: options.records,
+      processIdentityResolver: options.processIdentityResolver,
       legacyHomeDir: credentialsHomeDir,
       ...(credentialReadGuard
         ? { authorizeCredentialRead: credentialReadGuard }
@@ -178,7 +180,8 @@ export async function checkStartupConfiguration(
   // 4. 缺失 + TTY → 跑编辑器
   const editorResult = await options.edit({
     config, credentials, configPath,
-    save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore, records: options.records }),
+    save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore, records: options.records,
+      processIdentityResolver: options.processIdentityResolver }),
   });
 
   if (editorResult.kind === "completed") {
@@ -191,6 +194,7 @@ export async function checkStartupConfiguration(
       configPath,
       store: secretStore,
       records: options.records,
+      processIdentityResolver: options.processIdentityResolver,
       legacyHomeDir: credentialsHomeDir,
       ...(updatedCredentialReadGuard
         ? { authorizeCredentialRead: updatedCredentialReadGuard }

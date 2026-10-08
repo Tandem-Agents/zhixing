@@ -22,6 +22,24 @@ async function fixture() {
 }
 
 describe("EncryptedVaultSecretStore", () => {
+  it('uses injected native protection and identity for every vault lock and retains locked semantics', async () => {
+    const directory = await createTempDir('native-vault-ports'); let reads = 0, protectedBytes: Buffer | undefined;
+    const options = { homeDir: directory, platform: 'win32' as const,
+      processIdentityResolver: { read: async () => { reads++; return { kind: 'present' as const, birth: 'synthetic-native-self' }; } },
+      commandRunner: async () => { throw Error('shell must not run'); },
+      windowsProtection: async (mode: 'protect' | 'unprotect', input: Uint8Array) => {
+        if (mode === 'protect') { protectedBytes = Buffer.from(input); return Buffer.from('synthetic-wrapped-key'); }
+        return Buffer.from(protectedBytes!);
+      } };
+    const store = createPlatformSecretStore(options);
+    await store.runExclusive(async () => store.put({ kind: 'provider', bindingId: 'test' }, 'synthetic'));
+    expect(reads).toBeGreaterThanOrEqual(3); // exclusive, initialization and vault mutation
+    const reopened = createPlatformSecretStore(options);
+    expect(await reopened.get({ kind: 'provider', bindingId: 'test' })).toBe('synthetic');
+    const locked = createPlatformSecretStore({ ...options, windowsProtection: async () => { throw Error('native unavailable'); } });
+    expect(await locked.unlockState()).toBe('locked');
+    protectedBytes?.fill(0);
+  });
   it('persists pairing and peer rendezvous references across vault reopen and deletion', async () => {
     const { vaultPath, store } = await fixture();
     const refs = [

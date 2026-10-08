@@ -79,18 +79,49 @@ export class TerminalPrivateEndpoint {
   }
 }
 
+/** One bounded receive workspace per connection. Reuse it across frames instead
+ * of copying the whole growing prefix for every socket chunk. Parsed objects
+ * own their strings; raw bytes are cleared before dispatch, including secrets. */
+export class TerminalJsonFrames {
+  #buffer = Buffer.alloc(0);
+  #used = 0;
+  constructor(readonly limit: number) {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw Error('terminal-frame-limit');
+  }
+  clear(): void { this.#buffer.fill(0); this.#used = 0; }
+  accept(data: Buffer, receive: (value: unknown) => void): void {
+    try {
+      for (let offset = 0; offset < data.length;) {
+        const newline = data.indexOf(10, offset), end = newline < 0 ? data.length : newline;
+        const length = this.#used + end - offset;
+        if (length > this.limit) throw Error('terminal-frame-capacity');
+        if (length > this.#buffer.length) {
+          const next = Buffer.allocUnsafe(Math.min(this.limit, Math.max(length, 4096, this.#buffer.length * 2)));
+          this.#buffer.copy(next, 0, 0, this.#used); this.#buffer.fill(0); this.#buffer = next;
+        }
+        data.copy(this.#buffer, this.#used, offset, end); this.#used = length;
+        if (newline < 0) return;
+        const value: unknown = JSON.parse(this.#buffer.toString('utf8', 0, length));
+        this.#buffer.fill(0, 0, length); this.#used = 0;
+        receive(value); offset = end + 1;
+      }
+    } catch (error) { this.clear(); throw error; }
+  }
+}
+
 /** Private same-instance connection to S. Does not read terminal input. */
 export class TerminalParentTransport extends EventEmitter {
   readonly socket: Socket;
-  #buffer = Buffer.alloc(0);
+  readonly #frames: TerminalJsonFrames;
   #closed = false;
   constructor(endpoint: string | 3 | 6, readonly frameBytes = TERMINAL_LIMITS.frameBytes) {
     super();
+    this.#frames = new TerminalJsonFrames(frameBytes);
     if (typeof endpoint === 'string' ? !isTerminalPrivateEndpoint(endpoint) : ![3, 6].includes(endpoint)) throw Error('terminal-parent-endpoint');
     this.socket = typeof endpoint === 'string' ? connect(endpoint) : adoptTerminalSocket(endpoint);
     this.socket.on('data', data => this.#data(data));
     this.socket.on('error', () => this.#fail());
-    this.socket.once('close', () => { this.#closed = true; this.emit('disconnect'); });
+    this.socket.once('close', () => { this.#closed = true; this.#frames.clear(); this.emit('disconnect'); });
   }
   get connected(): boolean { return !this.#closed; }
   send(message: unknown, done: (error?: Error | null) => void): void {
@@ -102,18 +133,8 @@ export class TerminalParentTransport extends EventEmitter {
   }
   close(): void { if (!this.#closed) { this.#closed = true; this.socket.end(); } }
   #data(data: Buffer): void {
-    for (let offset = 0; offset < data.length;) {
-      const newline = data.indexOf(10, offset);
-      const end = newline < 0 ? data.length : newline;
-      const part = data.subarray(offset, end);
-      if (this.#buffer.length + part.length > this.frameBytes) { this.#fail(); return; }
-      this.#buffer = Buffer.concat([this.#buffer, part]);
-      if (newline < 0) return;
-      const frame = this.#buffer; this.#buffer = Buffer.alloc(0);
-      try { this.emit('message', JSON.parse(frame.toString('utf8'))); }
-      catch { this.#fail(); return; }
-      offset = end + 1;
-    }
+    try { this.#frames.accept(data, value => this.emit('message', value)); }
+    catch { this.#fail(); }
   }
-  #fail(): void { this.#closed = true; this.socket.destroy(); }
+  #fail(): void { this.#closed = true; this.#frames.clear(); this.socket.destroy(); }
 }

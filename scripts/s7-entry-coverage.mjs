@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FEISHU_INBOUND_EVENT_NAMES } from "../packages/channels/feishu/src/adapter.ts";
 import { SKILL_COMMAND_SOURCE_DESCRIPTOR } from "../packages/cli/src/commands/skill-command-source.ts";
+import { BUILTIN_COMMANDS } from "../packages/cli/src/commands/builtin-definitions.ts";
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import { packagedExtensions } from "../packages/cli/src/runtime/extensions/catalog.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
@@ -398,17 +399,46 @@ export function collectSlashCommandsFromRegistrar(
     throw new Error(`${relative}: missing production slash registrar ${functionName}`);
   }
   const commands = [];
+  const builtinNames = new Set();
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) ||
+      path.posix.normalize(path.posix.join(path.posix.dirname(relative), statement.moduleSpecifier.text)) !==
+        "packages/cli/src/commands/builtin-definitions.js" ||
+      !statement.importClause?.namedBindings || !ts.isNamedImports(statement.importClause.namedBindings)) continue;
+    for (const binding of statement.importClause.namedBindings.elements) {
+      if ((binding.propertyName?.text ?? binding.name.text) === "BUILTIN_COMMANDS") builtinNames.add(binding.name.text);
+    }
+  }
+  const invalid = () => { throw new Error(`${relative}:${functionName}: non-literal command descriptor`); };
+  const descriptor = (node) => {
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) &&
+      builtinNames.has(node.expression.text) && ts.isStringLiteral(node.argumentExpression)) {
+      const value = BUILTIN_COMMANDS[node.argumentExpression.text];
+      if (!value) return invalid();
+      return { id: value.id, name: value.name, execution: value.execution };
+    }
+    if (!ts.isObjectLiteralExpression(node)) return invalid();
+    const value = {};
+    for (const property of node.properties) {
+      if (ts.isSpreadAssignment(property)) Object.assign(value, descriptor(property.expression));
+      else {
+        if (!property.name || ts.isComputedPropertyName(property.name)) return invalid();
+        const key = property.name.text;
+        if (!["id", "name", "execution"].includes(key)) continue;
+        if (!ts.isPropertyAssignment(property) || !ts.isStringLiteral(property.initializer)) return invalid();
+        value[key] = property.initializer.text;
+      }
+    }
+    return value;
+  };
   const visit = (node) => {
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === "register" &&
-      node.arguments[0] &&
-      ts.isObjectLiteralExpression(node.arguments[0])
+      node.arguments[0]
     ) {
-      const id = literalProperty(node.arguments[0], "id");
-      const name = literalProperty(node.arguments[0], "name");
-      const execution = literalProperty(node.arguments[0], "execution");
+      const { id, name, execution } = descriptor(node.arguments[0]);
       if (!id || !name || !execution) {
         throw new Error(`${relative}:${functionName}: non-literal command descriptor`);
       }
@@ -3470,7 +3500,7 @@ export function inspectRuntimeSecretProjectionBoundary(records) {
   const projection = required(
     "packages/cli/src/runtime/runtime-secret-projections.ts",
   );
-  const startup = required("packages/cli/src/startup.ts");
+  const startup = required("packages/cli/src/runtime/startup-application.ts");
   const topology = required("packages/cli/src/serve/role-topology.ts");
   const host = required("packages/cli/src/serve/application-host.ts");
   const anchor = required("packages/cli/src/serve/command.ts");
@@ -3602,7 +3632,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   );
   const repl = required("packages/cli/src/repl.ts");
   const infoCommands = required("packages/cli/src/commands/info-commands.ts");
-  const startup = required("packages/cli/src/startup.ts");
+  const startup = required("packages/cli/src/runtime/startup-application.ts");
   const topology = required("packages/cli/src/serve/role-topology.ts");
   const host = required("packages/cli/src/serve/application-host.ts");
   const anchor = required("packages/cli/src/serve/command.ts");
@@ -3731,17 +3761,18 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   }
 
   const allowedConfigurationSourceOwners = new Set([
+    "packages/cli/src/terminal/application.ts",
     "packages/cli/src/runtime/extensions/channel-configuration.ts",
     "packages/cli/src/runtime/mcp-connection-adapter.ts",
     "packages/cli/src/maintenance/doctor.ts",
     "packages/cli/src/repl.ts",
-    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/configuration-application.ts",
     "packages/cli/src/runtime/runtime-configuration-provider.ts",
     "packages/cli/src/serve/backup-command.ts",
     "packages/cli/src/serve/disaster-recovery-command.ts",
     "packages/cli/src/serve/managed-service-runtime.ts",
     "packages/cli/src/serve/mesh-pair-command.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
   ]);
   for (const record of records) {
     if (
@@ -3875,7 +3906,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !snapshotConstructors.some((record) =>
       record.relative === "packages/cli/src/runtime/runtime-configuration-snapshot.ts") ||
     !snapshotConstructors.some((record) =>
-      record.relative === "packages/cli/src/startup.ts")
+      record.relative === "packages/cli/src/runtime/startup-application.ts")
   ) {
     failures.push("runtime configuration snapshot has a second constructor or misses the startup edge");
   }
@@ -3900,7 +3931,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   const expectedSnapshotTypeOwners = new Set([
     "packages/cli/src/runtime/runtime-configuration-projections.ts",
     "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
-    "packages/cli/src/startup.ts",
+    "packages/cli/src/runtime/startup-application.ts",
   ]);
   if (
     snapshotTypeOwners.some((record) => !expectedSnapshotTypeOwners.has(record.relative))
@@ -4251,7 +4282,7 @@ export function inspectMcpManagementBoundary(records) {
   const editorTypes = required("packages/cli/src/config-editor/types.ts");
   const panel = required("packages/cli/src/config-editor/panels/mcp.ts");
   const section = required("packages/cli/src/config-editor/sections/mcp.ts");
-  const configCommand = required("packages/cli/src/runtime/config-command.ts");
+  const configCommand = required("packages/cli/src/runtime/configuration-application.ts");
   const commandRegistration = required("packages/cli/src/commands/config-commands.ts");
 
   if (
@@ -4879,7 +4910,7 @@ export function inspectStorageRemainderBoundary(records) {
   const managedService = required("packages/cli/src/serve/managed-service.ts");
   const logRuntime = required("packages/cli/src/logging/runtime.ts");
   const logBootstrap = required("packages/cli/src/logging/bootstrap.ts");
-  const logEntry = required("packages/cli/src/entry.ts");
+  const logEntry = required("packages/cli/src/legacy-entry.ts");
   const logStore = required("packages/core/src/logging/storage.ts");
 
   if (
@@ -4894,7 +4925,7 @@ export function inspectStorageRemainderBoundary(records) {
   requireMultiplicity(
     "createPlatformSecretStore(",
     [
-      ["packages/cli/src/runtime/config-command.ts", 1],
+      ["packages/cli/src/runtime/configuration-application.ts", 1],
       ["packages/cli/src/runtime/surface-core-host-link.ts", 1],
       ["packages/cli/src/runtime/workspace-command.ts", 1],
       ["packages/cli/src/serve/backup-command.ts", 2],
@@ -4902,7 +4933,8 @@ export function inspectStorageRemainderBoundary(records) {
       ["packages/cli/src/serve/managed-service-runtime.ts", 1],
       ["packages/cli/src/serve/mesh-pair-command.ts", 1],
       ["packages/cli/src/serve/topology-command.ts", 1],
-      ["packages/cli/src/startup.ts", 1],
+      ["packages/cli/src/runtime/startup-application.ts", 1],
+      ["packages/cli/src/terminal/application.ts", 1],
     ],
     "P01 SecretStore concrete factory",
     new Set(["packages/secrets/src/platform-secret-store.ts"]),
@@ -5060,6 +5092,7 @@ export function inspectStorageRemainderBoundary(records) {
   }
   requireMultiplicity("new LogRecorder(", [["packages/cli/src/logging/bootstrap.ts", 1]], "P15 production recorder");
   const readerSurfaces = new Set([
+    "packages/cli/src/terminal/application.ts",
     "packages/orchestrator/src/tools/task.ts", "packages/rpc/src/log-client.ts",
     "packages/server/src/rpc/methods/logs.ts", "packages/cli/src/serve/command.ts",
   ]);
@@ -8080,7 +8113,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /AnchorConversationDirectoryMechanism|readonly conversationDirectory\s*:/u.test(
       accessSurfaceContext,
     ) ||
-    accessSurfaces.split("inputConversationIdentityLifecycle.").length - 1 !== 4 ||
+    accessSurfaces.split("inputConversationIdentityLifecycle.").length - 1 !== 5 ||
     /ctx\.conversationDirectory\.(?:exists|ensure|ensureTranscript)\s*\(/u.test(
       accessSurfaces,
     ) ||
@@ -9534,7 +9567,7 @@ export function inspectManagedHostAssembly(records) {
   const serviceRuntime = byPath.get("packages/cli/src/serve/managed-service-runtime.ts");
   const bootstrap = byPath.get("packages/mesh/src/bootstrap.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
-  const config = byPath.get("packages/cli/src/runtime/config-command.ts");
+  const config = byPath.get("packages/cli/src/runtime/configuration-application.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const accessSurface = byPath.get("packages/cli/src/serve/access-surface.ts");
   const accessSurfaces = byPath.get("packages/cli/src/serve/access-surfaces.ts");
@@ -9598,6 +9631,7 @@ export function inspectManagedHostAssembly(records) {
     "executorJobOwner.close",
     "losslessDataPlane.close",
     "ephemeralRuntime.dispose",
+    "sessionProcess.dispose",
   ];
   const anchorRuntimeLifecycleIds = [
     "anchorInternalStop.close",
@@ -10014,7 +10048,8 @@ export function inspectManagedHostAssembly(records) {
     !service.includes("projection.actions.items.length === 1")
   ) failures.push("managed host Windows bytes, strict projection or HRESULT classifier drifted");
   if (
-    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 4 ||
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 3 ||
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage, commandRunner })") !== 1 ||
     !serviceRuntime.includes("export async function prepareManagedServiceMaintenance(") ||
     !serviceRuntime.includes("export async function prepareProgramUninstallManagedService(") ||
     !service.includes('"managed-service-reconcile"') ||
@@ -10395,7 +10430,9 @@ export function inspectManagedHostAssembly(records) {
     !connection.includes("const surfaceClient = await this.deps.createSurfaceClient()") ||
     !surfaceLink.includes("isCurrentAnchorRelayMethod(method)") ||
     !surfaceLink.includes("canonicalize(trust)") ||
-    !surfaceLink.includes("await this.#remote.close(this.#connection)") ||
+    !surfaceLink.includes("binding.remote.close(binding.connection)") ||
+    !surfaceLink.includes("this.#retiring.add(closing)") ||
+    !surfaceLink.includes("await Promise.all(this.#retiring)") ||
     !surfaceLink.includes("this.bootstrapStore.stopStorageMaintenance()")
   ) failures.push("managed host finite current-anchor surface relay drifted");
   for (const forbidden of [
@@ -10472,7 +10509,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const authorityCommitLog = byPath.get("packages/core/src/authority/commit-log.ts");
   const exposureAuthority = byPath.get("packages/cli/src/serve/credential-exposure-authority.ts");
   const credentialRotation = byPath.get("packages/cli/src/serve/credential-rotation-publication.ts");
-  const startup = byPath.get("packages/cli/src/startup.ts");
+  const startup = byPath.get("packages/cli/src/runtime/startup-application.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   const checkpointService = byPath.get("packages/mesh/src/checkpoint-service.ts");
   const checkpointTarget = byPath.get("packages/mesh/src/checkpoint-target.ts");
@@ -12139,7 +12176,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor transfer stop gate or strict product identity drifted");
   }
   const publicText = [...product.matchAll(
-    /(?:console\.log|TypeError)\((?:`([^`]*)`|"([^"]*)"|'([^']*)')/gu,
+    /(?:console\.log|writeLine|TypeError|\(options\.writeLine\s*\?\?\s*console\.log\))\((?:`([^`]*)`|"([^"]*)"|'([^']*)')/gu,
   )].map((match) => match[1] ?? match[2] ?? match[3] ?? "").join(" ");
   if (/anchor|epoch|issuer|catalog/iu.test(publicText)) {
     failures.push("planned anchor transfer public journey leaks internal topology terms");
@@ -13828,6 +13865,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "discardDeferredIntent",
       "ensureSession",
       "finalHistory",
+      "recoveryPage",
       "listConversations",
       "listConversationAuthorities",
       "listDeferredIntents",
@@ -14806,7 +14844,7 @@ export function inspectConversationAdoptionAssembly(records) {
     count(
       conversationFacade.text,
       /\.\.\.this\.#continuationConsent\(\)/gu,
-    ) !== 9 ||
+    ) !== 10 ||
     !/pendingContinuationConfirmation\(\):\s*readonly\s+string\[\]\s*\|\s*null/u.test(
       conversationFacade.text,
     ) ||
@@ -14815,7 +14853,7 @@ export function inspectConversationAdoptionAssembly(records) {
       conversationFacade.text,
     )
   ) {
-    failures.push(`${conversationFacade.relative}: the Surface client must apply one capability confirmation fact to the nine mutation requests without topology state`);
+    failures.push(`${conversationFacade.relative}: the Surface client must apply one capability confirmation fact to the nine mutation requests and the bounded resume consumer without topology state`);
   }
   const conversationController = required.get(
     "packages/cli/src/runtime/conversation-controller.ts",
@@ -15066,7 +15104,8 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   const broker = required.get("packages/cli/src/runtime/rpc-confirmation-broker.ts");
-  if (!/async\s+refresh\s*\(\s*\)[\s\S]*?request[\s\S]*?"confirmation\.list"[\s\S]*?this\.acceptPending/u.test(broker.text)) {
+  if (!/async\s+refresh\s*\(\s*\)[\s\S]*?this\.acceptPending\(item\)/u.test(broker.text) ||
+      !/client\.consume[\s\S]*?['"]confirmation\.list['"][\s\S]*?client\.request[\s\S]*?['"]confirmation\.list['"]/u.test(broker.text)) {
     failures.push(`${broker.relative}: the first-party confirmation renderer must recover missed pending requests`);
   }
   const repl = required.get("packages/cli/src/repl.ts");
@@ -15579,11 +15618,14 @@ const coreHostRpcLinkOwners = new Set([
   "packages/cli/src/runtime/rpc-workscene-facade.ts",
 ]);
 const rpcClientOwners = new Set([
+  "packages/cli/src/runtime/rpc-conversation-facade.ts",
+  "packages/cli/src/terminal/application.ts",
   "packages/cli/src/runtime/core-host-connection.ts",
   "packages/cli/src/runtime/surface-core-host-link.ts",
   "packages/cli/src/serve/stop.ts",
 ]);
 const coreHostConnectionOwners = new Set([
+  "packages/cli/src/terminal/application.ts",
   "packages/cli/src/index.ts",
   "packages/cli/src/repl.ts",
   "packages/cli/src/runtime/anchor-uninstall-command.ts",

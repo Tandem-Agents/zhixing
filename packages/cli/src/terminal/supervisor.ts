@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { beginTerminalWriterDeclaration } from './writer-declaration.js';
+import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -10,7 +10,7 @@ import { TerminalChannel } from '@zhixing/terminal-ui/channel';
 import { TERMINAL_PROTOCOL, type TerminalMessage, type TerminalTraffic } from '@zhixing/terminal-ui/protocol';
 import { isTerminalPrivateEndpoint, TerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
 import { createServer, type Server, type Socket } from 'node:net';
-import { TERMINAL_WINDOWS_PRIVATE_GATE, TerminalWindowsWriterAdmission, type TerminalHelperRole } from './host-launch.js';
+import { TerminalWindowsWriterAdmission, type TerminalHelperRole } from './host-launch.js';
 import { createDeviceCapacityRuntime } from '../serve/device-capacity-runtime.js';
 import { TerminalInstanceAssets, type TerminalIdentityResolver, type TerminalProcessIdentity } from './instance-assets.js';
 import { TerminalForegroundProcesses, type TerminalForegroundChild } from './foreground-process.js';
@@ -64,6 +64,7 @@ class TerminalSupervisor {
   #resolve!: (code: number) => void;
   #closing?: Promise<void>;
   #sealed = false;
+  #executionSealed = false;
   #result = 0;
   #deadline = 0;
   #deadlineTimer?: ReturnType<typeof setTimeout>;
@@ -113,17 +114,31 @@ class TerminalSupervisor {
       // silently enter an old renderer. Hash costs belong to complete startup.
       const executableSuffix = process.platform === 'win32' ? '.exe' : '';
       const renderLibrary = process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so';
-      for (const name of [`recovery${executableSuffix}`, `ui${executableSuffix}`, renderLibrary, 'foreground.node', ...(process.platform === 'win32' ? [] : ['exec-gate'])]) {
+      const verificationBuffer = Buffer.allocUnsafe(1024 * 1024);
+      for (const name of [`recovery${executableSuffix}`, `ui${executableSuffix}`, renderLibrary, 'foreground.node', `exec-gate${executableSuffix}`]) {
         const item = manifest.artifacts.find(value => value.name === name);
         if (!item || !/^[a-f0-9]{64}$/u.test(item.sha256)) throw Error('terminal-package-manifest');
         const file = path.join(distribution, name);
         const digest = createHash('sha256');
-        if ((await stat(file)).size !== item.bytes) throw Error('terminal-package-integrity');
-        for await (const chunk of createReadStream(file, { highWaterMark: 64 * 1024 })) { this.#live(); digest.update(chunk); }
+        const handle = await open(file, 'r');
+        try {
+          if ((await handle.stat()).size !== item.bytes) throw Error('terminal-package-integrity');
+          // Reuse one buffer across the complete fixed closure. Read streams
+          // allocate the entire bundle's volume again as transient chunks.
+          let offset = 0;
+          while (offset < item.bytes) {
+            this.#live();
+            const { bytesRead } = await handle.read(verificationBuffer, 0, Math.min(verificationBuffer.length, item.bytes - offset), offset);
+            if (!bytesRead) throw Error('terminal-package-integrity');
+            digest.update(verificationBuffer.subarray(0, bytesRead)); offset += bytesRead;
+          }
+          if ((await handle.stat()).size !== item.bytes) throw Error('terminal-package-integrity');
+        } finally { await handle.close(); }
         if (digest.digest('hex') !== item.sha256) throw Error('terminal-package-integrity');
       }
       this.#live();
       this.#processes = new TerminalForegroundProcesses(path.join(distribution, 'foreground.node'));
+      await beginTerminalWriterDeclaration(this.options.home, this.#processes.artifact); this.#live();
       if (process.platform === 'win32') {
         this.#creationServer = createServer(socket => this.#acceptCreation(socket));
         this.#creationServer.on('error', () => void this.#close(71, 'terminal-creation-channel-failed'));
@@ -149,7 +164,11 @@ class TerminalSupervisor {
       await this.#assets.intent('application', this.#abort.signal, applicationSpawn);
       this.#live();
       const applicationDeadline = Date.now() + 5000;
-      this.#application = this.#spawn('application', process.execPath, [this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
+      // Projection creates short-lived DTOs beside another rendering runtime.
+      // Collect them earlier instead of growing a server-sized spare heap.
+      // This changes GC scheduling, not the admitted RPC/large-input capacity.
+      this.#application = this.#spawn('application', process.execPath,
+        ['--max-semi-space-size=4', '--heap-growing-percent=20', this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
         ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_INSTANCE: this.instance,
         ZHIXING_TERMINAL_DIRECTORY: instancePath, ZHIXING_TERMINAL_DIRECTORY_ID: this.#assets.instanceIdentity, ZHIXING_TERMINAL_HOME: this.options.home,
       }, applicationSpawn);
@@ -186,17 +205,32 @@ class TerminalSupervisor {
 
   #live(): void { if (this.#sealed || this.#abort.signal.aborted) throw Error('terminal-admission-closed'); }
 
+  #helperLive(owner: string, role: string): void {
+    if (!this.#sealed) { this.#live(); return; }
+    // Stop new business immediately, but let the existing log owners drain.
+    // Their lazy file/probe workers are part of that drain, not new work.
+    const logging = (owner === 'application' || owner === 'supervisor') && role === 'log-store'
+      || owner === 'application' && (role === 'log-files' || role === 'writer-observer')
+      || owner === 'log-store' && (role === 'log-files' || role === 'writer-observer')
+      || owner === 'log-files' && (role === 'filesystem' || role === 'writer-observer')
+      || owner === 'writer-observer' && role === 'writer-observer';
+    if (!logging || this.#executionSealed || Date.now() >= terminalWriterDeadline(this.#deadline)) throw Error('terminal-admission-closed');
+  }
+
   #createLogStore(): ReturnType<LogStoreWorkerFactory> {
-    this.#live();
+    this.#helperLive('supervisor', 'log-store');
     const owner = this.#newCreationOwner('log-store');
     let child: TerminalForegroundChild;
     try { child = this.#processes!.create(process.execPath,
-      [path.join(path.dirname(this.options.entry), 'logging-store-worker.js'), this.options.home, String(process.pid)],
+      // This lifecycle-only recorder is IO-bound and emits few events. Avoid
+      // reserving a second JIT compiler/code heap for it; N and U keep their
+      // normal runtimes for business projection and rendering.
+      ['--jitless', '--max-semi-space-size=2', '--heap-growing-percent=20', path.join(path.dirname(this.options.entry), 'logging-store-worker.js'), this.options.home, String(process.pid)],
       { ...process.env, ...owner.env }, false, false, { scope: 'execution', pipeEnvironment: 'ZHIXING_LOG_STORE_PIPE', frameBytes: LOG_STORE_FRAME_BYTES, creationOwner: true });
     } catch (error) { this.#creationOwners.delete(owner.token); throw error; }
     this.#bindCreationOwner(owner.token, child);
     this.#trackHelper(child);
-    child.once('spawn', () => { try { this.#live(); child.resume(); } catch { child.kill(); } });
+    child.once('spawn', () => { try { this.#helperLive('supervisor', 'log-store'); child.resume(); } catch { child.kill(); } });
     // The logging owner handles worker failures. S retains actual exit duty.
     child.on('error', () => {});
     return { worker: child, ready: child.transportReady };
@@ -269,7 +303,7 @@ class TerminalSupervisor {
     });
   }
   #acceptOwnerChannel(owner: string, ownerChild: TerminalForegroundChild, socket: Socket): void {
-    if (this.#sealed || this.#creationConnections.size >= 32) { socket.destroy(); ownerChild.kill(); return; }
+    if (this.#executionSealed || this.#creationConnections.size >= 32) { socket.destroy(); ownerChild.kill(); return; }
     this.#creationConnections.add(socket);
     const ownerEntry = this.#creationOwners.get(owner);
     if (!ownerEntry) { socket.destroy(); ownerChild.kill(); return; }
@@ -311,16 +345,19 @@ class TerminalSupervisor {
             if (!helper) continue;
             helper.child.kill(message.signal as NodeJS.Signals); continue;
           }
-          this.#live();
-          const { role, deadline } = message;
+          const { role, deadline: requestedDeadline } = message;
           const authorization = this.#creationOwners.get(owner);
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
+            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
             credential: ['credential-command'], 'writer-observer': ['writer-observer'],
           };
           if (message.type !== 'create' || !authorization || ownerChild.exited || typeof role !== 'string' || !allowed[authorization.role]?.includes(role as TerminalHelperRole) ||
-              this.#privateHelpers.has(id) || this.#hosts.has(id) || typeof deadline !== 'number' || !Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline > Date.now() + 5000) throw Error('terminal-helper-admission');
+              this.#privateHelpers.has(id) || this.#hosts.has(id) || typeof requestedDeadline !== 'number' || !Number.isSafeInteger(requestedDeadline) || requestedDeadline <= Date.now()) throw Error('terminal-helper-admission');
+          // Each process samples wall time independently. Bound the granted
+          // lifetime here rather than rejecting a valid peer a few ms ahead.
+          const deadline = Math.min(requestedDeadline, Date.now() + 5000);
+          this.#helperLive(authorization.role, role);
           if (this.#processes!.children.size >= 32 || (allowed[role] && this.#creationOwners.size >= 32)) {
             if (socket.writableLength > 4096) { fail(); return; }
             socket.write(JSON.stringify({ id, event: 'closed', code: 75, signal: null, deadline }) + '\n');
@@ -358,7 +395,7 @@ class TerminalSupervisor {
                 writerIdentity = await this.#helperIdentity(child, id);
                 await this.#assets!.bindWriter(writerIdentity, this.#abort.signal);
               }
-              this.#live(); if (socket.destroyed || ownerChild.exited || Date.now() >= deadline) throw Error('terminal-helper-create-expired');
+              this.#helperLive(authorization.role, role); if (socket.destroyed || ownerChild.exited || Date.now() >= deadline) throw Error('terminal-helper-create-expired');
               const generation = child.handoffChannels(ownerChild, id);
               handed = true;
               this.#channelHandoffs.set(id, { owner, generation, cancel: ownerClosed => {
@@ -367,7 +404,7 @@ class TerminalSupervisor {
               }, permit: () => {
                 acknowledged = true;
                 if (closed) { finish(); return; }
-                this.#live(); if (Date.now() >= deadline || ownerChild.exited || socket.destroyed || child.exited || child.cancelled) { child.kill(); return; }
+                this.#helperLive(authorization.role, role); if (Date.now() >= deadline || ownerChild.exited || socket.destroyed || child.exited || child.cancelled) { child.kill(); return; }
                 child.resume(); clearTimeout(timer); send(id, 'permitted', child);
               } });
               send(id, 'created', child); send(id, 'channels', child);
@@ -383,7 +420,7 @@ class TerminalSupervisor {
     });
   }
   #acceptCreation(socket: Socket): void {
-    if (this.#sealed || this.#creationConnections.size >= 32) { socket.destroy(); return; }
+    if (this.#executionSealed || this.#creationConnections.size >= 32) { socket.destroy(); return; }
     this.#creationConnections.add(socket);
     let helper: TerminalForegroundChild | undefined, buffer = '', requestId: string | undefined, issuingOwner: string | undefined;
     const fail = () => { helper?.kill('SIGKILL'); socket.destroy(); };
@@ -402,18 +439,19 @@ class TerminalSupervisor {
             if (message.type !== 'signal' || !['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP', 'SIGQUIT'].includes(String(message.signal))) throw Error('terminal-helper-control');
             helper.kill(message.signal as NodeJS.Signals); continue;
           }
-          this.#live();
-          const { owner, id, role, endpoint, token, deadline } = message;
+          const { owner, id, role, endpoint, token, deadline: requestedDeadline } = message;
           const authorization = typeof owner === 'string' ? this.#creationOwners.get(owner) : undefined;
           const allowed: Readonly<Record<string, readonly TerminalHelperRole[]>> = {
-            application: ['filesystem', 'log-store', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
+            application: ['filesystem', 'log-store', 'log-files', 'credential', 'clipboard', 'mcp-probe', 'writer-observer', 'managed-service'],
             'log-store': ['log-files', 'writer-observer'], 'log-files': ['filesystem', 'writer-observer'],
             credential: ['credential-command'], 'writer-observer': ['writer-observer'],
           };
           if (message.v !== 1 || !authorization?.child || authorization.child.exited || typeof role !== 'string' || !allowed[authorization.role]?.includes(role as TerminalHelperRole) ||
               typeof id !== 'string' || !/^[a-f0-9-]{36}$/u.test(id) || this.#privateHelpers.has(id) ||
               typeof token !== 'string' || !/^[a-f0-9-]{36}$/u.test(token) || typeof endpoint !== 'string' || !isTerminalPrivateEndpoint(endpoint) ||
-              typeof deadline !== 'number' || !Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline > Date.now() + 5000) throw Error('terminal-helper-admission');
+              typeof requestedDeadline !== 'number' || !Number.isSafeInteger(requestedDeadline) || requestedDeadline <= Date.now()) throw Error('terminal-helper-admission');
+          const deadline = Math.min(requestedDeadline, Date.now() + 5000);
+          this.#helperLive(authorization.role, role);
           if (this.#processes!.children.size >= 32 || this.#creationOwners.size >= 32) {
             clearTimeout(timeout);
             socket.end(JSON.stringify({ event: 'closed', code: 75, signal: null, deadline }) + '\n'); return;
@@ -424,9 +462,8 @@ class TerminalSupervisor {
           void intent?.catch(() => {});
           let writerIdentity: TerminalProcessIdentity | undefined;
           issuingOwner = nextOwner.token;
-          const executable = process.execPath;
-          const args = ['--input-type=commonjs', '--eval', TERMINAL_WINDOWS_PRIVATE_GATE, endpoint, token, String(deadline),
-            intent ? id : '', intent ? this.#processes!.artifact : ''];
+          const executable = this.#processes!.gate;
+          const args = [endpoint, token, String(deadline), intent ? id : ''];
           const child = helper = this.#processes!.create(executable, args, { ...process.env, ...nextOwner.env }, false, !intent,
             { scope: role === 'mcp-probe' ? 'probe' : 'execution', pipeEnvironment: intent ? 'ZHIXING_TERMINAL_WRITER_PIPE' : false,
               ...(intent ? { creationPermit: intent, frameBytes: 1024 } : {}) });
@@ -469,8 +506,8 @@ class TerminalSupervisor {
           const gateAdmission = child.created.then(async () => {
             try {
               if (intent) await intent;
-              this.#live(); if (socket.destroyed || Date.now() >= deadline || authorization.child!.exited) throw Error('terminal-helper-create-expired');
-              send(intent ? 'gate-ready' : 'created'); this.#live(); child.resume();
+              this.#helperLive(authorization.role, role); if (socket.destroyed || Date.now() >= deadline || authorization.child!.exited) throw Error('terminal-helper-create-expired');
+              send(intent ? 'gate-ready' : 'created'); this.#helperLive(authorization.role, role); child.resume();
               if (!intent) clearTimeout(creationTimer);
             } catch (error) { writerAdmission?.close(error); child.kill('SIGKILL'); throw error; }
           });
@@ -802,6 +839,7 @@ class TerminalSupervisor {
     const drained = await this.#bounded(owners, this.#remaining(Math.max(0, this.#deadline - Date.now() - 400)));
     if (!drained && !this.#result) this.#result = 74;
     if (!this.#processes) return drained;
+    this.#executionSealed = true; this.#processes.seal();
     this.#processes.terminateExecution();
     const until = Math.min(this.#deadline - 100, Date.now() + this.#remaining(300));
     let empty = false;
@@ -835,7 +873,7 @@ class TerminalSupervisor {
     // synchronously re-enter this method on an already broken connection.
     let resolveClosing!: () => void;
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
-    this.#sealed = true; this.#processes?.seal(); this.#abort.abort(); clearTimeout(this.#startupTimer);
+    this.#sealed = true; this.#abort.abort(); clearTimeout(this.#startupTimer);
     // Preserve the first finite lifecycle cause before logging is drained.
     // Observation failure must not re-enter or delay this closing path.
     try { this.options.records?.record({ event: 'terminalLifecycle', data: { instance: this.instance, phase: 'closing', reason, exitCode: this.#result } }); } catch { /* Close remains authoritative. */ }

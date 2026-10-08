@@ -106,7 +106,8 @@ await mkdir(nativeArtifacts, { recursive: true });
 await run(nativeCompiler, [...nativeArguments, ...(process.platform === 'win32' ? ['-municode'] : []), '-O2', '-Wall', '-Wextra',
   path.join(root, process.platform === 'win32' ? 'native/recovery-win32.c' : 'native/recovery-posix.c'),
   ...(process.platform === 'darwin' ? ['-lproc'] : []), '-o', path.join(nativeArtifacts, `recovery${target.suffix}`)], nativeArtifacts);
-if (process.platform !== 'win32') await run(nativeCompiler, [...nativeArguments, '-O2', '-Wall', '-Wextra', path.join(root, 'native/exec-gate-posix.c'), '-o', path.join(nativeArtifacts, 'exec-gate')], nativeArtifacts);
+await run(nativeCompiler, [...nativeArguments, ...(process.platform === 'win32' ? ['-municode'] : []), '-O2', '-Wall', '-Wextra',
+  path.join(root, process.platform === 'win32' ? 'native/exec-gate-win32.c' : 'native/exec-gate-posix.c'), '-o', path.join(nativeArtifacts, `exec-gate${target.suffix}`)], nativeArtifacts);
 // Node-API v8 is stable across the supported Node 24 runtime. Headers/import
 // library are developer build inputs only, never an installed runtime download.
 const nodeApi = path.join(build, 'node-api');
@@ -123,9 +124,9 @@ catch { throw Error('Provide Node-API developer headers/import library with ZHIX
 if (archiveDirectory && process.platform === 'win32') await verifyInput(path.join(nodeApi, 'node.lib'), inputs.node.windowsLibrary);
 await run(nativeCompiler, [...nativeArguments, '-shared', '-O2', '-Wall', '-Wextra', '-DNAPI_VERSION=8', '-I', nodeApi,
   path.join(root, process.platform === 'win32' ? 'native/foreground-win32.c' : 'native/foreground-posix.c'),
-  ...(process.platform === 'win32' ? [path.join(nodeApi, 'node.lib')] : ['-fPIC', '-pthread']),
+  ...(process.platform === 'win32' ? [path.join(nodeApi, 'node.lib'), '-lcrypt32'] : ['-fPIC', '-pthread']),
   ...(process.platform === 'darwin' ? ['-undefined', 'dynamic_lookup', '-lproc'] : []), '-o', path.join(nativeArtifacts, 'foreground.node')], nativeArtifacts);
-for (const name of [`recovery${target.suffix}`, 'foreground.node', ...(process.platform === 'win32' ? [] : ['exec-gate'])]) {
+for (const name of [`recovery${target.suffix}`, 'foreground.node', `exec-gate${target.suffix}`]) {
   await copyFile(path.join(nativeArtifacts, name), path.join(dist, name));
 }
 await run(bun, [path.join(root, 'scripts/build-ui.ts')], root);
@@ -138,7 +139,7 @@ if (process.platform === 'win32') for (const name of ['foreground-win32.lib', 'f
     await unlink(file);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
-const files = [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, 'foreground.node', ...(process.platform === 'win32' ? [] : ['exec-gate']), ...inputs.requiredAssets].sort();
+const files = [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, 'foreground.node', `exec-gate${target.suffix}`, ...inputs.requiredAssets].sort();
 const actualFiles = (await relativeFiles(dist)).filter(name => name !== 'manifest.json').sort();
 if (JSON.stringify(files) !== JSON.stringify(actualFiles)) throw Error('Terminal dist is incomplete or contains stale/unexpected files. Use a clean target dist before rebuilding.');
 const artifacts = [];

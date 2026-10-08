@@ -189,7 +189,7 @@ async function verifyTerminalClosure(packageRoot, version) {
     assert(Array.isArray(nodeFiles) && JSON.stringify(nodeFiles.map(item => item.name).sort()) === JSON.stringify(expectedNodeFiles) &&
       nodeFiles.every(item => /^[0-9a-f]{64}$/u.test(item.sha256)), `${id} Node 开发输入记录不完整`);
     if (manifest.buildInputs.verifiedArchives && id === "win32-x64") assert(nodeFiles.find(item => item.name === "node.lib").sha256 === terminalInputs.node.windowsLibrary.sha256, "Windows node.lib 不属于固定 Node 24.0.0");
-    const binaries = [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, "foreground.node", ...(id.startsWith("win32-") ? [] : ["exec-gate"])];
+    const binaries = [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, "foreground.node", `exec-gate${target.suffix}`];
     const expectedFiles = [...binaries, ...terminalInputs.requiredAssets].sort();
     const actualFiles = (await relativeFiles(targetRoot)).filter(name => name !== "manifest.json").sort();
     assert(JSON.stringify(actualFiles) === JSON.stringify(expectedFiles), `${id} terminal worker/grammar/assets/notices 或二进制闭包不完整`);

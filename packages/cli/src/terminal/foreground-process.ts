@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { closeSync } from 'node:fs';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
-import { adoptTerminalSocket, TerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
+import { adoptTerminalSocket, TerminalPrivateEndpoint, TerminalJsonFrames } from '@zhixing/terminal-ui/parent-transport';
 
 interface NativeState {
   ready: boolean; created: boolean; resumed: boolean; cancelled: boolean;
@@ -45,9 +45,10 @@ export class TerminalForegroundProcesses {
   #sealed = false;
   #timer?: ReturnType<typeof setTimeout>;
   #finished = false;
+  #observing = false;
   constructor(readonly artifact: string) {
     this.native = createRequire(import.meta.url)(artifact) as NativeEdge;
-    this.gate = path.join(path.dirname(artifact), 'exec-gate');
+    this.gate = path.join(path.dirname(artifact), process.platform === 'win32' ? 'exec-gate.exe' : 'exec-gate');
     this.#observe();
   }
   get sealed(): boolean { return this.#sealed; }
@@ -58,21 +59,30 @@ export class TerminalForegroundProcesses {
     // The caller receives and registers responsibility before any asynchronous
     // creation or observation can finish.
     queueMicrotask(() => void child.start(executable, args, env, console));
+    this.requestObservation();
     return child;
   }
-  seal(): void { this.#sealed = true; this.native.seal(); }
+  seal(): void { this.#sealed = true; this.native.seal(); this.requestObservation(); }
   executionState(): ReturnType<NativeEdge['executionState']> { return this.native.executionState(); }
   terminateExecution(): void { this.native.terminateExecution(); }
+  requestObservation(): void {
+    if (this.#finished || this.#observing) return;
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(() => this.#observe(), 0);
+  }
   #observe(): void {
     if (this.#finished) return;
+    this.#observing = true;
     for (const child of this.children) child.poll();
     // Detached independent hosts retain a non-intervening native reaper until
     // S exits. They are never included in execution cancellation.
     if (process.platform !== 'win32') this.native.executionState();
     // Creation/closing needs prompt receipts. A stable process already has
-    // its pipe's immediate disconnect notification; reaping can wait 100 ms.
+    // its pipe's immediate disconnect notification. Poll only as a fallback
+    // for helpers without a control pipe; lifecycle edges wake it immediately.
     const urgent = this.#sealed || [...this.children].some(child => child.observationUrgent);
-    this.#timer = setTimeout(() => this.#observe(), urgent ? 5 : 100);
+    this.#observing = false;
+    this.#timer = setTimeout(() => this.#observe(), urgent ? 5 : 500);
   }
   finish(): void {
     this.#finished = true; this.seal(); clearTimeout(this.#timer);
@@ -104,10 +114,11 @@ export class TerminalForegroundChild extends EventEmitter {
   #socket?: Socket;
   #ownerSocket?: Socket;
   #server: Server;
-  #buffer = Buffer.alloc(0);
+  readonly #frames: TerminalJsonFrames;
   readonly #endpoint = new TerminalPrivateEndpoint();
   constructor(readonly owner: TerminalForegroundProcesses, readonly raw: boolean, readonly options: TerminalProcessOptions) {
     super();
+    this.#frames = new TerminalJsonFrames(this.#frameBytes);
     this.stdio = [null, null, null, new PassThrough(), new PassThrough()];
     this.created = new Promise((resolve, reject) => { this.#resolveCreated = resolve; this.#rejectCreated = reject; });
     void this.created.catch(() => {});
@@ -129,6 +140,7 @@ export class TerminalForegroundChild extends EventEmitter {
     this.#detaching = true;
     if (this.#nativeId && !this.owner.native.snapshot(this.#nativeId).resumed) this.kill();
     this.poll();
+    this.owner.requestObservation();
   }
   async start(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, console: boolean): Promise<void> {
     try {
@@ -190,6 +202,7 @@ export class TerminalForegroundChild extends EventEmitter {
       if (process.platform === 'win32') this.owner.native.stop(this.#nativeId);
       else this.owner.native.stop(this.#nativeId, numbers[signal]);
     }
+    this.owner.requestObservation();
     return true;
   }
   send(packet: unknown, done: (error?: Error | null) => void): void {
@@ -244,7 +257,9 @@ export class TerminalForegroundChild extends EventEmitter {
   }
   #disconnect(): void {
     if (this.#disconnected) return;
+    this.#frames.clear();
     this.#disconnected = true; this.#rejectTransport(Error('terminal-process-disconnected')); this.emit('disconnect');
+    this.owner.requestObservation();
   }
   #closeServer(): void {
     this.#closingEndpoint ??= this.#endpoint.close().then(() => {
@@ -256,16 +271,8 @@ export class TerminalForegroundChild extends EventEmitter {
     this.#closed = true; this.owner.children.delete(this); this.emit('close');
   }
   #data(data: Buffer): void {
-    for (let offset = 0; offset < data.length;) {
-      const newline = data.indexOf(10, offset), end = newline < 0 ? data.length : newline;
-      if (this.#buffer.length + end - offset > this.#frameBytes) { this.#socket?.destroy(); return; }
-      this.#buffer = Buffer.concat([this.#buffer, data.subarray(offset, end)]);
-      if (newline < 0) return;
-      const frame = this.#buffer; this.#buffer = Buffer.alloc(0);
-      try { this.emit('message', JSON.parse(frame.toString('utf8'))); }
-      catch { this.#socket?.destroy(); return; }
-      offset = end + 1;
-    }
+    try { this.#frames.accept(data, value => this.emit('message', value)); }
+    catch { this.#socket?.destroy(); }
   }
 }
 

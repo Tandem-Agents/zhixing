@@ -45,7 +45,10 @@ describe("built CLI log entry and exit chain", () => {
   it("keeps early load failure evidence in the explicit managed home", async () => {
     const defaultHome = await createTempDir("logging-entry-default");
     const managedHome = await createTempDir("logging-entry-managed");
-    const source = await readFile(cli, "utf8");
+    const entry = await readFile(cli, "utf8");
+    const legacy = /import\("(\.\/legacy-entry-[^"]+\.js)"\)/u.exec(entry)?.[1];
+    expect(legacy).toBeTruthy();
+    const source = await readFile(path.resolve(path.dirname(cli), legacy!), "utf8");
     const target = /"load-cli",[^\n]*import\("([^"]+)"\)/u.exec(source)?.[1];
     expect(target).toBeTruthy();
     const hook = `import { registerHooks } from 'node:module'; registerHooks({ resolve(specifier, context, next) { if (specifier === ${JSON.stringify(target)}) throw Object.assign(Error('private import path'), {code:'EACCES'}); return next(specifier, context); } });`;
@@ -199,7 +202,7 @@ describe("built CLI log entry and exit chain", () => {
         });
       });
       expect(exit, stderr).toBe(0);
-      expect(phases).toEqual(["started", "finished"]);
+      expect(phases).toEqual(["started", ...(process.platform === 'win32' ? ['declaration-retained'] : []), "finished"]);
       const result = await run(home, ["logs", "--offline", "search"]);
       expect(result.code).toBe(0);
       expect(

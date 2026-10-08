@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include <string.h>
+#include "credential-win32.h"
 
 /* In-process creation edge of S. No domain data, terminal writes, process
    discovery, or supervision of S. A child cannot run before S admits its
@@ -19,9 +20,6 @@
 typedef struct {
   HANDLE job, creator, process, primary, verifiedTarget;
   wchar_t *executable, *command, *environment, *directory;
-  wchar_t *privateEndpoint;
-  char privateToken[37];
-  ULONGLONG privateDeadline;
   DWORD pid, error, identity;
   LONG occupied, cancelled, ready, resumed, finished;
   BOOL creatorObservedExited;
@@ -34,46 +32,9 @@ static BOOL sealed = FALSE;
 static DWORD generation = 0;
 static HANDLE executionJob = NULL;
 
-static ULONGLONG epoch_ms(void) {
-  FILETIME now; GetSystemTimeAsFileTime(&now);
-  return ((((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime) / 10000) - 11644473600000ULL;
-}
-static BOOL private_cancelled(Child *child) {
-  return InterlockedCompareExchange(&child->cancelled, 0, 0) || epoch_ms() >= child->privateDeadline;
-}
-/* The gate alone knows these private lanes. S receives no command, environment
-   or payload. Open only the already-bound, unguessable owner endpoint. */
-static HANDLE private_stdio(Child *child, const char *kind, DWORD *error) {
-  SECURITY_ATTRIBUTES security = { sizeof security, NULL, TRUE };
-  HANDLE pipe = INVALID_HANDLE_VALUE;
-  while (!private_cancelled(child)) {
-    pipe = CreateFileW(child->privateEndpoint, GENERIC_READ | GENERIC_WRITE, 0,
-      &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (pipe != INVALID_HANDLE_VALUE) break;
-    *error = GetLastError();
-    if (*error != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
-    if (!WaitNamedPipeW(child->privateEndpoint, 20) && GetLastError() != ERROR_SEM_TIMEOUT) {
-      *error = GetLastError(); return INVALID_HANDLE_VALUE;
-    }
-  }
-  if (pipe == INVALID_HANDLE_VALUE || private_cancelled(child)) {
-    if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
-    *error = ERROR_CANCELLED; return INVALID_HANDLE_VALUE;
-  }
-  char hello[64]; DWORD written = 0;
-  int length = snprintf(hello, sizeof hello, "%s %s\n", child->privateToken, kind);
-  if (length <= 0 || (size_t)length >= sizeof hello ||
-      !WriteFile(pipe, hello, (DWORD)length, &written, NULL) || written != (DWORD)length) {
-    *error = GetLastError(); if (!*error) *error = ERROR_WRITE_FAULT;
-    CloseHandle(pipe); return INVALID_HANDLE_VALUE;
-  }
-  *error = 0; return pipe;
-}
-
 static void free_arguments(Child *child) {
   free(child->executable); free(child->command);
   free(child->environment); free(child->directory);
-  free(child->privateEndpoint); child->privateEndpoint = NULL;
   child->executable = child->command = child->environment = child->directory = NULL;
 }
 static DWORD WINAPI create_child(void *opaque) {
@@ -94,18 +55,7 @@ static DWORD WINAPI create_child(void *opaque) {
   if (!error && child->job && !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
       jobs, sizeof(HANDLE) * (child->scope == 1 ? 2 : 1), NULL, NULL)) error = GetLastError();
   if (!error) {
-    if (child->scope == 3) {
-      BOOL inJob = FALSE;
-      if (!IsProcessInJob(GetCurrentProcess(), NULL, &inJob) || !inJob) error = ERROR_ACCESS_DENIED;
-      const char *kinds[] = { "input", "output", "error" };
-      for (int i = 0; i < 3 && !error; i++) {
-        inherited[i] = private_stdio(child, kinds[i], &error);
-        if (inherited[i] != INVALID_HANDLE_VALUE) inheritedCount++;
-      }
-      startup.StartupInfo.hStdInput = inherited[0];
-      startup.StartupInfo.hStdOutput = inherited[1];
-      startup.StartupInfo.hStdError = inherited[2];
-    } else if (child->console) {
+    if (child->console) {
       const DWORD kinds[] = { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE };
       for (int i = 0; i < 3 && !error; i++) {
         if (!DuplicateHandle(GetCurrentProcess(), GetStdHandle(kinds[i]), GetCurrentProcess(), &inherited[i], 0, TRUE, DUPLICATE_SAME_ACCESS)) error = GetLastError();
@@ -128,7 +78,6 @@ static DWORD WINAPI create_child(void *opaque) {
   /* Cancellation can precede or overlap CreateProcess. Even in the latter
      case the initial thread is suspended and the job membership is atomic. */
   if (!error && InterlockedCompareExchange(&child->cancelled, 0, 0)) error = ERROR_CANCELLED;
-  if (!error && child->scope == 3 && private_cancelled(child)) error = ERROR_CANCELLED;
   if (!error && !CreateProcessW(child->executable, child->command, NULL, NULL, TRUE,
       CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | (child->scope == 2 ? DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP : 0),
       child->environment, child->directory, &startup.StartupInfo, &process)) error = GetLastError();
@@ -194,54 +143,10 @@ static napi_value create(napi_env env, napi_callback_info info) {
   ReleaseSRWLockExclusive(&lock);
   napi_create_uint32(env, child->identity, &result); return result;
 }
-/* Used only inside the fixed Windows private gate. Inherited Job membership
-   is atomic at CreateProcess; no breakaway or alternate parent is permitted.
-   This creator does not open or duplicate any S Job handle. */
-static napi_value create_private(napi_env env, napi_callback_info info) {
-  napi_value args[7], result; size_t count = 7; double deadline = 0;
-  if (napi_get_cb_info(env, info, &count, args, NULL, NULL) != napi_ok || count != 7 ||
-      napi_get_value_double(env, args[6], &deadline) != napi_ok ||
-      !(deadline > (double)epoch_ms() && deadline <= (double)epoch_ms() + 5000)) return fail(env, "terminal-private-create-arguments");
-  AcquireSRWLockExclusive(&lock);
-  int id = 0; while (id < CHILDREN && children[id].occupied) id++;
-  if (sealed || id == CHILDREN || generation >= 0x07FFFFFF) { ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-admission-closed"); }
-  Child *child = &children[id]; ZeroMemory(child, sizeof *child);
-  child->occupied = TRUE; child->scope = 3; child->privateDeadline = (ULONGLONG)deadline;
-  child->identity = ++generation * CHILDREN + id;
-  child->executable = text(env, args[0], FALSE); child->command = text(env, args[1], FALSE);
-  child->environment = text(env, args[2], TRUE); child->directory = text(env, args[3], FALSE);
-  child->privateEndpoint = text(env, args[4], FALSE);
-  size_t length = 0, written = 0;
-  BOOL tokenValid = napi_get_value_string_utf8(env, args[5], NULL, 0, &length) == napi_ok && length == 36 &&
-    napi_get_value_string_utf8(env, args[5], child->privateToken, sizeof child->privateToken, &written) == napi_ok && written == 36;
-  for (size_t i = 0; tokenValid && i < 36; i++) {
-    char c = child->privateToken[i]; if (!(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) tokenValid = FALSE;
-  }
-  const wchar_t *prefix = L"\\\\.\\pipe\\zhixing-terminal-";
-  size_t prefixLength = wcslen(prefix);
-  BOOL endpointValid = child->privateEndpoint && wcslen(child->privateEndpoint) == prefixLength + 36 &&
-    wcsncmp(child->privateEndpoint, prefix, prefixLength) == 0;
-  for (size_t i = 0; endpointValid && i < 36; i++) {
-    wchar_t c = child->privateEndpoint[prefixLength + i];
-    if (!(c == L'-' || (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) endpointValid = FALSE;
-  }
-  if (!child->executable || !child->command || !child->environment || !child->directory || !endpointValid || !tokenValid) {
-    free_arguments(child); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock);
-    return fail(env, "terminal-private-create-preflight");
-  }
-  child->creator = CreateThread(NULL, 0, create_child, child, 0, NULL);
-  if (!child->creator) {
-    free_arguments(child); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock);
-    return fail(env, "terminal-private-create-thread");
-  }
-  ReleaseSRWLockExclusive(&lock);
-  napi_create_uint32(env, child->identity, &result); return result;
-}
 static napi_value resume(napi_env env, napi_callback_info info) {
   Child *child = argument_child(env, info); if (!child) return NULL;
   AcquireSRWLockExclusive(&lock);
-  BOOL allowed = !sealed && !child->cancelled && child->ready && child->process && !child->resumed &&
-    (child->scope != 3 || epoch_ms() < child->privateDeadline);
+  BOOL allowed = !sealed && !child->cancelled && child->ready && child->process && !child->resumed;
   if (allowed && ResumeThread(child->primary) == 1) child->resumed = TRUE;
   else allowed = FALSE;
   ReleaseSRWLockExclusive(&lock);
@@ -361,7 +266,9 @@ static napi_value release(napi_env env, napi_callback_info info) {
   CloseHandle(child->creator); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child);
   ReleaseSRWLockExclusive(&lock); return undefined(env);
 }
+#include "writer-declaration-win32.h"
 static void cleanup(void *unused) {
+  declaration_close();
   (void)unused; AcquireSRWLockExclusive(&lock); sealed = TRUE;
   for (int i = 0; i < CHILDREN; i++) if (children[i].occupied) {
     children[i].cancelled = TRUE;
@@ -394,13 +301,41 @@ static napi_value detach(napi_env env, napi_callback_info info) {
   CloseHandle(child->primary); CloseHandle(child->process); CloseHandle(child->creator); ZeroMemory(child, sizeof *child);
   ReleaseSRWLockExclusive(&lock); return undefined(env);
 }
+/* Read-only identity adapter for FileLock. Match its persisted .NET UTC ticks,
+   not the FILETIME representation used by the private terminal protocol. */
+static napi_value process_identity(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value args[1], result, value; double requested = 0;
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+  const char *kind = "unknown"; char birth[48] = {0};
+  if (argc == 1 && napi_get_value_double(env, args[0], &requested) == napi_ok &&
+      requested >= 1 && requested <= 4294967295.0 && requested == (double)(DWORD)requested) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, (DWORD)requested);
+    if (!process) { if (GetLastError() == ERROR_INVALID_PARAMETER) kind = "absent"; }
+    else {
+      FILETIME created, ended, kernel, user;
+      if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) kind = "absent";
+      else if (GetProcessTimes(process, &created, &ended, &kernel, &user)) {
+        unsigned long long ticks = (((unsigned long long)created.dwHighDateTime << 32) | created.dwLowDateTime) + 504911232000000000ULL;
+        snprintf(birth, sizeof birth, "win32:%llu", ticks); kind = "present";
+      }
+      CloseHandle(process);
+    }
+  }
+  napi_create_object(env, &result);
+  napi_create_string_utf8(env, kind, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "kind", value);
+  if (birth[0]) { napi_create_string_utf8(env, birth, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "birth", value); }
+  return result;
+}
 static napi_value initialize(napi_env env, napi_value exports) {
   executionJob = CreateJobObjectW(NULL, NULL);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!executionJob || !SetInformationJobObject(executionJob, JobObjectExtendedLimitInformation, &limits, sizeof limits)) return fail(env, "terminal-execution-job-unavailable");
   napi_property_descriptor methods[] = {
+    { "protectKey", NULL, protect_key, NULL, NULL, NULL, napi_default, NULL },
+    { "processIdentity", NULL, process_identity, NULL, NULL, NULL, napi_default, NULL },
+    { "declareWriter", NULL, declare_writer, NULL, NULL, NULL, napi_default, NULL },
+    { "closeWriterDeclaration", NULL, close_writer_declaration, NULL, NULL, NULL, napi_default, NULL },
     { "create", NULL, create, NULL, NULL, NULL, napi_default, NULL },
-    { "createPrivate", NULL, create_private, NULL, NULL, NULL, napi_default, NULL },
     { "verifyTarget", NULL, verify_target, NULL, NULL, NULL, napi_default, NULL },
     { "resume", NULL, resume, NULL, NULL, NULL, napi_default, NULL },
     { "stop", NULL, stop, NULL, NULL, NULL, napi_default, NULL },

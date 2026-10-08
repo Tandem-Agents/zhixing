@@ -79,7 +79,12 @@ export function createLogWriterProbe(home: string, processes: LogWriterProcessOb
       signal?.throwIfAborted();
       cached = { ...result, at };
     } catch (error) { cached = { complete: false, at, candidates: [], failure: logFailureEvidence(error) }; }
-    cachedUntil = performance.now() + 1000;
+    // Cache established compatibility, never a transient inability to prove it.
+    // A worker may exit or publish its declaration immediately after inventory;
+    // retaining that negative snapshot can consume an entire short entry drain.
+    const proven = cached.complete && (process.platform !== 'win32' || cached.candidates.every(candidate =>
+      candidate.pid === ownerPid || cached!.compatible?.some(peer => peer.pid === candidate.pid && peer.birth === candidate.birth)));
+    cachedUntil = performance.now() + (proven ? 1000 : 0);
     return cached;
   };
 }

@@ -2,7 +2,7 @@ import { observeLogPhase } from "@zhixing/core/logging";
 import { getZhixingHome } from "@zhixing/core/paths";
 import { beginEntryLogging } from "./logging/bootstrap.js";
 import { cliLoggingMode, managedHomeArgument, normalizeCliArgs } from "./logging/entry-mode.js";
-import { beginWriterDeclaration, closeWriterDeclaration } from "./logging/writer-admission.js";
+import { beginWriterDeclaration } from "./logging/writer-admission.js";
 import { createStartupProgressPresenter } from "./screen/startup-progress.js";
 import { recordFirstSurfaceOutput } from "./logging/runtime-source.js";
 
@@ -30,4 +30,4 @@ try {
   } } catch { /* If logging itself cannot load, its memory has no durability guarantee. */ }
   process.stderr.write("知行入口加载失败；可用 zz logs 查看已保留的记录。\n");
   process.exitCode = 1;
-} finally { progress?.disable(); await closeWriterDeclaration(); }
+} finally { progress?.disable(); }

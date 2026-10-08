@@ -21,10 +21,18 @@ async function setup() {
   const files = new TerminalManagedFiles(root); fixtures.push({ root, files });
   return { root, files };
 }
+async function releaseWritePins(files: TerminalManagedFiles) {
+  // A managed mutation releases the bounded write cache. Exercise replacement
+  // after that real lifecycle boundary as well as while a write handle is held.
+  const temporary = await files.write('input/release', Buffer.from('x'), 0, 1, step);
+  await files.unlink('input/release', temporary.identity, step);
+}
 describe.skipIf(process.platform !== 'win32')('terminal pinned input and display files', () => {
   it('keeps writes, reads and removal on the owned directory after its path becomes a junction', async () => {
     const { root, files } = await setup();
     const first = await files.write('input/owned', Buffer.from('first'), 0, 5, step);
+    await expect(rename(path.join(root, 'input'), path.join(root, 'held-input'))).rejects.toThrow();
+    await releaseWritePins(files);
     await rename(path.join(root, 'input'), path.join(root, 'held-input'));
     await writeFile(path.join(root, 'outside', 'owned'), 'outside-preserved');
     await symlink(path.join(root, 'outside'), path.join(root, 'input'), 'junction');
@@ -37,6 +45,8 @@ describe.skipIf(process.platform !== 'win32')('terminal pinned input and display
   it('rejects a substituted leaf for reads, writes and deletion without changing either file', async () => {
     const { root, files } = await setup();
     const original = await files.write('input/owned', Buffer.from('original'), 0, 8, step);
+    await expect(rename(path.join(root, 'input', 'owned'), path.join(root, 'input', 'retired'))).rejects.toThrow();
+    await releaseWritePins(files);
     await rename(path.join(root, 'input', 'owned'), path.join(root, 'input', 'retired'));
     await writeFile(path.join(root, 'input', 'owned'), 'unknown!');
     await expect(files.write('input/owned', Buffer.from('changed!'), 0, 8, step, original.identity)).rejects.toThrow();

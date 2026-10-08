@@ -5,15 +5,16 @@ import path from "node:path";
 import { logFailureEvidence, type LogFailureEvidence } from "@zhixing/core/logging";
 
 type DeclarationFailure = (reason: string, failure?: LogFailureEvidence) => void;
+export type LogWriterDeclaration = { ready: Promise<void>; close(): Promise<void> };
+export type LogWriterDeclarationFactory = (root: string, protocol: number) => LogWriterDeclaration;
 
 export const LOG_WRITE_PROTOCOL = 2;
 let entryDeclaration: { root: string; value: ReturnType<typeof declareLogWriter> } | undefined;
-export function beginWriterDeclaration(home: string, unavailable?: DeclarationFailure) {
+export function beginWriterDeclaration(home: string, unavailable?: DeclarationFailure, create?: LogWriterDeclarationFactory) {
   const root = writerRootKey(home);
-  if (entryDeclaration?.root !== root) { void entryDeclaration?.value.close(); entryDeclaration = { root, value: declareLogWriter(home, unavailable) }; }
+  if (entryDeclaration?.root !== root) { void entryDeclaration?.value.close(); entryDeclaration = { root, value: declareLogWriter(home, unavailable, create) }; }
   return entryDeclaration.value.ready;
 }
-export async function closeWriterDeclaration(): Promise<void> { const current = entryDeclaration; entryDeclaration = undefined; await current?.value.close(); }
 export function writerRootKey(home: string): string {
   const root = path.resolve(home);
   return createHash("sha256").update(process.platform === "win32" ? root.toLowerCase() : root).digest("hex");
@@ -24,10 +25,14 @@ export function writerEndpoint(pid: number): string {
 }
 
 /** Memory-only declaration. Store still owns resource admission, registration and disk exclusion. */
-export function declareLogWriter(home: string, unavailable?: DeclarationFailure): { ready: Promise<void>; close(): Promise<void> } {
+export function declareLogWriter(home: string, unavailable?: DeclarationFailure, create?: LogWriterDeclarationFactory): LogWriterDeclaration {
   const notify: DeclarationFailure = (reason, failure) => { try { unavailable?.(reason, failure); } catch { /* Observation must not block fallback admission. */ } };
   // Darwin has no abstract local sockets; retain conservative registration there.
   if (process.platform !== "win32" && process.platform !== "linux") return { ready: Promise.resolve(), async close() {} };
+  if (create) {
+    try { return create(writerRootKey(home), LOG_WRITE_PROTOCOL); }
+    catch (error) { notify("declaration-create-failed", logFailureEvidence(error)); return { ready: Promise.resolve(), async close() {} }; }
+  }
   const built = new URL("./logging-admission-worker.js", import.meta.url), compiled = existsSync(built);
   // The declaration must answer even while the application thread parses heavy modules.
   // One bounded isolate, no log data, file writes, credentials, or additional process.

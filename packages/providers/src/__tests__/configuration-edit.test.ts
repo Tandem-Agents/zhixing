@@ -55,6 +55,28 @@ async function fixture() {
 
 afterEach(() => { vi.restoreAllMocks(); durability.afterDirectorySync = undefined; });
 describe("configuration and credential save", () => {
+  it("uses the supplied identity boundary for snapshot, save and pending recovery", async () => {
+    const { options, baseline, next } = await fixture();
+    const read = vi.fn(async (_pid: number) => ({ kind: 'present' as const, birth: 'fixture-owner' }));
+    const owned = { ...options, processIdentityResolver: { read } };
+    await loadConfigurationSnapshot(owned);
+    expect(read).toHaveBeenCalledWith(process.pid);
+    read.mockClear();
+    let interrupted = false;
+    options.store.fail = (action, ref) => {
+      if (!interrupted && action === 'delete' && ref.bindingId === CONFIGURATION_EDIT_REF.bindingId) {
+        interrupted = true; throw Error('interrupted final retirement');
+      }
+    };
+    await expect(editConfiguration(baseline, next, owned)).rejects.toThrow('已接纳');
+    expect(read).toHaveBeenCalledWith(process.pid);
+    read.mockClear();
+    expect((await loadConfigurationSnapshot(owned)).config).toEqual(next.config);
+    expect(read.mock.calls.filter(([pid]) => pid === process.pid)).toHaveLength(2);
+    expect(await options.store.get(CONFIGURATION_EDIT_REF)).toBeNull();
+    await expect(loadConfigurationSnapshot({ ...owned, processIdentityResolver: { read: async () => ({ kind: 'unknown' }) } }))
+      .rejects.toThrow('identity is unavailable');
+  });
   it("preserves independent rotations from concurrent editors across all credential families", async () => {
     const { options, baseline } = await fixture();
     const a = structuredClone(baseline), b = structuredClone(baseline), c = structuredClone(baseline);

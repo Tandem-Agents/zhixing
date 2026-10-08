@@ -120,6 +120,27 @@ describe("log writer OS observation", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
 
+  it.skipIf(process.platform !== "win32").each(['incomplete', 'unproven'] as const)('re-observes %s inventory without retaining a transient rejection', async kind => {
+    const self = { pid: 1, birth: '123', argv: ['node', 'self'] };
+    const peer = { pid: 2, birth: '456', argv: ['node', entry] };
+    let observations = 0, declarations = 0;
+    const probe = createLogWriterProbe(home, {
+      observeNodeProcesses: async () => ({ complete: ++observations > 1 || kind !== 'incomplete', entries: [self, peer] }),
+      readLocalProcessDeclaration: async () => {
+        if (++declarations === 1 && kind === 'unproven') throw Error('still starting');
+        return JSON.stringify({ protocol: 2, pid: peer.pid, root: writerRootKey(home) });
+      },
+    }, self.pid);
+    const first = await probe();
+    expect(first.compatible ?? []).toEqual([]);
+    const recovered = await probe();
+    expect(recovered.complete).toBe(true);
+    expect(recovered.compatible).toEqual([{ pid: peer.pid, birth: peer.birth }]);
+    const count = observations;
+    expect(await probe()).toBe(recovered);
+    expect(observations).toBe(count);
+  });
+
   it.skipIf(process.platform !== "win32").each(["reused", "incomplete"])("does not attach a peer proof to a %s inventory", async kind => {
     const self = { pid: 1, birth: "123", argv: ["node", "self"] };
     const peer = { pid: 2, birth: "456", argv: ["node", entry] };
