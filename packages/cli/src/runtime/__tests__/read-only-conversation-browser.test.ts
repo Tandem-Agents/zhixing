@@ -1,10 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { renderReadOnlyConversationBrowser } from "../read-only-conversation-browser.js";
-import { CoreHostUnavailableError } from "../core-host-connection.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listReadOnlyConversations, queryReadOnlyConversationHistory } from "../read-only-conversation-query.js";
-import type { CliWriter } from "../../screen/index.js";
 import { createReadOnlyConversationStorage } from "../../serve/conversation-storage-infrastructure.js";
 
 let oldHome: string | undefined;
@@ -25,155 +22,40 @@ afterEach(async () => {
   await fs.rm(home, { recursive: true, force: true });
 });
 
-describe("read-only conversation browser", () => {
-  it.each(["pending", "read-failed", "projection-failed"])("后项%s仍保留已显示的前项历史", async scenario => {
-    await writeConversation("first", "首个对话", "2026-01-03T00:00:00.000Z", [run("已读问题", "已读回复", 0)]);
-    await writeConversation("second", "后续对话", "2026-01-02T00:00:00.000Z", []);
+describe("read-only conversation query", () => {
+  it("lists the most recent conversation and reads its committed history without a Host", async () => {
+    await writeConversation("old", "旧对话", "2026-01-01T00:00:00.000Z", [run("旧问题", "旧回复", 0)]);
+    await writeConversation("recent", "最近对话", "2026-01-02T00:00:00.000Z", [run("用户问题", "AI 回复", 0)]);
     const storage = createReadOnlyConversationStorage(home);
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof storage.readHistory>>>();
-    const readHistory = vi.fn((id: string, options: Parameters<typeof storage.readHistory>[1]) =>
-      id === "second" ? pending.promise : storage.readHistory(id, options));
-    const { writer, lines } = makeWriter();
-    const outcome = renderReadOnlyConversationBrowser({
-      writer, error: "offline", storage: { list: () => storage.list(), readHistory }, width: 100,
-    }).then(result => ({ result }), error => ({ error }));
-    await vi.waitFor(() => expect(readHistory).toHaveBeenCalledWith("second", { limit: 1 }));
-    expect(lines.join("\n")).toContain("已读问题");
-    expect(lines.join("\n")).toContain("已读回复");
-    expect(lines.join("\n")).toContain("后续对话 (second)");
-    if (scenario === "read-failed") pending.reject(new Error("synthetic read failure"));
-    else pending.resolve(scenario === "pending" ? { runs: [], hasMore: false } : {
-      runs: [{ shardId: "000001", record: { ...run("unused", "unused", 0), messages: [] } }], hasMore: false,
-    } as Awaited<ReturnType<typeof storage.readHistory>>);
-    expect(await outcome).toHaveProperty(scenario === "pending" ? "result" : "error");
-    expect(lines.join("\n")).toContain("已读回复");
+    expect((await listReadOnlyConversations(storage, 1)).map(item => item.conversationId)).toEqual(["recent"]);
+    const result = await queryReadOnlyConversationHistory(storage, "recent", 1);
+    expect(result.renderedRuns).toBe(1);
+    expect(result.history.entries[0]).toMatchObject({ userText: "用户问题", assistantText: "AI 回复" });
   });
-
-  it("shows only the public startup summary and a direct evidence command", async () => {
-    const { writer, lines } = makeWriter();
-    await renderReadOnlyConversationBrowser({
-      writer, error: new CoreHostUnavailableError("private failure detail", "本机服务启动失败。"),
-      storage: createReadOnlyConversationStorage(home),
-    });
-    expect(lines.join("\n")).toContain("本机服务启动失败。");
-    expect(lines.join("\n")).toContain("zz logs search --source runtime");
-    expect(lines.join("\n")).not.toContain("private failure detail");
+  it("does not cross a clear boundary", async () => {
+    await writeConversation("cleared", "清空过", "2026-01-02T00:00:00.000Z", [
+      run("旧问题", "旧回复", 0), { type: "clear", timestamp: "2026-01-02T00:00:00.000Z" },
+    ]);
+    const result = await queryReadOnlyConversationHistory(createReadOnlyConversationStorage(home), "cleared", 1);
+    expect(result).toEqual({ history: { entries: [] }, renderedRuns: 0 });
   });
-  it("只读渲染最近对话与最近 run，不需要宿主连接", async () => {
-    await writeConversation("chat-a", "旧对话", "2026-01-01T00:00:00.000Z", [
-      run("早一点", "旧回复", 0),
-    ]);
-    await writeConversation("chat-b", "最近对话", "2026-01-02T00:00:00.000Z", [
-      run("用户问题", "AI 回复", 0),
-    ]);
-
-    const { writer, lines } = makeWriter();
-    const result = await renderReadOnlyConversationBrowser({
-      writer,
-      error: new Error("host down"),
-      storage: createReadOnlyConversationStorage(home),
-      maxConversations: 1,
-      width: 100,
-    });
-
-    expect(result).toEqual({ conversations: 1, renderedRuns: 1 });
-    expect(lines.join("\n")).toContain("知行暂时无法启动");
-    expect(lines.join("\n")).not.toContain("host down");
-    expect(lines.join("\n")).toContain("最近对话 (chat-b)");
-    expect(lines.join("\n")).toContain("用户问题");
-    expect(lines.join("\n")).toContain("AI 回复");
-    expect(lines.join("\n")).not.toContain("旧对话");
+  it.each(["missing", "corrupt"] as const)("reconstructs a %s index from the read-only shards", async condition => {
+    await writeConversation("rebuild", "重建", "2026-01-02T00:00:00.000Z", [run("仍可读取", "分片回复", 0)]);
+    const index = path.join(home, "conversations", "rebuild", "transcript", "index.json");
+    if (condition === "missing") await fs.unlink(index);
+    else await fs.writeFile(index, JSON.stringify({ shards: null }));
+    const result = await queryReadOnlyConversationHistory(createReadOnlyConversationStorage(home), "rebuild", 1);
+    expect(result.renderedRuns).toBe(1);
+    expect(result.history.entries[0]).toMatchObject({ userText: "仍可读取", assistantText: "分片回复" });
   });
-
-  it("遇到 clear 边界时不读穿旧历史", async () => {
-    await writeConversation("chat-clear", "清空过", "2026-01-02T00:00:00.000Z", [
-      run("旧问题", "旧回复", 0),
-      { type: "clear", timestamp: "2026-01-02T00:00:00.000Z" },
-    ]);
-
-    const { writer, lines } = makeWriter();
-    const result = await renderReadOnlyConversationBrowser({
-      writer,
-      error: "offline",
-      storage: createReadOnlyConversationStorage(home),
-      maxConversations: 1,
-      width: 100,
-    });
-
-    expect(result).toEqual({ conversations: 1, renderedRuns: 0 });
-    expect(lines.join("\n")).toContain("暂无可显示的最近轮次");
-    expect(lines.join("\n")).not.toContain("旧问题");
-  });
-
-  it("index 缺失时仍从分片只读重建投影并渲染最近 run", async () => {
-    await writeConversation("chat-rebuild", "索引缺失", "2026-01-02T00:00:00.000Z", [
-      run("仍可读取", "分片回复", 0),
-    ]);
-    await fs.unlink(
-      path.join(home, "conversations", "chat-rebuild", "transcript", "index.json"),
-    );
-
-    const { writer, lines } = makeWriter();
-    const result = await renderReadOnlyConversationBrowser({
-      writer,
-      error: "offline",
-      storage: createReadOnlyConversationStorage(home),
-      maxConversations: 1,
-      width: 100,
-    });
-
-    expect(result).toEqual({ conversations: 1, renderedRuns: 1 });
-    expect(lines.join("\n")).toContain("仍可读取");
-    expect(lines.join("\n")).toContain("分片回复");
-  });
-
-  it("index 结构损坏时仍从分片只读重建投影并渲染最近 run", async () => {
-    await writeConversation("chat-bad-index", "索引损坏", "2026-01-02T00:00:00.000Z", [
-      run("坏索引也能读", "仍走分片", 0),
-    ]);
-    await fs.writeFile(
-      path.join(home, "conversations", "chat-bad-index", "transcript", "index.json"),
-      JSON.stringify({ shards: null }),
-    );
-
-    const { writer, lines } = makeWriter();
-    const result = await renderReadOnlyConversationBrowser({
-      writer,
-      error: "offline",
-      storage: createReadOnlyConversationStorage(home),
-      maxConversations: 1,
-      width: 100,
-    });
-
-    expect(result).toEqual({ conversations: 1, renderedRuns: 1 });
-    expect(lines.join("\n")).toContain("坏索引也能读");
-    expect(lines.join("\n")).toContain("仍走分片");
-  });
-
-  it("保持旧只读入口对缺 createdAt meta 的宽松接受", async () => {
-    await writeConversation("chat-legacy", "旧元数据", "2026-01-02T00:00:00.000Z", [
-      run("仍可浏览", "兼容回复", 0),
-    ]);
-    const metaPath = path.join(home, "conversations", "chat-legacy", "meta.json");
-    const meta = JSON.parse(await fs.readFile(metaPath, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    delete meta.createdAt;
-    await fs.writeFile(metaPath, JSON.stringify(meta));
-
-    const { writer, lines } = makeWriter();
-    await expect(
-      renderReadOnlyConversationBrowser({
-        writer,
-        error: "offline",
-        storage: createReadOnlyConversationStorage(home),
-        maxConversations: 1,
-        width: 100,
-      }),
-    ).resolves.toEqual({ conversations: 1, renderedRuns: 1 });
-    expect(lines.join("\n")).toContain("旧元数据 (chat-legacy)");
-    expect(lines.join("\n")).toContain("仍可浏览");
+  it("accepts historical metadata without createdAt", async () => {
+    await writeConversation("legacy", "旧元数据", "2026-01-02T00:00:00.000Z", [run("仍可浏览", "兼容回复", 0)]);
+    const file = path.join(home, "conversations", "legacy", "meta.json");
+    const metadata = JSON.parse(await fs.readFile(file, "utf8")); delete metadata.createdAt;
+    await fs.writeFile(file, JSON.stringify(metadata));
+    const storage = createReadOnlyConversationStorage(home);
+    expect((await listReadOnlyConversations(storage, 1))[0]?.conversationId).toBe("legacy");
+    expect((await queryReadOnlyConversationHistory(storage, "legacy", 1)).history.entries[0]?.userText).toBe("仍可浏览");
   });
 });
 
@@ -246,19 +128,6 @@ async function writeConversation(
       "",
     ].join("\n"),
   );
-}
-
-function makeWriter(): { writer: CliWriter; lines: string[] } {
-  const lines: string[] = [];
-  return {
-    lines,
-    writer: {
-      line: (s) => lines.push(s),
-      appendInline: (s) => lines.push(s),
-      notify: (s) => lines.push(s),
-      ensureSegmentBreak: () => {},
-    },
-  };
 }
 
 function run(user: string, assistant: string, runIndex: number) {

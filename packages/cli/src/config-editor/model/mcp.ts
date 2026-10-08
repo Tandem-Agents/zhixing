@@ -7,11 +7,11 @@
  * 连接状态只读展示（来自注入的 runtime）。接入新 server 的引导向导是另一条路径（异步），
  * 不在此面板。
  */
-import type { ConfigModelContext as ConfigEditorContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, WorkingState } from "../types.js";
+import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, WorkingState } from "../types.js";
 import type { McpManagementServerStatus } from "@zhixing/core/mcp-management";
 import { clearInputBuffer, isMcpServerEnabled, listMcpServerIds, patchMcpSecrets, removeMcpServer, setInputBuffer, setMcpServerEnabled, upsertMcpServer } from "../state.js";
 import { applyMcpSetup, validateMcpSetup } from "@zhixing/core/mcp-management";
-import type { KeyEvent } from "../../tui/index.js";
+import type { KeyEvent } from "../../tui/key-event.js";
 
 export const ACTION_TOGGLE = 0;
 
@@ -89,7 +89,7 @@ export function handleMcpServerPanelKey(
 }
 
 export function handleMcpAddPanelKey(
-  ctx: ConfigEditorContext,
+  ctx: ConfigModelContext,
   state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "mcp-add" }>,
   key: KeyEvent,
@@ -180,7 +180,7 @@ export function handleMcpAddPanelKey(
 }
 
 export function handleMcpAddInputPanelKey(
-  ctx: ConfigEditorContext,
+  ctx: ConfigModelContext,
   state: WorkingState,
   _descriptor: Extract<PanelDescriptor, { kind: "mcp-add-input" }>,
   key: KeyEvent,
@@ -267,7 +267,7 @@ export function handleMcpAddInputPanelKey(
 }
 
 export function handleMcpChoicesPanelKey(
-  ctx: ConfigEditorContext,
+  ctx: ConfigModelContext,
   state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "mcp-choices" }>,
   key: KeyEvent,

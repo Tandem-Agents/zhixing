@@ -10,9 +10,9 @@
 
 import { describe, expect, it } from "vitest";
 import { createInitialState, writeModelRole } from "../state.js";
-import { handleListPanelKey } from "../panels/list.js";
-import { handleThinkingBudgetPanelKey } from "../panels/input.js";
-import { handleEntityPanelKey } from "../panels/entity.js";
+import { handleListPanelKey } from "../model/list.js";
+import { handleThinkingBudgetPanelKey } from "../model/input.js";
+import { handleEntityPanelKey } from "../model/entity.js";
 import type { PanelDescriptor, WorkingState } from "../types.js";
 
 const modelListDesc = {

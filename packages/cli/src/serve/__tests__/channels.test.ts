@@ -22,13 +22,21 @@ import { ChannelConfiguration } from "../../runtime/extensions/channel-configura
 import { createChannelExtensionReadiness } from "../../runtime/extensions/channel-readiness.js";
 import { messagingSection } from "../../config-editor/sections/messaging.js";
 import { disableMessaging, enableMessaging } from "../../config-editor/state.js";
-import { handleConfigCommand } from "../../runtime/config-command.js";
+import { editRuntimeConfiguration, type ConfigurationApplicationDeps } from "../../runtime/configuration-application.js";
+async function applyConfigurationEdit(deps: ConfigurationApplicationDeps): Promise<void> {
+  await editRuntimeConfiguration(deps, {
+    kind: "config",
+    edit: async session => {
+      const result = await editor.run(session);
+      if (result.kind === "completed") await session.writers.save(result);
+      return result;
+    },
+  });
+}
 
 const catalog = vi.hoisted(() => ({ seeds: [] as unknown[] }));
 const editor = vi.hoisted(() => ({ run: vi.fn(), store: undefined as unknown }));
 vi.mock("../../runtime/extensions/catalog.js", () => ({ packagedExtensions: () => catalog.seeds }));
-vi.mock("../../config-editor/runner.js", () => ({ runEventLoop: editor.run }));
-vi.mock("../../commands/command-visibility.js", () => ({ requireChrome: () => true }));
 vi.mock("@zhixing/secrets", async (original) => ({ ...await original<typeof import("@zhixing/secrets")>(), createPlatformSecretStore: () => editor.store }));
 const roots: string[] = [];
 const systems: SetupChannelsResult[] = [];
@@ -289,7 +297,7 @@ describe("managed Channel production composition", () => {
     expect(await f.configuration.publication("one")).toBeUndefined();
   });
 
-  it("the real config command publishes before saving and recovers after its apply RPC is lost", async () => {
+  it("the real configuration application publishes before saving and recovers after its apply RPC is lost", async () => {
     const f = await fixture(); await connect(f);
     const before = await f.current();
     await f.api.command(extensionSetEnabled, { id: "one", enabled: false, expectedRevision: before.revision });
@@ -303,9 +311,8 @@ describe("managed Channel production composition", () => {
     });
     const apply = vi.fn(async () => { throw new Error("fixture RPC lost"); });
     const reload = vi.fn();
-    await handleConfigCommand({ zhixingHome: f.root, configPath: f.configPath,
-      rl: { pause() {}, resume() {} } as never, renderer: { stop() {} }, writer: { line() {} } as never,
-      screen: { reassertCursorHidden() {} } as never, state: { activeTurnPromise: null },
+    await applyConfigurationEdit({ zhixingHome: f.root, configPath: f.configPath,
+      state: { activeTurnPromise: null },
       requestHostReload: reload, readExtensions: () => f.api.query(extensionList, undefined), applyExtensionConfiguration: apply });
     expect(apply).toHaveBeenCalledWith(["one"]);
     expect(reload).not.toHaveBeenCalled();
@@ -410,9 +417,8 @@ describe("managed Channel production composition", () => {
       if (lostApply) throw new Error("fixture RPC lost");
       return f.api.command(extensionApplyConfiguration, { ids });
     });
-    await handleConfigCommand({ zhixingHome: f.root, configPath: f.configPath,
-      rl: { pause() {}, resume() {} } as never, renderer: { stop() {} }, writer: { line() {} } as never,
-      screen: { reassertCursorHidden() {} } as never, state: { activeTurnPromise: null },
+    await applyConfigurationEdit({ zhixingHome: f.root, configPath: f.configPath,
+      state: { activeTurnPromise: null },
       requestHostReload: vi.fn(), readExtensions: () => f.api.query(extensionList, undefined), applyExtensionConfiguration: apply });
     expect(apply).toHaveBeenCalledWith(["one"]);
     if (!lostApply) expect((await f.current()).enabled).toBe(false);
@@ -432,7 +438,6 @@ describe("managed Channel production composition", () => {
   it.each([false, true])("stopping from an old editor uses the merged Channel credential (retry: %s)", async (retry) => {
     const f = await fixture(); await connect(f); editor.store = f.store;
     const options = { configPath: f.configPath, store: f.store };
-    const writer = { line: vi.fn() };
     editor.run.mockImplementation(async (context) => {
       const baseline = await loadConfigurationSnapshot(options), rotated = structuredClone(baseline);
       rotated.credentials.channels!.one!.token = "concurrent-renewed-token";
@@ -448,17 +453,16 @@ describe("managed Channel production composition", () => {
       return f.api.command(extensionApplyConfiguration, { ids });
     });
     const deps = { zhixingHome: f.root, configPath: f.configPath,
-      rl: { pause() {}, resume() {} } as never, renderer: { stop() {} }, writer: writer as never,
-      screen: { reassertCursorHidden() {} } as never, state: { activeTurnPromise: null },
+      state: { activeTurnPromise: null },
       requestHostReload: vi.fn(), readExtensions: () => f.api.query(extensionList, undefined), applyExtensionConfiguration: apply };
-    await handleConfigCommand(deps);
+    await applyConfigurationEdit(deps);
     if (retry) {
       const ref = { kind: "channel" as const, bindingId: "extension-edits/one" };
       const pending = JSON.parse((await f.store.get(ref))!);
       // Reproduce a mismatched publication left by an earlier version.
       await f.store.put(ref, JSON.stringify({ ...pending, credentials: f.credentials.channels.one }));
       editor.run.mockImplementation(async context => ({ kind: "completed", config: context.initialConfig, credentials: context.initialCredentials }));
-      await handleConfigCommand(deps);
+      await applyConfigurationEdit(deps);
     }
     expect((await f.current()).enabled).toBe(false);
     expect((await loadConfigurationSnapshot(options)).credentials.channels!.one!.token).toBe("concurrent-renewed-token");
@@ -480,13 +484,12 @@ describe("managed Channel production composition", () => {
       return f.api.command(extensionApplyConfiguration, { ids });
     });
     const deps = { zhixingHome: f.root, configPath: f.configPath,
-      rl: { pause() {}, resume() {} } as never, renderer: { stop() {} }, writer: { line() {} } as never,
-      screen: { reassertCursorHidden() {} } as never, state: { activeTurnPromise: null },
+      state: { activeTurnPromise: null },
       requestHostReload: vi.fn(), readExtensions: () => f.api.query(extensionList, undefined), applyExtensionConfiguration: apply };
-    await handleConfigCommand(deps);
+    await applyConfigurationEdit(deps);
     expect(await f.configuration.publication("one")).toBeDefined();
     if (newerStop) await f.api.command(extensionSetEnabled, { id: "one", enabled: false, expectedRevision: (await f.current()).revision });
-    first = false; await handleConfigCommand(deps);
+    first = false; await applyConfigurationEdit(deps);
     expect(apply).toHaveBeenCalledTimes(2);
     expect((await f.current()).enabled).toBe(!newerStop);
     expect(await f.configuration.publication("one")).toBeUndefined();

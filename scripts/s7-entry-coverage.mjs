@@ -323,7 +323,7 @@ function resolveRelativeTypeScript(importer, specifier) {
 }
 
 export function discoverSlashRegistrars(replText) {
-  const relative = "packages/cli/src/repl.ts";
+  const relative = "packages/cli/src/surface-entry.ts";
   const source = sourceFile(relative, replText);
   const imports = new Map();
   for (const statement of source.statements) {
@@ -379,7 +379,7 @@ export function discoverSlashRegistrars(replText) {
     "slash registrar",
   );
   if (!dynamicSkillRegistered) {
-    throw new Error("dynamic SkillCommandSource is not registered by the production REPL");
+    throw new Error("dynamic SkillCommandSource is not registered by the Surface");
   }
   return registrars;
 }
@@ -453,20 +453,96 @@ export function collectSlashCommandsFromRegistrar(
   return commands;
 }
 
-async function collectSlashCommands() {
-  const repl = await readFile(path.join(root, "packages/cli/src/repl.ts"), "utf8");
-  const registrars = discoverSlashRegistrars(repl);
-  const commands = [];
-  for (const registrar of registrars) {
-    const text = await readFile(path.join(root, registrar.source), "utf8");
-    commands.push(
-      ...collectSlashCommandsFromRegistrar(
-        registrar.source,
-        text,
-        registrar.functionName,
-      ),
-    );
+export const TERMINAL_SLASH_REGISTRATION_SOURCES = Object.freeze([
+  "packages/cli/src/terminal/candidates.ts",
+  "packages/cli/src/terminal/session-commands.ts",
+  "packages/cli/src/terminal/application.ts",
+  "packages/cli/src/terminal/skill-commands.ts",
+  "packages/cli/src/text-session.ts",
+]);
+
+/** Capture the registries actually assembled by the two production Surfaces.
+ * Catalog membership alone is insufficient: the literal candidate sets, their
+ * binding calls, the text dispatcher and the dynamic source must all be live. */
+export function collectTerminalSlashCommands(records) {
+  const byPath = new Map(records.map(record => [record.relative, record.text]));
+  const required = relative => {
+    const text = byPath.get(relative);
+    if (text === undefined) throw new Error(`${relative}: production slash registration source is missing`);
+    return text;
+  };
+  const [candidatePath, sessionPath, applicationPath, skillPath, textPath] = TERMINAL_SLASH_REGISTRATION_SOURCES;
+  const candidate = required(candidatePath), session = required(sessionPath);
+  const application = required(applicationPath), skill = required(skillPath), text = required(textPath);
+  const catalogImport = (relative, sourceText) => sourceFile(relative, sourceText).statements.some(statement =>
+    ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier) &&
+    resolveRelativeTypeScript(relative, statement.moduleSpecifier.text) === "packages/cli/src/commands/builtin-definitions.ts" &&
+    statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings) &&
+    statement.importClause.namedBindings.elements.some(binding => binding.name.text === "BUILTIN_COMMANDS" &&
+      (binding.propertyName?.text ?? binding.name.text) === "BUILTIN_COMMANDS"));
+  for (const [relative, content] of [[candidatePath, candidate], [sessionPath, session], [textPath, text]]) {
+    if (!catalogImport(relative, content)) throw new Error(`${relative}: slash catalog is not the production builtin definitions`);
   }
+  const literalNames = (relative, sourceText, select) => {
+    const source = sourceFile(relative, sourceText);
+    let array;
+    const visit = node => {
+      const selected = select(node, source);
+      if (selected) {
+        if (array) throw new Error(`${relative}: duplicate slash candidate declaration`);
+        array = selected;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    if (!array || !ts.isArrayLiteralExpression(array) || array.elements.some(item => !ts.isStringLiteralLike(item))) {
+      throw new Error(`${relative}: non-literal command descriptor`);
+    }
+    const names = array.elements.map(item => item.text);
+    assertUnique(names, "slash candidate name");
+    if (!names.length || names.some(name => !BUILTIN_COMMANDS[`${name}:repl`])) {
+      throw new Error(`${relative}: non-literal command descriptor`);
+    }
+    return names;
+  };
+  const candidateNames = literalNames(candidatePath, candidate, node =>
+    ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "available" &&
+    node.initializer && ts.isNewExpression(node.initializer) && node.initializer.expression.getText() === "Set"
+      ? node.initializer.arguments?.[0] : undefined);
+  const sessionNames = literalNames(sessionPath, session, (node, source) =>
+    ts.isBinaryExpression(node) && node.left.getText(source) === "this.commands" &&
+    ts.isCallExpression(node.right) && ts.isPropertyAccessExpression(node.right.expression) &&
+    node.right.expression.name.text === "map" ? node.right.expression.expression : undefined);
+  // These finite composition statements are checked after parsing the literal
+  // descriptors, so an unknown name or dynamic spread cannot become coverage.
+  if (!/for\s*\(const definition of Object\.values\(BUILTIN_COMMANDS\)\)\s*if\s*\(available\.has\(definition\.name\)\)\s*this\.registry\.register\(definition\)/u.test(candidate) ||
+      !candidate.includes("this.registry.register(command)") ||
+      !/\.\.\.BUILTIN_COMMANDS\[`\$\{name\}:repl` as keyof typeof BUILTIN_COMMANDS\]/u.test(session) ||
+      !application.includes("this.#candidates.bindCommands(this.#sessionCommands.commands)") ||
+      !text.includes("for (const definition of Object.values(BUILTIN_COMMANDS))") ||
+      !text.includes("registry.register(definition)") ||
+      !text.includes("dispatcher.registerHandler(definition.id,") ||
+      !text.includes("const controlText = normalizeLeadingSlashAlias(line.trim())") ||
+      !text.includes("dispatcher.dispatch(controlText, runtime())")) {
+    throw new Error("production slash registration graph is disconnected from its command handlers");
+  }
+  if (!skill.includes("new SkillCommandSource({ client: options.client, findExisting })") ||
+      !skill.includes("options.registry.registerDynamicSource({ id: source.id,") ||
+      !skill.includes("source.list()") ||
+      !application.includes("new TerminalSkillCommands({ client, registry: this.#candidates.registry,") ||
+      !text.includes("new TerminalSkillCommands({ registry, client: new SkillCatalogRpcClient(connection),")) {
+    throw new Error("dynamic SkillCommandSource is not registered by both production Surfaces");
+  }
+  const terminalNames = [...candidateNames, ...sessionNames];
+  assertUnique(terminalNames, "production terminal slash name");
+  const commands = terminalNames.map(name => {
+    const definition = BUILTIN_COMMANDS[`${name}:repl`];
+    return { id: definition.id, name: definition.name, execution: definition.execution,
+      source: sessionNames.includes(name) ? sessionPath : candidatePath,
+      registrar: sessionNames.includes(name) ? "TerminalSessionCommands" : "TerminalCandidatesOwner" };
+  });
+  const missing = Object.values(BUILTIN_COMMANDS).filter(definition => !terminalNames.includes(definition.name));
+  if (missing.length) throw new Error(`production terminal slash commands are unregistered: ${missing.map(item => item.id).join(", ")}`);
   commands.push({
     id: SKILL_COMMAND_SOURCE_DESCRIPTOR.entryId,
     name: SKILL_COMMAND_SOURCE_DESCRIPTOR.name,
@@ -474,9 +550,16 @@ async function collectSlashCommands() {
     source: "packages/cli/src/commands/skill-command-source.ts",
     collisionPolicy: SKILL_COMMAND_SOURCE_DESCRIPTOR.collisionPolicy,
   });
-  assertUnique(commands.map((item) => item.id), "slash command id");
+  assertUnique(commands.map(item => item.id), "slash command id");
   return commands.sort((left, right) => left.id.localeCompare(right.id, "en-US"));
 }
+
+async function collectSlashCommands() {
+  return collectTerminalSlashCommands(await Promise.all(TERMINAL_SLASH_REGISTRATION_SOURCES.map(async relative => ({
+    relative, text: await readFile(path.join(root, relative), "utf8"),
+  }))));
+}
+
 
 export function collectCleanupRegistrationsFromSource(relative, text) {
   const source = sourceFile(relative, text);
@@ -3630,8 +3713,10 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
   const surfaceLink = required(
     "packages/cli/src/runtime/surface-core-host-link.ts",
   );
-  const repl = required("packages/cli/src/repl.ts");
-  const infoCommands = required("packages/cli/src/commands/info-commands.ts");
+  const terminal = required("packages/cli/src/terminal/application.ts");
+  const textSession = required("packages/cli/src/text-session.ts");
+  const infoCommands = required("packages/cli/src/terminal/information-commands.ts");
+  const statusPresentation = required("packages/cli/src/runtime/server-status-presentation.ts");
   const startup = required("packages/cli/src/runtime/startup-application.ts");
   const topology = required("packages/cli/src/serve/role-topology.ts");
   const host = required("packages/cli/src/serve/application-host.ts");
@@ -3742,13 +3827,19 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     ) ||
     !replLocalView.includes("configuration.readReplSurface()") ||
     !replLocalView.includes("get primaryModel(): RuntimePrimaryModelDisplayProjection") ||
-    /localView\.config|\bgetConfig\b|\bZhixingConfig\b/u.test(repl) ||
-    !repl.includes("localView.primaryModel.providerId") ||
-    !repl.includes("getPrimaryModel: () => localView.primaryModel") ||
+    [terminal, textSession].some(source => /(?:localView|local)\.config|\bgetConfig\b|\bZhixingConfig\b/u.test(source)) ||
+    !terminal.includes("getPrimaryModel: () => this.#localView.primaryModel") ||
+    !textSession.includes("getPrimaryModel: () => local.primaryModel") ||
+    !terminal.includes("configuration: createRuntimeConfigurationProvider(") ||
+    !textSession.includes("configuration: createRuntimeConfigurationProvider(") ||
     /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(
       infoCommands,
     ) ||
-    !infoCommands.includes("getPrimaryModel: () => RuntimePrimaryModelDisplayProjection")
+    !infoCommands.includes("getPrimaryModel: () => RuntimePrimaryModelDisplayProjection") ||
+    !statusPresentation.includes("model: RuntimePrimaryModelDisplayProjection") ||
+    !statusPresentation.includes("proxy: RuntimeNetworkProxyDisplayProjection") ||
+    !statusPresentation.includes("model.providerId") ||
+    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(statusPresentation)
   ) {
     failures.push("REPL Surface regained a raw or aggregate configuration path");
   }
@@ -3765,7 +3856,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     "packages/cli/src/runtime/extensions/channel-configuration.ts",
     "packages/cli/src/runtime/mcp-connection-adapter.ts",
     "packages/cli/src/maintenance/doctor.ts",
-    "packages/cli/src/repl.ts",
+    "packages/cli/src/text-session.ts",
     "packages/cli/src/runtime/configuration-application.ts",
     "packages/cli/src/runtime/runtime-configuration-provider.ts",
     "packages/cli/src/serve/backup-command.ts",
@@ -4280,10 +4371,10 @@ export function inspectMcpManagementBoundary(records) {
   const setup = required("packages/core/src/mcp-management/setup.ts");
   const discovery = required("packages/core/src/mcp-management/discovery.ts");
   const editorTypes = required("packages/cli/src/config-editor/types.ts");
-  const panel = required("packages/cli/src/config-editor/panels/mcp.ts");
+  const panel = required("packages/cli/src/config-editor/model/mcp.ts");
   const section = required("packages/cli/src/config-editor/sections/mcp.ts");
   const configCommand = required("packages/cli/src/runtime/configuration-application.ts");
-  const commandRegistration = required("packages/cli/src/commands/config-commands.ts");
+  const commandRegistration = required("packages/cli/src/terminal/application.ts");
 
   if (
     !contract.includes("export interface McpManagementServerDraft") ||
@@ -4620,7 +4711,7 @@ export function inspectConversationStorageBoundary(records) {
   const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
   const directory = required("packages/cli/src/serve/conversation-directory.ts");
   const readOnly = required(
-    "packages/cli/src/runtime/read-only-conversation-browser.ts",
+    "packages/cli/src/runtime/read-only-conversation-query.ts",
   );
   const bootstrap = required(
     "packages/core/src/context/bootstrap/build-startup-bootstrap.ts",
@@ -4692,7 +4783,7 @@ export function inspectConversationStorageBoundary(records) {
       [context, surfaces, readOnly].join("\n"),
     ) ||
     /from\s+["']node:(?:fs|fs\/promises|path)["']/u.test(readOnly) ||
-    !readOnly.includes('storage: Pick<ConversationDirectoryStorage, "list" | "readHistory">')
+    (!readOnly.includes('storage: Pick<ConversationDirectoryStorage, "list">') || !readOnly.includes('storage: Pick<ConversationDirectoryStorage, "readHistory">'))
   ) {
     failures.push(
       "Conversation Surface reads concrete storage or physical paths instead of finite projections",
@@ -4910,7 +5001,7 @@ export function inspectStorageRemainderBoundary(records) {
   const managedService = required("packages/cli/src/serve/managed-service.ts");
   const logRuntime = required("packages/cli/src/logging/runtime.ts");
   const logBootstrap = required("packages/cli/src/logging/bootstrap.ts");
-  const logEntry = required("packages/cli/src/legacy-entry.ts");
+  const logEntry = required("packages/cli/src/command-entry.ts");
   const logStore = required("packages/core/src/logging/storage.ts");
 
   if (
@@ -5562,7 +5653,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     "packages/cli/src/runtime/local-workspace-control.ts",
   );
   const command = required("packages/cli/src/runtime/workspace-command.ts");
-  const repl = required("packages/cli/src/repl.ts");
+  const terminal = required("packages/cli/src/terminal/application.ts");
 
   const finiteWorkspaceResourcePort =
     /Pick<\s*ResourceReservationPort,\s*"acquireRoot"\s*\|\s*"settle"\s*\|\s*"release"\s*>/u;
@@ -5825,9 +5916,9 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !command.includes("workspaceAdministrationOperationTarget(operation.input)") ||
     command.includes("function operationTarget(") ||
     command.includes("WORKSPACE_CATALOG_RESET_IMPACT") ||
-    !repl.includes("withLocalWorkspaceClient(") ||
-    !repl.includes("createWorksceneFromLocalWorkspaceAuthorization(") ||
-    repl.includes("withLocalWorkspaceFacade")
+    !terminal.includes("withLocalWorkspaceClient(") ||
+    !terminal.includes("createWorksceneFromLocalWorkspaceAuthorization(") ||
+    terminal.includes("withLocalWorkspaceFacade")
   ) {
     failures.push(
       "Workspace CLI or Workscene binding still interprets Workspace Administration facts or reset impact",
@@ -7314,13 +7405,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const managementFacade = required(
     "packages/cli/src/runtime/rpc-management-facade.ts",
   );
-  const repl = required("packages/cli/src/repl.ts");
-  const infoCommands = required("packages/cli/src/commands/info-commands.ts");
+  const terminal = required("packages/cli/src/terminal/application.ts");
+  const textSession = required("packages/cli/src/text-session.ts");
+  const dynamicSkills = required("packages/cli/src/terminal/skill-commands.ts");
+  const taskCommands = required("packages/cli/src/terminal/tasks.ts");
   const skillManager = required(
     "packages/cli/src/skills/manager-controller.ts",
   );
   const skillManagerCommand = required(
-    "packages/cli/src/skills/manager-command.ts",
+    "packages/cli/src/terminal/skills.ts",
   );
   const skillCommandSource = required(
     "packages/cli/src/commands/skill-command-source.ts",
@@ -7356,15 +7449,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const assignmentMutationPort = required(
     "packages/cli/src/serve/assignment-global-state-ports.ts",
   );
-  const taskSurfaceStart = infoCommands.indexOf(
-    'dispatcher.registerHandler("tasks:repl"',
-  );
-  const taskSurfaceEnd = infoCommands.indexOf(
-    "function formatRecoveryBackupState(",
-    taskSurfaceStart,
-  );
+  const taskSurfaceStart = taskCommands.indexOf("if (name === 'tasks')");
+  const taskSurfaceEnd = taskCommands.indexOf("if (name === 'tasklist')", taskSurfaceStart);
   const taskSurface = taskSurfaceStart >= 0 && taskSurfaceEnd > taskSurfaceStart
-    ? infoCommands.slice(taskSurfaceStart, taskSurfaceEnd)
+    ? taskCommands.slice(taskSurfaceStart, taskSurfaceEnd)
     : "";
   const worksceneConversationCleanupFactoryConsumers = records.filter(
     (record) =>
@@ -7883,7 +7971,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /SchedulerEventMap|isInternal|scheduler:task-/u.test(scheduleEventBridge) ||
     !authHandler.includes("productApi?.supports(SCHEDULE_MANAGEMENT_LIST_QUERY)") ||
     /server\.scheduler/u.test(authHandler) ||
-    /createEventBus<SchedulerEventMap>|scheduler:task-failed/u.test(repl)
+    [terminal, textSession].some(source => /createEventBus<SchedulerEventMap>|scheduler:task-failed/u.test(source))
   ) {
     failures.push("Host, Server or Surface retains a raw Schedule runtime decision path");
   }
@@ -7893,7 +7981,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     scheduleTool.includes('?? "normal"') ||
     taskSurfaceStart < 0 ||
     taskSurface.length === 0 ||
-    !taskSurface.includes("const tasks = await deps.getScheduler().list();") ||
+    !taskSurface.includes("const tasks = await this.options.scheduler.list();") ||
     /\bisInternal\b|\.filter\s*\(/u.test(taskSurface) ||
     !rpcSchedule.includes('client.request<TaskView>("schedule.create"') ||
     !rpcSchedule.includes('client.request<AgentTurnResult>("schedule.run"') ||
@@ -9129,25 +9217,32 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("RpcManagementFacade retains a parallel Skill client mainline");
   }
   if (
-    repl.split("new SkillCatalogRpcClient(coreHost)").length - 1 !== 1 ||
-    !repl.includes('from "@zhixing/rpc/skill-catalog-client"') ||
-    repl.includes("./runtime/skill-catalog-rpc-client") ||
-    !repl.includes("skillClient,") ||
-    !repl.includes("client: skillClient") ||
-    !repl.includes("skillClient.onFact(") ||
-    !repl.includes("detachSkillCatalogFacts();") ||
-    repl.includes("skillStore:") ||
-    repl.includes("as never") && repl.includes("managementFacade.skill")
+    terminal.split("new SkillCatalogRpcClient(this.#connection)").length - 1 !== 1 ||
+    !terminal.includes("import('@zhixing/rpc/skill-catalog-client')") ||
+    !terminal.includes("new TerminalSkillCommands({ client, registry: this.#candidates.registry,") ||
+    !terminal.includes("client: binding.client") ||
+    !terminal.includes("refreshCommands: () => binding.commands.refresh()") ||
+    !terminal.includes("this.#skillCommands?.dispose()") ||
+    textSession.split("new SkillCatalogRpcClient(connection)").length - 1 !== 1 ||
+    !textSession.includes("from '@zhixing/rpc/skill-catalog-client'") ||
+    !textSession.includes("new TerminalSkillCommands({ registry, client: new SkillCatalogRpcClient(connection),") ||
+    !textSession.includes("skills?.dispose()") ||
+    !dynamicSkills.includes("new SkillCommandSource({ client: options.client, findExisting })") ||
+    !dynamicSkills.includes("options.registry.registerDynamicSource(") ||
+    !dynamicSkills.includes("options.client.onFact(") ||
+    !dynamicSkills.includes("this.#unsubscribe(); this.#unregister();") ||
+    [terminal, textSession].some(source => /skill-catalog-rpc-client|skillStore:|managementFacade\.skill/u.test(source))
   ) {
-    failures.push("REPL does not share one Skill client across manager, dynamic slash and Fact refresh");
+    failures.push("Terminal or text Surface does not share one Skill client across manager, dynamic slash and Fact refresh");
   }
   for (const [relative, text] of [
     ["packages/cli/src/skills/manager-controller.ts", skillManager],
-    ["packages/cli/src/skills/manager-command.ts", skillManagerCommand],
+    ["packages/cli/src/terminal/skills.ts", skillManagerCommand],
+    ["packages/cli/src/terminal/skill-commands.ts", dynamicSkills],
     ["packages/cli/src/commands/skill-command-source.ts", skillCommandSource],
   ]) {
     if (
-      !text.includes('from "@zhixing/core/skills/catalog"') ||
+      !/from ["']@zhixing\/core\/skills\/catalog["']/u.test(text) ||
       !text.includes("SkillCatalogClient") ||
       text.includes("SkillManagerStore") ||
       text.includes("listForManagement") ||
@@ -9588,7 +9683,7 @@ export function inspectManagedHostAssembly(records) {
   const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
   const roleTopology = byPath.get("packages/cli/src/serve/role-topology.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
-  const repl = byPath.get("packages/cli/src/repl.ts");
+  const terminal = byPath.get("packages/cli/src/terminal/application.ts");
   const surfaceLink = byPath.get("packages/cli/src/runtime/surface-core-host-link.ts");
   const secrets = byPath.get("packages/secrets/src/platform-secret-store.ts");
   const status = byPath.get("packages/cli/src/serve/status.ts");
@@ -9610,7 +9705,7 @@ export function inspectManagedHostAssembly(records) {
     !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
     !anchorSessionBroadcast || !channelSetup ||
     !executorRoleLifecycle || !executorServerLifecycle || !anchorHostShell ||
-    !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !roleTopology || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !roleTopology || !connection || !terminal || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server || !inboundRouter || !advancementAdapters ||
     !serverIndex || !sessionBroadcastTransport || !rpcIndex
@@ -10100,8 +10195,9 @@ export function inspectManagedHostAssembly(records) {
     count(reconciler, "input.adapter.disable(initial.spec, input.signal)") !== 0 ||
     !serviceRuntime.includes(".disableFuture(current.spec, signal)") ||
     !config.includes("? { beforeTurnover: input.prepareManagedServiceTurnover }") ||
-    !repl.includes('strategy: "drain"') ||
-    !repl.includes("prepareManagedServiceTurnover: () => prepareCurrentManagedServiceConfigTurnover(undefined, zhixingHome)") ||
+    !terminal.includes("strategy: 'drain'") ||
+    !terminal.includes("prepareManagedServiceTurnover: async () =>") ||
+    !terminal.includes("return prepareCurrentManagedServiceConfigTurnover(undefined, this.home)") ||
     !serverContext.includes("lifecycleShutdown?: LifecycleShutdownAdapter;") ||
     !serverShutdown.includes("return await lifecycle.prepare({") ||
     !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
@@ -10466,7 +10562,9 @@ export function inspectRecoveryBackupAssembly(records) {
   const backupApplication = byPath.get("packages/core/src/backup-recovery/application.ts");
   const serverContext = byPath.get("packages/server/src/context.ts");
   const managementFacade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
-  const infoCommands = byPath.get("packages/cli/src/commands/info-commands.ts");
+  const statusPresentation = byPath.get("packages/cli/src/runtime/server-status-presentation.ts");
+  const terminal = byPath.get("packages/cli/src/terminal/application.ts");
+  const textSession = byPath.get("packages/cli/src/text-session.ts");
   const bootstrapStore = byPath.get("packages/cli/src/serve/mesh-bootstrap-store.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
@@ -10518,7 +10616,7 @@ export function inspectRecoveryBackupAssembly(records) {
   if (
     !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
     !doctor || !cliIndex || !backupApplication || !serverContext || !managementFacade ||
-    !infoCommands ||
+    !statusPresentation || !terminal || !textSession ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !pairedIncomingInfrastructure || !pairedCheckpointTarget ||
     !pairedCheckpointTargetInfrastructure || !publishedCheckpointTarget ||
@@ -10655,7 +10753,10 @@ export function inspectRecoveryBackupAssembly(records) {
       'import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application"',
     ) ||
     !managementFacade.includes("recoveryBackup?: BackupRecoveryPublicStatus;") ||
-    !infoCommands.includes('case "restore-backup-connection":') ||
+    !statusPresentation.includes("case 'restore-backup-connection':") ||
+    !statusPresentation.includes("formatRecoveryBackupState(info.recoveryBackup)") ||
+    !terminal.includes("serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status)") ||
+    !textSession.includes("serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, local.hostInfo)") ||
     !backup.includes('case "restore-backup-connection":') ||
     records.some(({ text }) => text.includes("start-authenticated-mesh"))
   ) {
@@ -14591,7 +14692,8 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
     ["packages/cli/src/runtime/rpc-conversation-facade.ts", undefined],
     ["packages/cli/src/runtime/conversation-controller.ts", undefined],
-    ["packages/cli/src/repl.ts", undefined],
+    ["packages/cli/src/terminal/application.ts", undefined],
+    ["packages/cli/src/text-session.ts", undefined],
     ["packages/core/src/conversation/application.ts", undefined],
     ["packages/rpc/src/session-wire.ts", undefined],
     ["packages/rpc/src/confirmation-bridge.ts", undefined],
@@ -15108,17 +15210,21 @@ export function inspectConversationAdoptionAssembly(records) {
       !/client\.consume[\s\S]*?['"]confirmation\.list['"][\s\S]*?client\.request[\s\S]*?['"]confirmation\.list['"]/u.test(broker.text)) {
     failures.push(`${broker.relative}: the first-party confirmation renderer must recover missed pending requests`);
   }
-  const repl = required.get("packages/cli/src/repl.ts");
-  if (!/initialAdoptionReview[\s\S]*?\.message/u.test(repl.text) || !/rpcConfirmationBroker\.refresh\s*\(\s*\)/u.test(repl.text)) {
-    failures.push(`${repl.relative}: the first-party REPL must present adoption summaries and recover pending confirmations`);
+  const terminal = required.get("packages/cli/src/terminal/application.ts");
+  const textSession = required.get("packages/cli/src/text-session.ts");
+  for (const surface of [terminal, textSession]) {
+    if (!surface.text.includes("initial.adoptionReview.message") ||
+        !/(?:this\.#confirmations|confirmations!?)\.refresh\s*\(\s*\)/u.test(surface.text)) {
+      failures.push(`${surface.relative}: the first-party Surface must present adoption summaries and recover pending confirmations`);
+    }
+    if (/confirmLocalContinuation/u.test(surface.text)) {
+      failures.push(`${surface.relative}: the first-party Surface must present exact capability consequences instead of physical topology`);
+    }
   }
-  if (
-    !/confirmContinuation:\s*async\s*\(unavailableCapabilities\)[\s\S]*?unavailableCapabilities\.join\("；"\)[\s\S]*?接受以上限制并继续/u.test(
-      repl.text,
-    ) ||
-    /confirmLocalContinuation/u.test(repl.text)
-  ) {
-    failures.push(`${repl.relative}: the first-party Surface must present exact capability consequences instead of physical topology`);
+  if (!terminal.text.includes("confirmContinuation: capabilities => this.#confirmLimited(capabilities)") ||
+      !/message: capabilities\.join\('\\n'\)[\s\S]*?接受以上限制并继续[\s\S]*?=== 'continue'/u.test(terminal.text) ||
+      !/confirmContinuation:\s*async unavailable =>\s*\{[\s\S]*?unavailable\.join\('；'\)[\s\S]*?return false;/u.test(textSession.text)) {
+    failures.push("Terminal or text Surface must present exact capability consequences instead of physical topology");
   }
 
   return failures;
@@ -15627,7 +15733,7 @@ const rpcClientOwners = new Set([
 const coreHostConnectionOwners = new Set([
   "packages/cli/src/terminal/application.ts",
   "packages/cli/src/index.ts",
-  "packages/cli/src/repl.ts",
+  "packages/cli/src/text-session.ts",
   "packages/cli/src/runtime/anchor-uninstall-command.ts",
   "packages/cli/src/runtime/device-removal-command.ts",
   "packages/cli/src/runtime/duty-migration-command.ts",

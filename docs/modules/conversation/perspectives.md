@@ -111,7 +111,7 @@
 
 ### 事件与体验
 
-复用本次 EventBus 的 orchestration 事件与 RPC 投影；CLI 已有 run_start/node_start/run_end 消费者及历史 perspectiveCount 来源投影。用户应看到评议进度、最终答案或失败环节，不必理解 DAG；未来其他触发面复用同一应用行为，不复制流程。
+复用本次 EventBus 的 orchestration 事件与 RPC 投影，历史保留 perspectiveCount 来源。用户看到评议开始、交叉吸收、收敛及失败提示，不必理解 DAG；其他触发面复用同一应用行为，不复制流程。CLI `TerminalProcessSession` 消费 Host 的 `session.event` 事件来源，按会话、运行身份和源序号维护有限进度提示，即使正文尚无 delta 也能显示；该来源不创建第二个 canonical 运行，也不以它的结束事件关闭父运行。
 
 事件桥随执行清理，busy 在执行 finally 中释放。实时进度不是最终提交证据；用户最终看到的答案与历史应以同一已提交结果为准。帮助说明、触发边界、失败呈现和历史标记属于此能力的产品维护范围。
 
@@ -119,6 +119,6 @@
 
 - [产品应用与内置模板](../../../packages/core/src/conversation/perspectives-application.ts)。
 - [宿主正确性适配](../../../packages/cli/src/serve/conversation-perspectives-correctness.ts)、[RPC 入口](../../../packages/server/src/rpc/methods/session.ts)。
-- [CLI 触发与材料处理](../../../packages/cli/src/session-engage.ts)、[进度渲染](../../../packages/cli/src/render.ts)、[历史投影](../../../packages/cli/src/history-tail.ts)。
+- [CLI 触发与材料处理](../../../packages/cli/src/session-engage.ts)、[过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[历史投影](../../../packages/cli/src/runtime/conversation-history-projection.ts)。
 
-回归核对触发不误伤、文本材料、数量与档位、三层依赖、共享快照、输出合同、准入与推进交界、失败/中止、耐久提交与发布重驱。应用测试、宿主正确性测试与 CLI session-engage/render/history-tail 测试共同覆盖，不能以替身 runner 通过代替真实生产提交链。
+回归核对触发不误伤、文本材料、数量与档位、三层依赖、共享快照、输出合同、准入与推进交界、失败/中止、耐久提交与发布重驱。应用测试、宿主正确性测试与 CLI session-engage、过程投影和历史投影测试共同覆盖，不能以替身 runner 通过代替真实生产提交链。

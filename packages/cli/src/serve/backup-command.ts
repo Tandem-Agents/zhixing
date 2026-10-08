@@ -72,7 +72,7 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
-import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
 import type { PairedRecoveryRootActivation } from "./paired-checkpoint-target.js";
@@ -1098,7 +1098,7 @@ async function sourceDevice(store: FileMeshBootstrapStore): Promise<string> {
 async function readDecodedRecoveryPackage(
   injected?: () => Promise<string>,
 ): Promise<ReturnType<typeof decodeRecoveryPackage>> {
-  if (!injected) return readRecoveryPackageFromTty();
+  if (!injected) return requireRecoveryPackageSurface();
   const encoded = await injected();
   assertRecoveryPackageInputLimit(encoded);
   return decodeRecoveryPackage(encoded);

@@ -13,22 +13,20 @@
 | 数据 | 当前含义与来源 |
 |---|---|
 | 请求容量估算 | `context:tokens_snapshot.totalTokens` 表达下次请求的估算输入量，覆盖 system、实际消息及 tools；不是本轮累计流量 |
-| API 消耗 | `llm:request_end.usage` 提供单次请求报告的用量；状态条在 run 内累加，请求尚未结束时输出量包含流式估算 |
-| 缓存命中 | 上下文指示器显示最近一次主调用的 `cacheReadTokens`；不是当前估算快照中保证可命中的部分，也不是费用节省金额 |
+| API 消耗 | `llm:request_end.usage` 提供单次请求报告的用量；N 的过程投影按已结束请求累加；不能把容量估算混入实耗 |
+| 缓存命中 | 过程投影保留主请求的 `cacheReadTokens`；不是当前估算快照中保证可命中的部分，也不是费用节省金额 |
 
 容量占比以 `ContextBudget.currentTokens / effectiveWindow` 计算，有效容量扣除了受上限约束的输出预留，不等于模型标称窗口。缺值与零值须区分；未拿到统计不能展示为“零消耗”。费用还依赖计价与计费口径，不能仅由缓存 token 或容量下降推导。
 
-## 当前状态条与上下文指示器
+## 当前过程投影与信息行
 
-`render.ts` 按 run 装配状态条和 ContextIndicator；后者仅在有 screen 时启用，不另设显示配置开关。状态条展示运行阶段、耗时及过程中输入／输出量，完成态不保留过程 token 数，保留结束反馈；原 `renderSummary` 每轮摘要已退出。
+N 的 [TerminalProcessProjection](../../../packages/cli/src/terminal/process-projection.ts)消费主运行事件，分别维护请求用量、上下文估算、缓存和过程提示；U 的共同根显示过程 DTO，不装配旧 StatusBar 或 ContextIndicator。run 开始清理上一运行状态，请求结束使用供应方报告的 usage，输入量按 getTotalInputTokens 统一口径。
 
-状态条把已完成请求的用量与当前请求流式输出估算分开维护，请求结束后以该请求 usage 结算，避免工具循环中的多个请求被覆盖或重复累计。输入按 `getTotalInputTokens` 统一包含缓存读取等供应方差异；不把上下文估算加入消耗总数。
-
-ContextIndicator 在稳定尾部展示 `~ 14.0k` 或 `~ 14.0k (cache 9.0k)`，`~` 表示估算。它只消费主 lineage 信号；新 run 内状态从空开始，容量快照更新取最新值，cache 每次主请求结束覆盖，缺失或非正数撤去 cache 后缀。没有容量快照时不生成新段；dispose 取消订阅但保留上次显示，随后有效快照覆盖，屏幕输入分离时统一清理。残留显示是上次快照，不能解读为新 run 已取得统计。
+上下文快照与 API 消耗必须分开。缺失值显示未知或不显示，不能借保留旧值冒充新运行统计。事件投影按运行和 lineage 关联，子调用用量不替换主上下文水位。旧指示器的 dispose 残留和静态尾段布局不再是当前生命周期。
 
 ## 按需查询
 
-`/usage` 与 `/context` 经命令 dispatcher 调用 ConversationController，再通过会话 RPC 与领域应用取得宿主投影；CLI 只渲染结果，不自建计量事实或解析工具文本作为权威统计。宿主适配调用 owner 的 existing 查询；查询失败显示“用量信息不可用”或“上下文信息不可用”，不伪造空账单。
+`/usage` 与 `/context` 经 TerminalInformationCommands 调用 ConversationController，再通过会话 RPC 与领域应用取得宿主投影；CLI 只渲染结果，不自建计量事实或解析工具文本作为权威统计。宿主适配调用 owner 的 existing 查询；查询失败显示“用量信息不可用”或“上下文信息不可用”，不伪造空账单。
 
 - **`/usage`**：展示容量占比及当前量／有效容量、标称窗口、会话轮次和可用的估算校准系数；有结构化子任务用量时追加状态、token、工具调用、耗时、短标识及总计，分隔线适配终端宽度。主区当前不是本轮／会话累计输入输出账单，子任务合计也不能宣称是全会话总成本。
 - **`/context`**：展示有效容量、占比条与阈值标尺。当前没有按系统提示、历史、工具结果分解的构成分析。渲染器固定标尺为 75%／85%／95%，警示时提供 `/compact` 提示；这些是展示口径，不能据此宣称自动压缩必在 85% 发生。当前自动切段由模型注意力阈值与 SegmentManager 裁决，见上下文架构。
@@ -47,7 +45,7 @@ ContextIndicator 在稳定尾部展示 `~ 14.0k` 或 `~ 14.0k (cache 9.0k)`，`~
 
 ## 实现与核对入口
 
-- [命令与错误反馈](../../../packages/cli/src/commands/info-commands.ts)、[会话控制](../../../packages/cli/src/runtime/conversation-controller.ts)、[RPC](../../../packages/server/src/rpc/methods/session.ts)、[宿主查询适配](../../../packages/cli/src/serve/conversation-usage-application.ts)。
-- [渲染与 run 装配](../../../packages/cli/src/render.ts)、[状态条](../../../packages/cli/src/status-bar/status-bar.ts)、[上下文指示器](../../../packages/cli/src/context-indicator/context-indicator.ts)、[预算口径](../../../packages/core/src/context/budget.ts)。
+- [命令与错误反馈](../../../packages/cli/src/terminal/information-commands.ts)、[会话控制](../../../packages/cli/src/runtime/conversation-controller.ts)、[RPC](../../../packages/server/src/rpc/methods/session.ts)、[宿主查询适配](../../../packages/cli/src/serve/conversation-usage-application.ts)。
+- [应用装配](../../../packages/cli/src/terminal/application.ts)、[过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[查询格式](../../../packages/cli/src/terminal/information-presentation.ts)、[预算口径](../../../packages/core/src/context/budget.ts)。
 
-直接核对估算与实耗分离、多请求累加与结算、主子 lineage 隔离、cache 缺值与更新、跨 run 显示生命周期、查询失败不伪造结果、子任务拆分及窄屏可读性、整理成功／失败／降级互不冒充。对应命令、渲染、状态条、ContextIndicator 和宿主查询测试提供局部证据。
+直接核对估算与实耗分离、多请求累加与结算、主子 lineage 隔离、cache 缺值与更新、跨 run 显示生命周期、查询失败不伪造结果、子任务拆分及窄屏可读性、整理成功／失败／降级互不冒充。对应命令、过程投影、信息格式与宿主查询测试提供局部证据。

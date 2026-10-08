@@ -18,9 +18,3 @@ export {
   type SelectionRunOptions,
   type SelectionSelectedResult,
 } from "./types.js";
-
-export {
-  createSelectionService,
-  type SelectionService,
-  type SelectionServiceOptions,
-} from "./selection-service.js";

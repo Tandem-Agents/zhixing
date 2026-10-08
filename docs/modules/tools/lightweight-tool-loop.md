@@ -55,7 +55,7 @@
 ## 当前消费者
 
 - **MCP 搜索引导**：CLI 配置命令将 main 角色的宿主 `llmComplete` 注入 `mcp-discovery`。场景工具维护真实搜索结果集合，`parseChoices` 拒绝不在集合中的包名及超过五项的候选；这不证明模型写出的摘要和推荐理由都正确。选择后的配置提取由另一阶段处理，不由通用循环完成。业务正文见 [MCP 接入与管理](../mcp/onboarding-and-management.md)。
-- **工作场景智能创建**：REPL 将 main 角色的宿主文本调用注入 `runWorksceneCreateAssist`。场景负责澄清、创建前确认、已创建结果保护及取消处理，真实写入走工作场景用例；不是另一个常驻 Agent。业务正文见[工作场景管理](../workscene/management.md)。
+- **工作场景智能创建**：终端应用将 main 角色的宿主文本调用注入 `runWorksceneCreateAssist`。场景负责澄清、创建前确认、已创建结果保护及取消处理，真实写入走工作场景用例；不是另一个常驻 Agent。业务正文见[工作场景管理](../workscene/management.md)。
 
 两条路径通过管理接口调用宿主，不再由 CLI 直接持有旧 `AgentRuntime.callText` 接线。通用原语只要求文本完成端口；模型角色与连接规则由[模型角色](../providers/model-roles.md)负责。客户端停止等待、循环放弃结果与宿主取消请求是不同边界，不能仅凭 signal 参数存在就宣称贯通取消。
 
@@ -64,5 +64,5 @@
 ## 实现与核对入口
 
 - [循环实现](../../../packages/core/src/tool-loop/run.ts)、[合同类型](../../../packages/core/src/tool-loop/types.ts)、[JSON 提取](../../../packages/core/src/json.ts)、[直接测试](../../../packages/core/src/tool-loop/__tests__/run.test.ts)。核对多轮调用、真实结果回灌、final 拒绝纠正、轮数耗尽及工具错误与模型错误的区别。
-- [MCP 场景](../../../packages/core/src/mcp-management/discovery.ts)、[配置命令接线](../../../packages/cli/src/runtime/config-command.ts)。
-- [工作场景创建](../../../packages/cli/src/runtime/workscene-create-assist.ts)、[REPL 接线](../../../packages/cli/src/repl.ts)。场景测试另负责事实集合、确认、取消和已完成副作用的处理，不能只用循环 mock 证明业务安全。
+- [MCP 场景](../../../packages/core/src/mcp-management/discovery.ts)、[配置命令接线](../../../packages/cli/src/runtime/configuration-application.ts)。
+- [工作场景创建](../../../packages/cli/src/runtime/workscene-create-assist.ts)、[终端接线](../../../packages/cli/src/terminal/application.ts)。场景测试另负责事实集合、确认、取消和已完成副作用的处理，不能只用循环 mock 证明业务安全。

@@ -3,7 +3,7 @@
  *
  * 宿主侧 per-run bus 经转发装饰器投影为统一信封(SessionEventEnvelope)组播,
  * 本适配器把信封还原为渲染层所需的 bus 形接口(IEventBus<AgentEventMap>),
- * createRenderSubscribers / status-bar 订阅零改:
+ * 纯运行反馈与观察订阅器沿用同一 per-run 接口：
  *
  * - 以 run 事件帧建立 per-run 投影 bus，以发端 dispose 的关闭帧拆除，
  *   建立时调用注入的装饰钩子(与本地 runtime 的 decorateRunBus 同形)挂渲染

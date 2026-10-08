@@ -6,63 +6,37 @@
 
 - 首次长粘贴显示紧凑占位符；输入中已有文本粘贴占位符时，再次粘贴替换旧占位符并显示新原文，保留周围普通文字。这不是把两次粘贴拼接，也不是把旧占位符展开后再追加。
 - 同一次粘贴的传输分片必须先合成完整事件，不能被当作用户再次粘贴而丢掉前半段。
-- 提交前的输入历史（↑／↓ 可恢复草稿）可以保留占位符；提交后终端 scrollback 中的用户消息必须显示原文。两者不是同一个“历史”。原生 scrollback 无法可靠事后重绘，不能把等待展开的引用先写进去。
+- 提交前的输入历史（↑／↓ 可恢复草稿）可以保留占位符；提交后的用户消息必须显示原文。编辑历史与会话历史不是同一对象，不能把临时占位符当作正文提交。
 - 正文首尾空白、缩进和末尾换行须保真；trim 只用于空输入判断和命令控制流。UI 折叠不主动截断内容，也不替模型决定删减哪些文字。
-- 图片、文件等结构化材料输入是相邻职责，不等于文本折叠。本文只说明共享输入交界，不定义材料采集、读取授权、模型能力或存储协议；也不提供磁盘粘贴库、语法高亮或预建多模态能力。
+- 图片、文件等结构化材料输入是相邻职责，不等于文本折叠。本文只说明共享输入交界，不定义材料采集、读取授权、模型能力或存储协议；不提供跨实例持久粘贴库、语法高亮或预建多模态能力；本实例受预算管理的临时盘属于输入保活。
 
 ## 责任链
 
-`终端按键 → 完整粘贴事件 → 输入态折叠／原子编辑 → 提交时展开 → 正文准备与接收 → 提交历史及回显`
+`U 完整粘贴事件 → N 有界原文/材料存储 → U 草稿与原子编辑 → N 展开/准备 → 产品接纳回执 → 历史与回显`。
 
-| 责任 | 当前归属 |
-|---|---|
-| 识别粘贴边界 | `paste-detector.ts`，向调用方输出单键或一次完整 paste，不决定业务呈现 |
-| 折叠与编辑协调 | `typeahead-input.ts`，组装 detector、registry、buffer 和补全 Broker |
-| 临时原文与格式 | `paste-registry.ts`，维护 id、原文、行数、字节数及同内容复用 |
-| 展开及引用保活 | `paste-expand.ts`，倒序替换占位符；`PasteReferenceIndex` 索引可恢复草稿 |
-| 原子操作与布局 | `paste-atomic.ts`、`input-handle-tokens.ts` 和 TUI 原子布局原语，统一处理输入 handle |
-| 普通草稿和输入历史 | `InputBuffer`，提供字符编辑与可恢复槽位，不依赖粘贴 registry |
-| 正文交付 | REPL、`user-turn-input.ts` 与对话调用链；CLI 临时 token 不成为核心的文本协议 |
+U 的 `TerminalPasteStream` 合并同次粘贴的分片，`TerminalInputSession` 保留草稿版本、上传占位和历史引用；N 在本实例有界存储中保存完整文本，`prepareSessionSend` 按真实输入身份和版本准备正文。传输分片、编辑窗口和显示片段都不能成为正文截断依据。
 
-这条链留在接入面。core 的补全匹配只接受注入的 `wordTerminators`，不知道 CLI 占位符含义，不形成 core 对 CLI 的反向依赖。
-
-## 完整粘贴事件
-
-REPL 启用 bracketed paste mode，退出时复位。detector 在 keypress 层识别 `paste-start`／`paste-end`，跨批次累积并在结束时一次性交付；换行事件还原为 `\n`，不是触发提交的 Enter。
-
-没有协议标记时，同一批多个同步 keypress 作为粘贴片段，再以 15ms idle 窗口合并相邻片段；单键沿 microtask 路径及时交付。该 fallback 是兼容性启发式，不能保证任意间隔的分片都能正确分组。旧设计“标记只抑制警告、纯 microtask 足够、无需计时合并”已被替代。
-
-detector 不决定所有消费者都丢弃或都接受 paste：正文输入处理完整文本，选择面板的输入层接受字符、选择层不把 paste 当动作，具体合同见[选择模块](selection.md)。停止订阅时调用 `release()`，结束批处理与计时器，未完成粘贴不在退出后继续写入输入区。
+bracketed paste 由统一模式所有者管理，取消/关闭停止未完成输入。粘贴未完成时 Enter 不得抢先提交；完成后仍需核对场景、草稿及光标版本，不能把迟到数据写到另一个页面。右键路径沿相同通路，平台读取和 helper 关闭受同一有限期限约束。
 
 ## 输入态：折叠、格式与编辑
 
-非材料粘贴达到 **4 行或 200 UTF-8 字节**时可折叠；统计行数时不计末尾空行，但原文仍完整保存。短内容直接铺开。当前 `finalizePaste` 先处理材料识别交界，再移除已有文本 paste token：只有本次没有移除旧 token、且达到阈值时才折叠；“干净”不是要求整个草稿为空。
+非材料粘贴达到 **4 行或 200 UTF-8 字节**时可折叠；统计行数时不计末尾空行，但原文仍完整保存。短内容直接铺开。先处理材料识别，再由 N 的 `TerminalInputStore` 统一决定折叠或替换：扫描完整不可变草稿中的已登记文本 token，存在旧 token 时移除旧 token 并插入本次新原文，保留周围文字与材料。U 只提交输入身份及偏移、读取有界编辑窗口；冷区不漏查，大原文不需要全部进入编辑内存。
 
-占位符格式为 `[Pasted #N +M lines · size]`；size 使用 ASCII 的 B／KB／MB，不内嵌长预览。显示格式和解析 pattern 由 registry 同源定义，调用方不各写一套正则。相同原文可复用 id，hash 命中还须比较原文，不以 hash 独自判断内容相等。
+占位符格式为 `[Pasted #N +M lines · size]`；size 使用 ASCII 的 B／KB／MB，不内嵌长预览。显示格式和解析 pattern 同源定义，调用方不各写一套正则。TerminalInputStore 按输入身份保存；粘贴替换流式生成新草稿，完整写入并结算后才发布。迟到结果不得覆盖新编辑；失败明确未接纳并保留原草稿，不发布半完成替换。
 
 左右移动整段跨过 handle，Backspace／物理 Delete 整段删除；没有命中 handle 时回到普通字符编辑。Ctrl+D 仍属于候选删除，不充当文本 Delete。原子操作在输入层完成，不把字符 buffer 改造成粘贴专用状态机。
 
-文本 token 与材料 chip 共用原子识别和布局入口，但再次文本粘贴只清理文本 paste token，不静默删掉材料 chip。硬换行与软换行统一使用续行缩进；原子区域不在普通换行边界随意切碎。屏幕宽度及输入区呈现由[输入区视觉](input-visual.md)与[屏幕渲染](screen-rendering.md)负责，不在此重复定义。
+文本 token 与材料 chip 共用 handle 识别，U 负责原子编辑与呈现，但再次文本粘贴只清理文本 paste token，不静默删掉材料 chip。硬换行与软换行统一使用续行缩进；同一已受理范围同时用于原子编辑和原生换行；本行放不下的 token 整体续行，宽于整个视口时按字素安全降级，放宽后恢复。布局不修改原文，缩放、撤销和复制保持一致。屏幕宽度及输入区呈现由[输入区视觉](input-visual.md)与[屏幕渲染](screen-rendering.md)负责，不在此重复定义。
 
-CLI 向补全 Broker 注入统一 handle patterns 作为额外 word 边界，避免占位符字面值污染候选 query。原子操作、正文准备和候选匹配是不同职责，不能用一个 token 正则替代整条交付链。
+N 的 TerminalCandidatesOwner 向 Provider 查询上下文注入统一 handle patterns 作为额外 word 边界，避免占位符字面值污染候选 query。原子操作、正文准备和候选匹配是不同职责，不能用一个 token 正则替代整条交付链。
 
-## 临时存储与输入历史
+## 临时存储、历史与提交
 
-`PasteRegistry` 由 REPL 创建并注入常驻输入控制器，跨轮共享；随 REPL scope 释放，不为恢复终端 scrollback 而持久化。
+本实例存储与会话权威分离；草稿、输入历史和暂存草稿引用共同决定文本及材料的保活。历史淘汰且无有效引用时回收，不能只按当前输入框删除，也不能无限保留。编辑窗口之外的冷数据通过身份/版本接续，不以界面已折叠为由丢弃原文。
 
-保活集合包括当前草稿、输入历史条目和浏览历史前暂存的草稿。`InputBuffer.getRestorableDraftSlots()` 只暴露这些通用槽位；`PasteReferenceIndex` 缓存每个槽位的引用，只重新解析新增或变化的文本；registry 按汇总 id 清理。
+用原草稿判定命令语言，trim 仅用于空输入和命令控制；展开后的正文保留空白，不能把粘贴原文中的 slash 自动升级为命令。准备成功不等于接纳，按[迁移设计 D06](../../workbench/terminal-architecture-migration.md)处理接纳回执、拒绝、未知及后续结果；失败不静默丢草稿，未知不自动重发。
 
-因此提交清空当前框不会误删历史里的引用，↑ 恢复后仍可折叠显示并再次发送原文，↓ 回到未提交草稿也不失活。历史淘汰且其他槽位不再引用时才回收；既不每次扫描全部历史大文本，也不让 registry 整个会话永不清理。只按当前草稿回收、或仅特别保留刚提交 token，都会遗漏正常恢复路径。
-
-## 提交：临时表示转为正文
-
-1. 从 `rawDraft` 展开文本 token 得到 `canonicalDraft`，倒序替换保持多个匹配的偏移正确。
-2. 用 raw 草稿决定是否进入命令语言；trim 后的控制文本只用于空输入、slash 命令和别名判断。折叠原文即使以 `/` 或 `、` 开头，也不因展开而自动变成命令。
-3. 普通正文传递未裁剪的 canonical 文本；`prepareUserTurnInput` 保留正文空白，显式 `@file:` 等引用按既有输入协议解析，不把 UI token 当成核心消息。
-4. 当前 REPL 配置 deferred 正文提交：输入控制器返回 `pending-text`，输入准备失败时保留草稿，不写提交回显。准备通过后，`onAccepted` 回调或 `beginUserTurn` 正常返回都会触发幂等 commit；正常返回后的 commit 先于结果分支判断，因此等待准则确认、合同失败或取消也可能已提交输入，不能概括为“只有接收成功才提交”或“失败一律保留草稿”。材料处理本身不属于本文。
-5. commit 保存 raw 输入历史，清空当前草稿、同步 Broker，再以 canonical 文本写 scrollback。命令及非 deferred 调用有各自直接提交路径，不应概括为所有输入都等宿主接收。
-
-纯空白输入只清理输入态，不作为正文消息或输入历史条目。`expandPastes` 遇到 registry 中不存在的 id 仍保留字面文本，这是当前容错行为，不是“有效 token 允许失活”；系统自己产生且仍可恢复的引用必须由保活链保证完整。
+历史回显展示原文及材料摘要；文件/图片读取与模型能力仍沿共同材料合同。基础文本接入复用正文准备和领域语义，不创建第二套折叠编辑器。
 
 ## 范围与验证边界
 
@@ -70,4 +44,4 @@ CLI 向补全 Broker 注入统一 handle patterns 作为额外 word 边界，避
 
 维护时须验证整条交互链而不只测纯函数：协议与 fallback 拆批、首次折叠／再次替换、普通文本与中文阈值、原子编辑、提交原文与空白保真、命令隔离、↑ 再提交、saved draft 恢复、历史淘汰回收，以及失败保留输入。终端启用序列和单测通过不等于所有终端兼容性已实测。
 
-直接实现入口：[输入控制器](../../../packages/cli/src/typeahead-input.ts)、[粘贴检测](../../../packages/cli/src/paste-detector.ts)、[临时存储](../../../packages/cli/src/paste-registry.ts)、[展开与保活](../../../packages/cli/src/paste-expand.ts)、[正文准备](../../../packages/cli/src/user-turn-input.ts)。
+直接实现入口：[实例存储](../../../packages/cli/src/terminal/input-store.ts)、[粘贴应用](../../../packages/cli/src/terminal/application.ts)、[完整粘贴](../../../packages/terminal-ui/src/paste-stream.ts)、[输入状态](../../../packages/terminal-ui/src/input-session.ts)、[提交准备](../../../packages/cli/src/terminal/prepare-session-send.ts)、[文本准备](../../../packages/cli/src/user-turn-input.ts)。

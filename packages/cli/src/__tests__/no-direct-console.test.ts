@@ -1,20 +1,5 @@
-/**
- * 静态约束测试：cli 运行时模块禁止直接 console.log / process.stdout.write 推走 chrome。
- *
- * 协议：
- *   - 所有写屏走 CliWriter（src/screen/cli-writer.ts）协调，让 ScreenController 维护
- *     "持久 input chrome" 不变量
- *   - 新加直接 console.log / process.stdout.write 会破坏 chrome（推走 input region），
- *     用此测试在 CI 阶段拦住，强制走 cliWriter.line / cliWriter.notify
- *
- * 例外清单（ALLOW_LIST）：
- *   - 早期路径（chrome 未建立）：bin entry / startup-check 失败
- *   - 后端/非交互路径：serve daemon / setup-channels logger
- *   - dispose 路径：process.exit 之前的清理日志
- *   - CliWriter 实现本身（StdoutWriter 内部用 stdout.write）
- *   - 测试文件 / 手动测试 (__manual__)
- */
-
+/** Runtime output has one surface owner: U for interactive pages, CliWriter for plain commands.
+ * Early entry failures are outside the active surface and may write stderr directly. */
 import { describe, expect, it } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -36,9 +21,10 @@ const SRC_DIR = path.resolve(
  *  - __manual__ / __tests__：手动测试 / 单元测试模拟，不是运行时
  */
 const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string }> = [
+  { file: "command-entry.ts", reason: "plain entry load failure before any surface is attached" },
+  { file: "terminal/launch.ts", reason: "supervisor admission failure before UI, or after it has exited" },
   { file: "index.ts", reason: "bin 入口 startup-check 失败路径——chrome 未建立" },
   { file: "screen/cli-writer.ts", reason: "CliWriter 实现本身——StdoutWriter 直写 stdout 是合法语义" },
-  { file: "screen/screen-controller.ts", reason: "ScreenController 实现本身——是 stdout 协调的最底层" },
   { file: "serve/command.ts", reason: "serve daemon——后台进程无 chrome；setup chrome 之前的 logger" },
   { file: "serve/access-surfaces.ts", reason: "serve 接入面装配单元——从 command.ts 抽出的 serve 后台路径，logger 输出走无 chrome daemon 的 console" },
   { file: "serve/daemon.ts", reason: "daemon 启动诊断——chrome 未建立" },
@@ -58,9 +44,6 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
 ];
 
 const ALLOWED_DIR_PREFIXES: readonly string[] = [
-  "tui/__manual__/",
-  "config-editor/", // 进入 alt-screen 全屏接管，不与 chrome 共存
-  "security/terminal-renderer.ts", // 进入 alt-screen 接管 stdin
 ];
 
 interface Violation {

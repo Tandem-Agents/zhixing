@@ -42,13 +42,31 @@ function run(
   });
 }
 describe("built CLI log entry and exit chain", () => {
+  it.each([{ args: [] }, { args: ["serve"] }])("initializes a genuinely absent product home before opening its log store ($args)", async ({ args }) => {
+    const parent = await createTempDir("logging-fresh-home");
+    const home = path.join(parent, "not-created");
+    await expect(stat(home)).rejects.toMatchObject({ code: "ENOENT" });
+    const result = await run(home, args);
+    expect(result.code).toBe(2); // Missing configuration remains a normal non-TTY outcome.
+    expect(result.stdout + result.stderr).not.toContain("运行日志已降级");
+    expect(result.stdout + result.stderr).not.toContain("运行日志已恢复");
+    const root = path.join(home, "logs", "runtime");
+    const names = (await readdir(root)).filter(name => /^segment-[a-f0-9-]{36}\.jsonl$/u.test(name));
+    expect(names.length).toBeGreaterThan(0);
+    const records = (await Promise.all(names.map(name => readFile(path.join(root, name), "utf8"))))
+      .flatMap(text => text.trim().split("\n").filter(Boolean).map(line => JSON.parse(line)));
+    expect(records.some(record => record.source === "runtime" && record.event === "started")).toBe(true);
+    expect(records.some(record => record.source === "runtime" && record.event === "failed" && record.data.reason === "non-tty")).toBe(true);
+    expect(records.filter(record => record.source === "logging" && ["degraded", "recovered"].includes(record.event))).toEqual([]);
+  }, 30_000);
+
   it("keeps early load failure evidence in the explicit managed home", async () => {
     const defaultHome = await createTempDir("logging-entry-default");
     const managedHome = await createTempDir("logging-entry-managed");
     const entry = await readFile(cli, "utf8");
-    const legacy = /import\("(\.\/legacy-entry-[^"]+\.js)"\)/u.exec(entry)?.[1];
-    expect(legacy).toBeTruthy();
-    const source = await readFile(path.resolve(path.dirname(cli), legacy!), "utf8");
+    const command = /import\("(\.\/command-entry-[^"]+\.js)"\)/u.exec(entry)?.[1];
+    expect(command).toBeTruthy();
+    const source = await readFile(path.resolve(path.dirname(cli), command!), "utf8");
     const target = /"load-cli",[^\n]*import\("([^"]+)"\)/u.exec(source)?.[1];
     expect(target).toBeTruthy();
     const hook = `import { registerHooks } from 'node:module'; registerHooks({ resolve(specifier, context, next) { if (specifier === ${JSON.stringify(target)}) throw Object.assign(Error('private import path'), {code:'EACCES'}); return next(specifier, context); } });`;

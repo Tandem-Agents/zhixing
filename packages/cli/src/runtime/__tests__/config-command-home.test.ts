@@ -17,11 +17,6 @@ vi.mock("@zhixing/providers/configuration", async (original) => ({
   loadConfigurationSnapshot: calls.snapshot,
 }));
 vi.mock("@zhixing/secrets", () => ({ createPlatformSecretStore: calls.store }));
-vi.mock("../../commands/command-visibility.js", () => ({ requireChrome: () => true }));
-vi.mock("../../config-editor/index.js", () => ({
-  BASE_CONFIG_SECTION_IDS: [],
-  runConfigEditor: calls.editor,
-}));
 vi.mock("../../serve/managed-service-runtime.js", () => ({
   reconcileCurrentManagedService: calls.reconcile,
 }));
@@ -35,157 +30,131 @@ vi.mock("../mcp-management-adapter.js", () => ({
     probe: vi.fn(), search: vi.fn(), readSource: vi.fn(),
   }),
 }));
-import { handleConfigCommand, handleMcpCommand } from "../config-command.js";
+import { editRuntimeConfiguration, prepareMcpConfiguration, type ConfigurationApplicationDeps } from "../configuration-application.js";
 import { ChannelConfiguration } from "../extensions/channel-configuration.js";
 
-describe("REPL config command home binding", () => {
-  const makeDeps = () => ({
-    zhixingHome: path.resolve("synthetic-config-home"), configPath: path.resolve("synthetic-config-home/config.jsonc"),
-    rl: { pause: vi.fn(), resume: vi.fn() } as never,
-    renderer: { stop: vi.fn() }, writer: { line: vi.fn(), appendInline: vi.fn(), notify: vi.fn(), ensureSegmentBreak: vi.fn() },
-    screen: { reassertCursorHidden: vi.fn() } as never,
-    state: { activeTurnPromise: null as Promise<unknown> | null }, requestHostReload: vi.fn(async () => undefined),
-  });
+const edit = (deps: ConfigurationApplicationDeps) =>
+  editRuntimeConfiguration(deps, { kind: "config", edit: calls.editor });
+const makeDeps = () => ({
+  zhixingHome: path.resolve("synthetic-config-home"),
+  configPath: path.resolve("synthetic-config-home/config.jsonc"),
+  state: { activeTurnPromise: null as Promise<unknown> | null },
+  requestHostReload: vi.fn(async () => undefined),
+});
+afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
-  it.each(["cancelled", "save-failed", "unchanged"])("旧配置适配器的 %s 不请求换代且恢复输入", async scenario => {
+describe("Node configuration application home and commit boundaries", () => {
+  it.each(["cancelled", "save-failed", "unchanged"])("%s does not request turnover", async scenario => {
     calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
-    calls.write.mockImplementation(async () => { if (scenario === "save-failed") throw new Error("fenced edit rejected"); });
-    calls.editor.mockImplementation(async input => {
+    calls.write.mockImplementation(async () => { if (scenario === "save-failed") throw Error("fenced edit rejected"); });
+    calls.editor.mockImplementation(async session => {
       if (scenario === "cancelled") return { kind: "cancelled" };
       const result = { kind: "completed", config: {}, credentials: {} };
-      await input.writers.save(result);
-      return result;
+      await session.writers.save(result); return result;
     });
     const deps = makeDeps();
-    await handleConfigCommand(deps);
+    if (scenario === "save-failed") await expect(edit(deps)).rejects.toThrow("fenced edit rejected");
+    else await expect(edit(deps)).resolves.toMatchObject({ kind: scenario === "cancelled" ? "cancelled" : "local-applied" });
     expect(deps.requestHostReload).not.toHaveBeenCalled();
-    expect(deps.rl.resume).toHaveBeenCalledOnce();
-    expect(deps.screen.reassertCursorHidden).toHaveBeenCalledOnce();
-    if (scenario === "save-failed") {
-      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("fenced edit rejected");
-      expect(deps.writer.line.mock.calls.flat().join("\n")).not.toContain("已保存");
-    }
   });
 
-  it.each([false, true])("MCP owner 保存一次，等待当前轮再激活，激活失败=%s 保留已保存反馈", async failed => {
-    const deps = makeDeps();
-    const turn = Promise.withResolvers<void>();
-    const saved = Promise.withResolvers<void>();
-    const waitingForTurn = Promise.withResolvers<void>();
+  it.each([false, true])("MCP saves once, waits for the current turn and reports activation failure=%s", async failed => {
+    const deps = makeDeps(), turn = Promise.withResolvers<void>(), saved = Promise.withResolvers<void>();
+    const waiting = Promise.withResolvers<void>();
     const catchTurn = turn.promise.catch.bind(turn.promise);
-    const turnSubscription = vi.spyOn(turn.promise, 'catch').mockImplementation(onRejected => {
-      const pending = catchTurn(onRejected);
-      waitingForTurn.resolve();
-      return pending;
+    const subscription = vi.spyOn(turn.promise, "catch").mockImplementation(handler => {
+      const pending = catchTurn(handler); waiting.resolve(); return pending;
     });
     deps.state.activeTurnPromise = turn.promise;
-    deps.requestHostReload.mockImplementation(async () => { if (failed) throw new Error("activation failed"); });
+    deps.requestHostReload.mockImplementation(async () => { if (failed) throw Error("activation failed"); });
     calls.load.mockReturnValue({});
     calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
     calls.write.mockImplementation(async () => { saved.resolve(); });
-    calls.editor.mockImplementation(async input => {
+    calls.editor.mockImplementation(async session => {
       const result = { kind: "completed", config: { mcp: { servers: {} } }, credentials: { mcp: {} } };
-      await input.writers.save(result);
-      return result;
+      await session.writers.save(result); return result;
     });
-    const run = handleMcpCommand({ ...deps, readMcpStatusWire: async () => [], llmComplete: vi.fn(async () => { throw new Error("no model"); }) });
+    const management = await prepareMcpConfiguration({
+      configPath: deps.configPath, readMcpStatusWire: async () => [],
+      llmComplete: vi.fn(async () => { throw Error("no model"); }),
+    });
+    const run = editRuntimeConfiguration(deps, { kind: "mcp", edit: calls.editor, mcpApplication: management.mcpApplication });
+    let result: Awaited<typeof run> | undefined;
     try {
-      await Promise.race([saved.promise, run.then(() => { throw new Error('MCP command completed without saving'); })]);
-      // The real activation owner has now subscribed to the unresolved turn.
-      // Removing its wait must fail, even when saving still happens first.
-      await Promise.race([waitingForTurn.promise, run.then(() => { throw new Error('MCP command completed without waiting for the active turn'); })]);
+      await Promise.race([saved.promise, run.then(() => { throw Error("completed without saving"); })]);
+      await Promise.race([waiting.promise, run.then(() => { throw Error("completed without waiting for active turn"); })]);
       expect(calls.write).toHaveBeenCalledOnce();
-      expect(turnSubscription).toHaveBeenCalledOnce();
+      expect(subscription).toHaveBeenCalledOnce();
       expect(deps.requestHostReload).not.toHaveBeenCalled();
-    } finally { turn.resolve(); await run.finally(() => turnSubscription.mockRestore()); }
+    } finally { turn.resolve(); result = await run.finally(() => subscription.mockRestore()); }
     expect(calls.write.mock.calls[0]?.[2]).toMatchObject({ scope: "mcp", configPath: deps.configPath });
     expect(deps.requestHostReload).toHaveBeenCalledOnce();
-    expect(deps.writer.line.mock.calls.flat().join("\n")).toContain(failed ? "尚未确认生效" : "已保存并生效");
-    expect(deps.rl.resume).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: "mcp", result: { status: failed ? "saved" : "active" } });
   });
-  it.each([false, true])("通道应用失败不跳过同次模型与启动项变更，重载失败=%s 分别反馈", async reloadFails => {
+
+  it.each([false, true])("Channel failure preserves model and launch changes; reload failure=%s is independent", async reloadFails => {
     const deps = makeDeps(), turn = Promise.withResolvers<void>();
     deps.state.activeTurnPromise = turn.promise;
     deps.requestHostReload.mockImplementation(async () => { if (reloadFails) throw Error("reload unavailable"); });
     const apply = vi.fn(async () => { throw Error("channel response lost"); });
     calls.snapshot.mockResolvedValue({ config: {}, credentials: {} });
     calls.write.mockImplementation(async () => undefined);
-    calls.editor.mockImplementation(async input => {
+    calls.editor.mockImplementation(async session => {
       const result = { kind: "completed", config: {
         llm: { main: { provider: "synthetic", model: "synthetic-model" } },
         mesh: { enabledRoles: ["executor"], executorAutoStart: true },
         messaging: { synthetic: { enabled: true } },
       }, credentials: {} };
-      await input.writers.save(result); return result;
+      await session.writers.save(result); return result;
     });
-    const run = handleConfigCommand({ ...deps, applyExtensionConfiguration: apply });
+    const run = edit({ ...deps, applyExtensionConfiguration: apply });
     await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(["synthetic"]));
     expect(deps.requestHostReload).not.toHaveBeenCalled();
-    turn.resolve(); await run;
+    turn.resolve(); const result = await run;
     expect(deps.requestHostReload).toHaveBeenCalledExactlyOnceWith({ launchSelectionChanged: true });
     expect(calls.reconcile).toHaveBeenCalledExactlyOnceWith("local-role-config-committed", undefined, deps.zhixingHome);
-    const lines = deps.writer.line.mock.calls.flat().join("\n");
-    expect(lines).toContain("消息通道尚未确认应用");
-    expect(lines).toContain(reloadFails ? "核心宿主重载未确认" : "核心宿主已按新配置重启");
-    expect(deps.rl.resume).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: "reloaded", pendingChannels: true,
+      effects: { reload: { status: reloadFails ? "failed" : "succeeded" }, reconcile: { status: "succeeded" } } });
   });
 
-  it("只有通道的应用失败保持待应用，重开未改配置仍重试原发布且不换代", async () => {
-    const deps = makeDeps();
-    const config = { messaging: { synthetic: { enabled: true } } };
+  it("reopening unchanged pending Channel configuration retries the publication without turnover", async () => {
+    const deps = makeDeps(), config = { messaging: { synthetic: { enabled: true } } };
     calls.snapshot.mockResolvedValue({ config, credentials: {} });
     calls.write.mockImplementation(async () => undefined);
-    calls.editor.mockImplementation(async input => {
-      const result = { kind: "completed", config: input.initialConfig, credentials: input.initialCredentials };
-      await input.writers.save(result); return result;
+    calls.editor.mockImplementation(async session => {
+      const result = { kind: "completed", config: session.initialConfig, credentials: session.initialCredentials };
+      await session.writers.save(result); return result;
     });
     const pending = vi.spyOn(ChannelConfiguration.prototype, "pending").mockResolvedValue(true);
     const snapshot = { instances: [], operations: [] } as never;
     const apply = vi.fn().mockRejectedValueOnce(Error("channel response lost")).mockResolvedValueOnce(snapshot);
     try {
       const input = { ...deps, readExtensions: async () => snapshot, applyExtensionConfiguration: apply };
-      await handleConfigCommand(input);
-      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("消息通道尚未确认应用");
-      await handleConfigCommand(input);
+      await expect(edit(input)).resolves.toEqual({ kind: "saved-pending", stage: "channels" });
+      await expect(edit(input)).resolves.toEqual({ kind: "local-applied" });
       expect(apply.mock.calls).toEqual([[["synthetic"]], [["synthetic"]]]);
       expect(deps.requestHostReload).not.toHaveBeenCalled();
-      expect(deps.writer.line.mock.calls.flat().join("\n")).toContain("连接按需局部刷新");
-      expect(deps.rl.resume).toHaveBeenCalledTimes(2);
     } finally { pending.mockRestore(); }
   });
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    vi.clearAllMocks();
-  });
-  it("rereads and writes the chosen file while credentials and turnover retain the data root", async () => {
-    const home = path.resolve("config-data-a");
-    const configPath = path.resolve("config-files-b/custom.jsonc");
+
+  it("rereads and writes the selected config while credentials and turnover retain the original data root", async () => {
+    const home = path.resolve("config-data-a"), configPath = path.resolve("config-files-b/custom.jsonc");
     const current = { mesh: { enabledRoles: ["executor"], executorAutoStart: false } };
     const updated = { mesh: { enabledRoles: ["executor"], executorAutoStart: true } };
     calls.snapshot.mockResolvedValue({ config: current, credentials: {} });
-    calls.editor.mockImplementation(async (input) => {
-      expect(input.initialConfig).toBe(current);
-      expect(input.header.configPath).toBe(configPath);
+    calls.write.mockImplementation(async () => undefined);
+    calls.editor.mockImplementation(async session => {
+      expect(session.initialConfig).toBe(current);
       vi.stubEnv("ZHIXING_HOME", path.resolve("unrelated-data"));
       vi.stubEnv("ZHIXING_CONFIG_PATH", path.resolve("unrelated.jsonc"));
-      await input.writers.save({ kind: "completed", config: updated, credentials: {} });
-      return { kind: "completed", config: updated, credentials: {} };
+      const result = { kind: "completed", config: updated, credentials: {} };
+      await session.writers.save(result); return result;
     });
     const reload = vi.fn(async () => undefined);
-    const writer = { line: vi.fn(), appendInline: vi.fn(), notify: vi.fn(), ensureSegmentBreak: vi.fn() };
-    await handleConfigCommand({
-      zhixingHome: home,
-      configPath,
-      rl: { pause: vi.fn(), resume: vi.fn() } as never,
-      renderer: { stop: vi.fn() },
-      writer,
-      screen: { reassertCursorHidden: vi.fn() } as never,
-      state: { activeTurnPromise: null },
-      requestHostReload: reload,
-    });
+    await edit({ zhixingHome: home, configPath, state: { activeTurnPromise: null }, requestHostReload: reload });
     expect(calls.snapshot).toHaveBeenCalledWith({ configPath, store: { marker: "selected-store" } });
-    expect(calls.write).toHaveBeenCalledWith({ config: current, credentials: {} }, { kind: "completed", config: updated, credentials: {} },
-      { configPath, store: { marker: "selected-store" }, prepare: undefined });
+    expect(calls.write).toHaveBeenCalledWith({ config: current, credentials: {} },
+      { kind: "completed", config: updated, credentials: {} }, { configPath, store: { marker: "selected-store" }, prepare: undefined });
     expect(calls.store).toHaveBeenCalledWith({ homeDir: home });
     expect(reload).toHaveBeenCalledOnce();
     expect(calls.reconcile).toHaveBeenCalledWith("local-role-config-committed", undefined, home);

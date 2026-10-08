@@ -38,4 +38,4 @@ adapter 不读取配置文件，也不直接读取界面能力描述，而按 `P
 
 - [类型与校验](../../../packages/core/src/types/llm.ts)、[预设](../../../packages/providers/src/presets.ts)、[方言转换](../../../packages/providers/src/adapters/thinking-params.ts)
 - [Kernel 宿主装配](../../../packages/cli/src/runtime/kernel-runtime-bindings.ts)、[推进装配](../../../packages/cli/src/runtime/advancement-model-provider.ts)
-- [配置编辑器](../../../packages/cli/src/config-editor/runner.ts)
+- [配置编辑器](../../../packages/cli/src/terminal/configuration-editor.ts)

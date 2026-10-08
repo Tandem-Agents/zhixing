@@ -8,12 +8,12 @@ CLI 与服务复用检查和编辑责任；秘密只在目标设备专用界面�
 
 ## 当前启动链
 
-[runStartupCheck](../../../packages/cli/src/startup.ts)在创建模型和接入通道前执行：
+共享[启动应用](../../../packages/cli/src/runtime/startup-application.ts)在创建模型和接入通道前执行；新终端注入同一根内的编辑端口，[runStartupCheck](../../../packages/cli/src/startup.ts)是服务和文本入口的非交互适配：
 
 1. 读取公开配置，校验结构、废弃秘密字段与 mesh 角色配置；失败不打开 SecretStore。
 2. 打开平台 SecretStore，确认解锁，先完成已接纳配置保存的恢复，再读取配对的公开配置与同一代凭据并完成旧明文迁移及清理；恢复后的配置仍做语义检查。仅当信任记录存在、`device-key/device/v1/` 下恰有一个设备密钥引用，且对应设备在信任记录中为 active 时，才注入凭据暴露读取检查；任一条件不满足时不注入该检查。
 3. 使用纯函数 [checkModel](../../../packages/cli/src/config-editor/checks/model.ts)检查 main 的 provider、model、API key。
-4. 缺失且非 TTY 时返回 non-tty，入口报缺失字段并以错误退出；有 TTY 则进入所需配置 section。
+4. 必填项缺失且未提供交互编辑端口时返回 non-tty，入口报缺失字段；新终端通过已注入的编辑端口进入所需配置 section。物理 TTY 存在不代表共享启动应用自行获取输入所有权。
 5. 编辑完成后重新读取公开配置与凭据快照，生成冻结运行配置及用途秘密投影；取消则正常退出。
 
 当前 main 必填，light／power 为可选角色，缺失不进入阻塞检查，解析和降级遵循[模型角色](../providers/model-roles.md)。CLI 与 host 启动都不因可选 messaging 凭据缺失触发本引导；通道未能装配时由接入层告警处理。这不免除分布式角色的就绪检查：本函数返回的 ready 是启动配置结果，不等于整个设备获得 ready 资格。
@@ -22,9 +22,9 @@ CLI 与服务复用检查和编辑责任；秘密只在目标设备专用界面�
 
 ## 共享编辑器
 
-[配置编辑器](../../../packages/cli/src/config-editor/index.ts)以 stdin、stdout、writers、sections、标题及初始数据作为边界。必要字段检查是纯函数，由启动与编辑 section 复用；面板交互不承担后端装配。配置选择、列表、实体、输入和模型选择按面板状态组织，通过方向键、Enter、Esc、Ctrl+C 导航。
+[终端配置编辑器](../../../packages/cli/src/terminal/configuration-editor.ts)适配纯[面板模型](../../../packages/cli/src/config-editor/model)与[配置应用](../../../packages/cli/src/runtime/configuration-application.ts)。必要字段检查、sections 和模型状态仍可复用；N 保有编辑基线与保存责任，U 负责同一根内的选择、列表、字段和专用秘密输入，不把 stdin/stdout 或独占屏幕传进纯模型。
 
-初始配置、服务启动和 REPL `/config` 复用编辑器与秘密仓库；后续 MCP 专用接入见[MCP 接入与管理](../mcp/onboarding-and-management.md)。编辑后的运行配置应用不由秘密存储重复定义，见[运行期配置应用](../configuration/runtime-application.md)。
+新终端的初始配置与 `/config` 复用编辑应用及秘密仓库；服务启动复用同一检查／恢复责任，但不启动交互编辑器；后续 MCP 专用接入见[MCP 接入与管理](../mcp/onboarding-and-management.md)。编辑后的运行配置应用不由秘密存储重复定义，见[运行期配置应用](../configuration/runtime-application.md)。
 
 ## 保存、取消与失败
 

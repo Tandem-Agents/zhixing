@@ -52,7 +52,7 @@ import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
-import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
@@ -213,7 +213,7 @@ async function admitDisasterRecoveryCandidate(
         const decoded = recoveryPackages.requireCurrentRecoveryPackage(
           encoded !== undefined
             ? recoveryPackages.decodeRecoveryPackage(encoded)
-            : await readRecoveryPackageFromTty({ signal }),
+            : requireRecoveryPackageSurface(),
         );
         signal.throwIfAborted();
         const identity = decoded.root.publicIdentity();

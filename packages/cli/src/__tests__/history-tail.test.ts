@@ -5,17 +5,10 @@
  * 测试直接喂倒序 run 记录,清空边界由宿主倒读原语保证(/clear 后空页)。
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { userMessage, type Message } from "@zhixing/core";
 import { type RunRecord } from "@zhixing/core/transcript";
-import {
-  projectHistoryTail,
-  renderHistoryTailLines,
-  renderHistoryTail,
-  DEFAULT_TAIL_RUNS,
-} from "../history-tail.js";
-import { stringWidth } from "../tui/line-width.js";
-import type { CliWriter } from "../screen/index.js";
+import { projectHistoryTail, DEFAULT_TAIL_RUNS } from "../runtime/conversation-history-projection.js";
 
 function assistantMsg(text: string): Message {
   return { role: "assistant", content: [{ type: "text", text }] };
@@ -48,32 +41,10 @@ describe("projectHistoryTail", () => {
       { role: "assistant", content: [{ type: "tool_use", id: "send", name: "conversation", input: { action: "send", conversationId: "source-a", input: "结论" } }] },
       { role: "user", content: [{ type: "tool_result", toolUseId: "send", content: JSON.stringify({ accepted: true, messageId: "reply" }) }] },
     );
-    const writer = { line: vi.fn() };
-    renderHistoryTail({ runs: [record], writer: writer as never, width: 160,
-      inputsOutsideHistory: [{ runId: "r", state: "failed", disposition: "stopped", consumed: false,
-        message: { role: "user", content: [{ type: "text", text: "未读来信" }], inputIdentity: { id: "m2", source: { kind: "conversation", conversationId: "source-c" } } } }],
-    });
-    const text = writer.line.mock.calls.flat().join("\n");
-    expect(text).toContain("来自对话 source-a: 追加意见");
-    expect(text).toContain("→ 对话 source-a · 已接纳 · 不代表任务完成");
-    expect(text).toContain("来自对话 source-c · 已停止、未消费: 未读来信");
-    expect(text).toContain("完成核实");
-  });
-
-  it("renders outside-history inputs even when no Run has committed", () => {
-    const writer = { line: vi.fn() };
-    renderHistoryTail({ runs: [], writer: writer as never, inputsOutsideHistory: [{ runId: "r", state: "queued", consumed: false, disposition: "pending", message: userMessage("尚未启动") }] });
-    expect(writer.line.mock.calls.flat().join("\n")).toContain("已接纳、待处理: 尚未启动");
-  });
-  it.each([
-    ["cancelled", "运行已停止"], ["failed", "运行失败"],
-    ["uncertain", "运行结果待确认"], ["cancel-requested", "正在停止"],
-  ] as const)("shows %s separately from input consumption", (state, label) => {
-    const writer = { line: vi.fn() };
-    renderHistoryTail({ runs: [], writer: writer as never, inputsOutsideHistory: [
-      { runId: "r", state, consumed: true, disposition: "consumed", message: userMessage("待核实输入") },
-    ] });
-    expect(writer.line.mock.calls.flat().join("\n")).toContain(`已进入运行输入 · ${label}: 待核实输入`);
+    const entry = projectHistoryTail([record]).entries[0]!;
+    expect(entry.inputs).toEqual([{ text: "追加意见", sourceConversationId: "source-a" }]);
+    expect(entry.sent).toEqual(["→ 对话 source-a · 已接纳 · 不代表任务完成"]);
+    expect(entry.assistantText).toBe("完成核实");
   });
   it("取最近 maxRuns 条、时间正序返回，latestAt 为最近一条的时刻", () => {
     const runs = [
@@ -118,12 +89,6 @@ describe("projectHistoryTail", () => {
 
     expect(tail.entries[0]!.fromAdvancement).toBeUndefined();
     expect(tail.entries[1]!.fromAdvancement).toBe(true);
-
-    const lines = renderHistoryTailLines(tail, 120);
-    expect(lines.some((line) => line.includes("❯ 普通提问"))).toBe(true);
-    expect(
-      lines.some((line) => line.includes("◇ 知行推进 · 自动续推: 请修复失败测试后再继续。")),
-    ).toBe(true);
   });
 
   it("多视角评议 run 的 assistant 摘录带评议来源标记", () => {
@@ -137,10 +102,6 @@ describe("projectHistoryTail", () => {
     const tail = projectHistoryTail([perspectiveRun]);
 
     expect(tail.entries[0]!.perspectiveCount).toBe(3);
-    const lines = renderHistoryTailLines(tail, 120);
-    expect(
-      lines.some((line) => line.includes("◆ 多视角评议 · 3 视角: 最终结论")),
-    ).toBe(true);
   });
 
   it("run 无 assistant 文本（中断等）→ assistantText 缺省", () => {
@@ -172,47 +133,6 @@ describe("projectHistoryTail", () => {
 
 // ─── renderHistoryTailLines ───
 
-describe("renderHistoryTailLines", () => {
-  it("空条目零输出;有条目时含标题与摘录行,逐行不超宽", () => {
-    expect(renderHistoryTailLines({ entries: [] }, 80)).toEqual([]);
 
-    const tail = projectHistoryTail(
-      newestFirst(run("一个相当长的问题".repeat(10), "一个相当长的回答".repeat(10))),
-    );
-    const lines = renderHistoryTailLines(tail, 60);
-    expect(lines.length).toBeGreaterThan(1);
-    expect(lines[0]).toContain("最近对话");
-    for (const line of lines) {
-      expect(stringWidth(line)).toBeLessThanOrEqual(60);
-    }
-  });
-});
 
 // ─── renderHistoryTail(组合入口) ───
-
-describe("renderHistoryTail", () => {
-  function makeWriter(): CliWriter & { lines: string[] } {
-    const lines: string[] = [];
-    return {
-      lines,
-      line: vi.fn((text: string) => lines.push(text)),
-    } as unknown as CliWriter & { lines: string[] };
-  }
-
-  it("有历史 → 写出标题（含时间锚）与摘录行", () => {
-    const writer = makeWriter();
-    renderHistoryTail({
-      runs: newestFirst(run("问", "答")),
-      writer,
-      width: 80,
-    });
-    expect(writer.lines.length).toBeGreaterThan(0);
-    expect(writer.lines[0]).toContain("最近对话");
-  });
-
-  it("空历史零输出 —— 启动新对话 / 刚清空时不渲染任何东西", () => {
-    const writer = makeWriter();
-    renderHistoryTail({ runs: [], writer, width: 80 });
-    expect(writer.lines).toEqual([]);
-  });
-});

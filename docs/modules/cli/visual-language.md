@@ -45,7 +45,7 @@
 
 ## 实现与维护入口
 
-- [样式](../../../packages/cli/src/tui/style.ts)、[框体](../../../packages/cli/src/tui/chrome.ts)、[章节](../../../packages/cli/src/tui/section.ts)、[状态](../../../packages/cli/src/tui/status-pill.ts)、[按钮](../../../packages/cli/src/tui/button.ts)、[选中纹理](../../../packages/cli/src/tui/highlight.ts)、[列宽](../../../packages/cli/src/tui/line-width.ts)。
-- [配置主面板](../../../packages/cli/src/config-editor/panels/main.ts)、[REPL 状态条](../../../packages/cli/src/status-bar/status-bar.ts)是不同使用面，不承担另一套视觉定义。
+- [公共布局](../../../packages/terminal-ui/src/surface-layout.ts)、[UI 根](../../../packages/terminal-ui/src/root.tsx)、[过程反馈](../../../packages/terminal-ui/src/process-view.tsx)、[正文](../../../packages/terminal-ui/src/body-view.tsx)。
+- [N 过程投影](../../../packages/cli/src/terminal/process-projection.ts)与各页面只消费同一视觉合同，不建立另一套状态语义。
 
 维护时检查：状态不用颜色也能理解，中文混排与窄屏不破坏布局，主次操作明确，动态反馈不污染历史。源码存在不等于所有终端表现已经通过视觉验收。

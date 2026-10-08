@@ -87,7 +87,7 @@ import {
 import type { BackupTargetConfigurationRepository } from "./backup-target-config.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
-import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "./recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "./recovery-package-input.js";
 import {
   createFileMeshPairingContinuationRepository,
 } from "./mesh-pairing-continuation.js";
@@ -387,6 +387,7 @@ export async function activateInitialRecoveryRoot(input: {
   if (input.current.recoveryRootPublicKey || input.current.recoveryBackupPublicKey) {
     throw new Error("Recovery root is already active");
   }
+  if (!input.confirmRecoveryPackage) requireRecoveryPackageSurface();
   const pending = await loadPendingFullRootActivation(
     input.store,
     input.current,
@@ -406,9 +407,7 @@ export async function activateInitialRecoveryRoot(input: {
   if (readBack !== undefined) assertRecoveryPackageInputLimit(readBack);
   const decoded = readBack !== undefined
     ? decodeRecoveryPackage(readBack)
-    : await readRecoveryPackageFromTty({
-        prompt: "请粘贴完整恢复码，确认你已经保存：",
-      });
+    : requireRecoveryPackageSurface();
   const candidateRoot = decoded.root;
   const legacy = decoded.version === 1 ? decoded : undefined;
   if (pending && (

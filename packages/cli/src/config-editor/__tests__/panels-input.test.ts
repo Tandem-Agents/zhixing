@@ -14,7 +14,7 @@ import { createInitialState } from "../state.js";
 import {
   handleAddModelPanelKey,
   handleInputPanelKey,
-} from "../panels/input.js";
+} from "../model/input.js";
 import type { PanelDescriptor } from "../types.js";
 
 describe("handleInputPanelKey · 字符累积 / 删除", () => {

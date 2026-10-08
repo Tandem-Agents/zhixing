@@ -96,6 +96,6 @@ stdio 探测会实际启动本机命令，确认必须在探测前，不能放�
 - 产品应用：[application.ts](../../../packages/core/src/mcp-management/application.ts)；分流与提取：[setup.ts](../../../packages/core/src/mcp-management/setup.ts)；搜索与场景校验：[discovery.ts](../../../packages/core/src/mcp-management/discovery.ts)。
 - 模型入口与接入边界：[mcp-tools.ts](../../../packages/cli/src/serve/mcp-tools.ts)、[mcp-connection-adapter.ts](../../../packages/cli/src/runtime/mcp-connection-adapter.ts)；原任务续接：[continuation.ts](../../../packages/core/src/workscene/continuation.ts)。
 - 数据来源：[source.ts](../../../packages/mcp/src/source.ts)、[search.ts](../../../packages/mcp/src/search.ts)；临时探测：[probe.ts](../../../packages/mcp/src/probe.ts)。
-- 面板与列表：[panels/mcp.ts](../../../packages/cli/src/config-editor/panels/mcp.ts)、[sections/mcp.ts](../../../packages/cli/src/config-editor/sections/mcp.ts)。
-- 管理适配与生效：[mcp-management-adapter.ts](../../../packages/cli/src/runtime/mcp-management-adapter.ts)、[config-command.ts](../../../packages/cli/src/runtime/config-command.ts)、[mcp-config.ts](../../../packages/cli/src/runtime/mcp-config.ts)。
+- 面板与列表：[panels/mcp.ts](../../../packages/cli/src/config-editor/model/mcp.ts)、[sections/mcp.ts](../../../packages/cli/src/config-editor/sections/mcp.ts)。
+- 管理适配与生效：[mcp-management-adapter.ts](../../../packages/cli/src/runtime/mcp-management-adapter.ts)、[config-command.ts](../../../packages/cli/src/runtime/configuration-application.ts)、[mcp-config.ts](../../../packages/cli/src/runtime/mcp-config.ts)。
 - 编辑与持久化语义：[state.ts](../../../packages/cli/src/config-editor/state.ts)、[config-loader.ts](../../../packages/providers/src/config-loader.ts)、[credentials-loader.ts](../../../packages/providers/src/credentials-loader.ts)。

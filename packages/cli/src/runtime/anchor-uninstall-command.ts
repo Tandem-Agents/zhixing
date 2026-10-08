@@ -10,11 +10,7 @@ import {
   type AnchorUninstallPreflight,
   type AnchorUninstallState,
 } from "./rpc-management-facade.js";
-import {
-  encodeRecoveryPackage,
-  requireCurrentRecoveryPackage,
-} from "@zhixing/mesh/recovery-package";
-import { assertRecoveryPackageInputLimit, readRecoveryPackageFromTty } from "../serve/recovery-package-input.js";
+import { assertRecoveryPackageInputLimit, requireRecoveryPackageSurface } from "../serve/recovery-package-input.js";
 
 export interface AnchorUninstallIO {
   readonly interactive: boolean;
@@ -189,10 +185,7 @@ function defaultUninstallIO(writeLine: (line: string) => void = console.log, sig
       return (await question(`${message} 输入“确认”继续：`)) === "确认";
     },
     async readRecoveryPackage() {
-      const decoded = requireCurrentRecoveryPackage(
-        await readRecoveryPackageFromTty({ signal }),
-      );
-      return encodeRecoveryPackage(decoded.root);
+      return requireRecoveryPackageSurface();
     },
   };
 }

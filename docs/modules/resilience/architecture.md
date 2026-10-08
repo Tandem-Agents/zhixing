@@ -43,7 +43,7 @@
 
 ## 反馈与可靠性边界
 
-`retry:attempt` 表达尝试次数与等待时间，`retry:success` 表达恢复成功，`retry:exhausted` 表达耗尽或熔断拒绝。它们经会话事件投影进入 RPC，CLI 渲染器和状态条已有消费者；并非每个不可恢复错误都会发出 exhausted。success 中 `totalDelayMs` 当前为 0，占位值不能当成真实累计延迟。
+`retry:attempt` 表达尝试次数与等待时间，`retry:success` 表达恢复成功，`retry:exhausted` 表达耗尽或熔断拒绝。它们经会话事件投影进入 RPC，交互 N 的过程投影消费对应主运行事件，U 统一呈现；并非每个不可恢复错误都会发出 exhausted。success 中 `totalDelayMs` 当前为 0，占位值不能当成真实累计延迟。
 
 用户消息应得到回复，失败也应有交代。短暂恢复不打扰用户，持续等待应反馈处理中，最终失败必须明确告知；但 retry 事件本身不证明通道已完成这些通知，也没有统一的 10/30 秒通知合同。消息至少一次交付、重连期间缓冲、最终降级回复与跨会话故障隔离，分别由消息、通道和服务责任链保障，不能仅凭模型请求重试推导为全部已实现。
 
@@ -53,4 +53,4 @@
 
 - [重试包装器](../../../packages/core/src/resilience/with-retry.ts)、[配置](../../../packages/core/src/resilience/types.ts)、[错误分类](../../../packages/core/src/resilience/classify.ts)、[退避](../../../packages/core/src/resilience/backoff.ts)、[熔断器](../../../packages/core/src/resilience/circuit-breaker.ts)。
 - [运行装配](../../../packages/orchestrator/src/runtime/create-agent-runtime.ts)、[流 watchdog](../../../packages/core/src/interrupt/watchdog.ts)。
-- [会话事件投影](../../../packages/rpc/src/session-events.ts)、[CLI 渲染](../../../packages/cli/src/render.ts)、[状态条](../../../packages/cli/src/status-bar/status-bar.ts)。
+- [会话事件投影](../../../packages/rpc/src/session-events.ts)、[过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[终端呈现](../../../packages/terminal-ui/src/root.tsx)。

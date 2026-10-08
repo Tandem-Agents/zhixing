@@ -19,10 +19,10 @@
 
 ## 当前生产链
 
-统一[命令系统](../cli/command-system.md)调用[配置 handler](../../../packages/cli/src/runtime/config-command.ts)，并由 [REPL 接线](../../../packages/cli/src/repl.ts)提供宿主操作：
+统一[命令接入](../cli/command-system.md)调用[配置应用](../../../packages/cli/src/runtime/configuration-application.ts)，[终端装配](../../../packages/cli/src/terminal/application.ts)注入编辑页面与宿主操作：
 
-1. 检查交互终端能力；暂停 readline 与渲染，让编辑器接管输入。重新加载配置和凭据，不用启动时缓存作为编辑事实。
-2. 编辑器仅“完成”才写入；取消返回原交互。`finally` 恢复 readline 与光标约束。秘密与编辑器保存语义见[首次引导与配置编辑](../secrets/onboarding.md)。
+1. 通过同一 U 根进入配置页，重新加载配置与凭据；纯文本入口明确要求专用交互编辑，不抢占 readline 或另建 raw-mode 所有者。不用启动缓存作为编辑事实。
+2. 编辑器仅“完成”才保存，取消返回原页面并释放编辑作用域。N 保有公开基线及秘密编辑状态，U 只接收公开字段和专用输入；秘密与保存语义见[首次引导与配置编辑](../secrets/onboarding.md)。
 3. 保存由 Configuration／Secret owner 核对编辑基线、合并真正修改的凭据并耐久接纳，恢复也由同一 owner 负责。Channel 变更先调用扩展管理应用局部刷新；未变更或只有 Channel 配置／凭据变更时不请求宿主换代。通道应用失败保留已保存、待应用状态，重开可重试原发布；不跳过同次编辑中其他配置所需的后续应用。其他配置变更等待本终端 `activeTurnPromise` 到达终态，比较 enabledRoles 与 executorAutoStart，判断是否还需处理托管服务启动选择。
 4. 请求宿主 `server.shutdown`，reason 为 config-reload、策略为 drain；随后通过 coreHost.reconnect 重新连接／拉起，角色启动选择变化时在换代前执行托管服务准备。
 5. 等待重载状态，刷新本地视图、重新挂接当前会话观察者并同步任务列表。对话恢复消费持久事实，不能用终端本地消息数组恢复第二份权威。

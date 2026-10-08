@@ -19,11 +19,11 @@ import {
   handleMcpAddPanelKey,
   handleMcpChoicesPanelKey,
   handleMcpServerPanelKey,
-} from "../panels/mcp.js";
+} from "../model/mcp.js";
 import { presetToCandidate, type McpSetupCandidate } from "@zhixing/core/mcp-management";
 import { findMcpPreset } from "../../registries/index.js";
 import type {
-  ConfigEditorContext,
+  ConfigModelContext,
   ConfigEditorRuntime,
   WorkingState,
 } from "../types.js";
@@ -135,8 +135,8 @@ describe("handleMcpAddPanelKey — 接入向导", () => {
   };
   function ctxWith(
     mcpProbe?: ConfigEditorRuntime["mcpProbe"],
-  ): ConfigEditorContext {
-    return { runtime: mcpProbe ? { mcpProbe } : {} } as unknown as ConfigEditorContext;
+  ): ConfigModelContext {
+    return { runtime: mcpProbe ? { mcpProbe } : {} } as unknown as ConfigModelContext;
   }
 
   it("字符累积；空 Enter 不前进；Esc 取消", () => {
@@ -238,8 +238,8 @@ describe("handleMcpAddInputPanelKey — 统一输入接入", () => {
   };
   const ctxResolve = (
     resolve: ConfigEditorRuntime["mcpResolve"],
-  ): ConfigEditorContext =>
-    ({ runtime: { mcpResolve: resolve } }) as unknown as ConfigEditorContext;
+  ): ConfigModelContext =>
+    ({ runtime: { mcpResolve: resolve } }) as unknown as ConfigModelContext;
   const ctxFail = ctxResolve(async () => ({ ok: false, error: "x" }));
 
   it("字符累积；空 Enter 不前进；Esc 取消", () => {
@@ -293,7 +293,7 @@ describe("handleMcpAddInputPanelKey — 统一输入接入", () => {
 
   it("未注入 mcpResolve → 防御性 replace 报错", () => {
     const s0 = setInputBuffer(createInitialState({}, {}), "x");
-    const ctx = { runtime: {} } as unknown as ConfigEditorContext;
+    const ctx = { runtime: {} } as unknown as ConfigModelContext;
     const action = handleMcpAddInputPanelKey(ctx, s0, inputDesc, { type: "enter" });
     expect(action.type).toBe("replace");
   });
@@ -329,8 +329,8 @@ describe("handleMcpChoicesPanelKey — 候选选择 + 阶段2 提取", () => {
   };
   const ctxExtract = (
     extract: ConfigEditorRuntime["mcpExtract"],
-  ): ConfigEditorContext =>
-    ({ runtime: { mcpExtract: extract } }) as unknown as ConfigEditorContext;
+  ): ConfigModelContext =>
+    ({ runtime: { mcpExtract: extract } }) as unknown as ConfigModelContext;
   const s0 = createInitialState({}, {});
 
   it("↑↓ 移动高亮（环绕）", () => {
@@ -376,7 +376,7 @@ describe("handleMcpChoicesPanelKey — 候选选择 + 阶段2 提取", () => {
   });
 
   it("未注入 mcpExtract → 防御性回显错误", () => {
-    const ctx = { runtime: {} } as unknown as ConfigEditorContext;
+    const ctx = { runtime: {} } as unknown as ConfigModelContext;
     const action = handleMcpChoicesPanelKey(ctx, s0, choicesDesc, { type: "enter" });
     expect(action.type).toBe("replace");
     if (action.type === "replace" && action.panel.kind === "mcp-choices") {

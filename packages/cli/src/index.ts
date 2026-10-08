@@ -2,7 +2,7 @@
  * 知行 CLI 入口
  *
  * 运行模式：
- * - 交互模式：zhixing → REPL 多轮对话
+ * - 交互模式：zhixing → 独立终端接入面；重定向输入 → 基础文本对话
  * - 运行控制：zhixing status / zhixing stop → 查看或停止知行
  * - 宿主启动：zhixing serve → 核心宿主（由交互入口按需拉起，保留给内部与诊断）
  */
@@ -15,16 +15,12 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
-import { createStartupProgressPresenter, type StartupProgressPresenter } from "./screen/startup-progress.js";
-import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
 import type { RuntimeLogging } from "./logging/runtime.js";
 import { cliLoggingMode, normalizeCliArgs } from "./logging/entry-mode.js";
-import { peekEntryLogging } from "./logging/bootstrap.js";
-import { recordFirstSurfaceOutput } from "./logging/runtime-source.js";
 
 let commandLogging: RuntimeLogging | undefined;
 let managedCommand: ManagedCommandPorts | undefined;
@@ -60,53 +56,7 @@ async function renderActionError(error: unknown): Promise<void> {
 }
 
 
-/**
- * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
- * ready / completed 状态下返回，让 caller 继续主流程。
- */
-function handleStartupResult(result: StartupCheckResult): number | undefined {
-  if (result.kind === "ready") return;
-
-  if (result.kind === "schema-error") {
-    console.error(chalk.red(`[配置错误] ${result.message}`));
-    console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
-    return 2;
-  }
-  if (result.kind === "secret-store-error") {
-    console.error(chalk.red(`[秘密存储不可用] ${result.message}`));
-    console.error(chalk.dim(`设备本地目录：${result.filePath}`));
-    return 2;
-  }
-  if (result.kind === "semantic-error") {
-    console.error(
-      chalk.red(`[配置错误] ${result.filePath} 含 ${result.issues.length} 处废弃字段：`),
-    );
-    console.error("");
-    for (const [index, issue] of result.issues.entries()) {
-      console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
-      console.error(chalk.dim(`   原因：${issue.reason}`));
-      console.error(chalk.dim(`   修复：${issue.fix}`));
-      console.error("");
-    }
-    console.error(chalk.dim("修复后重新运行 `zhixing` 验证。"));
-    return 2;
-  }
-  if (result.kind === "non-tty") {
-    console.error(chalk.red("缺少必要配置，且当前环境非交互终端。"));
-    console.error(chalk.dim("请在 TTY 终端中运行 `zhixing` 完成配置。缺失项："));
-    for (const label of result.missingLabels) {
-      console.error(chalk.dim(`  - ${label}`));
-    }
-    return 2;
-  }
-  if (result.kind === "cancelled") {
-    console.log(chalk.dim("已取消配置。"));
-    return 0;
-  }
-}
-
 export const program = new Command();
-let entryProgress: StartupProgressPresenter | undefined;
 const COMMANDER_HELP = new Help();
 
 const ROOT_HELP_TITLES: Readonly<Record<string, string>> = Object.freeze({
@@ -231,74 +181,20 @@ program
     subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
   })
   .action(async () => {
-    const earlyRecords = peekEntryLogging()?.records;
-    const progress = entryProgress ?? (process.stdout.isTTY ? createStartupProgressPresenter({ stdout: process.stdout,
-      onFirstOutput: () => recordFirstSurfaceOutput(earlyRecords),
-    }) : undefined);
-    if (!entryProgress) progress?.begin(performance.now() - process.uptime() * 1000);
-    const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE },
-      { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure, recordStartupFailure }, { INPUT_LOG_SOURCE }] = await Promise.all([
-      import("@zhixing/core/paths"), import("@zhixing/providers/configuration"), import("./logging/runtime.js"), import("./logging/input.js"),
+    const [{ getZhixingHome }, { getGlobalConfigPath, CONFIGURATION_LOG_SOURCE }, { beginRuntimeLogging, observeStartupPhase, recordRuntimeFailure }] = await Promise.all([
+      import("@zhixing/core/paths"), import("@zhixing/providers/configuration"), import("./logging/runtime.js"),
     ]);
-    const plainNotice = (message: string): void => createStdoutWriter().notify(chalk.dim(message));
-    let logNotice = plainNotice;
-    const logging = beginRuntimeLogging(getZhixingHome(), "repl", (message) => logNotice(message));
-    let connection: import("./runtime/core-host-connection.js").CoreHostConnection | undefined;
+    const home = getZhixingHome();
+    const logging = beginRuntimeLogging(home, "repl", message => createStdoutWriter({ stdout: process.stderr }).notify(message));
     try {
-      const zhixingHome = getZhixingHome();
-      const configPath = getGlobalConfigPath(process.env, zhixingHome);
-      const { CoreHostConnection, defaultCoreHostConnectionDeps } = await import("./runtime/core-host-connection.js");
-      const { connectReplHost } = await import("./runtime/repl-host-startup.js");
-
-      connection = new CoreHostConnection(defaultCoreHostConnectionDeps(zhixingHome, logging.records));
-      const notices: import("./runtime/core-host-connection.js").CoreHostLifecycleNotice[] = [];
-      const stopNotices = connection.onLifecycleNotice(notice => { if (notice.kind !== "starting") notices.push(notice); });
-      const startupNotice = progress ? (message: string) => progress.notify(chalk.dim(message)) : plainNotice;
-      logNotice = startupNotice;
-      const [prepared, { startRepl }] = await Promise.all([connectReplHost({
-        connection,
-        starting: () => progress?.begin(performance.now() - process.uptime() * 1000),
-        settled: () => {},
-        checkConfiguration: async () => {
-          progress?.stop();
-          // The setup editor owns stdout until it closes. Keep a bounded set of
-          // notices, then present them before startup or the REPL takes ownership.
-          const pending = new Set<string>();
-          logNotice = message => { pending.add(message); if (pending.size > 4) pending.delete(pending.values().next().value!); };
-          try {
-            const { runStartupCheck } = await import("./startup.js");
-            return await observeStartupPhase(logging.records, "check-configuration", () => runStartupCheck({
-              homeDir: zhixingHome, configPath, mode: "repl",
-              records: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }),
-            }));
-          } finally { logNotice = startupNotice; for (const message of pending) startupNotice(message); }
-        },
-      }), observeStartupPhase(logging.records, "load-interface", () => import("./repl.js"))]);
-      stopNotices();
-      if (prepared.kind === "configuration") {
-        progress?.stop();
-        const startupResult = prepared.result;
-        const startupExit = handleStartupResult(startupResult) ?? 2;
-        recordStartupFailure(logging.records, startupResult);
-        await connection.dispose();
-        await logging.finish(startupExit === 0 ? "cancelled" : "failure", startupResult.kind);
-        return await exitCommand(startupExit);
-        return;
-      }
-
-      await startRepl(zhixingHome, configPath, (code) => logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "host-connection-failed"), logging.bind(INPUT_LOG_SOURCE, { scope: "storage" }), logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }), logging.records, {
-        connection, notices, progress,
-        setLogNoticeHandler: handler => { logNotice = handler ?? plainNotice; },
-        ...(prepared.kind === "unavailable" ? { initialFailure: { error: prepared.error } } : {}),
-      });
-      await logging.finish("success", "completed");
-    } catch (err) {
-      progress?.stop();
-      logNotice = plainNotice;
-      await connection?.dispose().catch(cleanup => recordRuntimeFailure(logging.records, cleanup, "foreground-cleanup-failed"));
-      recordRuntimeFailure(logging.records, err, "foreground-failed");
+      const { startTextSession } = await observeStartupPhase(logging.records, "load-interface", () => import("./text-session.js"));
+      const code = await startTextSession(home, getGlobalConfigPath(process.env, home), { runtimeRecords: logging.records, configurationRecords: logging.bind(CONFIGURATION_LOG_SOURCE, { scope: "storage" }) });
+      await logging.finish(code === 0 ? "success" : "failure", code === 0 ? "completed" : "text-session-failed");
+      return await exitCommand(code);
+    } catch (error) {
+      recordRuntimeFailure(logging.records, error, "foreground-failed");
       await logging.finish("failure", "foreground-failed");
-      await renderActionError(err);
+      await renderActionError(error);
       return await exitCommand(1);
     }
   });
@@ -1060,17 +956,12 @@ function isExecutedAsMain(moduleUrl: string, argvEntry: string | undefined): boo
   }
 }
 
-export async function runCli(progress?: StartupProgressPresenter): Promise<void> {
-  entryProgress = progress;
-  try {
-    const argv = [...process.argv.slice(0, 2), ...normalizeCliArgs(process.argv.slice(2))];
-
-    rejectUnknownCommandPath(argv, program);
-
-    await program.parseAsync(argv).catch(async (err: unknown) => {
-      await renderActionError(err);
-      return await exitCommand(1);
-    });
-  } finally { entryProgress = undefined; }
+export async function runCli(): Promise<void> {
+  const argv = [...process.argv.slice(0, 2), ...normalizeCliArgs(process.argv.slice(2))];
+  rejectUnknownCommandPath(argv, program);
+  await program.parseAsync(argv).catch(async (error: unknown) => {
+    await renderActionError(error);
+    return await exitCommand(1);
+  });
 }
 if (isExecutedAsMain(import.meta.url, process.argv[1])) void runCli();

@@ -9,10 +9,10 @@
  *   Enter  进入该项的目标 panel；按钮触发对应动作
  *   Ctrl+C 退出（cancelled）
  */
-import type { ConfigModelContext as ConfigEditorContext, PanelAction, PanelDescriptor, Section, Status, WorkingState } from "../types.js";
+import type { ConfigModelContext, PanelAction, PanelDescriptor, Section, Status, WorkingState } from "../types.js";
 import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
 import { getSections } from "../sections/index.js";
-import type { KeyEvent } from "../../tui/index.js";
+import type { KeyEvent } from "../../tui/key-event.js";
 
 export interface MainPanelCursor {
   index: number;
@@ -39,7 +39,7 @@ export interface MainPanelButton {
 export type MainPanelOption = MainPanelItem | MainPanelButton;
 
 export function buildOptions(
-  ctx: ConfigEditorContext,
+  ctx: ConfigModelContext,
   state: WorkingState,
 ): { sections: Array<{ section: Section; entries: MainPanelItem[] }>; options: MainPanelOption[] } {
   const sections = getSections(ctx.sections).map((section) => {
@@ -80,7 +80,7 @@ export interface MainPanelKeyResult {
 }
 
 export function handleMainPanelKey(
-  ctx: ConfigEditorContext,
+  ctx: ConfigModelContext,
   state: WorkingState,
   cursor: MainPanelCursor,
   key: KeyEvent,

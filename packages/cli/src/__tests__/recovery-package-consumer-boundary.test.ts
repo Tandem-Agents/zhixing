@@ -5,15 +5,14 @@ import { describe, expect, it } from "vitest";
 
 const CLI_SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONSUMER_PATTERN =
-  /\b(?:decodeRecoveryPackage|readDecodedRecoveryPackage|readRecoveryPackageFromTty)\s*\(/u;
+  /\b(?:decodeRecoveryPackage|readDecodedRecoveryPackage)\s*\(/u;
 
 const EXPECTED_CONSUMERS = [
-  "runtime/anchor-uninstall-command.ts",
   "serve/backup-command.ts",
   "serve/command.ts",
   "serve/disaster-recovery-command.ts",
   "serve/mesh-pair-command.ts",
-  "serve/recovery-package-input.ts",
+  "terminal/independent-command.ts",
 ] as const;
 
 describe("recovery package consumer boundary", () => {
@@ -32,7 +31,7 @@ describe("recovery package consumer boundary", () => {
     expect(pairing.match(/decoded\.version === 1/gu)).toHaveLength(1);
     expect(pairing).not.toContain("requireCurrentRecoveryPackage(");
 
-    expect(source("runtime/anchor-uninstall-command.ts").match(
+    expect(source("terminal/independent-command.ts").match(
       /requireCurrentRecoveryPackage\s*\(/gu,
     )).toHaveLength(1);
     expect(source("serve/command.ts").match(

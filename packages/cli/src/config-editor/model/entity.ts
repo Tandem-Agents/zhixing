@@ -20,7 +20,7 @@ import { SUPPORTED_PROVIDERS, listSupportedChannels, findSupportedChannel } from
 import { maskForDisplay } from "../ui/mask.js";
 import { checkModel } from "../checks/model.js";
 import { checkMessaging } from "../checks/messaging.js";
-import type { KeyEvent } from "../../tui/index.js";
+import type { KeyEvent } from "../../tui/key-event.js";
 
 export interface OnEnterResult {
   action: PanelAction;

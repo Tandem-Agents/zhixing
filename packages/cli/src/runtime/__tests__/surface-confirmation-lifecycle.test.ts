@@ -5,7 +5,6 @@ import { RpcClientClosedError, ServerNotRunningError } from "@zhixing/server";
 import { CoreHostConnection } from "../core-host-connection.js";
 import { RpcConfirmationBroker } from "../rpc-confirmation-broker.js";
 import { CurrentAnchorSurfaceRpcClient } from "../surface-core-host-link.js";
-import { shouldRefreshReplAfterHostNotice } from "../../repl.js";
 
 interface Command {
   op: "dispatch" | "poll" | "close";
@@ -183,22 +182,5 @@ describe("current-anchor confirmation lifecycle through the real link and relay"
       : f.defaultReply(device, command, signal));
     await f.broker.refresh();
     expect(f.received).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "refreshed" }));
-  });
-
-  it("automatically refreshes the new owner through the actual REPL readiness predicate", async () => {
-    const f = await fixture();
-    await f.show();
-    f.setRespond((device, command, signal) => command.method === "confirmation.list"
-      ? Promise.resolve({ result: { items: [{ request: request("new-owner-pending") }] } })
-      : f.defaultReply(device, command, signal));
-    f.link.onLifecycleNotice(async notice => {
-      if (shouldRefreshReplAfterHostNotice(notice)) await f.broker.refresh();
-    });
-    await f.surface.reconcileOwner(f.change("device:b", 2));
-    await vi.waitFor(() => expect(f.received.mock.calls.map(([value]) => value.id)).toEqual(["request:1", "new-owner-pending"]));
-    expect(f.calls.filter(call => call.command.method === "confirmation.list").map(call => call.deviceId)).toEqual(["device:b"]);
-    expect(f.broker.resolve("new-owner-pending", { kind: "allow-once" })).toBe(true);
-    await vi.waitFor(() => expect(f.resolves()).toHaveLength(1));
-    expect(f.resolves()[0]).toMatchObject({ deviceId: "device:b", command: { params: { requestId: "new-owner-pending", decision: { kind: "allow-once" } } } });
   });
 });

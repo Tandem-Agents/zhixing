@@ -6,7 +6,7 @@
 
 | 接入 | 展示与回程 | 授权边界 |
 |---|---|---|
-| 本机 CLI | RPC 请求投影 → TerminalConfirmationRenderer → 内联操作区；决定经 RPC 回传 | 已认证本机发起面可提交完整受支持决定，不再直连业务 Broker |
+| 本机 CLI | RPC 请求投影 → N 权限选择映射 → U 共同页面；决定经 RPC 回传 | 已认证本机发起面可提交完整受支持决定，不再直连业务 Broker |
 | 其他 RPC 客户端 | `confirmation.list`、pending／resolved 通知；`confirmation.resolve` 应答 | 可观察与可应答分离；非本机受限决定仅 allow-once／deny |
 | 渠道文本 | 发送操作摘要与回复提示，精确词集或拒绝理由回程 | 校验原始应答人及耐久 challenge／grant 绑定，不以群成员可见或文本匹配代替授权 |
 
@@ -23,9 +23,11 @@
 
 持久选项只在有建议模式且未命中 `bypassImmune`、未要求逐次显式确认时生成；否则只保留本次允许与拒绝。模式优先选子命令通配，再选可执行命令通配，最后候选兜底；这是授权粒度，不保证通配模式本身排除了所有危险参数，安全底线仍须独立评估。`allow-session` 类型保留但常规面板不生成，因为其内存作用域不是用户感知的对话生命周期。
 
-[TerminalConfirmationRenderer](../../../packages/cli/src/security/terminal-renderer.ts)使用 `SelectOperationRegion`，由 ScreenController 管理内联操作区，让 scrollback 保持可见。上下键、快捷键和 Enter 完成选择，拒绝项可输入理由。选择层的 Esc 取消映射为 deny，Ctrl+C／Ctrl+D／外部 abort 映射 cancelled；输入模式下 Esc 的返回行为由选择状态机处理，不能统称“所有取消键都拒绝”。
+[权限适配](../../../packages/cli/src/terminal/confirmation.ts)从真实请求构造通用选择页，[U 根](../../../packages/terminal-ui/src/root.tsx)处理输入，N 关联请求与回执。选项只来自权威能力，持久授权增加后果说明与独立确认；拒绝项可补充理由。无法完整展示时禁用允许，不默认继续。
 
-轻量原生终端方案支持内联输入与可控布局，不引入 React/Ink 依赖；只提供选择列表的组件不能直接完成“选择并补充文字”的一次交互，先接过渡库再替换也会重复适配。当前使用 Chrome 内联操作区，早期独立屏原地擦行方案已退出。宿主用 beforeShow／afterShow 协调输入让位与恢复，避免两个输入消费者争用；通用机制见[选择模块](../cli/selection.md)与[屏幕渲染](../cli/screen-rendering.md)，权限面板尚不是 SelectionService 的业务调用。
+Esc／返回与 Ctrl+C 等用户取消须按真实动作保留语义：通用页面消失不是同意；拒绝与 cancelled 不得互换。当前适配将退出确认映射为 deny，将显式 cancelled 映射为 user-ctrl-c；Ctrl+D 与其他取消原因须有独立输入与回程证据，不能沿用退休 renderer 的结论。补充输入和二次确认的返回行为见[选择模块](../cli/selection.md)。
+
+确认与主对话使用同一终端根，不再装配旧 TerminalConfirmationRenderer、SelectOperationRegion 或 ScreenController，不进行 beforeShow／afterShow 的 stdin 交接。共同输入与页面生命周期见[屏幕渲染](../cli/screen-rendering.md)。权限队列和授权事实仍由原 owner／RPC 责任链维护。
 
 CLI 通过 [RpcConfirmationBroker](../../../packages/cli/src/runtime/rpc-confirmation-broker.ts)接收完整请求并去重；`refresh` 可补查漏通知。同步 `resolve=true` 仅表示本地发起，只有 RPC 返回 `ok:true` 才完成本次回程。`ok:false`、无效回执或异步失败均上报并尝试刷新真实 pending，不自动重发失败决定；连接关闭仍以同一原始决定重放。面板消失本身不是授权成功保证。该适配器也不自建全局审批队列，不能宣称已有“#N of M”视图或批量审批。
 

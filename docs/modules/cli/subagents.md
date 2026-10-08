@@ -1,40 +1,27 @@
 # CLI 子任务展示
 
-## 体验合同
+用户需要知道委派是否推进、哪些失败及总体成本，不需要阅读完整子推理或每次内部工具输出。成功项聚合，失败／中止明确可见；主答案仍应披露未取得的结果。执行、提交和生命周期见[子 Agent 架构](../subagents/architecture.md)。
 
-用户关注的是委派是否在推进、哪些失败及总体成本，不需要阅读完整子推理或每次内部工具输出。成功项聚合，失败/中止明确可见；主 Agent 应在综合答案中披露失败，不把部分来源冒充全部成功。
+## 当前责任链
 
-这里说明 Task 的呈现，不把文件化编排和多视角的进度混入同一状态机。执行与结果语义以[子 Agent 架构](../subagents/architecture.md)为准。
+新终端协商 bounded-v1 展示能力，经既有会话流接收有限子任务进度和 subagent artifact。默认 observer、模型结果及持久 transcript 不因此接收展示 payload。能力未接纳时应显示限制，不能把本地格式化成功当作协商成功。
 
-## 状态与布局
+N 的 TerminalProcessProjection 按 conversation、run、父 toolCallId 和 child 身份归并状态，U 只呈现有限过程 DTO。子运行结束不结束父运行；迟到事件不能串到新的父工具或会话。活跃子任务保留标签、状态、时长和工具摘要，终态合并已有结构化用量及必要诊断，不投递完整子输出。
 
-本地状态栏按父 toolCallId 维护 Task registry，记录 child 是否启动、lineage、状态、焦点及内部工具。计数从 registry 派生，不另设累加真相。child_end 幂等更新子终态，call_end 收口父调用；无 child lifecycle 的前置失败由父调用收口，不能重复计数或凭调用顺序串槽。
+旧 StatusBar、Task registry 展示壳、subtasks/presentation 和手写 scrollback 已退役；现在的状态与正文都由同一 U 根绘制。领域事实仍来自事件与结果，CLI 投影不是第二个执行状态机。
 
-正常底部是稳定状态栏、输入区和输入下方提示行。Task 活跃时只在状态栏上方增加一条临时详情行：
+## 呈现合同
 
-```text
-⌬ 3 个子任务 · 2 运行 1 完成 · #3 核查状态 · grep
-◈ 子任务中 · 耗时与用量 │ 长期任务进度 │ 上下文
-输入区
-输入提示行
-```
+状态、数量与可定位身份优先于可省略描述；失败和中止不能被右侧裁剪吞掉。活动过程保持有限占用，结果作为正文块保留；页面回看、resize 和返回遵循[屏幕渲染](screen-rendering.md)，不得清掉历史来伪造适配。
 
-详情承载总数、运行/完成/失败/中止计数及焦点；原状态栏保持紧邻输入区的锚点，长期任务 tail 仍附在锚点，不移到详情行。子 usage 可参与成本呈现，但不应改变主阶段或主上下文水位；一般主事件按根 lineage 过滤，orchestration 事件仍按自身身份消费。
+批次完成应给出可理解的总计，成功项避免逐条刷屏；失败／中止保留短身份和诊断。子用量不能改变主阶段或主上下文水位，不将缺值当零。此前单行子任务详情和批次告警的用户信息义务仍须迁移核对，不能用新块类型存在证明全部旧反馈已闭合。
 
-详情随批次出现与消失，不为每个成功子任务增删行。screen controller 只认识通用详情行和锚点，不理解 Task。终端使用主缓冲区，已提交 scrollback 不回头重绘；非 TTY 或不支持 Chrome 时只输出追加式结果，不输出动态中间帧。
+artifact 用于即时显示，不进入模型历史；运行层解析的结构化用量用于查询，CLI 不从私有 trailer 文本重新猜测统计。[用量展示](usage-display.md)统一描述 /usage 的拆分和成本边界。
 
-宽度不足时优先保状态、数量及焦点编号，再分配描述，先省略内部工具。禁止把整行从右侧盲裁导致失败消失；状态行不得软折，极窄宽度只能在明确布局预算内降级。该要求需以实际 renderer 验证，不能由存在格式化函数推断所有终端都已达标。
+## 接入与验证边界
 
-## 结束摘要与成本
+交互终端的增强投影可承接子任务展示；默认 RPC 仍保持剥离，不应再把“默认投影不含 artifact”推断为新终端不可达。文本入口使用自己的追加式投影，不获取 U 或旧状态栏。非流式渠道不据此承诺展示子内部过程，失败披露仍是产品要求。
 
-批次结束追加一次总计，成功项不逐条刷屏；失败和中止项各追加带编号、短身份及诊断的告警。保留成本和状态后再分配描述宽度，不回写已提交历史。
+实现入口：[过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[过程格式](../../../packages/cli/src/terminal/process-presentation.ts)、[展示输出](../../../packages/cli/src/terminal/output.ts)、[U 根](../../../packages/terminal-ui/src/root.tsx)、[RPC 流](../../../packages/rpc/src/session-turn-stream.ts)、[事件投影](../../../packages/rpc/src/session-events.ts)。
 
-Task 的展示 artifact 与 usage trailer 分工不同：artifact 服务即时呈现，不进入 transcript；trailer 经运行层解析为结构化查询结果，CLI 不自行猜测私有文本状态。`/usage` 的拆分与宽度规则统一见[用量展示](usage-display.md)。
-
-## 当前接入边界
-
-状态栏已有 child_start/end 消费与 registry，结果呈现也有本地实现；但常规远端会话的 RPC 事件白名单没有 child_start/end，默认 session delta 又剥离 renderer-only presentation。因此不能将本地渲染能力写成常规 RPC REPL 已完整显示上述动态详情及终态告警；保留 lineage 并不等于转发了全部事件。
-
-非流式渠道主要消费主答案，不承诺展示子内部过程；失败披露仍是产品要求，不能仅靠主模型提示证明一定可见。后续接入应复用相同子身份、结果与产品语义，不通过终端 ANSI 或第二套猜测状态补通道。
-
-维护入口：[状态栏](../../../packages/cli/src/status-bar/status-bar.ts)、[摘要格式](../../../packages/cli/src/subtasks/presentation.ts)、[RPC 白名单](../../../packages/rpc/src/session-events.ts)。核对混合工具批次关联、child_end/call_end 去重、根/子事件隔离、批次高度、窄屏 CJK、非 TTY 降级及真实 RPC 消费；不能只测本地 EventBus 后宣称用户链完整。
+验证真实 RPC 增强／默认隔离、父子关联、迟到与重复终态、混合工具批次、未知用量、失败诊断、窄屏和文本降级；本地 EventBus 或格式化快照不能代替生产消费链。

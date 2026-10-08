@@ -21,30 +21,24 @@
 
 `trackMessages` 从 tool_end 只提取工具 id、content 和 isError 形成模型／历史消息，不将 presentation 写入这些消息。公开 session delta 经 `stripPresentationFromAgentYield` 去掉 presentation，保留其余事件与结果字段；默认跨接入面不应负担本地 diff 展示数据。其它持久化或传输边界也必须守住展示与协议事实分离，不能仅靠某个 CLI 消费者自觉忽略。
 
-其他接入面若需要差异展示，应明确自己的展示合同，而不是接收 CLI ANSI。旧稿的“显式 presentation-capable 连接可透传”是设计方向，不是当前 RPC 已提供的能力协商接口。
+新交互终端通过 bounded-v1 协商接收有界 file-diff／subagent 展示投影；默认 observer、模型结果及持久 transcript 仍不含 presentation。增强投影复用既有会话流及 current-anchor 责任，不另建 artifact 查询事实源。
 
-## 当前生产链的可达边界
+## 当前生产链
 
-工具生成器和 CLI 渲染器均已实现，但当前常规 REPL 并未直接消费工具的本地原始 yield：
+`edit/write → tool_end.presentation → RPC 增强投影 → ConversationController → N TerminalProcessProjection → 有界正文块 → U`。
 
-`edit/write → tool_end → 宿主 projectSessionTurn → 剥离 presentation 的 session delta → ConversationController.onDelta → CLI 渲染`
-
-`ToolBatchCoordinator.recordSideEffect` 能消费 file-diff artifact；没有 artifact 时只显示原有摘要。当前 RPC 剥离发生在它之前，所以不能因工具和 renderer 单测存在，就宣称常规 REPL 已实现端到端 diff 展示。端到端展示仍是产品要求，当前存在接入缺口。
+N 验证 artifact 身份与容量后生成过程／差异文本，U 在统一正文视口呈现。能力协商失败、缺少 artifact 或容量不足时应明确展示边界，工具执行事实不因展示缺失改变。旧 ToolBatchCoordinator 与 DiffBlockRenderer 已退役，不能继续用旧 renderer 单测作为当前用户链证据。
 
 ## 终端展示合同
 
-采用 main buffer 的静态 scrollback：副作用事件先封口普通工具批次，单独输出 `✎` 摘要，再下挂 diff block。当前摘要显示文件 basename、操作及可用的增删计数；完整路径仍保存在 artifact 中。
+文件摘要之后展示有限的 unified diff 片段、范围、行号与增删标记，让用户可检查改变。符号和结构必须在无颜色时仍可理解；完整路径、统计是否精确和片段是否截断由 artifact 事实决定，不伪造零变更。
 
-渲染器按 unified diff hunk header 展示范围，以新文件行号为主，删除行的主行号列留空；增加用 `+` 和绿色，删除用 `-` 和红色，header 弱青色，上下文与 gutter 保持克制。颜色只是辅助，无颜色时仍靠符号、行号和结构理解；默认不用整行背景抢占对话主视觉。
+[过程格式](../../../packages/cli/src/terminal/process-presentation.ts)将结构化差异转换为有限正文，[过程投影](../../../packages/cli/src/terminal/process-projection.ts)关联父工具及运行，[正文输出](../../../packages/cli/src/terminal/output.ts)进入统一显示存储。U 按视口和公共宽度策略渲染、回看和 resize；不再使用旧 renderer 的 20 列下限、6 个 hunk／80 行／300 行静态参数作为新实现事实。
 
-当前最多显示 6 个 hunk、每个 80 行、合计 300 行变更／上下文行；超限显示截断提示。长行由 `clampLine` 裁剪，不是交互式折叠。提示中的 `git diff` 只能辅助检查 Git 工作区，不能保证还原非 Git 文件或某次调用的完整差异。
-
-屏幕目标是不触发隐式 wrap、不破坏 chrome。当前 renderer 将 columns 下限设为 20，再按 columns − 1 裁剪，因此不能把小于 20 列的极窄终端也写成已满足；旧稿“极窄时只留符号与正文”的降级尚非当前实现。屏幕所有权与历史能力见[屏幕渲染](screen-rendering.md)。
-
-本职责不提供 alt-screen viewer、鼠标滚动接管、交互展开收起、resize 后重排已绘历史或行内 word-level 高亮。静态内容一次写出后不靠未来重绘补救。
+差异生成上限、RPC 投影上限、正文存储预算和 U 视口预算是不同边界。超限必须说明截断，不能让界面截断改变工具结果或模型输入。git diff 只辅助检查 Git 工作区，不能保证还原非 Git 文件或本次调用的完整差异。具体屏幕生命周期见[屏幕渲染](screen-rendering.md)。
 
 ## 维护验证
 
 必须分别验证生成、隔离、渲染和生产接入：新增／覆盖／替换、空行与行尾、重复行、中文、无变化、大输入的未知统计与片段截断；模型消息和默认 delta 无 presentation；无颜色、长行、窄屏及摘要退化；最后沿真实 REPL 的工具结果到渲染器证明 artifact 可达。不能用人工构造 renderer 输入代替生产接入证明。
 
-实现入口：[差异生成](../../../packages/tools-builtin/src/file-diff.ts)、[消息投影](../../../packages/orchestrator/src/runtime/track-messages.ts)、[公开事件剥离](../../../packages/core/src/loop/presentation.ts)、[RPC 流](../../../packages/rpc/src/session-turn-stream.ts)、[会话控制器](../../../packages/cli/src/runtime/conversation-controller.ts)、[副作用展示](../../../packages/cli/src/output/tool-batch-coordinator.ts)、[diff 渲染](../../../packages/cli/src/diff/diff-block-renderer.ts)。
+实现入口：[差异生成](../../../packages/tools-builtin/src/file-diff.ts)、[消息投影](../../../packages/orchestrator/src/runtime/track-messages.ts)、[公开事件剥离](../../../packages/core/src/loop/presentation.ts)、[RPC 流](../../../packages/rpc/src/session-turn-stream.ts)、[会话控制器](../../../packages/cli/src/runtime/conversation-controller.ts)、[过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[diff 格式](../../../packages/cli/src/terminal/process-presentation.ts)。

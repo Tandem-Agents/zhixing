@@ -13,7 +13,7 @@ import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type { PanelAction, PanelDescriptor, WorkingState } from "../types.js";
 import { readModelRole, readModelThinking, readProviderEntry, writeModelRole, writeModelThinking } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../../registries/index.js";
-import type { KeyEvent } from "../../tui/index.js";
+import type { KeyEvent } from "../../tui/key-event.js";
 
 export interface ListItem {
   label: string;

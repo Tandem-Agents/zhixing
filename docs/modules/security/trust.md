@@ -91,9 +91,9 @@ Trust Administration 的管理应用拥有 list/revoke 的上下文选择、可�
 
 `/trust` 的 typeahead 增强入口是管理面板，不是批准选择器：Enter 不接受或提交规则，撤销使用连续两次 Ctrl+D 确认，避免浏览时误操作。候选展示作用范围、贡献来源与匹配次数；实际撤销仍经宿主应用执行。通用状态与退出规则见[输入补全](../cli/input-completion.md)，不在安全模块另建交互状态机。
 
-自动授权必须可见但不重复打扰。CLI 消费安全审计事件：安全助理 safe 用低调一行说明操作与理由；规则沉淀说明生效范围、累计次数、模式及 `/trust` 查看／撤销入口。needs-confirm 的理由交确认面板，escalate 交阻止错误显示，不重复输出审计横幅。用户面统一称“安全助理”，内部 `steward` 命名不改变产品术语；事件发出与各表面实际展示是两层职责，不能据 CLI 渲染推定所有渠道都有相同提示。
+自动授权必须可见但不重复打扰。CLI 过程投影消费 canonical `session.process` 中的安全审计事件：安全助理 safe 用低调一行说明操作与理由；规则沉淀说明生效范围、累计次数、模式及 `/trust` 查看／撤销入口。needs-confirm 的理由交确认面板，escalate 交阻止错误显示，不重复输出审计横幅。用户面统一称“安全助理”，内部 `steward` 命名不改变产品术语；主子身份和源序号由既有过程投影核对，Host 的 stdout 不作为终端反馈通路。
 
-当前接线见[管理候选](../../../packages/cli/src/security/trust-rule-arg-provider.ts)、[CLI 事件消费](../../../packages/cli/src/render.ts)及[审计提示渲染](../../../packages/cli/src/security/terminal-renderer.ts)。
+当前接线见[管理候选](../../../packages/cli/src/security/trust-rule-arg-provider.ts)、[终端过程投影](../../../packages/cli/src/terminal/process-projection.ts)、[文本事件订阅](../../../packages/cli/src/render-events.ts)及[纯审计格式](../../../packages/cli/src/security/audit-event-renderer.ts)。
 
 ## 实现定位
 

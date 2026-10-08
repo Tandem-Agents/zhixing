@@ -12,6 +12,9 @@ const SRC_DIR = path.resolve(
 );
 
 const ENTRY_FILE = path.join(SRC_DIR, "index.ts");
+// Structural import checks own a bounded child process. Let its timeout clean up
+// before Vitest ends the test; startup performance has a separate real-entry gate.
+const IMPORT_CHECK_TIMEOUT_MS = 20_000;
 
 const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "node:fs",
@@ -20,7 +23,6 @@ const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "chalk",
   "commander",
   "./screen/cli-writer.js",
-  "./screen/startup-progress.js",
   "./serve/log-line-count.js",
   "./version.js",
   "./command-gate.js",
@@ -52,25 +54,37 @@ function collectRuntimeStaticImports(sourceText: string): string[] {
 }
 
 describe("CLI entry import graph", () => {
+  it('keeps the built foreground supervisor graph in one CLI module', async () => {
+    const dist = path.resolve(SRC_DIR, '../dist');
+    const index = await readFile(path.join(dist, 'index.js'), 'utf8');
+    const entry = index.match(/import\("(\.\/launch-[A-Z0-9]+\.js)"\)/u)?.[1];
+    expect(entry).toBeDefined();
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', String.raw`
+      import { registerHooks } from 'node:module';
+      const modules = new Set();
+      registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
+      const entry = await import(${JSON.stringify(pathToFileURL(path.join(dist, entry!)).href)});
+      process.stdout.write(JSON.stringify({ exported: typeof entry.launchTerminal, modules: [...modules] }));
+    `], { timeout: 15_000, windowsHide: true });
+    const loaded = JSON.parse(stdout) as { exported: string; modules: string[] };
+    expect(loaded.exported).toBe('function');
+    expect(loaded.modules.filter(url => url.startsWith(pathToFileURL(`${dist}${path.sep}`).href))).toHaveLength(1);
+    expect(loaded.modules.filter(url => /packages\/(owner-kernel|executor|orchestrator|runtime-host|mcp|tools-builtin)\/dist\//u.test(url))).toEqual([]);
+  }, IMPORT_CHECK_TIMEOUT_MS);
   it("keeps configuration descriptions and headless notices free of network and syntax-highlighting implementations", async () => {
-    const dist = path.resolve(SRC_DIR, "../dist");
-    const chunks = (await readdir(dist)).filter(name => name.endsWith(".js"));
-    const candidates = await Promise.all(chunks.map(async name => ({ name, source: await readFile(path.join(dist, name), "utf8") })));
-    const notices = candidates.find(item => item.source.includes("function createRunEventSubscribers("));
-    expect(notices).toBeDefined();
-    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import=tsx/esm", "--input-type=module", "-e", String.raw`
       import { registerHooks } from 'node:module';
       const modules = new Set();
       registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
       await import('@zhixing/network/proxy');
-      await import(${JSON.stringify(pathToFileURL(path.join(dist, notices!.name)).href)});
+      await import(${JSON.stringify(pathToFileURL(path.join(SRC_DIR, "render-events.ts")).href)});
       process.stdout.write(JSON.stringify([...modules].filter(url => /undici|cli-highlight|highlight\.js/u.test(url))));
     `], { timeout: 15000, windowsHide: true });
     expect(JSON.parse(stdout)).toEqual([]);
-  });
-  it("loads the built interactive surface without the backend execution stack", async () => {
+  }, IMPORT_CHECK_TIMEOUT_MS);
+  it.each(["application", "text-session"])("loads built %s without the backend execution stack", async (surface) => {
     const dist = path.resolve(SRC_DIR, "../dist");
-    const entry = (await readdir(dist)).find(name => /^repl-[A-Z0-9]+\.js$/u.test(name));
+    const entry = (await readdir(dist)).find(name => new RegExp(`^${surface}-[A-Z0-9]+\\.js$`, "u").test(name));
     expect(entry, "Build the CLI before checking its actual import graph").toBeDefined();
     const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", String.raw`
       import { registerHooks } from 'node:module';
@@ -80,7 +94,7 @@ describe("CLI entry import graph", () => {
       process.stdout.write(JSON.stringify([...modules].filter(url => /packages\/(owner-kernel|executor|orchestrator|runtime-host|mcp|tools-builtin)\/dist\//u.test(url))));
     `], { timeout: 15_000, windowsHide: true });
     expect(JSON.parse(stdout)).toEqual([]);
-  });
+  }, IMPORT_CHECK_TIMEOUT_MS);
 
   it("keeps metadata commands on the lightweight static import path", async () => {
     const sourceText = await readFile(ENTRY_FILE, "utf-8");

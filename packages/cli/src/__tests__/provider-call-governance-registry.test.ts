@@ -75,7 +75,7 @@ const DEFERRED_CALL_SITES: ReadonlyArray<{
 /** 生产 provider 调用的原始入口指纹（callText 族与 meter 装配点）——扫描面 */
 const SCAN_ROOTS = ["cli/src", "core/src/conversation"] as const;
 const CALL_PATTERN_ALL =
-  /\b(callText|callTextWithUsage|llmComplete|createMainCallLLM|createLightCallLLM|createMainCallLLMWithUsage|createLightCallLLMWithUsage)\s*[(:]|\.provider\.chat\s*\(|\bprovider\.chat\s*\(/gu;
+  /\b(callText|callTextWithUsage|llmComplete|createMainCallLLM|createLightCallLLM|createMainCallLLMWithUsage|createLightCallLLMWithUsage)\s*!?\s*[(:]|\.provider\.chat\s*\(|\bprovider\.chat\s*\(/gu;
 
 function listSourceFiles(root: string): string[] {
   const absolute = path.join(WORKSPACE_SRC, root);
@@ -116,6 +116,8 @@ describe("provider call governance registry", () => {
       readonly expected: number;
       readonly nature: string;
     }> = [
+      { file: "cli/src/runtime/configuration-application.ts", expected: 2, nature: "配置应用的依赖端口类型与调用；由管理 RPC llmComplete 注入" },
+      { file: "cli/src/terminal/application.ts", expected: 3, nature: "N 向治理宿主的 llmComplete 转发：配置应用与场景创建；无本地 Provider" },
       {
         file: "cli/src/serve/advancement-controller.ts",
         expected: 0,
@@ -157,21 +159,6 @@ describe("provider call governance registry", () => {
         file: "cli/src/runtime/rpc-management-facade.ts",
         expected: 1,
         nature: "RPC 客户端——打到宿主已治理的 llm.complete",
-      },
-      {
-        file: "cli/src/commands/config-commands.ts",
-        expected: 2,
-        nature: "management facade 透传（经 RPC 到宿主治理边界）",
-      },
-      {
-        file: "cli/src/repl.ts",
-        expected: 1,
-        nature: "management facade 消费（经 RPC 到宿主治理边界）",
-      },
-      {
-        file: "cli/src/runtime/config-command.ts",
-        expected: 2,
-        nature: "接入向导类型与注释引用（经宿主 llm.complete）",
       },
     ];
     const budget = new Map(

@@ -3,14 +3,13 @@ import chalk from "chalk";
 import type { AgentEventMap, IEventBus } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import { PERSPECTIVES_CONVERGENCE_NODE_ID, PERSPECTIVES_DELIBERATION_DEFINITION_ID } from "@zhixing/core/conversation/application";
-import type { OutputRenderer } from "./output/output-renderer.js";
 import type { CliWriter } from "./screen/index.js";
 import { ANCHOR_SUB_AGENT } from "./output/speaker-state.js";
-import { renderAuditEvent } from "./security/terminal-renderer.js";
+import { renderAuditEvent } from "./security/audit-event-renderer.js";
 import { createLifecycleWarningDeduper, renderLifecycleWarningLine, type LifecycleWarningDeduper } from "./lifecycle-diagnostics-presentation.js";
 
 export interface CreateRunEventSubscribersOptions {
-  readonly renderer?: OutputRenderer;
+  readonly renderer?: { stop(): void };
   readonly writer: CliWriter;
   readonly lifecycleWarningDeduper?: LifecycleWarningDeduper;
 }
@@ -32,18 +31,8 @@ export interface InterruptRenderingHandle {
   dispose(): void;
 }
 
-/**
- * 装载 EventBus 中断事件 → 终端可视反馈：
- *
- * - `interrupt:warn` → 单次写一行警告 "stream slow, will auto-cancel in Ns..."。
- *   实时倒计时由 status-bar 接管（订阅 interrupt:warn 在状态条按 250ms tick 刷新
- *   remainSec）；此处只做"突起的一次性提示行"让用户在 status-bar 之外也注意到。
- *
- * - `interrupt:fired` → 写 dim `[interrupted]` 视觉标记。reason 文本由 status-bar
- *   在 done 状态展示（关注点分离：fired 是 abort 瞬间的视觉锚点，done 状态展示完整原因）。
- *
- * 返回 dispose 函数，调用方在 run() 结束 finally 调一次。
- */
+/** One-shot interruption notices for line-output consumers.
+ * Live terminal activity is projected separately by N. */
 export function setupInterruptRendering(
   eventBus: IEventBus<AgentEventMap>,
   pauseUI: () => void,

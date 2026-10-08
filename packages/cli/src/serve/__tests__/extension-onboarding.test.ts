@@ -21,9 +21,8 @@ import { listSupportedChannels } from "../../registries/channels.js";
 import { messagingSection } from "../../config-editor/sections/messaging.js";
 import { checkMessaging } from "../../config-editor/checks/messaging.js";
 import { extensionContinuationText } from "../extension-continuation.js";
-import { renderInputPanel } from "../../config-editor/panels/input.js";
-import { renderEntityPanel } from "../../config-editor/panels/entity.js";
-import { Renderer } from "../../tui/index.js";
+import { resolveInputField } from "../../config-editor/model/input.js";
+import { resolveEntityMeta } from "../../config-editor/model/entity.js";
 
 vi.mock("../../runtime/extensions/catalog.js", () => ({ packagedExtensions: () => [] }));
 const roots: string[] = [];
@@ -358,19 +357,12 @@ describe("published extension onboarding production path", { timeout: 40_000 }, 
     const state = { config: { messaging: { "instance-a": { type: a.id }, "instance-b": { type: b.id } } },
       credentials: { channels: { "instance-a": { account: "A", token: "synthetic-secret" }, "instance-b": { account: "B", token: "public-value" } } },
       inputBuffer: "", channelCatalog: catalog };
-    const render = (id: string, entity = false, buffer = "") => {
-      let output = "";
-      const renderer = new Renderer({ columns: 100, write: (chunk: string) => { output += chunk; return true; } } as unknown as NodeJS.WritableStream);
-      if (entity) renderEntityPanel(state, { kind: "channel-config", channelId: id }, { index: 0 }, renderer);
-      else renderInputPanel({ ...state, inputBuffer: buffer }, { kind: "input", fieldId: `channel-field:${id}:token` }, renderer);
-      renderer.flush();
-      return output;
-    };
-    expect(render("instance-a")).not.toContain("synthetic-secret");
-    expect(render("instance-a", true)).not.toContain("synthetic-secret");
-    expect(render("instance-a", false, "new-secret")).not.toContain("new-secret");
-    expect(render("instance-b")).toContain("public-value");
-    expect(render("instance-b", true)).toContain("public-value");
+    expect(resolveInputField("channel-field:instance-a:token", state)?.sensitive).toBe(true);
+    expect(resolveInputField("channel-field:instance-b:token", state)?.sensitive).toBe(false);
+    const first = resolveEntityMeta(state, { kind: "channel-config", channelId: "instance-a" });
+    const second = resolveEntityMeta(state, { kind: "channel-config", channelId: "instance-b" });
+    expect(JSON.stringify(first)).not.toContain("synthetic-secret");
+    expect(JSON.stringify(second)).toContain("public-value");
     expect(checkMessaging(state.config, state.credentials, undefined, catalog)).toEqual([]);
     const changedFields = { ...b, declaration: { ...declaration, requiredFields: declaration.requiredFields.map(field => field.id === "token" ? { ...field, id: "v2-field" } : field) } };
     const independent = listSupportedChannels({ instances: [{ id: "instance-a", binding: { manifest: a } } as never],

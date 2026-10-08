@@ -1,58 +1,37 @@
 # CLI 总体架构
 
-CLI 是知行的终端接入面：负责启动入口、交互和呈现，不拥有另一套智能体执行与会话权威。本文说明整体职责与关键取舍；具体操作见 [CLI 使用说明](../../../packages/cli/README.md)，终端能力见[屏幕渲染与能力边界](screen-rendering.md)。
+CLI 是知行的终端接入面，负责启动、交互和呈现；会话、运行提交、权限与持久化仍由共同产品内核拥有。[迁移设计](../../workbench/terminal-architecture-migration.md)定义完整合同，[核心架构](../../../research/design/architecture/overview.md)定义权威边界。
 
-## 目标与取舍
+## 默认入口与职责
 
-让用户直接进入可用的个人智能体，而不是先理解、手动拼装服务拓扑。技术选择由实际交互需求驱动，不以引入 UI 框架、复制其他产品或预设代码规模为目标；简单实现仍须完整承担输入、流式输出、确认和恢复体验。
+`zz` 与 `zhixing` 指向同一构建入口。交互环境默认启动 OpenTUI/Solid 终端；重定向输入或不适用交互屏幕的环境使用基础文本对话。帮助、版本、纯文本管理和后台服务按真实 Commander 描述符分流。不存在开发期新旧终端开关，也没有第二套交互 renderer。
 
-| 选择 | 当前取舍与理由 |
-|---|---|
-| 进程内直接运行，还是客户端／宿主分离 | 对话入口已采用宿主／RPC。执行、持久化和多入口协作由共享权威承担；客户端负责发现、按需启动或连接宿主，保留无需手动先启动服务的体验，而非保留旧单体实现 |
-| 自定义命令解析，还是成熟命令框架 | 启动命令使用 Commander，避免重复实现解析与帮助；REPL 使用自己的命令注册和分派机制，两者服务不同入口 |
-| 引入 React／Ink，还是按需管理终端状态 | 当前使用原生终端能力与自有输入、渲染组件，无 React／Ink 依赖。不再承诺从 readline 升级到 Ink；未来选型须证明具体收益，也不能假定替换渲染零成本 |
-| 原生回卷，还是完整应用内历史画面 | 主 REPL 保留终端回卷与复制体验，应用管理活动输出及固定交互区；代价是不能任意重排已进入回卷的历史，详见屏幕能力正文 |
-| 一次性提示组件，还是持续交互系统 | 表单式引导不能替代 REPL；持续输入、输出、确认和独占面板需要明确的生命周期与输出协调 |
+| 所有者 | 职责 | 边界 |
+|---|---|---|
+| S · 入口 supervisor | 准入、拉起 N/U/R、转交通道、关闭顺序和自有进程收束 | 不拥有业务事实，不解释任意脚本 |
+| N · Node 应用适配 | 配置、会话/命令、确认映射、材料准备、有限显示投影与本实例存储 | 通过已认证 RPC 和领域 facade 使用产品能力，不直接运行 Agent Loop |
+| U · OpenTUI/Solid | 唯一交互屏幕树、编辑、页面、滚动、选择和显示状态 | 只消费有限协议；不持产品凭据、不访问业务持久化、不自行批准操作 |
+| R · 原生恢复 | 保存已取得的终端模式依据，在全部自有写者退出后最终恢复 | 不替代业务清理，不因超时与仍活跃写者争写 |
+| PersistentApplicationHost | 共同产品装配与长驻运行 | 独立寿命；关闭前台不能顺手终止飞书、调度或其他接入面 |
 
-## 入口与运行责任
+N 的 `CoreHostConnection` 负责发现、按需启动、认证、断线恢复及观察者重挂；`ConversationController` 和领域 facade 使用同一接入身份。RPC 重连、重绘、翻阅历史不重发任务。确认 broker 只呈现权威请求并提交明确用户选择。
 
-`zz` 与 `zhixing` 指向同一构建入口。`src/index.ts` 的 Commander 命令树分派交互、管理及内部服务启动路径；默认入口经启动检查进入 `startRepl()`。当前没有旧稿中的 `-p/--print` 单次模式及启动期 `--continue/--resume` 参数，不能把旧命令示例当成可执行合同。
+CLI 包同时包含后台组合根和前台适配，因此包依赖不能代替运行时边界判断。N 导入图不得拉入后台执行栈；U 的发行资产随包提供，用户无需另装 UI 运行时或编译工具。
 
-```text
-Commander → 启动检查 → REPL 输入／命令分派
-                            ↓
-             ConversationController／领域 facade／确认 broker
-                            ↓
-                  CoreHostConnection → 已认证 RPC → 宿主产品能力
-                            ↑
-             对话流／事件投影 → 呈现订阅 → 输出与屏幕组件
-```
+## 输入、输出与生命周期
 
-- `CoreHostConnection` 管理共享连接、发现与按需启动、断线重建及订阅重挂；会话、调度、管理和确认等共享同一接入身份，不各建连接。设备拓扑允许时也可接入当前 anchor，不要求每个接入设备都启动本地宿主。
-- `ConversationController` 管理当前观察的对话及本地提交、旁观输出；领域 facade 调用宿主能力。会话接受、运行提交、执行与持久化仍归宿主及 owner 责任链，不在 CLI 重建。
-- `RpcEventBus` 将宿主事件信封还原为供渲染消费的运行投影，按观察对话过滤并维护生命周期；它不是内核事件总线，更不是监听全部事件即可得到完整可观测性的保证。
-- `RpcConfirmationBroker` 接入宿主确认能力，终端负责呈现与提交用户选择，不自行决定授权。确认合同见[确认架构](../confirmation/architecture.md)。
+主页面、配置、候选、选择和临时输入共用 U 的输入所有权与公共信息行。页面切换保留适用草稿和阅读状态，业务只提供内容、选择结果与生命周期，不自行写 ANSI 或切屏。
 
-CLI 包还包含服务启动和部署装配代码，因此依赖不止 `@zhixing/core`。必须区分包内装配入口与交互接入面的职责，不能以包依赖多为由把执行权威放回 REPL。
+正文由 N 的有界 Markdown 投影和显示存储供给，U 按稳定源身份维护组件、阅读锚点和选区；resize 重排已保留内容。显示存储是有界投影，不成为第二份会话权威。来源不可重读且容量不足时明确暂停，不能静默丢正文。
 
-## 输入、输出与可见状态
+正常退出、取消、断连和异常共用关闭责任链：先拒新并结清 N/U/helper，再由原 R 恢复，S 确认实际退出和有限排空后返回 shell。没有旧 ScreenController、主屏滚动区与面板各自接管输入的并行机制。
 
-REPL 命令声明、帮助、补全与执行按[命令系统](command-system.md)协作；不在本文维护另一份命令清单。当前输入包含自有输入缓冲、补全、粘贴与面板交互，不能再概括为一个 `readline/promises` 循环。
-
-输出由渲染器及 `CliWriter`、`ScreenController` 等协调，主屏输出区与固定输入／状态区共享终端，不能让业务代码任意直写 stdout 破坏布局。Markdown 使用 `marked` 与自有流式／块级渲染，颜色和代码高亮使用 `chalk`、`cli-highlight`；旧方案中的 `marked-terminal`、`ora` 已不是当前依赖。
-
-模型、用量、成本、工具及执行状态应通过产品事实的呈现让用户理解进展，不暴露全部内部事件。相关口径见[用量与上下文展示](usage-display.md)、[子任务展示](subagents.md)；视觉与面板边界见[视觉设计语言](visual-language.md)。主屏与独占面板的输出切换、恢复和尺寸变化遵循屏幕正文，不把“原生 ANSI”误写成没有 UI 状态。
-
-## 上下文与对话连续性
-
-稳定的角色、行为与安全输入和变化的任务状态应分离，避免无意义地改写稳定前缀；动态信息不得冻结在启动时，也不能据此承诺整次请求缓存命中。组装责任属于[上下文架构](../context/architecture.md)与[逐轮注入](../context/turn-context-injection.md)，不是 CLI 自建 prompt 目录或按入口重复拼装。知行的产品定位是个人智能体，不限于编码助手。
-
-对话已经具备持久化和启动恢复；CLI 经宿主恢复对话及读取历史摘要展示，对话切换／新建通过 REPL 能力完成。终端回卷只是显示，不是会话存储；清屏、清窗口与删除历史也不是同一动作。用户域、工作场景域及接受／恢复语义由[对话持久化](../conversation/persistence.md)说明，不沿用旧的按项目散落 session JSONL 方案。本地部署与存储不意味着模型请求必然离线或不会使用网络。
+基础文本对话使用独立的按行适配器，不创建原生屏幕所有者；保留文本发送、已有命令及错误结果，EOF 排空已收到的行。需要交互选择时明确取消或不可用，不把管道中的下一行当作授权。
 
 ## 实现入口
 
-- [入口与命令树](../../../packages/cli/src/index.ts)、[REPL 装配](../../../packages/cli/src/repl.ts)。
-- [宿主连接](../../../packages/cli/src/runtime/core-host-connection.ts)、[事件投影](../../../packages/cli/src/runtime/rpc-event-bus.ts)。
-- [屏幕协调](../../../packages/cli/src/screen/screen-controller.ts)、[Markdown 输出](../../../packages/cli/src/output/markdown/markdown-stream.ts)。
+- [入口分流](../../../packages/cli/src/entry.ts)、[命令描述符](../../../packages/cli/src/index.ts)、[文本接入](../../../packages/cli/src/text-session.ts)。
+- [S 启动与收束](../../../packages/cli/src/terminal/launch.ts)、[N 应用](../../../packages/cli/src/terminal/application.ts)、[U 根](../../../packages/terminal-ui/src/root.tsx)。
+- [共享连接](../../../packages/cli/src/runtime/core-host-connection.ts)、[正文投影](../../../packages/cli/src/terminal/body-projection.ts)。
 
-当前总体架构取代早期单体 CLI 与三阶段 UI 路线图；屏幕与文本转换的详细合同分别见[屏幕渲染](screen-rendering.md)和 [Markdown 流式渲染](markdown-rendering.md)，不在本篇重复定义。
+具体合同见[屏幕](screen-rendering.md)、[输入](input-visual.md)、[命令](command-system.md)、[正文](markdown-rendering.md)。

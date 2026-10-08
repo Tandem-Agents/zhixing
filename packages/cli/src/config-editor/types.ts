@@ -299,47 +299,9 @@ export type PanelAction =
       run: (signal: AbortSignal, report: (message: string) => void) => Promise<PanelAction>;
     };
 
-// ─── 主入口 Context / Result ───
-
-export interface ConfigEditorContext {
-  channelCatalog?: WorkingState["channelCatalog"];
-  channelSetup?: WorkingState["channelSetup"];
-  channelStates?: WorkingState["channelStates"];
-  /** 初始 config（从文件加载） */
-  initialConfig: ZhixingConfig;
-  /** 初始 credentials（从文件加载） */
-  initialCredentials: ZhixingCredentials;
-  /** 落盘接口——caller 控制（生产用 providers writer，测试用 mock） */
-  writers: ConfigEditorWriters;
-  /** 启用哪些 sections——caller 按入口需求决定 */
+/** Pure configuration handlers receive model context only; no input or screen owner. */
+export interface ConfigModelContext {
   sections: SectionId[];
-  /** UI 顶部标题（如 "初始配置" / "服务模式初始化" / "基础配置"） */
-  title: string;
-  /**
-   * 欢迎/导引文本（可选）——初始配置场景显示在 header 上方降低用户冷启动成本。
-   *
-   * `/config` 等复编场景不传——避免老用户每次打开都看一遍欢迎语。
-   */
-  welcomeText?: string;
-  /** 头部展示信息（如 workspace 路径） */
-  header?: { workspaceRoot?: string; configPath: string; secretStoreLabel: string };
-  /** I/O 注入点 */
-  stdin: NodeJS.ReadStream;
-  stdout: NodeJS.WritableStream;
-  /** 是否 TTY——非 TTY 时编辑器直接返回 cancelled，caller 走 fail-fast 路径 */
-  isTTY: boolean;
-  /**
-   * 运行时只读快照访问器（可选）—— /mcp 注入 hub 的 serverStatuses，让 mcp section 叠加
-   * 连接状态；/config 等不注入时 section 仅显示配置态。
-   */
   runtime?: ConfigEditorRuntime;
 }
-
-export interface ConfigEditorWriters {
-  save: (result: Extract<ConfigEditorResult, { kind: "completed" }>) => Promise<void>;
-}
-
-/** Node configuration decisions do not receive a terminal stream or renderer. */
-export type ConfigModelContext = Pick<ConfigEditorContext, 'sections' | 'runtime'>;
-
 export type ConfigEditorResult = import("../runtime/configuration-edit.js").ConfigurationEditResult;

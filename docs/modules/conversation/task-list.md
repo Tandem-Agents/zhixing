@@ -29,22 +29,22 @@
 
 TaskListService 按会话缓存状态，`set` 先保存再更新缓存与发布事件，保存失败不推进缓存；订阅者异常相互隔离。它不是用户命令的并发仲裁器，生产读改写由 owner 的维护边界串行保护，不能把底层单次 save 原子性误写为任意多步变更都无竞争。当前 `prime` 读取失败会缓存为空列表，不代表磁盘任务已被删除。
 
-CLI 通过宿主状态同步维护 TaskListViewCache，仅提供视图；命令写入走 RPC。切换或恢复会话时刷新对应视图，不携带上个会话的任务。模型输入侧由 TaskListProvider 按当前身份读取，详见[逐轮上下文注入](../context/turn-context-injection.md)。
+CLI 的 TerminalTasks 通过宿主状态同步维护当前会话的只读快照和摘要；命令写入走 RPC。切换或恢复会话时刷新对应视图，不携带上个会话的任务。模型输入侧由 TaskListProvider 按当前身份读取，详见[逐轮上下文注入](../context/turn-context-injection.md)。
 
 ## 展示取舍
 
 常驻区只显示当前任务和“已完成／总数”，完整列表按需展开；没有任务或全部完成时隐藏常驻摘要，避免为偶尔使用的功能持续占据屏幕。
 
-TaskTail 只订阅状态并生成任务文本；屏幕控制器负责位置、分隔符、宽度和重绘。任务段使用独立稳定 id，与其他状态段共存，不反向修改状态栏业务。无进行中任务时显示待办数量；多个进行中项显示首项与其余数量。详情以序号和状态区分条目，与完成命令的选择方式一致。
+TerminalTasks 读取任务状态并生成有限摘要，U 公共信息区负责位置、宽度和绘制；N 只发布 DTO，不接管屏幕。无进行中任务时显示待办数量，多个进行中项显示首项与其余数量。详情由同一页面展示，序号与完成命令保持一致。
 
 任务文本是主信息，“已完成／总数”是辅助信息；详情用 `●` 进行中、`○` 待办、`✓` 已完成区分三态，序号从 1 开始。任务摘要不依赖“思考中”等运行状态存在，空闲时也应可见；不能以始终不增加一行的布局承诺牺牲这一职责，具体布局由屏幕层统一决定。
 
-TaskTail 事件驱动，不另设定时刷新器或接管屏幕暂停／恢复。启动时主动读取初值，切换会话时显式刷新，因为订阅只感知数据变化，不感知当前会话身份切换；销毁时取消订阅并清空自身任务段，避免旧任务残留或覆盖其他状态段。
+任务投影由 session.changed 驱动，限制一项在途读取及可合并的后继。启动／切换时主动刷新，generation 和会话身份拒收旧结果；dispose 清除本投影，不覆盖其他过程信息。没有新的定时刷新器或旧 TaskTail 屏幕暂停／恢复生命周期。
 
 用户命令显示简短成功或失败反馈，不伪造完成；模型工具已有结果反馈，不另叠加一份命令回声。窄终端允许摘要截断，完整信息仍由详情查看。
 
 ## 实现与验证入口
 
 - [会话应用](../../../packages/core/src/conversation/application.ts)、[状态服务](../../../packages/core/src/conversation/task-list-state.ts)、[Anchor 适配](../../../packages/cli/src/serve/conversation-task-list-application.ts)：业务、保存失败、维护互斥与耐久暂存边界。
-- [用户命令](../../../packages/cli/src/commands/task-commands.ts)、[只读缓存](../../../packages/cli/src/runtime/task-list-view.ts)、[任务摘要](../../../packages/cli/src/task-tail/task-tail.ts)：RPC 写入、会话隔离与显示生命周期。
-- [状态测试](../../../packages/core/src/conversation/__tests__/task-list-state.test.ts)、[生产适配测试](../../../packages/cli/src/serve/__tests__/conversation-task-list-application.test.ts)、[命令测试](../../../packages/cli/src/commands/__tests__/task-commands.test.ts)、[显示测试](../../../packages/cli/src/task-tail/__tests__)分别保护状态、消费链与体验，不以单张快照替代提交与恢复验证。
+- [命令与只读投影](../../../packages/cli/src/terminal/tasks.ts)、[终端摘要呈现](../../../packages/terminal-ui/src/root.tsx)：RPC 写入、会话隔离与显示生命周期。
+- [状态测试](../../../packages/core/src/conversation/__tests__/task-list-state.test.ts)、[生产适配测试](../../../packages/cli/src/serve/__tests__/conversation-task-list-application.test.ts)、[任务适配测试](../../../packages/cli/src/terminal/__tests__/tasks.test.ts)、[U 测试](../../../packages/terminal-ui/src/__tests__)分别保护状态、消费链与体验，不以单张快照替代提交与恢复验证。

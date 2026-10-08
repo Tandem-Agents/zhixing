@@ -14,6 +14,8 @@ import {
   captureS7EntryCoverage,
   collectCleanupRegistrationsFromSource,
   collectSlashCommandsFromRegistrar,
+  collectTerminalSlashCommands,
+  TERMINAL_SLASH_REGISTRATION_SOURCES,
   discoverSlashRegistrars,
   inspectProductionManifest,
   inspectProductionSource,
@@ -231,53 +233,62 @@ test("Commander and slash capture consume the actual production registration gra
   assert.equal(commander.find((item) => item.path === "root actionless").hasAction, false);
   assert.equal(commander.find((item) => item.path === "root actioned").hasAction, true);
 
-  const repl = await readFile("packages/cli/src/repl.ts", "utf8");
-  const registrars = discoverSlashRegistrars(repl);
-  assert.deepEqual(
-    registrars.map((item) => item.functionName).sort(),
-    [
-      "registerConfigCommands",
-      "registerInfoCommands",
-      "registerModeCommands",
-      "registerSessionCommands",
-      "registerSkillsCommand",
-      "registerTaskCommands",
-    ],
-  );
-  assert.throws(
-    () => discoverSlashRegistrars(
-      repl.replace("tRegistry.registerDynamicSource(", "tRegistry.ignoreDynamicSource("),
-    ),
-    /SkillCommandSource is not registered/,
-  );
-  const info = await readFile("packages/cli/src/commands/info-commands.ts", "utf8");
-  assert.ok(
-    collectSlashCommandsFromRegistrar(
-      "packages/cli/src/commands/info-commands.ts",
-      info,
-      "registerInfoCommands",
-    ).some((item) => item.id === "help:repl"),
-  );
-  assert.throws(
-    () => collectSlashCommandsFromRegistrar(
-      "packages/cli/src/commands/info-commands.ts",
-      info.replace('BUILTIN_COMMANDS["help:repl"]', 'BUILTIN_COMMANDS[buildHelpId()]'),
-      "registerInfoCommands",
-    ),
-    /non-literal command descriptor/,
-  );
+  const records = await Promise.all(TERMINAL_SLASH_REGISTRATION_SOURCES.map(async relative => ({
+    relative, text: await readFile(relative, "utf8"),
+  })));
+  const commands = collectTerminalSlashCommands(records);
+  assert.ok(commands.some(item => item.id === "help:repl"));
+  assert.ok(commands.some(item => item.id === "work:repl"));
+  assert.ok(commands.some(item => item.id === "skill:<catalog-id>"));
+  const mutate = (relative, pattern, replacement) => records.map(record => record.relative === relative
+    ? { ...record, text: replaceExactlyOnce(record.text, pattern, replacement, relative) } : record);
+  for (const [relative, pattern, replacement] of [
+    ["packages/cli/src/terminal/candidates.ts", /this\.registry\.register\(definition\)/u, "this.registry.ignore(definition)"],
+    ["packages/cli/src/terminal/application.ts", /this\.#candidates\.bindCommands\(this\.#sessionCommands\.commands\)/u, "void this.#sessionCommands.commands"],
+    ["packages/cli/src/text-session.ts", /dispatcher\.registerHandler\(definition\.id,/u, "dispatcher.ignore(definition.id,"],
+    ["packages/cli/src/text-session.ts", /dispatcher\.dispatch\(controlText, runtime\(\)\)/u, "dispatcher.ignore(controlText, runtime())"],
+    ["packages/cli/src/text-session.ts", /normalizeLeadingSlashAlias\(line\.trim\(\)\)/u, "line.trim()"],
+  ]) assert.throws(() => collectTerminalSlashCommands(mutate(relative, pattern, replacement)), /registration graph is disconnected/);
+  for (const [relative, pattern, replacement] of [
+    ["packages/cli/src/terminal/skill-commands.ts", /options\.registry\.registerDynamicSource\(/u, "options.registry.ignoreDynamicSource("],
+    ["packages/cli/src/terminal/application.ts", /new TerminalSkillCommands\(\{ client, registry: this\.#candidates\.registry,/u, "new OtherSkillCommands({ client, registry: this.#candidates.registry,"],
+    ["packages/cli/src/text-session.ts", /new TerminalSkillCommands\(\{ registry, client: new SkillCatalogRpcClient\(connection\),/u, "new OtherSkillCommands({ registry, client: new SkillCatalogRpcClient(connection),"],
+  ]) assert.throws(() => collectTerminalSlashCommands(mutate(relative, pattern, replacement)), /SkillCommandSource is not registered/);
+  for (const replacement of ["'missing'", "buildHelpName()", "...extraCommands"]) {
+    assert.throws(() => collectTerminalSlashCommands(mutate(
+      "packages/cli/src/terminal/candidates.ts", /'help', 'status'/u, `${replacement}, 'status'`,
+    )), /non-literal command descriptor/);
+  }
+  assert.throws(() => collectTerminalSlashCommands(mutate(
+    "packages/cli/src/terminal/candidates.ts", /'help', 'status'/u, "'status'",
+  )), /unregistered: help:repl/);
+  assert.throws(() => collectTerminalSlashCommands(mutate(
+    "packages/cli/src/terminal/session-commands.ts", /'new', 'name', 'clear'/u, "'help', 'name', 'clear'",
+  )), /duplicate production terminal slash name/);
+  assert.throws(() => collectTerminalSlashCommands(mutate(
+    "packages/cli/src/text-session.ts", /\.\/commands\/builtin-definitions\.js/u, "./commands/unrelated-definitions.js",
+  )), /not the production builtin definitions/);
+
+  // Keep the literal/unknown/spread/import-source rejection contract of the
+  // generic registrar parser independently of files retired by stage three.
+  const fixturePath = "packages/cli/src/commands/fixture-registrar.ts";
+  const fixture = `import { BUILTIN_COMMANDS } from './builtin-definitions.js';
+    export function registerCommands({ registry }) { registry.register(BUILTIN_COMMANDS["help:repl"]); }`;
+  const fixtureEntry = `import { registerCommands } from './commands/fixture-registrar.js';
+    registerCommands({ registry: tRegistry });
+    tRegistry.registerDynamicSource(new SkillCommandSource({ client }));`;
+  assert.deepEqual(discoverSlashRegistrars(fixtureEntry), [{ functionName: "registerCommands", source: fixturePath }]);
+  assert.throws(() => discoverSlashRegistrars(fixtureEntry.replace("registerDynamicSource", "ignoreDynamicSource")), /SkillCommandSource is not registered/);
+  assert.equal(collectSlashCommandsFromRegistrar(fixturePath, fixture, "registerCommands")[0].id, "help:repl");
   for (const replacement of [
+    'BUILTIN_COMMANDS[buildHelpId()]',
     'BUILTIN_COMMANDS["missing:repl"]',
     '{ ...BUILTIN_COMMANDS["help:repl"], id: buildHelpId() }',
     '{ ...BUILTIN_COMMANDS["help:repl"], ...unknownDescriptor }',
-  ]) assert.throws(() => collectSlashCommandsFromRegistrar(
-    "packages/cli/src/commands/info-commands.ts",
-    info.replace('BUILTIN_COMMANDS["help:repl"]', replacement), "registerInfoCommands",
-  ), /non-literal command descriptor/);
-  assert.throws(() => collectSlashCommandsFromRegistrar(
-    "packages/cli/src/commands/info-commands.ts",
-    info.replace('./builtin-definitions.js', './unrelated-definitions.js'), "registerInfoCommands",
-  ), /non-literal command descriptor/);
+  ]) assert.throws(() => collectSlashCommandsFromRegistrar(fixturePath,
+    fixture.replace('BUILTIN_COMMANDS["help:repl"]', replacement), "registerCommands"), /non-literal command descriptor/);
+  assert.throws(() => collectSlashCommandsFromRegistrar(fixturePath,
+    fixture.replace('./builtin-definitions.js', './unrelated-definitions.js'), "registerCommands"), /non-literal command descriptor/);
 });
 
 test("cleanup and channel coverage are bound to actual production calls", async () => {
@@ -1878,7 +1889,8 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/runtime/rpc-confirmation-broker.ts",
     "packages/cli/src/runtime/rpc-conversation-facade.ts",
     "packages/cli/src/runtime/conversation-controller.ts",
-    "packages/cli/src/repl.ts",
+    "packages/cli/src/terminal/application.ts",
+    "packages/cli/src/text-session.ts",
     "packages/core/src/conversation/application.ts",
     "packages/rpc/src/session-wire.ts",
     "packages/rpc/src/confirmation-bridge.ts",
@@ -2210,6 +2222,23 @@ test("conversation adoption stays bound to the two production roots and ordered 
     )).join("\n"),
     /must follow the stable authenticated surface across reconnects/,
   );
+  for (const relative of ["packages/cli/src/terminal/application.ts", "packages/cli/src/text-session.ts"]) {
+    assert.match(inspectConversationAdoptionAssembly(mutate(relative, text => replaceExactlyOnce(
+      text, /initial\.adoptionReview\.message/u, "'generic startup message'", `${relative}: adoption summary`,
+    ))).join("\n"), /must present adoption summaries/);
+    assert.match(inspectConversationAdoptionAssembly(mutate(relative, text =>
+      text.replaceAll(/(?:this\.#confirmations|confirmations!?)\.refresh\(\)/gu, "Promise.resolve()"),
+    )).join("\n"), /recover pending confirmations/);
+  }
+  assert.match(inspectConversationAdoptionAssembly(mutate("packages/cli/src/terminal/application.ts", text => replaceExactlyOnce(
+    text, /message: capabilities\.join\('\\n'\)/u, "message: 'generic continuation'", "terminal exact capability consequences",
+  ))).join("\n"), /exact capability consequences/);
+  assert.match(inspectConversationAdoptionAssembly(mutate("packages/cli/src/text-session.ts", text => replaceExactlyOnce(
+    text, /unavailable\.join\('；'\)/u, "'generic continuation'", "text exact capability consequences",
+  ))).join("\n"), /exact capability consequences/);
+  assert.match(inspectConversationAdoptionAssembly(mutate("packages/cli/src/text-session.ts", text => replaceExactlyOnce(
+    text, /(confirmContinuation: async unavailable => \{[\s\S]*?)return false;/u, "$1return true;", "text must not auto-accept limitations",
+  ))).join("\n"), /exact capability consequences/);
 });
 
 test("recovery backup stays bound to one current-anchor owner and finite paired receivers", async () => {
@@ -2220,7 +2249,9 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/backup-target-config-infrastructure.ts",
     "packages/cli/src/maintenance/doctor.ts",
     "packages/cli/src/index.ts",
-    "packages/cli/src/commands/info-commands.ts",
+    "packages/cli/src/runtime/server-status-presentation.ts",
+    "packages/cli/src/terminal/application.ts",
+    "packages/cli/src/text-session.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/core/src/backup-recovery/application.ts",
     "packages/cli/src/serve/mesh-bootstrap-store.ts",
@@ -2394,10 +2425,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/commands/info-commands.ts",
+      "packages/cli/src/runtime/server-status-presentation.ts",
       (text) => text.replace(
-        'case "restore-backup-connection":',
-        'case "check-backup-target":',
+        "case 'restore-backup-connection':",
+        "case 'check-backup-target':",
       ),
     )).join("\n"),
     /public unavailable actions must stay exact and topology-neutral/,
@@ -2976,6 +3007,13 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     )).join("\n"),
     /disaster installation completion, consumer recovery or public-open order drifted/,
   );
+  for (const [relative, pattern] of [
+    ["packages/cli/src/terminal/application.ts", /serverStatusLines\(name, this\.#localView\.primaryModel, this\.#localView\.networkProxy, status\)/u],
+    ["packages/cli/src/text-session.ts", /serverStatusLines\(activeController\.current\.name, local\.primaryModel, local\.networkProxy, local\.hostInfo\)/u],
+    ["packages/cli/src/runtime/server-status-presentation.ts", /formatRecoveryBackupState\(info\.recoveryBackup\)/u],
+  ]) assert.match(inspectRecoveryBackupAssembly(mutate(relative, text => replaceExactlyOnce(
+    text, pattern, "'generic status'", `${relative}: backup recovery projection`,
+  ))).join("\n"), /public unavailable actions must stay exact and topology-neutral/);
 });
 
 test("planned duty migration stays bound to two production roots and a finite owner/receiver exact-set", async () => {
@@ -3511,7 +3549,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
-    "packages/cli/src/repl.ts",
+    "packages/cli/src/terminal/application.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
     "packages/secrets/src/platform-secret-store.ts",
     "packages/cli/src/serve/status.ts",
@@ -4164,6 +4202,12 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     )).join("\n"),
     /bounded successor or start classifier drifted/,
   );
+  assert.match(inspectManagedHostAssembly(mutate("packages/cli/src/terminal/application.ts", text => replaceExactlyOnce(
+    text, /reason: 'config-reload', strategy: 'drain'/u, "reason: 'config-reload', strategy: 'cancel'", "configuration reload drain",
+  ))).join("\n"), /configuration turnover|turnover|managed host/i);
+  assert.match(inspectManagedHostAssembly(mutate("packages/cli/src/terminal/application.ts", text => replaceExactlyOnce(
+    text, /return prepareCurrentManagedServiceConfigTurnover\(undefined, this\.home\)/u, "return undefined", "managed service config turnover",
+  ))).join("\n"), /configuration turnover|turnover|managed host/i);
 });
 
 test("device lifecycle stays on one journal, two production roots and local-only host control", async () => {
@@ -5922,8 +5966,10 @@ test("validated configuration crosses composition roots as finite frozen project
     "packages/cli/src/runtime/runtime-configuration-provider.ts",
     "packages/cli/src/runtime/repl-local-view.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
-    "packages/cli/src/repl.ts",
-    "packages/cli/src/commands/info-commands.ts",
+    "packages/cli/src/terminal/application.ts",
+    "packages/cli/src/text-session.ts",
+    "packages/cli/src/terminal/information-commands.ts",
+    "packages/cli/src/runtime/server-status-presentation.ts",
     "packages/cli/src/runtime/startup-application.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/serve/application-host.ts",
@@ -6052,6 +6098,12 @@ test("validated configuration crosses composition roots as finite frozen project
     )).join("\n"),
     /Configuration Provider does not publish only finite frozen Surface projections/,
   );
+  for (const [relative, pattern] of [
+    ["packages/cli/src/terminal/application.ts", /getPrimaryModel: \(\) => this\.#localView\.primaryModel/u],
+    ["packages/cli/src/text-session.ts", /getPrimaryModel: \(\) => local\.primaryModel/u],
+  ]) assert.match(inspectRuntimeConfigurationProjectionBoundary(mutate(relative, text => replaceExactlyOnce(
+    text, pattern, "getPrimaryModel: () => loadConfig()", `${relative}: finite model projection`,
+  ))).join("\n"), /Surface regained a raw or aggregate configuration path/);
 });
 
 test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
@@ -6281,10 +6333,10 @@ test("MCP management consumes finite status, probe and discovery contracts behin
     "packages/core/src/mcp-management/setup.ts",
     "packages/core/src/mcp-management/discovery.ts",
     "packages/cli/src/config-editor/types.ts",
-    "packages/cli/src/config-editor/panels/mcp.ts",
+    "packages/cli/src/config-editor/model/mcp.ts",
     "packages/cli/src/config-editor/sections/mcp.ts",
     "packages/cli/src/runtime/configuration-application.ts",
-    "packages/cli/src/commands/config-commands.ts",
+    "packages/cli/src/terminal/application.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -6304,7 +6356,7 @@ test("MCP management consumes finite status, probe and discovery contracts behin
   );
   assert.match(
     inspectMcpManagementBoundary(mutate(
-      "packages/cli/src/config-editor/panels/mcp.ts",
+      "packages/cli/src/config-editor/model/mcp.ts",
       (text) => `${text}\nconst leaked = probeServer;`,
     )).join("\n"),
     /regained concrete MCP ownership/,
@@ -6351,7 +6403,7 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
     "packages/cli/src/runtime/workspace-command.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
-    "packages/cli/src/repl.ts",
+    "packages/cli/src/terminal/application.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -7648,10 +7700,12 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
-    "packages/cli/src/repl.ts",
-    "packages/cli/src/commands/info-commands.ts",
+    "packages/cli/src/terminal/application.ts",
+    "packages/cli/src/text-session.ts",
+    "packages/cli/src/terminal/tasks.ts",
     "packages/cli/src/skills/manager-controller.ts",
-    "packages/cli/src/skills/manager-command.ts",
+    "packages/cli/src/terminal/skills.ts",
+    "packages/cli/src/terminal/skill-commands.ts",
     "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/access-surface.ts",
@@ -8399,10 +8453,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/commands/info-commands.ts",
+      "packages/cli/src/terminal/tasks.ts",
       (text) => text.replace(
-        "const tasks = await deps.getScheduler().list();",
-        "const tasks = (await deps.getScheduler().list()).filter((task) => !task.system);",
+        "const tasks = await this.options.scheduler.list();",
+        "const tasks = (await this.options.scheduler.list()).filter((task) => !task.system);",
       ),
     )).join("\n"),
     /Schedule consumers do not converge on the one management application/,
@@ -9441,8 +9495,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/repl.ts",
-      (text) => text.replace("client: skillClient", "listAll: async () => []"),
+      "packages/cli/src/terminal/application.ts",
+      (text) => replaceExactlyOnce(text, /client: binding\.client/u, "listAll: async () => []", "shared terminal Skill client"),
     )).join("\n"),
     /does not share one Skill client/,
   );
@@ -9463,6 +9517,15 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     ]).join("\n"),
     /unauthorized empty Skill Product API Surface/,
   );
+  for (const [relative, pattern, replacement] of [
+    ["packages/cli/src/text-session.ts", /client: new SkillCatalogRpcClient\(connection\)/u, "client: {}"],
+    ["packages/cli/src/text-session.ts", /skills\?\.dispose\(\)/u, "void skills"],
+    ["packages/cli/src/terminal/application.ts", /this\.#skillCommands\?\.dispose\(\)/u, "void this.#skillCommands"],
+    ["packages/cli/src/terminal/skill-commands.ts", /options\.client\.onFact\(/u, "otherClient.onFact("],
+    ["packages/cli/src/terminal/skill-commands.ts", /this\.#unsubscribe\(\); this\.#unregister\(\);/u, "this.#unsubscribe();"],
+  ]) assert.match(inspectSkillCatalogApplicationOwnership(mutate(relative, text => replaceExactlyOnce(
+    text, pattern, replacement, `${relative}: shared Skill client lifecycle`,
+  ))).join("\n"), /does not share one Skill client/);
 });
 
 test("finite dependency syntax and manifests cannot bypass owner or role isolation", () => {
@@ -9701,7 +9764,8 @@ test("all public CLI RPC calls are canonical and dynamic forwarders are closed",
     /raw RPC capability CoreHostRpcLink acquired outside owner/,
   );
   for (const compositionOwner of [
-    "packages/cli/src/repl.ts",
+    "packages/cli/src/terminal/application.ts",
+    "packages/cli/src/text-session.ts",
     "packages/cli/src/runtime/workspace-command.ts",
   ]) {
     assert.deepEqual(
@@ -9819,7 +9883,7 @@ test("Conversation storage implementations stay behind one finite Host adapter",
     "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/conversation-directory.ts",
-    "packages/cli/src/runtime/read-only-conversation-browser.ts",
+    "packages/cli/src/runtime/read-only-conversation-query.ts",
     "packages/core/src/context/bootstrap/build-startup-bootstrap.ts",
     "packages/core/src/conversation/application.ts",
   ];
@@ -9850,7 +9914,7 @@ test("Conversation storage implementations stay behind one finite Host adapter",
   );
   assert.match(
     inspectConversationStorageBoundary(mutate(
-      "packages/cli/src/runtime/read-only-conversation-browser.ts",
+      "packages/cli/src/runtime/read-only-conversation-query.ts",
       (text) => `${text}\nimport fs from "node:fs/promises";`,
     )).join("\n"),
     /Surface reads concrete storage or physical paths/,
@@ -9962,7 +10026,7 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/cli/src/serve/managed-service.ts",
     "packages/cli/src/logging/runtime.ts",
     "packages/cli/src/logging/bootstrap.ts",
-    "packages/cli/src/legacy-entry.ts",
+    "packages/cli/src/command-entry.ts",
     "packages/cli/src/terminal/application.ts",
     "packages/core/src/logging/storage.ts",
     "packages/cli/src/runtime/configuration-application.ts",
@@ -10190,7 +10254,7 @@ test("disaster-recovery staging keeps one physical adapter and required Host flo
 });
 
 test("runtime logging P15 rejects reverse reader dependencies and private writers", async () => {
-  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts", "packages/cli/src/logging/bootstrap.ts", "packages/cli/src/legacy-entry.ts"];
+  const paths = ["packages/cli/src/logging/runtime.ts", "packages/core/src/logging/storage.ts", "packages/core/src/conversation/application.ts", "packages/cli/src/logging/bootstrap.ts", "packages/cli/src/command-entry.ts"];
   const records = await Promise.all(paths.map(async relative => ({ relative, text: await readFile(relative, "utf8") })));
   const inspect = (input) => inspectStorageRemainderBoundary(input).filter(failure => failure.includes("P15"));
   assert.deepEqual(inspect(records), []);

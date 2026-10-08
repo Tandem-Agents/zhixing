@@ -75,7 +75,7 @@ Fact Event 只表示已经提交的事实；Progress Event 只表示带运行身
 
 ### 进程与 Host
 
-1. `@zhixing/cli` 的 `zz` 与 `zhixing` 两个 bin 指向轻量入口 `packages/cli/src/entry.ts`，先建立运行观察身份，再装载 `index.ts` 的 Commander 分派；默认交互、管理命令和内部 `serve` 共用该入口。
+1. `@zhixing/cli` 的 `zz` 与 `zhixing` 两个 bin 指向轻量入口 `packages/cli/src/entry.ts`：默认 TTY 对话直接进入 S；管理命令按 Commander 描述符选择交互或文本表面，内部 `serve` 走命令入口。各实际进程入口建立自己的运行观察身份，再进入所属生命周期。
 2. 持久服务入口 `packages/cli/src/serve/topology-command.ts` 解析进程模式，取得 home、启动检查和秘密投影，然后只创建一个 `PersistentApplicationHost`。
 3. `PersistentApplicationHost` 完成 Mesh/bootstrap maintenance、恢复根前置、容量与本机 workspace lease，再用 `planServeTopology` 选择 `anchor-host`、`executor-host` 或 disabled；Anchor+Executor 仍是同一个 Host 中的两项角色贡献，不是第二组合根。
 4. Host 在任何角色副作用前装入所需模块。Anchor-only 不装入 Executor，Executor-only 不装入 Anchor；角色正常返回或失败后，外层资源都由同一个 Host 终止路径释放。
@@ -91,7 +91,7 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 ### 产品调用
 
 - Anchor 组合根创建唯一 sealed `ProductApiDispatcher`，组合当前领域贡献。Server 接收该 dispatcher；RPC handler 只做认证、wire 校验、调用、错误映射和事件传输。
-- CLI/REPL 的管理 client 与 Feishu Channel 的 conversation binding 调用同一领域应用语义，不直接读取领域日志或复制状态机。
+- CLI 的 Node 应用适配与 Feishu Channel 的 conversation binding 调用同一领域应用语义，不直接读取领域日志或复制状态机。交互终端分为 S 生命周期、N 应用适配、U 显示交互与 R 最终恢复；U 通过有限协议消费显示投影，替换终端不改变内核权威。前台关闭不终止独立 PersistentApplicationHost；非交互文本入口共享同一产品语义。
 - `@zhixing/server` 在同一已绑定 endpoint 上完成 handler、连接设施、运行期贡献和关闭责任后才从 inactive 503 激活 HTTP/REST、WebSocket 与 JSON-RPC，并随后发布发现与 ready 状态。
 
 ### 智能运行
@@ -131,7 +131,7 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 
 ## 包与模块索引
 
-仓库由 pnpm workspace 管理。当前共有 17 个 package：16 个公开交付包，加 1 个 private 的内部测试包。它们是物理交付边界，不是一套与逻辑责任一一对应的“技术分层”。
+仓库由 pnpm workspace 管理。当前共有 18 个 package：16 个公开交付包，加 private 的终端构建包与内部测试包。它们是物理交付边界，不是一套与逻辑责任一一对应的“技术分层”。
 
 | 包 | 当前生产责任 |
 |---|---|
@@ -151,6 +151,7 @@ Store 使用独立 `logs/runtime/` 根，各保留层复用活动段，按大小
 | `@zhixing/network` | SSRF 安全 fetch、URL/IP 防护与网络出口原语 |
 | `@zhixing/secrets` | 设备本地平台密钥保护与加密 SecretStore |
 | `@zhixing/channel-feishu` | `packages/channels/feishu` 构建固定摘要的独立 Channel 扩展与 manifest，承接飞书／Lark 长连接和卡片／文本发送；无 JS 库入口，CLI 仅在构建期取用迁移制品 |
+| `@zhixing/terminal-ui` | private 的 OpenTUI/Solid 终端表面与固定平台资产构建；资产随 CLI 交付，不拥有业务事实或执行权威 |
 | `@zhixing/test-utils` | private 的跨包测试基础设施；没有生产运行责任 |
 
 正式库公共面以各包 `package.json#exports` 和 CLI `bin` 为准；飞书可执行制品的公共合同是扩展 manifest 和版本化协议。源码内部路径、测试入口、旧 `dist` 或目录名称不能用来推导公开合同。

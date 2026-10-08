@@ -1,12 +1,4 @@
-import {
-  CommandDispatcher,
-  DefaultCommandRegistry,
-} from "@zhixing/core/typeahead";
-import {
-  registerConfigCommands,
-  type ConfigCommandsDeps,
-} from "../commands/config-commands.js";
-import { FEATURE_CHROME } from "../commands/command-visibility.js";
+import { TerminalInformationCommands } from "../terminal/information-commands.js";
 import { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -747,28 +739,18 @@ describe("unified native log access", () => {
       w = wire(f.access.api);
     await w.request("auth", { token: "fixture-only" });
     const lines: string[] = [];
-    const registry = new DefaultCommandRegistry();
-    const dispatcher = new CommandDispatcher({ registry });
     const management = new RpcManagementFacade({
       getClient: async () => ({ request: w.request }),
     } as ConstructorParameters<typeof RpcManagementFacade>[0]);
-    registerConfigCommands({
-      registry,
-      dispatcher,
-      management,
-      writer: { line: (value: string) => lines.push(value) },
-    } as unknown as ConfigCommandsDeps);
-    await dispatcher.dispatch(
-      `/config logs 128 14 ${f.status.policy.version}`,
-      {
-        sessionBusy: false,
-        workspaceId: null,
-        cwd: f.home,
-        target: "cli",
-        features: { [FEATURE_CHROME]: true },
-        now: 0,
-      },
-    );
+    const controller = { current: { conversationId: "conversation:a" } } as never;
+    const commands = new TerminalInformationCommands({
+      controller: () => controller, getPrimaryModel: () => ({}) as never,
+      logs: management.logs(), signal: new AbortController().signal,
+      publish: async result => { lines.push(result.message); },
+      choose: async page => { if (page.message) lines.push(page.message); return undefined; },
+    });
+    try { await commands.run("config", "logs 128 14 " + f.status.policy.version); }
+    finally { commands.dispose(); }
     const status = await f.manager.status();
     expect(status.policy.effective.maxBytes).toBe(128 * 1024 * 1024);
     expect(lines.join("\n")).toContain("已生效容量 128 MiB");

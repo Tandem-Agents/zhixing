@@ -6,12 +6,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { handleMainPanelKey, initialMainCursor } from "../panels/main.js";
+import { handleMainPanelKey, initialMainCursor } from "../model/main.js";
 import { createInitialState } from "../state.js";
-import type { ConfigEditorContext, SectionId, WorkingState } from "../types.js";
+import type { ConfigModelContext, SectionId, WorkingState } from "../types.js";
 
-function ctxWith(sections: SectionId[]): ConfigEditorContext {
-  return { sections } as unknown as ConfigEditorContext;
+function ctxWith(sections: SectionId[]): ConfigModelContext {
+  return { sections } as unknown as ConfigModelContext;
 }
 
 const state: WorkingState = createInitialState({} as never, {} as never);

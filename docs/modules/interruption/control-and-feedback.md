@@ -51,9 +51,9 @@ CLI 键盘 → ConversationController → RPC session.abort ─┐
 
 ## CLI、断线与关停
 
-常规 REPL 每次执行装载 KeyboardSource 与 SignalSource，但本地 signal 触发的是 `ConversationController.abort()`，**不是把该 controller 直接传给本地 Agent Loop**。Esc／首次 Ctrl+C 请求取消；800ms 内再次 Ctrl+C 记录退出意图，等待 outcome、detach 后再关闭输入，避免先断掉终态接收。当前桥不传本地 typed reason，因此不能保证宿主最终原因保留 esc／ctrl-c 区别。
+交互终端由 U 根统一接收按键，向 N 发送 interrupt／abort 行动，再由 ConversationController 提交真实会话取消。主对话有草稿时 Esc 先处理草稿或候选；无草稿且运行中才请求中止。首次 Ctrl+C 请求中止，750ms 内再次 Ctrl+C 请求退出；关闭仍经统一责任链结清与恢复终端，不能直接丢弃正在接收的权威终态。
 
-KeyboardSource 复用 stdin ownership：临时 cooked 输入前 pause，释放键盘所有权并切 cooked；结束后 resume 重新获取；detach 依次卸监听、恢复原 raw 状态、归还所有权。raw 模式 Ctrl+C 不产生 OS SIGINT，须监听 keypress；非 TTY／cooked 由 SignalSource 兜底。闲时按键和关闭局部 UI 不由运行中断源接管。
+配置、确认和选择页保留各自明确的返回／取消语义，不能把所有 Ctrl+C 都解释成取消运行。文本入口由 text-session 的文本 I/O 与中断适配处理信号，不加载旧 KeyboardSource 或 stdin ownership。终端模式仅由统一所有者管理，不为临时页面切 cooked／raw。
 
 生产耐久 RPC 连接只拥有在线观察能力，**断线不取消运行**；显式取消走 session.abort。源码中的非耐久兼容分支仍以 connection-close 触发 external 原因，不能把它写成生产耐久运行规则。
 
@@ -72,7 +72,7 @@ Host 停止不是用户取消的别名：当前 HostStopLifecycle 关闭准入�
 
 reason 语义保持一致，格式留在表面：主动取消表示用户控制；idle-timeout 表示流无新 chunk；parent-abort 展示可追溯根因；external 按已知 origin 解释、未知兜底。中文渠道 formatter 与英文 serializer 各自负责形式，不为少量分支构建通用国际化框架。serializer 的 message 可按根因解释，detail 保留原始嵌套结构。
 
-当前 [RPC 事件投影](../../../packages/rpc/src/session-events.ts)通过 `session.event` 转发 `interrupt:warn`／`interrupt:fired`；REPL 经 [RpcEventBus](../../../packages/cli/src/runtime/rpc-event-bus.ts)还原事件并挂接[渲染订阅](../../../packages/cli/src/render.ts)。主运行预警显示一次提示，中断触发显示 `[interrupted]` 标记。有 screen 时另挂[状态条](../../../packages/cli/src/status-bar/status-bar.ts)：运行中收到预警显示剩余倒计时，收到新的流事件恢复正常展示，收到 `interrupt:fired` 保存原因，在 `agent:run_end` 展示中断终态。无 screen 时不装载动态状态条，不能承诺倒计时展示。
+当前 [RPC 事件投影](../../../packages/rpc/src/session-events.ts)通过 session.event 转发 interrupt:warn／interrupt:fired；交互 N 的[过程投影](../../../packages/cli/src/terminal/process-projection.ts)消费对应主运行事件并更新有限状态，U 统一显示。文本入口的追加式结果由其输出适配负责。旧状态条倒计时和 render.ts 的 run 装配已退役，不能把它们的存在作为当前提示完整性的证明；及时预警、明确中止与真实终态反馈仍须沿新链核对。
 
 非流式渠道的取消回执不等于完整展示 partial；其他 RPC 客户端虽能接收事件，其展示由各自消费实现决定，不保证具有 CLI 的提示和倒计时。未来按钮、暂停恢复或其他控制类型不作为已实现能力。
 
@@ -80,6 +80,6 @@ reason 语义保持一致，格式留在表面：主动取消表示用户控制�
 
 - [入站分类与反馈](../../../packages/server/src/channels/inbound-router.ts)、[分类器](../../../packages/server/src/intent/intent-classifier.ts)、[Host 词集装配](../../../packages/cli/src/serve/channels.ts)。
 - [渠道 binding](../../../packages/cli/src/serve/channel-conversation-product-binding.ts)、[Conversation 应用](../../../packages/core/src/conversation/application.ts)、[取消协议 runtime](../../../packages/cli/src/serve/conversation-protocol-runtime.ts)、[owner 决定](../../../packages/owner-kernel/src/conversation-assignment.ts)。
-- [RPC 入口](../../../packages/server/src/rpc/methods/session.ts)、[CLI 控制器](../../../packages/cli/src/runtime/conversation-controller.ts)、[REPL](../../../packages/cli/src/repl.ts)、[Host 停止生命周期](../../../packages/cli/src/serve/host-stop-lifecycle.ts)。
+- [RPC 入口](../../../packages/server/src/rpc/methods/session.ts)、[CLI 控制器](../../../packages/cli/src/runtime/conversation-controller.ts)、[终端行动](../../../packages/cli/src/terminal/application.ts)、[Host 停止生命周期](../../../packages/cli/src/serve/host-stop-lifecycle.ts)。
 
 直接回归边界：pending confirmation 下取消只走控制；否定词不误取消；相同请求重放不扩大候选；新消息不被旧批次吞掉；取消证明与反馈单源；断线仍可恢复观察；关停先闭准入后处理已接受工作；取消后新输入可继续。测试和旧验收记录是核对入口，不单独证明生产链成立。
