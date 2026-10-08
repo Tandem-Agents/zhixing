@@ -1,4 +1,4 @@
-import { stat, type FileHandle } from "node:fs/promises";
+import { open, type FileHandle } from "node:fs/promises";
 import type { Hash } from "node:crypto";
 
 export interface VerifiedWalTail {
@@ -32,7 +32,24 @@ export interface WalFileVersion { dev: bigint; ino: bigint; size: number; mtimeN
 
 /** Preserve filesystem timestamp precision; millisecond floats can alias fast rewrites. */
 export async function readWalVersion(file: string | FileHandle): Promise<WalFileVersion> {
-  const value = await (typeof file === "string" ? stat(file, { bigint: true }) : file.stat({ bigint: true }));
+  if (typeof file === "string") {
+    // Node 24.0 on Windows can report dev=0 through path stat while fstat
+    // reports the real volume ID. All WAL proofs must use the same API.
+    const handle = await open(file, "r");
+    let version: WalFileVersion;
+    try {
+      version = await readWalVersion(handle);
+    } catch (error) {
+      try { await handle.close(); }
+      catch (closeError) {
+        throw new AggregateError([error, closeError], "Authority WAL metadata read and handle close failed", { cause: error });
+      }
+      throw error;
+    }
+    await handle.close();
+    return version;
+  }
+  const value = await file.stat({ bigint: true });
   const size = Number(value.size);
   if (!Number.isSafeInteger(size)) throw new RangeError("Authority WAL exceeds safe byte addressing");
   return { dev: value.dev, ino: value.ino, size, mtimeNs: value.mtimeNs, ctimeNs: value.ctimeNs };
