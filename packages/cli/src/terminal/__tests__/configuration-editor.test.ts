@@ -6,12 +6,12 @@ import type { ConfigurationEditResult } from '../../runtime/configuration-edit.j
 import { ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import type { McpSetupCandidate } from '@zhixing/core/mcp-management';
 
-function setup(runtime?: ConfigEditorRuntime) {
+function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456') {
   const views: Omit<TerminalView, 'generation'>[] = [];
   const save = vi.fn(async (_edit: Extract<ConfigurationEditResult, { kind: 'completed' }>) => {});
   const editor = new TerminalConfigurationEditor({
     session: { initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
-      initialCredentials: { providers: { deepseek: { apiKey: 'synthetic-original-secret-123456' } } }, writers: { save } },
+      initialCredentials: { providers: { deepseek: { apiKey } } }, writers: { save } },
     title: '合成配置', sections: runtime ? ['mcp'] : ['model'], runtime,
     publish: async view => { views.push(view); },
   });
@@ -67,13 +67,13 @@ describe('single-root Node configuration transaction', () => {
     h.editor.cancel(); expect((await h.result).kind).toBe('cancelled'); expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('pages a complete long MCP command before making the probe action available', async () => {
-    const args = ['x'.repeat(4095), '🦞final-argument'];
+  it.each([undefined, 'Q'])('pages the complete MCP target before probing, including redaction expansion (%s)', async apiKey => {
+    const args = [apiKey ? apiKey.repeat(2000) : 'x'.repeat(4095), '🦞final-argument'];
     const target = args.join(' ');
     const candidate: McpSetupCandidate = { serverId: 'synthetic-long', source: 'inferred',
       entry: { type: 'stdio', command: 'synthetic-command', args }, secretFields: [] };
     const probe = vi.fn(async () => ({ ok: true as const, tools: [] }));
-    const h = setup({ mcpResolve: async () => ({ ok: true, candidate }), mcpProbe: { probe } });
+    const h = setup({ mcpResolve: async () => ({ ok: true, candidate }), mcpProbe: { probe } }, apiKey);
     await h.choose('其他');
     await h.editor.act({ kind: 'configuration-action', editId: h.editor.editId, action: 'field', value: 'synthetic-long' });
     await vi.waitFor(() => expect(h.current().message).toContain('连接目标'));
@@ -81,11 +81,13 @@ describe('single-root Node configuration transaction', () => {
     const pieces: string[] = [];
     while (true) {
       pieces.push(h.current().message!.split('\n')[1]!);
+      expect(h.current().message!.length).toBeLessThanOrEqual(4097);
       expect(probe).not.toHaveBeenCalled();
       if (!h.current().choices?.some(choice => choice.id === 'next')) break;
       await h.action('next');
     }
-    expect(pieces.join('')).toBe(`将在本机运行：synthetic-command ${target}`);
+    const expected = `将在本机运行：synthetic-command ${target}`;
+    expect(pieces.join('')).toBe(apiKey ? expected.replaceAll(apiKey, '[已设置]') : expected);
     await h.choose('验证连接');
     await vi.waitFor(() => expect(h.current().choices?.some(choice => choice.label.includes('synthetic-long'))).toBe(true));
     expect(probe).toHaveBeenCalledOnce();

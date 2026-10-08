@@ -17,6 +17,10 @@ type EditIntent = Extract<TerminalAction, { kind: 'configuration-action' | 'secr
 type SurfaceView = Omit<TerminalView, 'generation'>;
 const PAGE_ITEMS = 24;
 const FIELD_BYTES = 8 * 1024;
+const MESSAGE_CHARS = 4096;
+function boundMessage(value: string): string {
+  return value.length > MESSAGE_CHARS ? `${value.slice(0, MESSAGE_CHARS)}…` : value;
+}
 
 /** The editor transaction, credentials and asynchronous effects remain in N.
  * U receives one page of labels and a dedicated empty secret field. */
@@ -267,16 +271,19 @@ export class TerminalConfigurationEditor {
         // an ellipsis authorize the hidden remainder of a command or URL.
         targetPaging = true;
         let targetPart = '', targetPages = 0;
-        for (const part of textFragments(target, 6 * 1024)) {
+        // Redact before paging: replacement text can be longer than the secret.
+        // Reserve space for the page header and instructions under the message cap.
+        for (const part of textFragments(this.#safe(target, false), 3 * 1024)) {
           if (targetPages === this.#page) targetPart = part.text;
           targetPages++;
         }
         this.#probeBlocked = this.#page + 1 < targetPages;
         const secret = panel.candidate.secretFields[panel.fieldIndex];
-        message = [targetPages > 1 ? `连接目标 · 第 ${this.#page + 1}/${targetPages} 页` : '', targetPart,
-          panel.error ?? panel.description ?? '填写后验证连接，完成后保存。',
+        const instructions = [panel.error ?? panel.description ?? '填写后验证连接，完成后保存。',
           ...(this.#probeBlocked ? ['查看完全部目标后才能验证连接。'] : secret ? [`密钥 ${panel.fieldIndex + 1}/${panel.candidate.secretFields.length}：${secret.label}`, secret.hint,
             secret.docUrl ?? panel.candidate.homepage, secret.example] : ['此连接无需密钥，按 Enter 验证。'])].filter(Boolean).join('\n');
+        message = [targetPages > 1 ? `连接目标 · 第 ${this.#page + 1}/${targetPages} 页` : '', targetPart,
+          this.#safe(instructions)].filter(Boolean).join('\n');
         if (this.#probeBlocked) choices.push({ id: 'next', label: '继续查看连接目标' });
         else if (secret) field = { id: secret.key, label: secret.label, secret: true, configured: !!panel.inputs[secret.key] };
         else add('验证连接');
@@ -291,12 +298,13 @@ export class TerminalConfigurationEditor {
     this.#choices = new Set(visible.map(choice => choice.id));
     this.#fieldId = field?.id; this.#fieldSecret = field?.secret ?? false;
     this.#current = { kind: 'configuration', editId: this.editId, title: this.#safe(title),
-      message: this.#safe([message, this.#error].filter(Boolean).join('\n')), field,
+      message: targetPaging ? boundMessage([message, this.#error ? this.#safe(this.#error) : ''].filter(Boolean).join('\n'))
+        : this.#safe([message, this.#error].filter(Boolean).join('\n')), field,
       choices: visible.map(choice => ({ ...choice, label: this.#safe(choice.label), detail: choice.detail ? this.#safe(choice.detail) : undefined })) };
     await this.options.publish(this.#current);
   }
 
-  #safe(value: string): string {
+  #safe(value: string, bounded = true): string {
     let result = value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, '');
     const redact = (object: unknown): void => {
       if (typeof object === 'string' && object.length > 0) result = result.split(object).join('[已设置]');
@@ -310,6 +318,6 @@ export class TerminalConfigurationEditor {
     }
     redact(this.#state.credentials.mcp);
     for (const panel of this.#stack) if (panel.kind === 'mcp-add') redact(panel.inputs);
-    return result.length > 4096 ? `${result.slice(0, 4096)}…` : result;
+    return bounded ? boundMessage(result) : result;
   }
 }
