@@ -25,12 +25,19 @@ typedef struct {
   BOOL creatorObservedExited;
   char birth[32];
   BOOL console; DWORD scope;
+  double queuedAt, queueMs, setupMs, createMs, publishMs, totalMs, readyAt;
 } Child;
 static Child children[CHILDREN];
 static SRWLOCK lock = SRWLOCK_INIT;
 static BOOL sealed = FALSE;
 static DWORD generation = 0;
 static HANDLE executionJob = NULL;
+
+static double monotonic_ms(void) {
+  LARGE_INTEGER counter, frequency;
+  QueryPerformanceCounter(&counter); QueryPerformanceFrequency(&frequency);
+  return (double)counter.QuadPart * 1000.0 / (double)frequency.QuadPart;
+}
 
 static void free_arguments(Child *child) {
   free(child->executable); free(child->command);
@@ -39,6 +46,7 @@ static void free_arguments(Child *child) {
 }
 static DWORD WINAPI create_child(void *opaque) {
   Child *child = opaque;
+  const double beganAt = monotonic_ms();
   SIZE_T bytes = 0;
   InitializeProcThreadAttributeList(NULL, 2, 0, &bytes);
   LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(bytes);
@@ -78,19 +86,27 @@ static DWORD WINAPI create_child(void *opaque) {
   /* Cancellation can precede or overlap CreateProcess. Even in the latter
      case the initial thread is suspended and the job membership is atomic. */
   if (!error && InterlockedCompareExchange(&child->cancelled, 0, 0)) error = ERROR_CANCELLED;
+  const double createAt = monotonic_ms();
   if (!error && !CreateProcessW(child->executable, child->command, NULL, NULL, TRUE,
       CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | (child->scope == 2 ? DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP : 0),
       child->environment, child->directory, &startup.StartupInfo, &process)) error = GetLastError();
+  const double createdAt = monotonic_ms();
   if (initialized) DeleteProcThreadAttributeList(attributes);
   free(attributes);
   for (DWORD i = 0; i < inheritedCount; i++) CloseHandle(inherited[i]);
   AcquireSRWLockExclusive(&lock);
+  child->queueMs = beganAt - child->queuedAt;
+  child->setupMs = createAt - beganAt;
+  child->createMs = createdAt - createAt;
   child->error = error;
   if (!error) {
     child->process = process.hProcess; child->primary = process.hThread; child->pid = process.dwProcessId;
     if (sealed || child->cancelled) { child->cancelled = TRUE; TerminateProcess(child->process, ERROR_CANCELLED); }
   }
   free_arguments(child);
+  child->readyAt = monotonic_ms();
+  child->publishMs = child->readyAt - createdAt;
+  child->totalMs = child->readyAt - child->queuedAt;
   child->ready = TRUE;
   ReleaseSRWLockExclusive(&lock);
   InterlockedExchange(&child->finished, TRUE);
@@ -138,6 +154,7 @@ static napi_value create(napi_env env, napi_callback_info info) {
     free_arguments(child); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child);
     ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-create-preflight");
   }
+  child->queuedAt = monotonic_ms();
   child->creator = CreateThread(NULL, 0, create_child, child, 0, NULL);
   if (!child->creator) { free_arguments(child); if (child->job) CloseHandle(child->job); ZeroMemory(child, sizeof *child); ReleaseSRWLockExclusive(&lock); return fail(env, "terminal-native-create-thread"); }
   ReleaseSRWLockExclusive(&lock);
@@ -170,6 +187,9 @@ static void number(napi_env env, napi_value object, const char *name, DWORD valu
 }
 static void boolean(napi_env env, napi_value object, const char *name, BOOL value) {
   napi_value property; napi_get_boolean(env, !!value, &property); napi_set_named_property(env, object, name, property);
+}
+static void duration(napi_env env, napi_value object, const char *name, double value) {
+  napi_value property; napi_create_double(env, value, &property); napi_set_named_property(env, object, name, property);
 }
 /* S verifies the private gate's metadata against its own Job and a real held
    target handle before publishing the writer identity. A PID string alone is
@@ -213,6 +233,14 @@ static napi_value snapshot_state(napi_env env, napi_callback_info info, BOOL inv
   napi_value result; napi_create_object(env, &result);
   AcquireSRWLockExclusive(&lock);
   boolean(env, result, "ready", child->ready); boolean(env, result, "created", child->process != NULL);
+  if (child->ready) {
+    duration(env, result, "nativeQueueMs", child->queueMs);
+    duration(env, result, "nativeSetupMs", child->setupMs);
+    duration(env, result, "nativeCreateMs", child->createMs);
+    duration(env, result, "nativePublishMs", child->publishMs);
+    duration(env, result, "nativeTotalMs", child->totalMs);
+    duration(env, result, "observationMs", monotonic_ms() - child->readyAt);
+  }
   boolean(env, result, "resumed", child->resumed); boolean(env, result, "cancelled", child->cancelled);
   if (!child->creatorObservedExited && child->creator && WaitForSingleObject(child->creator, 0) == WAIT_OBJECT_0) child->creatorObservedExited = TRUE;
   boolean(env, result, "creationExited", child->creatorObservedExited);

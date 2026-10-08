@@ -144,6 +144,14 @@ export interface BeginTurnOptions {
   }) => void;
 }
 
+/** A failed transport receipt cannot retract matching execution evidence. */
+export class AcceptedTurnOutcomeUnknownError extends Error {
+  constructor(readonly conversationId: string, readonly turnId: string, cause: unknown) {
+    super(`输入已接纳，原运行可能仍在继续，最终结果未知。请在交互终端用 /resume ${conversationId} 查看原对话，确认前勿重复发送。\n${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = 'AcceptedTurnOutcomeUnknownError';
+  }
+}
+
 export type ExitSceneResult =
   | { kind: "not-in-workscene"; active: ActiveConversation }
   | {
@@ -328,6 +336,10 @@ export class ConversationController<Outcome = TurnOutcome> {
   private pendingSwitchTarget: ((conversationId: string) => boolean) | null =
     null;
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
+  // Receipt lifetime only: an already settled execution survives a late RPC
+  // error, without retaining completed outcomes or introducing another owner.
+  private readonly completedOutcomes = new WeakSet<Promise<Outcome>>();
+  private readonly acceptedOutcomes = new WeakMap<Promise<Outcome>, { conversationId: string; turnId: string }>();
   private readonly pendingPostTurnControls = new Map<string, PostTurnControlOutcome>();
   private readonly localTurnsByConversation = new Map<string, string>();
   private readonly localOutput = new Map<string, { conversationId: string; text: ObservedTextPrefix; recovering: boolean; pendingReceipt: boolean }>();
@@ -587,7 +599,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     const outcome = this.attachTurnWaiter(target, turnId, options);
     let request: Promise<SessionSendResult>;
     try { request = send(target, turnId); }
-    catch (error) { this.discardTurnWaiter(target, turnId); return Promise.reject(error); }
+    catch (error) { request = Promise.reject(error); }
     return this.finishUserTurn(request, target, turnId, outcome, options);
   }
 
@@ -605,7 +617,11 @@ export class ConversationController<Outcome = TurnOutcome> {
           submission: { turnId, disposition: result.submission?.turnId === turnId ? result.submission.disposition : 'unknown' } };
       }
       return await this.finishUserTurn(Promise.resolve(result), target, turnId, outcome, options);
-    } catch (error) { this.discardTurnWaiter(target, turnId); throw error; }
+    } catch (error) {
+      const accepted = this.completedTurnAfterError(target, turnId, outcome);
+      if (accepted) return { kind: 'accepted', turn: accepted };
+      this.discardTurnWaiter(target, turnId); throw this.turnReceiptFailure(error, outcome);
+    }
   }
 
   private async finishUserTurn(
@@ -613,6 +629,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     initialOutcome: Promise<Outcome>, options: BeginTurnOptions,
   ): Promise<BeginUserTurnResult<Outcome>> {
     let outcome = initialOutcome;
+    let currentTurnId = turnId;
     try {
       const sendResult = await request;
       this.observedConversationId = target;
@@ -659,6 +676,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         this.pendingAbortByTurn.delete(turnId);
         this.discardTurnWaiter(target, turnId);
         outcome = this.attachTurnWaiter(target, acceptedId, options);
+        currentTurnId = acceptedId;
         if (pendingAbort) this.pendingAbortByTurn.set(acceptedId, pendingAbort);
       }
       this.registerDurableRun(target, acceptedId, sendResult.runId);
@@ -676,8 +694,10 @@ export class ConversationController<Outcome = TurnOutcome> {
         },
       };
     } catch (err) {
-      this.discardTurnWaiter(target, turnId);
-      throw err;
+      const accepted = this.completedTurnAfterError(target, currentTurnId, outcome);
+      if (accepted) return { kind: 'accepted', turn: accepted };
+      this.discardTurnWaiter(target, currentTurnId);
+      throw this.turnReceiptFailure(err, outcome);
     }
   }
 
@@ -729,8 +749,10 @@ export class ConversationController<Outcome = TurnOutcome> {
           : {}),
       };
     } catch (err) {
+      const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
+      if (accepted) return accepted;
       this.discardTurnWaiter(pending.conversationId, pending.turnId);
-      throw err;
+      throw this.turnReceiptFailure(err, outcome);
     }
   }
 
@@ -792,7 +814,10 @@ export class ConversationController<Outcome = TurnOutcome> {
       };
     } catch (err) {
       if (outcome) {
+        const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
+        if (accepted) return { kind: 'direct-execution', advancementSessionId: pending.advancementSessionId, turn: accepted };
         this.discardTurnWaiter(pending.conversationId, pending.turnId);
+        throw this.turnReceiptFailure(err, outcome);
       }
       throw err;
     }
@@ -842,15 +867,34 @@ export class ConversationController<Outcome = TurnOutcome> {
     turnId: string,
     options: BeginTurnOptions = {},
   ): Promise<Outcome> {
+    let projected!: Promise<Outcome>;
     const outcome = new Promise<TurnOutcome>((resolve) => {
-      this.waiters.set(turnId, resolve);
+      this.waiters.set(turnId, value => {
+        this.completedOutcomes.add(projected);
+        resolve(value);
+      });
     });
     this.localTurnsByConversation.set(conversationId, turnId);
     if (this.opts.pagedRecovery) this.localOutput.set(turnId, { conversationId, text: new ObservedTextPrefix(), recovering: false, pendingReceipt: true });
-    if (options.onAccepted) {
-      this.localTurnAcceptances.set(turnId, options.onAccepted);
-    }
-    return this.opts.projectOutcome ? outcome.then(this.opts.projectOutcome) : outcome as Promise<Outcome>;
+    projected = this.opts.projectOutcome ? outcome.then(this.opts.projectOutcome) : outcome as Promise<Outcome>;
+    this.localTurnAcceptances.set(turnId, turn => {
+      this.acceptedOutcomes.set(projected, turn);
+      options.onAccepted?.(turn);
+    });
+    return projected;
+  }
+
+  private completedTurnAfterError(conversationId: string, turnId: string, outcome: Promise<Outcome>): AcceptedTurn<Outcome> | undefined {
+    if (this.disposed || !this.completedOutcomes.has(outcome)) return undefined;
+    this.observedConversationId = conversationId;
+    const runId = this.durableRunByTurn.get(turnId);
+    return { conversationId, turnId, outcome, ...(runId ? { runId } : {}) };
+  }
+
+  private turnReceiptFailure(error: unknown, outcome: Promise<Outcome>): unknown {
+    const accepted = this.acceptedOutcomes.get(outcome);
+    if (!accepted || error instanceof AcceptedTurnOutcomeUnknownError) return error;
+    return new AcceptedTurnOutcomeUnknownError(accepted.conversationId, accepted.turnId, error);
   }
 
   private discardTurnWaiter(conversationId: string, turnId: string): void {
@@ -2023,6 +2067,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     this.waiters.clear();
     this.pendingPostTurnControls.clear();
     this.localTurnsByConversation.clear();
+    this.localTurnAcceptances.clear();
     this.durableRuns.clear();
     this.durableRunByTurn.clear();
     this.pendingFinals.clear();

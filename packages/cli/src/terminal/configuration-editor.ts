@@ -9,7 +9,7 @@ import { resolveListMeta, handleListPanelKey } from '../config-editor/model/list
 import { resolveEntityMeta, handleEntityPanelKey } from '../config-editor/model/entity.js';
 import { resolveInputField, resolveBudgetRange, handleInputPanelKey, handleAddModelPanelKey, handleThinkingBudgetPanelKey } from '../config-editor/model/input.js';
 import { describeStatus, findStatus, handleMcpServerPanelKey, handleMcpAddPanelKey, handleMcpAddInputPanelKey, handleMcpChoicesPanelKey } from '../config-editor/model/mcp.js';
-import type { KeyEvent } from '../tui/index.js';
+import type { KeyEvent } from '../tui/key-event.js';
 import { findSupportedChannel, listSupportedChannels } from '../registries/channels.js';
 import { textFragments } from './history-segments.js';
 

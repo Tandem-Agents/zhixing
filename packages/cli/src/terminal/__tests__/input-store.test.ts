@@ -1,3 +1,4 @@
+import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
@@ -228,7 +229,7 @@ describe('terminal cold original references', () => {
   it('replaces old paste tokens outside the current window across scan-page boundaries without dropping surrounding text', async () => {
     const h = await setup(), old = randomUUID(), incoming = randomUUID();
     for (const id of [old, incoming]) { h.store.begin(id, 'paste'); await h.store.part(id, 0, id === old ? 'old原文' : 'new原文', true); }
-    const oldToken = h.store.completePaste(old).token, newToken = h.store.completePaste(incoming).token;
+    const oldToken = h.store.completePaste(old).token;
     const prefix = 'a'.repeat(256 * 1024 - 5), suffix = '🙂\r\n  '.repeat(8192);
     const original = prefix + oldToken + suffix + oldToken + '\nTAIL';
     const source = randomUUID(); h.store.begin(source, 'draft'); let index = 0;
@@ -237,13 +238,11 @@ describe('terminal cold original references', () => {
       await h.store.part(source, index++, original.slice(offset, end), false); offset = end;
     }
     await h.store.part(source, index, '', true); await h.store.retainDraft(`history:${source}`, source);
-    const page = await h.store.window(source, h.store.bytes(source));
-    const visible = page.text.replaceAll(oldToken, '') + newToken;
-    const replacement = await draft(h.store, visible);
-    const result = await h.store.editWindow(source, page.start, page.end, replacement, incoming);
-    expect(result.end - result.start).toBe(Buffer.byteLength(visible));
+    const end = h.store.bytes(source);
+    const result = await h.store.applyPaste(source, end, end, incoming, end);
+    expect(result.end - result.start).toBe(Buffer.byteLength('new原文'));
     const text = await h.store.text(result.inputId, 4 * 1024 * 1024);
-    expect(text).toBe(prefix + suffix + '\nTAIL' + newToken);
+    expect(text).toBe(prefix + suffix + '\nTAIL' + 'new原文');
     expect(text).not.toContain(oldToken);
     expect((await h.store.text(source, 4 * 1024 * 1024))).toBe(original);
   });
@@ -390,4 +389,99 @@ describe('terminal cold original references', () => {
     expect(h.counts().outstanding).toBe(1); expect(h.counts().active).toBe(0);
     await expect(stat(path.join(h.root, 'input', incoming))).resolves.toBeDefined();
   });
+
+  it.each([
+    ['a'.repeat(199), false], ['a'.repeat(200), true], ['中'.repeat(66) + 'a', false], ['中'.repeat(66) + 'ab', true],
+    ['one\ntwo\nthree\n\n\n', false], ['one\ntwo\nthree\nfour\n\n', true],
+    ['one\r\ntwo\r\nthree\r\n\r\n', false], ['one\r\ntwo\r\nthree\r\nfour\r\n\r\n', true],
+  ] as const)('uses the 200 UTF-8 byte / four nontrailing-line threshold (%s)', async (text, fold) => {
+    const h = await setup(), id = randomUUID(); h.store.begin(id, 'paste'); await h.store.part(id, 0, text, true);
+    expect(h.store.completePaste(id).fold).toBe(fold);
+  });
+
+  it('folds the first long paste inside surrounding text and settles its token extent before the suffix copy', async () => {
+    const h = await setup(), incoming = randomUUID(); h.store.begin(incoming, 'paste'); await h.store.part(incoming, 0, '中'.repeat(80), true);
+    const paste = h.store.completePaste(incoming), source = await draft(h.store, 'beforeMARKafter');
+    const result = await h.store.applyPaste(source, 6, 10, incoming, 15);
+    expect(await h.store.text(result.inputId, 2 * 1024 * 1024)).toBe('before' + paste.token + 'after');
+    expect(result.cursor).toBe(result.bytes); expect(h.counts().outstanding).toBe(0);
+  });
+
+  it('expands a replacement larger than the U window, finds cold old tokens, preserves chips and rebases intervening edits', async () => {
+    const h = await setup();
+    const upload = async (text: string, purpose: 'draft' | 'paste') => {
+      const id = randomUUID(); h.store.begin(id, purpose); let index = 0;
+      for (let offset = 0; offset < text.length;) {
+        let end = Math.min(text.length, offset + 8192);
+        if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1]!)) end--;
+        await h.store.part(id, index++, text.slice(offset, end), false); offset = end;
+      }
+      await h.store.part(id, index, '', true); return id;
+    };
+    const old = await upload('old'.repeat(100), 'paste'), oldToken = h.store.completePaste(old).token;
+    const material = await upload('synthetic-file-path', 'paste'), chip = '[File #1 · keep.txt · 7B]';
+    h.store.registerHandles(material, chip);
+    const prefix = 'a'.repeat(256 * 1024 - 5), suffix = 'b'.repeat(64 * 1024) + chip + ' tail';
+    const source = await upload(prefix + oldToken + suffix, 'draft'); await h.store.retainDraft(`history:${source}`, source);
+    const reader = new TerminalInputHistoryReader(h.store);
+    const incoming = '\uFEFF新原文 🙂\r\n'.repeat(30_000);
+    let entered!: () => void, release!: () => void, applies = 0, submitted: string | undefined;
+    const applying = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const noWholeRead = vi.spyOn(h.store, 'text').mockRejectedValue(Error('whole original read forbidden'));
+    const request = async (action: TerminalAction): Promise<unknown> => {
+      switch (action.kind) {
+        case 'input-history': return reader.open(source);
+        case 'input-history-end': return reader.close(action.ticket);
+        case 'input-window': return h.store.window(action.inputId, action.position);
+        case 'input-begin': return h.store.begin(action.inputId, action.purpose, action.bytes);
+        case 'input-part': return h.store.part(action.inputId, action.index, action.text, action.final);
+        case 'input-splice': return h.store.editWindow(action.inputId, action.start, action.end, action.replacementId);
+        case 'input-references': return h.store.reconcileReferences(action.version, action.ids, action.completed, action.cached);
+        case 'paste-finish': {
+          const paste = h.store.completePaste(action.inputId);
+          if (!action.draft) return { textEdit: true, text: paste.token, paste: true };
+          const edit = await h.store.applyPaste(action.draft.inputId, action.draft.start, action.draft.end, action.inputId, action.draft.cursor);
+          if (++applies === 1) { entered(); await held; }
+          return { edit };
+        }
+        case 'input-submit': submitted = action.inputId; await h.store.retainDraft(`frozen:${submitted}`, submitted); return {};
+        default: throw Error(`Unexpected paste action ${action.kind}`);
+      }
+    };
+    const session = new TerminalInputSession(request, vi.fn()); await session.history(-1);
+    expect(session.draft.text).not.toContain(oldToken); const oldStart = session.windowStart;
+    const work = session.paste(Buffer.from(incoming)); await applying;
+    session.edit('X' + session.draft.text + 'Y', session.draft.text.length + 2);
+    release(); await work;
+    expect(applies).toBe(2); expect(noWholeRead).not.toHaveBeenCalled();
+    expect(Buffer.byteLength(session.draft.text)).toBeLessThanOrEqual(32 * 1024);
+    expect(session.draft.text).not.toContain('[Pasted'); expect(session.beforeWindow).toBe(true);
+    // Both inserted keystrokes belong to the newer draft. The cold token only
+    // precedes its window, so deleting it shifts X's absolute position.
+    const original = prefix + oldToken + suffix;
+    const encoded = Buffer.from(original);
+    const edited = encoded.subarray(0, oldStart).toString('utf8') + 'X' + encoded.subarray(oldStart).toString('utf8') + incoming + 'Y';
+    const expected = edited.replace(oldToken, '');
+    session.edit(session.draft.text, 0); await session.navigate('left');
+    expect(session.afterWindow).toBe(true); await session.submit();
+    const hash = createHash('sha256'); for await (const page of h.store.pages(submitted!)) hash.update(page);
+    expect(hash.digest('hex')).toBe(createHash('sha256').update(expected).digest('hex'));
+    expect(h.counts().active).toBe(0); await reader.close();
+  });
+
+});
+
+
+it('keeps folded slash-like paste bodies out of the raw command source and original history', async () => {
+  const h = await setup();
+  for (const prefix of ['\u3001clear', '/clear']) {
+    const paste = randomUUID(), body = prefix + '\n' + 'paragraph'.repeat(1000);
+    h.store.begin(paste, 'paste'); await h.store.part(paste, 0, body, true);
+    const token = h.store.completePaste(paste).token, id = await draft(h.store, token);
+    const head = await h.store.window(id, 0);
+    expect(normalizeLeadingSlashAlias(head.text.trim()).startsWith('/')).toBe(false);
+    expect(head.text).toBe(token); expect(await h.store.expand(id, 4 * 1024 * 1024)).toBe(body);
+    expect((await h.store.window(id, 0)).text).toBe(token);
+  }
 });

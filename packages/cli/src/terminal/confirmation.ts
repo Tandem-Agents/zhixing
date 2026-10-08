@@ -35,7 +35,7 @@ export function projectTerminalConfirmation(request: ConfirmationRequest): Termi
     const value = `decision:${index}`;
     options.set(value, option);
     const persistent = option.kind === 'allow-session' || option.kind === 'allow-context' || option.kind === 'allow-global';
-    const basic = { value, label: option.label, ...(persistent ? { description: '这会保存授权规则，后续匹配的操作可按该规则执行。', tone: 'danger' as const } : {}) };
+    const basic = { value, label: option.label, hotkey: option.hotkey, ...(persistent ? { description: '这会保存授权规则，后续匹配的操作可按该规则执行。', tone: 'danger' as const } : {}) };
     if (option.kind === 'allow-with-note' || option.kind === 'deny-with-reason') choices.push({ ...basic, input: { placeholder: option.placeholder, allowEmpty: true } });
     else if (persistent) choices.push({ ...basic, confirm: { title: '保存这条授权规则？', body: ['后续匹配的操作可按该规则执行。', option.pattern.label, `${option.pattern.pattern.tool} ${option.pattern.pattern.argument}`], confirmLabel: '确认保存并允许', cancelLabel: '返回' } });
     else choices.push(basic);
@@ -57,15 +57,17 @@ class Dismissed extends Error { constructor(readonly decision: ConfirmationDecis
 export async function resolveTerminalConfirmation(projection: TerminalConfirmation, choose: TerminalSelectionPort): Promise<ConfirmationDecision> {
   try {
     const selected = await chooseTerminalSelection(projection.selection, async page => {
-      const hasDenial = page.choices?.some(choice => choice.id.startsWith('option:') && projection.options.get(choice.id.slice(7))?.kind === 'deny');
+      const outer = page.selectionLayer === 'select';
+      const hasDenial = outer && page.choices?.some(choice => choice.id.startsWith('option:') && projection.options.get(choice.id.slice(7))?.kind === 'deny');
       const result = await choose({ ...page, kind: 'confirmation', choices: page.choices
         ?.filter(choice => choice.id !== 'return' || !hasDenial)
-        .map(choice => choice.id === 'return' ? { ...choice, label: '拒绝本次操作' } : choice) });
-      if (!result || result.itemId === 'return') throw new Dismissed({ kind: 'deny' });
-      if (result.itemId === 'cancelled') throw new Dismissed({ kind: 'cancelled', cause: 'user-ctrl-c' });
+        .map(choice => outer && choice.id === 'return' ? { ...choice, label: '拒绝本次操作' } : choice) });
+      if (!result || (outer && result.itemId === 'return')) throw new Dismissed({ kind: 'deny' });
+      if (result.itemId === 'cancelled' && !result.cancelCause) return { ...result, cancelCause: 'ctrl-c' };
       return result;
     });
     if (!selected) return { kind: 'deny' };
+    if (selected.kind === 'cancelled') return translate(selected, new Map(projection.options));
     return translate({ kind: 'selected', value: selected.value, ...('input' in selected ? { note: selected.input } : {}) }, new Map(projection.options));
   } catch (error) { if (error instanceof Dismissed) return error.decision; throw error; }
 }

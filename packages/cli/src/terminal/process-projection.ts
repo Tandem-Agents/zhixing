@@ -212,6 +212,19 @@ export class TerminalProcessProjection {
       }
       case 'context:tokens_snapshot': if (main) this.#usage = { ...this.#usage, contextTokens: event.payload.totalTokens }; break;
       case 'llm:request_start': if (main) this.#phase = '正在请求模型'; break;
+      case 'security:steward_review': {
+        const p = event.payload;
+        if (p.decision !== 'safe') break;
+        this.#flushBatch();
+        this.#emit('process', `◆ ${main ? '' : '子任务 · '}安全助理放行 ${processText(p.tool, 256)} ${processText(p.operation, 768)}（理由：${processText(p.reason, 1024)}）`);
+        break;
+      }
+      case 'security:rule_sedimented': {
+        const p = event.payload, scope = p.contextId.kind === 'main' ? '主模式' : '当前工作场景';
+        this.#flushBatch();
+        this.#emit('process', `◆ ${main ? '' : '子任务 · '}已在 ${scope} 记住 ${p.contributors.length} 次同类操作，自动建立放行规则：${processText(p.pattern.argument, 1024)}（进 /trust 可查看/撤销）`);
+        break;
+      }
       case 'retry:attempt': if (main) this.#notice = `请求重试 ${event.payload.attempt}/${event.payload.maxRetries} · ${event.payload.errorType}`; break;
       case 'retry:success': if (main) this.#notice = undefined; break;
       case 'retry:exhausted': if (main) this.#notice = `重试未成功：${processText(event.payload.lastError, 768)}`; break;
@@ -219,7 +232,10 @@ export class TerminalProcessProjection {
       case 'segment:new_started': if (main) this.#notice = '上下文已整理'; break;
       case 'segment:transition_failed': if (main) this.#notice = `上下文整理未完成：${processText(event.payload.error, 768)}`; break;
       case 'segment:emergency_floor': if (main) this.#notice = `上下文已紧急截断 ${event.payload.droppedTurns} 轮：${processText(event.payload.error, 512)}`; break;
-      case 'interrupt:warn': if (main) this.#notice = '再次取消将停止当前运行'; break;
+      case 'interrupt:warn': if (main) {
+        const remaining = Math.max(0, Math.ceil((event.payload.timeoutMs - event.payload.elapsedMs) / 1000));
+        this.#notice = `模型流暂未响应；若仍无响应，约 ${remaining} 秒后自动取消`;
+      } break;
       case 'interrupt:fired': if (main) this.#notice = '正在停止'; break;
       case 'lifecycle:hook_failed': if (main) this.#notice = `运行钩子未完成：${processText(event.payload.error, 768)}`; break;
       case 'lifecycle:warning': if (main) this.#notice = processText(event.payload.message, 1024); break;

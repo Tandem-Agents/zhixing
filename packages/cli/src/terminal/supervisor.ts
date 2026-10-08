@@ -1,12 +1,12 @@
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { beginTerminalWriterDeclaration } from './writer-declaration.js';
-import { open, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import { checkpointFilesystemCompletion, CheckpointDirectoryHandle, type CheckpointFilesystemProcess } from '@zhixing/mesh/filesystem';
-import type { LogRecordPort } from '@zhixing/core/logging';
-import { TerminalChannel } from '@zhixing/terminal-ui/channel';
+import { checkpointFilesystemCompletion, CheckpointDirectoryHandle, type CheckpointFilesystemProcess, type CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
+import { beginLogPhase, type LogRecordPort } from '@zhixing/core/logging';
+import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { TERMINAL_LIMITS, TERMINAL_PROTOCOL, type TerminalMessage, type TerminalTraffic } from '@zhixing/terminal-ui/protocol';
 import { isTerminalPrivateEndpoint, TerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
 import { createServer, type Server, type Socket } from 'node:net';
@@ -17,13 +17,14 @@ import { TerminalForegroundProcesses, type TerminalForegroundChild } from './for
 import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/store-process.js';
 import { resolveSelfExec } from '../serve/self-exec.js';
 import { terminalWriterDeadline } from './close-budget.js';
+import { verifyTerminalAssets } from './verify-assets.js';
 
 type Role = 'recovery' | 'application' | 'ui';
 interface OwnedProcess {
   readonly role: Role; readonly child: TerminalForegroundChild; readonly spawnId: string;
   readonly exit: Promise<void>; readonly drained: Promise<void>;
   readonly listening: Promise<void>; announceListening(): void; announced: boolean;
-  created: boolean; exited: boolean; code: number | null; birth?: string;
+  created: boolean; resumed: boolean; exited: boolean; code: number | null; birth?: string;
   exitRequested?: boolean;
   channel?: TerminalChannel;
 }
@@ -69,6 +70,7 @@ class TerminalSupervisor {
   #deadline = 0;
   #deadlineTimer?: ReturnType<typeof setTimeout>;
   #loggingDrain?: Promise<void>;
+  #loggingAdmission?: Promise<void>;
   #nativeReady = false;
   #nativeBirth?: string;
   #nativeSequence = 0;
@@ -79,10 +81,14 @@ class TerminalSupervisor {
   #applicationAdmitted?: Promise<void>;
   #ui?: OwnedProcess;
   #assets?: TerminalInstanceAssets;
+  #filesystem?: CheckpointFilesystemSession;
+  #fixedAssets?: Promise<void>;
+  #executionDrain?: Promise<void>;
   #capacity?: ReturnType<typeof createDeviceCapacityRuntime>;
   #startupTimer?: ReturnType<typeof setTimeout>;
   #modeAdmission = false;
   #uiReady = false;
+  #firstFramePhase?: ReturnType<typeof beginLogPhase>;
   #interrupts = 0;
   #lastAssetRequest = 0;
   #processes?: TerminalForegroundProcesses;
@@ -108,102 +114,158 @@ class TerminalSupervisor {
     process.on('unhandledRejection', this.#uncaught);
     try {
       const distribution = path.join(this.options.distribution, `${process.platform}-${process.arch}`);
-      const manifest = JSON.parse(await readFile(path.join(distribution, 'manifest.json'), 'utf8')) as { protocol?: string; artifacts?: { name: string; bytes: number; sha256: string }[] };
+      const manifest = JSON.parse(await this.#phase('manifest', () => readFile(path.join(distribution, 'manifest.json'), 'utf8'))) as { protocol?: string; artifacts?: { name: string; bytes: number; sha256: string }[] };
       if (manifest.protocol !== TERMINAL_PROTOCOL || !Array.isArray(manifest.artifacts)) throw Error('terminal-package-version');
-      // A fixed closure is required. Missing/corrupt packages never download or
-      // silently enter an old renderer. Hash costs belong to complete startup.
+      const artifacts = manifest.artifacts;
+      const filesystem = this.#filesystem = CheckpointDirectoryHandle.createSession(5000, (executable, args) => this.#createFilesystem(executable, args));
+      // Fixed package reads can overlap R preparation. Process creation and
+      // all caller storage effects still require R and normal admission.
+      const filesystemVerified = this.#phase('filesystem-verify', () => filesystem.prepare());
+      void filesystemVerified.catch(() => {});
+      // Each native consumer must be verified before use. Verify R and the
+      // creation edge first; the large UI closure can be checked while R and
+      // the independently verified filesystem owner prepare the instance.
+      // N/U cannot execute until the entire fixed closure has passed.
       const executableSuffix = process.platform === 'win32' ? '.exe' : '';
       const renderLibrary = process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so';
-      const verificationBuffer = Buffer.allocUnsafe(1024 * 1024);
-      for (const name of [`recovery${executableSuffix}`, `ui${executableSuffix}`, renderLibrary, 'foreground.node', `exec-gate${executableSuffix}`]) {
-        const item = manifest.artifacts.find(value => value.name === name);
-        if (!item || !/^[a-f0-9]{64}$/u.test(item.sha256)) throw Error('terminal-package-manifest');
-        const file = path.join(distribution, name);
-        const digest = createHash('sha256');
-        const handle = await open(file, 'r');
-        try {
-          if ((await handle.stat()).size !== item.bytes) throw Error('terminal-package-integrity');
-          // Reuse one buffer across the complete fixed closure. Read streams
-          // allocate the entire bundle's volume again as transient chunks.
-          let offset = 0;
-          while (offset < item.bytes) {
-            this.#live();
-            const { bytesRead } = await handle.read(verificationBuffer, 0, Math.min(verificationBuffer.length, item.bytes - offset), offset);
-            if (!bytesRead) throw Error('terminal-package-integrity');
-            digest.update(verificationBuffer.subarray(0, bytesRead)); offset += bytesRead;
-          }
-          if ((await handle.stat()).size !== item.bytes) throw Error('terminal-package-integrity');
-        } finally { await handle.close(); }
-        if (digest.digest('hex') !== item.sha256) throw Error('terminal-package-integrity');
-      }
+      const verify = (names: readonly string[]) => verifyTerminalAssets(distribution, artifacts, names,
+        () => this.#live(), () => { void this.#close(71, 'terminal-package-integrity'); }, this.options.records);
+      // Neither group depends on the other. Keep the full per-consumer check,
+      // and retain both real handle-closing completions even on early failure.
+      const recoveryVerified = verify([`recovery${executableSuffix}`, 'foreground.node', `exec-gate${executableSuffix}`]);
+      const surfaceCheck = verify([`ui${executableSuffix}`, renderLibrary]);
+      const surfaceVerified = surfaceCheck.then(() => true, error => {
+        if (!(this.#sealed && error instanceof TerminalChannelRetiredError)) void this.#close(71, 'terminal-package-integrity');
+        return false;
+      });
+      this.#fixedAssets = Promise.allSettled([recoveryVerified, surfaceCheck]).then(results => {
+        const failed = results.find(result => result.status === 'rejected' && !(result.reason instanceof TerminalChannelRetiredError));
+        if (failed?.status === 'rejected') throw failed.reason;
+      });
+      void this.#fixedAssets.catch(() => {});
+      await recoveryVerified;
       this.#live();
-      this.#processes = new TerminalForegroundProcesses(path.join(distribution, 'foreground.node'));
-      await beginTerminalWriterDeclaration(this.options.home, this.#processes.artifact); this.#live();
+      const nativePhase = this.options.records && beginLogPhase(this.options.records, 'terminal.native-edge', { waitFor: 'native-edge', refs: [{ kind: 'terminal', id: this.instance }] });
+      // Publish the lifetime owner synchronously. Observation must not add an
+      // await between creating it and making it available to the close path.
+      try {
+        this.#processes = new TerminalForegroundProcesses(path.join(distribution, 'foreground.node'));
+        nativePhase?.finish();
+      } catch (error) { nativePhase?.finish(error); throw error; }
+      await this.#phase('writer-declaration', () => beginTerminalWriterDeclaration(this.options.home, this.#processes!.artifact)); this.#live();
       if (process.platform === 'win32') {
         this.#creationServer = createServer(socket => this.#acceptCreation(socket));
         this.#creationServer.on('error', () => void this.#close(71, 'terminal-creation-channel-failed'));
-        await this.#creationEndpoint.listen(this.#creationServer); this.#live();
+        await this.#phase('creation-endpoint', () => this.#creationEndpoint.listen(this.#creationServer!)); this.#live();
       }
       this.#observe('starting');
       const ready = this.#waitNative(event => event.event === 'ready', 1500);
       this.#native = this.#spawn('recovery', path.join(distribution, `recovery${executableSuffix}`), ['resident', this.instance], [0, 1, 2, 'pipe', 'pipe'], this.#uiEnvironment(distribution));
-      await ready; this.#live();
-      await this.#nativeCommand('admit', event => event.event === 'admitted', 800);
+      await this.#phase('recovery-ready', () => ready); this.#live();
+      await this.#phase('recovery-admit', () => this.#nativeCommand('admit', event => event.event === 'admitted', 800));
       this.#live();
       this.#capacity = createDeviceCapacityRuntime(path.join(this.options.home, 'temporary', 'terminal'), { createDirectory: false, activityDriven: true });
-      await this.options.admitted?.(() => this.#createLogStore(), this.#capacity); this.#live();
       const identity: TerminalIdentityResolver = { read: pid => this.#identity(pid) };
-      const filesystem = CheckpointDirectoryHandle.createSession(5000, (executable, args) => this.#createFilesystem(executable, args));
+      await filesystemVerified; this.#live();
       this.#assets = new TerminalInstanceAssets(this.options.home, this.#capacity.arbiter, identity, filesystem, async () => {
         if (!this.#assetFileWorker) throw Error('terminal-assets-worker-unregistered');
         return this.#helperIdentity(this.#assetFileWorker.child, this.#assetFileWorker.spawnId);
       });
-      const instancePath = await this.#assets.admit(this.instance, { pid: this.#native.child.pid!, birth: this.#nativeBirth!, spawnId: this.#native.spawnId }, this.#abort.signal);
-      this.#live();
-      const applicationSpawn = this.#roleIntents.application = randomUUID();
-      await this.#assets.intent('application', this.#abort.signal, applicationSpawn);
-      this.#live();
-      const applicationDeadline = Date.now() + 5000;
-      // Projection creates short-lived DTOs beside another rendering runtime.
-      // Collect them earlier instead of growing a server-sized spare heap.
-      // This changes GC scheduling, not the admitted RPC/large-input capacity.
-      this.#application = this.#spawn('application', process.execPath,
-        ['--max-semi-space-size=4', '--heap-growing-percent=20', this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
-        ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_INSTANCE: this.instance,
-        ZHIXING_TERMINAL_DIRECTORY: instancePath, ZHIXING_TERMINAL_DIRECTORY_ID: this.#assets.instanceIdentity, ZHIXING_TERMINAL_HOME: this.options.home,
-      }, applicationSpawn);
-      const applicationIdentity = await this.#processIdentity(this.#application);
-      await this.#assets.bind('application', applicationIdentity, this.#abort.signal);
-      this.#live(); this.#application.child.resume();
-      // Loading business modules cannot hold the first visible UI hostage.
-      // Only forwarding business requests waits for N's acknowledged admission.
-      const application = this.#application;
-      this.#applicationAdmitted = (async () => {
-        if (!await this.#bounded(application.listening, Math.max(0, applicationDeadline - Date.now()), this.#abort.signal)) throw Error('terminal-application-listener-timeout');
-        this.#live();
-        await application.channel!.send({ type: 'hello', role: 'application' });
-      })();
-      void this.#applicationAdmitted.catch(() => this.#close(71, 'terminal-application-admission-failed'));
-      const uiSpawn = this.#roleIntents.ui = randomUUID();
-      await this.#assets.intent('ui', this.#abort.signal, uiSpawn);
-      this.#live();
-      // Install the whole UI creation deadline before invoking spawn, including
-      // synchronous creation time; a late returned child is owned and closed.
-      const startupDeadline = Date.now() + 5000;
-      this.#startupTimer = setTimeout(() => void this.#close(78, 'terminal-startup-timeout'), 5000);
-      this.#ui = this.#spawn('ui', path.join(distribution, `ui${executableSuffix}`), [], [0, 1, 2, 'ipc'], this.#uiEnvironment(distribution, instancePath), uiSpawn);
-      if (Date.now() >= startupDeadline) throw Error('terminal-creation-deadline');
-      const uiIdentity = await this.#processIdentity(this.#ui);
-      await this.#assets.bind('ui', uiIdentity, this.#abort.signal);
-      this.#live(); this.#ui.child.resume();
-      if (!await this.#bounded(this.#ui.listening, Math.max(0, startupDeadline - Date.now()), this.#abort.signal)) throw Error('terminal-ui-listener-timeout');
-      this.#live();
-      await this.#ui.channel!.send({ type: 'hello', role: 'ui' });
-    } catch { void this.#close(71, 'terminal-startup-failed'); }
+      const { instancePath, startupDeadline, ui } = await this.#admitUi(distribution, surfaceVerified);
+      // UI creation has no dependency on the business module graph. Start N
+      // while U establishes its input/rendering handshake, retaining one
+      // admission promise before U is allowed to send any business request.
+      this.#beginApplication(instancePath);
+      // The original bootstrap recorder already owns all startup evidence.
+      // Start its physical store after instance/UI creation, before the UI
+      // handshake, so logging helpers do not contend with that cold path.
+      await this.#phase('logging-admission', () => this.#admitLogging()); this.#live();
+      await this.#phase('ui-listener', async () => {
+        if (!await this.#bounded(ui.listening, Math.max(0, startupDeadline - Date.now()), this.#abort.signal)) throw Error('terminal-ui-listener-timeout');
+      });
+      this.#live(startupDeadline);
+      await this.#phase('ui-hello', () => ui.channel!.send({ type: 'hello', role: 'ui' }));
+    } catch (error) {
+      if (!(this.#sealed && error instanceof TerminalChannelRetiredError)) void this.#close(71, 'terminal-startup-failed');
+    }
     return this.#completion;
   }
 
-  #live(): void { if (this.#sealed || this.#abort.signal.aborted) throw Error('terminal-admission-closed'); }
+  async #admitUi(distribution: string, surfaceVerified: Promise<boolean>): Promise<{ instancePath: string; startupDeadline: number; ui: OwnedProcess }> {
+    const assets = this.#assets!, recovery = this.#native!;
+    const admitted = this.#phase('storage-admission', () => assets.admit(this.instance, { pid: recovery.child.pid!, birth: this.#nativeBirth!, spawnId: recovery.spawnId }, this.#abort.signal));
+    void admitted.catch(() => { if (!this.#sealed) void this.#close(71, 'terminal-assets-admission-failed'); });
+    this.#live();
+    // R and the native/gate closure are already admitted. OS creation may
+    // overlap full UI verification and storage admission: Windows keeps its
+    // initial thread suspended; POSIX runs only the verified fixed exec gate.
+    // Full integrity, storage and durable binding still precede the sole resume.
+    // The future runtime path is deterministic; no path is opened here.
+    const instancePath = path.join(assets.root, `instance-${this.instance}`);
+    const uiSpawn = this.#roleIntents.ui = randomUUID();
+    const startupDeadline = Date.now() + 5000;
+    this.#startupTimer = setTimeout(() => void this.#close(78, 'terminal-startup-timeout'), 5000);
+    this.#ui = this.#spawn('ui', path.join(distribution, process.platform === 'win32' ? 'ui.exe' : 'ui'), [], [0, 1, 2, 'ipc'], this.#uiEnvironment(distribution, instancePath), uiSpawn);
+    if (Date.now() >= startupDeadline) throw Error('terminal-creation-deadline');
+    if (!await surfaceVerified) throw Error('terminal-package-integrity');
+    this.#live(startupDeadline);
+    if (await admitted !== instancePath) throw Error('terminal-instance-path');
+    this.#live();
+    await this.#phase('ui-intent', () => assets.intent('ui', this.#abort.signal, uiSpawn)); this.#live();
+    const identity = await this.#phase('ui-identity', () => this.#processIdentity(this.#ui!)); this.#live();
+    await this.#phase('ui-bind', () => assets.bind('ui', identity, this.#abort.signal)); this.#live();
+    this.#resume(this.#ui, startupDeadline);
+    return { instancePath, startupDeadline, ui: this.#ui };
+  }
+
+  #resume(item: OwnedProcess, deadline?: number): void {
+    this.#live(deadline);
+    if (item.role === 'ui' && this.options.records) this.#firstFramePhase = beginLogPhase(this.options.records, 'terminal.ui-first-frame', { waitFor: 'ui-runtime-and-mode-handshake', refs: [{ kind: 'terminal', id: this.instance }] });
+    item.child.resume(); item.resumed = true;
+  }
+
+  async #phase<T>(name: string, work: () => Promise<T>): Promise<T> {
+    if (!this.options.records) return work();
+    const phase = beginLogPhase(this.options.records, `terminal.${name}`, { waitFor: name, refs: [{ kind: 'terminal', id: this.instance }] });
+    try { const value = await phase.run(work); phase.finish(); return value; }
+    catch (error) {
+      phase.finish(error instanceof TerminalChannelRetiredError ? new DOMException('terminal-retired', 'AbortError') : error);
+      throw error;
+    }
+  }
+
+  #beginApplication(instancePath: string): void {
+    this.#applicationAdmitted = (async () => {
+      this.#live();
+      const spawnId = this.#roleIntents.application = randomUUID();
+      await this.#assets!.intent('application', this.#abort.signal, spawnId);
+      this.#live();
+      const deadline = Date.now() + 5000;
+      // Projection creates short-lived DTOs beside another rendering runtime.
+      // Adjust GC scheduling without capping the admitted RPC/input capacity.
+      const application = this.#spawn('application', process.execPath,
+        ['--max-semi-space-size=4', '--heap-growing-percent=20', this.options.entry, ...this.options.args], ['ignore', 'pipe', 'pipe', 'ipc'], {
+          ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_INSTANCE: this.instance,
+          ZHIXING_TERMINAL_DIRECTORY: instancePath, ZHIXING_TERMINAL_DIRECTORY_ID: this.#assets!.instanceIdentity, ZHIXING_TERMINAL_HOME: this.options.home,
+        }, spawnId);
+      const identity = await this.#processIdentity(application);
+      await this.#assets!.bind('application', identity, this.#abort.signal);
+      this.#resume(application, deadline);
+      if (!await this.#bounded(application.listening, Math.max(0, deadline - Date.now()), this.#abort.signal)) throw Error('terminal-application-listener-timeout');
+      this.#live(deadline);
+      await application.channel!.send({ type: 'hello', role: 'application' });
+    })().catch(error => {
+      // Normal startup cancellation closes this same gate. Waiting U requests
+      // then see #sealed and finish without forwarding or a false failure.
+      if (!this.#sealed) { void this.#close(71, 'terminal-application-admission-failed'); throw error; }
+    });
+    void this.#applicationAdmitted.catch(() => {});
+  }
+
+  #live(deadline?: number): void {
+    if (this.#sealed || this.#abort.signal.aborted) throw new TerminalChannelRetiredError();
+    if (deadline !== undefined && Date.now() >= deadline) throw Error('terminal-creation-deadline');
+  }
 
   #helperLive(owner: string, role: string): void {
     if (!this.#sealed) { this.#live(); return; }
@@ -220,13 +282,16 @@ class TerminalSupervisor {
   #createLogStore(): ReturnType<LogStoreWorkerFactory> {
     this.#helperLive('supervisor', 'log-store');
     const owner = this.#newCreationOwner('log-store');
+    const spawnId = randomUUID();
     let child: TerminalForegroundChild;
     try { child = this.#processes!.create(process.execPath,
       // This lifecycle-only recorder is IO-bound and emits few events. Avoid
       // reserving a second JIT compiler/code heap for it; N and U keep their
       // normal runtimes for business projection and rendering.
       ['--jitless', '--max-semi-space-size=2', '--heap-growing-percent=20', path.join(path.dirname(this.options.entry), 'logging-store-worker.js'), this.options.home, String(process.pid)],
-      { ...process.env, ...owner.env }, false, false, { scope: 'execution', pipeEnvironment: 'ZHIXING_LOG_STORE_PIPE', frameBytes: LOG_STORE_FRAME_BYTES, creationOwner: true });
+      { ...process.env, ...owner.env }, false, false, { scope: 'execution', pipeEnvironment: 'ZHIXING_LOG_STORE_PIPE', frameBytes: LOG_STORE_FRAME_BYTES, creationOwner: true,
+        observeCreation: (timing, result) => this.options.records?.record({ event: 'terminalCreation', result, data: { instance: this.instance, role: 'log-store', spawnId, ...timing } }),
+      });
     } catch (error) { this.#creationOwners.delete(owner.token); throw error; }
     this.#bindCreationOwner(owner.token, child);
     this.#trackHelper(child);
@@ -238,8 +303,11 @@ class TerminalSupervisor {
 
   #createFilesystem(executable: string, args: readonly string[] = []): CheckpointFilesystemProcess {
     this.#live();
-    const child = this.#processes!.create(executable, args, process.env, false, true, { scope: 'execution', pipeEnvironment: 'ZHIXING_CHECKPOINT_PIPE' });
-    this.#assetFileWorker = { child, spawnId: randomUUID() };
+    const spawnId = randomUUID();
+    const child = this.#processes!.create(executable, args, process.env, false, true, { scope: 'execution', pipeEnvironment: 'ZHIXING_CHECKPOINT_PIPE',
+      observeCreation: (timing, result) => this.options.records?.record({ event: 'terminalCreation', result, data: { instance: this.instance, role: 'filesystem', spawnId, ...timing } }),
+    });
+    this.#assetFileWorker = { child, spawnId };
     this.#trackHelper(child);
     const stderr = new PassThrough();
     const worker = Object.assign(new EventEmitter(), {
@@ -610,11 +678,14 @@ class TerminalSupervisor {
     const started = performance.now();
     const creationOwner = role === 'application' ? this.#newCreationOwner(role) : undefined;
     let child: TerminalForegroundChild;
-    try { child = this.#processes!.create(executable, args, { ...env, ...creationOwner?.env }, role !== 'application', role === 'recovery', { creationOwner: !!creationOwner }); }
+    try { child = this.#processes!.create(executable, args, { ...env, ...creationOwner?.env }, role !== 'application', role === 'recovery', { creationOwner: !!creationOwner,
+      observeCreation: (timing, result) => this.options.records?.record({ event: 'terminalCreation', result, data: { instance: this.instance, role, spawnId, ...timing } }),
+    }); }
     catch (error) { if (creationOwner) this.#creationOwners.delete(creationOwner.token); throw error; }
+    void this.#phase(`create-${role}`, () => child.created).catch(() => {});
     if (creationOwner) this.#bindCreationOwner(creationOwner.token, child);
     let resolveExit!: () => void, resolveDrain!: () => void, resolveListening!: () => void;
-    const item: OwnedProcess = { role, child, spawnId, created: false, exited: false, code: null,
+    const item: OwnedProcess = { role, child, spawnId, created: false, resumed: false, exited: false, code: null,
       listening: new Promise(resolve => { resolveListening = resolve; }), announceListening: () => resolveListening(), announced: false,
       exit: new Promise(resolve => { resolveExit = resolve; }), drained: new Promise(resolve => { resolveDrain = resolve; }) };
     // Responsibility exists before any observer or asynchronous identity query.
@@ -628,11 +699,12 @@ class TerminalSupervisor {
       if (this.#sealed) { child.kill(); return; }
       try {
         this.#observe('created', { role, pid: child.pid!, spawnId: item.spawnId, createMs: performance.now() - started });
-        this.#live(); if (role === 'recovery') child.resume();
+        this.#live(); if (role === 'recovery') this.#resume(item);
       } catch { child.kill(); void this.#close(74, 'terminal-child-admission-failed'); }
     });
     child.once('error', () => {
       if (!item.created) { item.exited = true; item.code = 71; resolveExit(); }
+      if (this.#sealed && !item.resumed && child.cancelled) return;
       void this.#close(71, `${role}-error`);
     });
     child.once('exit', code => {
@@ -690,11 +762,11 @@ class TerminalSupervisor {
       if (this.#modeAdmission || !Number.isInteger(message.originalMask) || message.originalMask < 0 || message.originalMask > 511) throw Error('terminal-mode-registration');
       this.#modeAdmission = true;
       const end = Date.now() + 800;
-      await this.#nativeCommand(`modes-${message.originalMask}`, event => event.event === 'modes-admitted', Math.max(0, end - Date.now()));
+      await this.#phase('mode-register', () => this.#nativeCommand(`modes-${message.originalMask}`, event => event.event === 'modes-admitted', Math.max(0, end - Date.now())));
       this.#live();
-      await this.#nativeCommand('activate', event => event.event === 'entered', Math.max(0, end - Date.now()));
+      await this.#phase('mode-activate', () => this.#nativeCommand('activate', event => event.event === 'entered', Math.max(0, end - Date.now())));
       this.#live();
-      await this.#nativeCommand('permit-modes', event => event.event === 'modes-permitted', Math.max(0, end - Date.now()));
+      await this.#phase('mode-permit', () => this.#nativeCommand('permit-modes', event => event.event === 'modes-permitted', Math.max(0, end - Date.now())));
       this.#live();
       if (Date.now() >= end) throw Error('terminal-mode-admission-deadline');
       await item.channel!.send({ type: 'grant' }); return;
@@ -702,6 +774,7 @@ class TerminalSupervisor {
     if (item.role === 'ui' && message.type === 'ready') {
       if (!this.#modeAdmission || this.#uiReady || !Number.isSafeInteger(message.frameId)) throw Error('terminal-first-frame-order');
       this.#uiReady = true; clearTimeout(this.#startupTimer);
+      this.#firstFramePhase?.finish();
       this.#observe('first-frame', { frameId: message.frameId }); return;
     }
     if (item.role === 'ui' && message.type === 'request' && this.#uiReady) {
@@ -826,19 +899,43 @@ class TerminalSupervisor {
   };
   readonly #uncaught = (): void => { void this.#close(73, 'supervisor-error'); };
 
+  #admitLogging(): Promise<void> {
+    if (!this.#capacity) return Promise.resolve();
+    return this.#loggingAdmission ??= Promise.resolve().then(() =>
+      this.options.admitted?.(() => this.#createLogStore(), this.#capacity!));
+  }
+
+  #drainLogging(): Promise<void> {
+    // A failed/cancelled startup still attaches and drains the same recorder.
+    // Close and successful startup share one admission, never a second logger.
+    return this.#loggingDrain ??= this.#admitLogging().then(() =>
+      this.options.drain?.(terminalWriterDeadline(this.#deadline), this.#result));
+  }
+
   async #finishExecution(): Promise<boolean> {
     // Leave one finite restoration window after logging's own bounded drain.
-    this.#loggingDrain ??= this.options.drain?.(terminalWriterDeadline(this.#deadline), this.#result) ?? Promise.resolve();
-    const files = this.#assets?.close(this.#deadline) ?? Promise.resolve();
-    // A failed cleanup is not a successful persistence receipt, but its actual
-    // settlement still ends that owner's ability to start more runtime work.
-    // Wait for both owners even if one rejects before the other has finished.
-    const owners = Promise.allSettled([this.#loggingDrain, files]).then(results => {
-      if (results.some(result => result.status === 'rejected') && !this.#result) this.#result = 74;
-    });
+    const owners = this.#executionDrain ??= (() => {
+      const loggingDrain = this.#drainLogging();
+      // Preparation already owns read handles before assets exists. A failure
+      // in R/package admission must close that same owner as well.
+      const files = (this.#assets?.close(this.#deadline) ?? this.#filesystem?.close(this.#remaining(1000)) ?? Promise.resolve()).catch(async error => {
+        // The bridge's bounded stop can reject before prepare/creation/exit has
+        // physically finished. Retain that issued fence, then preserve failure.
+        await checkpointFilesystemCompletion(error);
+        throw error;
+      });
+      // A failed cleanup is not a successful persistence receipt, but its actual
+      // settlement still ends that owner's ability to start more runtime work.
+      // Wait for both owners even if one rejects before the other has finished.
+      return Promise.allSettled([loggingDrain, files, this.#fixedAssets]).then(results => {
+        if (results.some(result => result.status === 'rejected') && !this.#result) this.#result = 74;
+      });
+    })();
     const drained = await this.#bounded(owners, this.#remaining(Math.max(0, this.#deadline - Date.now() - 400)));
-    if (!drained && !this.#result) this.#result = 74;
-    if (!this.#processes) return drained;
+    if (!this.#processes) {
+      if (!drained && !this.#result) this.#result = 74;
+      return drained;
+    }
     this.#executionSealed = true; this.#processes.seal();
     this.#processes.terminateExecution();
     const until = Math.min(this.#deadline - 100, Date.now() + this.#remaining(300));
@@ -850,8 +947,10 @@ class TerminalSupervisor {
       await new Promise(resolve => setTimeout(resolve, 5));
     } while (true);
     // Terminating the existing helpers can settle a previously waiting owner.
-    // Recheck that actual fence within the same deadline; the earlier timeout
-    // remains a failure result, not a permanent veto after all work has ended.
+    // Recheck that actual fence within the same deadline. The earlier slice
+    // starts execution sealing; it is not a failure if all owners subsequently
+    // fulfill and execution/transport exit is proved in the reserved window.
+    // Rejected owners still set 74 above; an unknown final fence fails below.
     const helpers = await this.#bounded(Promise.all([owners, ...this.#helpers.map(item => item.drained)]),
       this.#remaining(Math.max(0, this.#deadline - Date.now() - 100)));
     const final = this.#processes.executionState();
@@ -873,7 +972,10 @@ class TerminalSupervisor {
     // synchronously re-enter this method on an already broken connection.
     let resolveClosing!: () => void;
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
-    this.#sealed = true; this.#abort.abort(); clearTimeout(this.#startupTimer);
+    this.#sealed = true;
+    for (const item of this.#owned) item.channel?.beginClose();
+    this.#abort.abort(); clearTimeout(this.#startupTimer);
+    this.#firstFramePhase?.finish(code === 0 || code === 130 ? new DOMException(reason, 'AbortError') : Error(reason));
     // Preserve the first finite lifecycle cause before logging is drained.
     // Observation failure must not re-enter or delay this closing path.
     try { this.options.records?.record({ event: 'terminalLifecycle', data: { instance: this.instance, phase: 'closing', reason, exitCode: this.#result } }); } catch { /* Close remains authoritative. */ }
@@ -882,16 +984,21 @@ class TerminalSupervisor {
     // Failure cannot authorize R while an old writer remains unproved.
     this.#deadlineTimer = setTimeout(() => process.exit(this.#result || 75), Math.max(0, this.#deadline - Date.now()));
     void (async () => {
-      for (const item of [this.#application, this.#ui]) if (item && !item.exited && !item.exitRequested) void item.channel?.send({ type: 'close', deadline: this.#deadline }).catch(() => {});
-      this.#loggingDrain = this.options.drain?.(terminalWriterDeadline(this.#deadline), this.#result) ?? Promise.resolve();
-      void this.#loggingDrain.catch(() => {});
+      for (const item of [this.#application, this.#ui]) if (item && !item.exited && !item.exitRequested) {
+        // A suspended process/gate has no business listener. Cancel it now,
+        // then await the same real creation/exit/drain fence below.
+        if (!item.resumed) item.child.kill('SIGKILL');
+        else void item.channel?.send({ type: 'close', deadline: this.#deadline }).catch(() => {});
+      }
+      const loggingDrain = this.#drainLogging();
+      void loggingDrain.catch(() => {});
       const writers = this.#owned.filter(item => item.role !== 'recovery');
       if (!await this.#bounded(Promise.all(writers.map(item => item.exit)), Math.max(0, terminalWriterDeadline(this.#deadline) - Date.now()))) {
         if (!this.#result) this.#result = 74;
         for (const item of writers) if (!item.exited) item.child.kill('SIGKILL');
       }
       let ended = await this.#bounded(Promise.all(writers.map(item => item.exit)), this.#remaining(1000));
-      if (!this.#result && writers.some(item => item.exited && item.code !== 0)) this.#result = 74;
+      if (!this.#result && writers.some(item => item.exited && item.code !== 0 && (item.resumed || !item.child.cancelled))) this.#result = 74;
       let drained = await this.#bounded(Promise.all(writers.map(item => item.drained)), this.#remaining(500));
       // N's death revokes its creation capability and terminates each directly
       // held helper. Its files cannot be collected merely because N exited.
@@ -938,6 +1045,12 @@ class TerminalSupervisor {
       }
       if (this.#native && !this.#native.exited) { this.#native.child.kill('SIGKILL'); await this.#bounded(this.#native.exit, 100); }
     }).finally(async () => {
+      // An intermediate restore slice may expire with physical IO still in
+      // flight. Keep the original total deadline armed until the actual owner
+      // fence ends; never return to the shell with only a bounded rejection.
+      if (this.#executionDrain && !await this.#bounded(this.#executionDrain, this.#remaining(8000))) {
+        process.exit(this.#result || 74);
+      }
       clearTimeout(this.#deadlineTimer);
       this.#capacity?.close();
       for (const waiter of this.#waiters) { clearTimeout(waiter.timer); waiter.reject(Error('terminal-closed')); }

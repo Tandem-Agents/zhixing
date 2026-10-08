@@ -85,14 +85,14 @@ export class TerminalInputStore {
         if (final) await this.#settle(blob);
         for (const char of text) {
           if (char === '\n') { blob.newlines++; blob.trailingNewlines++; }
-          else { blob.hasNonNewline = true; blob.trailingNewlines = 0; }
+          else if (char !== '\r') { blob.hasNonNewline = true; blob.trailingNewlines = 0; }
         }
       } catch (error) { blob.failed = true; throw error; }
     })).finally(() => { this.#pending--; });
     this.#serial = work.catch(() => {}); return work;
   }
 
-  completePaste(id: string): { token: string; bytes: number } {
+  completePaste(id: string): { token: string; bytes: number; fold: boolean } {
     const blob = this.#ready(id);
     if (blob.purpose !== 'paste') throw Error('terminal-input-purpose');
     if (!blob.pasteId) {
@@ -103,7 +103,8 @@ export class TerminalInputStore {
       this.#pastes.set(blob.pasteId, blob);
       this.#handles.set(blob.token, blob.id);
     }
-    return { token: blob.token!, bytes: blob.bytes };
+    const lines = blob.hasNonNewline ? blob.newlines - blob.trailingNewlines + 1 : 0;
+    return { token: blob.token!, bytes: blob.bytes, fold: blob.bytes >= 200 || lines >= 4 };
   }
 
   registerHandles(id: string, text: string): readonly { token: string; id: string }[] {
@@ -280,34 +281,76 @@ export class TerminalInputStore {
    * written and settled. The old version and its owners survive a failure.
    * Full copies are streamed through existing P transactions, never joined in
    * J. Unchanged windows need no replacement and no full-file copy. */
-  splice(id: string, start: number, end: number, replacementId: string): Promise<string> {
-    return this.editWindow(id, start, end, replacementId).then(result => result.inputId);
-  }
-  editWindow(id: string, start: number, end: number, replacementId: string, replacePastes?: string): Promise<{ inputId: string; start: number; end: number; bytes: number }> {
+  /** Replace a complete paste in one immutable draft transaction. Thresholds
+   * and old-token discovery live here; a U window cannot know the cold suffix. */
+  applyPaste(id: string, start: number, end: number, pasteId: string, cursor: number): Promise<{ inputId: string; start: number; end: number; bytes: number; cursor: number }> {
     if (this.#spliceWork) return Promise.reject(Error('terminal-input-edit-in-progress'));
-    return this.#spliceWork = this.#splice(id, start, end, replacementId, replacePastes).finally(() => { this.#spliceWork = undefined; });
+    const work = this.#applyPaste(id, start, end, pasteId, cursor);
+    this.#spliceWork = work;
+    return work.finally(() => { this.#spliceWork = undefined; });
+  }
+  async #applyPaste(id: string, start: number, end: number, pasteId: string, cursor: number): Promise<{ inputId: string; start: number; end: number; bytes: number; cursor: number }> {
+    const source = this.#ready(id), incoming = this.#ready(pasteId);
+    if (source.purpose !== 'draft' || incoming.purpose !== 'paste') throw Error('terminal-input-purpose');
+    await this.#validateRange(source, start, end);
+    await this.#validateRange(source, cursor, cursor);
+    let replaced = false, carry = '';
+    for await (const page of this.pages(id)) {
+      const text = carry + page;
+      for (const match of text.matchAll(createPasteTokenPattern())) {
+        const old = this.#pastes.get(Number(match[1]));
+        if (old?.token === match[0] && old.id !== pasteId) { replaced = true; break; }
+      }
+      if (replaced) break;
+      carry = text.slice(-1024);
+    }
+    const paste = this.completePaste(pasteId);
+    const expanded = replaced || !paste.fold;
+    const next = randomUUID(); this.begin(next, 'draft');
+    const target = this.#blobs.get(next)!, mapping: { at: number; value?: number } = { at: cursor };
+    try {
+      await this.#copyWithoutPastes(source, 0, start, target, pasteId, mapping);
+      const windowStart = target.bytes;
+      if (expanded) await this.#copy(incoming, 0, incoming.bytes, target);
+      else { await this.part(next, target.index, paste.token, false); await this.#settle(target); }
+      const windowEnd = target.bytes;
+      if (cursor > start && cursor <= end) mapping.value = windowEnd;
+      await this.#copyWithoutPastes(source, end, source.bytes, target, pasteId, mapping);
+      await this.part(next, target.index, '', true);
+      return { inputId: next, start: windowStart, end: windowEnd, bytes: target.bytes, cursor: mapping.value ?? windowEnd };
+    } catch (error) { await this.release(next).catch(() => {}); throw error; }
   }
 
-  async #splice(id: string, start: number, end: number, replacementId: string, replacePastes?: string): Promise<{ inputId: string; start: number; end: number; bytes: number }> {
-    const source = this.#ready(id), replacement = this.#ready(replacementId);
-    if (replacePastes && this.#ready(replacePastes).purpose !== 'paste') throw Error('terminal-input-purpose');
+  async #validateRange(source: InputBlob, start: number, end: number): Promise<void> {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > source.bytes) throw Error('terminal-input-range');
     for (const offset of new Set([start, end])) if (offset && offset < source.bytes) {
       const byte = await this.#files.runOperation(() => terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
         if (!source.identity) throw Error('terminal-input-identity-unavailable');
-        return this.#files.read(`input/${id}`, source.bytes, offset, 1, source.identity, step);
+        return this.#files.read(`input/${source.id}`, source.bytes, offset, 1, source.identity, step);
       }));
       if (byte.length !== 1 || (byte[0]! & 0xc0) === 0x80) throw Error('terminal-input-range-encoding');
     }
+  }
+  splice(id: string, start: number, end: number, replacementId: string): Promise<string> {
+    return this.editWindow(id, start, end, replacementId).then(result => result.inputId);
+  }
+  editWindow(id: string, start: number, end: number, replacementId: string): Promise<{ inputId: string; start: number; end: number; bytes: number }> {
+    if (this.#spliceWork) return Promise.reject(Error('terminal-input-edit-in-progress'));
+    return this.#spliceWork = this.#splice(id, start, end, replacementId).finally(() => { this.#spliceWork = undefined; });
+  }
+
+  async #splice(id: string, start: number, end: number, replacementId: string): Promise<{ inputId: string; start: number; end: number; bytes: number }> {
+    const source = this.#ready(id), replacement = this.#ready(replacementId);
+    await this.#validateRange(source, start, end);
     const next = randomUUID();
-    this.begin(next, 'draft', replacePastes ? undefined : source.bytes - (end - start) + replacement.bytes);
+    this.begin(next, 'draft', source.bytes - (end - start) + replacement.bytes);
     const target = this.#blobs.get(next)!;
     try {
-      await this.#copyWithoutPastes(source, 0, start, target, replacePastes);
+      await this.#copy(source, 0, start, target);
       const windowStart = target.bytes;
-      await this.#copyWithoutPastes(replacement, 0, replacement.bytes, target, replacePastes);
+      await this.#copy(replacement, 0, replacement.bytes, target);
       const windowEnd = target.bytes;
-      await this.#copyWithoutPastes(source, end, source.bytes, target, replacePastes);
+      await this.#copy(source, end, source.bytes, target);
       await this.part(next, target.index, '', true);
       return { inputId: next, start: windowStart, end: windowEnd, bytes: target.bytes };
     } catch (error) {
@@ -317,8 +360,12 @@ export class TerminalInputStore {
     }
   }
 
-  async #copyWithoutPastes(source: InputBlob, start: number, end: number, target: InputBlob, keep?: string): Promise<void> {
-    if (!keep || !this.#pastes.size) { await this.#copy(source, start, end, target); return; }
+  async #copyWithoutPastes(source: InputBlob, start: number, end: number, target: InputBlob, keep?: string, mapping?: { at: number; value?: number }): Promise<void> {
+    const copy = async (from: number, to: number) => {
+      if (mapping && mapping.value === undefined && mapping.at >= from && mapping.at <= to) mapping.value = target.bytes + mapping.at - from;
+      await this.#copy(source, from, to, target);
+    };
+    if (!keep || !this.#pastes.size) { await copy(start, end); return; }
     // Only registered old paste tokens disappear. Scan one bounded page plus
     // token carry, and copy unchanged ranges without retaining a range table.
     let offset = start, textOffset = start, spanStart = start, carry = '';
@@ -340,12 +387,13 @@ export class TerminalInputStore {
         const blob = this.#pastes.get(Number(match[1]));
         if (blob?.token !== match[0] || blob.id === keep) continue;
         const tokenStart = textOffset + Buffer.byteLength(text.slice(0, match.index));
-        await this.#copy(source, spanStart, tokenStart, target);
+        await copy(spanStart, tokenStart);
         spanStart = tokenStart + Buffer.byteLength(match[0]);
+        if (mapping && mapping.value === undefined && mapping.at >= tokenStart && mapping.at <= spanStart) mapping.value = target.bytes;
       }
       textOffset += Buffer.byteLength(text.slice(0, limit)); carry = text.slice(limit);
     }
-    await this.#copy(source, spanStart, end, target);
+    await copy(spanStart, end);
   }
 
   async #copy(source: InputBlob, start: number, end: number, target: InputBlob): Promise<void> {

@@ -28,7 +28,7 @@ function fixture() {
   const abort = new AbortController();
   const tasks = new TerminalTasks({ controller: () => current, conversation, scheduler, choose, publish, changed, signal: abort.signal });
   return { tasks, controller, conversation, scheduler, choose, publish, changed, abort,
-    text: () => choose.mock.calls.map(([page]) => page.message).join('\n'),
+    text: () => [...choose.mock.calls.map(([page]) => page.message), ...publish.mock.calls.map(([result]) => result.message)].join('\n'),
     replace(next: TerminalTaskController | undefined) { current = next; } };
 }
 
@@ -74,6 +74,8 @@ describe('terminal task commands and current projection', () => {
   it('does not call a failed or malformed query an empty task list, and refresh recovers', async () => {
     const f = fixture(); f.conversation.taskList.mockRejectedValueOnce(Error('read unavailable'));
     await f.tasks.run('tasklist'); expect(f.text()).toContain('read unavailable'); expect(f.text()).not.toContain('任务列表为空');
+    expect(f.publish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ error: true, message: expect.stringContaining('read unavailable') }));
+    expect(f.choose).not.toHaveBeenCalled();
     expect(f.tasks.summary?.state).toBe('error');
     await f.tasks.refresh(); expect(f.tasks.summary?.state).toBe('ready');
     f.tasks.apply({ conversationId: 'conv-1', change: 'taskList', taskList: state('x'.repeat(1100 * 1024)) });

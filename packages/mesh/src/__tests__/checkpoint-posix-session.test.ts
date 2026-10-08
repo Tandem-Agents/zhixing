@@ -24,6 +24,31 @@ function fixture(autoExit = true) {
 afterEach(() => vi.useRealTimers());
 
 describe('owned POSIX filesystem transport (host-independent)', () => {
+  it('retains a prepare-only owner through bounded close and forbids late spawn', async () => {
+    vi.useFakeTimers(); let verified!: (path: string) => void;
+    const f = fixture(), verify = vi.fn(() => new Promise<string>(resolve => { verified = resolve; }));
+    const owner = ownedPosixFilesystem(5000, verify, f.factory);
+    const prepared = owner.prepare(), closing = owner.stop(20).catch(error => error);
+    await vi.advanceTimersByTimeAsync(21);
+    const failure = await closing;
+    expect(failure).toMatchObject({ code: 'ERR_CHECKPOINT_OWNER_EXIT_UNCONFIRMED' });
+    const completion = checkpointFilesystemCompletion(failure)!;
+    let ended = false; void completion.then(() => { ended = true; });
+    await Promise.resolve(); expect(ended).toBe(false);
+    verified('/fixture/addon.node'); await prepared; await completion;
+    expect(f.factory).not.toHaveBeenCalled(); expect(verify).toHaveBeenCalledOnce();
+    await expect(owner.prepare()).rejects.toThrow();
+    await expect(owner.request('openPath', {})).rejects.toThrow();
+  });
+
+  it('does not retry failed preverification at first use', async () => {
+    const f = fixture(), invalid = Error('invalid artifact'), verify = vi.fn(async () => { throw invalid; });
+    const owner = ownedPosixFilesystem(5000, verify, f.factory);
+    await expect(owner.prepare()).rejects.toBe(invalid);
+    await expect(owner.request('openPath', {})).rejects.toBe(invalid);
+    await owner.stop(); expect(f.factory).not.toHaveBeenCalled(); expect(verify).toHaveBeenCalledOnce();
+  });
+
   it('fences a late artifact verification without creating a late owner', async () => {
     let verified!: (path: string) => void;
     const f = fixture();

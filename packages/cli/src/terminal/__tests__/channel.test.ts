@@ -1,8 +1,61 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TerminalChannel } from '@zhixing/terminal-ui/channel';
+import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
 import { TERMINAL_LIMITS, TERMINAL_PROTOCOL } from '@zhixing/terminal-ui/protocol';
 
 describe('terminal independent control capacity', () => {
+  it('retires only business, tolerates its genuine late ACK, and still rejects an unmatched ACK', async () => {
+    const packets: any[] = [], failure = vi.fn();
+    const channel = new TerminalChannel('synthetic', (packet, done) => { packets.push(packet); done(); }, () => {}, failure);
+    const pending = Array.from({ length: 8 }, (_, id) => channel.send({ type: 'reply', id }).catch(error => error));
+    channel.beginClose();
+    expect((await Promise.all(pending)).every(error => error instanceof TerminalChannelRetiredError)).toBe(true);
+    await expect(channel.send({ type: 'reply', id: 9 })).rejects.toBeInstanceOf(TerminalChannelRetiredError);
+    const end = channel.send({ type: 'exit', code: 0, reason: 'user-exit' });
+    for (const [index, packet] of [packets[0], packets.at(-1)].entries()) {
+      channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: index + 1, traffic: 'control', payload: { type: 'ack', sequence: packet.sequence } });
+    }
+    await end; expect(failure).not.toHaveBeenCalled();
+    channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 3, traffic: 'control', payload: { type: 'ack', sequence: packets[0].sequence } });
+    expect(failure).toHaveBeenCalledExactlyOnceWith('terminal-unmatched-ack');
+  });
+
+  it.each([false, true])('settles a receiving handler on retirement without swallowing a real error=%s', async real => {
+    let reject!: (error: Error) => void;
+    const sent = vi.fn(), failure = vi.fn();
+    const channel = new TerminalChannel('synthetic', sent, () => new Promise<void>((_resolve, no) => { reject = no; }), failure);
+    channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 1, traffic: 'body', payload: { type: 'reply', id: 1 } });
+    await Promise.resolve(); channel.beginClose();
+    reject(real ? Error('real receiver failure') : new TerminalChannelRetiredError());
+    if (real) { await expect(channel.closeAfterReceived()).rejects.toThrow(); expect(failure).toHaveBeenCalledExactlyOnceWith('terminal-receive-failed'); }
+    else { await channel.closeAfterReceived(); expect(failure).not.toHaveBeenCalled(); }
+    expect(sent).not.toHaveBeenCalled();
+  });
+
+  it('keeps malformed traffic and failed lifecycle writes fatal during retirement', async () => {
+    const failure = vi.fn();
+    const channel = new TerminalChannel('synthetic', (_packet, done) => done(Error('real write failure')), () => {}, failure);
+    channel.beginClose();
+    await expect(channel.send({ type: 'exit', code: 0, reason: 'user-exit' })).rejects.toThrow();
+    expect(failure).toHaveBeenCalledExactlyOnceWith('terminal-send-failed');
+    const invalid = vi.fn(), peer = new TerminalChannel('synthetic', vi.fn(), () => {}, invalid);
+    peer.beginClose(); peer.accept({ invalid: true });
+    expect(invalid).toHaveBeenCalledExactlyOnceWith('terminal-invalid-envelope');
+  });
+
+  it('cancels a late ordinary ACK callback after retirement but preserves prior failures', async () => {
+    for (const retireFirst of [false, true]) {
+      let done!: (error: Error) => void;
+      const failure = vi.fn();
+      const channel = new TerminalChannel('synthetic', (_packet, finish) => { done = finish; }, () => {}, failure);
+      channel.accept({ protocol: TERMINAL_PROTOCOL, instance: 'synthetic', sequence: 1, traffic: 'body', payload: { type: 'reply', id: 1 } });
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      if (retireFirst) channel.beginClose();
+      done(Error('peer ended')); channel.beginClose();
+      if (retireFirst) { await channel.closeAfterReceived(); expect(failure).not.toHaveBeenCalled(); }
+      else { await expect(channel.closeAfterReceived()).rejects.toThrow(); expect(failure).toHaveBeenCalledExactlyOnceWith('terminal-ack-failed'); }
+    }
+  });
+
   it('keeps control and the reserved exit reachable when the body window is full', async () => {
     const sent = vi.fn((_packet, done: (error?: Error) => void) => done()), failure = vi.fn();
     const channel = new TerminalChannel('synthetic', sent, () => {}, failure);

@@ -1,9 +1,38 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { patchParserClient, patchParserWorker } from './opentui-parser-patch.js';
+import { patchParserAssets, patchParserClient, patchParserWorker } from './opentui-parser-patch.js';
 
 describe('packaged OpenTUI parser worker', () => {
+  it('resolves every grammar, worker and wasm only through the existing packaged asset boundary', async () => {
+    const source = await readFile(new URL('../node_modules/@opentui/core/chunk-bun-sjw2d9bq.js', import.meta.url), 'utf8');
+    const patched = patchParserAssets(source);
+    const resolverStart = patched.indexOf('function resolveAssetPath(');
+    const resolver = patched.slice(resolverStart, patched.indexOf('// src/platform/runtime.ts', resolverStart));
+    const grammar = patched.slice(patched.indexOf('var packagedParserAssets ='), patched.indexOf('// src/node-asset-target.ts'));
+    const runtime = patched.slice(patched.indexOf('var CORE_ASSET_PREFIX ='), patched.indexOf('async function resolveNativeLibraryPath()'));
+    const env = { OTUI_ASSET_ROOT: path.resolve('synthetic-assets') as string | undefined }, stat = vi.fn(() => ({ isFile: () => true }));
+    const api = new Function('process', 'isAbsolute', 'join', 'statSync', `${resolver}\n${grammar}\n${runtime}
+      return { keys: [...packagedParserAssets], grammar: resolveDefaultParserAsset, worker: resolveDefaultTreeSitterWorkerPath, wasm: resolveTreeSitterWasm };`
+    )({ env }, path.isAbsolute, path.join, stat);
+    expect(api.keys).toHaveLength(11);
+    for (const key of api.keys) expect(await api.grammar(key, 'forbidden-fallback')).toBe(path.join(env.OTUI_ASSET_ROOT!, '@opentui/core', key));
+    expect(api.worker('forbidden-fallback')).toBe(path.join(env.OTUI_ASSET_ROOT!, '@opentui/core/parser.worker.js'));
+    expect(api.wasm()).toBe(path.join(env.OTUI_ASSET_ROOT!, 'web-tree-sitter/tree-sitter.wasm'));
+    expect(stat).toHaveBeenCalledTimes(13);
+    expect(() => api.grammar('../escape.wasm')).toThrow('Unknown');
+    expect(grammar + runtime).not.toContain('import(');
+    expect(grammar + runtime).not.toContain('resolveBundledFilePath');
+    for (const operation of [() => api.grammar(api.keys[0], 'forbidden-fallback'), () => api.worker('forbidden-fallback'), () => api.wasm()]) {
+      env.OTUI_ASSET_ROOT = undefined; expect(operation).toThrow('no package-relative fallback');
+      env.OTUI_ASSET_ROOT = 'relative-root'; expect(operation).toThrow('absolute directory');
+      env.OTUI_ASSET_ROOT = path.resolve('missing-root'); stat.mockReturnValue({ isFile: () => false });
+      expect(operation).toThrow('Missing OpenTUI asset'); stat.mockReturnValue({ isFile: () => true });
+    }
+    expect(() => patchParserAssets(source.replace('"assets/zig/highlights.scm":', '"assets/other/highlights.scm":'))).toThrow('identity changed');
+    expect(() => patchParserAssets(source.replace('useAssetRoot: false', 'useAssetRoot: true'))).toThrow('identity changed');
+    expect(() => patchParserAssets(patched)).toThrow('seam changed');
+  });
   it('keeps actual worker failure and timeout settlement on the root error channel without console output', async () => {
     const source = await readFile(new URL('../node_modules/@opentui/core/chunk-bun-sjw2d9bq.js', import.meta.url), 'utf8');
     const patched = patchParserClient(source), worker = { onerror: undefined as undefined | ((error: { message: string; error: Error }) => void) };

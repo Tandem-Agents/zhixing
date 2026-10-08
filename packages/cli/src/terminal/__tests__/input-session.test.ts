@@ -288,28 +288,29 @@ describe('terminal draft receipts and asynchronous paste', () => {
     expect(session.draft).toMatchObject({ text: 'tail', cursor: 2 });
   });
 
-  it('keeps a failed off-window paste replacement pending and retries it before explicit submission', async () => {
+  it('keeps the complete prior draft when atomic paste publication fails, and never submits its pending marker', async () => {
     const inputId = crypto.randomUUID(), ticket = crypto.randomUUID(), bytes = 65 * 1024 * 1024;
-    let fail = true, pasted = '', replacement = '';
+    const sizes = new Map([[inputId, bytes]]), uploads = new Map<string, string>();
     const request = vi.fn(async (action: TerminalAction) => {
       if (action.kind === 'input-history') return { inputId, ticket, bytes };
       if (action.kind === 'input-window') return { inputId, bytes, start: bytes - 4, end: bytes, text: 'tail' };
-      if (action.kind === 'input-begin' && action.purpose === 'draft') replacement = '';
-      if (action.kind === 'input-part') replacement += action.text;
-      if (action.kind === 'paste-finish') { pasted = action.inputId; return { text: '[new paste]', handles: [{ token: '[new paste]', id: pasted }], paste: true, replacePastes: true }; }
+      if (action.kind === 'input-begin') { uploads.set(action.inputId, ''); sizes.set(action.inputId, 0); }
+      if (action.kind === 'input-part') { uploads.set(action.inputId, uploads.get(action.inputId)! + action.text); sizes.set(action.inputId, Buffer.byteLength(uploads.get(action.inputId)!)); }
+      if (action.kind === 'paste-finish') {
+        if (!action.draft) return { textEdit: true, text: '[new original]' };
+        throw Error('synthetic atomic paste failure');
+      }
       if (action.kind === 'input-splice') {
-        expect(action.replacePastes).toBe(pasted);
-        if (fail) { fail = false; throw Error('synthetic write failure'); }
-        const start = action.start - 20, end = start + Buffer.byteLength(replacement);
-        return { inputId: crypto.randomUUID(), start, end, bytes: end };
+        const id = crypto.randomUUID(), total = sizes.get(action.inputId)! - (action.end - action.start) + sizes.get(action.replacementId)!;
+        sizes.set(id, total); return { inputId: id, bytes: total };
       }
       return {};
     });
     const session = new TerminalInputSession(request, vi.fn()); await session.history(-1);
-    await expect(session.paste(Buffer.from('new original'))).rejects.toThrow('synthetic write failure');
-    expect(session.draft.text).toBe('tail[new paste]');
-    await session.submit();
-    expect(request.mock.calls.filter(([action]) => action.kind === 'input-splice')).toHaveLength(2);
-    expect(request.mock.calls.filter(([action]) => action.kind === 'input-submit')).toHaveLength(1);
+    await expect(session.paste(Buffer.from('new original'))).rejects.toThrow('synthetic atomic paste failure');
+    expect(session.draft.text).toBe('tail'); await session.submit();
+    const submission = request.mock.calls.map(([action]) => action).findLast(action => action.kind === 'input-submit');
+    expect(submission?.kind).toBe('input-submit'); expect(sizes.get(submission!.inputId)).toBe(bytes);
+    expect(uploads.get(request.mock.calls.map(([action]) => action).findLast(action => action.kind === 'input-splice')!.replacementId)).toBe('tail');
   });
 });

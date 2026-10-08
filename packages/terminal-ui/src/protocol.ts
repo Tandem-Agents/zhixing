@@ -4,6 +4,8 @@ import type { TerminalProcessView } from './process-model.js';
 export { validateProcessView } from './process-model.js';
 
 /** Private same-release terminal transport, not a second product API. */
+export interface TerminalPasteDraft { readonly inputId: string; readonly start: number; readonly end: number; readonly cursor: number }
+
 export const TERMINAL_PROTOCOL = "zhixing-terminal/1";
 export const TERMINAL_LIMITS = Object.freeze({
   frameBytes: 256 * 1024,
@@ -81,25 +83,29 @@ export type TerminalAction =
   | { readonly kind: "configuration-open"; readonly section?: "model" | "mcp" }
   | { readonly kind: "configuration-action"; readonly editId: string; readonly action: string; readonly value?: string | number | boolean }
   | { readonly kind: "secret-value"; readonly editId: string; readonly fieldId: string; readonly value: string }
-  | { readonly kind: "confirmation"; readonly requestId: string; readonly action: string; readonly note?: string }
-  | { readonly kind: "selection"; readonly requestId: string; readonly itemId?: string; readonly input?: string; readonly cancelled?: boolean }
+  | { readonly kind: "confirmation"; readonly requestId: string; readonly action: string; readonly note?: string; readonly cancelCause?: TerminalSelectionCancelCause }
+  | { readonly kind: "selection"; readonly requestId: string; readonly itemId?: string; readonly input?: string; readonly cancelled?: boolean; readonly cancelCause?: TerminalSelectionCancelCause }
   | { readonly kind: "input-begin"; readonly inputId: string; readonly purpose: 'draft' | 'paste'; readonly bytes?: number }
   | { readonly kind: "input-part"; readonly inputId: string; readonly index: number; readonly text: string; readonly final: boolean }
   | { readonly kind: "input-submit"; readonly inputId: string; readonly version: number }
   | { readonly kind: 'input-window'; readonly inputId: string; readonly position: number }
-  | { readonly kind: 'input-splice'; readonly inputId: string; readonly start: number; readonly end: number; readonly replacementId: string; readonly replacePastes?: string }
+  | { readonly kind: 'input-splice'; readonly inputId: string; readonly start: number; readonly end: number; readonly replacementId: string }
   | { readonly kind: 'input-references'; readonly version: number; readonly ids: readonly string[]; readonly completed: readonly string[]; readonly cached?: readonly string[] }
   | { readonly kind: 'input-history'; readonly offset: number }
   | { readonly kind: 'input-history-next' | 'input-history-end'; readonly ticket: string }
-  | { readonly kind: 'input-candidates'; readonly revision: number; readonly text: string; readonly cursor: number }
+  | { readonly kind: 'input-candidates'; readonly revision: number; readonly text: string; readonly cursor: number; readonly atStart?: boolean }
+  | { readonly kind: 'candidate-ghost'; readonly revision: number }
   | { readonly kind: 'candidate-accept'; readonly revision: number; readonly id: string }
   | { readonly kind: 'candidate-revoke'; readonly revision: number; readonly id: string }
   | { readonly kind: 'candidate-manage'; readonly revision: number; readonly action: 'delete' | 'rename' | 'create'; readonly id?: string }
-  | { readonly kind: 'paste-finish'; readonly inputId: string }
+  | { readonly kind: 'paste-finish'; readonly inputId: string; readonly draft?: TerminalPasteDraft }
   | { readonly kind: "input-release"; readonly inputId: string }
   | { readonly kind: "clipboard-read"; readonly inputId: string; readonly target: 'draft' | 'field' };
 
 export interface TerminalCandidates {
+  /** Display-only prefix target. Acceptance is authorized by N's revision. */
+  readonly ghost?: { readonly fullValue: string };
+  readonly argumentHint?: string;
   readonly revision: number;
   readonly mode?: 'picker' | 'management';
   readonly canDelete?: boolean;
@@ -119,12 +125,16 @@ export interface TerminalCandidateAcceptance {
   readonly handles?: readonly { readonly token: string; readonly id: string }[];
 }
 
+export type TerminalSelectionCancelCause = 'escape' | 'ctrl-c' | 'ctrl-d' | 'aborted';
+
 export interface TerminalChoice {
   readonly id: string;
   readonly label: string;
   readonly detail?: string;
   readonly disabled?: boolean;
   readonly danger?: boolean;
+  readonly hotkey?: string;
+  readonly detailsActionId?: string;
 }
 
 export interface TerminalDisplaySegment {
@@ -163,8 +173,12 @@ export interface TerminalView {
   readonly requestId?: string;
   readonly editId?: string;
   readonly choices?: readonly TerminalChoice[];
+  readonly selectionLayer?: 'select' | 'input' | 'confirm' | 'details';
+  readonly initialItemId?: string;
+  readonly detailsActionId?: string;
   readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean };
   readonly connected?: boolean;
+  readonly environment?: { readonly provider: string; readonly model: string; readonly workspace: string | null };
   readonly busy?: boolean;
   readonly skills?: TerminalSkillsView;
   readonly recovery?: { readonly requestId: string; readonly input: boolean; readonly pages: number; readonly settled?: boolean };
@@ -177,4 +191,28 @@ export function terminalEnvelope(value: unknown, instance: string): value is Ter
     Number.isSafeInteger(packet.sequence) && packet.sequence! > 0 &&
     (packet.traffic === "body" || packet.traffic === "control") &&
     !!packet.payload && typeof packet.payload === "object" && typeof packet.payload.type === "string";
+}
+
+/** One-code-unit command alias; normalize semantic matching only.
+ * Keep the original draft/history literal. Expanded paste payloads require
+ * the unexpanded draft as the guard so pasted punctuation stays ordinary text. */
+export const SLASH_ALIASES: readonly string[] = ["、"];
+
+export function normalizeLeadingSlashAlias(input: string): string {
+  for (const alias of SLASH_ALIASES) {
+    if (input.startsWith(alias)) return "/" + input.slice(alias.length);
+  }
+  return input;
+}
+
+/** Caller supplies trimmed control strings; guard and target have the same
+ * leading alias when the alias is typed before any folded paste reference. */
+export function normalizeLeadingSlashAliasInExpanded(
+  target: string,
+  guard: string,
+): string {
+  for (const alias of SLASH_ALIASES) {
+    if (guard.startsWith(alias)) return "/" + target.slice(alias.length);
+  }
+  return target;
 }

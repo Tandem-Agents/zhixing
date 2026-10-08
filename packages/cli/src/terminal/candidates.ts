@@ -1,13 +1,13 @@
 import { ArgumentProvider, CommandProvider, DefaultCommandRegistry, FileProvider, type CommandDef, type SuggestionItem, type SuggestionProvider, type RuntimeContext } from '@zhixing/core/typeahead';
 import type { TerminalTrustCandidates } from './trust-candidates.js';
-import type { TerminalCandidates } from '@zhixing/terminal-ui/protocol';
+import { normalizeLeadingSlashAlias, type TerminalCandidates } from '@zhixing/terminal-ui/protocol';
 import { BUILTIN_COMMANDS } from '../commands/builtin-definitions.js';
 import { createInputHandleTokenPatterns } from '../input-handle-tokens.js';
 
 /** Commands delivered in this migration unit. Other command ownership stays in
  * the same catalog, without exposing an inoperative candidate. */
 const available = new Set(['help', 'status', 'stop', 'config', 'mcp', 'skills', 'exit', 'trust', 'security', 'advancement', 'resolve', 'tasklist', 'task', 'tasks', 'model', 'usage', 'context', 'compact']);
-interface CandidateQuery { revision: number; abort: AbortController; items: readonly SuggestionItem[]; command?: 'resume' | 'work' }
+interface CandidateQuery { revision: number; abort: AbortController; items: readonly SuggestionItem[]; ghost?: string; command?: 'resume' | 'work' }
 
 export class TerminalCandidatesOwner {
   readonly registry = new DefaultCommandRegistry();
@@ -40,18 +40,19 @@ export class TerminalCandidatesOwner {
     this.#providers = [new CommandProvider({ registry: this.registry }), new ArgumentProvider({ registry: this.registry }), new FileProvider({ root: () => runtime().cwd, maxResults: 100, maxResultBytes: 96 * 1024 })]
       .sort((left, right) => left.priority - right.priority);
   }
-  async query(revision: number, text: string, cursor: number): Promise<TerminalCandidates> {
-    if (!Number.isSafeInteger(revision) || revision < 0 || typeof text !== 'string' || Buffer.byteLength(text) > 32 * 1024 ||
+  async query(revision: number, text: string, cursor: number, atStart = true): Promise<TerminalCandidates> {
+    if (typeof atStart !== 'boolean' || !Number.isSafeInteger(revision) || revision < 0 || typeof text !== 'string' || Buffer.byteLength(text) > 32 * 1024 ||
       !Number.isSafeInteger(cursor) || cursor < 0 || cursor > text.length || (this.#query && revision <= this.#query.revision)) throw Error('terminal-candidate-query');
     this.#query?.abort.abort();
     const query: CandidateQuery = { revision, abort: new AbortController(), items: [] as readonly SuggestionItem[] }; this.#query = query;
-    const context = { draft: text, cursor: Array.from(text.slice(0, cursor)).length, runtime: this.runtime(), mode: 'prompt' as const,
+    const semanticText = atStart ? normalizeLeadingSlashAlias(text) : text;
+    const context = { draft: semanticText, cursor: Array.from(text.slice(0, cursor)).length, runtime: this.runtime(), mode: 'prompt' as const,
       wordTerminators: createInputHandleTokenPatterns() };
     for (const provider of this.#providers) {
       const match = provider.matchTrigger(context);
       if (!match) continue;
-      const trust = provider.id === 'argument' && /^\/trust\s/u.test(text);
-      const command = provider.id === 'argument' ? /^\/(resume|work)\s/u.exec(text)?.[1] as 'resume' | 'work' | undefined : undefined;
+      const trust = provider.id === 'argument' && /^\/trust\s/u.test(semanticText);
+      const command = provider.id === 'argument' ? /^\/(resume|work)\s/u.exec(semanticText)?.[1] as 'resume' | 'work' | undefined : undefined;
       const chars = Array.from(text);
       const range = { revision, start: chars.slice(0, match.tokenStart).join('').length, end: chars.slice(0, match.tokenEnd).join('').length };
       let items: readonly SuggestionItem[];
@@ -69,9 +70,16 @@ export class TerminalCandidatesOwner {
         if (bytes + charge > 96 * 1024) return false;
         bytes += charge; return true;
       }).slice(0, 100);
+      // Pure provider results are projected as bounded presentation data. The
+      // full ghost replacement remains owned by this revision in N.
+      const ghost = provider.supportsGhostText ? provider.computeGhostText?.(match) : undefined;
+      if (ghost && typeof ghost.fullValue === 'string' && ghost.fullValue.length > 0 && Buffer.byteLength(ghost.fullValue) <= 4096) query.ghost = ghost.fullValue;
+      const argument = provider.computeArgumentHint?.(match);
+      const hintText = argument ? (!query.items.length && argument.emptyHint ? argument.emptyHint : argument.renderedHint) : undefined;
+      const argumentHint = typeof hintText === 'string' ? Array.from(hintText).slice(0, 1024).join('') : undefined;
       if (trust) this.#trust?.retain(revision, query.items);
       query.command = command;
-      return { ...range, ...(trust ? { mode: 'management' as const, canDelete: true, hint: 'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销 · Ctrl+R 刷新' }
+      return { ...range, ...(query.ghost ? { ghost: { fullValue: query.ghost } } : {}), ...(argumentHint ? { argumentHint } : {}), ...(trust ? { mode: 'management' as const, canDelete: true, hint: 'Esc 返回 · ↑↓ 选择 · 两次 Ctrl+D 撤销 · Ctrl+R 刷新' }
         : command ? { mode: 'picker' as const, canDelete: true, canRename: command === 'work', canCreate: command === 'work', hint: command === 'work'
           ? 'Esc 返回 · Enter 进入 · Ctrl+D 删除 · Ctrl+R 改名 · Ctrl+N 新建' : 'Esc 返回 · Enter 切换 · 两次 Ctrl+D 删除' } : {}),
         items: query.items.map(item => ({ id: item.id, label: item.displayText, detail: item.description })) };
@@ -82,7 +90,13 @@ export class TerminalCandidatesOwner {
     const query = this.#query, item = query?.items.find(item => item.id === id);
     if (!query || query.revision !== revision || query.abort.signal.aborted || !item) throw Error('terminal-candidate-expired');
     if (item.acceptPayload.metadata?.commandId === 'trust:repl') throw Error('信任管理候选不可提交。');
-    query.items = []; return item;
+    query.items = []; query.ghost = undefined; return item;
+  }
+  acceptGhost(revision: number): { text: string; execute: false } {
+    const query = this.#query;
+    if (!query || query.revision !== revision || query.abort.signal.aborted || !query.ghost) throw Error('terminal-candidate-expired');
+    const text = query.ghost; query.ghost = undefined; query.items = [];
+    return { text, execute: false };
   }
   close(): void { this.#query?.abort.abort(); this.#query = undefined; }
 }

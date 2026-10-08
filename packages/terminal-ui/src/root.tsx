@@ -1,10 +1,11 @@
 import { createEffect, createMemo, createSignal, For, Show, ErrorBoundary } from 'solid-js';
 import { createCliRenderer, TextBuffer, TextBufferView, type CliRenderer, type TextareaRenderable, type ScrollBoxRenderable, type BoxRenderable, type KeyEvent, type PasteEvent } from '@opentui/core';
 import { render, extend } from '@opentui/solid';
-import { validateProcessView, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
+import { normalizeLeadingSlashAlias, validateProcessView, type TerminalSelectionCancelCause, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalDisplayPage, type TerminalTaskStatus, type TerminalProcessStatus } from './protocol.js';
 import { ProcessView } from './process-view.js';
 import { RecoveryInputBuffer, RECOVERY_INPUT_PART_BYTES } from './recovery-input.js';
-import { TerminalInputSession } from './input-session.js';
+import { TerminalInputSession, type TerminalAtomicRange } from './input-session.js';
+import { setEditorAtomicWrap } from './editor-atomic-wrap.js';
 import type { TerminalPasteSink } from './paste-stream.js';
 import { TerminalCandidateSession } from './candidate-session.js';
 import { TerminalTrustCandidateControls } from './trust-candidate-controls.js';
@@ -14,7 +15,7 @@ import { BODY_PAGE_BYTES, bodyWindows, decodeBodyPage, sameBodyPageContent, type
 import { bodySelection } from './body-selection.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
-import { interactionKey, inputRows, selectedLabel } from './surface-layout.js';
+import { interactionKey, inputRows, selectedLabel, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
@@ -99,10 +100,22 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const [secretLength, setSecretLength] = createSignal(0);
   const [editorLines, setEditorLines] = createSignal(1);
   const [editorEmpty, setEditorEmpty] = createSignal(true);
+  let atomicLayoutDirty = true;
+  let atomicLayoutEditor: TextareaRenderable | undefined;
+  let atomicLayoutRanges: readonly TerminalAtomicRange[] | undefined;
+  const noAtomicRanges: readonly TerminalAtomicRange[] = [];
   const syncEditor = () => {
-    if (!editor || editor.isDestroyed) return;
+    if (!editor || editor.isDestroyed || changingDraft) return;
+    const text = editor.plainText;
+    const ranges = view().kind === 'conversation' ? input.atomicRanges() : noAtomicRanges;
+    if (atomicLayoutDirty || atomicLayoutEditor !== editor || atomicLayoutRanges !== ranges) {
+      try {
+        setEditorAtomicWrap(editor, text, ranges, renderer.widthMethod);
+        atomicLayoutDirty = false; atomicLayoutEditor = editor; atomicLayoutRanges = ranges;
+      } catch (error) { reportStatus()(error); }
+    }
     setEditorLines(editor.editorView.getTotalVirtualLineCount());
-    setEditorEmpty(editor.plainText.length === 0);
+    setEditorEmpty(text.length === 0);
   };
   const [display, setDisplay] = createSignal<TerminalDisplayPage>({ first: 0, last: 0, start: 0, follow: true, segments: [] });
   let displayReceived: BodyPageRevision | undefined;
@@ -152,7 +165,6 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   createEffect(() => { if (trustControls.sync(trustSnapshot())) setStatus(''); });
   const editorValue = () => editor && !editor.isDestroyed ? editor.plainText : '';
   const preserveDraft = () => {
-    syncEditor();
     if (!changingDraft && view().kind === 'conversation' && editor && !editor.isDestroyed) {
       const text = editor.plainText, cursor = editorUtf16Cursor(editor);
       try {
@@ -176,6 +188,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         setStatus(error instanceof Error ? error.message : '输入暂不可用，草稿保留。');
       }
     }
+    syncEditor();
     candidates?.sync(view().kind === 'conversation');
   };
   const preserveCursor = () => {
@@ -203,7 +216,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (isBody()) await bodyView?.page(direction);
   };
   const attach = (value: TextareaRenderable) => {
-    editor = value;
+    editor = value; atomicLayoutDirty = true;
     queueMicrotask(() => { if (!value.isDestroyed) {
       if (view().kind === 'conversation') {
         changingDraft = true; try { setEditorUtf16Cursor(value, draft.text, draft.cursor, renderer.widthMethod); } finally { changingDraft = false; }
@@ -220,7 +233,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (!safeAction()) { setStatus('请放大窗口后提交；仍可按 Esc 取消。'); return; }
       const value = editorValue();
       if (Buffer.byteLength(value) > 8192) { setStatus('说明过长，请缩短后再提交。'); return; }
-      const itemId = current.choices?.[selected()]?.id ?? 'submit';
+      const choice = current.choices?.[selected()];
+      if (!choice || choice.disabled) return;
+      const itemId = choice.id;
       if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId, action: itemId, note: value });
       else await action({ kind: 'selection', requestId: current.requestId, itemId, input: value }); return;
     }
@@ -249,8 +264,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (candidateValue()?.mode === 'management') return;
       const text = draft.text;
       if (input.completeWindow && !text.trim()) return;
-      if (input.completeWindow && text.startsWith('/')) {
-        const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(text);
+      const controlText = normalizeLeadingSlashAlias(text.trim());
+      if (input.completeWindow && controlText.startsWith('/')) {
+        const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(controlText);
         const version = draft.version;
         if (match) {
           const route = await action({ kind: 'command-route', name: match[1]! }) as { route?: 'input' | 'local' } | undefined;
@@ -263,7 +279,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           const result = await action({ kind: 'command', name: match[1]!, argument: match[2] ?? '' }) as { accepted?: boolean } | undefined;
           if (result?.accepted && draft.version === version) {
             input.clear(version);
-            if (view().kind === 'conversation') { changingDraft = true; try { editor?.setText(''); } finally { changingDraft = false; } }
+            if (view().kind === 'conversation') { changingDraft = true; try { editor?.setText(''); } finally { changingDraft = false; } syncEditor(); }
             candidates?.dismiss();
           }
         }
@@ -273,12 +289,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       }
     }
   };
-  const cancelPage = async () => {
+  const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
     const current = view(); releaseSecret();
     if (current.kind === 'history') await action({ kind: 'history-close' });
     else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
-    else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'reject' });
-    else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true });
+    else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'cancelled', cancelCause: cause });
+    else if (current.kind === 'selection') await action({ kind: 'selection', requestId: current.requestId!, cancelled: true, cancelCause: cause });
   };
   const refreshCopy = () => {
     if (disposed) return;
@@ -310,13 +326,20 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const current = view(), blocks = information.snapshot(interactionKey(current));
     const candidate = current.kind === 'conversation' ? candidateValue() : undefined;
     const left = [...blocks.left];
-    if (candidate?.error || candidate?.hint) left.push(candidate.error ?? candidate.hint ?? '');
+    if (candidate?.error) left.push(candidate.error);
+    else if (candidate?.argumentHint || candidate?.hint) {
+      if (candidate.argumentHint) left.push(candidate.argumentHint);
+      if (candidate.hint) left.push(candidate.hint);
+    }
     else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty()) left.push('输入消息或 / 查看命令');
-    const keys = candidate?.items.length || candidate?.mode ? '↑↓ 选择 · Tab/Enter 接纳 · Esc 返回'
+    const keys = candidate?.ghost ? `Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`
+      : candidate?.items.length || candidate?.mode ? '↑↓ 选择 · Tab/Enter 接纳 · Esc 返回'
       : current.kind === 'skills' ? 'Esc 返回 · p/d/m/a 管理 · r 刷新'
+      : current.selectionLayer === 'details' ? '↑↓ 阅读 · ←/Enter/Esc 返回 · PgUp/PgDn 翻阅'
       : current.field ? 'Enter 确认 · Esc 返回'
       : current.kind === 'conversation' ? 'Enter 发送 · Esc 清空 · Ctrl+C 中止/退出'
+      : (current.detailsActionId || current.choices?.some(choice => choice.detailsActionId)) ? 'Enter 确认 · → 详情 · Esc 返回 · PgUp/PgDn 阅读'
       : 'Enter 确认 · Esc 返回 · PgUp/PgDn 阅读';
     const copy = copyAvailable() && size().width >= 12 ? '复制选区' : '';
     const copyWidth = copy ? measureInformation(copy) : 0;
@@ -372,12 +395,16 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const App = () => <box width="100%" height="100%" flexDirection="column" onMouseDown={event => {
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
   }}>
-    <box height={size().height < 16 ? 1 : 4} marginX={1} flexShrink={0} overflow="hidden" flexDirection="column">
+    <box height={size().height < 16 ? 1 : view().environment ? 6 : 4} marginX={1} flexShrink={0} overflow="hidden" flexDirection="column">
       <Show when={size().height < 16} fallback={<>
       <text fg={teal}> ╲</text>
       <text fg={teal}> ▄▄▄    {displayText(view().title)}</text>
       <text fg={teal}>▌●●▐    {view().connected === false ? '离线 · 本机配置与历史仍可用' : '知行 · 伴你行动'}</text>
       <text fg={teal}> ▀▀</text>
+      <Show when={view().environment}>{(environment: () => NonNullable<TerminalView['environment']>) => <>
+        <text height={1} wrapMode="none" truncate fg="#9aa8a1">{`工作目录  ${displayText(environment().workspace ?? '未绑定工作目录')}`}</text>
+        <text height={1} wrapMode="none" truncate fg="#9aa8a1">{`模型      ${displayText([environment().provider, environment().model].filter(Boolean).join(' · ') || '未配置')}`}</text>
+      </>}</Show>
       </>}><text height={1} wrapMode="none" truncate fg={teal}>{displayText(view().title)}</text></Show>
     </box>
     <box ref={value => { bodyBox = value; }} marginX={1} flexGrow={1} minHeight={1}
@@ -423,7 +450,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     </Show>
     <box flexDirection="column" flexShrink={0} marginX={1}>
       <For each={choices()}>{(choice, index) => <box height={1} backgroundColor={selected() === index() + choiceStart() ? choice.danger ? '#592c2c' : '#304c45' : undefined}>
-        <text height={1} wrapMode="none" truncate fg={choice.disabled ? '#808b87' : choice.danger ? '#ef9c9c' : selected() === index() + choiceStart() ? teal : '#d5ddd9'}>{selected() === index() + choiceStart() ? '▌ ' : '  '}{selectedLabel(displayText(choice.label), selected() === index() + choiceStart(), !!choice.danger, Math.max(0, size().width - 4), measureInformation)}</text>
+        <text height={1} wrapMode="none" truncate fg={choice.disabled ? '#808b87' : choice.danger ? '#ef9c9c' : selected() === index() + choiceStart() ? teal : '#d5ddd9'}>{selected() === index() + choiceStart() ? '▌ ' : '  '}{selectedLabel(displayText(choice.hotkey ? `[${choice.hotkey}] ${choice.label}` : choice.label), selected() === index() + choiceStart(), !!choice.danger, Math.max(0, size().width - 4), measureInformation)}</text>
       </box>}</For>
     </box>
     <Show when={!safeAction()}><text fg="#e7ba70">窗口较小：可取消；放大后继续确认。</text></Show>
@@ -433,7 +460,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <text width={2} selectable={false} fg={teal}>❯ </text>
         <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 8)))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
-            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 8)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
+            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 8)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
           </Show>
         </Show>
       </box>
@@ -551,7 +578,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (event.ctrl && event.name === 'c') {
       consume();
-      if (view().kind === 'confirmation') { void action({ kind: 'confirmation', requestId: view().requestId!, action: 'cancelled' }); return; }
+      if (view().kind === 'confirmation' || view().kind === 'selection') { void cancelPage('ctrl-c'); return; }
       if (view().kind === 'unavailable' || view().kind === 'history' || (view().kind === 'conversation' && view().connected === false)) { void options.exit(); return; }
       if (view().editId) { releaseSecret(); void action({ kind: 'configuration-action', editId: view().editId!, action: 'cancel' }); ctrlC = 0; return; }
       if (view().kind !== 'conversation') { void cancelPage(); ctrlC = 0; return; }
@@ -559,6 +586,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (ctrlC > 0 && now - ctrlC < 750) { void options.exit(); return; }
       ctrlC = now; void action({ kind: 'interrupt' }); return;
     }
+    if (event.ctrl && event.name === 'd' && (view().kind === 'selection' || view().kind === 'confirmation')) { consume(); void cancelPage('ctrl-d'); return; }
     if (view().kind === 'conversation') {
       if (!(event.ctrl && event.name === 'd')) { if (candidates?.deleteArmed) setStatus(''); candidates?.resetDelete(); }
       const value = candidateValue();
@@ -599,6 +627,9 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
       if (view().kind === 'conversation' && view().busy) void action({ kind: 'abort' }); else void cancelPage(); return;
     }
+    if (view().kind === 'conversation' && candidateValue()?.ghost && event.name === 'tab' && !event.ctrl && !event.shift && !event.meta) {
+      consume(); void candidates?.accept(true).catch(reportStatus()); return;
+    }
     if (view().kind === 'conversation' && candidateItems().length && size().height >= 18 && !event.ctrl && !event.shift && !event.meta) {
       if (event.name === 'up' || event.name === 'down') { consume(); candidates?.move(event.name === 'up' ? -1 : 1); return; }
       if (event.name === 'tab' || event.name === 'return') {
@@ -627,12 +658,40 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (event.name === 'pageup' || event.name === 'pagedown') {
       consume();
       const direction = event.name === 'pageup' ? -1 : 1;
+      if (view().selectionLayer === 'details') {
+        const current = view(), itemId = direction < 0 ? 'previous' : 'next';
+        if (current.choices?.some(choice => choice.id === itemId && !choice.disabled)) {
+          if (current.kind === 'confirmation') void action({ kind: 'confirmation', requestId: current.requestId!, action: itemId });
+          else void action({ kind: 'selection', requestId: current.requestId!, itemId });
+        }
+        return;
+      }
       if (['conversation', 'history'].includes(view().kind)) void pageHistory(direction);
       else if (historyBox) historyBox.scrollBy(direction * Math.max(1, historyBox.viewport.height - 2));
       return;
     }
     if (['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'end') {
       consume(); void bodyView?.bottom(); return;
+    }
+    const selectionView = view();
+    if ((selectionView.kind === 'selection' || selectionView.kind === 'confirmation') && !event.ctrl && !event.meta) {
+      const sendChoice = (itemId: string) => selectionView.kind === 'confirmation'
+        ? action({ kind: 'confirmation', requestId: selectionView.requestId!, action: itemId })
+        : action({ kind: 'selection', requestId: selectionView.requestId!, itemId });
+      if (selectionView.selectionLayer === 'details' && !event.shift) {
+        if (event.name === 'left' || event.name === 'return') { consume(); void sendChoice('return'); return; }
+        if (event.name === 'up' || event.name === 'down') { consume(); historyBox?.scrollBy(event.name === 'up' ? -1 : 1); return; }
+      }
+      if (!selectionView.field && (selectionView.selectionLayer === undefined || selectionView.selectionLayer === 'select')) {
+        if (event.name === 'right' && !event.shift) {
+          const choice = selectionView.choices?.[selected()];
+          const detailId = choice?.disabled ? undefined : choice?.detailsActionId ?? selectionView.detailsActionId;
+          if (detailId) { consume(); void sendChoice(detailId); return; }
+        }
+        const key = /^[!-~]$/u.test(event.sequence) ? event.sequence : /^[!-~]$/u.test(event.name) ? event.name : undefined;
+        const hotkey = key === undefined ? -1 : selectionView.choices?.findIndex(choice => !choice.disabled && choice.hotkey?.toLowerCase() === key.toLowerCase()) ?? -1;
+        if (hotkey >= 0) { consume(); setSelected(hotkey); void submit(); return; }
+      }
     }
     if (event.name === 'return' && !event.shift) { consume(); void submit(); return; }
     if (event.ctrl && event.name === 's' && view().editId) {
@@ -654,7 +713,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       setSecretLength(Array.from(secret).length); return;
     }
     if (view().choices?.length && (event.name === 'up' || event.name === 'down')) {
-      consume(); setSelected(current => Math.max(0, Math.min(view().choices!.length - 1, current + (event.name === 'up' ? -1 : 1))));
+      consume(); setSelected(current => nextChoiceIndex(view(), current, event.name === 'up' ? -1 : 1));
     }
   };
   const paste = (event: PasteEvent) => {
@@ -711,7 +770,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           if (!sameInteraction) {
             activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
           }
-          setSelected(sameInteraction && selectedId ? Math.max(0, message.view.choices?.findIndex(choice => choice.id === selectedId) ?? 0) : 0);
+          setSelected(initialChoiceIndex(message.view, sameInteraction ? selectedId : undefined));
           setView(message.view);
           syncAnimation();
           input.activate(message.view.kind === 'conversation');

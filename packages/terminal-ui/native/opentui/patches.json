@@ -1,7 +1,7 @@
 {
   "version": "0.5.14",
   "upstreamCommit": "31a93fbe66992298d6d0f27481fa781f43d0c1e2",
-  "purpose": "External recovery ownership and synchronous current-frame write success",
+  "purpose": "External recovery ownership, synchronous current-frame writes and bounded atomic input wrapping",
   "files": [
     {
       "file": "src/renderer-output.zig",
@@ -276,6 +276,305 @@
           "remove": 3,
           "insert": [
             "    _ = tty; _ = title;"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/text-buffer-view.zig",
+      "baseSha256": "10a40935419ae6e9611f6408d37acb1e4376214cff2c5e696784b6b9e6c35993",
+      "outputSha256": "5ee90b96b57587a448749c98abfeb6514192b58a5e92e44eee83c1de3d0adcba",
+      "edits": [
+        {
+          "at": 11,
+          "remove": 0,
+          "insert": [
+            "",
+            "/// Document display-cell offsets, including one weight for each hard newline.",
+            "/// Presentation only: never changes the underlying EditBuffer or copied text.",
+            "pub const NoBreakRange = extern struct { start: u32, end: u32 };",
+            "pub const max_no_break_ranges: usize = 65536;"
+          ]
+        },
+        {
+          "at": 247,
+          "remove": 0,
+          "insert": [
+            "    no_break_ranges: []NoBreakRange = &.{},",
+            "    no_break_epoch: u64 = 0,"
+          ]
+        },
+        {
+          "at": 350,
+          "remove": 0,
+          "insert": [
+            "        self.global_allocator.free(self.no_break_ranges);"
+          ]
+        },
+        {
+          "at": 398,
+          "remove": 0,
+          "insert": [
+            "    }",
+            "",
+            "    /// Replaced atomically; callers republish after every content edit/undo/redo.",
+            "    /// A stale content epoch is ignored, so offsets never attach to edited text.",
+            "    pub fn setNoBreakRanges(self: *Self, ranges: []const NoBreakRange) bool {",
+            "        if (ranges.len > max_no_break_ranges) return false;",
+            "        var previous_end: u32 = 0;",
+            "        for (ranges) |range| {",
+            "            if (range.start < previous_end or range.end <= range.start or range.end > self.text_buffer.textEndOffset()) return false;",
+            "            const start = iter_mod.offsetToCoords(self.text_buffer.rope(), range.start) orelse return false;",
+            "            const last = iter_mod.offsetToCoords(self.text_buffer.rope(), range.end - 1) orelse return false;",
+            "            if (start.row != last.row) return false;",
+            "            const start_bounds = self.text_buffer.graphemeBoundsAtOffset(range.start) orelse return false;",
+            "            const end_bounds = self.text_buffer.graphemeBoundsAtOffset(range.end - 1) orelse return false;",
+            "            if (start_bounds.start != range.start or end_bounds.end != range.end) return false;",
+            "            previous_end = range.end;",
+            "        }",
+            "        const replacement = self.global_allocator.dupe(NoBreakRange, ranges) catch return false;",
+            "        self.global_allocator.free(self.no_break_ranges);",
+            "        self.no_break_ranges = replacement;",
+            "        self.no_break_epoch = self.text_buffer.getContentEpoch();",
+            "        self.virtual_lines_dirty = true;",
+            "        self.cached_measure_result = null;",
+            "        self.truncation_applied = false;",
+            "        return true;",
+            "    }",
+            "",
+            "    fn activeNoBreakRanges(self: *const Self) []const NoBreakRange {",
+            "        return if (self.no_break_epoch == self.text_buffer.getContentEpoch()) self.no_break_ranges else &.{};"
+          ]
+        },
+        {
+          "at": 470,
+          "remove": 2,
+          "insert": [
+            "            .char => calculateVirtualLinesGeneric(.render, .char, virtual_allocator, self.text_buffer, self.wrap_width.?, self.first_line_offset, output, null, self.activeNoBreakRanges()),",
+            "            .word => calculateVirtualLinesGeneric(.render, .word, virtual_allocator, self.text_buffer, self.wrap_width.?, self.first_line_offset, output, &self.word_layout, &.{}),"
+          ]
+        },
+        {
+          "at": 1496,
+          "remove": 2,
+          "insert": [
+            "            .char => calculateVirtualLinesGeneric(.measure, .char, measure_allocator, self.text_buffer, width, self.first_line_offset, &result, null, self.activeNoBreakRanges()),",
+            "            .word => calculateVirtualLinesGeneric(.measure, .word, measure_allocator, self.text_buffer, width, self.first_line_offset, &result, null, &.{}),"
+          ]
+        },
+        {
+          "at": 1610,
+          "remove": 0,
+          "insert": [
+            "        no_break_ranges: []const NoBreakRange,"
+          ]
+        },
+        {
+          "at": 1619,
+          "remove": 0,
+          "insert": [
+            "            no_break_ranges: []const NoBreakRange,",
+            "            no_break_index: usize = 0,"
+          ]
+        },
+        {
+          "at": 2143,
+          "remove": 1,
+          "insert": [
+            "                    var remaining_width_cols = if (wctx.current_vline_width_cols < line_wrap_width_cols) line_wrap_width_cols - wctx.current_vline_width_cols else 0;",
+            "",
+            "                    // Stop before each range start so its complete width can be",
+            "                    // considered even when it crosses multiple rope chunks.",
+            "                    while (wctx.no_break_index < wctx.no_break_ranges.len and",
+            "                        wctx.no_break_ranges[wctx.no_break_index].end <= wctx.document_cell_offset)",
+            "                        wctx.no_break_index += 1;",
+            "                    if (wctx.no_break_index < wctx.no_break_ranges.len) {",
+            "                        const range = wctx.no_break_ranges[wctx.no_break_index];",
+            "                        if (wctx.document_cell_offset < range.start) {",
+            "                            remaining_width_cols = @min(remaining_width_cols, range.start - wctx.document_cell_offset);",
+            "                        } else if (wctx.document_cell_offset == range.start and",
+            "                            range.end - range.start > remaining_width_cols and",
+            "                            (wctx.current_vline_width_cols > 0 or wctx.current_wrap_width < wctx.wrap_w))",
+            "                        {",
+            "                            try commitVirtualLine(wctx);",
+            "                            continue;",
+            "                        }",
+            "                        if (wctx.document_cell_offset >= range.start)",
+            "                            remaining_width_cols = @min(remaining_width_cols, range.end - wctx.document_cell_offset);",
+            "                        // A range wider than a full row uses the existing",
+            "                        // grapheme-safe character fallback on its fresh row.",
+            "                    }"
+          ]
+        },
+        {
+          "at": 2388,
+          "remove": 0,
+          "insert": [
+            "            .no_break_ranges = no_break_ranges,"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/lib.zig",
+      "baseSha256": "1e09f19493d43d9ee841e616afbf82f21607505cfee18eb4bd292efd5d382491",
+      "outputSha256": "5360124f3f31d3a81a572c660b5f82f3c826c504e5f6ded25220a9dba3be7d40",
+      "edits": [
+        {
+          "at": 3002,
+          "remove": 0,
+          "insert": [
+            "export fn editorViewSetNoBreakRanges(view_handle: NativeHandle, ranges: ?[*]const text_buffer_view.NoBreakRange, count: u32) bool {",
+            "    const object_ptr = acquireEditorView(view_handle) orelse return false;",
+            "    if (count > text_buffer_view.max_no_break_ranges) return false;",
+            "    const input: []const text_buffer_view.NoBreakRange = if (count == 0) &.{} else (ranges orelse return false)[0..count];",
+            "    if (!object_ptr.getTextBufferView().setNoBreakRanges(input)) return false;",
+            "    object_ptr.makeCursorVisible();",
+            "    return true;",
+            "}",
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/tests/text-buffer-view_test.zig",
+      "baseSha256": "cca320a1328a89e90fd79d4a2908c34e1a68a443b11f512135f1e3620bff57bb",
+      "outputSha256": "30f59bdd8fae0186ceb5c7f7a09366fb123a2f6a6fc31454c968e1dc77cf1648",
+      "edits": [
+        {
+          "at": 4922,
+          "remove": 0,
+          "insert": [
+            "",
+            "test \"Zhixing atomic ranges wrap as one unit with render and measurement parity\" {",
+            "    const pool = gp.initGlobalPool(std.testing.allocator);",
+            "    defer gp.deinitGlobalPool();",
+            "    const links = link.initGlobalLinkPool(std.testing.allocator);",
+            "    defer link.deinitGlobalLinkPool();",
+            "    const tb = try TextBuffer.init(std.testing.allocator, pool, links, .unicode);",
+            "    defer tb.deinit();",
+            "    const view = try TextBufferView.init(std.testing.allocator, tb);",
+            "    defer view.deinit();",
+            "    // Deliberate rope fragmentation through the token.",
+            "    try tb.append(\"12345[A\");",
+            "    try tb.append(\" B]z\");",
+            "    view.setWrapMode(.char);",
+            "    view.setWrapWidth(8);",
+            "    _ = try view.measureForDimensions(8, 10); // Seed the old measure cache.",
+            "    try std.testing.expect(view.setNoBreakRanges(&.{.{ .start = 5, .end = 10 }}));",
+            "    const lines = view.getVirtualLines();",
+            "    try std.testing.expectEqual(@as(usize, 2), lines.len);",
+            "    try std.testing.expectEqual(@as(u32, 5), lines[0].width_cols);",
+            "    try std.testing.expectEqual(@as(u32, 5), lines[1].document_cell_offset);",
+            "    try std.testing.expectEqual(@as(u32, 6), lines[1].width_cols);",
+            "    const measure = try view.measureForDimensions(8, 10);",
+            "    try std.testing.expectEqual(@as(u32, 2), measure.line_count);",
+            "    try std.testing.expectEqual(@as(u32, 6), measure.width_cols_max);",
+            "    // Overwide token moves to a fresh row and falls back without truncation.",
+            "    view.setWrapWidth(4);",
+            "    const narrow = view.getVirtualLines();",
+            "    try std.testing.expectEqual(@as(usize, 4), narrow.len);",
+            "    try std.testing.expectEqual(@as(u32, 5), narrow[2].document_cell_offset);",
+            "    try std.testing.expectEqual(@as(u32, 4), narrow[2].width_cols);",
+            "    try std.testing.expectEqual(@as(u32, 2), narrow[3].width_cols);",
+            "    view.setWrapWidth(11);",
+            "    try std.testing.expectEqual(@as(u32, 1), view.getVirtualLineCount());",
+            "    view.setWrapWidth(8);",
+            "    try std.testing.expect(view.setNoBreakRanges(&.{}));",
+            "    try std.testing.expectEqual(@as(u32, 8), view.getVirtualLines()[0].width_cols);",
+            "}",
+            "",
+            "test \"Zhixing atomic ranges use document cells across CJK combining and hard newline\" {",
+            "    const pool = gp.initGlobalPool(std.testing.allocator);",
+            "    defer gp.deinitGlobalPool();",
+            "    const links = link.initGlobalLinkPool(std.testing.allocator);",
+            "    defer link.deinitGlobalLinkPool();",
+            "    const tb = try TextBuffer.init(std.testing.allocator, pool, links, .unicode);",
+            "    defer tb.deinit();",
+            "    const view = try TextBufferView.init(std.testing.allocator, tb);",
+            "    defer view.deinit();",
+            "    try tb.setText(\"x\\n\\u{754c}e\\u{301}[A B]z\");",
+            "    view.setWrapMode(.char);",
+            "    view.setWrapWidth(7);",
+            "    // x + newline + CJK(2) + e/combining(1) => 5; token width is 5.",
+            "    try std.testing.expect(view.setNoBreakRanges(&.{.{ .start = 5, .end = 10 }}));",
+            "    const lines = view.getVirtualLines();",
+            "    try std.testing.expectEqual(@as(usize, 3), lines.len);",
+            "    try std.testing.expectEqual(@as(u32, 3), lines[1].width_cols);",
+            "    try std.testing.expectEqual(@as(u32, 5), lines[2].document_cell_offset);",
+            "    try std.testing.expectEqual(@as(u32, 6), lines[2].width_cols);",
+            "    try std.testing.expect(!view.setNoBreakRanges(&.{.{ .start = 0, .end = 6 }}));",
+            "    try std.testing.expect(!view.setNoBreakRanges(&.{.{ .start = 5, .end = 10 }, .{ .start = 6, .end = 10 }}));",
+            "    // Edits invalidate old coordinates; they cannot silently mark new content.",
+            "    try tb.setText(\"123456789\");",
+            "    try std.testing.expectEqual(@as(u32, 7), view.getVirtualLines()[0].width_cols);",
+            "}",
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/tests/editor-view_test.zig",
+      "baseSha256": "127a3bf8fa1b26bddf2609478837867a59bf0c9e19a378b7d9afff0483c638e5",
+      "outputSha256": "ca3662ad040d2b060a04e011da47cdc932a6e93380c3827126d97038df200844",
+      "edits": [
+        {
+          "at": 3765,
+          "remove": 0,
+          "insert": [
+            "",
+            "test \"Zhixing atomic wrap preserves raw input cursor and copied selection\" {",
+            "    const pool = gp.initGlobalPool(std.testing.allocator);",
+            "    defer gp.deinitGlobalPool();",
+            "    const links = link.initGlobalLinkPool(std.testing.allocator);",
+            "    defer link.deinitGlobalLinkPool();",
+            "    const eb = try EditBuffer.init(std.testing.allocator, pool, links, .unicode, null);",
+            "    defer eb.deinit();",
+            "    const ev = try EditorView.init(std.testing.allocator, eb, 8, 8);",
+            "    defer ev.deinit();",
+            "    const text = \"12345[A B]z\";",
+            "    try eb.insertText(text);",
+            "    ev.setWrapMode(.char);",
+            "    try std.testing.expect(ev.getTextBufferView().setNoBreakRanges(&.{.{ .start = 5, .end = 10 }}));",
+            "    var raw: [64]u8 = undefined;",
+            "    try std.testing.expectEqualStrings(text, raw[0..ev.getText(&raw)]);",
+            "    ev.setSelection(5, 10, null, null);",
+            "    var copy: [64]u8 = undefined;",
+            "    try std.testing.expectEqualStrings(\"[A B]\", copy[0..ev.getSelectedTextIntoBuffer(&copy)]);",
+            "    try ev.setCursorByOffset(5);",
+            "    const visual = ev.getVisualCursor();",
+            "    try std.testing.expectEqual(@as(u32, 1), visual.visual_row);",
+            "    try std.testing.expectEqual(@as(u32, 0), visual.visual_col);",
+            "    ev.setViewportSize(4, 8);",
+            "    try std.testing.expectEqualStrings(text, raw[0..ev.getText(&raw)]);",
+            "    try std.testing.expectEqualStrings(\"[A B]\", copy[0..ev.getSelectedTextIntoBuffer(&copy)]);",
+            "}",
+            ""
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/edit-buffer.zig",
+      "baseSha256": "890dd77c1f5f52aa37c492ead0f47c02cd0132aced39fa848df547657305b3cd",
+      "outputSha256": "9715e1db56051f909a9050e5a1b3fda9b401e7da2f248126f8358e93d798b193",
+      "edits": [
+        {
+          "at": 763,
+          "remove": 1,
+          "insert": [
+            "        self.emitNativeEvent(\"cursor-changed\");",
+            "        self.emitNativeEvent(\"content-changed\");"
+          ]
+        },
+        {
+          "at": 780,
+          "remove": 1,
+          "insert": [
+            "        self.emitNativeEvent(\"cursor-changed\");",
+            "        self.emitNativeEvent(\"content-changed\");"
           ]
         }
       ]

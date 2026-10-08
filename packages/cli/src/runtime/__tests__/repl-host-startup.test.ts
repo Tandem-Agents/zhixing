@@ -11,6 +11,23 @@ function fixture() {
 }
 
 describe("REPL Host startup", () => {
+  it.each(['before', 'ensure-fails', 'ensure-returns', 'configuration'] as const)('does not enter another startup phase after cancellation at %s', async at => {
+    const f = fixture(), abort = new AbortController();
+    if (at === 'before') abort.abort();
+    if (at.startsWith('ensure')) f.connection.ensure.mockImplementationOnce(async () => {
+      abort.abort(); if (at === 'ensure-fails') throw Error('cancelled connection');
+    });
+    if (at === 'configuration') {
+      f.connection.ensure.mockRejectedValueOnce(Error('not configured'));
+      f.checkConfiguration.mockImplementationOnce(async () => {
+        abort.abort(); return { kind: 'ready', configurationCompleted: true } as StartupCheckResult;
+      });
+    }
+    await expect(connectReplHost({ ...f, signal: abort.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(f.connection.ensure).toHaveBeenCalledTimes(at === 'before' ? 0 : 1);
+    expect(f.checkConfiguration).toHaveBeenCalledTimes(at === 'configuration' ? 1 : 0);
+    expect(f.settled).toHaveBeenCalledTimes(at === 'before' ? 0 : 1);
+  });
   it("uses the authenticated Host without reading local credentials again", async () => {
     const f = fixture();
     expect(await connectReplHost(f)).toEqual({ kind: "connected" });

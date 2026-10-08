@@ -9,8 +9,15 @@ interface Delivery {
   readonly traffic: TerminalTraffic;
   readonly closing: boolean;
   readonly timer: ReturnType<typeof setTimeout>;
+  retired?: boolean;
   resolve(): void;
   reject(error: Error): void;
+}
+
+/** The surface stopped consuming business traffic. This is not a domain
+ * cancellation, transport failure, or proof that any process has exited. */
+export class TerminalChannelRetiredError extends Error {
+  constructor() { super('terminal-surface-retired'); }
 }
 
 /** Acknowledgement means the bounded receiving surface retained this message.
@@ -21,6 +28,7 @@ export class TerminalChannel {
   #sequence = 0;
   #received = 0;
   #closed = false;
+  #retiring = false;
   #failure?: Error;
   #body = 0;
   #control = 0;
@@ -35,7 +43,22 @@ export class TerminalChannel {
     readonly failure: (reason: string) => void,
   ) {}
 
-  get bodyAvailable(): boolean { return !this.#closed && this.#body < TERMINAL_LIMITS.bodyFrames; }
+  get bodyAvailable(): boolean { return !this.#closed && !this.#retiring && this.#body < TERMINAL_LIMITS.bodyFrames; }
+
+  /** Seal ordinary delivery while retaining close/exit and their receipts.
+   * Keep the bounded sent identities until ACK/close: a late genuine ACK must
+   * remain distinguishable from an unsolicited or duplicated ACK. */
+  beginClose(): void {
+    if (this.#closed || this.#retiring) return;
+    this.#retiring = true;
+    const error = new TerminalChannelRetiredError();
+    for (const delivery of this.#pending.values()) if (!delivery.closing) {
+      delivery.retired = true; clearTimeout(delivery.timer); delivery.reject(error);
+    }
+    for (const delivery of this.#controlQueue.splice(0)) {
+      clearTimeout(delivery.timer); delivery.reject(error);
+    }
+  }
 
   /** Retain every accepted ACK write, including arrivals during the drain.
    * The empty check and close share one synchronous handoff: no new receive
@@ -51,6 +74,7 @@ export class TerminalChannel {
   send(payload: TerminalMessage, traffic: TerminalTraffic = 'control'): Promise<void> {
     if (this.#closed) return Promise.reject(Error('terminal-channel-closed'));
     const closing = payload.type === 'close' || payload.type === 'exit';
+    if (this.#retiring && !closing) return Promise.reject(new TerminalChannelRetiredError());
     // Producers share the same transport window. Waiting for a free slot is
     // normal backpressure, not a failed delivery. Retention remains bounded by
     // the existing request budget, and each retained frame has a byte limit.
@@ -83,12 +107,12 @@ export class TerminalChannel {
     else this.#control++;
     this.#pending.set(sequence, delivery);
     const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence, traffic: delivery.traffic, payload: delivery.payload };
-    try { this.sender(packet, error => { if (error) this.#fail('terminal-send-failed'); }); }
+    try { this.sender(packet, error => { if (error && !delivery.retired) this.#fail('terminal-send-failed'); }); }
     catch { this.#fail('terminal-send-failed'); }
   }
 
   #flushControl(): void {
-    while (!this.#closed && this.#control < TERMINAL_LIMITS.controlFrames && this.#controlQueue.length) this.#send(this.#controlQueue.shift()!);
+    while (!this.#closed && !this.#retiring && this.#control < TERMINAL_LIMITS.controlFrames && this.#controlQueue.length) this.#send(this.#controlQueue.shift()!);
   }
 
   accept(value: unknown): void {
@@ -109,21 +133,30 @@ export class TerminalChannel {
       this.#flushControl();
       pending.resolve(); return;
     }
+    const closing = message.type === 'close' || message.type === 'exit';
+    if (this.#retiring && !closing) return;
     if (++this.#receiving > TERMINAL_LIMITS.bodyFrames + TERMINAL_LIMITS.controlFrames + 1) {
       this.#fail('terminal-receive-capacity'); return;
     }
     // A forwarder acknowledges only after its next hop acknowledges, keeping
     // the two-hop body window at eight retained batches, not eight per hop.
-    const work = Promise.resolve().then(() => this.receiveMessage(message, value.traffic)).then(() => {
+    const retired = () => this.#retiring && !closing;
+    const work = Promise.resolve().then(() => {
+      if (!retired()) return this.receiveMessage(message, value.traffic);
+    }).catch(error => {
+      if (retired() && error instanceof TerminalChannelRetiredError) return;
+      this.#fail('terminal-receive-failed'); throw error;
+    }).then(() => {
+      if (retired()) return;
       if (this.#closed) throw Error('terminal-channel-closed');
       const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence: ++this.#sequence, traffic: 'control', payload: { type: 'ack', sequence: value.sequence } };
       return new Promise<void>((resolve, reject) => {
         try { this.sender(packet, error => {
-          if (error) { this.#fail('terminal-ack-failed'); reject(error); } else resolve();
+          if (error && !retired()) { this.#fail('terminal-ack-failed'); reject(error); } else resolve();
         }); }
         catch (error) { this.#fail('terminal-ack-failed'); reject(error); }
       });
-    }, error => { this.#fail('terminal-receive-failed'); throw error; })
+    })
       .finally(() => { this.#receiving--; this.#receivedWork.delete(work); });
     this.#receivedWork.add(work);
     void work.catch(() => {});

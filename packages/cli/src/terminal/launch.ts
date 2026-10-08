@@ -6,11 +6,15 @@ import { runTerminalSupervisor } from './supervisor.js';
 import { TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 
 /** No stdin or screen access: the original R owns restoration through return. */
-export async function launchTerminal(args: readonly string[]): Promise<number> {
+export async function launchTerminal(args: readonly string[], entryTiming?: {
+  entryMs: number; prepareMs: number; loadMs: number; processCpuUserMs: number; processCpuSystemMs: number;
+}): Promise<number> {
   const home = getZhixingHome();
   const entry = path.resolve(process.argv[1]!);
   const mode = args.length ? 'independent-command' : 'repl';
   const early = beginEntryLogging(mode);
+  try { if (entryTiming) early.records.record({ event: 'terminalEntry', data: entryTiming }); }
+  catch { /* A timing observation cannot reject the interactive entry. */ }
   let logging: ReturnType<typeof beginRuntimeLogging> | undefined;
   let result = 1;
   const output: { stream: 'stdout' | 'stderr'; text: string }[] = [];

@@ -111,17 +111,19 @@ describe('UI close retains its control receipts', () => {
     expect(h.processPort.exitCode).toBe(71); expect(h.failures).toEqual(['U:terminal-ack-failed']);
   });
 
-  it.each([false, true])('retains a reply accepted during drain, including its later failure=%s', async fail => {
+  it('does not retain a business reply received after surface retirement', async () => {
     const h = harness({ holdAck: true });
     const notified = h.closeFromSupervisor();
     await h.pump(); await notified;
-    const late = h.replyFromSupervisor();
-    await h.pump(); await late;
-    h.releaseFirstAcknowledgement(); await ticks();
-    expect(h.transport.connected).toBe(true); expect(h.processPort.exitCode).toBeUndefined();
-    h.releaseAcknowledgements(fail ? Error('synthetic late reply ACK failure') : undefined);
+    const late = h.replyFromSupervisor().catch(error => error);
+    await h.pump();
+    expect(h.sent.filter(packet => packet.payload.type === 'ack')).toHaveLength(1);
+    h.releaseAcknowledgements();
     await h.closeUi('supervisor-close', 0, false);
-    expect(h.transport.connected).toBe(false); expect(h.processPort.exitCode).toBe(fail ? 71 : 0);
-    expect(h.failures).toEqual(fail ? ['U:terminal-ack-failed'] : []);
+    expect(h.transport.connected).toBe(false); expect(h.processPort.exitCode).toBe(0);
+    expect(h.failures).toEqual([]);
+    // The synthetic S has not received a production close intent of its own.
+    // Release its retained ordinary delivery without waiting for a fake ACK.
+    cleanup.splice(0).forEach(close => close()); await late;
   });
 });

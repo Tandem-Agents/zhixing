@@ -12,6 +12,11 @@ interface NativeState {
   creationExited: boolean; exited: boolean; pid: number; error: number;
   birth?: string; exitCode?: number;
   branchActive?: number;
+  nativeQueueMs?: number; nativeSetupMs?: number; nativeCreateMs?: number; nativePublishMs?: number; nativeTotalMs?: number; observationMs?: number;
+}
+export interface TerminalCreationTiming {
+  durationMs: number; permitMs: number; endpointMs: number; parameterMs: number; dispatchMs: number;
+  nativeQueueMs?: number; nativeSetupMs?: number; nativeCreateMs?: number; nativePublishMs?: number; nativeTotalMs?: number; observationMs?: number; errorCode?: number;
 }
 interface NativeEdge {
   create(executable: string, command: string, environment: string, directory: string, console: boolean, scope: number): number;
@@ -34,6 +39,7 @@ export interface TerminalProcessOptions {
   readonly channels?: 'private' | 'host';
   /** The existing child slot is reserved while its writer intent is durable. */
   readonly creationPermit?: Promise<void>;
+  readonly observeCreation?: (timing: TerminalCreationTiming, result: 'success' | 'failure') => void;
 }
 
 /** S alone uses the lifecycle exports. Node owners load only the fixed rights
@@ -114,6 +120,9 @@ export class TerminalForegroundChild extends EventEmitter {
   #socket?: Socket;
   #ownerSocket?: Socket;
   #server: Server;
+  #creationStarted = 0;
+  #creationObserved = false;
+  readonly #creationTiming: TerminalCreationTiming = { durationMs: 0, permitMs: 0, endpointMs: 0, parameterMs: 0, dispatchMs: 0 };
   readonly #frames: TerminalJsonFrames;
   readonly #endpoint = new TerminalPrivateEndpoint();
   constructor(readonly owner: TerminalForegroundProcesses, readonly raw: boolean, readonly options: TerminalProcessOptions) {
@@ -143,12 +152,19 @@ export class TerminalForegroundChild extends EventEmitter {
     this.owner.requestObservation();
   }
   async start(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, console: boolean): Promise<void> {
+    this.#creationStarted = performance.now();
+    let at = this.#creationStarted;
+    let segment: 'permitMs' | 'endpointMs' | 'parameterMs' | 'dispatchMs' = 'permitMs';
     try {
       if (this.options.creationPermit) await this.options.creationPermit;
+      this.#creationTiming.permitMs = performance.now() - this.#creationStarted;
       if (this.owner.sealed || this.#cancelled) throw Error('terminal-process-create-cancelled');
+      at = performance.now(); segment = 'endpointMs';
       if (process.platform === 'win32' && this.options.pipeEnvironment !== false) await this.#endpoint.listen(this.#server);
+      this.#creationTiming.endpointMs = performance.now() - at;
       this.#server.on('error', error => this.emit('error', error));
       if (this.owner.sealed || this.#cancelled) throw Error('terminal-process-create-cancelled');
+      at = performance.now(); segment = 'parameterMs';
       const pipeKey = this.options.pipeEnvironment || 'ZHIXING_TERMINAL_PIPE';
       const childEnv = { ...env };
       delete childEnv[pipeKey]; delete childEnv[pipeKey.replace(/_PIPE$/u, '_FD')];
@@ -158,12 +174,20 @@ export class TerminalForegroundChild extends EventEmitter {
         .sort(([a], [b]) => a.toUpperCase().localeCompare(b.toUpperCase()))
         .map(([key, value]) => { if (key.includes('=') || key.includes('\0') || value.includes('\0')) throw Error('terminal-child-environment'); return `${key}=${value}`; });
       const scope = this.options.scope === 'recovery' ? 0 : this.options.scope === 'host' ? 2 : this.options.scope === 'probe' && process.platform !== 'win32' ? 3 : 1;
+      this.#creationTiming.parameterMs = performance.now() - at;
+      at = performance.now(); segment = 'dispatchMs';
       this.#nativeId = process.platform === 'win32'
         ? this.owner.native.create(executable, [executable, ...args].map(quoteWindowsArgument).join(' '), environment.join('\0') + '\0\0', process.cwd(), console, scope)
         : this.owner.native.createPosix(this.owner.gate, executable, args, environment, process.cwd(), console, scope,
           this.options.channels === 'private' ? (this.options.creationOwner ? 'private-owner' : 'private') : this.options.channels === 'host' ? 'host' :
           this.options.creationOwner ? 'owner' : this.options.pipeEnvironment === 'ZHIXING_CHECKPOINT_PIPE' ? 'stdio' : this.options.pipeEnvironment === false ? 'none' : 'control');
-    } catch (error) { this.#failed(error instanceof Error ? error : Error('terminal-process-create-failed')); }
+      this.#creationTiming.dispatchMs = performance.now() - at;
+    } catch (error) {
+      // A rejected phase still spent time. Keep that duration rather than
+      // reporting a misleading zero at the actual point of failure.
+      this.#creationTiming[segment] = performance.now() - at;
+      this.#failed(error instanceof Error ? error : Error('terminal-process-create-failed'));
+    }
   }
   resume(): void {
     if (!this.#nativeId || this.#cancelled || this.owner.sealed) throw Error('terminal-process-resume-closed');
@@ -218,6 +242,7 @@ export class TerminalForegroundChild extends EventEmitter {
     if (state.exited && state.branchActive === undefined) throw Error('terminal-exited-branch-unobserved');
     if (state.ready && !this.#announced) {
       this.#announced = true;
+      this.#observeCreation(state.created ? 'success' : 'failure', state);
       if (!state.created) this.#failed(Error(`terminal-process-create-${state.error}`));
       else {
         this.pid = state.pid; this.birth = state.birth;
@@ -251,6 +276,7 @@ export class TerminalForegroundChild extends EventEmitter {
     this.#closeServer(); this.#socket?.destroy(); this.#ownerSocket?.destroy(); this.stdio[3].destroy(); this.stdio[4].destroy();
   }
   #failed(error: Error): void {
+    this.#observeCreation('failure');
     this.#exited = true; this.#rejectCreated(error); this.#rejectTransport(error);
     this.#closeServer(); this.emit('error', error);
     this.#disconnect(); this.#closeIfDone();
@@ -260,6 +286,18 @@ export class TerminalForegroundChild extends EventEmitter {
     this.#frames.clear();
     this.#disconnected = true; this.#rejectTransport(Error('terminal-process-disconnected')); this.emit('disconnect');
     this.owner.requestObservation();
+  }
+  #observeCreation(result: 'success' | 'failure', state?: NativeState): void {
+    if (this.#creationObserved) return;
+    this.#creationObserved = true;
+    const timing: TerminalCreationTiming = { ...this.#creationTiming, durationMs: performance.now() - this.#creationStarted };
+    if (state) {
+      for (const key of ['nativeQueueMs', 'nativeSetupMs', 'nativeCreateMs', 'nativePublishMs', 'nativeTotalMs', 'observationMs'] as const) {
+        const value = state[key]; if (typeof value === 'number' && Number.isFinite(value) && value >= 0) timing[key] = value;
+      }
+      timing.errorCode = state.error;
+    }
+    try { this.options.observeCreation?.(timing, result); } catch { /* Observation never controls process admission. */ }
   }
   #closeServer(): void {
     this.#closingEndpoint ??= this.#endpoint.close().then(() => {

@@ -33,6 +33,22 @@ async function buildExtensionKit() {
   await writeFile(`${kit}/channel-sdk.d.ts`, 'export { serveChannelExtension } from "./contracts/channels/extension-worker.js";\n');
 }
 
+async function bundleSupervisorEntry() {
+  // S runs before the first frame. Keep its small process-local graph in one
+  // module instead of reopening dozens of shared chunks on every launch.
+  // Bundle the emitted entry so tsup's dynamic route and chained source maps
+  // remain authoritative; worker URLs stay beside the same CLI entry.
+  const index = await readFile('dist/index.js', 'utf8');
+  const entry = index.match(/import\("(\.\/launch-[A-Z0-9]+\.js)"\)/u)?.[1];
+  if (!entry) throw Error('Terminal supervisor distribution entry missing');
+  const require = createRequire(import.meta.url);
+  const { build } = createRequire(require.resolve('tsup'))('esbuild');
+  await build({ entryPoints: [join('dist', entry)], outfile: join('dist', entry),
+    bundle: true, allowOverwrite: true, platform: 'node', format: 'esm', target: 'node24',
+    // Mesh owns its native filesystem assets relative to its own package.
+    external: ['@zhixing/mesh/*'], sourcemap: true, logLevel: 'silent' });
+}
+
 export default defineConfig({
   entry: { index: "src/entry.ts", metadata: "src/index.ts", "logging-admission-worker": "src/logging/writer-admission-worker.ts", "logging-files-worker": "src/logging/logging-files-worker.ts", "logging-writers-worker": "src/logging/logging-writers-worker.ts", "logging-store-worker": "src/logging/store-worker.ts" },
   format: ["esm"],
@@ -43,6 +59,7 @@ export default defineConfig({
   noExternal: ["@zhixing/terminal-ui"],
   banner: { js: "#!/usr/bin/env node" },
   onSuccess: async () => {
+    await bundleSupervisorEntry();
     await buildExtensionKit();
     // The independent UI/native closure survives tsup's clean build.
     await cp("../terminal-ui/dist", "dist/terminal", { recursive: true });

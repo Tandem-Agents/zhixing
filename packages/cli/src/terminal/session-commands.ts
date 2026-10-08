@@ -9,22 +9,29 @@ import type { TerminalSelectionPort } from './selection.js';
 
 type Navigation = Extract<PostTurnControlOutcome['intent'], { kind: 'enter' | 'exit' | 'set_workdir' }>;
 export interface TerminalTurnOutcome {
+  readonly reason: TurnOutcome['result']['reason'];
   readonly message: string;
   readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean };
 }
 
 /** Keep navigation, never the task handoff body or the complete agent result. */
 export function projectTerminalTurnOutcome(outcome: TurnOutcome): TerminalTurnOutcome {
-  const error = outcome.result.reason === 'error' ? outcome.result.error.message : undefined;
-  const message = error === undefined ? outcome.result.reason === 'aborted' ? '本次运行已中止。' : '本次运行已结束。'
-    : `任务未完成：${error.slice(0, 2048)}${error.length > 2048 ? '…（完整错误见运行记录）' : ''}`;
+  const result = outcome.result, reason = result.reason;
+  let message: string;
+  switch (result.reason) {
+    case 'completed': message = '本次运行已结束。'; break;
+    case 'max_turns': message = `本次运行已达到轮次上限（${result.maxTurns}）并停止。`; break;
+    case 'aborted': message = '本次运行已中止。'; break;
+    case 'error': message = `任务未完成：${result.error.message.slice(0, 2048)}${result.error.message.length > 2048 ? '…（完整错误见运行记录）' : ''}`; break;
+    default: { const unhandled: never = result; throw Error(`terminal-turn-result:${unhandled}`); }
+  }
   const control = outcome.postTurnControl, intent = control?.intent;
-  if (!control || !intent) return { message };
+  if (!control || !intent) return { reason, message };
   const handedOff = !!intent.handoff?.remaining.length;
   const navigation = handedOff ? undefined : intent.kind === 'enter' ? { kind: 'enter' as const, sceneId: intent.sceneId }
     : intent.kind === 'exit' ? { kind: 'exit' as const }
       : intent.kind === 'set_workdir' ? { kind: 'set_workdir' as const, sceneId: intent.sceneId, workspace: intent.workspace } : undefined;
-  return boundedControlProjection({ message, control: { navigation, handedOff, conflict: !!control.conflict } }, 16 * 1024);
+  return boundedControlProjection({ reason, message, control: { navigation, handedOff, conflict: !!control.conflict } }, 16 * 1024);
 }
 
 export interface TerminalSessionOptions {
@@ -121,7 +128,7 @@ export class TerminalSessionCommands {
             ...(page ? [{ id: 'previous', label: '上一页' }] : []), ...(matches.length > (page + 1) * 20 ? [{ id: 'next', label: '下一页' }] : []),
             ...(name === 'work' ? [{ id: 'create', label: '新建工作场景' }] : []), { id: 'cancel', label: '返回' }] });
         scope.current();
-        if (!response || response.itemId === 'cancel') return;
+        if (!response || response.cancelCause || response.itemId === 'cancel') return;
         if (response.itemId === 'previous') { page--; continue; }
         if (response.itemId === 'next') { page++; continue; }
         if (response.itemId === 'create') { await this.manage('work', 'create'); return; }

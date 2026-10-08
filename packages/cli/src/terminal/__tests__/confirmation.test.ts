@@ -20,7 +20,7 @@ describe('terminal control projection', () => {
     });
     expect(shown).toBe(command); expect(result).toEqual({ kind: 'allow-once' });
   });
-  it('distinguishes Esc denial from Ctrl+C cancellation, even in the note page', async () => {
+  it('keeps headless undefined denial and legacy Ctrl+C compatibility in the note page', async () => {
     for (const cancelled of [false, true]) {
       let count = 0;
       const decision = await resolveTerminalConfirmation(projectTerminalConfirmation(request()), async () => {
@@ -48,3 +48,22 @@ describe('terminal control projection', () => {
     expect([...projection.options.values()].some(option => option.kind === 'deny')).toBe(true);
   });
 });
+
+
+it('returns from a permission note on Escape, preserving the pending request and option hotkeys', async () => {
+  const source = request(); source.options[0] = { kind: 'allow-once', label: '允许一次', hotkey: 'y' };
+  const pages: string[] = []; let count = 0;
+  const result = await resolveTerminalConfirmation(projectTerminalConfirmation(source), async page => {
+    pages.push(page.selectionLayer!);
+    if (count++ === 0) { expect(page.choices![0]!.hotkey).toBe('y'); return { itemId: 'option:decision:1' }; }
+    if (count === 2) return { itemId: 'cancelled', cancelCause: 'escape' };
+    return { itemId: 'option:decision:0' };
+  });
+  expect(pages).toEqual(['select', 'input', 'select']); expect(result).toEqual({ kind: 'allow-once' });
+});
+for (const [cause, expected] of [['escape', 'deny'], ['ctrl-c', 'user-ctrl-c'], ['ctrl-d', 'user-ctrl-d'], ['aborted', 'aborted']] as const) {
+  it(`preserves permission cancellation ${cause}`, async () => {
+    const decision = await resolveTerminalConfirmation(projectTerminalConfirmation(request()), async () => ({ itemId: 'cancelled', cancelCause: cause }));
+    expect(decision).toEqual(expected === 'deny' ? { kind: 'deny' } : { kind: 'cancelled', cause: expected });
+  });
+}

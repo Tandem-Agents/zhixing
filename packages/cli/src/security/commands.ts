@@ -23,13 +23,13 @@ interface SecurityOptions {
 export async function handleSecurityCommand(
   args: string,
   opts: SecurityOptions,
-): Promise<void> {
+): Promise<boolean> {
   const subcommand = args.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
   if (subcommand === "rules") {
     return showPolicyRules(opts);
   }
   if (subcommand === "help") {
-    return printSecurityHelp(opts.writer);
+    printSecurityHelp(opts.writer); return true;
   }
   return showSecurityOverview(opts);
 }
@@ -59,10 +59,10 @@ async function loadSecuritySnapshot(
   }
 }
 
-async function showSecurityOverview(opts: SecurityOptions): Promise<void> {
+async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
   const { writer } = opts;
   const snapshot = await loadSecuritySnapshot(opts);
-  if (!snapshot) return;
+  if (!snapshot) return false;
 
   const rules = snapshot.permissionRules;
   const sessionCount = rules.filter((r) => r.scope === "session").length;
@@ -128,11 +128,12 @@ async function showSecurityOverview(opts: SecurityOptions): Promise<void> {
   }
   writer.line(chalk.bold("╰────────────────────────────────────────"));
   writer.line("");
+  return true;
 }
 
-async function showPolicyRules(opts: SecurityOptions): Promise<void> {
+async function showPolicyRules(opts: SecurityOptions): Promise<boolean> {
   const snapshot = await loadSecuritySnapshot(opts);
-  if (!snapshot) return;
+  if (!snapshot) return false;
   const rules = snapshot.builtinRules;
   opts.writer.line("");
   opts.writer.line(chalk.bold(`  策略规则 (${rules.length} 条)`));
@@ -153,6 +154,7 @@ async function showPolicyRules(opts: SecurityOptions): Promise<void> {
   opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
   opts.writer.line(chalk.dim("  [!] = bypassImmune（任何配置都无法覆盖）"));
   opts.writer.line("");
+  return true;
 }
 // ─── /trust ───
 
@@ -174,19 +176,19 @@ interface TrustOptions {
 export async function handleTrustCommand(
   args: string,
   opts: TrustOptions,
-): Promise<void> {
+): Promise<boolean> {
   const trimmed = args.trim();
   const sub = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
   if (sub === "revoke") {
     return revokeTrustRule(trimmed.slice("revoke".length).trim(), opts);
   }
   if (sub === "help") {
-    return printTrustHelp(opts.writer);
+    printTrustHelp(opts.writer); return true;
   }
   return listTrustRules(opts);
 }
 
-async function listTrustRules(opts: TrustOptions): Promise<void> {
+async function listTrustRules(opts: TrustOptions): Promise<boolean> {
   const { writer } = opts;
   let rules: TrustAdministrationRule[];
   try {
@@ -197,11 +199,11 @@ async function listTrustRules(opts: TrustOptions): Promise<void> {
         `\n  信任规则不可用: ${err instanceof Error ? err.message : String(err)}\n`,
       ),
     );
-    return;
+    return false;
   }
   if (rules.length === 0) {
     writer.line(chalk.dim("\n  暂无信任规则\n"));
-    return;
+    return true;
   }
   writer.line(`\n${chalk.bold(`  信任规则 (${rules.length} 条)`)}`);
   for (const rule of rules) {
@@ -211,13 +213,14 @@ async function listTrustRules(opts: TrustOptions): Promise<void> {
     writer.line(`    ${chalk.dim(formatRuleDescription(rule))}`);
   }
   writer.line(chalk.dim("\n  撤销: /trust revoke <id>\n"));
+  return true;
 }
 
-async function revokeTrustRule(id: string, opts: TrustOptions): Promise<void> {
+async function revokeTrustRule(id: string, opts: TrustOptions): Promise<boolean> {
   const { writer } = opts;
   if (!id) {
     writer.line(chalk.yellow("\n  用法: /trust revoke <id>\n"));
-    return;
+    return false;
   }
   try {
     const ok = await opts.revokeRule(id);
@@ -226,12 +229,14 @@ async function revokeTrustRule(id: string, opts: TrustOptions): Promise<void> {
     } else {
       writer.line(chalk.red(`\n  信任规则 "${id}" 不存在\n`));
     }
+    return ok;
   } catch (err) {
     writer.line(
       chalk.red(
         `\n  撤销失败: ${err instanceof Error ? err.message : String(err)}\n`,
       ),
     );
+    return false;
   }
 }
 

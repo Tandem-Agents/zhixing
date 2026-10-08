@@ -30,9 +30,10 @@ export function ownedPosixFilesystem(
   timeoutMs: number,
   verify: () => Promise<string>,
   createProcess?: CheckpointFilesystemProcessFactory,
-): { request<T>(op: string, input: Record<string, unknown>): Promise<T>; failed(): boolean; stop(remainingMs?: number): Promise<void> } {
+): { request<T>(op: string, input: Record<string, unknown>): Promise<T>; prepare(): Promise<void>; failed(): boolean; stop(remainingMs?: number): Promise<void> } {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError('Invalid filesystem operation timeout');
   let child: CheckpointFilesystemProcess | undefined;
+  let preparing: Promise<string> | undefined;
   let starting: Promise<void> | undefined;
   let stopping: Promise<void> | undefined;
   let exitResolve: (() => void) | undefined;
@@ -82,6 +83,7 @@ export function ownedPosixFilesystem(
     return stopping ??= (async () => {
       const actualCompletion = (async () => {
         try { await starting; } catch { /* Creation did not produce a process. */ }
+        if (!child) try { await preparing; } catch { /* Verification retained no process. */ }
         if (child && !didExit) await exited;
       })();
       try {
@@ -90,6 +92,7 @@ export function ownedPosixFilesystem(
           // a bounded close failure, never a false successful cleanup. Its
           // closed check prevents late process creation after this deadline.
           try { await starting; } catch { /* No successful startup to retain. */ }
+          if (!child) try { await preparing; } catch { /* Verification retained no process. */ }
           if (!child || didExit) return;
           references(true);
           // SIGKILL interrupts a helper blocked inside the addon; a successful
@@ -145,8 +148,12 @@ export function ownedPosixFilesystem(
       pump();
     } catch (cause) { fail(cause); }
   };
+  const prepare = (): Promise<string> => {
+    if (closed) return Promise.reject(error('ERR_CHECKPOINT_OWNER_CLOSED', 'Filesystem owner closed'));
+    return preparing ??= verify();
+  };
   const start = (): Promise<void> => starting ??= (async () => {
-    const artifact = await verify();
+    const artifact = await prepare();
     if (closed) throw error('ERR_CHECKPOINT_OWNER_CLOSED', 'Filesystem owner closed');
     const args = ['--input-type=commonjs', '--eval', POSIX_FILESYSTEM_CHILD, artifact];
     const current = createProcess ? createProcess(process.execPath, args) : spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -198,7 +205,7 @@ export function ownedPosixFilesystem(
       pump();
     });
   };
-  return { request, failed: () => closed || failure !== undefined, stop };
+  return { request, prepare: () => prepare().then(() => {}), failed: () => closed || failure !== undefined, stop };
 }
 
 // A fixed, package-owned finite protocol, not a general file/spawn service. The

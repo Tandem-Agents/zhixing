@@ -58,10 +58,19 @@ export function verifyCheckpointBridgeArtifact(packageRoot: string, target: Chec
 export async function verifyCheckpointBridgeArtifactAsync(packageRoot: string, target: CheckpointBridgeTarget): Promise<string> {
   const directory = checkpointBridgeArtifactDirectory(packageRoot, target), file = path.join(directory, target.file);
   try {
-    const binary = await readBounded(file, 16 * 1024 * 1024);
-    const descriptor: unknown = JSON.parse((await readBounded(path.join(directory, "descriptor.json"), 64 * 1024)).toString("utf8"));
-    const manifest = JSON.parse((await readBounded(path.join(packageRoot, "package.json"), 64 * 1024)).toString("utf8")) as { version: string };
-    verifyArtifact(binary, descriptor, manifest.version, target);
+    // Independent fixed inputs share one admission. Wait for every bounded
+    // read to close its handle even when one fails; never expose a partly
+    // checked executable or leave a sibling read running after rejection.
+    const [binary, descriptor, manifest] = await Promise.allSettled([
+      readBounded(file, 16 * 1024 * 1024),
+      readBounded(path.join(directory, "descriptor.json"), 64 * 1024),
+      readBounded(path.join(packageRoot, "package.json"), 64 * 1024),
+    ]);
+    if (binary.status === 'rejected') throw binary.reason;
+    if (descriptor.status === 'rejected') throw descriptor.reason;
+    if (manifest.status === 'rejected') throw manifest.reason;
+    verifyArtifact(binary.value, JSON.parse(descriptor.value.toString('utf8')),
+      (JSON.parse(manifest.value.toString('utf8')) as { version: string }).version, target);
     return file;
   } catch (cause) {
     throw new Error(`${target.id} checkpoint helper 缺失或与当前包不匹配；请重新安装 @zhixing/cli`, { cause });

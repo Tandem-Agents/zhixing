@@ -68,4 +68,12 @@ describe('terminal session navigation', () => {
     expect(outcome.control).toEqual({ handedOff: true, navigation: undefined, conflict: false });
     expect(JSON.stringify(outcome).length).toBeLessThan(512);
   });
+  it('keeps completed, turn-limit, aborted and error outcomes distinct', () => {
+    const project = (result: unknown) => projectTerminalTurnOutcome({ result: result as TurnOutcome['result'] });
+    expect(project({ reason: 'completed' })).toEqual({ reason: 'completed', message: '本次运行已结束。' });
+    expect(project({ reason: 'max_turns', maxTurns: 7 })).toEqual({ reason: 'max_turns', message: '本次运行已达到轮次上限（7）并停止。' });
+    expect(project({ reason: 'aborted' }).message).toContain('中止');
+    expect(project({ reason: 'error', error: { message: 'unavailable' } }).message).toBe('任务未完成：unavailable');
+    expect(project({ reason: 'error', error: { message: 'x'.repeat(10000) } }).message.length).toBeLessThan(2100);
+  });
 });

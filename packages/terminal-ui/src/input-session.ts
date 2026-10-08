@@ -1,10 +1,11 @@
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalCandidateAcceptance } from './protocol.js';
 import { TerminalPasteStream, type TerminalPasteSink } from './paste-stream.js';
 
+export interface TerminalAtomicRange { readonly start: number; readonly end: number }
 export interface TerminalDraft { text: string; cursor: number; version: number }
 interface Submission { readonly inputId: string; readonly version: number }
 interface InputWindow { inputId: string; start: number; end: number; bytes: number; text: string; handles?: readonly { token: string; id: string; paste: boolean }[] }
-interface DraftSnapshot { text: string; cursor: number; cold?: Omit<InputWindow, 'text'>; dirty: boolean; replacePastes?: string }
+interface DraftSnapshot { text: string; cursor: number; cold?: Omit<InputWindow, 'text'>; dirty: boolean }
 const EDIT_WINDOW_BYTES = 128 * 1024;
 const COMPACT_WINDOW_BYTES = 48 * 1024;
 const inputIdValid = (id: unknown): id is string => typeof id === 'string' && /^[a-f0-9-]{36}$/u.test(id);
@@ -20,10 +21,10 @@ export class TerminalInputSession {
   #referenceDirty = false; #referenceSignature = '';
   #referenceVersion = 0;
   #pasteBytes = 0;
+  #pasteApplyWork: Promise<void> = Promise.resolve();
   #saved?: DraftSnapshot;
   #cold?: Omit<InputWindow, 'text'>;
   #dirty = false;
-  #replacePastes?: string;
   #document = 0;
   #persistWork?: Promise<{ inputId: string; version: number }>;
   #working?: DraftSnapshot & { inputId?: string };
@@ -36,6 +37,8 @@ export class TerminalInputSession {
   #submission?: Submission & { readonly text: string };
   #referenceError?: unknown;
   #marker = 0;
+  #atomicTokenVersion = 0;
+  #atomicCache?: { draftVersion: number; tokenVersion: number; ranges: readonly TerminalAtomicRange[] };
   constructor(readonly request: (action: TerminalAction) => Promise<unknown>, readonly changed: () => void) {}
   get pending(): boolean { return this.#preparing || !!this.#submission || this.#pastes.size > 0 || !!this.#persistWork || this.#paging || this.#historyLoading; }
   get windowStart(): number { return this.#cold?.start ?? 0; }
@@ -45,7 +48,7 @@ export class TerminalInputSession {
   clear(version: number): boolean {
     if (this.draft.version !== version) return false;
     this.#saved = undefined; this.#historyOffset = -1; this.#historyEpoch++;
-    this.#cold = undefined; this.#dirty = false; this.#replacePastes = undefined; this.#document++;
+    this.#cold = undefined; this.#dirty = false; this.#document++;
     this.edit('', 0); this.changed(); return true;
   }
   activate(active: boolean): void {
@@ -63,7 +66,7 @@ export class TerminalInputSession {
     if (replace) {
       try { this.edit(this.draft.text.slice(0, replace.start) + result.text + this.draft.text.slice(replace.end), replace.start + result.text.length); this.changed(); }
       finally { this.#syncReferences(); }
-    } else this.#syncReferences();
+    } else { this.#syncReferences(); this.changed(); }
   }
   async submit(): Promise<void> {
     if (this.pending) throw Error('输入仍在处理，请稍候；草稿已保留。');
@@ -98,7 +101,7 @@ export class TerminalInputSession {
   async pasteClipboard(): Promise<void> {
     if (this.#pastes.size >= 2) throw Error('前次粘贴仍在保存，原有草稿保留。');
     const inputId = crypto.randomUUID(), marker = `[粘贴处理中 · ${++this.#marker}]`;
-    this.#pastes.set(inputId, marker);
+    this.#pastes.set(inputId, marker); this.#atomicTokenVersion++;
     try {
       const cursor = this.draft.cursor;
       this.edit(this.draft.text.slice(0, cursor) + marker + this.draft.text.slice(cursor), cursor + marker.length); this.changed();
@@ -106,7 +109,7 @@ export class TerminalInputSession {
       if (read?.empty) { this.#replaceMarker(marker, ''); return; }
       await this.#finishPaste(inputId, marker);
     } catch (error) { this.#replaceMarker(marker, ''); throw error; }
-    finally { this.#pastes.delete(inputId); this.#completed.add(inputId); this.#syncReferences(); }
+    finally { this.#replaceMarker(marker, ''); this.#pastes.delete(inputId); this.#atomicTokenVersion++; this.#completed.add(inputId); this.#syncReferences(); }
   }
   beginPaste(expectedBytes?: number): TerminalPasteSink & { readonly done: Promise<void> } {
     if (this.#pastes.size >= 2) throw Error('前次粘贴仍在保存，原有草稿保留。');
@@ -117,10 +120,10 @@ export class TerminalInputSession {
       this.#pasteBytes += bytes;
     }, bytes => { this.#pasteBytes -= bytes; });
     const inputId = crypto.randomUUID(), marker = `[粘贴处理中 · ${++this.#marker}]`;
-    this.#pastes.set(inputId, marker);
+    this.#pastes.set(inputId, marker); this.#atomicTokenVersion++;
     const cursor = this.draft.cursor;
     try { this.edit(this.draft.text.slice(0, cursor) + marker + this.draft.text.slice(cursor), cursor + marker.length); this.changed(); }
-    catch (error) { this.#pastes.delete(inputId); stream.abort(); throw error; }
+    catch (error) { this.#pastes.delete(inputId); this.#atomicTokenVersion++; stream.abort(); throw error; }
     const done = this.#consumePaste(inputId, marker, stream, expectedBytes);
     return { write: bytes => stream.write(bytes), end: () => stream.end(), abort: () => stream.abort(), done };
   }
@@ -129,19 +132,67 @@ export class TerminalInputSession {
       await this.#upload(inputId, 'paste', decodePaste(stream), expectedBytes);
       await this.#finishPaste(inputId, marker);
     } catch (error) { this.#replaceMarker(marker, ''); throw error; }
-    finally { stream.abort(); this.#pastes.delete(inputId); this.#completed.add(inputId); this.#syncReferences(); }
+    finally { stream.abort(); this.#replaceMarker(marker, ''); this.#pastes.delete(inputId); this.#atomicTokenVersion++; this.#completed.add(inputId); this.#syncReferences(); }
   }
-  async #finishPaste(inputId: string, marker: string): Promise<void> {
-    const result = await this.request({ kind: 'paste-finish', inputId }) as { text?: unknown; handles?: readonly { token: string; id: string }[]; paste?: boolean; replacePastes?: boolean };
-    if (typeof result?.text !== 'string' || result.text.length > 64 * 1024) throw Error('粘贴结果不可用，原有草稿保留。');
-    if (!result.text) { this.#replaceMarker(marker, ''); return; }
-    this.#registerHandles(result.handles ?? [], !!result.paste);
-    const applied = this.#replaceMarker(marker, result.text, !!result.replacePastes, inputId);
-    if (applied && result.replacePastes && !this.completeWindow) {
-      this.#replacePastes = inputId; this.#syncReferences();
-      await this.#persistWork;
-      await this.#persist();
+  #finishPaste(inputId: string, marker: string): Promise<void> {
+    // At most two admitted pastes. Their commits serialize, while ordinary
+    // edits remain live; a late immutable result is never applied over them.
+    const work = this.#pasteApplyWork.then(() => this.#applyPaste(inputId, marker));
+    this.#pasteApplyWork = work.catch(() => {}); return work;
+  }
+  async #applyPaste(inputId: string, marker: string): Promise<void> {
+    const initialDocument = this.#document, initialEpoch = this.#historyEpoch;
+    const preview = await this.request({ kind: 'paste-finish', inputId }) as {
+      text?: unknown; textEdit?: boolean; handles?: readonly { token: string; id: string }[]; paste?: boolean;
+    };
+    if (initialDocument !== this.#document || initialEpoch !== this.#historyEpoch || !this.draft.text.includes(marker)) return;
+    if (!preview?.textEdit) {
+      if (typeof preview?.text !== 'string' || Buffer.byteLength(preview.text) > 64 * 1024) throw Error('粘贴结果不可用，原有草稿保留。');
+      this.#registerHandles(preview.handles ?? [], !!preview.paste);
+      this.#replaceMarker(marker, preview.text); return;
     }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.#persistWork;
+      if (!this.draft.text.includes(marker)) return;
+      const document = this.#document, epoch = this.#historyEpoch;
+      const frozen = await this.#persist();
+      if (document !== this.#document || epoch !== this.#historyEpoch) return;
+      if (frozen.version !== this.draft.version) continue;
+      const version = this.draft.version, cursor = this.draft.cursor, at = this.draft.text.indexOf(marker);
+      if (at < 0) return;
+      const start = this.windowStart + Buffer.byteLength(this.draft.text.slice(0, at));
+      const position = this.windowStart + Buffer.byteLength(this.draft.text.slice(0, cursor));
+      const result = await this.request({ kind: 'paste-finish', inputId,
+        draft: { inputId: frozen.inputId, start, end: start + Buffer.byteLength(marker), cursor: position } }) as {
+          text?: unknown; handles?: readonly { token: string; id: string }[]; paste?: boolean;
+          edit?: { inputId: string; bytes: number; cursor: number };
+        };
+      if (document !== this.#document || epoch !== this.#historyEpoch) {
+        if (inputIdValid(result?.edit?.inputId)) { this.#completed.add(result.edit.inputId); this.#syncReferences(); }
+        return;
+      }
+      if (result?.edit) {
+        const edit = result.edit;
+        if (!inputIdValid(edit.inputId) || !Number.isSafeInteger(edit.bytes) || !Number.isSafeInteger(edit.cursor) || edit.cursor < 0 || edit.cursor > edit.bytes) throw Error('粘贴保存结果未确认，原草稿保留。');
+        const current = () => document === this.#document && epoch === this.#historyEpoch && version === this.draft.version && cursor === this.draft.cursor;
+        try {
+          if (!current()) continue;
+          const page = await this.#readWindow(edit.inputId, edit.cursor);
+          if (page.bytes !== edit.bytes) throw Error('粘贴窗口未完整读取，原草稿保留。');
+          if (!current()) continue;
+          this.#rememberHandles(page);
+          const pageCursor = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.from(page.text).subarray(0, edit.cursor - page.start)).length;
+          this.#restore({ text: page.text, cursor: pageCursor, cold: this.#metadata(page), dirty: false }); this.changed();
+          return;
+        } finally { this.#completed.add(edit.inputId); this.#syncReferences(); }
+      }
+      // Material/empty results stay finite and preserve ordinary edits around
+      // the still-present marker. Only N decides whether text is folded.
+      if (typeof result?.text !== 'string' || Buffer.byteLength(result.text) > 64 * 1024) throw Error('粘贴结果不可用，原有草稿保留。');
+      this.#registerHandles(result.handles ?? [], !!result.paste);
+      this.#replaceMarker(marker, result.text); return;
+    }
+    throw Error('粘贴期间草稿持续变化，本次尚未接纳；原草稿和新编辑已保留，请重试。');
   }
   async history(direction: -1 | 1): Promise<void> {
     if (this.pending || !this.#active) return;
@@ -223,17 +274,16 @@ export class TerminalInputSession {
       return true;
     } finally { this.#paging = false; }
   }
-  #snapshot(): DraftSnapshot { return { text: this.draft.text, cursor: this.draft.cursor, cold: this.#cold, dirty: this.#dirty, replacePastes: this.#replacePastes }; }
+  #snapshot(): DraftSnapshot { return { text: this.draft.text, cursor: this.draft.cursor, cold: this.#cold, dirty: this.#dirty }; }
   #restore(snapshot: DraftSnapshot): void {
     this.#cold = snapshot.cold; this.#document++;
     this.draft.text = snapshot.text; this.draft.cursor = snapshot.cursor; this.draft.version++;
-    this.#dirty = snapshot.dirty; this.#replacePastes = snapshot.replacePastes; this.#syncReferences();
+    this.#dirty = snapshot.dirty; this.#syncReferences();
   }
   #persist(force = false): Promise<{ inputId: string; version: number }> {
     if (this.#persistWork) return this.#persistWork;
     const snapshot = this.#snapshot(), version = this.draft.version, document = this.#document;
-    const replacePastes = snapshot.replacePastes;
-    if (!force && !replacePastes && snapshot.cold && !snapshot.dirty) return Promise.resolve({ inputId: snapshot.cold.inputId, version });
+    if (!force && snapshot.cold && !snapshot.dirty) return Promise.resolve({ inputId: snapshot.cold.inputId, version });
     this.#working = snapshot;
     const work = (async () => {
       const replacementId = crypto.randomUUID(), bytes = Buffer.byteLength(snapshot.text);
@@ -241,20 +291,15 @@ export class TerminalInputSession {
       let inputId: string = replacementId;
       let total = bytes, start = snapshot.cold?.start ?? 0, end = start + bytes;
       if (snapshot.cold) {
-        const result = await this.request({ kind: 'input-splice', inputId: snapshot.cold.inputId, start: snapshot.cold.start, end: snapshot.cold.end, replacementId, ...(replacePastes ? { replacePastes } : {}) }) as { inputId?: unknown; bytes?: unknown; start?: unknown; end?: unknown };
+        const result = await this.request({ kind: 'input-splice', inputId: snapshot.cold.inputId, start: snapshot.cold.start, end: snapshot.cold.end, replacementId }) as { inputId?: unknown; bytes?: unknown; start?: unknown; end?: unknown };
         const expected = snapshot.cold.bytes - (snapshot.cold.end - snapshot.cold.start) + bytes;
-        if (!inputIdValid(result.inputId) || !Number.isSafeInteger(result.bytes) || (replacePastes ? (result.bytes as number) < bytes || (result.bytes as number) > expected : result.bytes !== expected)) throw Error('输入保存结果未确认，原草稿保留。');
-        if (replacePastes) {
-          if (!Number.isSafeInteger(result.start) || !Number.isSafeInteger(result.end) || (result.start as number) < 0 || (result.end as number) > (result.bytes as number) || (result.end as number) - (result.start as number) !== bytes) throw Error('输入替换位置未确认，原草稿保留。');
-          start = result.start as number; end = result.end as number;
-        }
+        if (!inputIdValid(result.inputId) || !Number.isSafeInteger(result.bytes) || result.bytes !== expected) throw Error('输入保存结果未确认，原草稿保留。');
         inputId = result.inputId; total = result.bytes as number; this.#completed.add(replacementId);
       }
       this.#working = { ...snapshot, inputId };
       if (document === this.#document) {
         this.#cold = { inputId, start, end, bytes: total };
         this.#dirty = this.draft.text !== snapshot.text;
-        if (this.#replacePastes === replacePastes) this.#replacePastes = undefined;
       }
       this.#completed.add(inputId); this.#syncReferences(); await this.#referenceWork;
       if (this.#referenceError) throw Error('输入引用保存未确认，原草稿保留。');
@@ -278,21 +323,36 @@ export class TerminalInputSession {
       if (!this.#handles.has(handle.token)) added.add(handle.token);
     }
     if (this.#handles.size + added.size > 4096) throw Error('输入引用工作区不足，原草稿保留；请重新核对后再试。');
+    if (added.size) this.#atomicTokenVersion++;
     for (const handle of handles) this.#handles.set(handle.token, { id: handle.id, paste: paste ?? !!handle.paste });
   }
   #metadata({ inputId, start, end, bytes }: InputWindow): Omit<InputWindow, 'text'> { return { inputId, start, end, bytes }; }
-  atomic(kind: 'backspace' | 'delete' | 'left' | 'right'): boolean {
-    const cursor = this.draft.cursor;
-    for (const token of [...this.#handles.keys(), ...this.#pastes.values()]) {
+  /** One range authority for native layout and atomic keyboard operations. */
+  atomicRanges(): readonly TerminalAtomicRange[] {
+    if (this.#atomicCache?.draftVersion === this.draft.version && this.#atomicCache.tokenVersion === this.#atomicTokenVersion) return this.#atomicCache.ranges;
+    const ranges: TerminalAtomicRange[] = [];
+    for (const token of new Set([...this.#handles.keys(), ...this.#pastes.values()])) {
       for (let from = 0; from < this.draft.text.length;) {
         const start = this.draft.text.indexOf(token, from);
         if (start < 0) break;
         const end = start + token.length; from = end;
-        if ((kind === 'backspace' || kind === 'left') ? cursor > start && cursor <= end : cursor >= start && cursor < end) {
-          if (kind === 'left' || kind === 'right') this.edit(this.draft.text, kind === 'left' ? start : end);
-          else this.edit(this.draft.text.slice(0, start) + this.draft.text.slice(end), start);
-          this.changed(); return true;
-        }
+        ranges.push({ start, end });
+        if (ranges.length > 65536) throw Error('输入原子区域超过有界布局容量，原文仍保留。');
+      }
+    }
+    ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+    let end = -1;
+    const unique = ranges.filter(range => { if (range.start < end) return false; end = range.end; return true; });
+    this.#atomicCache = { draftVersion: this.draft.version, tokenVersion: this.#atomicTokenVersion, ranges: unique };
+    return unique;
+  }
+  atomic(kind: 'backspace' | 'delete' | 'left' | 'right'): boolean {
+    const cursor = this.draft.cursor;
+    for (const { start, end } of this.atomicRanges()) {
+      if ((kind === 'backspace' || kind === 'left') ? cursor > start && cursor <= end : cursor >= start && cursor < end) {
+        if (kind === 'left' || kind === 'right') this.edit(this.draft.text, kind === 'left' ? start : end);
+        else this.edit(this.draft.text.slice(0, start) + this.draft.text.slice(end), start);
+        this.changed(); return true;
       }
     }
     return false;
@@ -319,7 +379,7 @@ export class TerminalInputSession {
         if (result?.accepted === false) throw Error('输入引用保留尚未确认，草稿已保留。');
         for (const id of completed) this.#completed.delete(id);
         this.#referenceError = undefined;
-        for (const id of result?.removed ?? []) for (const [token, handle] of this.#handles) if (handle.id === id) this.#handles.delete(token);
+        for (const id of result?.removed ?? []) for (const [token, handle] of this.#handles) if (handle.id === id) { this.#handles.delete(token); this.#atomicTokenVersion++; }
         this.#referenceSignature = ids.join(',');
         if (this.#completed.size) this.#referenceDirty = true;
       }
@@ -328,19 +388,14 @@ export class TerminalInputSession {
   }
   #referencedIds(): string[] {
     return [...new Set([
-      ...[this.#cold?.inputId, this.#replacePastes, this.#saved?.cold?.inputId, this.#saved?.replacePastes, this.#working?.cold?.inputId, this.#working?.inputId, this.#working?.replacePastes, this.#submission?.inputId].filter((id): id is string => !!id),
+      ...[this.#cold?.inputId, this.#saved?.cold?.inputId, this.#working?.cold?.inputId, this.#working?.inputId, this.#submission?.inputId].filter((id): id is string => !!id),
       ...[...this.#handles].filter(([token]) => this.draft.text.includes(token) || this.#saved?.text.includes(token) || this.#submission?.text.includes(token) || this.#working?.text.includes(token)).map(([, handle]) => handle.id),
     ])];
   }
-  #replaceMarker(marker: string, text: string, replacePastes = false, newId?: string): boolean {
-    let draft = this.draft.text, cursor = this.draft.cursor;
+  #replaceMarker(marker: string, text: string): boolean {
+    const draft = this.draft.text;
+    let cursor = this.draft.cursor;
     if (!draft.includes(marker)) return false;
-    if (replacePastes) for (const [token, handle] of this.#handles) if (handle.paste && handle.id !== newId) {
-      for (let at = draft.indexOf(token); at >= 0; at = draft.indexOf(token)) {
-        draft = draft.slice(0, at) + draft.slice(at + token.length);
-        if (cursor > at) cursor -= Math.min(token.length, cursor - at);
-      }
-    }
     const start = draft.indexOf(marker);
     if (start < 0) return false;
     const end = start + marker.length;

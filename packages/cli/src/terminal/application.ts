@@ -1,3 +1,4 @@
+import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
@@ -7,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
-import { TERMINAL_LIMITS, type TerminalAction, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
+import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
@@ -58,11 +59,12 @@ import { createUserSubmission } from '../runtime/user-submission.js';
 import { createReadOnlyConversationStorage } from '../serve/conversation-storage-infrastructure.js';
 import type { ConversationHistoryCursor } from '@zhixing/core/conversation/application';
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
-import { chooseTerminalSelection, type TerminalSelectionResponse } from './selection.js';
+import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
 import { TerminalProcessSession } from './process-session.js';
 import { TerminalRecovery } from './recovery.js';
 import { normalizeCliArgs } from '../logging/entry-mode.js';
+import { terminalEnvironment } from './environment-presentation.js';
 import { RpcConfirmationBroker } from '../runtime/rpc-confirmation-broker.js';
 import { projectTerminalConfirmation, resolveTerminalConfirmation } from './confirmation.js';
 import { TerminalCandidatesOwner } from './candidates.js';
@@ -209,6 +211,7 @@ class TerminalApplication {
     this.#connection = new CoreHostConnection({ ...defaultCoreHostConnectionDeps(home, this.#logging.records, this.#hosts.start),
       createClient: url => createRpcClient({ url, maximumPendingRequests: 12, maximumQueuedRequestBytes: 1024 * 1024 }),
       createSurfaceClient: async () => {
+        this.#abort.signal.throwIfAborted();
         const { createCurrentAnchorSurfaceRpcClient } = await import('../runtime/surface-core-host-link.js');
         return createCurrentAnchorSurfaceRpcClient({ zhixingHome: home, secretStore: this.#secretStore });
       },
@@ -298,7 +301,7 @@ class TerminalApplication {
       this.#confirmation.invalid = true;
       const selection = this.#selection; this.#selection = undefined;
       if (selection) {
-        selection.resolve(); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {});
+        selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {});
       }
     });
     this.#connection.onDisconnect(() => {
@@ -308,7 +311,7 @@ class TerminalApplication {
       this.#sceneCreateAbort?.abort();
       this.#sessionCommands?.invalidate();
       this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#candidates.close();
-      this.#selection?.resolve(); this.#selection = undefined;
+      this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;
       this.#mainView = { ...this.#mainView, connected: false, message: '连接已断开。可查看已有内容、编辑本机配置或显式重试。',
         choices: [{ id: 'retry', label: '重试连接' }, { id: 'config', label: '本机配置' }, { id: 'exit', label: '退出终端' }] };
       if (!this.#editor && !this.#operation) void this.#publish(this.#mainView).catch(() => this.#close(70, 'view-undelivered'));
@@ -396,17 +399,22 @@ class TerminalApplication {
       case 'selection': {
         const selection = this.#selection;
         if (!selection || selection.id !== action.requestId) throw Error('terminal-selection-expired');
+        if (action.cancelled !== undefined && typeof action.cancelled !== 'boolean') throw Error('terminal-selection-cancel');
+        if (action.cancelCause !== undefined && (!action.cancelled || !isSelectionCancelCause(action.cancelCause))) throw Error('terminal-selection-cause');
+        if (action.cancelled && (action.itemId !== undefined || action.input !== undefined)) throw Error('terminal-selection-cancel');
         if (!action.cancelled && (!action.itemId || !selection.allowed.has(action.itemId))) throw Error('terminal-selection-invalid');
         if (action.input !== undefined && (!selection.field || typeof action.input !== 'string' || Buffer.byteLength(action.input) > 8192)) throw Error('terminal-selection-input');
-        this.#selection = undefined; selection.resolve(action.cancelled ? undefined : { itemId: action.itemId!, input: action.input }); return { accepted: true };
+        this.#selection = undefined; selection.resolve(action.cancelled ? { itemId: 'cancelled', cancelCause: action.cancelCause ?? 'escape' } : { itemId: action.itemId!, input: action.input }); return { accepted: true };
       }
       case 'confirmation': {
         const selection = this.#selection;
         if (!this.#confirmation || this.#confirmation.invalid || !selection || selection.id !== action.requestId) throw Error('terminal-confirmation-expired');
+        if (action.cancelCause !== undefined && (!['reject', 'cancelled'].includes(action.action) || !isSelectionCancelCause(action.cancelCause))) throw Error('terminal-confirmation-cause');
+        if (['reject', 'cancelled'].includes(action.action) && action.note !== undefined) throw Error('terminal-confirmation-cancel');
         if (!['reject', 'cancelled'].includes(action.action) && !selection.allowed.has(action.action)) throw Error('terminal-confirmation-option');
         if (action.note !== undefined && (!selection.field || typeof action.note !== 'string' || Buffer.byteLength(action.note) > 8192)) throw Error('terminal-confirmation-input');
         this.#selection = undefined;
-        selection.resolve(action.action === 'reject' ? undefined : { itemId: action.action, input: action.note }); return { accepted: true };
+        selection.resolve(['reject', 'cancelled'].includes(action.action) ? { itemId: 'cancelled', cancelCause: action.cancelCause ?? (action.action === 'reject' ? 'escape' : 'ctrl-c') } : { itemId: action.action, input: action.note }); return { accepted: true };
       }
       case 'display-page':
         if (action.start !== undefined && !Number.isSafeInteger(action.start)) throw Error('terminal-display-cursor');
@@ -428,7 +436,8 @@ class TerminalApplication {
         this.#confirmationBlocked = false; await this.#confirmations.refresh(); this.#drainConfirmations(); return { accepted: true };
       case 'input-candidates':
         await this.#ensureDecisionBinding();
-        return this.#candidates.query(action.revision, action.text, action.cursor);
+        return this.#candidates.query(action.revision, action.text, action.cursor, action.atStart);
+      case 'candidate-ghost': return this.#candidates.acceptGhost(action.revision);
       case 'candidate-accept': return this.#acceptCandidate(action.revision, action.id);
       case 'candidate-revoke': return this.#candidates.revokeTrust(action.revision, action.id);
       case 'candidate-manage': {
@@ -446,7 +455,7 @@ class TerminalApplication {
       case 'input-release': await this.#inputs.release(action.inputId); return { accepted: true };
       case 'input-window': return this.#inputs.window(action.inputId, action.position);
       case 'input-splice': {
-        return this.#inputs.editWindow(action.inputId, action.start, action.end, action.replacementId, action.replacePastes);
+        return this.#inputs.editWindow(action.inputId, action.start, action.end, action.replacementId);
       }
       case 'input-references': {
         return this.#inputs.reconcileReferences(action.version, action.ids, action.completed, action.cached).then(result => {
@@ -460,7 +469,7 @@ class TerminalApplication {
       }
       case 'input-history-next': return this.#inputHistoryReader.next(action.ticket);
       case 'input-history-end': await this.#inputHistoryReader.close(action.ticket); return { accepted: true };
-      case 'paste-finish': return this.#finishPaste(action.inputId);
+      case 'paste-finish': return this.#finishPaste(action.inputId, action.draft);
       case 'clipboard-read': {
         if (action.target === 'field') {
           let text = '';
@@ -519,6 +528,7 @@ class TerminalApplication {
     let code = 1;
     try {
       await this.#publish({ kind: 'unavailable', title: '知行 · 执行命令', message: '正在执行命令…', busy: true });
+      this.#abort.signal.throwIfAborted();
       const { runIndependentCommand } = await import('./independent-command.js');
       code = await runIndependentCommand(this.args, {
         home: this.home, signal: this.#abort.signal, logging: this.#logging, secretStore: this.#secretStore,
@@ -526,6 +536,7 @@ class TerminalApplication {
         ensureManagement: async () => { this.#abort.signal.throwIfAborted(); await this.#connection.ensure(); this.#abort.signal.throwIfAborted(); },
         choose: view => this.#choosePage(view), send: message => this.#channel.send(message, 'body'),
         completeConfiguration: async () => {
+          this.#abort.signal.throwIfAborted();
           const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
           const result = await checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
             secretStore: this.#secretStore, records: this.#logging.records,
@@ -553,8 +564,9 @@ class TerminalApplication {
     try {
     await this.#ensureTasksBinding();
     this.#taskNotices?.resume();
-    const result = await connectReplHost({ connection: this.#connection, starting: () => {}, settled: () => {},
+    const result = await connectReplHost({ connection: this.#connection, signal: this.#abort.signal, starting: () => {}, settled: () => {},
       checkConfiguration: async () => {
+        this.#abort.signal.throwIfAborted();
         // Configuration/identity backends belong to this operation. Loading
         // them must not prevent the real IPC/close consumer from being installed.
         const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
@@ -683,13 +695,15 @@ class TerminalApplication {
   }
 
   async #choose(view: View): Promise<string | undefined> {
-    return (await this.#choosePage(view))?.itemId;
+    const response = await this.#choosePage(view);
+    return response?.cancelCause ? undefined : response?.itemId;
   }
 
   async #choosePage(view: View): Promise<TerminalSelectionResponse | undefined> {
     if (this.#selection) throw Error('terminal-selection-capacity');
     const id = randomUUID();
-    const response = new Promise<TerminalSelectionResponse | undefined>(resolve => { this.#selection = { id, resolve, field: !!view.field, allowed: new Set(view.choices?.filter(choice => !choice.disabled).map(choice => choice.id)) }; });
+    const allowed = terminalSelectionActions(view);
+    const response = new Promise<TerminalSelectionResponse | undefined>(resolve => { this.#selection = { id, resolve, field: !!view.field, allowed }; });
     await this.#publish({ ...view, kind: view.kind === 'confirmation' ? 'confirmation' : 'selection', requestId: id });
     return response;
   }
@@ -894,26 +908,29 @@ class TerminalApplication {
     this.#materials.cleanup(materialIds);
   }
 
-  async #finishPaste(inputId: string): Promise<{ text: string; handles: readonly { token: string; id: string }[]; paste: boolean; replacePastes: boolean }> {
+  async #finishPaste(inputId: string, draft?: TerminalPasteDraft): Promise<{ text: string; handles: readonly { token: string; id: string }[]; paste: boolean; textEdit?: true } | { edit: { inputId: string; bytes: number; cursor: number } }> {
     // Path intent is inspected only for bounded path-sized input. Large original
     // text is folded without materializing it or probing its contents as paths.
     const paste = this.#inputs.completePaste(inputId);
-    if (!paste.bytes) return { text: '', handles: [], paste: false, replacePastes: false };
+    if (!paste.bytes) return { text: '', handles: [], paste: false };
+    // U sends a draft only after this immutable original received a textEdit preview.
+    // Do not probe material paths a second time while committing that text edit.
+    if (draft) return { edit: await this.#inputs.applyPaste(draft.inputId, draft.start, draft.end, inputId, draft.cursor) };
     if (paste.bytes <= 64 * 1024) {
       const text = await this.#inputs.text(inputId, 1024 * 1024 * 2);
       const material = ingestPastedMaterials(text, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), maxWorkspaceBytes: 2 * 1024 * 1024 });
       if (material.kind === 'ingested') {
         if (Buffer.byteLength(material.insertText) > 128 * 1024) throw Error('材料引用工作区不足，原有草稿和材料保留。');
         const handles = this.#inputs.registerHandles(inputId, material.insertText);
-        const result = { text: material.insertText, handles, paste: false, replacePastes: false };
+        const result = { text: material.insertText, handles, paste: false };
         // Fail this complete paste through the ordinary request error path,
         // before an oversized control reply could close the terminal channel.
         if (Buffer.byteLength(JSON.stringify(result)) > TERMINAL_LIMITS.frameBytes - 4096) throw Error('材料引用工作区不足，原有草稿和材料保留。');
         return result;
       }
-      if (text.length < 400 && (text.match(/\n/gu)?.length ?? 0) < 5) return { text, handles: [], paste: false, replacePastes: true };
+      if (!paste.fold) return { text, handles: [], paste: false, textEdit: true };
     }
-    return { text: paste.token, handles: [{ token: paste.token, id: inputId }], paste: true, replacePastes: true };
+    return { text: paste.token, handles: [{ token: paste.token, id: inputId }], paste: true, textEdit: true };
   }
 
   async #acceptCandidate(revision: number, id: string): Promise<TerminalCandidateAcceptance> {
@@ -1029,11 +1046,17 @@ class TerminalApplication {
     signal.throwIfAborted();
     // Expansion's two carriers have their own phase. Leave 4 MiB for its
     // finite file owner/IPC/page scratch before entering material preparation.
+    // Inspect the immutable unexpanded draft: a leading paste handle is body,
+    // even when its expanded contents happen to start with a slash alias.
+    const head = await this.#inputs.window(inputId, 0);
+    const controlHead = head.text.trimStart();
+    const commandAliasOffset = head.start === 0 && normalizeLeadingSlashAlias(controlHead) !== controlHead
+      ? head.text.length - controlHead.length : undefined;
     const text = await this.#inputs.expand(inputId, TERMINAL_LIMITS.rpcWorkspaceBytes - 4 * 1024 * 1024);
     await new Promise<void>(resolve => setImmediate(resolve));
     const source = await this.#pendingSend.prepare(write => prepareSessionSendSnapshot(text, identity, {
       workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), materialRegistry: this.#materials,
-      signal, maximumParamsBytes,
+      signal, maximumParamsBytes, commandAliasOffset,
     }, write), signal);
     if (!source) throw new EmptyTerminalSubmission();
     return source;
@@ -1108,7 +1131,7 @@ class TerminalApplication {
         ...view, message: [this.#pendingRubricNotice, view.message].filter(Boolean).join('\n'),
       }));
       current();
-      if (!selected) {
+      if (!selected || selected.kind === 'cancelled') {
         const { rubricDraft: _draft, ...identity } = pending;
         this.#deferredRubric = boundedControlProjection(identity, 8192);
         this.#pendingRubric = undefined;
@@ -1188,6 +1211,9 @@ class TerminalApplication {
           message: `运行已结束；场景切换未完成：${error instanceof Error ? error.message.slice(0, 1024) : '请重新核对当前对话。'}` }; }
         if (outcome.control.conflict) this.#mainView = { ...this.#mainView, message: `本轮包含多个场景请求，已按最后一次确认处理。${this.#mainView.message ?? ''}` };
       }
+      if (outcome.reason !== 'completed' && this.#mainView.message !== outcome.message) {
+        this.#mainView = { ...this.#mainView, message: `${outcome.message}\n${this.#mainView.message ?? ''}` };
+      }
       if (!this.#editor && !this.#selection) await this.#publish(this.#mainView);
     }).catch(async () => {
       if (!this.#abort.signal.aborted && this.#controller?.current.conversationId === conversationId) {
@@ -1200,6 +1226,7 @@ class TerminalApplication {
   }
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
+    this.#abort.signal.throwIfAborted();
     const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
@@ -1211,6 +1238,7 @@ class TerminalApplication {
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
     await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP', message: '正在读取本机配置…', busy: true });
+    this.#abort.signal.throwIfAborted();
     const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
     const connected = this.#connection.getStatus().kind === 'connected';
@@ -1257,6 +1285,7 @@ class TerminalApplication {
   }
 
   async #reload(options?: HostReloadOptions) {
+    this.#abort.signal.throwIfAborted();
     const { reloadCoreHostAfterConfig, waitForReloadStatus } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
     this.#invalidateAuxiliary();
@@ -1265,6 +1294,7 @@ class TerminalApplication {
       requestDrainShutdown: () => this.#management.serverShutdown({ reason: 'config-reload', strategy: 'drain' }),
       reconnect: input => this.#connection.reconnect(input),
       prepareManagedServiceTurnover: async () => {
+        this.#abort.signal.throwIfAborted();
         const { prepareCurrentManagedServiceConfigTurnover } = await import('../serve/managed-service-runtime.js');
         this.#abort.signal.throwIfAborted();
         return prepareCurrentManagedServiceConfigTurnover(undefined, this.home);
@@ -1290,6 +1320,7 @@ class TerminalApplication {
 
   #ensureSkillsBinding(): Promise<SkillsBinding> {
     return this.#skillsBinding ??= (async () => {
+      this.#abort.signal.throwIfAborted();
       const [{ SkillCatalogRpcClient }, { TerminalSkillCommands, terminalSkillCommandRoute }] = await Promise.all([
         import('@zhixing/rpc/skill-catalog-client'), import('./skill-commands.js'),
       ]);
@@ -1314,6 +1345,7 @@ class TerminalApplication {
 
   async #showSkills(): Promise<void> {
     await this.#selectionFlow(async () => {
+      this.#abort.signal.throwIfAborted();
       const [binding, { TerminalSkillsOwner }] = await Promise.all([this.#ensureSkillsBinding(), import('./skills.js')]);
       this.#abort.signal.throwIfAborted();
       const owner = new TerminalSkillsOwner({ client: binding.client, signal: this.#abort.signal,
@@ -1372,6 +1404,7 @@ class TerminalApplication {
 
   #ensureTasksBinding(): Promise<void> {
     return this.#tasksBinding ??= (async () => {
+      this.#abort.signal.throwIfAborted();
       const [{ TerminalTasks }, { TerminalTaskNotices }, { RpcSchedulerFacade }] = await Promise.all([
         import('./tasks.js'), import('./task-notices.js'), import('../runtime/rpc-scheduler-facade.js'),
       ]);
@@ -1418,6 +1451,7 @@ class TerminalApplication {
 
   #ensureInformationBinding(): Promise<void> {
     return this.#informationBinding ??= (async () => {
+      this.#abort.signal.throwIfAborted();
       const { TerminalInformationCommands } = await import('./information-commands.js');
       this.#abort.signal.throwIfAborted();
       this.#information = new TerminalInformationCommands({
@@ -1450,6 +1484,7 @@ class TerminalApplication {
 
   #ensureDecisionBinding(): Promise<void> {
     return this.#decisionBinding ??= (async () => {
+      this.#abort.signal.throwIfAborted();
       const [{ TerminalDecisionCommands }, { TerminalTrustCandidates }] = await Promise.all([
         import('./decision-commands.js'), import('./trust-candidates.js'),
       ]);
@@ -1482,7 +1517,7 @@ class TerminalApplication {
     this.#invalidateAuxiliary();
     this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#sessionCommands?.invalidate(); this.#candidates.close();
     const selection = this.#selection; this.#selection = undefined;
-    if (selection) { selection.resolve(); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {}); }
+    if (selection) { selection.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); void this.#channel.send({ type: 'invalidate', requestId: selection.id }).catch(() => {}); }
   }
 
   #deletedCurrent(): void {
@@ -1541,6 +1576,7 @@ class TerminalApplication {
   }
 
   async #createSceneInner(input: string, current: () => void, signal: AbortSignal): Promise<void> {
+    current();
     const { runWorksceneCreateAssist, createWorksceneCreateSelectionRequest } = await import('../runtime/workscene-create-assist.js');
     current();
     const ask = async (title: string, prefill = '') => {
@@ -1554,6 +1590,7 @@ class TerminalApplication {
       complete: async (prompt, signal) => { current(); const result = await this.#management.llmComplete(prompt, 'main', signal); current(); return result; },
       create: async (name, workspace) => { current(); const result = await this.#workscene.create(name, workspace); current(); return result; },
       createWithLocalWorkspace: async (name, absolutePath) => {
+        current();
         const { withLocalWorkspaceClient, createWorksceneFromLocalWorkspaceAuthorization } = await import('../runtime/workspace-command.js');
         current();
         return withLocalWorkspaceClient(workspace => { current(); return workspace.authorizeForControl(name, absolutePath); }, {
@@ -1573,7 +1610,7 @@ class TerminalApplication {
       },
       confirm: async proposal => {
         current(); const selected = await chooseTerminalSelection(createWorksceneCreateSelectionRequest(proposal), view => this.#choosePage(view));
-        current(); return selected?.value === 'create';
+        current(); return selected?.kind === 'selected' && selected.value === 'create';
       },
       askUser: question => ask(question),
     }, signal);
@@ -1594,7 +1631,7 @@ class TerminalApplication {
   async #command(name: string, argument: string): Promise<unknown> {
     if (typeof name !== 'string' || typeof argument !== 'string' || name.length > 128 || argument.length > 8192) throw Error('terminal-command-size');
     const definition = this.#candidates.registry.findByName(name);
-    if (!definition) throw Error('该命令暂未迁移到此开发入口，请使用完整旧入口。');
+    if (!definition) throw Error('命令不可用，请用 /help 查看当前支持的命令。');
     name = definition.name;
     if (name === 'exit') {
       if (this.#controller?.current.mode.kind === 'workscene') this.#background(() => this.#sessionCommand(name, argument));
@@ -1615,20 +1652,35 @@ class TerminalApplication {
       await this.#publish({ ...this.#mainView, message: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`).join('\n') });
       return { accepted: true };
     }
-    throw Error('该命令暂未迁移到此开发入口，请使用完整旧入口。');
+    throw Error('命令不可用，请用 /help 查看当前支持的命令。');
   }
 
   async #stop(): Promise<void> {
     const status = await this.#management.serverInfoIfConnected();
+    this.#abort.signal.throwIfAborted();
     const choice = await this.#selectionFlow(() => chooseTerminalSelection(createStopSelectionRequest(status), view => this.#choosePage(view)));
-    if (!choice || choice.value === 'cancel') { await this.#publish(this.#mainView); return; }
+    if (!choice || choice.kind === 'cancelled' || choice.value === 'cancel') { await this.#publish(this.#mainView); return; }
     await this.#management.serverShutdown({ reason: 'user-stop', strategy: shutdownStrategyForChoice(choice.value), timeoutMs: 30_000 });
     void this.#close(0, 'user-stop');
   }
 
   async #status(): Promise<void> {
+    const controller = this.#controller, epoch = this.#conversationEpoch;
     const status = await this.#management.serverInfoIfConnected();
-    await this.#publish({ ...this.#mainView, message: status ? `服务已连接 · ${status.activeConversations} 个对话 · ${status.busyConversations} 个运行中对话` : '本机服务未连接。' });
+    if (this.#abort.signal.aborted || this.#controller !== controller || this.#conversationEpoch !== epoch) return;
+    const { serverStatusLines } = await import('../runtime/server-status-presentation.js');
+    await this.#localView.refresh();
+    if (this.#abort.signal.aborted || this.#controller !== controller || this.#conversationEpoch !== epoch) return;
+    const current = controller?.current;
+    const name = current?.mode.kind === 'workscene' ? `${current.name}（工作场景：${current.mode.sceneName}）` : current?.name ?? '当前对话';
+    await this.#selectionFlow(async () => {
+      try {
+        await chooseTerminalSelection({ id: 'server-status', title: '运行状态',
+          body: serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status),
+          options: [{ value: 'return', label: '返回对话' }],
+        }, view => this.#choosePage(view));
+      } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
+    });
   }
 
   #output(event: AgentYield, source: ConversationOutputSource): void {
@@ -1667,7 +1719,8 @@ class TerminalApplication {
     if (current && !current()) return Promise.resolve();
     if (this.#presentingConfirmation && view.kind !== 'confirmation') return Promise.resolve();
     if (this.#skills && view.kind !== 'skills') return Promise.resolve();
-    this.#nextView = { view: { ...view, conversationId: view.conversationId ?? this.#controller?.current.conversationId }, current };
+    this.#nextView = { view: { ...view, conversationId: view.conversationId ?? this.#controller?.current.conversationId,
+      environment: view.kind === 'conversation' && this.#resolvedLocalView ? terminalEnvironment(this.#resolvedLocalView) : undefined }, current };
     if (!this.#publishing) this.#publishing = (async () => {
       while (this.#nextView && !this.#abort.signal.aborted) {
         const next = this.#nextView; this.#nextView = undefined;
@@ -1682,10 +1735,11 @@ class TerminalApplication {
     if (this.#closing) return this.#closing;
     let resolveClosing!: () => void;
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
+    this.#channel.beginClose();
     this.#closeDeadline ||= Date.now() + (code === 0 ? 2000 : 8000);
     this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose();
     this.#resumeNoticeDisplay();
-    this.#abort.abort(); this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve(); this.#selection = undefined;
+    this.#abort.abort(); this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;
     void (async () => {
       // A failed control lane cannot report its own exit. Closing the existing
       // transport immediately lets S start its shared finite recovery deadline

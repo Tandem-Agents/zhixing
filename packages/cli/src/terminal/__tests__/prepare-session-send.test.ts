@@ -114,3 +114,20 @@ describe('bounded native JSON escaping', () => {
     expect(written).toBe(maximum);
   });
 });
+
+
+it('normalizes only an alias proven in the raw draft, keeping ordinary expanded paste text literal', async () => {
+  const registry = new InputMaterialRegistry();
+  for (const [original, commandAliasOffset, expected] of [
+    ['\u3001custom-skill ask', 0, '/custom-skill ask'],
+    ['  \u3001custom-skill a\u3001b', 2, '  /custom-skill a\u3001b'],
+    ['\u3001clear\npasted body', undefined, '\u3001clear\npasted body'],
+    ['/clear\npasted body', undefined, '/clear\npasted body'],
+    ['body\u3001clear', undefined, 'body\u3001clear'],
+  ] as const) {
+    const parts: Buffer[] = [];
+    await prepareSessionSendSnapshot(original, identity, { workspaceRoot: process.cwd(), materialRegistry: registry,
+      signal: new AbortController().signal, commandAliasOffset }, async bytes => { parts.push(Buffer.from(bytes)); });
+    expect(JSON.parse(Buffer.concat(parts).toString()).input.parts[0].text).toBe(expected);
+  }
+});

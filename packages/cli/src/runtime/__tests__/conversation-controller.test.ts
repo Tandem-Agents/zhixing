@@ -15,6 +15,7 @@ import type { ConversationControlCursor, ConversationControlPage, ConversationIn
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import {
   ConversationController,
+  AcceptedTurnOutcomeUnknownError,
   selectInitialConversation,
   type ActiveConversation,
 } from "../conversation-controller.js";
@@ -1569,7 +1570,21 @@ describe("ConversationController", () => {
       f.emit[kind](payload);
       throw new Error("late response error");
     });
-    await expect(controller.beginUserTurn("本次文字", { onAccepted: submission.accept })).rejects.toThrow("late response error");
+    if (kind === 'delta') {
+      // Acceptance is not a known terminal result: do not create an unbounded
+      // outcome wait after losing the receipt/run identity. The draft stays committed.
+      const failure = await controller.beginUserTurn('本次文字', { onAccepted: submission.accept }).catch(error => error);
+      expect(failure).toBeInstanceOf(AcceptedTurnOutcomeUnknownError);
+      expect(failure.message).toContain('输入已接纳');
+      expect(failure.message).toContain('最终结果未知');
+      expect(failure.message).toContain('/resume conv-1');
+      expect(failure.cause.message).toBe('late response error');
+    } else {
+      const result = await controller.beginUserTurn('本次文字', { onAccepted: submission.accept });
+      if (result.kind !== 'accepted') throw Error('matching completion lost');
+      await expect(result.turn.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+    }
+    expect(f.conversation.send).toHaveBeenCalledOnce();
     submission.reject();
     expect(draft.commit).toHaveBeenCalledOnce();
     expect(draft.reject).not.toHaveBeenCalled();
@@ -1628,16 +1643,61 @@ describe("ConversationController", () => {
     controller.dispose();
   });
 
-  it("其它 conversation 的同 turnId complete 不能接纳当前提交", async () => {
+  it.each(['prepared', 'referenced', 'confirm', 'direct'] as const)('retains completed %s execution when its receipt throws, without an acceptance callback', async kind => {
+    const f = makeFakes(); const { controller } = makeController(f);
+    const pending = { conversationId: 'conv-1', turnId: 'original', advancementSessionId: 'adv-1', rubricDraftId: 'draft-1', rubricDraft: rubricDraft('original'), kind: 'awaiting-rubric-confirmation' as const };
+    const completeThenThrow = (_id: string, turnId: string): never => {
+      f.emit.complete({ conversationId: 'conv-1', turnId, result: { reason: 'completed' } });
+      throw Error('late receipt');
+    };
+    f.conversation.confirmAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', 'original'));
+    f.conversation.cancelAdvancement.mockImplementationOnce(async () => completeThenThrow('conv-1', 'original'));
+    try {
+      const result = kind === 'prepared' ? await controller.beginPreparedUserTurn(completeThenThrow)
+        : kind === 'referenced' ? await controller.beginReferencedUserTurn(completeThenThrow)
+          : kind === 'confirm' ? { kind: 'accepted', turn: await controller.confirmRubricContract(pending) }
+            : await controller.cancelRubricContract(pending, { executeOriginal: true });
+      if (!('turn' in result)) throw Error('execution evidence lost');
+      await expect(result.turn.outcome).resolves.toMatchObject({ result: { reason: 'completed' } });
+      expect(f.conversation.send).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+
+  it.each(['prepared', 'referenced', 'confirm', 'direct'] as const)('reports accepted but unknown %s outcome without waiting or resending', async kind => {
+    const f = makeFakes(); const { controller } = makeController(f);
+    const pending = { conversationId: 'conv-1', turnId: 'original', advancementSessionId: 'adv-1', rubricDraftId: 'draft-1', rubricDraft: rubricDraft('original'), kind: 'awaiting-rubric-confirmation' as const };
+    const original = Error('lost receipt');
+    const acceptedThenThrow = (_id: string, turnId: string): never => {
+      f.emit.delta({ conversationId: 'conv-1', turnId, delta: { type: 'text_delta', text: 'accepted output' } });
+      throw original;
+    };
+    f.conversation.confirmAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', 'original'));
+    f.conversation.cancelAdvancement.mockImplementationOnce(async () => acceptedThenThrow('conv-1', 'original'));
+    try {
+      const result = kind === 'prepared' ? controller.beginPreparedUserTurn(acceptedThenThrow)
+        : kind === 'referenced' ? controller.beginReferencedUserTurn(acceptedThenThrow)
+          : kind === 'confirm' ? controller.confirmRubricContract(pending)
+            : controller.cancelRubricContract(pending, { executeOriginal: true });
+      const failure = await result.catch(error => error);
+      expect(failure).toBeInstanceOf(AcceptedTurnOutcomeUnknownError);
+      expect(failure).toMatchObject({ conversationId: 'conv-1', cause: original });
+      expect(failure.message).toContain('最终结果未知');
+      expect(f.conversation.send).not.toHaveBeenCalled();
+    } finally { controller.dispose(); }
+  });
+
+  it.each(['delta', 'complete'] as const)("其它 conversation 的同 turnId %s 不能接纳当前提交", async kind => {
     const f = makeFakes();
     const { controller } = makeController(f);
     const accepted = vi.fn();
     f.conversation.send.mockImplementationOnce(async (_text, _id, turnId) => {
-      f.emit.complete({ conversationId: "different", turnId, result: { reason: "completed" } });
+      f.emit[kind]({ conversationId: "different", turnId, delta: { type: 'text_delta', text: 'not ours' }, result: { reason: "completed" } });
       expect(accepted).not.toHaveBeenCalled();
       throw new Error("not accepted");
     });
-    await expect(controller.beginUserTurn("本次文字", { onAccepted: accepted })).rejects.toThrow("not accepted");
+    const error = await controller.beginUserTurn("本次文字", { onAccepted: accepted }).catch(error => error);
+    expect(error.message).toBe('not accepted');
+    expect(error).not.toBeInstanceOf(AcceptedTurnOutcomeUnknownError);
     expect(accepted).not.toHaveBeenCalled();
     controller.dispose();
   });

@@ -2,7 +2,7 @@
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { setRenderLibPath, type TextareaRenderable } from '@opentui/core';
+import { setRenderLibPath, resolveRenderLib, type TextareaRenderable } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
 import type { TerminalAction, TerminalView } from '../protocol.js';
@@ -11,13 +11,17 @@ import type { BodyNode, BodyPage } from '../body-model.js';
 import type { TerminalPasteSink } from '../paste-stream.js';
 
 process.env.OTUI_ASSET_ROOT = path.resolve(`dist/${process.platform}-${process.arch}/assets`);
-setRenderLibPath(path.resolve(`dist/${process.platform}-${process.arch}/${process.platform === 'win32' ? 'opentui.dll' : process.platform === 'darwin' ? 'libopentui.dylib' : 'libopentui.so'}`));
+const admittedLibrary = process.env.ZHIXING_TERMINAL_RENDER_LIB;
+assert.ok(admittedLibrary, 'test runner supplies the rebuilt admitted native library');
+setRenderLibPath(admittedLibrary);
+assert.equal(typeof (resolveRenderLib() as any).editorViewSetNoBreakRanges, 'function', 'same bundled FFI binds the new native export');
 const test = await createTestRenderer({ width: 80, height: 24, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
 const actions: TerminalAction[] = [];
 let generation = 0;
 const checks: string[] = [];
 const frameTimes: number[] = [];
 let clipboardReply: (() => Promise<unknown>) | undefined;
+let pasteReply: (() => unknown) | undefined;
 let externalPaste: (() => TerminalPasteSink | undefined) | undefined;
 const tick = setInterval(() => { void test.renderOnce(); }, 15);
 let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined;
@@ -25,10 +29,20 @@ try {
   root = await createTerminalRoot({ signal: new AbortController().signal, exit: async () => {}, inputReady() {},
     request: async action => {
       actions.push(action);
-      if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: 0, items: [] };
+      if (action.kind === 'command-route' && ['help', 'clear'].includes(action.name)) return { route: 'local' };
+      if (action.kind === 'input-candidates') {
+        if (action.text === '\u3001he') return { revision: action.revision, start: 0, end: 3, ghost: { fullValue: '/help' }, items: [{ id: 'help:repl', label: '/help' }] };
+        if (action.text === '/qui') return { revision: action.revision, start: 0, end: 4, ghost: { fullValue: '/quit' }, items: [{ id: 'exit:repl', label: '/exit' }] };
+        if (action.text === '/resume ') return { revision: action.revision, start: 8, end: 8, argumentHint: '暂无可切换对话', items: [] };
+        return { revision: action.revision, start: 0, end: 0, items: [] };
+      }
+      if (action.kind === 'candidate-ghost') {
+        const query = actions.findLast(item => item.kind === 'input-candidates' && item.revision === action.revision) as Extract<TerminalAction, { kind: 'input-candidates' }> | undefined;
+        return { text: query?.text === '\u3001he' ? '/help' : '/quit', execute: false };
+      }
       if (action.kind === 'input-history') return { end: true };
       if (action.kind === 'clipboard-read') return clipboardReply ? clipboardReply() : { text: '字段粘贴' };
-      if (action.kind === 'paste-finish') return { text: '右键中文🙂', handles: [], replacePastes: true };
+      if (action.kind === 'paste-finish') return pasteReply ? pasteReply() : { text: '右键中文🙂', handles: [], replacePastes: true };
       return { accepted: true };
     } }, async options => { externalPaste = (options as { externalPaste?: () => TerminalPasteSink | undefined })?.externalPaste; return test.renderer; });
   clearInterval(tick);
@@ -39,11 +53,113 @@ try {
     const visit = (node: any): TextareaRenderable | undefined => node.constructor.name === 'TerminalTextarea' ? node : node.getChildren?.().map(visit).find(Boolean);
     const found = visit(test.renderer.root); assert.ok(found, 'mounted editor'); return found;
   };
+  await show({ kind: 'conversation', title: '环境投影', conversationId: 'environment', connected: true,
+    environment: { provider: 'provider-one', model: 'model-one', workspace: 'D:/workspace-one' } });
+  assert.match(text(), /D:\/workspace-one/); assert.match(text(), /provider-one.*model-one/);
+  await test.mockInput.typeText('保留草稿'); await flush();
+  await show({ kind: 'conversation', title: '环境投影', conversationId: 'environment', connected: true,
+    environment: { provider: 'provider-two', model: 'model-two', workspace: 'E:/workspace-two' } });
+  assert.match(text(), /E:\/workspace-two/); assert.match(text(), /provider-two.*model-two/);
+  assert.ok(!text().includes('workspace-one')); assert.equal(editor().plainText, '保留草稿');
+  test.resize(40, 12); await flush(); assert.ok(editor().height > 0);
+  test.resize(80, 24); await flush(); assert.match(text(), /workspace-two/);
+  editor().setText(''); await flush();
+  checks.push('public model and directory refresh in the main header without resetting draft or blocking small-screen input');
+  await show({ kind: 'conversation', title: 'slash alias', conversationId: 'slash-alias' });
+  for (const command of ['help', 'clear']) {
+    const before = actions.length; await test.mockInput.typeText('\u3001' + command); await flush();
+    assert.equal(editor().plainText, '\u3001' + command); test.mockInput.pressEnter(); await flush();
+    assert.ok(actions.slice(before).some(action => action.kind === 'command-route' && action.name === command));
+    assert.ok(actions.slice(before).some(action => action.kind === 'command' && action.name === command));
+    assert.ok(!actions.slice(before).some(action => action.kind === 'input-submit'));
+  }
+  await test.mockInput.typeText('\u3001he'); await flush(); assert.equal(editor().plainText, '\u3001he');
+  const aliasTab = actions.length; test.mockInput.pressTab(); await flush(); assert.equal(editor().plainText, '/help');
+  assert.ok(actions.slice(aliasTab).some(action => action.kind === 'candidate-ghost'));
+  assert.ok(!actions.slice(aliasTab).some(action => action.kind === 'command' || action.kind === 'input-submit'));
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  await test.mockInput.typeText('body\u3001clear'); await flush(); const bodyStart = actions.length;
+  test.mockInput.pressEnter(); await flush();
+  assert.ok(actions.slice(bodyStart).some(action => action.kind === 'input-submit'));
+  assert.ok(!actions.slice(bodyStart).some(action => action.kind === 'command-route' || action.kind === 'command'));
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  checks.push('Chinese slash aliases preserve raw display, route locally, and complete without executing; middle punctuation stays body');
+  await show({ kind: 'conversation', title: '补全提示', conversationId: 'hints' });
+  await test.mockInput.typeText('/qui'); await flush();
+  assert.match(text(), /Tab 补全 \/quit/); assert.equal(editor().plainText, '/qui'); assert.equal(editor().placeholder, null);
+  const ghostStart = actions.length; test.mockInput.pressTab(); await flush();
+  assert.equal(editor().plainText, '/quit');
+  assert.ok(actions.slice(ghostStart).some(action => action.kind === 'candidate-ghost'));
+  assert.ok(!actions.slice(ghostStart).some(action => action.kind === 'candidate-accept' || action.kind === 'input-submit' || action.kind === 'command'));
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  assert.equal(editor().plainText, '');
+  await test.mockInput.typeText('/resume '); await flush();
+  assert.match(text(), /暂无可切换对话/); assert.equal(editor().plainText, '/resume ');
+  test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25)); await flush();
+  checks.push('prefix Tab only fills alias; argument hint remains visible with no items and no inline placeholder');
+  const selectionChoices = [{ id: 'disabled', label: '禁用', hotkey: 'x', disabled: true },
+    { id: 'first', label: '第一项', hotkey: 'a', detailsActionId: 'detail-first' },
+    { id: 'disabled-middle', label: '中间禁用', disabled: true }, { id: 'last', label: '末项', hotkey: 'z' }];
+  await show({ kind: 'selection', title: '选择合同', requestId: 'selection-contract', selectionLayer: 'select', initialItemId: 'last', choices: selectionChoices });
+  test.mockInput.pressEnter(); await flush();
+  assert.ok(actions.at(-1)?.kind === 'selection' && (actions.at(-1) as any).itemId === 'last');
+  test.mockInput.pressArrow('up'); await flush(); test.mockInput.pressEnter(); await flush();
+  assert.equal((actions.at(-1) as any).itemId, 'first', 'navigation skips disabled item');
+  const disabledStart = actions.length; test.mockInput.pressKey('x'); await flush();
+  assert.equal(actions.length, disabledStart, 'disabled hotkey cannot activate');
+  test.mockInput.pressKey('z'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'last');
+  test.mockInput.pressArrow('up'); test.mockInput.pressArrow('right'); await flush();
+  assert.equal((actions.at(-1) as any).itemId, 'detail-first', 'Right is a read-only detail intent');
+  for (const key of ['c', 'd'] as const) {
+    test.mockInput.pressKey(key, { ctrl: true }); await flush();
+    assert.equal((actions.at(-1) as any).cancelCause, key === 'c' ? 'ctrl-c' : 'ctrl-d');
+  }
+  await show({ kind: 'confirmation', title: '再次确认', requestId: 'confirmation-contract', selectionLayer: 'confirm', initialItemId: 'confirm', choices: [{ id: 'back', label: '返回' }, { id: 'confirm', label: '确认' }] });
+  test.mockInput.pressEnter(); await flush(); assert.equal((actions.at(-1) as any).action, 'confirm');
+  test.mockInput.pressKey('d', { ctrl: true }); await flush(); assert.equal((actions.at(-1) as any).cancelCause, 'ctrl-d');
+  await show({ kind: 'selection', title: '详情', requestId: 'details-contract', selectionLayer: 'details', initialItemId: 'return', message: '正文\n'.repeat(30), choices: [{ id: 'next', label: '下一页' }, { id: 'return', label: '返回' }] });
+  test.mockInput.pressArrow('down'); await flush(); test.mockInput.pressEnter(); await flush();
+  assert.equal((actions.at(-1) as any).itemId, 'return', 'detail scrolling does not activate business choices');
+  test.mockInput.pressKey('\x1b[6~'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'next');
+  test.mockInput.pressArrow('left'); await flush(); assert.equal((actions.at(-1) as any).itemId, 'return');
+  checks.push('selection defaults, enabled navigation, hotkeys, detail intents, confirmation Enter, Ctrl+C/D causes');
   await show({ kind: 'conversation', title: '知行 · 交互验证', conversationId: 'test' });
   let lines = text().split('\n');
   assert.match(lines.at(-2) ?? '', /输入消息或/);
   assert.equal(editor().height, 1); assert.equal(editor().placeholder, null);
   checks.push('empty input: 3-row frame, common footer, no inline placeholder');
+  // Enter admitted handles through the same paste completion path as N.
+  const atomicText = '1234567890123[A B][C D]z';
+  pasteReply = () => ({ text: atomicText, paste: true, handles: [
+    { token: '[A B]', id: '11111111-1111-1111-1111-111111111111' },
+    { token: '[C D]', id: '22222222-2222-2222-2222-222222222222' },
+  ] });
+  test.resize(24, 24); await flush();
+  const atomicPaste = externalPaste?.(); assert.ok(atomicPaste);
+  atomicPaste.write(Buffer.from('payload')); atomicPaste.end(); await flush(); await flush();
+  assert.equal(editor().plainText, atomicText, 'paste receipt keeps exact text');
+  assert.equal(editor().editorView.getTotalVirtualLineCount(), 2, 'multiple adjacent tokens stay on the continuation');
+  // Offsets are ASCII here so native cell and UTF-16 coordinates coincide.
+  editor().cursorOffset = 13; await flush();
+  assert.equal(editor().editorView.getVisualCursor().visualCol, 0, 'first token starts next visual line');
+  editor().cursorOffset = 18; await flush();
+  assert.equal(editor().editorView.getVisualCursor().visualCol, 5, 'adjacent token shares row without splitting');
+  editor().editorView.setSelection(13, 23);
+  assert.equal(editor().getSelectedText(), '[A B][C D]');
+  test.resize(12, 24); await flush();
+  assert.equal(editor().plainText, atomicText, 'overwide fallback never inserts or truncates text');
+  assert.equal(editor().getSelectedText(), '[A B][C D]', 'resize preserves exact selection copy');
+  assert.ok(editor().editorView.getTotalVirtualLineCount() > 2, 'narrow token makes bounded char-wrap progress');
+  test.resize(24, 24); await flush();
+  editor().editorView.resetSelection(); editor().cursorOffset = atomicText.length;
+  test.mockInput.pressKey('!'); await flush(); assert.equal(editor().plainText, atomicText + '!');
+  assert.ok(editor().undo()); await flush(); assert.equal(editor().plainText, atomicText);
+  editor().cursorOffset = 13; await flush(); assert.equal(editor().editorView.getVisualCursor().visualCol, 0, 'undo republishes atomic layout at current native epoch');
+  assert.ok(editor().redo()); await flush(); assert.equal(editor().plainText, atomicText + '!');
+  editor().cursorOffset = 13; await flush(); assert.equal(editor().editorView.getVisualCursor().visualCol, 0, 'redo republishes atomic layout');
+  editor().cursorOffset = 13; test.mockInput.pressArrow('right'); await flush(); assert.equal(editor().cursorOffset, 18, 'same cached ranges drive atomic Right');
+  checks.push('admitted multi-token paste, same native FFI, atomic wrap, narrow/wide resize, raw/copy preservation, undo/redo and atomic Right');
+  pasteReply = undefined; editor().setText(''); test.resize(80, 24); await flush();
   await show({ kind: 'conversation', title: '知行', conversationId: 'test', busy: true });
   root.receive({ type: 'process-status', status: { conversationId: 'test', view: { revision: 1, phase: '正在回复', tools: [], children: [], usage: {} } } });
   await flush(); assert.match(text(), /正在回复/); assert.ok(!text().includes('正在处理'));

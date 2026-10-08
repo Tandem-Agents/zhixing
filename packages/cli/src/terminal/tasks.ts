@@ -96,7 +96,8 @@ export class TerminalTasks {
       if (name === 'tasklist') {
         await this.refresh(); this.#assert(scope);
         if (!this.#snapshot || this.#summary?.state !== 'ready') {
-          await show('任务列表暂不可用', [this.#summary?.text ?? '尚未读取当前对话的任务列表，请重试。']); return;
+          await this.options.publish({ title: '任务列表暂不可用', error: true,
+            message: this.#summary?.text ?? '尚未读取当前对话的任务列表，请重试。' }); return;
         }
         this.#assert(this.#snapshot);
         await show('当前对话任务列表', taskListLines(this.#snapshot.state)); return;

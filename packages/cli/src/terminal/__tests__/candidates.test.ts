@@ -108,6 +108,64 @@ describe('terminal candidates and control commands', () => {
       return [{ itemId: 'option:cancel-work-stop' }, { itemId: 'back' }, { itemId: 'option:cancel-work-stop' }, { itemId: 'confirm' }][index++];
     });
     expect(pages).toEqual(['停止知行', '取消工作并停止知行', '停止知行', '取消工作并停止知行']);
-    expect(response?.value).toBe('cancel-work-stop');
+    expect(response).toEqual({ kind: 'selected', value: 'cancel-work-stop' });
   });
+});
+
+
+it('projects alias prefix ghosts separately and accepts them without execution', async () => {
+  const source = owner(); const value = await source.query(1, '/qui', 4);
+  expect(value.ghost).toEqual({ fullValue: '/quit' });
+  expect(source.acceptGhost(1)).toEqual({ text: '/quit', execute: false });
+  expect(() => source.acceptGhost(1)).toThrow('expired');
+  expect(() => source.accept(1, 'exit:repl')).toThrow('expired');
+  expect((await source.query(2, '/c', 2)).ghost).toBeUndefined();
+  expect((await source.query(3, '/quit', 5)).ghost).toBeUndefined();
+  await source.query(4, '/qui', 4); source.accept(4, 'exit:repl');
+  expect(() => source.acceptGhost(4)).toThrow('expired');
+});
+it('projects progressive argument and empty-list hints from the shared provider', async () => {
+  const source = owner();
+  source.bindCommands([{ id: 'hint-test', name: 'hint', description: 'hint', category: 'tools', tag: 'builtin', execution: 'local',
+    args: [{ name: 'name', kind: 'text', placeholder: '输入名称', required: true }] }]);
+  const text = await source.query(1, '/hint ', 6);
+  expect(text.items).toEqual([]); expect(text.argumentHint).toContain('输入名称');
+  source.bindCommands([{ id: 'hint-empty', name: 'empty', description: 'empty', category: 'tools', tag: 'builtin', execution: 'local',
+    args: [{ name: 'scene', kind: 'async-enum', required: true, provider: { mode: 'picker', emptyHint: '暂无场景', list: async () => [] } }] }]);
+  expect((await source.query(2, '/empty ', 7)).argumentHint).toBe('暂无场景');
+});
+it('accepts a ghost through the same draft snapshot guard without submitting', async () => {
+  let resolve!: (value: unknown) => void;
+  const actions: TerminalAction[] = [];
+  const request = async (action: TerminalAction) => {
+    actions.push(action);
+    if (action.kind === 'input-candidates') return { revision: action.revision, start: 0, end: 4, ghost: { fullValue: '/quit' }, items: [{ id: 'exit:repl', label: '/exit' }] };
+    if (action.kind === 'candidate-ghost') return new Promise(done => { resolve = done; });
+  };
+  const input = new TerminalInputSession(request, vi.fn()), surface = new TerminalCandidateSession(input, request, vi.fn());
+  input.edit('/qui', 4); surface.sync(); await vi.waitFor(() => expect(surface.value?.ghost).toBeDefined());
+  const accepted = surface.accept(true); input.edit('later', 5); surface.sync();
+  resolve({ text: '/quit', execute: false }); expect(await accepted).toBe(false); expect(input.draft.text).toBe('later');
+  expect(actions.some(action => action.kind === 'candidate-accept' || action.kind === 'input-submit')).toBe(false);
+});
+
+
+it('uses a leading Chinese slash alias for commands and ghosts without moving UTF-16 ranges', async () => {
+  const source = owner();
+  const value = await source.query(1, '\u3001he', 3, true);
+  expect(value.items.some(item => item.id === 'help:repl')).toBe(true);
+  expect(value.ghost).toEqual({ fullValue: '/help' }); expect(value.start).toBe(0); expect(value.end).toBe(3);
+  expect(source.acceptGhost(1)).toEqual({ text: '/help', execute: false });
+  expect((await source.query(2, '\u3001he', 3, false)).items).toEqual([]);
+  expect((await source.query(3, 'body\u3001he', 7, true)).items).toEqual([]);
+  expect((await source.query(4, '[Pasted #1 +2 lines]\u3001he', '[Pasted #1 +2 lines]\u3001he'.length, true)).ghost).toBeUndefined();
+});
+it('owns an alias trust management page while loading, without sending it as a turn', async () => {
+  let settle!: (value: unknown) => void; const actions: TerminalAction[] = [];
+  const request = async (action: TerminalAction) => { actions.push(action); if (action.kind === 'input-candidates') return new Promise(done => { settle = done; }); };
+  const input = new TerminalInputSession(request, vi.fn()), surface = new TerminalCandidateSession(input, request, vi.fn());
+  input.edit('\u3001trust ', 7); surface.sync();
+  expect(surface.value?.mode).toBe('management'); expect(await surface.accept()).toBe(false);
+  expect(actions[0]).toMatchObject({ kind: 'input-candidates', atStart: true, text: '\u3001trust ' });
+  surface.dismiss(); settle({ revision: 1, start: 7, end: 7, items: [] }); await Promise.resolve();
 });

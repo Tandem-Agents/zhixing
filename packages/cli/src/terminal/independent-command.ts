@@ -32,7 +32,7 @@ export async function runIndependentCommand(args: readonly string[], ports: Inde
   const writeLine = (line: string) => write('stdout', line + '\n');
   const choose = async (view: Omit<TerminalView, 'generation'>) => {
     ports.signal.throwIfAborted();
-    const answer = await ports.choose(view); ports.signal.throwIfAborted(); return answer;
+    const answer = await ports.choose(view); ports.signal.throwIfAborted(); return answer?.cancelCause ? undefined : answer;
   };
   const confirm = async (message: string) => (await choose({ kind: 'selection', title: '确认操作', message,
     choices: [{ id: 'cancel', label: '取消' }, { id: 'confirm', label: '确认', danger: true }] }))?.itemId === 'confirm';

@@ -30,7 +30,7 @@ function fixture() {
   const resumeRubric = vi.fn<TerminalDecisionOptions['resumeRubric']>(async scope => { scope.assertCurrent(); });
   const abort = new AbortController();
   const owner = new TerminalDecisionCommands({ controller: () => current, management, choose, publish, resumeRubric, signal: abort.signal });
-  const text = () => choose.mock.calls.map(([page]) => page.message ?? '').join('\n');
+  const text = () => [...choose.mock.calls.map(([page]) => page.message ?? ''), ...publish.mock.calls.map(([page]) => page.message)].join('\n');
   return { owner, controller, management, choose, publish, resumeRubric, abort, text,
     replace(value: TerminalDecisionController | undefined) { current = value; } };
 }
@@ -67,6 +67,15 @@ describe('terminal decision commands', () => {
     f.management.securityStatus.mockRejectedValueOnce(Error('offline'));
     await f.owner.run('security', '');
     expect(f.text()).toContain('安全状态不可用'); expect(f.text()).toContain('offline');
+    expect(f.publish).toHaveBeenLastCalledWith(expect.objectContaining({ error: true }));
+  });
+  it('carries trust lookup and revoke failures as typed failures instead of success-shaped text', async () => {
+    const f = fixture(); f.management.trustList.mockRejectedValueOnce(Error('offline'));
+    await f.owner.run('trust');
+    expect(f.publish).toHaveBeenLastCalledWith(expect.objectContaining({ error: true, message: expect.stringContaining('offline') }));
+    await f.owner.run('trust', 'revoke missing');
+    expect(f.publish).toHaveBeenLastCalledWith(expect.objectContaining({ error: true, message: expect.stringContaining('不存在') }));
+    expect(f.choose).not.toHaveBeenCalled(); expect(f.management.trustRevoke).not.toHaveBeenCalled();
   });
   it('paginates a long trust result through the shared selection port without retaining hidden extra pages', async () => {
     const f = fixture();

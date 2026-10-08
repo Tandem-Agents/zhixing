@@ -1,4 +1,4 @@
-import type { TerminalAction, TerminalCandidateAcceptance, TerminalCandidates } from './protocol.js';
+import { normalizeLeadingSlashAlias, type TerminalAction, type TerminalCandidateAcceptance, type TerminalCandidates } from './protocol.js';
 import type { TerminalInputSession } from './input-session.js';
 
 /** One outstanding bounded query, one replaceable successor, and one visible
@@ -27,7 +27,7 @@ export class TerminalCandidateSession {
   }
   #revision = 0;
   #signature = '';
-  #pending?: { version: number; cursor: number; text: string; offset: number; revision: number };
+  #pending?: { version: number; cursor: number; text: string; offset: number; revision: number; atStart: boolean };
   #snapshot?: { version: number; cursor: number; offset: number };
   #running = false;
   #accepting = false;
@@ -48,8 +48,9 @@ export class TerminalCandidateSession {
     if (offset && /[\uDC00-\uDFFF]/u.test(draft.text[offset]!)) offset++;
     if (end < draft.text.length && /[\uDC00-\uDFFF]/u.test(draft.text[end]!)) end--;
     const text = draft.text.slice(offset, end);
-    this.#pending = { version: draft.version, cursor: draft.cursor, text, offset, revision };
-    if (/^\/trust\s/u.test(text)) {
+    const atStart = offset === 0 && this.input.windowStart === 0;
+    this.#pending = { version: draft.version, cursor: draft.cursor, text, offset, revision, atStart };
+    if (/^\/trust\s/u.test(atStart ? normalizeLeadingSlashAlias(text) : text)) {
       this.value = { revision, start: text.length, end: text.length, mode: 'management', items: [], hint: 'Esc 返回 · 正在读取信任规则' };
       this.#snapshot = this.#pending; this.changed();
     }
@@ -89,16 +90,16 @@ export class TerminalCandidateSession {
     if (!this.value) return;
     this.selected = Math.max(0, Math.min(this.value.items.length - 1, this.selected + direction)); this.changed();
   }
-  async accept(): Promise<boolean> {
+  async accept(ghost = false): Promise<boolean> {
     const value = this.value, snapshot = this.#snapshot, item = value?.items[this.selected];
-    if (!item || !value || !snapshot || value.mode === 'management' || this.#accepting) return false;
+    if (!value || !snapshot || (ghost ? !value.ghost : !item) || value.mode === 'management' || this.#accepting) return false;
     this.#accepting = true; this.dismiss();
     try {
-      const result = await this.request({ kind: 'candidate-accept', revision: value.revision, id: item.id }) as TerminalCandidateAcceptance;
+      const result = await this.request(ghost ? { kind: 'candidate-ghost', revision: value.revision } : { kind: 'candidate-accept', revision: value.revision, id: item!.id }) as TerminalCandidateAcceptance;
       if (typeof result?.text !== 'string' || result.text.length > 32 * 1024) throw Error('补全结果不可用，草稿保留。');
       const current = this.#active && this.input.draft.version === snapshot.version && this.input.draft.cursor === snapshot.cursor;
       this.input.candidate(result, current ? { start: value.start + snapshot.offset, end: value.end + snapshot.offset } : undefined);
-      return current && result.execute;
+      return !ghost && current && result.execute;
     } finally {
       this.#accepting = false;
       // A file/directory completion may open its successor. A command will be
@@ -113,16 +114,18 @@ export class TerminalCandidateSession {
       while (this.#pending) {
         const query = this.#pending; this.#pending = undefined;
         // Preserve management ownership while loading, including an empty list.
-        if (/^\/trust\s/u.test(query.text)) {
+        if (/^\/trust\s/u.test(query.atStart ? normalizeLeadingSlashAlias(query.text) : query.text)) {
           this.value = { revision: query.revision, start: query.text.length, end: query.text.length,
             mode: 'management', items: [], hint: '正在读取信任规则 · Esc 返回' };
           this.#snapshot = query; this.changed();
         }
         try {
-          const result = await this.request({ kind: 'input-candidates', revision: query.revision, text: query.text, cursor: query.cursor - query.offset }) as TerminalCandidates;
+          const result = await this.request({ kind: 'input-candidates', revision: query.revision, text: query.text, cursor: query.cursor - query.offset, atStart: query.atStart }) as TerminalCandidates;
           if (query.revision !== this.#revision || !this.#active) continue;
           if (result.revision !== query.revision || !Array.isArray(result.items) || result.items.length > 100 ||
             result.start < 0 || result.end < result.start || result.end > query.text.length || ((query.offset > 0 || this.input.windowStart > 0) && result.start === 0)) continue;
+          if ((result.ghost !== undefined && (typeof result.ghost?.fullValue !== 'string' || !result.ghost.fullValue || Buffer.byteLength(result.ghost.fullValue) > 4096)) ||
+              (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096))) continue;
           this.value = result; this.#snapshot = query; this.changed();
         } catch (error) {
           if (query.revision === this.#revision && this.#active && this.value?.mode === 'management') {

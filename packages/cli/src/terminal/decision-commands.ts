@@ -69,15 +69,14 @@ export class TerminalDecisionCommands {
     try {
       if (name === 'security' || name === 'trust') {
         const collected = collectText(scope);
-        if (name === 'security') await handleSecurityCommand(argument, {
+        const succeeded = name === 'security' ? await handleSecurityCommand(argument, {
           writer: collected.writer,
           status: async () => {
             scope.assertCurrent();
             const result = await this.options.management.securityStatus(conversationId);
             scope.assertCurrent(); return boundedControlProjection(result, 1024 * 1024);
           },
-        });
-        else await handleTrustCommand(argument, {
+        }) : await handleTrustCommand(argument, {
           writer: collected.writer,
           listRules: async () => {
             scope.assertCurrent();
@@ -96,7 +95,13 @@ export class TerminalDecisionCommands {
             scope.assertCurrent(); return revoked;
           },
         });
-        await chooseTerminalSelection({ title: name === 'trust' ? '信任规则' : '安全状态',
+        scope.assertCurrent();
+        const title = name === 'trust' ? '信任规则' : '安全状态';
+        if (!succeeded) {
+          await this.options.publish({ title, message: collected.lines.join('\n'), error: true });
+          return;
+        }
+        await chooseTerminalSelection({ title,
           body: collected.lines, options: [{ value: 'done', label: '返回输入' }] }, choose);
         return;
       }
@@ -112,7 +117,7 @@ export class TerminalDecisionCommands {
           options: [...(pending ? [{ value: 'resume', label: '继续确认任务', description: '查看、修改、确认、直接执行或取消原任务' }] : []),
             { value: 'done', label: '返回输入' }],
         }, choose);
-        if (selected?.value === 'resume') {
+        if (selected?.kind === 'selected' && selected.value === 'resume') {
           scope.assertCurrent(); await this.options.resumeRubric(scope); scope.assertCurrent();
         }
         return;
@@ -136,7 +141,7 @@ export class TerminalDecisionCommands {
             { value: 'user-retry-acknowledged', label: '接受重复风险，重新执行', description: '仅在确认可以重复操作后选择', tone: 'danger' },
           ], initialValue: 'return', submitLabel: '确认', cancelLabel: '返回',
         }, choose);
-        if (!selected || selected.value === 'return') return;
+        if (!selected || selected.kind === 'cancelled' || selected.value === 'return') return;
         scope.assertCurrent();
         await controller.resolveUncertain(notice, selected.value);
         scope.assertCurrent();

@@ -21,6 +21,35 @@ function fixture() {
 afterEach(() => { vi.useRealTimers(); vi.mocked(verifyCheckpointBridgeArtifactAsync).mockReset().mockResolvedValue('fixture-helper.exe'); });
 
 describe.skipIf(process.platform !== 'win32')('owned Windows filesystem lifetime', () => {
+  it('prepares only fixed inputs once and preserves a failed verification for first use', async () => {
+    const f = fixture(), invalid = Error('invalid artifact');
+    vi.mocked(verifyCheckpointBridgeArtifactAsync).mockRejectedValueOnce(invalid);
+    const session = CheckpointDirectoryHandle.createWindowsSession(5000, f.factory);
+    await expect(session.prepare()).rejects.toBe(invalid);
+    expect(f.factory).not.toHaveBeenCalled();
+    await expect(session.openPath('fixture', false)).rejects.toBe(invalid);
+    await session.close();
+    expect(verifyCheckpointBridgeArtifactAsync).toHaveBeenCalledOnce();
+    expect(f.factory).not.toHaveBeenCalled();
+  });
+
+  it('retains an unfinished prepare through bounded close without ever spawning', async () => {
+    vi.useFakeTimers(); let verified!: (path: string) => void;
+    vi.mocked(verifyCheckpointBridgeArtifactAsync).mockImplementationOnce(() => new Promise(resolve => { verified = resolve; }));
+    const f = fixture(), session = CheckpointDirectoryHandle.createWindowsSession(5000, f.factory);
+    const prepared = session.prepare(), closing = session.close(20).catch(error => error);
+    await vi.advanceTimersByTimeAsync(21);
+    const failure = await closing;
+    expect(failure).toMatchObject({ code: 'ERR_CHECKPOINT_OWNER_EXIT_UNCONFIRMED' });
+    const completion = checkpointFilesystemCompletion(failure)!;
+    let ended = false; void completion.then(() => { ended = true; });
+    await Promise.resolve(); expect(ended).toBe(false);
+    verified('fixture'); await prepared; await completion;
+    expect(f.factory).not.toHaveBeenCalled();
+    await expect(session.openPath('late', false)).rejects.toThrow();
+    await expect(session.prepare()).rejects.toThrow();
+  });
+
   it('bounds a lost control connection without releasing physical work on a kill request', async () => {
     vi.useFakeTimers();
     const f = fixture(), session = CheckpointDirectoryHandle.createWindowsSession(5000, f.factory);

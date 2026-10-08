@@ -20,7 +20,9 @@ export interface TerminalProcessView {
   };
   readonly notice?: string;
 }
-const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+// Protocol-only consumers validate projections without initializing rendering.
+let segmenter: Intl.Segmenter | undefined;
+const graphemes = () => segmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 export function processCellWidth(text: string): number {
   if (/^[\p{Mark}\p{Cf}]*$/u.test(text)) return 0;
   if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\uFE0F/u.test(text)) return 2;
@@ -38,7 +40,7 @@ export function thinkingTail(text: string, columns: number): readonly string[] {
   const width = Math.max(1, Math.min(1000, Math.floor(columns) || 1));
   const rows: string[] = []; let row = '', cells = 0;
   const push = () => { rows.push(row); if (rows.length > 2) rows.shift(); row = ''; cells = 0; };
-  for (const { segment } of segmenter.segment(cleanProcessText(text.slice(-8192)))) {
+  for (const { segment } of graphemes().segment(cleanProcessText(text.slice(-8192)))) {
     if (segment === '\n' || segment === '\r\n') { push(); continue; }
     const size = processCellWidth(segment);
     if (cells && cells + size > width) push();
@@ -50,7 +52,7 @@ export function thinkingTail(text: string, columns: number): readonly string[] {
 }
 export function processLine(text: string, columns: number): string {
   const width = Math.max(1, columns); let output = '', used = 0;
-  for (const { segment } of segmenter.segment(cleanProcessText(text.slice(0, 8192)).replace(/\n/gu, ' '))) {
+  for (const { segment } of graphemes().segment(cleanProcessText(text.slice(0, 8192)).replace(/\n/gu, ' '))) {
     const size = processCellWidth(segment); if (used + size > width) break;
     output += segment; used += size;
   }
@@ -112,7 +114,7 @@ export function processThinkingBodyBlock(block: BodyRenderBlock, columns: number
   let from = Math.max(0, block.text.length - 8192), to = from, text = '', cells = 0;
   const push = () => { rows.push({ from, to, text }); if (rows.length > 2) rows.shift(); from = to; text = ''; cells = 0; };
   const tail = block.text.slice(from);
-  for (const part of segmenter.segment(tail)) {
+  for (const part of graphemes().segment(tail)) {
     const segment = part.segment, start = block.text.length - tail.length + part.index, end = start + segment.length;
     if (segment === '\n' || segment === '\r\n') { to = start; push(); from = to = end; continue; }
     const size = processCellWidth(segment);

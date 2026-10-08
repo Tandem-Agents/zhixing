@@ -19,6 +19,16 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     hostReady: { message: "宿主已通过就绪握手", level: "info", tier: "critical", fields: { pid: "number", spawnedPid: "number", launchMode: "text" } },
     firstOutput: { message: "终端已首次输出启动内容", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
     interactionReady: { message: "终端输入已就绪", level: "info", tier: "critical", fields: { sinceProcessStartMs: "number" } },
+    terminalEntry: { message: "终端入口依赖加载耗时", level: "info", tier: "critical", fields: {
+      entryMs: "number", prepareMs: "number", loadMs: "number", processCpuUserMs: "number", processCpuSystemMs: "number",
+    } },
+    terminalAssetVerification: { message: "终端固定制品校验耗时", level: "info", tier: "critical", fields: {
+      asset: "text", durationMs: "number", openMs: "number", statMs: "number", readMs: "number", hashMs: "number", closeMs: "number", bytes: "number", reads: "number",
+    } },
+    terminalCreation: { message: "终端进程创建分段耗时", level: "info", tier: "critical", fields: {
+      instance: "text", role: "text", spawnId: "text", durationMs: "number", permitMs: "number", endpointMs: "number", parameterMs: "number", dispatchMs: "number",
+      nativeQueueMs: "number", nativeSetupMs: "number", nativeCreateMs: "number", nativePublishMs: "number", nativeTotalMs: "number", observationMs: "number", errorCode: "number",
+    } },
     terminalLifecycle: { message: "终端生命周期阶段", level: "info", tier: "critical", fields: {
       instance: "text", phase: "text", role: "text", pid: "number", spawnId: "text", createMs: "number", frameId: "number", reason: "text", exitCode: "number",
     } },

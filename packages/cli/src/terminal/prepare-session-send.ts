@@ -1,3 +1,4 @@
+import { normalizeLeadingSlashAlias } from '@zhixing/terminal-ui/protocol';
 import * as path from 'node:path';
 import { expandUserHome } from '@zhixing/core/paths';
 import type { InputMaterialRegistry } from '../input-material-registry.js';
@@ -18,6 +19,8 @@ export interface PrepareSessionSendOptions {
   readonly materialRegistry: InputMaterialRegistry;
   readonly signal: AbortSignal;
   readonly maximumParamsBytes?: number;
+  /** Alias position proven against the unexpanded immutable draft by N. */
+  readonly commandAliasOffset?: number;
 }
 type SnapshotValue = { readonly kind: 'text'; readonly text: string } | {
   readonly kind: 'image'; readonly data: string; readonly mediaType: string;
@@ -42,7 +45,9 @@ export async function prepareSessionSendSnapshot(
   options.signal.throwIfAborted();
   if (!/\S/u.test(original)) return undefined;
   if (Buffer.byteLength(original) > 128 * MiB) throw Error(CAPACITY_ERROR);
-  const view = new InputView(original, [[0, original.length]]);
+  const aliasAt = options.commandAliasOffset;
+  if (aliasAt !== undefined && (!Number.isSafeInteger(aliasAt) || aliasAt < 0 || normalizeLeadingSlashAlias(original[aliasAt] ?? '') !== '/' || original[aliasAt] === '/')) throw Error('terminal-command-alias-source');
+  const view = new InputView(original, [[0, original.length]], aliasAt);
   const question = await engageView(view, options.signal);
   const writer = new SessionSendJsonWriter(write, options.signal, options.maximumParamsBytes);
   const materials = new MaterialSnapshots(options);
@@ -108,13 +113,13 @@ class InputPartsWriter implements PartsSink {
 class InputView {
   readonly length: number;
   readonly #searches = new Map<string, { from: number; found: number }>();
-  constructor(readonly original: string, readonly ranges: readonly Range[]) {
+  constructor(readonly original: string, readonly ranges: readonly Range[], readonly commandAliasOffset?: number) {
     this.length = ranges.reduce((length, range) => length + range[1] - range[0], 0);
   }
   char(index: number): string {
     if (index < 0) return '';
     for (const [start, end] of this.ranges) {
-      if (index < end - start) return this.original[start + index] ?? '';
+      if (index < end - start) return start + index === this.commandAliasOffset ? '/' : this.original[start + index] ?? '';
       index -= end - start;
     }
     return '';
@@ -123,7 +128,12 @@ class InputView {
     let position = 0; let result = '';
     for (const [start, end] of this.ranges) {
       const low = Math.max(0, from - position), high = Math.min(end - start, to - position);
-      if (high > low) result += this.original.slice(start + low, start + high);
+      if (high > low) {
+        const alias = this.commandAliasOffset;
+        result += alias !== undefined && alias >= start + low && alias < start + high
+          ? this.original.slice(start + low, alias) + '/' + this.original.slice(alias + 1, start + high)
+          : this.original.slice(start + low, start + high);
+      }
       position += end - start;
       if (position >= to) break;
     }
@@ -162,7 +172,7 @@ async function engageView(view: InputView, signal: AbortSignal): Promise<InputVi
     while (right > suffix && space(view.char(right - 1))) { right--; if (right % 65536 === 0) await scanYield(signal); }
     while (left < prefixEnd && space(view.char(left))) { left++; if (left % 65536 === 0) await scanYield(signal); }
     while (prefixEnd > left && space(view.char(prefixEnd - 1))) { prefixEnd--; if (prefixEnd % 65536 === 0) await scanYield(signal); }
-    if (left === prefixEnd) return new InputView(view.original, [[suffix, right]]);
+    if (left === prefixEnd) return new InputView(view.original, [[suffix, right]], view.commandAliasOffset);
     // Pick one existing separator code unit; no third large carrier. The old
     // parser normalizes CR/LF to LF, all other separating whitespace to space.
     let separator = ' ';
@@ -170,15 +180,15 @@ async function engageView(view: InputView, signal: AbortSignal): Promise<InputVi
       if (index % 65536 === 0) await scanYield(signal);
       if (view.char(index) === '\r' || view.char(index) === '\n') { separator = '\n'; break; }
     }
-    return new InputViewWithSeparator(view.original, [left, prefixEnd], [suffix, right], separator);
+    return new InputViewWithSeparator(view.original, [left, prefixEnd], [suffix, right], separator, view.commandAliasOffset);
   }
   return undefined;
 }
 
 class InputViewWithSeparator extends InputView {
-  constructor(original: string, readonly prefix: Range, readonly suffix: Range, readonly separator: string) {
+  constructor(original: string, readonly prefix: Range, readonly suffix: Range, readonly separator: string, commandAliasOffset?: number) {
     // The separator substitutes the trigger's existing one-code-unit range.
-    super(original, [prefix, [prefix[1], prefix[1] + 1], suffix]);
+    super(original, [prefix, [prefix[1], prefix[1] + 1], suffix], commandAliasOffset);
   }
   override char(index: number): string {
     return index === this.prefix[1] - this.prefix[0] ? this.separator : super.char(index);

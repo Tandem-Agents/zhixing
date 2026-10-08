@@ -85,6 +85,7 @@ function close(reason: string, code: number, notify = true): Promise<void> {
   if (closing) return closing;
   let resolveClosing!: () => void;
   closing = new Promise(resolve => { resolveClosing = resolve; });
+  channel.beginClose();
   phase = 'closing'; abort.abort(); input.cancel();
   rejectAdmission(Error('terminal-closed'));
   for (const operation of pending.values()) { clearTimeout(operation.timer); operation.reject(Error('terminal-closed')); }

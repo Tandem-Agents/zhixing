@@ -113,6 +113,7 @@ export class CheckpointDirectoryHandle {
     const owner = ownedWindowsBridge(timeoutMs, createProcess, pinWrites);
     return {
       get failed() { return owner.failed(); },
+      prepare: owner.prepare,
       observeNodeProcesses: () => owner.api.observeNodeProcesses(),
       readLocalProcessDeclaration: (endpoint, pid) => owner.api.readLocalProcessDeclaration(endpoint, pid),
       openPath: async (path, create, readOnly = false) => {
@@ -141,6 +142,7 @@ export class CheckpointDirectoryHandle {
       ? Promise.reject(Error('Filesystem read exceeds its byte bound')) : readFile(parent, name, declared, offset, limit, identity, prefix);
     return {
       get failed() { return owner.failed(); },
+      prepare: owner.prepare,
       observeNodeProcesses: () => api.observeNodeProcesses(),
       readLocalProcessDeclaration: (endpoint, pid) => api.readLocalProcessDeclaration(endpoint, pid),
       openPath: async (path, create, readOnly = false) => {
@@ -472,6 +474,9 @@ export interface NodeProcessInventory {
 
 export interface CheckpointFilesystemSession {
   readonly failed: boolean;
+  /** Verify fixed package inputs without creating a process or touching the
+   * caller's storage. openPath reuses this admission; close owns its IO. */
+  prepare(): Promise<void>;
   observeNodeProcesses(): Promise<NodeProcessInventory>;
   readLocalProcessDeclaration(endpoint: string, pid: number): Promise<string>;
   openPath(path: string, create: boolean, readOnly?: boolean): Promise<CheckpointDirectoryHandle>;
@@ -480,9 +485,10 @@ export interface CheckpointFilesystemSession {
   close(remainingMs?: number): Promise<void>;
 }
 
-function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesystemProcessFactory, pinWrites = false): { api: BridgeApi; failed(): boolean; stop(remainingMs?: number): Promise<void> } {
+function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesystemProcessFactory, pinWrites = false): { api: BridgeApi; prepare(): Promise<void>; failed(): boolean; stop(remainingMs?: number): Promise<void> } {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) throw new TypeError('Invalid filesystem operation timeout');
   let child: CheckpointFilesystemProcess | undefined;
+  let preparing: Promise<string> | undefined;
   let starting: Promise<void> | undefined, exited: Promise<void> | undefined, stopping: Promise<void> | undefined;
   let closed = false, broken = false, nextId = 0;
   let firstFailure: Error | undefined;
@@ -510,11 +516,13 @@ function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesys
     return stopping ??= (async () => {
       const actualCompletion = (async () => {
         try { await starting; } catch { /* No native owner was started. */ }
+        if (!child) try { await preparing; } catch { /* Verification retained no process. */ }
         await exited;
       })();
       try {
         const completion = (async () => {
           try { await starting; } catch { /* No native owner was started. */ }
+          if (!child) try { await preparing; } catch { /* Verification retained no process. */ }
           if (child) {
             child.ref(); refStream(child.stdin); refStream(child.stdout); refStream(child.stderr);
             child.kill('SIGKILL');
@@ -538,9 +546,13 @@ function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesys
     })();
   };
   const fail = (error?: Error): void => { firstFailure ??= error ?? Object.assign(Error("Filesystem protocol failed"), { code: "ERR_CHILD_PROCESS_PROTOCOL" }); broken = true; void stop().catch(() => {}); };
+  const prepare = (): Promise<string> => {
+    if (closed) return Promise.reject(Error('Filesystem owner closed'));
+    return preparing ??= verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL('../', import.meta.url)), checkpointBridgeTarget());
+  };
   const start = (): Promise<void> => starting ??= Promise.resolve().then(async () => {
     if (closed) throw Error("Filesystem owner closed");
-    const executable = await verifyCheckpointBridgeArtifactAsync(fileURLToPath(new URL("../", import.meta.url)), checkpointBridgeTarget());
+    const executable = await prepare();
     if (closed) throw Error("Filesystem owner closed");
     const current = createProcess ? createProcess(executable) : spawn(executable, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     child = current;
@@ -580,7 +592,7 @@ function ownedWindowsBridge(timeoutMs: number, createProcess?: CheckpointFilesys
       }).catch(fail);
     });
   };
-  return { api: windowsApi(request, pinWrites), failed: () => closed || broken, stop };
+  return { api: windowsApi(request, pinWrites), prepare: () => prepare().then(() => {}), failed: () => closed || broken, stop };
 }
 
 function windowsApi(request: <T>(op: string, input: Record<string, unknown>) => Promise<T>, pinWrites = false): BridgeApi {
