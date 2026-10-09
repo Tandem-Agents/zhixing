@@ -916,8 +916,8 @@ napi_value UnlinkCall(napi_env env, napi_callback_info info) {
     if (!retiredIdentity.empty() && (stat.st_size != 0 || StatIdentity(stat) != retiredIdentity))
       throw std::runtime_error("Retired file space is not confirmed");
     // All legal namespace writers hold the same parent lock through this point.
-    // Public POSIX transports remain fenced until their N/S owner prerequisites
-    // are integrated and validated; this is not protection from bypass writers.
+    // N additionally serializes whole operations; S waits for writer exit.
+    // This is cooperation, not protection from external bypass writers.
     if (unlinkat(parent, name.c_str(), directory ? AT_REMOVEDIR : 0) < 0) {
       if (errno == ENOENT) throw std::runtime_error("checkpoint-child-missing");
       throw PosixFailure("Unable to delete checkpoint entry by handle");

@@ -45,9 +45,9 @@ function receive(message: TerminalMessage): void {
     case 'hello': {
       if (phase !== 'waiting' || message.role !== 'ui') throw Error('terminal-handshake-order');
       phase = 'querying';
-      initializing = input.query(abort.signal).then(async originalMask => {
+      initializing = input.query(abort.signal).then(async baseline => {
         abort.signal.throwIfAborted(); phase = 'ready';
-        await channel.send({ type: 'modes', originalMask });
+        await channel.send({ type: 'modes', ...baseline });
       });
       void initializing.catch(() => close('terminal-mode-query-failed', 71)); return;
     }

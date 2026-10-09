@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { resolveCliEntry } from '../cli-entry.js';
 import { getZhixingHome } from '@zhixing/core/paths';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
@@ -10,7 +11,7 @@ export async function launchTerminal(args: readonly string[], entryTiming?: {
   entryMs: number; prepareMs: number; loadMs: number; processCpuUserMs: number; processCpuSystemMs: number;
 }): Promise<number> {
   const home = getZhixingHome();
-  const entry = path.resolve(process.argv[1]!);
+  const entry = resolveCliEntry();
   const mode = args.length ? 'independent-command' : 'repl';
   const early = beginEntryLogging(mode);
   try { if (entryTiming) early.records.record({ event: 'terminalEntry', data: entryTiming }); }

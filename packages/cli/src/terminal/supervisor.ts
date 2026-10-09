@@ -759,10 +759,11 @@ class TerminalSupervisor {
     if (item.role === 'application' && message.type === 'host-start') { this.#startHost(message, item); return; }
     if (item.role === 'application' && message.type === 'host-release') { this.#releaseHost(message.id); return; }
     if (item.role === 'ui' && message.type === 'modes') {
-      if (this.#modeAdmission || !Number.isInteger(message.originalMask) || message.originalMask < 0 || message.originalMask > 511) throw Error('terminal-mode-registration');
+      if (this.#modeAdmission || !Number.isInteger(message.originalMask) || message.originalMask < 0 || message.originalMask > 511 ||
+          !Number.isInteger(message.mutableMask) || message.mutableMask < 0 || message.mutableMask > 511 || !(message.mutableMask & 64)) throw Error('terminal-mode-registration');
       this.#modeAdmission = true;
       const end = Date.now() + 800;
-      await this.#phase('mode-register', () => this.#nativeCommand(`modes-${message.originalMask}`, event => event.event === 'modes-admitted', Math.max(0, end - Date.now())));
+      await this.#phase('mode-register', () => this.#nativeCommand(`modes-${message.originalMask}-${message.mutableMask}`, event => event.event === 'modes-admitted', Math.max(0, end - Date.now())));
       this.#live();
       await this.#phase('mode-activate', () => this.#nativeCommand('activate', event => event.event === 'entered', Math.max(0, end - Date.now())));
       this.#live();

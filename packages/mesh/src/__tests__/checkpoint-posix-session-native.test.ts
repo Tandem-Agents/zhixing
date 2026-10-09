@@ -203,7 +203,7 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
     } finally { await unlock?.(); native.close(left); native.close(right); native.close(rootFd); await rm(root, { recursive: true, force: true }); }
   }, 10_000);
 
-  it('checks kind, links and identity under exclusion while public identity deletion stays fenced', async () => {
+  it('checks kind, links and identity through both public transports under namespace exclusion', async () => {
     const root = await realpath(await mkdtemp(path.join(tmpdir(), 'checkpoint-posix-checked-')));
     const native = nativeFixture(), raw = native.openPath(root, false);
     const session = CheckpointDirectoryHandle.createPosixSession();
@@ -228,9 +228,9 @@ describe.skipIf(!posix)('owned POSIX native filesystem', () => {
       const current = native.statFile(raw, 'victim');
       expect(() => native.unlinkEntry(raw, 'victim', false, current.identity, '')).toThrow();
       const managed = await session.openPath(root, false);
-      await expect(managed.unlink('victim', false, current.identity)).rejects.toMatchObject({ code: 'ENOTSUP' });
-      await expect(direct.unlink('victim', false, current.identity)).rejects.toMatchObject({ code: 'ENOTSUP' });
-      native.unlinkEntry(raw, 'victim', false, '', current.identity);
+      await expect(managed.unlink('victim', false, 'wrong')).rejects.toThrow();
+      await expect(direct.unlink('victim', false, 'wrong')).rejects.toThrow();
+      await managed.unlink('victim', false, current.identity);
       await expect(access(path.join(root, 'victim'))).rejects.toMatchObject({ code: 'ENOENT' });
       native.writeFile(raw, 'retired', Buffer.alloc(0));
       native.unlinkEntry(raw, 'retired', false, native.statFile(raw, 'retired').identity, '');

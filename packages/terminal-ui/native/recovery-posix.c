@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <limits.h>
 #include "posix-process.h"
+#include "mode-contract.h"
 
 /* The original R keeps the only baseline. It neither reads TTY input nor
  * creates/reaps children; only S may admit final restoration after writers. */
@@ -19,9 +20,8 @@ static char instance[37], birth[64];
 static unsigned long sequence;
 static uint64_t deadline;
 static bool registered, permitted, admitted, finalizing;
-static unsigned original_modes;
+static unsigned original_modes, mutable_modes;
 static int buffer_phase; /* 0 untouched, 1 attempting, 2 entered, 3 leaving, 4 returned, 5 unknown */
-static const unsigned mode_ids[9] = {1000,1002,1003,1006,1004,2004,1049,25,1005};
 static void control(int signal) { (void)signal; if (controls < 32767) controls++; }
 static uint64_t end_time(uint64_t maximum) { uint64_t end = zx_utc_ms() + maximum; return deadline && deadline < end ? deadline : end; }
 static int write_until(int fd, const void *bytes, size_t length, uint64_t end) {
@@ -65,8 +65,8 @@ static int restore(Baseline *baseline) {
     else if (buffer_phase!=0 && buffer_phase!=4) errors++;
     if (permitted) {
       char modes[256]; size_t at=0;
-      at+=(size_t)snprintf(modes+at,sizeof modes-at,"\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l");
-      for (int i=0;i<9;i++) if(i!=6) at+=(size_t)snprintf(modes+at,sizeof modes-at,"\033[?%u%c",mode_ids[i],original_modes&(1u<<i)?'h':'l');
+      for (int i=0;i<9;i++) if(i!=6 && (mutable_modes&(1u<<i)) && !(original_modes&(1u<<i))) at+=(size_t)snprintf(modes+at,sizeof modes-at,"\033[?%ul",mode_ids[i]);
+      for (int i=0;i<9;i++) if(i!=6 && (mutable_modes&original_modes&(1u<<i))) at+=(size_t)snprintf(modes+at,sizeof modes-at,"\033[?%uh",mode_ids[i]);
       if(at>=sizeof modes || effect(baseline,modes))errors++;
     }
     // Returning to the original screen restores its saved cursor. R cannot
@@ -133,8 +133,10 @@ int main(int argc,char **argv) {
     if(!strcmp(command,"admit")&&!admitted){admitted=true;event("admitted",NULL);continue;}
     if(admitted&&!strncmp(command,"modes-",6)) {
       char *end;unsigned long mask=strtoul(command+6,&end,10);
-      if(registered||*end||mask>511||((mask&7)&&((mask&7)&((mask&7)-1)))||((mask&(1u<<3))&&(mask&(1u<<8)))){event("protocol-error",NULL);continue;}
-      original_modes=(unsigned)mask;registered=true;event("modes-admitted",NULL);continue;
+      if(*end!='-'){event("protocol-error",NULL);continue;}
+      unsigned long mutable=strtoul(end+1,&end,10);
+      if(registered||*end||mask>511||mutable>511||!(mutable&64)||((mask&7)&&((mask&7)&((mask&7)-1)))||((mask&8)&&(mask&256))){event("protocol-error",NULL);continue;}
+      original_modes=(unsigned)mask;mutable_modes=(unsigned)mutable;registered=true;event("modes-admitted",NULL);continue;
     }
     if(admitted&&!strcmp(command,"activate")) {
       if(!registered||buffer_phase||finalizing||(original_modes&(1u<<6))){event("activation-denied",NULL);continue;}

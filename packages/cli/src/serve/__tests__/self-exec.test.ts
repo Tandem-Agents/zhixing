@@ -37,6 +37,7 @@ describe("resolveSelfExec", () => {
     execPath: "/usr/bin/node",
     env: { PATH: "/usr/bin", HOME: "/home/u" },
     fileExistsFn: () => true,
+    realpathFn: (entry: string) => entry,
   };
 
   it("resolves to { execPath, [entry, ...forwarded], env with DAEMON_CHILD=1 }", () => {
@@ -83,6 +84,12 @@ describe("resolveSelfExec", () => {
     expect(() =>
       resolveSelfExec([], { ...baseDeps, argv: ["/node", "/x/index.cjs"] }),
     ).not.toThrow();
+  });
+  it.each(['zz', 'zhixing'])('resolves extensionless %s before validating or finding adjacent assets', bin => {
+    const entry = '/installed with spaces/zhixing/dist/index.js';
+    const resolved = resolveSelfExec(['serve'], { ...baseDeps, argv: ['/node', `/usr/local/bin/${bin}`],
+      realpathFn: path => { expect(path).toBe(`/usr/local/bin/${bin}`); return entry; } });
+    expect(resolved.args).toEqual([entry, 'serve']);
   });
 });
 

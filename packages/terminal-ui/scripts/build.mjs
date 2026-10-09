@@ -98,11 +98,14 @@ await run(zig, ['build', `-Dlibrary-target=${target.zig}`, '-Doptimize=ReleaseFa
 await copyFile(path.join(build, 'lib', target.folder, target.library), path.join(dist, target.library));
 const nativeCompiler = process.platform === 'darwin' ? (archiveDirectory ? '/usr/bin/cc' : toolCommand(process.env.ZHIXING_NATIVE_CC ?? 'cc')) : recoveryZig;
 const nativeCompilerVersion = process.platform === 'darwin' ? await run(nativeCompiler, ['--version'], root, true) : recoveryVersion;
-const nativeArguments = process.platform === 'darwin' ? [] : ['cc', '-target', target.zig];
+const nativeArguments = process.platform === 'darwin' ? ['-mmacosx-version-min=13.5'] : ['cc', '-target', target.zig];
 // Native linkers may emit import libraries/debug symbols next to -o or in cwd.
 // Keep those compiler-owned outputs in build and copy only runtime artifacts.
 const nativeArtifacts = path.join(build, 'terminal-native', targetId);
 await mkdir(nativeArtifacts, { recursive: true });
+const { TERMINAL_MODES } = await import('../dist/shared/mode-policy.js');
+await writeFile(path.join(nativeArtifacts, 'mode-contract.h'), `/* Generated from mode-policy.ts. */\nstatic const unsigned mode_ids[] = {${TERMINAL_MODES.map(mode => mode.id).join(',')}};\n`);
+nativeArguments.push('-I', nativeArtifacts);
 await run(nativeCompiler, [...nativeArguments, ...(process.platform === 'win32' ? ['-municode'] : []), '-O2', '-Wall', '-Wextra',
   path.join(root, process.platform === 'win32' ? 'native/recovery-win32.c' : 'native/recovery-posix.c'),
   ...(process.platform === 'darwin' ? ['-lproc'] : []), '-o', path.join(nativeArtifacts, `recovery${target.suffix}`)], nativeArtifacts);
@@ -130,6 +133,15 @@ for (const name of [`recovery${target.suffix}`, 'foreground.node', `exec-gate${t
   await copyFile(path.join(nativeArtifacts, name), path.join(dist, name));
 }
 await run(bun, [path.join(root, 'scripts/build-ui.ts')], root);
+if (process.platform === 'darwin') {
+  for (const name of [`ui${target.suffix}`, `recovery${target.suffix}`, target.library, 'foreground.node', `exec-gate${target.suffix}`]) {
+    const commands = await run('/usr/bin/otool', ['-l', path.join(dist, name)], root, true);
+    const deployments = commands.split(/Load command \d+/).filter(block => /cmd LC_(?:BUILD_VERSION|VERSION_MIN_MACOSX)\b/.test(block));
+    const versions = deployments.flatMap(block => [...block.matchAll(/(?:minos|version)\s+(\d+)\.(\d+)(?:\.\d+)?/g)].map(match => [Number(match[1]), Number(match[2])]));
+    if (!versions.length || versions.some(([major, minor]) => major > 13 || (major === 13 && minor > 5)))
+      throw Error(`Terminal asset exceeds the macOS 13.5 deployment baseline: ${name}`);
+  }
+}
 // Migrate only the three sidecars emitted by the previous Windows builder.
 // Unknown files (including unknown .lib/.pdb files) still fail the exact set check.
 if (process.platform === 'win32') for (const name of ['foreground-win32.lib', 'foreground.pdb', 'recovery.pdb']) {

@@ -391,9 +391,7 @@ function nativeBridge(): BridgeApi {
       native().renameEntry(source, name, target, targetName, replace ?? false);
     },
     unlinkEntry: async (parent, name, directory, retiredIdentity, expectedIdentity) => {
-      // Native cooperation is implemented, but N/S complete-operation exclusion
-      // and cleanup ownership must pass the same delivery before public use.
-      if (expectedIdentity) throw Object.assign(Error('POSIX identity deletion awaits owner integration'), { code: 'ENOTSUP' });
+      // Identity is checked inside the same native namespace exclusion as unlink.
       native().unlinkEntry(parent, name, directory, retiredIdentity ?? '', expectedIdentity ?? '');
     },
     sync: async (...args) => native().sync(...args),

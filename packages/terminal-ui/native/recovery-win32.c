@@ -19,12 +19,12 @@ static char commandSlot[256],outputSlot[8192],nonce[48]="aux";
 static DWORD outputLength; static BOOL outputOK=TRUE,outputBroken=FALSE,asyncOutput=FALSE;
 static unsigned long seq=0;
 static HANDLE stdh(int i){return GetStdHandle(i==0?STD_INPUT_HANDLE:i==1?STD_OUTPUT_HANDLE:STD_ERROR_HANDLE);}
-static BOOL modesRegistered=FALSE,modesPermitted=FALSE,finalizing=FALSE;static DWORD originalModes=0;
+static BOOL modesRegistered=FALSE,modesPermitted=FALSE,finalizing=FALSE;static DWORD originalModes=0,mutableModes=0;
 /* 0 untouched, 1 enter attempted, 2 entered, 3 leave attempted, 4 returned, 5 unknown/failed. */
 static int bufferPhase=0;
 static unsigned long long closeDeadline=0;
 static BOOL newlineAttempted=FALSE;
-static const unsigned int modeIds[9]={1000,1002,1003,1006,1004,2004,1049,25,1005};
+#include "mode-contract.h"
 static HANDLE extra(int fd){return controlPipe != INVALID_HANDLE_VALUE ? controlPipe : (HANDLE)_get_osfhandle(fd);}
 static BOOL channel_io(BOOL writing,void *bytes,DWORD count,DWORD *transferred){
  if(controlPipe==INVALID_HANDLE_VALUE)return writing?WriteFile(extra(3),bytes,count,transferred,NULL):ReadFile(extra(4),bytes,count,transferred,NULL);
@@ -100,10 +100,9 @@ static int restore_modes(void){
  if(bufferPhase==2){bufferPhase=3;errors+=write_effect("leave","\x1b[?1049l");if(errors)bufferPhase=5;}
  else if(bufferPhase!=0&&bufferPhase!=4)errors++;
  if(modesPermitted){
-  char sequence[256];int at=snprintf(sequence,sizeof sequence,"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l");
-  for(int i=0;i<3;i++)if(originalModes&(1u<<i))at+=snprintf(sequence+at,sizeof sequence-at,"\x1b[?%uh",modeIds[i]);
-  for(int i=0;i<9;i++)if(i==3||i==8){if(originalModes&(1u<<i))at+=snprintf(sequence+at,sizeof sequence-at,"\x1b[?%uh",modeIds[i]);}
-  for(int i=4;i<8;i++)if(i!=6)at+=snprintf(sequence+at,sizeof sequence-at,"\x1b[?%u%c",modeIds[i],(originalModes&(1u<<i))?'h':'l');
+  char sequence[256]={0};int at=0;
+  for(int i=0;i<9;i++)if(i!=6&&(mutableModes&(1u<<i))&&!(originalModes&(1u<<i)))at+=snprintf(sequence+at,sizeof sequence-at,"\x1b[?%ul",mode_ids[i]);
+  for(int i=0;i<9;i++)if(i!=6&&(mutableModes&originalModes&(1u<<i)))at+=snprintf(sequence+at,sizeof sequence-at,"\x1b[?%uh",mode_ids[i]);
   errors+=write_effect("restore-permitted-modes",sequence);
  }
  char f[180];snprintf(f,sizeof f,",\"phase\":%d,\"modesRegistered\":%s,\"modesPermitted\":%s",bufferPhase,modesRegistered?"true":"false",modesPermitted?"true":"false");event("buffer-outcome",f);return errors;
@@ -209,10 +208,12 @@ int wmain(int argc,wchar_t **argv){
    if(!strcmp(action,"admit")&&!admitted){admitted=TRUE;event("admitted",NULL);continue;}
    if(admitted&&!strncmp(action,"modes-",6)){
     char *end=NULL;unsigned long mask=strtoul(action+6,&end,10);
-    if(modesRegistered||!end||*end||mask>511){event("protocol-error",NULL);continue;}
+    if(!end||*end!='-'){event("protocol-error",NULL);continue;}
+    unsigned long mutable=strtoul(end+1,&end,10);
+    if(modesRegistered||*end||mask>511||mutable>511||!(mutable&64)){event("protocol-error",NULL);continue;}
     if((mask&7)&&((mask&7)&((mask&7)-1))){event("protocol-error",NULL);continue;}
     if((mask&(1u<<3))&&(mask&(1u<<8))){event("protocol-error",NULL);continue;}
-    originalModes=(DWORD)mask;modesRegistered=TRUE;char f[100];snprintf(f,sizeof f,",\"originalMask\":%lu",originalModes);
+    originalModes=(DWORD)mask;mutableModes=(DWORD)mutable;modesRegistered=TRUE;char f[100];snprintf(f,sizeof f,",\"originalMask\":%lu",originalModes);
     event("modes-admitted",f);continue;
    }
    if(admitted&&!strcmp(action,"activate")){activate_buffer();continue;}

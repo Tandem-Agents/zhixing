@@ -18,6 +18,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { resolveCliEntry } from '../cli-entry.js';
 import type { SpawnOptions } from "node:child_process";
 
 /** Child 通过这个 env 变量识别自己——刻意不用 CLI flag 避免 commander 报 unknown option */
@@ -58,6 +59,7 @@ export interface ResolveSelfExecDeps {
   execPath?: string;
   env?: NodeJS.ProcessEnv;
   fileExistsFn?: (path: string) => boolean;
+  realpathFn?: (path: string) => string;
 }
 
 /** 子进程判定自身身份 */
@@ -69,8 +71,8 @@ export function isDaemonChild(env: NodeJS.ProcessEnv = process.env): boolean {
  * 解析自重入所需的 { command, args, env }。
  *
  * 设计决策：
- * - 用 `process.argv[1]`（实际 entry script）而非 `process.execPath`（node binary）。
- *   execPath 只是 node 二进制；argv[1] 才是 zhixing 的入口 .js 文件。
+ * - 将 `process.argv[1]` 的 npm bin 链接解析到物理脚本，再用当前 Node 重入。
+ *   bin 名称可以没有扩展名；类型和邻接资产判断只使用解析后的脚本。
  * - 非 .js 入口（bundled binary / REPL）→ 抛 UnsupportedSelfExecError。
  *   Level 1 要求通过标准 CLI 启动；未来 Level 2 可注入 bundled resolver。
  */
@@ -83,13 +85,16 @@ export function resolveSelfExec(
   const env = deps.env ?? process.env;
   const fileExists = deps.fileExistsFn ?? existsSync;
 
-  const entryScript = argv[1];
-  if (!entryScript) {
+  if (!argv[1]) {
     throw new UnsupportedSelfExecError(
       "Cannot resolve self-exec: process.argv[1] is undefined. " +
         "Daemon mode requires launching via the standard zhixing CLI.",
     );
   }
+
+  let entryScript: string;
+  try { entryScript = resolveCliEntry(argv[1], deps.realpathFn); }
+  catch { throw new UnsupportedSelfExecError('Cannot resolve the physical CLI entry for self-exec.'); }
 
   const isJs =
     entryScript.endsWith(".js") ||

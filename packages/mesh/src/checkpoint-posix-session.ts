@@ -302,10 +302,9 @@ function dispatch(r) {
     }
     case 'renameEntry': return native.renameEntry(get(r.sourceParent, true), name(r.sourceName), get(r.targetParent, true), name(r.targetName), r.replace === true);
     case 'unlinkEntry': {
-      // No user override: N/S owner prerequisites and this exact native
-      // candidate must be integrated and independently verified together.
-      if (r.expectedIdentity) throw Object.assign(Error('POSIX identity deletion awaits owner integration'), { code: 'ENOTSUP' });
-      return native.unlinkEntry(h(true), n(), r.directory === true, r.retiredIdentity ?? '', '');
+      // N serializes the complete operation; S only collects after writers
+      // have exited. Native namespace exclusion covers identity check + unlink.
+      return native.unlinkEntry(h(true), n(), r.directory === true, r.retiredIdentity ?? '', r.expectedIdentity ?? '');
     }
     case 'sync': return native.sync(get(r.handle));
     case 'close': { const fd = get(r.handle); handles.delete(r.handle); return native.close(fd); }

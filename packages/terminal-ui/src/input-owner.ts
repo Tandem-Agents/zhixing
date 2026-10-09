@@ -1,5 +1,6 @@
 /** The one stdin reader owns both mode discovery and the admitted renderer. */
-const modes = [1000, 1002, 1003, 1006, 1004, 2004, 1049, 25, 1005] as const;
+import { TERMINAL_MODES, admitTerminalModes, type TerminalModeBaseline } from './mode-policy.js';
+const modes = TERMINAL_MODES.map(mode => mode.id);
 const EARLY_BYTES = 4096;
 
 export class TerminalInputOwner {
@@ -9,7 +10,7 @@ export class TerminalInputOwner {
 
   constructor(readonly failure: (reason: string) => void) {}
 
-  query(signal: AbortSignal): Promise<number> {
+  query(signal: AbortSignal): Promise<TerminalModeBaseline> {
     return new Promise((resolve, reject) => {
       let buffer = Buffer.alloc(0), received = 0, done = false;
       const values = new Map<number, number>();
@@ -26,7 +27,7 @@ export class TerminalInputOwner {
           this.#early = Buffer.concat([this.#early, chunk]);
         };
         process.stdin.on('data', this.#queued);
-        resolve(modes.reduce((mask, mode, index) => mask | (values.get(mode) === 1 ? 1 << index : 0), 0));
+        resolve(admitTerminalModes(values));
       };
       const abort = () => finish(Error('terminal-mode-query-cancelled'));
       const timer = setTimeout(() => finish(Error('terminal-mode-query-timeout')), 800);
@@ -45,10 +46,7 @@ export class TerminalInputOwner {
         buffer = Buffer.from(retained, 'latin1');
         if (contradictory) { finish(Error('terminal-mode-query-contradictory')); return; }
         if (!modes.every(mode => values.has(mode))) return;
-        if (!modes.every(mode => [1, 2].includes(values.get(mode)!)) || values.get(1049) !== 2 ||
-            [1000, 1002, 1003].filter(mode => values.get(mode) === 1).length > 1 || [1005, 1006].every(mode => values.get(mode) === 1)) {
-          finish(Error('terminal-original-modes-unavailable')); return;
-        }
+        try { admitTerminalModes(values); } catch (error) { finish(error as Error); return; }
         finish();
       };
       this.#cancel = abort;

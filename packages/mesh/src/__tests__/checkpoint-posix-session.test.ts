@@ -243,9 +243,6 @@ describe('owned POSIX filesystem transport (host-independent)', () => {
         ['tryLock', { parent: 1, name: 'new.lock' }],
         ['waitLock', { parent: 1, name: 'new.lock', waitMs: 10, shared: false }],
       ] as const) await expect(owner.request(op, input)).rejects.toThrow('capacity exhausted');
-      // The new native candidate must not implicitly enable public deletion.
-      await expect(owner.request('unlinkEntry', { parent: 1, name: 'preserved', directory: false, expectedIdentity: '1:2' }))
-        .rejects.toMatchObject({ code: 'ENOTSUP' });
       await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' });
       await owner.request('close', { handle: 1 });
       await owner.request('openPath', { path: '/fixture-new', create: true, readOnly: false });

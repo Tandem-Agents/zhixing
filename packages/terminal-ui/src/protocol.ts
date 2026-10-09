@@ -43,7 +43,7 @@ export interface TerminalEnvelope {
 
 export type TerminalMessage =
   | { readonly type: "hello"; readonly role: TerminalRole }
-  | { readonly type: "modes"; readonly originalMask: number }
+  | { readonly type: "modes"; readonly originalMask: number; readonly mutableMask: number }
   | { readonly type: "grant" }
   | { readonly type: "ready"; readonly frameId: number }
   | { readonly type: "close"; readonly deadline: number }

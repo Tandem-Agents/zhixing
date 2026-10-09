@@ -1,4 +1,5 @@
 import { normalizeCliArgs } from './logging/entry-mode.js';
+import { resolveCliEntry } from './cli-entry.js';
 
 // Capture the earliest JS boundary before loading the interactive graph. The
 // admitted bootstrap recorder consumes this finite observation; no extra file.
@@ -15,7 +16,7 @@ if (process.env.ZHIXING_TERMINAL_ROLE === 'application' &&
   if (home) {
     const path = await import('node:path');
     await (await import('./terminal/writer-declaration.js')).beginTerminalWriterDeclaration(home,
-      path.join(path.dirname(process.argv[1]!), 'terminal', `${process.platform}-${process.arch}`, 'foreground.node'));
+      path.join(path.dirname(resolveCliEntry()), 'terminal', `${process.platform}-${process.arch}`, 'foreground.node'));
   }
   const { runTerminalApplication } = await import('./terminal/application.js');
   await runTerminalApplication();
