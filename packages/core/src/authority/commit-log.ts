@@ -1,3 +1,4 @@
+import { closeArtifactJsonIndex } from "./artifact-json-index.js";
 import { createHash, randomBytes, type Hash } from "node:crypto";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import type { LogRecordPort } from "../logging/contracts.js";
@@ -497,6 +498,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await projection.state.stopStorageMaintenance();
     }
     this.#workObserver.flush();
+    await closeArtifactJsonIndex(this.artifactStore);
   }
 
   async readTail<Body = JsonValue>(

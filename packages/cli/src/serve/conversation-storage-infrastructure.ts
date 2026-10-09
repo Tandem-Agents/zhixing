@@ -4,6 +4,7 @@ import { fromSafePathSegment, toSafePathSegment } from "@zhixing/core/paths";
 import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/workscene";
 import {
   ConversationRepository,
+  readConversationDirectoryPage,
   conversationsDir,
   parseConversationId,
   type Conversation,
@@ -19,12 +20,13 @@ import type {
 import {
   buildStartupBootstrap,
   createTokenEstimator,
+  readBootstrapRunViews,
 } from "@zhixing/core/context";
 import {
   ShardedTranscriptStore,
   SnapshotStore,
-  countRuns,
   createReadOnlyTranscriptSource,
+  TranscriptByteReader,
   readRunsReverse,
   runRetentionSweep,
   type RetentionSweepReport,
@@ -107,16 +109,27 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   const runtime: ConversationRuntimeStoragePort = Object.freeze({
     async loadHistory(conversationId) {
       const storage = routeConversation(conversationId);
-      const turnCount = await countRuns(storage.transcript, storage.localId);
-      if (turnCount === 0) return undefined;
-      const bootstrap = await buildStartupBootstrap({
-        conversationId: storage.localId,
-        store: storage.transcript,
-        snapshots: storage.snapshots,
-        capability: { optimalMaxTokens: input.optimalMaxTokens },
-        estimator: createTokenEstimator(),
-      });
-      return { bootstrap, turnCount };
+      const { scope } = parseConversationId(conversationId);
+      const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
+        path.join(zhixingHome, 'cache', 'transcript-read-index'));
+      try {
+        // Count from finite record metadata. Warm reads reuse verified byte
+        // positions instead of decoding every historical message again.
+        let turnCount = 0;
+        for await (const _ of reader.records()) turnCount++;
+        if (!turnCount) return undefined;
+        const clearBoundary = { lastClearAt: reader.lastClearAt };
+        const bootstrap = await buildStartupBootstrap({
+          conversationId: storage.localId,
+          store: storage.transcript,
+          snapshots: storage.snapshots,
+          capability: { optimalMaxTokens: input.optimalMaxTokens },
+          estimator: createTokenEstimator(),
+          runs: readBootstrapRunViews(reader),
+          clearBoundary,
+        });
+        return { bootstrap, turnCount };
+      } finally { await reader.close(); }
     },
     async initTranscript(conversationId) {
       const storage = routeConversation(conversationId);
@@ -194,11 +207,20 @@ export function createConversationStorageInfrastructure(input: Readonly<{
  */
 export function createReadOnlyConversationStorage(zhixingHome: string): Pick<
   ConversationDirectoryStorage,
-  "list" | "readHistory"
-> {
+  "list" | "listPage" | "readHistory"
+> & { openBodyReader(conversationId: string): TranscriptByteReader } {
   const root = conversationsDir({ kind: "user" }, zhixingHome);
   const transcript = createReadOnlyTranscriptSource(root);
   return Object.freeze({
+    openBodyReader(conversationId: string) {
+      const { scope, localId } = parseConversationId(conversationId);
+      const directory = path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(localId), 'transcript');
+      return new TranscriptByteReader(directory, path.join(zhixingHome, 'cache', 'transcript-read-index'));
+    },
+    async listPage(input: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+      const page = await readConversationDirectoryPage(root, input);
+      return { records: page.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: page.next };
+    },
     async list() {
       let entries: string[];
       try {

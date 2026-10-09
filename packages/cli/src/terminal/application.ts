@@ -603,7 +603,7 @@ class TerminalApplication {
       await this.#controller.reattachActiveObserver({ reloadHistory }); await this.#localView.refresh();
     } else {
       const initial = await selectInitialConversation({
-        list: () => this.#conversation.list(), newConversation: () => this.#conversation.newConversation(),
+        list: () => this.#conversation.list(), listPage: (page) => this.#conversation.listPage(page), newConversation: () => this.#conversation.newConversation(),
         pendingContinuationConfirmation: () => this.#conversation.pendingContinuationConfirmation(),
         confirmContinuation: () => this.#conversation.confirmContinuation(),
         resumeIfExists: id => { this.#startupWatch = id; return this.#conversation.consumeResumeIfExists(id, result => {
@@ -723,20 +723,19 @@ class TerminalApplication {
     try {
       if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
       const storage = createReadOnlyConversationStorage(this.home);
-      let offset = 0;
+      const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
       for (;;) {
-        // Retain only the visible menu during user waiting. Re-query the read-only
-        // authority for another page instead of accumulating all list metadata.
-        const entries = (await storage.list()).slice(offset, offset + 25);
+        const result = await storage.listPage!({ limit: 24, after: pages.at(-1) });
+        const entries = result.records;
         this.#abort.signal.throwIfAborted();
-        if (!entries.length && offset === 0) { this.#mainView = { ...this.#mainView, message: '本机还没有可查看的对话历史。' }; return; }
+        if (!entries.length && pages.length === 1) { this.#mainView = { ...this.#mainView, message: '本机还没有可查看的对话历史。' }; return; }
         const choices = entries.slice(0, 24).map(entry => ({ id: entry.conversationId, label: entry.name }));
-        if (offset) choices.push({ id: 'previous', label: '上一页' });
-        if (entries.length > 24) choices.push({ id: 'next', label: '下一页' });
+        if (pages.length > 1) choices.push({ id: 'previous', label: '上一页' });
+        if (result.next) choices.push({ id: 'next', label: '下一页' });
         choices.push({ id: 'cancel', label: '返回' });
         const selected = await this.#choose({ kind: 'selection', title: '本机历史 · 只读', message: '只读取已保存内容，不会启动或重发任务。', choices });
         if (!selected || selected === 'cancel') return;
-        if (selected === 'next' || selected === 'previous') { offset += selected === 'next' ? 24 : -24; continue; }
+        if (selected === 'next' || selected === 'previous') { if (selected === 'next' && result.next) pages.push(result.next); else pages.pop(); continue; }
         const entry = entries.find(value => value.conversationId === selected)!;
         const continuing = !this.#readOnlyNeedsReset && this.#mainView.kind === 'history' && this.#history?.offline && this.#history.conversationId === selected;
         if (continuing) { await this.#displayPage(); return; }

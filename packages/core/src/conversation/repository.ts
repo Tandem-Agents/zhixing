@@ -1,3 +1,5 @@
+import type { ConversationDirectoryPageRequest } from './directory-page.js';
+import { readConversationDirectoryPage } from './directory-reader.js';
 /**
  * ConversationRepository — Conversation 磁盘 CRUD
  *
@@ -129,6 +131,10 @@ export class ConversationRepository implements IConversationRepository {
         new Date(b.lastActiveAt).getTime() -
         new Date(a.lastActiveAt).getTime(),
     );
+  }
+
+  async listPage(input: ConversationDirectoryPageRequest) {
+    return readConversationDirectoryPage(this.root, input, segment => this.readMetaFromPathSegment(segment));
   }
 
   async get(id: string): Promise<Conversation | null> {

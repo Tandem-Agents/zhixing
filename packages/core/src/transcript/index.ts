@@ -9,6 +9,7 @@ export { recoverOrphanTmp, writeAtomic } from "./serializer.js";
 export type { WriteAtomicOptions } from "./serializer.js";
 
 export * from "./shard/index.js";
+export { TranscriptByteReader, type TranscriptBodyCursor, type TranscriptBodyFragment, type TranscriptBodyPage } from './shard/byte-reader.js';
 export * from "./snapshot/index.js";
 
 export {

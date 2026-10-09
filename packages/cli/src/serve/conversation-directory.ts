@@ -80,6 +80,10 @@ export function createConversationDirectory(deps: {
         lastActiveAt: item.lastActiveAt,
       }));
     },
+    ...(deps.user.repo.listPage ? { async listPage(page: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+      const result = await deps.user.repo.listPage!(page);
+      return { records: result.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: result.next };
+    } } : {}),
     listForAdvancement() {
       return deps.user.repo.list();
     },

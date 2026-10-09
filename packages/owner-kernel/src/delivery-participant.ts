@@ -50,7 +50,8 @@ export interface ConversationDeliveryCommitInput {
   readonly conversationLifecycleSource: DeliveryLifecycleSourceRef;
   readonly assignmentLifecycleSource: DeliveryLifecycleSourceRef;
   readonly ingress: IngressContext;
-  readonly runRecord: TranscriptRunRecord;
+  /** Local replay needs metadata only; channel final delivery requires body. */
+  readonly runRecord: Omit<TranscriptRunRecord, 'messages'> & { readonly messages?: TranscriptRunRecord['messages'] };
   readonly mutationBatch?: MutationBatch;
   readonly finalContent?: DeliveryIntentDto["content"];
   readonly stagedContents?: ReadonlyMap<number, DeliveryIntentDto["content"]>;
@@ -504,7 +505,8 @@ function conversationCommitInputs(
 ): DeliveryObligation[] {
   const result: DeliveryObligation[] = [];
   if (input.ingress.kind === "channel" && !worksceneResultReturnTarget(input.ingress.turnOrigin, input.conversationId)) {
-    const text = finalAssistantText(input.runRecord);
+    if (!input.runRecord.messages) throw Error('Channel final delivery requires its committed body');
+    const text = finalAssistantText({ ...input.runRecord, messages: input.runRecord.messages });
     if (text.trim().length > 0) result.push({
       keyBody: {
         kind: "conversation-final-delivery",

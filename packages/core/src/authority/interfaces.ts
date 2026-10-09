@@ -21,6 +21,10 @@ export type AuthorityAppendAdmissionGuard = (
 ) => void;
 
 export interface ArtifactStore {
+  /** Stable physical generation for verified derived readers; never authority. */
+  readIdentity?(ref: ArtifactRef): Promise<string>;
+  /** Optional infrastructure-owned location for disposable byte indexes. */
+  readonly jsonIndexDirectory?: string;
   put(bytes: Uint8Array): Promise<ArtifactRef>;
   /**
    * Durably imports a stream only when its complete content matches the declared reference.

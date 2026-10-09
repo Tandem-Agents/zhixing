@@ -99,6 +99,7 @@ export interface SegmentMetadata {
 
 /** ConversationRepository 公共接口 — Conversation 身份的磁盘 CRUD (meta.json) */
 export interface IConversationRepository {
+  listPage?(input: import('./directory-page.js').ConversationDirectoryPageRequest): Promise<{ readonly records: readonly Conversation[]; readonly next?: import('./directory-page.js').ConversationDirectoryCursor }>;
   list(opts?: { includeArchived?: boolean }): Promise<Conversation[]>;
   get(id: string): Promise<Conversation | null>;
   create(opts: CreateConversationOptions): Promise<Conversation>;

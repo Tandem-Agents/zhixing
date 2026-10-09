@@ -9973,6 +9973,7 @@ type ConversationBehaviorRecordType =
   | (typeof CONVERSATION_RUN_INTERNAL_RECORD_TYPES)[number];
 
 type ConversationBehaviorScenarioId =
+  | "runInput"
   | "commit"
   | "advancementSession"
   | "worksceneSession"
@@ -10119,6 +10120,24 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async runInput() {
+    const harness = await createHarness();
+    await startConversation(harness);
+    const port = await harness.journal.openRunInput(RUN_ID, ASSIGNMENT_ID);
+    const source = { ...trustedControlSource(), ingress: { ...ingress(), ingressId: 'matrix-followup',
+      turnOrigin: { channel: 'rpc', messageIdentity: { id: 'matrix-message', source: { kind: 'conversation' as const, conversationId: CONVERSATION_ID } } } } };
+    const outcome = await harness.journal.applyInputControl({ admission: harness.control, source, runId: 'unused-queued-id',
+      envelope: createInitialControlEnvelope({ requestId: 'matrix-input', at: NOW, source, body: {
+        t: 'input', conversationId: CONVERSATION_ID, ownerEpoch: 3,
+        ingress: { ingressId: 'matrix-followup', source: 'first-party' },
+        input: { parts: [{ type: 'text', text: 'followup' }] }, invocation: { kind: 'agent', source: 'interactive' },
+      } }),
+    });
+    expect(outcome).toMatchObject({ kind: 'applied', result: { status: 'ok', body: { runId: RUN_ID } } });
+    expect(await port.receive({ boundary: 1, closing: false })).toHaveLength(1);
+    await port.close();
+    return conversationBehaviorHarness(harness);
+  },
   async sessionControl() {
     const harness = await createHarness();
     const source = trustedControlSource();
@@ -10710,6 +10729,26 @@ const noConversationRecovery = (reason: string): ConversationRecoveryExpectation
 // commit/lifecycle projection 均由耐久恢复投影器生产；其生产场景显式执行
 // 对应 resume 消费者，不以在线提交副作用冒充耐久生产路径。
 const CONVERSATION_RECORD_BEHAVIOR = {
+  "run-input-opened": {
+    scenario: "runInput",
+    recovery: noConversationRecovery("input consumption is replayed by the assignment input port and full run reducer"),
+    corrupt: (body) => ({ ...body, runId: "ghost-run" }),
+  },
+  "run-input-appended": {
+    scenario: "runInput",
+    recovery: noConversationRecovery("input consumption is replayed by the assignment input port and full run reducer"),
+    corrupt: (body) => ({ ...body, runId: "ghost-run" }),
+  },
+  "run-input-consumed": {
+    scenario: "runInput",
+    recovery: noConversationRecovery("input consumption is replayed by the assignment input port and full run reducer"),
+    corrupt: (body) => ({ ...body, runId: "ghost-run" }),
+  },
+  "run-input-closed": {
+    scenario: "runInput",
+    recovery: noConversationRecovery("input consumption is replayed by the assignment input port and full run reducer"),
+    corrupt: (body) => ({ ...body, runId: "ghost-run" }),
+  },
   "channel-challenge-prepared": {
     scenario: "channelLifecycle",
     recovery: conversationRecovery("channelChallengeOutbox"),
@@ -10956,8 +10995,10 @@ describe("conversation record execution-point behavior matrix", () => {
           : spec.corruptStream === "run"
             ? `run:${behavior.conversationId}`
             : stream;
-      await behavior.log.append([{ stream: corruptStream, body: vector }]);
-      await expectConversationRejected(behavior.fullProbe);
+      await expectConversationRejected(async () => {
+        await behavior.log.append([{ stream: corruptStream, body: vector }]);
+        await behavior.fullProbe();
+      });
       if (behavior.guardProbe) {
         const guardBehavior =
           await CONVERSATION_BEHAVIOR_SCENARIOS[spec.scenario]();
@@ -10979,6 +11020,7 @@ describe("conversation record execution-point behavior matrix", () => {
               structuredClone(guardTarget.body) as Record<string, unknown>,
             )
           : structuredClone(guardTarget.body);
+        await expectConversationRejected(async () => {
         await guardBehavior.log.append([
           {
             stream:
@@ -10992,7 +11034,8 @@ describe("conversation record execution-point behavior matrix", () => {
             body: guardVector,
           },
         ]);
-        await expectConversationRejected(guardBehavior.guardProbe);
+        await guardBehavior.guardProbe!();
+        });
       }
     },
     20_000,

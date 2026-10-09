@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   ConversationDirectoryApplicationService,
+  ConversationDirectoryPageCollector,
+  type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
@@ -33,6 +35,15 @@ export function createLocalConversationDirectoryApplication(input: {
           };
         }),
       );
+    },
+    async listPage(page) {
+      const collector = new ConversationDirectoryPageCollector<ConversationDirectoryRecord>(page);
+      // Metadata is read sequentially; the page never retains or activates all runtimes.
+      for (const conversationId of await input.owner.listConversations()) {
+        const meta = await input.owner.sessionState.readSessionMeta(conversationId, context(`list:${conversationId}`));
+        collector.add({ conversationId, name: meta.name ?? '本机对话', createdAt: meta.lastActiveAt, lastActiveAt: meta.lastActiveAt });
+      }
+      return collector.result();
     },
     async create() {
       const conversationId = await input.owner.createConversation();

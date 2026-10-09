@@ -5,6 +5,10 @@ import type { ConversationMessageStatus } from "@zhixing/core/conversation/appli
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
+import { ConversationReadIndex } from './conversation-read-index.js';
+import { conversationCommitSummary } from './conversation-commit-summary.js';
+import { ConversationBodyReader } from './conversation-body-reader.js';
+import { readConversationReplayRecord } from './conversation-replay-record.js';
 import {
   applyAdvancementEvent,
   assertAdvancementEventBatchLegal,
@@ -176,6 +180,7 @@ import {
   assertAssignmentSupersededReplayContract,
   assertCapabilityRevocationReplayContract,
   assertCommittedReplayContract,
+  assertCommittedRunRecord,
   assertDigest,
   assertDispatchAcknowledgementReplayContract,
   assertDispatchConflictHandlingReplayContract,
@@ -687,7 +692,6 @@ interface RunProjection {
   >;
   taskList: TaskListState;
   readonly segments: SegmentRecord[];
-  readonly transcript: TranscriptRunRecord[];
   readonly worksceneControls: Map<string, { readonly record: TranscriptRunRecord; readonly advancementSessionId?: string }>;
   clearedThroughLsn: number;
   sessionName?: string;
@@ -991,6 +995,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#conversationId;
   }
   readonly #log: AuthorityCommitLog;
+  readonly #readIndex: ConversationReadIndex;
   readonly #artifacts: ArtifactStore;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
@@ -1030,6 +1035,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#conversationId = options.conversationId;
     this.#ownerEpoch = options.ownerEpoch;
     this.#log = options.log;
+    this.#readIndex = new ConversationReadIndex(options.log, options.artifacts, options.verifier);
     this.#artifacts = options.artifacts;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
@@ -1049,21 +1055,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async sessionMeta(): Promise<SessionMeta> {
-    return this.#select((state) => {
-      const scope = parseConversationId(this.#conversationId).scope;
-      return {
-        conversationId: this.#conversationId,
-        ownerEpoch: this.#ownerEpoch,
-        baseRevision: state.commits.at(-1)?.commitRevision ?? 0,
-        ...(state.sessionName ? { name: state.sessionName } : {}),
-        ...(scope.kind === "workscene" ? { sceneId: scope.sceneId } : {}),
-        turnCount: state.transcript.length,
-        lastActiveAt:
-          state.sessionMeta?.lastActiveAt ??
-          state.lastActiveAt ??
-          "1970-01-01T00:00:00.000Z",
-      };
-    });
+    return this.#readIndex.meta(this.#conversationId, this.#ownerEpoch);
   }
 
   async transcriptTail(
@@ -1076,19 +1068,27 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (cursor && cursor.shardId !== "owner-log") {
       throw new TypeError("Transcript cursor belongs to another session store");
     }
-    return this.#select((state) => {
-      const eligible = cursor
-        ? state.transcript.filter((record) => record.runIndex < cursor.runIndex)
-        : state.transcript;
-      const records = eligible.slice(Math.max(0, eligible.length - limit));
-      const hasEarlier = eligible.length > records.length;
-      return {
-        records: snapshot(records, "Session transcript page"),
-        ...(hasEarlier && records[0]
-          ? { next: { shardId: "owner-log", runIndex: records[0].runIndex } }
-          : {}),
-      };
-    });
+    const before = await this.#readIndex.state(this.#conversationId);
+    const reader = new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch);
+    const records: TranscriptRunRecord[] = [];
+    let commit = await this.#readIndex.latest(this.#conversationId), more = false;
+    while (commit) {
+      let source = await reader.source(commit);
+      while ('ready' in source) { await new Promise<void>(setImmediate); source = await reader.source(commit); }
+      const runIndex = await reader.json.value(source.ref, [...source.keys, 'runIndex'], 128) as number;
+      if (!cursor || runIndex < cursor.runIndex) {
+        if (records.length === limit) { more = true; break; }
+        // Compatibility callers explicitly request complete records. Only the
+        // selected page is materialized; UI/context use the byte-bounded query.
+        let value: unknown = JSON.parse(Buffer.from(await this.#artifacts.get(source.ref)).toString('utf8'));
+        for (const key of source.keys) value = (value as Record<string | number, unknown>)[key];
+        records.unshift(validateTranscriptRunRecord(value as TranscriptRunRecord, commit.runId));
+      }
+      commit = await this.#readIndex.latest(this.#conversationId, commit.commitRevision);
+    }
+    const after = await this.#readIndex.state(this.#conversationId);
+    if (after.deleted || after.clearId !== before.clearId) throw Error('Conversation history generation changed');
+    return { records, ...(more && records[0] ? { next: { shardId: 'owner-log', runIndex: records[0].runIndex } } : {}) };
   }
 
   async taskList(): Promise<TaskListState> {
@@ -1408,6 +1408,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         interactionRequestId: prepared.token.interactionRequestId,
       };
     });
+  }
+
+  async primeImportedReadBase(records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[]): Promise<void> {
+    await this.#readIndex.installBase(records);
   }
 
   async primeRecoverySnapshot(
@@ -2160,6 +2164,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** Finite recovery reads use the original verified authority log and input
    * projection. They neither consume facts nor create a second delivery queue. */
+  async recoveryDeleted(): Promise<boolean> {
+    return (await this.#readIndex.state(this.#conversationId)).deleted === true;
+  }
+
   async recoveryPage(request: ConversationRecoveryRequest, base?: {
     readonly id: string;
     readonly records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[];
@@ -2167,6 +2175,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly clearedThroughLsn: number;
   }): Promise<ConversationRecoveryPage> {
     if (request.conversationId !== this.#conversationId) throw new TypeError('Recovery cursor belongs to another conversation');
+    if (request.mode === 'body-page') return new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).page(request);
+    if (request.mode === 'context') return new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).context();
+    if (request.mode === 'completion') {
+      assertIdentifier(request.runId, 'Completion run id');
+      if (request.ownerEpoch !== undefined && request.ownerEpoch !== this.#ownerEpoch) throw new Error('Completion owner generation changed');
+      const commit = await this.#readIndex.commit(this.#conversationId, request.runId);
+      if (!commit) return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch };
+      const summary = await new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).summary(commit);
+      if ('ready' in summary) throw Error('Committed metadata index is being prepared');
+      return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch, commitRevision: commit.commitRevision, summary };
+    }
     const head = await this.#log.checkpoint();
     const lifecycleOf = (state: RunProjection) => {
       let clearId: string | undefined;
@@ -4987,6 +5006,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           assignmentId: bundle.assignmentId,
           bundle: { ref: artifact.ref },
           commitRevision,
+          readSummary: conversationCommitSummary(committedRunRecord),
         };
         const entries: LogicalRecord<unknown>[] = [
           runRecord(this.#conversationId, committedRecord),
@@ -6090,7 +6110,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state.clearedThroughLsn = envelope.lsn;
           state.taskList = { items: [] };
           state.segments.length = 0;
-          state.transcript.length = 0;
         } else {
           state.deleted = true;
         }
@@ -7403,11 +7422,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           "settle-release",
           envelope.entries,
         );
-        let closure: ValidatedConversationBundleClosure;
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        let closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
         try {
-          closure = await validateConversationBundleClosure(bundle, this.#artifacts);
-          validateWorksceneContinuationCommit(closure.runRecord, assigned.envelope.work);
-          assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
+          if (state.openInputAssignments.get(body.runId) === body.assignmentId) throw Error('Run input must close before commit');
+          closure = admitted.record.ingress.kind !== 'channel' && !admitted.record.ingress.turnOrigin?.worksceneContinuation
+            ? await validateConversationBundleClosure(bundle, this.#artifacts, expectedRunInputMessages(state, body.runId, body.assignmentId))
+            : await validateConversationBundleClosure(bundle, this.#artifacts);
+          validateWorksceneContinuationCommit('metadata' in closure ? closure.metadata : closure.runRecord, assigned.envelope.work);
+          if (!('metadata' in closure)) assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
         } catch (error) {
           throw corruptRunJournal(
             error instanceof Error
@@ -7428,8 +7452,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             "Committed run is missing its content, publish, or final sidecars",
           );
         }
-        const admitted = state.admittedByRun.get(body.runId);
-        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        const committedMetadata = 'metadata' in closure ? closure.metadata : closure.runRecord;
         try {
           this.#delivery?.assertConversationCommit(
             {
@@ -7449,7 +7472,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 revision: assigned.record.dispatchDigest,
               },
               ingress: admitted.record.ingress,
-              runRecord: closure.runRecord,
+              runRecord: committedMetadata,
               ...(closure.batch ? { mutationBatch: closure.batch } : {}),
             },
             envelope,
@@ -7461,14 +7484,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               : "Committed delivery companions are invalid",
           );
         }
+        const expectedSummary = conversationCommitSummary(committedMetadata);
+        const { controlRecovery: _recovery, ...legacySummary } = expectedSummary;
+        if (body.readSummary && canonicalize(body.readSummary) !== canonicalize(body.readSummary.controlRecovery === undefined ? legacySummary : expectedSummary)) {
+          throw corruptRunJournal('Committed read summary does not match its authoritative record');
+        }
         state.committedByAssignment.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         state.bundleAcknowledgementOutbox.add(body.assignmentId);
         state.commits.push(body);
         state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
         state.pendingCommitProjections.set(body.assignmentId, body);
-        state.transcript.push(snapshot(closure.runRecord, "Committed transcript record"));
-        if (closure.runRecord.postTurnControl || state.admittedByRun.get(closure.runRecord.runId)?.record.ingress.turnOrigin?.worksceneContinuation) {
+        if (!('metadata' in closure) && (closure.runRecord.postTurnControl || state.admittedByRun.get(closure.runRecord.runId)?.record.ingress.turnOrigin?.worksceneContinuation)) {
           const advancement = [...state.advancementSessions.values()].find((session) => session.status === "active");
           state.worksceneControls.set(closure.runRecord.runId, {
             record: snapshot(closure.runRecord, "Committed workscene control"),
@@ -9391,18 +9418,22 @@ function projectMessageInputs(state: RunProjection): Array<{ readonly position: 
 
 function assertRunInputCommit(state: RunProjection, runId: string, assignmentId: string, messages: readonly Message[]): void {
   if (state.openInputAssignments.get(runId) === assignmentId) throw new Error("Run input must close before commit");
+  const expected = expectedRunInputMessages(state, runId, assignmentId);
+  const actual = messages.filter((message) => message.inputIdentity !== undefined);
+  if (canonicalize(expected) !== canonicalize(actual)) throw new Error("Run record does not match admitted and consumed message identities/content");
+}
+
+function expectedRunInputMessages(state: RunProjection, runId: string, assignmentId: string): Message[] {
   const initial = state.admittedByRun.get(runId)!;
   const initialIdentity = initial.record.ingress.turnOrigin?.messageIdentity;
   const consumed = [...state.inputConsumptions.values()]
     .filter((entry) => entry.assignmentId === assignmentId)
     .sort((a, b) => a.boundary - b.boundary)
     .flatMap((entry) => entry.ingressKeys.map((key) => state.appendedInputs.get(key)!));
-  const expected = [
+  return [
     ...(initialIdentity ? [{ ...userMessageFromTurnInput(initial.input), inputIdentity: initialIdentity }] : []),
     ...consumed.map((entry) => ({ ...userMessageFromTurnInput(entry.input), inputIdentity: entry.record.ingress.turnOrigin!.messageIdentity! })),
   ];
-  const actual = messages.filter((message) => message.inputIdentity !== undefined);
-  if (canonicalize(expected) !== canonicalize(actual)) throw new Error("Run record does not match admitted and consumed message identities/content");
 }
 
 function emptyProjection(conversationId: string): RunProjection {
@@ -9415,7 +9446,6 @@ function emptyProjection(conversationId: string): RunProjection {
     sessionMutationDigests: new Map(),
     taskList: { items: [] },
     segments: [],
-    transcript: [],
     worksceneControls: new Map(),
     clearedThroughLsn: 0,
     sessionMeta: undefined,
@@ -10524,6 +10554,9 @@ interface ValidatedConversationBundleClosure {
   readonly runRecord: TranscriptRunRecord;
   readonly references: ArtifactRef[];
 }
+interface ValidatedConversationReplayClosure extends Omit<ValidatedConversationBundleClosure, 'runRecord'> {
+  readonly metadata: Omit<TranscriptRunRecord, 'messages'>;
+}
 
 class BundleClosureError extends Error {
   constructor(
@@ -10536,25 +10569,35 @@ class BundleClosureError extends Error {
   }
 }
 
-async function validateConversationBundleClosure(
+function validateConversationBundleClosure(
   bundle: ReturnType<typeof validateConversationSealedBundle>,
   artifacts: ArtifactStore,
-): Promise<ValidatedConversationBundleClosure> {
+): Promise<ValidatedConversationBundleClosure>;
+function validateConversationBundleClosure(
+  bundle: ReturnType<typeof validateConversationSealedBundle>, artifacts: ArtifactStore, expectedInputs: readonly Message[] | null,
+): Promise<ValidatedConversationBundleClosure | ValidatedConversationReplayClosure>;
+async function validateConversationBundleClosure(
+  bundle: ReturnType<typeof validateConversationSealedBundle>, artifacts: ArtifactStore, expectedInputs?: readonly Message[] | null,
+): Promise<ValidatedConversationBundleClosure | ValidatedConversationReplayClosure> {
   const artifact = sealedBundleArtifact(bundle);
   if (!(await artifacts.has(artifact.ref))) {
     throw new BundleClosureError("missing-base", "Sealed bundle artifact is not present");
   }
   let closure: Awaited<ReturnType<typeof resolveSealedBundleArtifactClosure>>;
+  const replay = expectedInputs !== undefined && isStoredReference(bundle.body.runRecord)
+    ? await readConversationReplayRecord(artifacts, bundle.body.runRecord.ref, bundle.body.runId, expectedInputs ?? undefined) : undefined;
   try {
-    closure = await resolveSealedBundleArtifactClosure(bundle, artifacts);
+    closure = await resolveSealedBundleArtifactClosure(bundle, artifacts, replay ? async descriptor =>
+      descriptor.schema === 'transcript-run-record' ? replay.references : undefined : undefined);
   } catch (error) {
     throw bundleClosureReadError(error, "Invalid sealed bundle closure");
   }
 
   const references = [artifact.ref, ...closure.transfer];
 
-  let runRecord: TranscriptRunRecord;
-  if (isStoredReference(bundle.body.runRecord)) {
+  let runRecord: TranscriptRunRecord | undefined;
+  if (replay) { /* Canonical schema, input identities and exact dependencies were verified through byte ranges. */ }
+  else if (isStoredReference(bundle.body.runRecord)) {
     try {
       const bytes = await artifacts.get(bundle.body.runRecord.ref);
       const text = Buffer.from(bytes).toString("utf8");
@@ -10598,7 +10641,8 @@ async function validateConversationBundleClosure(
     }
   }
 
-  return { artifact, ...(batch ? { batch } : {}), runRecord, references };
+  return replay ? { artifact, ...(batch ? { batch } : {}), metadata: replay.metadata, references }
+    : { artifact, ...(batch ? { batch } : {}), runRecord: runRecord!, references };
 }
 
 function bundleClosureReadError(error: unknown, message: string): BundleClosureError {
@@ -10995,7 +11039,7 @@ function submissionCommitSidecarsMatch(
 interface CommittedBundleBinding {
   readonly committed: Extract<ConversationRunJournalRecord, { t: "committed" }>;
   readonly bundle: ReturnType<typeof validateConversationSealedBundle>;
-  readonly closure: ValidatedConversationBundleClosure;
+  readonly closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
 }
 
 async function loadCommittedBundleBinding(
@@ -11026,21 +11070,14 @@ async function loadCommittedBundleBinding(
     throw corruptRunJournal("Commit sidecar must bind exactly one committed run");
   }
   const { committed, stream } = candidates[0]!;
-  assertExactRecordKeys(
-    committed,
-    ["assignmentId", "bundle", "commitRevision", "runId", "t"],
-    "Committed run sidecar binding",
-  );
-  assertIdentifier(committed.assignmentId, "Committed assignment id");
-  assertIdentifier(committed.runId, "Committed run id");
-  assertPositiveSafeInteger(committed.commitRevision, "Committed revision");
-  assertExactRecordKeys(committed.bundle, ["ref"], "Committed bundle reference");
-  assertArtifactReference(committed.bundle.ref, "Committed bundle reference");
+  assertCommittedRunRecord(committed);
   const bytes = await artifacts.get(committed.bundle.ref);
   const bundle = validateConversationSealedBundle(
     JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
   );
-  const closure = await validateConversationBundleClosure(bundle, artifacts);
+  // Sidecars bind the committed bundle and its closure, not historical body
+  // strings. Input-to-admission binding belongs to the run projection.
+  const closure = await validateConversationBundleClosure(bundle, artifacts, null);
   if (
     stream !== runStream(bundle.body.conversationId) ||
     bundle.assignmentId !== committed.assignmentId ||

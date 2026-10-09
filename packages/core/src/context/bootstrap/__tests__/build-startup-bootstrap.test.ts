@@ -9,7 +9,7 @@
  * 的桥，桥的契约理应在真实两端上验证。
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { ShardedTranscriptStore } from "../../../transcript/shard/store.js";
@@ -17,6 +17,9 @@ import { SnapshotStore } from "../../../transcript/snapshot/store.js";
 import type { Message } from "../../../types/messages.js";
 import { extractFirstText } from "../../../types/messages.js";
 import { buildStartupBootstrap } from "../build-startup-bootstrap.js";
+import { readBootstrapRunViews } from '../byte-bootstrap.js';
+import { TranscriptByteReader } from '../../../transcript/shard/byte-reader.js';
+import { writeFile, appendFile } from 'node:fs/promises';
 
 let clock = Date.now();
 function runMessages(text: string, extra: Message[] = []): Message[] {
@@ -70,6 +73,64 @@ function bootstrapText(pair: readonly [Message, Message]): string {
 }
 
 describe("buildStartupBootstrap", () => {
+  it('keeps ordinary byte-backed context identical and clear-aware', async () => {
+    const root = await createTempDir('bootstrap-byte-equivalence');
+    const reader = new TranscriptByteReader(root);
+    await appendRun(store, 'c1', '第一句');
+    await appendRun(store, 'c1', '第二句');
+    const lines = [0, 1].map(i => JSON.stringify({ type: 'run', runIndex: i, messages: runMessages(i === 0 ? '第一句' : '第二句') }));
+    await writeFile(path.join(root, '000001.jsonl'), lines.join('\n') + '\n');
+    try {
+      const original = await buildStartupBootstrap(deps(160));
+      expect(await buildStartupBootstrap({ ...deps(160), runs: readBootstrapRunViews(reader) })).toEqual(original);
+      await appendFile(path.join(root, '000001.jsonl'), JSON.stringify({ type: 'clear' }) + '\n');
+      expect(await buildStartupBootstrap({ ...deps(160), runs: readBootstrapRunViews(reader) })).toBeNull();
+    } finally { await reader.close(); }
+  });
+
+  it('bounds giant context views while retaining first intent and final conclusion, including torn tails', async () => {
+    const root = await createTempDir('bootstrap-byte-giant');
+    const file = path.join(root, '000001.jsonl'), index = path.join(root, 'index');
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'FIRST-INTENT' }] },
+      { role: 'assistant', content: Array.from({ length: 25 }, (_, i) => ({ type: 'text', text: '🙂'.repeat(12000) + (i === 24 ? 'FINAL-CONCLUSION' : '') })) },
+    ];
+    await writeFile(file, JSON.stringify({ type: 'run', runIndex: 0, messages }) + '\n' + '{"type":"run","messages":');
+    for (let round = 0; round < 2; round++) {
+      const reader = new TranscriptByteReader(root, index);
+      try {
+        const views = [];
+        for await (const view of readBootstrapRunViews(reader)) views.push(view);
+        expect(views).toHaveLength(1);
+        expect(views[0]?.oversized).toBe(true);
+        const text = JSON.stringify(views[0]);
+        expect(text.length).toBeLessThan(100_000);
+        expect(text).toContain('FIRST-INTENT'); expect(text).toContain('FINAL-CONCLUSION');
+        const pair = await buildStartupBootstrap({ ...deps(100_000), runs: readBootstrapRunViews(reader) });
+        expect(bootstrapText(pair!)).toContain('FINAL-CONCLUSION');
+      } finally { await reader.close(); }
+    }
+  }, 30_000);
+
+  it('uses the byte source clear boundary for snapshots without reading a whole shard index', async () => {
+    await appendRun(store, 'c1', 'older');
+    await snapshots.write('c1', { coveredThroughRunIndex: 0,
+      structuredSummary: { facts: 'SUMMARY-BEFORE-CLEAR', state: '', active: '' }, tokensBefore: 10, tokensAfter: 5 });
+    const root = await createTempDir('bootstrap-boundary'), reader = new TranscriptByteReader(root);
+    const lastClearAt = new Date(Date.now() + 1000).toISOString();
+    await writeFile(path.join(root, '000001.jsonl'), [
+      { type: 'clear', timestamp: lastClearAt }, { type: 'run', runIndex: 1, messages: runMessages('new') },
+    ].map(line => JSON.stringify(line)).join('\n') + '\n');
+    const indexRead = vi.spyOn(store, 'ensureReadableIndex').mockRejectedValue(Error('whole shard read forbidden'));
+    try {
+      for await (const _ of reader.records()) { /* count pass discovers the boundary */ }
+      expect(reader.lastClearAt).toBe(lastClearAt);
+      const pair = await buildStartupBootstrap({ ...deps(100_000), runs: readBootstrapRunViews(reader), clearBoundary: { lastClearAt: reader.lastClearAt } });
+      expect(bootstrapText(pair!)).toContain('new'); expect(bootstrapText(pair!)).not.toContain('SUMMARY-BEFORE-CLEAR');
+      expect(indexRead).not.toHaveBeenCalled();
+    } finally { indexRead.mockRestore(); await reader.close(); }
+  });
+
   it("无历史 → null（新对话空窗起步）", async () => {
     expect(await buildStartupBootstrap(deps(100_000))).toBeNull();
   });

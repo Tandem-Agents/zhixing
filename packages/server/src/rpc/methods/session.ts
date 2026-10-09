@@ -1756,16 +1756,18 @@ export function buildSessionListMethod(): MethodEntry {
   return {
     name: "session.list",
     requiresAuth: true,
-    async handler(_params, ctx): Promise<SessionListResult> {
+    async handler(params, ctx): Promise<SessionListResult> {
       const productApi = requireConversationProductApi(
         ctx.server,
         CONVERSATION_LIST_QUERY,
       );
       const view = await productApi.query(CONVERSATION_LIST_QUERY, {
         kind: "list",
+        ...((params as { page?: import("@zhixing/core/conversation/application").ConversationDirectoryPageRequest } | null)?.page ? { page: (params as { page: import("@zhixing/core/conversation/application").ConversationDirectoryPageRequest }).page } : {}),
       });
       return {
         conversations: view.conversations.map(projectConversationEntry),
+        ...(view.next ? { next: view.next } : {}),
         ...(view.availability ? { availability: view.availability } : {}),
       };
     },

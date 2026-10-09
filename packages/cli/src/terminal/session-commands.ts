@@ -60,7 +60,7 @@ export class TerminalSessionCommands {
       emptyHint: command === 'work' ? '暂无工作场景，Ctrl+N 新建' : '暂无可切换对话',
       list: async (context, abort) => {
         const scope = this.#scope();
-        const entries = await this.#entries(command); scope.current();
+        const entries = await this.#entries(command, context.query); scope.current();
         if (abort.aborted) return [];
         const query = context.query.toLocaleLowerCase();
         return entries.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(query)).slice(0, 100)
@@ -81,9 +81,9 @@ export class TerminalSessionCommands {
           (!switched && controller.current.conversationId !== conversationId)) throw Error('对话已变化，请重新打开后操作。');
     } };
   }
-  async #entries(command: 'resume' | 'work') {
+  async #entries(command: 'resume' | 'work', query?: string) {
     const entries = command === 'resume'
-      ? (await this.options.controller()!.listConversations()).map(item => ({ id: item.conversationId, name: item.name,
+      ? (await this.options.controller()!.listConversationPage({ limit: 100, query })).conversations.map(item => ({ id: item.conversationId, name: item.name,
         description: item.advancement?.status === 'awaiting-rubric-confirmation' ? '待确认推进任务' : item.advancement?.status === 'active' ? '推进中' : item.lastActiveAt }))
       : (await this.options.workscene.list()).map(item => ({ id: item.sceneId, name: item.name,
         description: item.workspace ? [item.workspace.deviceName, item.workspace.workspaceName].filter(Boolean).join(' / ') : '未绑定工作区' }));
@@ -114,6 +114,7 @@ export class TerminalSessionCommands {
     if (name === 'exit') { await this.navigate({ kind: 'exit' }); return; }
     if (name !== 'resume' && name !== 'work') throw Error('未知会话命令。');
     if (name === 'work' && scope.controller.current.mode.kind !== 'main') throw Error('已在工作场景中，请先 /exit 返回主对话。');
+    if (name === 'resume') { await this.#resume(argument, scope); return; }
     const entries = await this.#entries(name); scope.current();
     const query = argument.trim().toLocaleLowerCase();
     const exact = entries.find(item => item.id === argument.trim());
@@ -135,12 +136,32 @@ export class TerminalSessionCommands {
         target = matches.find(item => item.id === response.itemId); if (target) break;
       }
     }
-    if (name === 'work') { await this.navigate({ kind: 'enter', sceneId: target.id }); return; }
-    const resumed = await scope.controller.resume(target.id); scope.current(true);
-    if (resumed.active.mode.kind === 'main') this.#mainReturn = resumed.active;
-    await this.options.changed(resumed.advancement);
-    await this.options.publish(resumed.adoptionReview?.message ?? `已切换到 ${resumed.active.name}`);
+    await this.navigate({ kind: 'enter', sceneId: target.id });
   }
+  async #resume(argument: string, scope: { controller: ConversationController<TerminalTurnOutcome>; current(switched?: boolean): void }): Promise<void> {
+    const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
+    for (;;) {
+      const page = await scope.controller.listConversationPage({ limit: 20, after: pages.at(-1), query: argument.trim() || undefined }); scope.current();
+      const exact = argument.trim() && page.conversations.find(item => item.conversationId === argument.trim());
+      let target = exact || (argument.trim() && page.conversations.length === 1 && !page.next ? page.conversations[0] : undefined);
+      if (!target) {
+        const response = await this.options.choose({ kind: 'selection', title: '切换对话', message: page.conversations.length ? `第 ${pages.length} 页` : '没有匹配项，可返回修改名称。',
+          choices: [...page.conversations.map(item => ({ id: item.conversationId, label: item.name, detail: item.lastActiveAt })),
+            ...(pages.length > 1 ? [{ id: 'previous', label: '上一页' }] : []), ...(page.next ? [{ id: 'next', label: '下一页' }] : []), { id: 'cancel', label: '返回' }] });
+        scope.current();
+        if (!response || response.cancelCause || response.itemId === 'cancel') return;
+        if (response.itemId === 'previous') { pages.pop(); continue; }
+        if (response.itemId === 'next' && page.next) { pages.push(page.next); continue; }
+        target = page.conversations.find(item => item.conversationId === response.itemId);
+      }
+      if (!target) continue;
+      const resumed = await scope.controller.resume(target.conversationId); scope.current(true);
+      if (resumed.active.mode.kind === 'main') this.#mainReturn = resumed.active;
+      await this.options.changed(resumed.advancement);
+      await this.options.publish(resumed.adoptionReview?.message ?? `已切换到 ${resumed.active.name}`); return;
+    }
+  }
+
   async navigate(intent: Navigation): Promise<void> {
     const scope = this.#scope(), controller = scope.controller;
     if (intent.kind === 'enter') {

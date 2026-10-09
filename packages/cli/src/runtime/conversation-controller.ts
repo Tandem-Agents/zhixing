@@ -285,7 +285,7 @@ export async function selectInitialConversation(
     Partial<
       Pick<
         RpcConversationFacade,
-        "pendingContinuationConfirmation" | "confirmContinuation"
+        "pendingContinuationConfirmation" | "confirmContinuation" | "listPage"
       >
     >,
   options: {
@@ -294,7 +294,7 @@ export async function selectInitialConversation(
     ) => boolean | Promise<boolean>;
   } = {},
 ): Promise<InitialConversationSelection> {
-  const candidates = await conversation.list();
+  let page = conversation.listPage ? await conversation.listPage({ limit: 24 }) : { conversations: await conversation.list(), next: undefined };
   const unavailableCapabilities =
     conversation.pendingContinuationConfirmation?.() ?? null;
   if (unavailableCapabilities) {
@@ -304,7 +304,8 @@ export async function selectInitialConversation(
     if (accepted !== true) throw new ConversationContinuationDeclinedError();
     conversation.confirmContinuation?.();
   }
-  for (const candidate of candidates) {
+  for (;;) {
+  for (const candidate of page.conversations) {
     if (!isMainConversationId(candidate.conversationId)) continue;
     const resumed = await conversation.resumeIfExists(candidate.conversationId);
     if (!resumed) continue;
@@ -318,6 +319,9 @@ export async function selectInitialConversation(
     };
   }
 
+  if (!page.next || !conversation.listPage) break;
+  page = await conversation.listPage({ limit: 24, after: page.next });
+  }
   const created = await conversation.newConversation();
   return {
     active: toActiveConversation(created),
@@ -1798,6 +1802,10 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (args[0].ref.conversationId !== this.active.conversationId) throw new Error("当前对话已切换，未执行处理。");
     await this.opts.conversation.resolveUncertain(...args);
     await this.reconcileObservedRuns();
+  }
+
+  async listConversationPage(page: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
+    return this.opts.conversation.listPage(page);
   }
 
   async listConversations(): Promise<SessionConversationEntry[]> {

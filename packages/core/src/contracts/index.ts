@@ -28,6 +28,7 @@ export {
 export type * from "./records.js";
 export type * from "./commit-log.js";
 export type * from './conversation-recovery.js';
+export { validateConversationCommitSummary } from './conversation-recovery.js';
 export type * from "./ports.js";
 export { ImmediateRootReplayTerminalError } from "./ports.js";
 export * from "./durable-contract.js";

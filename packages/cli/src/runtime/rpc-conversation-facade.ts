@@ -177,8 +177,12 @@ export class RpcConversationFacade {
 
   /** 对话列表——盘上全量叠加活跃态(/resume 候选源)。 */
   async list(): Promise<SessionConversationEntry[]> {
+    return (await this.listPage()).conversations;
+  }
+
+  async listPage(page?: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest): Promise<SessionListResult> {
     const client = await this.link.getClient();
-    const result = await client.request<SessionListResult>("session.list");
+    const result = await client.request<SessionListResult>("session.list", page ? { page } : undefined);
     const nextRequirement =
       result.availability?.capabilitySet === "limited" &&
       result.availability.continuationConfirmation === "required"
@@ -188,7 +192,7 @@ export class RpcConversationFacade {
       this.#limitedCapabilitiesAccepted = false;
     }
     this.#continuationRequirement = nextRequirement;
-    return result.conversations;
+    return result;
   }
 
   pendingContinuationConfirmation(): readonly string[] | null {
@@ -524,6 +528,16 @@ export class RpcConversationFacade {
     }, 512 * 1024);
     return client.consume ? client.consume('session.statusHistory', params, consume)
       : consume(await client.request<ConversationControlPage>('session.statusHistory', params));
+  }
+  async completion(conversationId: string, runId: string, ownerEpoch?: number): Promise<import('@zhixing/core/contracts').ConversationCompletionPage> {
+    const client = await this.link.getClient();
+    return boundedControlProjection(await client.request('session.statusHistory', { mode: 'completion', conversationId, runId, ownerEpoch }), 32 * 1024);
+  }
+  async bodyPage(conversationId: string, cursor?: import('@zhixing/core/contracts').ConversationBodyCursor,
+    options: { direction?: 'forward' | 'reverse'; runId?: string } = {}): Promise<import('@zhixing/core/contracts').ConversationBodyPage> {
+    const client = await this.link.getClient();
+    const page = await client.request<import('@zhixing/core/contracts').ConversationBodyPage>('session.statusHistory', { mode: 'body-page', conversationId, ...(cursor ? { cursor } : {}), ...options });
+    return boundedControlProjection(page, 224 * 1024);
   }
 
   async consumeInputPage<T>(conversationId: string, runId: string, cursor: ConversationInputCursor | undefined, consume: (page: ConversationInputPage) => Promise<T>): Promise<T> {

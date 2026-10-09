@@ -1,3 +1,5 @@
+import { ConversationDirectoryPageCollector, assertDirectoryPage, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor } from './directory-page.js';
+export { ConversationDirectoryPageCollector, assertDirectoryPage, type ConversationDirectoryPageRequest, type ConversationDirectoryCursor } from './directory-page.js';
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -161,12 +163,14 @@ export type ConversationAvailability =
     }>;
 
 export interface ConversationDirectoryView {
+  readonly next?: ConversationDirectoryCursor;
   readonly conversations: readonly ConversationDirectoryEntry[];
   readonly availability?: ConversationAvailability;
 }
 
 /** Conversation-owned demand-side storage contract. */
 export interface ConversationDirectoryStorage {
+  listPage?(input: ConversationDirectoryPageRequest): Promise<{ readonly records: readonly ConversationDirectoryRecord[]; readonly next?: ConversationDirectoryCursor }>;
   list(): Promise<readonly ConversationDirectoryRecord[]>;
   create(): Promise<ConversationDirectoryRecord>;
   rename(
@@ -794,7 +798,7 @@ export interface ConversationAdvancementProjectionReader {
 }
 
 export type ConversationDirectoryQuery =
-  | Readonly<{ kind: "list" }>
+  | Readonly<{ kind: "list"; page?: ConversationDirectoryPageRequest }>
   | Readonly<{
       kind: "identity-exists";
       conversationId: string;
@@ -1073,7 +1077,7 @@ export class ConversationApplicationError extends Error {
 }
 
 export interface ConversationDirectoryApplication {
-  queryList(): Promise<ConversationDirectoryView>;
+  queryList(page?: ConversationDirectoryPageRequest): Promise<ConversationDirectoryView>;
   queryIdentityExists(
     query: Extract<
       ConversationDirectoryQuery,
@@ -1195,10 +1199,16 @@ export class ConversationDirectoryApplicationService
     }>,
   ) {}
 
-  async queryList(): Promise<ConversationDirectoryView> {
-    const records = orderDurableConversationRecords(
-      await this.input.storage.list(),
-    );
+  async queryList(page?: ConversationDirectoryPageRequest): Promise<ConversationDirectoryView> {
+    if (page) assertDirectoryPage(page);
+    let result: { records: readonly ConversationDirectoryRecord[]; next?: ConversationDirectoryCursor };
+    if (page && this.input.storage.listPage) result = await this.input.storage.listPage(page);
+    else {
+      const all = await this.input.storage.list();
+      if (page) { const collector = new ConversationDirectoryPageCollector<ConversationDirectoryRecord>(page); for (const item of all) collector.add(item); result = collector.result(); }
+      else result = { records: orderDurableConversationRecords(all) };
+    }
+    const records = result.records;
     const conversations = await Promise.all(
       records.map(async (record): Promise<ConversationDirectoryEntry> => {
         const runtime = this.input.runtime?.read(record.conversationId);
@@ -1218,6 +1228,7 @@ export class ConversationDirectoryApplicationService
     );
     return Object.freeze({
       conversations: Object.freeze(conversations),
+      ...(result.next ? { next: result.next } : {}),
       ...(this.input.availability
         ? { availability: this.input.availability }
         : {}),
@@ -2558,8 +2569,8 @@ export function createConversationDirectoryProductApiContribution(
 ): ProductApiContribution {
   return defineProductApiContribution({
     operations: [
-      bindProductApiOperation(CONVERSATION_LIST_QUERY, async () => ({
-        result: await application.queryList(),
+      bindProductApiOperation(CONVERSATION_LIST_QUERY, async (query) => ({
+        result: await application.queryList(query.page),
         facts: [],
       })),
       bindProductApiOperation(

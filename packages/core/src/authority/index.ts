@@ -1,4 +1,5 @@
 export { AUTHORITY_LOG_SOURCE } from "./logging.js";
+export { artifactJsonIndex, ArtifactJsonIndex, type ArtifactJsonNode } from './artifact-json-index.js';
 export {
   assertArtifactRef,
   collectArtifactRefs,

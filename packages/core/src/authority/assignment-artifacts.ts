@@ -95,6 +95,7 @@ export function describeDispatchArtifactClosure(
 export async function resolveSealedBundleArtifactClosure(
   value: SealedBundle,
   artifacts: ArtifactStore,
+  inspect?: (descriptor: AssignmentArtifactDescriptor) => Promise<ArtifactRef[] | undefined>,
 ): Promise<AssignmentArtifactClosure> {
   const bundle = validatedSealedBundle(value);
   const described = describeSealedBundleArtifactClosure(bundle);
@@ -102,6 +103,7 @@ export async function resolveSealedBundleArtifactClosure(
     sealedBundleRootDescriptors(bundle, described.roots),
     described.dependencies,
     artifacts,
+    inspect,
   );
 }
 
@@ -664,6 +666,7 @@ async function resolveClosure(
   roots: readonly AssignmentArtifactDescriptor[],
   declaredDependencies: readonly ArtifactRef[],
   artifacts: ArtifactStore,
+  inspect?: (descriptor: AssignmentArtifactDescriptor) => Promise<ArtifactRef[] | undefined>,
 ): Promise<AssignmentArtifactClosure> {
   assertCanonicalArtifactRefs(declaredDependencies, "Assignment artifact dependencies");
   const normalizedRoots = normalizedArtifactRefs(roots.map(({ ref }) => ref));
@@ -674,8 +677,12 @@ async function resolveClosure(
       await assertArtifactPresent(artifacts, descriptor.ref);
       continue;
     }
-    const bytes = await artifacts.get(descriptor.ref);
-    dependencies.push(...extractRegisteredDependencies(descriptor, bytes));
+    const inspected = await inspect?.(descriptor);
+    if (inspected) dependencies.push(...inspected);
+    else {
+      const bytes = await artifacts.get(descriptor.ref);
+      dependencies.push(...extractRegisteredDependencies(descriptor, bytes));
+    }
   }
   const expectedDependencies = normalizedArtifactRefs([
     ...normalizedRoots,

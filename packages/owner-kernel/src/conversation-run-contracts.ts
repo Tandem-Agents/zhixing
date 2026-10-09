@@ -1,3 +1,4 @@
+import { validateConversationCommitSummary } from "@zhixing/core/contracts";
 import { AuthorityStorageError } from "@zhixing/core/authority";
 import { isAdvancementControlEvent } from "@zhixing/core/advancement";
 import type { AdvancementControlEvent } from "@zhixing/core/advancement";
@@ -193,6 +194,7 @@ export type ConversationRunJournalRecord =
       readonly assignmentId: string;
       readonly bundle: { readonly ref: ArtifactRef };
       readonly commitRevision: number;
+      readonly readSummary?: import('@zhixing/core/contracts').ConversationCommitSummary;
     }
   | {
       readonly t: "bundle-ack-observed";
@@ -353,6 +355,7 @@ export const CONVERSATION_RUN_RECORD_SHAPES = {
   },
   committed: {
     required: ["assignmentId", "bundle", "commitRevision", "runId", "t"],
+    optional: ["readSummary"],
   },
   "bundle-ack-observed": {
     required: ["assignmentId", "bundleRef", "commitRevision", "t"],
@@ -645,11 +648,7 @@ export function validateConversationRunRecord(
         }
         break;
       case "committed":
-        assertIdentifier(value.runId, "Committed run id");
-        assertIdentifier(value.assignmentId, "Committed assignment id");
-        assertPositiveSafeInteger(value.commitRevision, "Committed revision");
-        assertExactRecordKeys(value.bundle, ["ref"], "Committed bundle");
-        assertArtifactReference(value.bundle.ref, "Committed bundle reference");
+        assertCommittedRunRecord(value);
         break;
       case "bundle-ack-observed":
         assertIdentifier(value.assignmentId, "Bundle acknowledgement assignment id");
@@ -1702,6 +1701,23 @@ export function assertExactRecordKeys(
   label: string,
 ): asserts value is Record<string, unknown> {
   assertRecordKeys(value, keys, [], label);
+}
+
+/** Shared by the run projection and its final/publish sidecars. */
+export function assertCommittedRunRecord(value: unknown): asserts value is Extract<ConversationRunJournalRecord, { t: 'committed' }> {
+  assertRecordKeys(value, ['assignmentId', 'bundle', 'commitRevision', 'runId', 't'], ['readSummary'], 'Committed run');
+  if (value.t !== 'committed') throw corruptRunJournal('Committed run kind is invalid');
+  assertIdentifier(value.runId, 'Committed run id');
+  assertIdentifier(value.assignmentId, 'Committed assignment id');
+  assertPositiveSafeInteger(value.commitRevision, 'Committed revision');
+  assertExactRecordKeys(value.bundle, ['ref'], 'Committed bundle');
+  assertArtifactReference(value.bundle.ref, 'Committed bundle reference');
+  if (value.readSummary !== undefined) assertConversationCommitSummary(value.readSummary);
+}
+
+export function assertConversationCommitSummary(value: unknown): asserts value is import('@zhixing/core/contracts').ConversationCommitSummary {
+  try { validateConversationCommitSummary(value); }
+  catch (error) { throw corruptRunJournal(error instanceof Error ? error.message : 'Invalid committed read summary'); }
 }
 
 export function assertDigest(value: unknown, label: string): asserts value is string {

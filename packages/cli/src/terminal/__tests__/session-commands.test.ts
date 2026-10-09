@@ -9,7 +9,7 @@ function fixture() {
   const controller = {
     get current() { return active; },
     newConversation: vi.fn(async () => active = { conversationId: 'main-2', name: '新对话', mode: { kind: 'main' } }),
-    listConversations: vi.fn(async () => [{ conversationId: 'main-1', name: '主对话', lastActiveAt: '2026-10-06' }]),
+    listConversationPage: vi.fn(async () => ({ conversations: [{ conversationId: 'main-1', name: '主对话', lastActiveAt: '2026-10-06' }] })),
     resume: vi.fn(async (id: string) => ({ active: active = { conversationId: id, name: id, mode: { kind: 'main' } } })),
     rename: vi.fn(async (name: string) => { active = { ...active, name }; }),
     clear: vi.fn(async () => {}), deleteConversation: vi.fn(async () => {}),

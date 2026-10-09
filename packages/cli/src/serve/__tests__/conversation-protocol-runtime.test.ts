@@ -60,7 +60,7 @@ import { ExtensionOnboarding } from "@zhixing/core/extensions/onboarding";
 import { createExtensionContinuation, createExtensionStatusObserver, extensionContinuationText } from "../extension-continuation.js";
 import { resolve } from "node:path";
 import { createDeviceCapacityRuntime } from "../../__tests__/device-capacity-fixture.js";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, onTestFinished } from "vitest";
 import {
   setupAuthorityRuntime as setupAuthorityRuntimeProduction,
   type SetupAuthorityRuntimeOptions,
@@ -148,12 +148,14 @@ function setupAuthorityRuntime(
     readonly executorReadiness?: SetupAuthorityRuntimeOptions["executorReadiness"];
   },
 ) {
-  return setupAuthorityRuntimeProduction({
+  const runtime = setupAuthorityRuntimeProduction({
     ...options,
     executorReadiness: options.executorReadiness ?? TEST_EXECUTOR_READINESS,
     resourceCandidateTtlMs:
       options.resourceCandidateTtlMs ?? TEST_RESOURCE_CANDIDATE_TTL_MS,
   });
+  onTestFinished(async () => { await (await runtime).startupCleanup.run(); });
+  return runtime;
 }
 
 function createProtocol(
@@ -423,6 +425,14 @@ describe("ConversationProtocolRuntime", () => {
       expect(await authority.controlAdmission.listCreatedConversationIds()).not.toContain("conversation-absent");
       const created = await storage.directory.create();
       expect(await protocol.sessionExists(created.conversationId)).toBe(false);
+      const beforeRead = await authority.authorityLog.checkpoint();
+      await expect(protocol.recoveryPage({ mode: 'body-page', conversationId: created.conversationId }))
+        .resolves.toMatchObject({ fragments: [], hasMore: false });
+      await expect(protocol.recoveryPage({ mode: 'control-page', conversationId: created.conversationId }))
+        .resolves.toMatchObject({ facts: [], hasMore: false });
+      expect(await authority.authorityLog.checkpoint()).toEqual(beforeRead);
+      await expect(protocol.recoveryPage({ mode: 'body-page', conversationId: 'conversation-absent' }))
+        .rejects.toThrow('unavailable');
       await expect(store.createSession({ id: "adv-first-draft", conversationId: created.conversationId, originalUserTask: input, pendingRubricDraft: draft }))
         .resolves.toMatchObject({ id: "adv-first-draft", status: "awaiting-rubric-confirmation", pendingRubricDraft: draft });
       expect(await authority.controlAdmission.listCreatedConversationIds()).toContain(created.conversationId);
@@ -465,6 +475,8 @@ describe("ConversationProtocolRuntime", () => {
         conversationExists: () => storage.directory.exists(created.conversationId) });
       // Local projection may still exist while the durable deletion is final.
       expect(await storage.directory.exists(created.conversationId)).toBe(true);
+      await expect(protocol.recoveryPage({ mode: 'body-page', conversationId: created.conversationId }))
+        .rejects.toThrow('unavailable');
       await expect(port.maintain({ ...request(created.conversationId), operationId: "task:after-delete" }))
         .rejects.toMatchObject({ code: "not-found" });
       expect(await protocol.sessionExists(created.conversationId)).toBe(false);

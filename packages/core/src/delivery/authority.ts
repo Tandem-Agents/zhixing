@@ -1,3 +1,4 @@
+import { validateConversationCommitSummary } from "../contracts/conversation-recovery.js";
 import type {
   ArtifactRef,
   DeliveryEndpointDto,
@@ -1046,7 +1047,8 @@ function isValidConversationCommittedSource(
 } {
   return validatesCompanion(() => {
     assertPlainObject(value, "Conversation delivery source");
-    assertExactKeys(value, ["assignmentId", "bundle", "commitRevision", "runId", "t"]);
+    assertExactKeys(value, ["assignmentId", "bundle", "commitRevision", "runId", "t", ...(Object.hasOwn(value, "readSummary") ? ["readSummary"] : [])]);
+    if (value.readSummary !== undefined) validateConversationCommitSummary(value.readSummary);
     if (value.t !== "committed") throw new TypeError("Conversation delivery source type is invalid");
     assertIdentifier(value.runId, "Conversation delivery source run id");
     assertIdentifier(value.assignmentId, "Conversation delivery source assignment id");

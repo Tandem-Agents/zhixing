@@ -891,18 +891,12 @@ export class LocalConversationOwnerAssembly {
     manager = new ConversationManager(options.runtimeFactory, undefined, {
       onRelease: (conversationId) => protocol.releaseConversation(conversationId),
       loadHistory: async (conversationId) => {
-        const meta = await protocol.sessionState.readSessionMeta(
-          conversationId,
-          hostContext("local-owner-history"),
-        );
-        if (meta.turnCount === 0) return undefined;
-        const records = await readAllTranscript(protocol, conversationId);
-        const messages = records.flatMap((record) => record.messages).slice(-100);
-        const rendered = renderRecentContextFromMessages(messages);
-        return {
-          bootstrap: rendered ? buildStartupBootstrapPair(rendered) : null,
-          turnCount: meta.turnCount,
-        };
+        for (;;) {
+          const context = await protocol.recoveryPage({ mode: 'context', conversationId }) as import('@zhixing/core/contracts').ConversationContextPage;
+          if (context.preparing) { await new Promise<void>(setImmediate); continue; }
+          if (!context.turnCount) return undefined;
+          return { bootstrap: context.text ? buildStartupBootstrapPair(context.text) : null, turnCount: context.turnCount };
+        }
       },
       ensureConversation: (conversationId) => protocol.ensureSession(conversationId),
       initTranscript: (conversationId) => protocol.ensureSession(conversationId),

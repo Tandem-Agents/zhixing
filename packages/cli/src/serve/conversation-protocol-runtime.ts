@@ -507,6 +507,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     await journal.primeRecoverySnapshot(
       await this.#snapshotWithImportedBase(adopted.records),
     );
+    await journal.primeImportedReadBase(adopted.records);
     return Object.freeze({
       publish: () => {
         this.#adoptedConversations.set(conversationId, adopted);
@@ -719,7 +720,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async recoveryPage(request: import('@zhixing/core/contracts').ConversationRecoveryRequest) {
-    if (!this.#acceptsConversationId(request.conversationId) || !(await this.sessionExists(request.conversationId))) throw Error('Conversation recovery owner is unavailable');
+    const id = request.conversationId;
+    if (!this.#acceptsConversationId(id)) throw Error('Conversation recovery owner is unavailable');
+    // Empty legacy conversations already have a stored identity before their
+    // first authority write. Reading them must neither create facts nor replay
+    // every historical body. A durable deletion always wins over stored files.
+    const exists = this.#adoptedConversations.has(id) ||
+      (await this.#authority.controlAdmission.listCreatedConversationIds()).includes(id) ||
+      (await this.#storedIdentityExists?.(id)) === true;
+    if (!exists || await this.#journal(id).recoveryDeleted()) throw Error('Conversation recovery owner is unavailable');
     const base = this.#adoptedConversations.get(request.conversationId);
     return this.#journal(request.conversationId).recoveryPage(request, base && { id: base.transferId, records: base.records, clearId: base.clearId, clearedThroughLsn: base.clearedThroughLsn });
   }
@@ -1986,8 +1995,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const active: string[] = [];
     for (const conversationId of ids) {
       if (!this.#acceptsConversationId(conversationId)) continue;
-      const state = await this.#journalForQuery(conversationId).authorityState();
-      if (!state.deleted) active.push(conversationId);
+      if (!await this.#journalForQuery(conversationId).recoveryDeleted()) active.push(conversationId);
     }
     return active.sort((left, right) => left.localeCompare(right, "en-US"));
   }
@@ -1998,7 +2006,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const ids = await this.#authority.controlAdmission.listCreatedConversationIds();
       if (!ids.includes(conversationId)) return false;
     }
-    return !(await this.#journalForQuery(conversationId).authorityState()).deleted;
+    return !await this.#journalForQuery(conversationId).recoveryDeleted();
   }
 
   async #establishSession(conversationId: string): Promise<void> {
@@ -3492,6 +3500,7 @@ function discoverRecoveryConversations(
 ): Set<string> {
   type ConversationRecoveryFacts = {
     deleted: boolean;
+    controlRecovery: boolean;
     readonly lifecycleFacts: Set<number>;
     readonly lifecycleProjections: Set<number>;
     readonly runStates: Map<string, string>;
@@ -3507,6 +3516,7 @@ function discoverRecoveryConversations(
     if (!facts) {
       facts = {
         deleted: false,
+        controlRecovery: false,
         lifecycleFacts: new Set(),
         lifecycleProjections: new Set(),
         runStates: new Map(),
@@ -3551,6 +3561,8 @@ function discoverRecoveryConversations(
           typeof record.commitRevision === "number"
         ) {
           facts.commits.set(record.assignmentId, record.commitRevision);
+          const summary = record.readSummary as { controlRecovery?: boolean } | undefined;
+          if (summary?.controlRecovery !== false) facts.controlRecovery = true;
         } else if (
           record.t === "bundle-ack-observed" &&
           typeof record.assignmentId === "string"
@@ -3615,7 +3627,7 @@ function discoverRecoveryConversations(
     }
     // A committed run may carry an unconsumed product continuation even when
     // its final frame was acknowledged. Inspect that projection once at startup.
-    if (facts.commits.size > 0) result.add(conversationId);
+    if (facts.controlRecovery) result.add(conversationId);
     if (facts.deleted) continue;
     if ([...facts.runStates.values()].some((state) => openStates.has(state))) {
       result.add(conversationId);

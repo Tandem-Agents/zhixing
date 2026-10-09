@@ -42,6 +42,15 @@ export interface StartupBootstrapDeps {
   readonly estimator: {
     estimateMessages(messages: readonly Message[]): number;
   };
+  /** Optional byte-bounded source; oversized runs are explicit context views. */
+  readonly runs?: AsyncIterable<StartupRunProjection>;
+  /** Already-read source boundary; avoids opening a separate whole-shard index. */
+  readonly clearBoundary?: { readonly lastClearAt?: string };
+}
+
+export interface StartupRunProjection {
+  readonly record: Pick<RunRecord, 'runIndex' | 'messages'>;
+  readonly oversized?: true;
 }
 
 /** Context-owned read demand; the filesystem snapshot implementation stays at the Host edge. */
@@ -85,13 +94,13 @@ export async function buildStartupBootstrap(
   // 2. 倒读装原文：逐组（整 run record）入预算，装满即止。
   //    最近一组必装——它是连贯底线，预算放不下时降级为压缩核而非丢弃；
   //    连贯地板（最近一组 + 一条摘要的成本）可顶起过小的预算基准。
-  const picked: Array<{ record: RunRecord; compressed: boolean }> = [];
+  const picked: Array<{ record: StartupRunProjection['record']; compressed: boolean }> = [];
   let usedTokens = 0;
   let budget = budgetBase;
-  for await (const { record } of readRunsReverse(store, conversationId)) {
+  for await (const { record, oversized } of deps.runs ?? readRunsReverse(store, conversationId) as AsyncIterable<StartupRunProjection>) {
     if (picked.length === 0) {
       const fullCost = estimator.estimateMessages(record.messages);
-      const compressed = fullCost > budgetBase;
+      const compressed = oversized === true || fullCost > budgetBase;
       // 压缩核以原文预算基准为硬上限（独占原文预算）——收敛后 cost ≤ 基准，
       // 连贯地板顶起的 budget 随之恒有界
       const cost = compressed
@@ -104,6 +113,7 @@ export async function buildStartupBootstrap(
       budget = Math.max(budgetBase, cost + summaryReserve);
       continue;
     }
+    if (oversized) break;
     const cost = estimator.estimateMessages(record.messages);
     if (usedTokens + cost + summaryReserve > budget) break;
     picked.push({ record, compressed: false });
@@ -121,6 +131,7 @@ export async function buildStartupBootstrap(
     store,
     conversationId,
     earliestLoadedRunIndex,
+    deps.clearBoundary,
   );
 
   // 4. 渲染装填文本：摘要在前、最近原文正序在后（最贴近用户即将说的话）
@@ -154,11 +165,12 @@ async function pickSnapshotSummary(
   store: TranscriptReadSource,
   conversationId: string,
   earliestLoadedRunIndex: number,
+  clearBoundary?: { readonly lastClearAt?: string },
 ): Promise<string | null> {
   if (candidates.length === 0) return null;
 
-  const lastClearAt = (await store.ensureReadableIndex(conversationId))
-    ?.lastClearAt;
+  const lastClearAt = clearBoundary ? clearBoundary.lastClearAt :
+    (await store.ensureReadableIndex(conversationId))?.lastClearAt;
 
   for (const snapshot of candidates) {
     if (lastClearAt !== undefined && snapshot.createdAt <= lastClearAt) {
@@ -201,7 +213,7 @@ function renderSummary(snapshot: SegmentSnapshotFile): string {
  * run 同样被收敛覆盖。无 LLM、严格有界。
  */
 function renderRun(
-  record: RunRecord,
+  record: StartupRunProjection['record'],
   opts: { compressed: boolean; budgetTokens?: number },
 ): string {
   if (!opts.compressed) {

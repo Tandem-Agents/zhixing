@@ -299,6 +299,7 @@ export interface SessionConversationEntry {
 }
 
 export interface SessionListResult {
+  next?: import("@zhixing/core/conversation/application").ConversationDirectoryCursor;
   conversations: SessionConversationEntry[];
   /** 第一方入口当前可用的会话能力；省略等价于无需额外确认。 */
   availability?: ConversationAvailability;

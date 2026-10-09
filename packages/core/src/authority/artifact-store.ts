@@ -54,6 +54,7 @@ export interface FileArtifactStoreOptions {
 
 export class FileArtifactStore implements MutableArtifactStore {
   readonly rootDir: string;
+  get jsonIndexDirectory(): string { return path.join(this.rootDir, '.read-index'); }
   readonly #lockPath: string;
   readonly #lockStaleMs: number;
   readonly #lockWaitMs: number;
@@ -185,6 +186,13 @@ export class FileArtifactStore implements MutableArtifactStore {
         throw error;
       }
     }));
+  }
+
+  async readIdentity(ref: ArtifactRef): Promise<string> {
+    assertArtifactRef(ref);
+    const info = await stat(this.pathFor(ref), { bigint: true });
+    if (!info.isFile() || info.size !== BigInt(ref.bytes)) throw new AuthorityStorageError('artifact-corrupt', 'Artifact identity size changed');
+    return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
   }
 
   async readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array> {

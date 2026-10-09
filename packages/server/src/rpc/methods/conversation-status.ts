@@ -17,6 +17,27 @@ export function parseConversationRecoveryRequest(raw: unknown): ConversationReco
     if (!keys(point, ['logId', 'lsn', 'frameEndOffset', 'prefixDigest']) || !isProtocolIdentifier(point.logId) ||
         !integer(point.lsn) || !integer(point.frameEndOffset) || typeof point.prefixDigest !== 'string' || point.prefixDigest.length > 128) fail();
   };
+  if (value.mode === 'context') {
+    if (!keys(value, ['mode', 'conversationId']) || !isProtocolIdentifier(value.conversationId)) fail();
+    return value as unknown as ConversationRecoveryRequest;
+  }
+  if (value.mode === 'completion') {
+    if (!keys(value, ['mode', 'conversationId', 'runId', 'ownerEpoch']) || !isProtocolIdentifier(value.conversationId) ||
+      !isProtocolIdentifier(value.runId) || value.ownerEpoch !== undefined && (!integer(value.ownerEpoch) || value.ownerEpoch === 0)) fail();
+    return value as unknown as ConversationRecoveryRequest;
+  }
+  if (value.mode === 'body-page') {
+    if (!keys(value, ['mode', 'conversationId', 'cursor', 'direction', 'runId']) || !isProtocolIdentifier(value.conversationId) ||
+      value.runId !== undefined && !isProtocolIdentifier(value.runId) || value.direction !== undefined && !['forward', 'reverse'].includes(value.direction as string)) fail();
+    if (value.cursor !== undefined) {
+      const cursor = object(value.cursor);
+      if (!keys(cursor, ['conversationId', 'ownerEpoch', 'clearId', 'revision', 'message', 'block', 'offset']) || cursor.conversationId !== value.conversationId ||
+          !integer(cursor.ownerEpoch) || cursor.ownerEpoch === 0 || !integer(cursor.revision) || !integer(cursor.offset) ||
+          ['message', 'block'].some(key => !integer(cursor[key]) && cursor[key] !== -1) || cursor.clearId !== undefined && !isProtocolIdentifier(cursor.clearId)) fail();
+    }
+    if (value.direction === 'forward' && !value.cursor) fail();
+    return value as unknown as ConversationRecoveryRequest;
+  }
   if (!['control-page', 'input-page'].includes(value.mode as string) || !isProtocolIdentifier(value.conversationId) ||
       !keys(value, value.mode === 'input-page' ? ['mode', 'conversationId', 'runId', 'cursor'] : ['mode', 'conversationId', 'cursor', 'historyRunIds'])) fail();
   if (value.historyRunIds !== undefined && (!Array.isArray(value.historyRunIds) || value.historyRunIds.length > 4 ||
