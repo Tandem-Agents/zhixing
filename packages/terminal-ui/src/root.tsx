@@ -313,18 +313,27 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const refreshCopy = () => {
     if (disposed) return;
     syncEditor();
-    setCopyAvailable(isBody() && !!bodySelection(renderer, bodyBox));
+    setCopyAvailable(isBody() && !!bodyView?.hasSelection());
   };
-  const copyBody = () => {
+  let bodyCopyPending = false;
+  const copyBody = async () => {
     if (disposed || !isBody()) return;
-    const selection = bodySelection(renderer, bodyBox);
-    if (!selection) { setStatus('请重新选择要复制的正文。'); return; }
-    const text = selection.getSelectedText();
+    if (!bodyView?.hasSelection()) { setStatus('请重新选择要复制的正文。'); return; }
+    const text = bodyView?.selectedText() ?? '';
     if (!text) return;
-    if (Buffer.byteLength(text) > BODY_PAGE_BYTES) { setStatus('选区过大，请分段复制。'); return; }
+    if (bodyCopyPending) return;
+    const request = { kind: 'clipboard-write' as const, text };
+    if (Buffer.byteLength(JSON.stringify(request)) > BODY_PAGE_BYTES) { setStatus('选区过大，请分段复制。'); return; }
+    const report = reportStatus();
+    bodyCopyPending = true; ctrlC = 0;
     try {
-      setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求，选区已保留。');
-    } catch { setStatus('复制请求未完成，选区已保留。'); }
+      const result = await options.request(request) as { state?: string };
+      if (result.state === 'copied') report('已复制。');
+      else if (result.state === 'provider') report('已复制，关闭知行前请完成粘贴。');
+      else if (result.state === 'unavailable') report(renderer.copyToClipboardOSC52(text) ? '已发送复制请求，终端尚未确认。' : '当前终端无法执行复制请求，选区已保留。');
+      else report('未能确认复制结果，选区已保留。');
+    } catch { report('复制请求未完成，选区已保留。'); }
+    finally { bodyCopyPending = false; }
   };
   const copyRecovery = () => {
     if (disposed || view().kind !== 'recovery') return;
@@ -617,7 +626,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (event.name === 'f3') { consume(); void action({ kind: 'configuration-open' }); return; }
       if (event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     }
-    if (event.ctrl && event.shift && event.name === 'c' && isBody()) { consume(); copyBody(); return; }
+    if (event.ctrl && event.name === 'c' && isBody() && (event.shift || bodyView?.hasSelection())) { consume(); void copyBody(); return; }
     if ((view().displayPaused || view().bodyRecovery === 'blocked') && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
       consume(); void action({ kind: 'display-retry' }); return;
     }

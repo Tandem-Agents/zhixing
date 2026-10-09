@@ -127,8 +127,8 @@ catch { throw Error('Provide Node-API developer headers/import library with ZHIX
 if (archiveDirectory && process.platform === 'win32') await verifyInput(path.join(nodeApi, 'node.lib'), inputs.node.windowsLibrary);
 await run(nativeCompiler, [...nativeArguments, '-shared', '-O2', '-Wall', '-Wextra', '-DNAPI_VERSION=8', '-I', nodeApi,
   path.join(root, process.platform === 'win32' ? 'native/foreground-win32.c' : 'native/foreground-posix.c'),
-  ...(process.platform === 'win32' ? [path.join(nodeApi, 'node.lib'), '-lcrypt32'] : ['-fPIC', '-pthread']),
-  ...(process.platform === 'darwin' ? ['-undefined', 'dynamic_lookup', '-lproc'] : []), '-o', path.join(nativeArtifacts, 'foreground.node')], nativeArtifacts);
+  ...(process.platform === 'win32' ? [path.join(nodeApi, 'node.lib'), '-lcrypt32', '-luser32'] : ['-fPIC', '-pthread']),
+  ...(process.platform === 'darwin' ? ['-undefined', 'dynamic_lookup', '-lproc'] : process.platform === 'linux' ? ['-ldl'] : []), '-o', path.join(nativeArtifacts, 'foreground.node')], nativeArtifacts);
 for (const name of [`recovery${target.suffix}`, 'foreground.node', `exec-gate${target.suffix}`]) {
   await copyFile(path.join(nativeArtifacts, name), path.join(dist, name));
 }

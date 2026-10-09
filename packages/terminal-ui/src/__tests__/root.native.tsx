@@ -9,6 +9,10 @@ import type { TerminalAction, TerminalView } from '../protocol.js';
 import { interactionKey } from '../surface-layout.js';
 import type { BodyNode, BodyPage } from '../body-model.js';
 import type { TerminalPasteSink } from '../paste-stream.js';
+// Exercise the producer/renderer seam, not a hand-authored diff node fixture.
+import { TerminalOutputProjection } from '../../../cli/src/terminal/output.js';
+import { projectBodyHistory } from '../../../cli/src/terminal/body-projection.js';
+import { processArtifactLines, processArtifactSpans, processArtifactText } from '../../../cli/src/terminal/process-presentation.js';
 
 process.env.OTUI_ASSET_ROOT = path.resolve(`dist/${process.platform}-${process.arch}/assets`);
 const admittedLibrary = process.env.ZHIXING_TERMINAL_RENDER_LIB;
@@ -18,6 +22,7 @@ assert.equal(typeof (resolveRenderLib() as any).editorViewSetNoBreakRanges, 'fun
 const test = await createTestRenderer({ width: 80, height: 24, useThread: false, consoleMode: 'disabled', exitOnCtrlC: false, otherModifiersMode: true });
 const actions: TerminalAction[] = [];
 let generation = 0;
+let exits = 0;
 const checks: string[] = [];
 const frameTimes: number[] = [];
 let clipboardReply: (() => Promise<unknown>) | undefined;
@@ -32,7 +37,7 @@ const pendingRead = () => {
 const tick = setInterval(() => { void test.renderOnce(); }, 15);
 let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined;
 try {
-  root = await createTerminalRoot({ signal: new AbortController().signal, exit: async () => {}, inputReady() {},
+  root = await createTerminalRoot({ signal: new AbortController().signal, exit: async () => { exits++; }, inputReady() {},
     request: async action => {
       actions.push(action);
       if (readingReply && (action.kind === 'display-page' || action.kind === 'history-previous')) return readingReply(action);
@@ -49,6 +54,7 @@ try {
       }
       if (action.kind === 'input-history') return { end: true };
       if (action.kind === 'clipboard-read') return clipboardReply ? clipboardReply() : { text: '字段粘贴' };
+      if (action.kind === 'clipboard-write') return { state: 'copied' };
       if (action.kind === 'paste-finish') return pasteReply ? pasteReply() : { text: '右键中文🙂', handles: [], replacePastes: true };
       return { accepted: true };
     } }, async options => { externalPaste = (options as { externalPaste?: () => TerminalPasteSink | undefined })?.externalPaste; return test.renderer; });
@@ -631,5 +637,163 @@ try {
     assert.deepEqual(unhandled, []);
     checks.push('keyboard/wheel/latest read failures remain local and retryable; superseded success/failure cannot alter latest reading state');
   } finally { readingReply = undefined; process.off('unhandledRejection', onUnhandled); }
+  const blankCases = { trailing: ['alpha();', ''], only: [''], onlyTwo: ['', ''], onlyThree: ['', '', ''],
+    leading: ['', 'omega();'], middle: ['alpha();', '', 'omega();'], twoTrailing: ['alpha();', '', ''],
+    wrapped: ['const 中文 = "🙂"; ' + 'value '.repeat(12), ''] };
+  const beforeBlankInterrupts = actions.filter(action => action.kind === 'interrupt').length, beforeBlankExits = exits;
+  for (const [name, contents] of Object.entries(blankCases)) for (const width of [45, 80]) for (const reverse of [false, true]) {
+    test.renderer.clearSelection(); test.resize(width, 24);
+    await show({ kind: 'conversation', title: '空白差异行', conversationId: `blank-diff-${name}-${width}-${reverse}`, connected: true });
+    const segments: BodyPage['segments'][number][] = [];
+    const producer = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, async error => { throw error; },
+      { work: action => action(), amend: async () => {}, seal: async () => {} });
+    const artifact = { kind: 'file-diff' as const, path: 'blank.ts', operation: 'modified' as const,
+      changeStats: { kind: 'exact' as const, addedLines: contents.length, removedLines: 0 },
+      hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: contents.length,
+        lines: contents.map((content, index) => ({ type: 'added' as const, newLineNumber: index + 1, content })) }] };
+    producer.appendProcessBlock({ blockId: 'native-blank-diff', role: 'tool-diff', text: processArtifactText(artifact), lines: processArtifactLines(artifact), spans: processArtifactSpans(artifact) });
+    await producer.drain(); await producer.close();
+    const page = { first: 0, last: segments.length, start: 0, follow: false, segments };
+    root.receive({ type: 'display-page', page }); await flush();
+    const rows = text().split('\n'), displayed = rows.map((row, y) => ({ row, y })).filter(({ row }) => /\+ \d+  /u.test(row));
+    assert.equal(displayed.length, contents.length, text());
+    for (let i = 0; i < contents.length; i++) assert.ok(displayed[i]!.row.includes(`+ ${i + 1}  ${contents[i]!.slice(0, 10)}`), text());
+    const expected = contents.join('\n');
+    if (expected) {
+      const x = displayed[0]!.row.indexOf('+ 1  ') + 5;
+      const first = { x, y: displayed[0]!.y }, last = { x: x + contents.at(-1)!.length, y: displayed.at(-1)!.y };
+      const from = reverse ? last : first, to = reverse ? first : last;
+      await test.mockMouse.drag(from.x, from.y, to.x, to.y); await flush();
+      const copy = async (stage: string) => {
+        const count = actions.filter(a => a.kind === 'clipboard-write').length;
+        test.mockInput.pressKey('c', { ctrl: true }); await flush();
+        const copies = actions.filter(a => a.kind === 'clipboard-write');
+        assert.equal(copies.length, count + 1, `${name}/${width}/${reverse}/${stage}: copy must win over interrupt`);
+        assert.equal((copies.at(-1) as { text: string }).text, expected, `${name}/${width}/${reverse}/${stage}`);
+      };
+      await copy('initial');
+      test.resize(width === 45 ? 80 : 45, 24); await flush(); await copy('reflow');
+      root.receive({ type: 'display-page', page: JSON.parse(JSON.stringify(page)) }); await flush(); await copy('equivalent page');
+      test.resize(width, 24); await flush(); await copy('reflow back');
+    }
+  }
+  assert.equal(actions.filter(action => action.kind === 'interrupt').length, beforeBlankInterrupts);
+  assert.equal(exits, beforeBlankExits);
+  checks.push('production diff source selection: 28 copying cases + 4 single-empty display cases; forward/reverse, 45/80 columns, repeated reflow and equivalent pages; no interrupt or exit');
+  // Diff decorations occupy a nonselectable gutter. Unicode source selection
+  // and wrapped continuation use the same content column at both widths.
+  for (const columns of [45, 80]) {
+    test.resize(columns, 24); test.renderer.clearSelection();
+    await show({ kind: 'conversation', title: '差异复制', conversationId: `diff-copy-${columns}`, connected: true });
+    const code = 'const 中文 = "🙂"; ' + 'long_value '.repeat(7), source = code + '\n\nsecond();';
+    const node = (from: number, to: number, decoration: string) => ({ from, to, origin: from, kind: 'paragraph' as const, decoration,
+      runs: [{ from, to: to > from && source[to - 1] === '\n' ? to - 1 : to, text: source.slice(from, to).replace(/\n$/u, ''), style: 0, semantic: 'added' as const }] });
+    root.receive({ type: 'display-page', page: { first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'diff-copy', contentOffset: 0,
+      role: 'tool-diff', text: source, final: true, body: { version: 1, revision: 0, kind: 'plain', end: true,
+        context: { nodes: [node(0, code.length + 1, '+ 12  '), node(code.length + 1, code.length + 2, '+ 13  '), node(code.length + 2, source.length, '+ 14  ')] } } }] } });
+    await flush();
+    const rows = text().split('\n'), first = rows.findIndex(row => row.includes('const 中文')), last = rows.findIndex(row => row.includes('second();'));
+    assert.ok(first >= 0 && last > first);
+    const x = rows[first]!.indexOf('const');
+    assert.equal(rows[last]!.indexOf('second();'), x);
+    assert.equal(rows[first + 1]!.slice(0, x).trim(), '', 'wrapped code aligns past the gutter');
+    await test.mockMouse.drag(x, first, x + 'second();'.length, last); await flush();
+    const start = actions.length; test.mockInput.pressKey('c', { ctrl: true }); await flush();
+    const copied = actions.slice(start).find(a => a.kind === 'clipboard-write');
+    assert.ok(copied?.kind === 'clipboard-write'); assert.equal(copied.text, source, JSON.stringify({ columns, frame: text() }));
+  }
+  checks.push('diff gutter excluded from Unicode multi-line copy and wrapped content aligned at 45/80 columns');
+  const noBodyCopy = async (scenario: string) => {
+    const count = actions.filter(action => action.kind === 'clipboard-write').length;
+    assert.doesNotMatch(text(), /复制选区/, scenario);
+    test.mockInput.pressKey('c', { ctrl: true, shift: true }); await flush();
+    assert.equal(actions.filter(action => action.kind === 'clipboard-write').length, count, scenario);
+  };
+  test.renderer.clearSelection(); await flush();
+  const gutterRow = text().split('\n').findIndex(row => row.includes('+ 12'));
+  const gutterX = text().split('\n')[gutterRow]!.indexOf('+ 12');
+  await test.mockMouse.drag(gutterX, gutterRow, gutterX + 3, gutterRow); await flush();
+  await noBodyCopy('decoration alone is not source selection');
+  test.renderer.clearSelection(); editor().setText('draft only'); editor().selectAll(); await flush();
+  await noBodyCopy('editor selection is not body selection');
+  editor().editorView.resetSelection();
+  const bodyRows = text().split('\n'), bodyY = bodyRows.findIndex(row => row.includes('const 中文'));
+  const bodyX = bodyRows[bodyY]!.indexOf('const');
+  await test.mockMouse.drag(bodyX, bodyY, bodyX + 5, bodyY); await flush();
+  assert.match(text(), /复制选区/);
+  await show({ kind: 'conversation', title: '新对话', conversationId: 'copy-new-conversation', connected: true });
+  root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 1, follow: false,
+    segments: [{ blockId: 'fresh-body', contentOffset: 0, role: 'assistant', text: 'New body', final: true }] } }); await flush();
+  await noBodyCopy('old conversation selection cannot copy from the new page');
+  await show({ kind: 'configuration', title: '字段复制边界', editId: 'copy-field', field: { id: 'copy-field', label: '字段', secret: false } });
+  editor().setText('field only'); editor().selectAll(); await flush();
+  await noBodyCopy('field selection never enters body copy');
+  checks.push('source selection ownership excludes decoration-only, draft, field and previous conversation');
+  test.renderer.clearSelection(); test.resize(80, 24);
+  await show({ kind: 'conversation', title: 'Markdown 复制', conversationId: 'mapped-copy', connected: true });
+  const mapped: BodyPage['segments'][number][] = [];
+  for await (const part of projectBodyHistory('- **🙂甲**\t尾部\n', 'markdown', 'forward', async () => {}))
+    mapped.push({ blockId: 'mapped-copy', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
+  root.receive({ type: 'display-page', page: { first: 0, last: mapped.length, start: 0, follow: false, segments: mapped } }); await flush();
+  const mappedRows = text().split('\n'), mappedY = mappedRows.findIndex(row => row.includes('尾部'));
+  const tabX = mappedRows[mappedY]!.indexOf('尾部') - 3;
+  await test.mockMouse.drag(tabX, mappedY, tabX + 2, mappedY); await flush();
+  const selectedSpaces = test.renderer.getSelection()!.getSelectedText();
+  assert.match(selectedSpaces, /^ {1,3}$/u, 'only part of the four rendered spaces is selected');
+  const mappedCount = actions.filter(action => action.kind === 'clipboard-write').length;
+  test.mockInput.pressKey('c', { ctrl: true }); await flush();
+  const mappedCopies = actions.filter(action => action.kind === 'clipboard-write');
+  assert.equal(mappedCopies.length, mappedCount + 1, 'partial expanded tab retains a nonempty selection');
+  assert.equal((mappedCopies.at(-1) as { text: string }).text, selectedSpaces, 'source mapping does not round away selected rendered text');
+  for (const width of [45, 80]) {
+    test.resize(width, 24); await flush();
+    assert.equal(test.renderer.getSelection()!.getSelectedText(), selectedSpaces, 'expanded tab highlight survives reflow');
+    const count = actions.filter(action => action.kind === 'clipboard-write').length;
+    test.mockInput.pressKey('c', { ctrl: true }); await flush();
+    const copies = actions.filter(action => action.kind === 'clipboard-write');
+    assert.equal(copies.length, count + 1);
+    assert.equal((copies.at(-1) as { text: string }).text, selectedSpaces);
+  }
+  checks.push('partial expanded Markdown tab keeps exact highlight and copied text through reflow');
+  for (const reverse of [false, true]) for (const replacePage of [false, true]) for (const endCell of [1, 2, 7]) {
+    test.renderer.clearSelection(); test.resize(80, 24);
+    await show({ kind: 'conversation', title: '表格选区', conversationId: `table-selection-${reverse}-${replacePage}-${endCell}`, connected: true });
+    const segments: BodyPage['segments'][number][] = [];
+    const source = '| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n';
+    for await (const part of projectBodyHistory(source, 'markdown', 'forward', async () => {}))
+      segments.push({ blockId: 'table-selection', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
+    const page = { first: 0, last: segments.length, start: 0, follow: false, segments };
+    root.receive({ type: 'display-page', page }); await flush();
+    const point = (value: string) => {
+      const rows = text().split('\n'), y = rows.findIndex(row => row.includes(value)); assert.ok(y >= 0, text());
+      return { x: rows[y]!.indexOf(value), y };
+    };
+    const cells = ['alpha', 'beta', 'gamma', 'delta', 'eps', 'zeta', 'eta', 'theta'];
+    const chosen = cells.slice(0, endCell + 1), expected = chosen.join('\t');
+    const a = point('alpha'), b = point(cells[endCell]!); b.x += cells[endCell]!.length;
+    await test.mockMouse.drag(reverse ? b.x : a.x, reverse ? b.y : a.y, reverse ? a.x : b.x, reverse ? a.y : b.y); await flush();
+    const checkCopy = async (expected: string) => {
+      const count = actions.filter(action => action.kind === 'clipboard-write').length;
+      test.mockInput.pressKey('c', { ctrl: true }); await flush();
+      const copies = actions.filter(action => action.kind === 'clipboard-write');
+      assert.equal(copies.length, count + 1);
+      assert.equal((copies.at(-1) as { text: string }).text, expected, `table reverse=${reverse} replace=${replacePage} end=${endCell}`);
+    };
+    await checkCopy(expected);
+    for (const width of [45, 80, 45, 80]) {
+      test.resize(width, 24); await flush();
+      if (replacePage) { root.receive({ type: 'display-page', page: JSON.parse(JSON.stringify(page)) }); await flush(); }
+      await checkCopy(expected);
+      if (width === 80 || endCell === 1) {
+        const leaves = test.renderer.getSelection()!.selectedRenderables.map(leaf => leaf.getSelectedText());
+        assert.deepEqual(leaves, chosen, 'all source cells retain their highlight when visible again');
+      }
+    }
+    const gamma = point('gamma');
+    await test.mockMouse.drag(gamma.x, gamma.y, gamma.x + 5, gamma.y); await flush();
+    await checkCopy('gamma');
+    test.renderer.clearSelection(); await flush(); await noBodyCopy('cleared table selection must not reappear');
+  }
+  checks.push('production table cross-cell source selection survives repeated horizontal/stacked layout, equivalent pages, reverse gestures, replacement and clear');
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

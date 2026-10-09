@@ -5,6 +5,7 @@ import type { TerminalAction, TerminalMessage, TerminalView } from '@zhixing/ter
 const PAGE_UNITS = 8192;
 /** One volatile secret page/read-back. Values never enter body/history/log/result sinks. */
 export class TerminalRecovery {
+  get active(): boolean { return !!this.#current; }
   #current?: { id: string; title: string; value: string; input: boolean; retainResult?: boolean; dismiss?: () => void; receiver?: RecoveryInputReceiver;
     resolve?: (value: string) => void; reject?: (error: Error) => void };
   constructor(readonly ports: {

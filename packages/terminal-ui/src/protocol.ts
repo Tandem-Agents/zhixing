@@ -107,7 +107,8 @@ export type TerminalAction =
   | { readonly kind: 'candidate-manage'; readonly revision: number; readonly action: 'delete' | 'rename' | 'create'; readonly id?: string }
   | { readonly kind: 'paste-finish'; readonly inputId: string; readonly draft?: TerminalPasteDraft }
   | { readonly kind: "input-release"; readonly inputId: string }
-  | { readonly kind: "clipboard-read"; readonly inputId: string; readonly target: 'draft' | 'field' };
+  | { readonly kind: "clipboard-read"; readonly inputId: string; readonly target: 'draft' | 'field' }
+  | { readonly kind: 'clipboard-write'; readonly text: string };
 
 export interface TerminalCandidates {
   /** Display-only prefix target. Acceptance is authorized by N's revision. */

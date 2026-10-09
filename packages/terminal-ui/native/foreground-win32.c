@@ -354,11 +354,44 @@ static napi_value process_identity(napi_env env, napi_callback_info info) {
   if (birth[0]) { napi_create_string_utf8(env, birth, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "birth", value); }
   return result;
 }
+/* A short-lived helper publishes an eager CF_UNICODETEXT allocation. The OS,
+   not this process, owns its lifetime after SetClipboardData succeeds. */
+static napi_value clipboard_write(napi_env env, napi_callback_info info) {
+  size_t argc=1, length=0; napi_value args[1], result;
+  napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+  if(argc!=1||napi_get_value_string_utf16(env,args[0],NULL,0,&length)!=napi_ok||length>224*1024) return fail(env,"terminal-clipboard-size");
+  const char *status="unavailable";
+  HDESK input=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS);
+  WCHAR currentName[256], inputName[256]; DWORD needed=0;
+  BOOL desktop=input&&GetUserObjectInformationW(input,UOI_NAME,inputName,sizeof inputName,&needed)&&
+    GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,currentName,sizeof currentName,&needed)&&!wcscmp(inputName,currentName);
+  if(input)CloseDesktop(input);
+  if(desktop){
+    HWND window=CreateWindowExW(0,L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,NULL,GetModuleHandleW(NULL),NULL);
+    HGLOBAL allocation=GlobalAlloc(GMEM_MOVEABLE,(length+1)*sizeof(WCHAR));
+    WCHAR *text=allocation?GlobalLock(allocation):NULL;
+    if(text){
+      size_t copied=0;napi_get_value_string_utf16(env,args[0],(char16_t*)text,length+1,&copied);
+      BOOL valid=copied==length&&wcslen(text)==length;GlobalUnlock(allocation);
+      if(valid&&window&&OpenClipboard(window)){
+        if(EmptyClipboard()){
+          status="unknown";
+          if(SetClipboardData(CF_UNICODETEXT,allocation)){allocation=NULL;status="accepted";}
+        }
+        CloseClipboard();
+      }
+    }
+    if(allocation)GlobalFree(allocation);
+    if(window)DestroyWindow(window);
+  }
+  napi_create_string_utf8(env,status,NAPI_AUTO_LENGTH,&result);return result;
+}
 static napi_value initialize(napi_env env, napi_value exports) {
   executionJob = CreateJobObjectW(NULL, NULL);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!executionJob || !SetInformationJobObject(executionJob, JobObjectExtendedLimitInformation, &limits, sizeof limits)) return fail(env, "terminal-execution-job-unavailable");
   napi_property_descriptor methods[] = {
+    { "writeClipboard", NULL, clipboard_write, NULL, NULL, NULL, napi_default, NULL },
     { "protectKey", NULL, protect_key, NULL, NULL, NULL, napi_default, NULL },
     { "processIdentity", NULL, process_identity, NULL, NULL, NULL, napi_default, NULL },
     { "declareWriter", NULL, declare_writer, NULL, NULL, NULL, napi_default, NULL },

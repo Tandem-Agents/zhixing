@@ -1,4 +1,5 @@
 import { createTerminalOwnedProcessFactory } from './host-launch.js';
+import { TerminalClipboardWriter } from './clipboard-write.js';
 
 type Create = ReturnType<typeof createTerminalOwnedProcessFactory>;
 const CLIPBOARD_TIMEOUT_MS = 1500;
@@ -11,7 +12,10 @@ const commandList = (platform: NodeJS.Platform): readonly [string, string[]][] =
  * original text streams into the existing input store, never into a UI reply. */
 export class TerminalClipboard {
   #busy = false;
+  #writer?: TerminalClipboardWriter;
   constructor(readonly signal: AbortSignal, readonly create: Create = createTerminalOwnedProcessFactory('clipboard'), readonly platform = process.platform) {}
+  write(text: string) { return (this.#writer ??= new TerminalClipboardWriter(this.signal, this.create, this.platform)).write(text); }
+  async close(): Promise<void> { await this.#writer?.close(); }
   async read(write: (text: string) => Promise<void>, limit = 16 * 1024 * 1024): Promise<boolean> {
     this.signal.throwIfAborted();
     if (this.#busy) throw Error('terminal-clipboard-busy');

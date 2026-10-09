@@ -340,8 +340,13 @@ static napi_value execution(napi_env env,napi_callback_info info) {
   number(env,result,"ownedActive",owned_active);number(env,result,"ownedCreating",owned_creating);return result;
 }
 static napi_value terminate(napi_env env,napi_callback_info info){(void)info;pthread_mutex_lock(&mutex);for(size_t i=0;i<CHILDREN;i++)if(children[i].occupied&&(children[i].scope==1||children[i].scope==3))stop_locked(&children[i]);pthread_mutex_unlock(&mutex);return nothing(env);}
+#include "clipboard-x11.h"
 static napi_value init(napi_env env,napi_value exports){
   const napi_property_descriptor properties[]={
+#ifdef __linux__
+    {"writeXClipboard",NULL,write_x_clipboard,NULL,NULL,NULL,napi_default,NULL},
+    {"pollXClipboard",NULL,poll_x_clipboard,NULL,NULL,NULL,napi_default,NULL},
+#endif
     {"createPosix",NULL,create,NULL,NULL,NULL,napi_default,NULL},{"resume",NULL,resume,NULL,NULL,NULL,napi_default,NULL},
     {"takeOwnerControl",NULL,take_owner,NULL,NULL,NULL,napi_default,NULL},{"sendChannels",NULL,send_channels,NULL,NULL,NULL,napi_default,NULL},
     {"receiveChannels",NULL,receive_channels,NULL,NULL,NULL,napi_default,NULL},

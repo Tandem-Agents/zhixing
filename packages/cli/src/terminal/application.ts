@@ -494,6 +494,10 @@ class TerminalApplication {
       case 'input-history-next': return this.#inputHistoryReader.next(action.ticket);
       case 'input-history-end': await this.#inputHistoryReader.close(action.ticket); return { accepted: true };
       case 'paste-finish': return this.#finishPaste(action.inputId, action.draft);
+      case 'clipboard-write': {
+        if (!['conversation', 'history'].includes(this.#mainView.kind) || this.#editor || this.#selection || this.#recovery.active) throw Error('terminal-clipboard-context');
+        return await this.#clipboard.write(action.text);
+      }
       case 'clipboard-read': {
         if (action.target === 'field') {
           let text = '';
@@ -1884,6 +1888,7 @@ class TerminalApplication {
       this.#processSession.reset();
       this.#confirmations.dispose(); this.#pendingConfirmations.clear();
       await this.#connection.dispose();
+      await this.#clipboard.close();
       await this.#operation?.catch(() => {});
       await this.#historyRead?.catch(() => {});
       await this.#offlineReader?.reader.close(); this.#offlineReader = undefined;

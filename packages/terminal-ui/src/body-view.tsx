@@ -56,6 +56,8 @@ declare module '@opentui/solid' { interface OpenTUIComponents { body_text: typeo
 extend({ body_text: BodyTextRenderable });
 
 export interface BodyViewHandle {
+  hasSelection(): boolean;
+  selectedText(): string;
   selectionRange(): { from: BodyAnchor; to: BodyAnchor } | undefined;
   page(direction: -1 | 1, rows?: number): Promise<void>;
   bottom(): Promise<void>;
@@ -369,7 +371,31 @@ export function BodyView(props: BodyViewProps) {
     }
   };
   const handle: BodyViewHandle = {
+    hasSelection() { const current = currentSelection(); return !!current && (current.parts.length > 1 || current.parts.some(part =>
+      part.from.contentOffset !== part.to.contentOffset || part.fromBias !== part.toBias)); },
     selectionRange() { return currentSelection(); },
+    selectedText() {
+      const current = currentSelection();
+      if (!current) return '';
+      const selected = current.parts.map(part => {
+        const block = (mounted.get(part.key)?.block ?? blockIndex().get(part.key))!;
+        return { block, text: block.text.slice(sourceToRendered(block, part.from)! + part.fromBias, sourceToRendered(block, part.to)! + part.toBias) };
+      });
+      return selected.map((item, index) => {
+        const previous = selected[index - 1];
+        if (!previous) return item.text;
+        const sameSource = previous.block.blockId === item.block.blockId;
+        const sameTableRow = sameSource && previous.block.node.kind === 'table' && item.block.node.kind === 'table' &&
+          (previous.block.node.origin ?? previous.block.node.from) === (item.block.node.origin ?? item.block.node.from);
+        const continuation = sameSource && previous.block.key === item.block.key;
+        if (sameSource && previous.block.node.decoration && item.block.node.decoration && !continuation) {
+          const rendered = blocks(), a = rendered.findIndex(block => block.key === previous.block.key), b = rendered.findIndex(block => block.key === item.block.key);
+          const blank = a < 0 || b < 0 ? 0 : rendered.slice(a + 1, b).filter(block => block.blockId === item.block.blockId && block.node.decoration && !block.text).length;
+          return '\n'.repeat(blank + (previous.text.endsWith('\n') ? 0 : 1)) + item.text;
+        }
+        return (sameTableRow ? '\t' : continuation || previous.text.endsWith('\n') ? '' : '\n') + item.text;
+      }).join('');
+    },
     anchor: capture,
     beforeUpdate() {
       if (disposed) return;
