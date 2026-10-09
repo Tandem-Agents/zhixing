@@ -74,6 +74,7 @@ export function decodeBodyPage(patch: BodyPagePatch, previous?: BodyPageRevision
     return previous.page.segments[segment]!;
   });
   const page = { first: patch.first, last: patch.last, start: patch.start, follow: patch.follow, segments };
+  if (Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-body-page-capacity');
   bodyWindows(page);
   return { revision: patch.revision, page };
 }
@@ -157,7 +158,10 @@ export function sliceBodyNodes(nodes: readonly BodyNode[], from: number, to: num
 export function bodyWindows(page: BodyPage): readonly BodyWindow[] {
   const known = projectedPages.get(page);
   if (known) return known;
-  if (page.segments.length > BODY_PAGE_FRAGMENTS || Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-body-page-capacity');
+  if (![page.first, page.last, page.start].every(Number.isSafeInteger) || page.first > page.start || page.start > page.last ||
+      page.segments.length > page.last - page.start || typeof page.follow !== 'boolean') throw Error('terminal-body-page-range');
+  if (page.segments.length > 256 || Buffer.byteLength(JSON.stringify(page)) > 1024 * 1024 ||
+      page.segments.reduce((sum, segment) => sum + (segment.body?.context.nodes.length ?? 1), 0) > 8192) throw Error('terminal-body-page-capacity');
   const windows = page.segments.map(segment => {
     if (!segment.blockId || segment.blockId.length > 512 || (segment.groupId !== undefined && (!segment.groupId || segment.groupId.length > 512)) || !integer(segment.contentOffset) || Buffer.byteLength(segment.text) > BODY_FRAGMENT_BYTES ||
         (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) throw Error('terminal-body-source-invalid');

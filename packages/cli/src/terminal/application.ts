@@ -4,6 +4,9 @@ import { createRpcClient } from '@zhixing/server/client';
 import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
+import { HistoryBodyRangeCache } from './body-projection.js';
+import type { ConversationBodyCursor } from '@zhixing/core/contracts';
+import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
 import { isAbsolute } from 'node:path';
 import { TerminalChannel } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
@@ -44,8 +47,9 @@ import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { TerminalAssetClient } from './asset-client.js';
 import { TerminalDisplayStore } from './display-store.js';
+import { TerminalDisplayReplay, type DisplayReplaySource } from './display-replay.js';
 import { encodeBodyPage, type BodyPageRevision } from '@zhixing/terminal-ui/body-model';
-import { projectRenderedHistoryReverse, textFragments, type TerminalHistoryPosition } from './history-segments.js';
+import { textFragments } from './history-segments.js';
 import { TerminalBodyWork } from './body-work.js';
 import { TerminalInputStore } from './input-store.js';
 import { TerminalManagedFiles } from './managed-files.js';
@@ -57,7 +61,6 @@ import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-mate
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
 import { createReadOnlyConversationStorage } from '../serve/conversation-storage-infrastructure.js';
-import type { ConversationHistoryCursor } from '@zhixing/core/conversation/application';
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
 import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
@@ -75,6 +78,10 @@ import { boundedControlProjection } from '../runtime/control-projection.js';
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
 class EmptyTerminalSubmission extends Error {}
+interface TerminalHistoryState {
+  conversationId: string;
+  bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
+}
 
 /** This private role is only admitted by S. It owns the single application
  * connection and configuration transaction; it never opens a terminal reader. */
@@ -146,7 +153,10 @@ class TerminalApplication {
   #controller?: ConversationController<TerminalTurnOutcome>;
   #editor?: TerminalConfigurationEditor;
   #selection?: { id: string; allowed: ReadonlySet<string>; field: boolean; resolve(selected?: TerminalSelectionResponse): void };
-  #history?: { conversationId: string; before?: ConversationHistoryCursor; position?: TerminalHistoryPosition; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[] };
+  #history?: TerminalHistoryState;
+  readonly #historyParser = new HistoryBodyRangeCache();
+  readonly #displayReplay = new TerminalDisplayReplay((source, offset) => this.#readDisplaySource(source, offset));
+  #displayReplayReader?: { conversationId: string; reader: TranscriptByteReader };
   #displayStart?: number;
   #displayRevision = 0;
   #displaySent?: BodyPageRevision;
@@ -177,6 +187,7 @@ class TerminalApplication {
   readonly #localDeletions = new Set<string>();
   #skillsBinding?: Promise<SkillsBinding>;
   #historyRead?: Promise<void>;
+  #offlineReader?: { history: TerminalHistoryState; reader: TranscriptByteReader; cursor?: TranscriptBodyCursor };
   #nextHistoryRead = false;
   #readOnlyNeedsReset = false;
   #historySelection = false;
@@ -266,7 +277,8 @@ class TerminalApplication {
     }, true);
     this.#files = new TerminalManagedFiles(directory, directoryIdentity, filesystemSession,
       () => void this.#close(74, 'terminal-filesystem-unconfirmed'));
-    this.#display = new TerminalDisplayStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
+    this.#display = new TerminalDisplayStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files,
+      record => this.#displayReplay.read(record));
     this.#inputs = new TerminalInputStore(directory, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal, this.#files);
     this.#pendingSend = new TerminalPendingSendStore(this.#files, this.#logging.capacity.arbiter, this.#assets, this.#abort.signal);
     this.#inputHistoryReader = new TerminalInputHistoryReader(this.#inputs);
@@ -391,7 +403,7 @@ class TerminalApplication {
       case 'recovery-part': case 'recovery-page': case 'recovery-cancel':
         await this.#recovery.act(action); return { accepted: true };
       case 'retry-connection': this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
-      case 'display-retry': this.#background(() => this.#retryDisplay()); return { accepted: true };
+      case 'display-retry': this.#controller?.retryRecovery(); this.#background(() => this.#retryDisplay()); return { accepted: true };
       case 'exit': void this.#close(this.args.length ? 130 : 0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
         if (!this.#editor) throw Error('terminal-editor-not-open');
@@ -422,10 +434,20 @@ class TerminalApplication {
         if (action.start !== undefined && !Number.isSafeInteger(action.start)) throw Error('terminal-display-cursor');
         this.#displayStart = action.follow ? undefined : action.start;
         await this.#displayPage(); return { accepted: true };
-      case 'history-previous':
+      case 'history-previous': {
+        const history = this.#history;
+        if (!history || !history.hasMore) return { accepted: true, hasEarlier: false };
+        if (this.#historyRead) {
+          await this.#historyRead;
+          if (this.#history !== history) throw Error('terminal-history-scope-changed');
+          return { accepted: true, hasEarlier: history.hasMore };
+        }
+        if (this.#history !== history) throw Error('terminal-history-scope-changed');
         this.#displayStart = this.#display.first - 4;
-        if (this.#history?.offline) this.#loadOfflineHistory(); else this.#background(() => this.#historyPage());
-        return { accepted: true };
+        const work = this.#historyPage(); this.#historyRead = work;
+        try { await work; return { accepted: true, hasEarlier: history.hasMore }; }
+        finally { if (this.#historyRead === work) this.#historyRead = undefined; }
+      }
       case 'history-open': this.#background(() => this.#readOnly()); return { accepted: true };
       case 'history-close':
         this.#leaveHistoryRead();
@@ -659,11 +681,15 @@ class TerminalApplication {
           await this.#display.reset(); this.#displayStart = undefined;
           if (!current()) return;
           this.#history = { conversationId, hasMore: true, offline: false };
-          await this.#historyPage(false);
+          await this.#historyPage();
         },
         projectOutcome: projectTerminalTurnOutcome,
         projectCommittedOutcome: projectCommittedTerminalOutcome,
         onRunTerminal: source => this.#processSession.end(source.conversationId, source.turnId, source.runId),
+        onRecoveryState: state => {
+          this.#mainView = { ...this.#mainView, bodyRecovery: state === 'idle' ? undefined : state };
+          if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => {});
+        },
         onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
         onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
       }, initial.active);
@@ -760,6 +786,7 @@ class TerminalApplication {
   }
 
   #publishHistoryView(): Promise<void> {
+    this.#mainView = { ...this.#mainView, historyHasMore: this.#history?.hasMore ?? false };
     return this.#historySelection || this.#abort.signal.aborted ? Promise.resolve() : this.#publish(this.#mainView);
   }
 
@@ -791,57 +818,119 @@ class TerminalApplication {
     void work.catch(() => this.#close(70, 'terminal-history-read-undelivered'));
   }
 
-  async #historyPage(updateStatus = true): Promise<void> {
+  async #historyPage(): Promise<void> {
     const history = this.#history;
     if (!history || !history.hasMore) {
-      this.#mainView = { ...this.#mainView, message: '已到达最早的可用历史。' };
-      await this.#publishHistoryView(); return;
+      return;
     }
-    const options = { limit: 4, before: history.before };
-    const previousMessage = this.#mainView.message, previousBusy = this.#mainView.busy;
-    const consume = async (page: Pick<Awaited<ReturnType<RpcConversationFacade['history']>>, 'runs' | 'hasMore'>) => {
-      this.#abort.signal.throwIfAborted();
-      if (this.#history !== history) return;
-      let position: TerminalHistoryPosition | undefined, projected = 0;
-      try {
-        await this.#bodyWork.run(async () => {
-          for await (const segment of projectRenderedHistoryReverse(page.runs, history.position)) {
-            if (this.#history !== history) return;
-            await this.#display.append(segment, true);
-            position = { blockId: segment.blockId, contentOffset: segment.contentOffset };
-            // Opening a conversation prepares one bounded viewport, not every
-            // fragment of four arbitrarily long runs. The authority page is
-            // released now and resumed by stable source coordinates on demand.
-            if (++projected === 4) break;
-          }
-        });
-      } catch {
-        await this.#displayGap(); return;
+    if (!history.offline) { await this.#onlineHistoryPage(history); return; }
+    await this.#offlineHistoryPage(history); return;
+  }
+
+  async #offlineHistoryPage(history: TerminalHistoryState): Promise<void> {
+    if (this.#offlineReader?.history !== history) {
+      await this.#offlineReader?.reader.close();
+      this.#offlineReader = { history, reader: createReadOnlyConversationStorage(this.home).openBodyReader(history.conversationId) };
+    }
+    const state = this.#offlineReader, current = () => this.#history === history && !this.#abort.signal.aborted;
+    let projected = 0;
+    while (current() && projected < 4 && history.hasMore) {
+      const page = await state.reader.page({ cursor: state.cursor, signal: this.#abort.signal });
+      if (!current()) return;
+      if (page.preparing) { state.cursor = page.cursor; await new Promise<void>(setImmediate); continue; }
+      const source = page.fragments[0];
+      if (!source) { state.cursor = page.cursor; history.hasMore = page.hasMore; continue; }
+      const blockId = `shard:${source.cursor.shard}:${source.runIndex}:${source.message}:${source.block}`;
+      const role = source.type === 'thinking' ? 'thinking' : source.type === 'tool_use' ? 'tool' : source.type === 'tool_result' ? (source.isError ? 'tool-error' : 'tool') : source.role;
+      const groupId = source.toolId ? `${source.cursor.shard}:${source.runIndex}:tool:${source.toolId}` : `${source.cursor.shard}:${source.runIndex}:${source.message}:${role}`;
+      const replay: DisplayReplaySource = { kind: 'shard', conversationId: history.conversationId, cursor: source.cursor,
+        length: source.length, markdown: source.type === 'text' && source.role === 'assistant' };
+      if (source.type === 'text' && source.role === 'assistant') {
+        const before = state.cursor?.shard === source.cursor.shard && state.cursor.from === source.cursor.from && state.cursor.message === source.message && state.cursor.block === source.block
+          ? Math.min(state.cursor.offset, source.length) : source.length;
+        const parsed = await this.#bodyWork.run(() => this.#historyParser.read(`${history.conversationId}:${source.cursor.identity ?? ''}:${blockId}`, source.length, async offset => {
+          if (!current()) throw Error('terminal-history-cancelled');
+          const part = await state.reader.page({ cursor: { ...source.cursor, offset }, forward: true, signal: this.#abort.signal });
+          if (part.preparing || part.fragments[0]?.offset !== offset) throw Error('terminal-history-source-changed');
+          return part.fragments[0]!.text;
+        }, before));
+        if (!current()) return;
+        if (!parsed.ready) { await new Promise<void>(setImmediate); continue; }
+        for (const item of parsed.items) {
+          await this.#display.append({ blockId, groupId, role, text: item.text, contentOffset: item.contentOffset, final: item.body.end, body: item.body }, true, undefined, true, replay);
+          state.cursor = { ...source.cursor, offset: item.contentOffset }; if (++projected === 4) break;
+        }
+        if (!parsed.items.length) state.cursor = { ...source.cursor, offset: 0 };
+      } else {
+        for (const part of page.fragments) {
+          await this.#display.append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
+            body: { version: 1, revision: 1, kind: 'plain', end: part.final, context: { nodes: [{ kind: 'paragraph', origin: 0,
+              from: part.offset, to: part.offset + part.text.length, anchor: part.offset === 0 && role !== 'user' && role !== 'thinking',
+              runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, true, undefined, true, replay);
+          state.cursor = { ...source.cursor, offset: part.offset }; if (++projected === 4) break;
+        }
       }
-      if (this.#history !== history) return;
-      // The finite, actually accepted first history page proves the completed
-      // prefix owned by history. Later commits and every uncommitted input
-      // remain the recovery worker's responsibility.
-      if (!options.before) history.recoveryRunIds = page.runs.flatMap(item => 'runId' in item.record && typeof item.record.runId === 'string' ? [item.record.runId] : []);
-      const oldest = page.runs.at(-1);
-      history.hasMore = projected === 4 || page.hasMore;
-      history.position = projected === 4 ? position : undefined;
-      if (history.position) {
-        const newest = page.runs[0]!;
-        history.before = { shardId: newest.shardId, runIndex: newest.record.runIndex + 1 };
-      } else if (oldest) history.before = { shardId: oldest.shardId, runIndex: oldest.record.runIndex };
-      // A later command receipt or running turn owns the current status.
-      // History can finish after /new or /clear has already published it.
-      if (updateStatus && this.#mainView.message === previousMessage && this.#mainView.busy === previousBusy) {
-        this.#mainView = { ...this.#mainView, message: page.runs.length
-          ? 'PageUp / PageDown 回看，翻到顶部读取更早历史 · Ctrl+End 回到最新内容'
-          : '还没有已保存的对话内容。', busy: false };
-      }
-      await this.#displayPage();
-      await this.#publishHistoryView();
+    }
+    if (current()) { await this.#displayPage(); await this.#publishHistoryView(); }
+  }
+
+  async #onlineHistoryPage(history: TerminalHistoryState): Promise<void> {
+    let projected = 0;
+    const originalMessage = this.#mainView.message;
+    let progressMessage = originalMessage;
+    const progress = (message: string) => {
+      if (this.#mainView.message === progressMessage) { this.#mainView = { ...this.#mainView, message }; progressMessage = message; }
     };
-    if (history.offline) await consume(await createReadOnlyConversationStorage(this.home).readHistory(history.conversationId, options));
-    else await this.#conversation.consumeHistory(history.conversationId, options, consume);
+    const current = () => this.#history === history && !this.#abort.signal.aborted;
+    while (current() && projected < 4 && history.hasMore) {
+      const page = await this.#conversation.bodyPage(history.conversationId, history.bodyCursor);
+      if (!current()) return;
+      if (page.reset) { history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
+      if (page.preparing) {
+        history.bodyCursor = page.cursor;
+        progress(`正在恢复历史索引（${Math.floor(page.preparing.bytes / 1024)} / ${Math.ceil(page.preparing.total / 1024)} KiB）…`);
+        await this.#publishHistoryView(); await new Promise<void>(setImmediate); continue;
+      }
+      const source = page.fragments[0];
+      if (!source) { history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }
+      const blockId = `owner-log:${source.runId}:${source.message}:${source.block}`;
+      const role = source.type === 'thinking' ? 'thinking' : source.type === 'tool_use' ? 'tool' : source.type === 'tool_result' ? (source.isError ? 'tool-error' : 'tool') : source.role;
+      const groupId = source.toolId ? `${source.runId}:tool:${source.toolId}` : `${source.runId}:${source.message}:${role}`;
+      const replay: DisplayReplaySource = { kind: 'owner', conversationId: history.conversationId, runId: source.runId, cursor: source.cursor,
+        length: source.length, markdown: source.type === 'text' && source.role === 'assistant' };
+      if (source.type === 'text' && source.role === 'assistant') {
+        const before = history.bodyCursor?.revision === source.cursor.revision && history.bodyCursor.message === source.message && history.bodyCursor.block === source.block
+          ? Math.min(history.bodyCursor.offset, source.length) : source.length;
+        const parsed = await this.#bodyWork.run(() => this.#historyParser.read(`${history.conversationId}:${source.cursor.ownerEpoch}:${source.cursor.revision}:${source.cursor.clearId ?? ''}:${blockId}`, source.length, async offset => {
+          if (!current()) throw Error('terminal-history-cancelled');
+          const part = await this.#conversation.bodyPage(history.conversationId, { ...source.cursor, offset }, { direction: 'forward', runId: source.runId });
+          if (part.reset || part.preparing || part.fragments[0]?.offset !== offset) throw Error('terminal-history-source-changed');
+          return part.fragments[0]!.text;
+        }, before));
+        if (!current()) return;
+        if (!parsed.ready) {
+          progress('正在恢复这条历史消息的排版…'); await this.#publishHistoryView(); continue;
+        }
+        for (const item of parsed.items) {
+          await this.#display.append({ blockId, groupId, role, text: item.text, contentOffset: item.contentOffset, final: item.body.end, body: item.body }, true, undefined, true, replay);
+          history.bodyCursor = { ...source.cursor, offset: item.contentOffset }; projected++;
+          if (projected === 4) break;
+        }
+        if (!parsed.items.length) history.bodyCursor = { ...source.cursor, offset: 0 };
+      } else {
+        for (const part of page.fragments) {
+          if (part.runId !== source.runId || part.message !== source.message || part.block !== source.block) break;
+          await this.#display.append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
+            body: { version: 1, revision: 1, kind: 'plain', end: part.final, context: { nodes: [{ kind: 'paragraph', origin: 0,
+              from: part.offset, to: part.offset + part.text.length, anchor: part.offset === 0 && role !== 'user' && role !== 'thinking',
+              runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, true, undefined, true, replay);
+          history.bodyCursor = { ...source.cursor, offset: part.offset }; projected++;
+          if (projected === 4) break;
+        }
+      }
+      history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
+    }
+    if (current()) { progress(originalMessage ?? ''); await this.#displayPage(); await this.#publishHistoryView(); }
   }
 
   async #displayPage(): Promise<void> {
@@ -854,6 +943,33 @@ class TerminalApplication {
       this.#displaySent = { revision, page };
       try { await this.#channel.send({ type: 'display-patch', patch }, 'body'); }
       catch (error) { this.#displaySent = undefined; throw error; }
+    }
+  }
+
+  async #readDisplaySource(source: DisplayReplaySource, offset: number): Promise<string> {
+    for (;;) {
+      this.#abort.signal.throwIfAborted();
+      if (source.kind === 'owner') {
+        const page = await this.#conversation.bodyPage(source.conversationId, { ...source.cursor, offset }, { direction: 'forward', runId: source.runId });
+        if (page.reset) throw Error('terminal-history-generation-changed');
+        if (!page.preparing) {
+          const fragment = page.fragments[0];
+          if (!fragment || fragment.offset !== offset) throw Error('terminal-display-replay-source-range');
+          return fragment.text;
+        }
+      } else {
+        if (this.#displayReplayReader?.conversationId !== source.conversationId) {
+          await this.#displayReplayReader?.reader.close();
+          this.#displayReplayReader = { conversationId: source.conversationId, reader: createReadOnlyConversationStorage(this.home).openBodyReader(source.conversationId) };
+        }
+        const page = await this.#displayReplayReader.reader.page({ cursor: { ...source.cursor, offset }, forward: true, signal: this.#abort.signal });
+        if (!page.preparing) {
+          const fragment = page.fragments[0];
+          if (!fragment || fragment.offset !== offset) throw Error('terminal-display-replay-source-range');
+          return fragment.text;
+        }
+      }
+      await new Promise<void>(setImmediate);
     }
   }
 
@@ -1770,11 +1886,14 @@ class TerminalApplication {
       await this.#connection.dispose();
       await this.#operation?.catch(() => {});
       await this.#historyRead?.catch(() => {});
+      await this.#offlineReader?.reader.close(); this.#offlineReader = undefined;
+      this.#historyParser.close();
       await this.#outputProjection.close();
       await this.#display.close();
       await this.#inputHistoryReader.close();
       await this.#inputs.close(); this.#materials.clearAll();
       await this.#files.close(terminalWriterDeadline(this.#closeDeadline));
+      this.#displayReplay.close(); await this.#displayReplayReader?.reader.close(); this.#displayReplayReader = undefined;
       await this.#logging.finish(code === 0 ? 'success' : 'failure', reason,
         Math.max(0, terminalWriterDeadline(this.#closeDeadline) - Date.now() - TERMINAL_LOG_EXIT_RESERVE_MS));
       await notified;

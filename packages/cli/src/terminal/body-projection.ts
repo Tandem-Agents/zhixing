@@ -630,6 +630,75 @@ function updatePending(pending: PendingBody, change: BodyProjectionChange, from:
     }
   }
 }
+
+/** Sparse restart checkpoints reuse the live parser. Work is bounded per call,
+ * so a legacy giant block can report progress without blocking the editor.
+ * Checkpoints contain parser state, not an additional copy of body history. */
+export class HistoryBodyRangeCache {
+  readonly #entries = new Map<string, { points: BodyCheckpoint[]; stride: number }>();
+  #checkpointBytes = 0;
+  readonly #costs = new WeakMap<BodyCheckpoint, number>();
+  #cost(point: BodyCheckpoint): number { let size = this.#costs.get(point); if (size === undefined) { size = Buffer.byteLength(JSON.stringify(point)) * 2 + 256; this.#costs.set(point, size); } return size; }
+  #drop(key: string): void { const entry = this.#entries.get(key); if (entry) for (const point of entry.points) this.#checkpointBytes -= this.#cost(point); this.#entries.delete(key); }
+  get checkpointBytes(): number { return this.#checkpointBytes; }
+  #work?: { key: string; before: number; parser: TerminalBodyProjection; pending: PendingBody; position: number };
+  close(): void { this.#work?.parser.dispose(); this.#work = undefined; this.#entries.clear(); this.#checkpointBytes = 0; }
+  async read(key: string, length: number, read: (offset: number) => Promise<string>, before = length): Promise<
+    { ready: true; items: readonly BodyAppend[] } | { ready: false; offset: number }> {
+    if (!Number.isSafeInteger(before) || before <= 0 || before > length) throw Error('terminal-history-range');
+    let entry = this.#entries.get(key);
+    if (!entry) {
+      const parser = new TerminalBodyProjection('markdown'); entry = { points: [parser.checkpoint()], stride: 64 * 1024 }; parser.dispose();
+      if (this.#entries.size >= 8) this.#drop(this.#entries.keys().next().value!);
+      this.#entries.set(key, entry); this.#checkpointBytes += this.#cost(entry.points[0]!);
+    }
+    this.#entries.delete(key); this.#entries.set(key, entry);
+    if (!this.#work || this.#work.key !== key || this.#work.before !== before) {
+      this.#work?.parser.dispose();
+      // Leave at least one transfer page before the requested boundary. A
+      // checkpoint may contain a partial logical block beginning even earlier.
+      const point = [...entry.points].reverse().find(p => p.offset <= Math.max(0, before - 64 * 1024)) ?? entry.points[0]!;
+      this.#work = { key, before, parser: TerminalBodyProjection.resume('markdown', point), pending: { items: [], bytes: 0 }, position: point.offset };
+    }
+    const work = this.#work; let spent = 0;
+    const apply = (change: BodyProjectionChange) => {
+      updatePending(work.pending, change, 0, before);
+      while (work.pending.items.length > 4 && work.pending.items[0]!.contentOffset + work.pending.items[0]!.text.length <= work.parser.stableOffset) {
+        work.pending.bytes -= pendingCost(work.pending.items.shift()!);
+      }
+    };
+    while (work.position < length && (work.position < before || work.parser.stableOffset < before)) {
+      const text = await read(work.position);
+      if (!text || work.position + text.length > length || Buffer.byteLength(text) > 32 * 1024) throw Error('terminal-history-source-range');
+      for (let local = 0; local < text.length;) {
+        const end = pieceEnd(text, local), piece = text.slice(local, end);
+        for (const change of work.parser.feed(piece)) apply(change);
+        work.position += piece.length; local = end; spent += Buffer.byteLength(piece);
+        const last = entry.points.at(-1)!;
+        if (work.position - last.offset >= entry.stride && work.parser.retainedBytes <= 16 * 1024) {
+          const checkpoint = work.parser.checkpoint();
+          entry.points.push(checkpoint); this.#checkpointBytes += this.#cost(checkpoint);
+          // Spatial compaction bounds memory while preserving the initial and
+          // latest checkpoints. No source content is evicted or truncated.
+          if (entry.points.length > 32) { entry.points = entry.points.filter((point, i, all) => { if (i % 2 === 0 || i === all.length - 1) return true; this.#checkpointBytes -= this.#cost(point); return false; }); entry.stride *= 2; }
+          while (this.#checkpointBytes > 4 * 1024 * 1024 && this.#entries.size > 1) this.#drop(this.#entries.keys().next().value!);
+          while (this.#checkpointBytes > 4 * 1024 * 1024 && entry.points.length > 2) this.#checkpointBytes -= this.#cost(entry.points.splice(1, 1)[0]!);
+          if (this.#checkpointBytes > 4 * 1024 * 1024) throw new BodyProjectionCapacityError();
+        }
+        await yieldImmediate();
+      }
+      if (spent >= 256 * 1024 && work.position < before) return { ready: false, offset: work.position };
+    }
+    if (work.position === length) for (const change of work.parser.end()) apply(change);
+    const items = work.pending.items.slice(-4).map(item => {
+      const to = Math.min(before, item.contentOffset + item.text.length);
+      return to === item.contentOffset + item.text.length ? item : { ...item, text: item.text.slice(0, to - item.contentOffset),
+        body: { ...item.body, end: false, context: { nodes: sliceBodyNodes(item.body.context.nodes, item.contentOffset, to) } } };
+    }).reverse();
+    work.parser.dispose(); this.#work = undefined;
+    return { ready: true, items };
+  }
+}
 /** Cold history uses the same forward parser and real EOF as live output.
  * Reverse traversal retains only a bounded restart index and one bucket. It
  * does not reverse-guess Markdown state or keep a whole block's fragments. */

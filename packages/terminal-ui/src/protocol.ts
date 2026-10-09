@@ -177,6 +177,7 @@ export interface TerminalProcessStatus {
   readonly view: TerminalProcessView;
 }
 export interface TerminalView {
+  readonly historyHasMore?: boolean;
   readonly generation: number;
   readonly kind: "conversation" | "history" | "configuration" | "selection" | "confirmation" | "unavailable" | 'skills' | 'recovery';
   readonly title: string;
@@ -184,6 +185,7 @@ export interface TerminalView {
   readonly message?: string;
   readonly displayGap?: boolean;
   readonly displayPaused?: boolean;
+  readonly bodyRecovery?: 'retrying' | 'blocked';
   readonly requestId?: string;
   readonly editId?: string;
   readonly configurationHome?: boolean;

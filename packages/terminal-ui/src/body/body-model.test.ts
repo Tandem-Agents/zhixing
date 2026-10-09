@@ -91,7 +91,7 @@ describe('finite body page source positions', () => {
     const first = page().segments[0]!;
     expect(validateBodyMetadata({ ...first.body, extra: true }, 0, 5)).toBe(false);
     expect(validateBodyMetadata({ ...first.body, context: { nodes: [{ ...node, to: 10000 }] } }, 0, 5)).toBe(false);
-    expect(() => bodyWindows({ ...page(), segments: Array(5).fill(first) })).toThrow('terminal-body-page-capacity');
+    expect(() => bodyWindows({ ...page(), last: 257, segments: Array(257).fill(first) })).toThrow('terminal-body-page-capacity');
   });
   it('replaces controls only in rendered runs and keeps original UTF-16 coordinates', () => {
     const value = page();

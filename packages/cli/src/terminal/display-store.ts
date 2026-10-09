@@ -6,6 +6,7 @@ import type { TerminalAssetAccount } from './asset-client.js';
 import { TerminalManagedFiles } from './managed-files.js';
 import { terminalPhysicalStep } from './physical-step.js';
 import { createHash } from 'node:crypto';
+import type { DisplayReplayRecord, DisplayReplaySource } from './display-replay.js';
 
 const PAGE_BYTES = 224 * 1024;
 const INDEX_BYTES = 16;
@@ -70,7 +71,8 @@ export class TerminalDisplayStore {
   readonly #files: TerminalManagedFiles;
   readonly #ownsFiles: boolean;
   constructor(readonly directory: string, readonly capacity: DeviceCapacityArbiterPort,
-    readonly account: TerminalAssetAccount, readonly signal: AbortSignal, files?: TerminalManagedFiles) {
+    readonly account: TerminalAssetAccount, readonly signal: AbortSignal, files?: TerminalManagedFiles,
+    readonly replay?: (record: DisplayReplayRecord) => Promise<TerminalDisplaySegment>) {
     this.#files = files ?? new TerminalManagedFiles(directory); this.#ownsFiles = !files;
   }
 
@@ -92,10 +94,11 @@ export class TerminalDisplayStore {
     });
   }
 
-  append(segment: TerminalDisplaySegment, prepend = false, current?: () => boolean, stable = false): Promise<void> {
+  append(segment: TerminalDisplaySegment, prepend = false, current?: () => boolean, stable = false, replay?: DisplayReplaySource): Promise<void> {
     // Context cancellation is for independent plain notices. Streaming bodies
     // retain their existing amendment/reset owner and cannot use this gate.
     if (current && segment.body) return Promise.reject(Error('terminal-display-context-body'));
+    if (replay && (!prepend || !this.replay)) return Promise.reject(Error('terminal-display-replay-admission'));
     const isCurrent = current ?? (() => true);
     if (!segment.blockId || segment.blockId.length > 512 || segment.role.length > 32 ||
       !Number.isSafeInteger(segment.contentOffset) || segment.contentOffset < 0 || Buffer.byteLength(segment.text) > 32 * 1024 ||
@@ -111,11 +114,11 @@ export class TerminalDisplayStore {
       if (prepend) parts.reverse();
       for (const { segment: part, encoded } of parts) {
         if (!isCurrent()) return;
-        await this.#appendFragment(part, this.#encode(part, encoded), prepend, isCurrent, stable);
+        await this.#appendFragment(part, this.#encode(part, encoded), prepend, isCurrent, stable, replay);
       }
     });
   }
-  async #appendFragment(segment: TerminalDisplaySegment, encoded: Buffer, prepend: boolean, current: () => boolean, stable: boolean): Promise<void> {
+  async #appendFragment(segment: TerminalDisplaySegment, encoded: Buffer, prepend: boolean, current: () => boolean, stable: boolean, replay?: DisplayReplaySource): Promise<void> {
       const ordinal = prepend ? this.#first - 1 : this.#last;
       const active = !prepend && segment.body && !stable ? this.#active.get(segment.blockId) : undefined;
       const tail = active?.at(-1);
@@ -139,6 +142,15 @@ export class TerminalDisplayStore {
         }
       }
       if (!prepend && segment.body && !stable) this.#checkActive(segment.blockId);
+      if (replay) {
+        const record: DisplayReplayRecord = { replay, blockId: segment.blockId, groupId: segment.groupId, role: segment.role,
+          contentOffset: segment.contentOffset, length: segment.text.length, final: segment.final,
+          digest: createHash('sha256').update(segment.text).digest('hex') };
+        // The confirmed hot page retains its full projection. Disk stores only
+        // an immutable locator; dropping that hot copy never loses source data.
+        encoded = Buffer.from(JSON.stringify(record));
+        if (encoded.length > 4096) throw Error('terminal-display-replay-size');
+      }
       await this.#write(ordinal, encoded, undefined, !prepend && !!segment.body && !stable, segment);
       // The write remains accounted, but a notice from a superseded context
       // must never advance the visible range. A later append reuses this index.
@@ -254,7 +266,7 @@ export class TerminalDisplayStore {
     this.#dataAllocation = dataAllocation; this.#indexAllocation = indexAllocation;
     // Metadata is validated/frozen by #encode. Keep a private immutable outer
     // record; a JSON round trip here only recreated the same confirmed content.
-    this.#rememberHot(ordinal, { entry, segment: confirmed, encodedBytes: encoded.length });
+    this.#rememberHot(ordinal, { entry, segment: confirmed, encodedBytes: Buffer.byteLength(JSON.stringify(confirmed)) });
   }
   #rememberHot(ordinal: number, value: ConfirmedFragment): void {
     if (this.#reading.has(ordinal)) this.#reading.set(ordinal, value);
@@ -265,7 +277,7 @@ export class TerminalDisplayStore {
     this.signal.throwIfAborted();
     const hot = this.#hot.get(ordinal) ?? this.#reading.get(ordinal);
     if (hot) { this.#rememberHot(ordinal, hot); return hot; }
-    return terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
+    const stored = await terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
       if (!this.#indexIdentity || !this.#dataIdentity) throw Error('terminal-display-identity-unavailable');
       const entry = this.#unpublished?.ordinal === ordinal ? this.#unpublished.entry :
         await this.#files.read('display/index', this.#indexAllocation, indexPosition(ordinal), INDEX_BYTES, this.#indexIdentity, step, true);
@@ -274,10 +286,22 @@ export class TerminalDisplayStore {
       if (!Number.isSafeInteger(at) || !length || length > SLOT_BYTES || at + length > this.#bytes) throw Error('terminal-display-index-invalid');
       const bytes = await this.#files.read('display/data', this.#dataAllocation, at, length, this.#dataIdentity, step, true);
       if (bytes.length !== length) throw Error('terminal-display-short-read');
-      const segment = JSON.parse(bytes.toString('utf8')) as TerminalDisplaySegment;
-      this.#encode(segment);
-      const value = { entry, segment: Object.freeze(segment), encodedBytes: bytes.length }; this.#rememberHot(ordinal, value); return value;
+      return { entry, decoded: JSON.parse(bytes.toString('utf8')) as TerminalDisplaySegment | DisplayReplayRecord };
     });
+    // Source/parse work happens after releasing the physical display IO permit.
+    const segment = 'replay' in stored.decoded ? await this.#replay(stored.decoded) : stored.decoded;
+    const encoded = this.#encode(segment);
+    const value = { entry: stored.entry, segment: Object.freeze(segment), encodedBytes: encoded.length };
+    this.#rememberHot(ordinal, value); return value;
+  }
+
+  async #replay(record: DisplayReplayRecord): Promise<TerminalDisplaySegment> {
+    if (!this.replay) throw Error('terminal-display-replay-unavailable');
+    const segment = await this.replay(record);
+    if (segment.blockId !== record.blockId || segment.role !== record.role || segment.contentOffset !== record.contentOffset ||
+        segment.text.length !== record.length || createHash('sha256').update(segment.text).digest('hex') !== record.digest)
+      throw Error('terminal-display-replay-source-changed');
+    return segment;
   }
 
   async page(start?: number, follow = start === undefined): Promise<TerminalDisplayPage> {

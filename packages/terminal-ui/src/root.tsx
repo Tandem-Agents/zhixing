@@ -13,6 +13,7 @@ import { TerminalTextarea, editorUtf16Cursor, setEditorUtf16Cursor } from './edi
 import { BodyView, TerminalScrollBox, type BodyViewHandle } from './body-view.js';
 import { BODY_PAGE_BYTES, bodyWindows, decodeBodyPage, sameBodyPageContent, type BodyPageRevision, type BodyAnchor } from './body-model.js';
 import { bodySelection } from './body-selection.js';
+import { BodyReadingWindow } from './body-window.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
 import { interactionKey, inputRows, selectedLabel, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
@@ -122,6 +123,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const [display, setDisplay] = createSignal<TerminalDisplayPage>({ first: 0, last: 0, start: 0, follow: true, segments: [] });
   let displayReceived: BodyPageRevision | undefined;
+  const bodyWindow = new BodyReadingWindow();
   let historyBox: ScrollBoxRenderable | undefined;
   let bodyView: BodyViewHandle | undefined;
   let bodyBox: BoxRenderable | undefined;
@@ -130,6 +132,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const [actionHeight, setActionHeight] = createSignal(0);
   const [contextHeight, setContextHeight] = createSignal(0);
   const [bodyAnchor, setBodyAnchor] = createSignal<BodyAnchor>();
+  // Configuration and other overlays may omit the conversation identity. They
+  // do not replace the retained conversation or its reading position.
+  let bodyConversationId: string | undefined;
+  const [reading, setReading] = createSignal<{ below: boolean; loading: boolean; retry?: -1 | 1 }>({ below: false, loading: false },
+    { equals: (a, b) => a.below === b.below && a.loading === b.loading && a.retry === b.retry });
   const isBody = () => ['conversation', 'history'].includes(view().kind);
   const bodyReady = (value: BodyViewHandle | undefined) => {
     const previous = bodyView; bodyView = value;
@@ -330,10 +337,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const candidateHeight = () => view().kind === 'conversation' && candidateItems().length > 0 && size().height >= 18
     ? Math.min(5, candidateItems().length) + 2 : 0;
   // Reserve compact chrome (2), a body row, input borders (2), the footer
-  // on body surfaces.
+  // and the fixed reading-navigation row on body surfaces.
   // Measure only the preceding context, so editor resizing cannot feed itself.
   const fieldRows = () => view().field?.secret ? 1 : Math.max(1, Math.min(
-    inputRows(editorLines(), size().height), size().height - contextHeight() - candidateHeight() - 6,
+    inputRows(editorLines(), size().height), size().height - contextHeight() - candidateHeight() - 6 - (isBody() ? 1 : 0),
   ));
   const computeInfo = () => {
     informationRevision();
@@ -433,9 +440,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
+          hasEarlier={view().historyHasMore}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
-          requestPage={(start, follow) => action({ kind: 'display-page', start, follow })}
-          requestPrevious={() => action({ kind: 'history-previous' })}
+          requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
+          requestPrevious={() => options.request({ kind: 'history-previous' })}
+          onReading={setReading}
           onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : '正文暂不可用，已保留内容仍可回看。'); }} />
       </Show>}>
         <SkillsView view={view().skills!} width={bodySize().width} height={bodySize().height}
@@ -448,6 +457,14 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       </Show>
     </box>
     <box flexDirection="column" flexShrink={0} onSizeChange={function(this: BoxRenderable) { setActionHeight(this.height); }}>
+    <Show when={isBody()}><text height={1} marginX={spacing.content} fg={reading().retry ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
+      onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
+        if (view().bodyRecovery === 'blocked') { void action({ kind: 'display-retry' }); return; }
+        const retry = reading().retry; if (!retry && (!reading().below || reading().loading)) return;
+        void (retry ? bodyView?.page(retry) : bodyView?.bottom())?.catch(setStatus); }}>
+      {view().bodyRecovery === 'blocked' ? '部分正文待恢复 · 点击或 Ctrl+R 重试' : reading().retry ? '读取未完成 · 点击或原方向翻页重试' :
+        view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…' : reading().below ? '↓ 下方还有内容 · Ctrl+End 回到最新' : ''}
+    </text></Show>
     <box flexDirection="column" flexShrink={0} onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
     <Show when={isBody() && view().message && view().connectionState !== 'starting'}><text marginX={spacing.content} selectable fg={view().connectionState === 'unavailable' ? tone.warn : tone.dim}>{displayText(view().message ?? '')}</text></Show>
     <Show when={view().kind === 'recovery'}>
@@ -601,7 +618,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       if (event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     }
     if (event.ctrl && event.shift && event.name === 'c' && isBody()) { consume(); copyBody(); return; }
-    if (view().displayPaused && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
+    if ((view().displayPaused || view().bodyRecovery === 'blocked') && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
       consume(); void action({ kind: 'display-retry' }); return;
     }
     if (event.ctrl && event.name === 'c') {
@@ -793,12 +810,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         if (message.type === 'view') {
           if (message.view.generation < view().generation) return;
           const previous = view(), sameInteraction = interactionKey(previous) === interactionKey(message.view);
+          const changedConversation = message.view.conversationId !== undefined && bodyConversationId !== message.view.conversationId;
           const selectedId = previous.choices?.[selected()]?.id;
           const refreshCandidates = view().kind === 'conversation' && message.view.kind === 'conversation';
           if (message.view.recovery?.requestId !== view().recovery?.requestId) releaseRecovery();
           if (message.view.recovery?.input && !recoveryInput) recoveryInput = new RecoveryInputBuffer();
           candidates?.resetDelete(); trustControls.reset();
           preserveDraft(); bodyView?.beforeUpdate();
+          if (changedConversation) {
+            bodyView?.resetReading();
+            bodyConversationId = message.view.conversationId;
+            bodyWindow.reset(); setBodyAnchor(undefined);
+          }
           if (!sameInteraction) {
             activateInformation(message.view); releaseSecret(); setEditorLines(1); setEditorEmpty(!message.view.field?.value);
           }
@@ -827,12 +850,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         } else if (message.type === 'display-patch') {
           const next = decodeBodyPage(message.patch, displayReceived);
           if (!sameBodyPageContent(display(), next.page)) bodyView?.beforeUpdate();
-          displayReceived = next; setDisplay(next.page);
+          const protectedRange = bodyView?.selectionRange();
+          displayReceived = next; setDisplay(bodyWindow.accept(next.page, protectedRange?.from, protectedRange?.to));
+          if (bodyWindow.notice) setStatus(bodyWindow.notice);
         } else if (message.type === 'display-page') {
+          if (message.page.segments.length > 4 || Buffer.byteLength(JSON.stringify(message.page)) > BODY_PAGE_BYTES) throw Error('terminal-display-wire-size');
           bodyWindows(message.page); // Validate complete source/metadata/page before installing it.
           bodyView?.beforeUpdate();
           displayReceived = undefined;
-          setDisplay(message.page);
+          bodyWindow.reset(); setDisplay(bodyWindow.accept(message.page));
         } else if (message.type === 'invalidate' && view().requestId === message.requestId) {
           releaseSecret();
           const next: TerminalView = { generation: view().generation, kind: 'conversation', title: '知行', conversationId: view().conversationId, message: '该请求已由其他入口处理或已失效。' };

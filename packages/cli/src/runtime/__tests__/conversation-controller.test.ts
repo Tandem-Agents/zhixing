@@ -235,17 +235,18 @@ describe('bounded authoritative recovery consumer', () => {
     const settle = () => new Promise<void>(resolve => setImmediate(resolve));
     try {
       f.emit.status(notice(1)); await settle(); expect(pages).toHaveBeenCalledTimes(1);
-      for (const [index, delay] of [250, 500, 1000, 2000, 4000, 5000, 5000].entries()) {
+      for (const [index, delay] of [500, 1000].entries()) {
         await vi.advanceTimersByTimeAsync(delay - 1); expect(pages).toHaveBeenCalledTimes(index + 1);
         await vi.advanceTimersByTimeAsync(1); await settle(); expect(pages).toHaveBeenCalledTimes(index + 2);
       }
+      await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(3);
       pages.mockResolvedValue({ facts: [], cursor: cursor(0), hasMore: false, reset: false });
-      f.emit.status(notice(2)); await settle(); expect(pages).toHaveBeenCalledTimes(9);
-      await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(9);
+      controller.retryRecovery(); await settle(); expect(pages).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(4);
       pages.mockRejectedValue(Error('Temporary read failure'));
       f.emit.status(notice(3)); await settle();
-      await vi.advanceTimersByTimeAsync(250); await settle(); expect(pages).toHaveBeenCalledTimes(11);
-      controller.dispose(); await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(11);
+      await vi.advanceTimersByTimeAsync(500); await settle(); expect(pages).toHaveBeenCalledTimes(6);
+      controller.dispose(); await vi.advanceTimersByTimeAsync(20_000); expect(pages).toHaveBeenCalledTimes(6);
     } finally { controller.dispose(); vi.useRealTimers(); }
   });
 

@@ -23,12 +23,19 @@ const frameTimes: number[] = [];
 let clipboardReply: (() => Promise<unknown>) | undefined;
 let pasteReply: (() => unknown) | undefined;
 let externalPaste: (() => TerminalPasteSink | undefined) | undefined;
+let readingReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
+const pendingRead = () => {
+  let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
+  const promise = new Promise<unknown>((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+};
 const tick = setInterval(() => { void test.renderOnce(); }, 15);
 let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined;
 try {
   root = await createTerminalRoot({ signal: new AbortController().signal, exit: async () => {}, inputReady() {},
     request: async action => {
       actions.push(action);
+      if (readingReply && (action.kind === 'display-page' || action.kind === 'history-previous')) return readingReply(action);
       if (action.kind === 'command-route' && ['help', 'clear'].includes(action.name)) return { route: 'local' };
       if (action.kind === 'input-candidates') {
         if (action.text === '\u3001he') return { revision: action.revision, start: 0, end: 3, ghost: { fullValue: '/help' }, items: [{ id: 'help:repl', label: '/help' }] };
@@ -578,5 +585,51 @@ try {
   checks.push('bounded long-block/history roots meet response budgets; capacity retry preserves input and explicit gap');
   assert.ok(test.renderer.listenerCount('selection') <= 2, 'disposed scrollboxes release selection listeners');
   shared.dispose();
+  // Reading failures are ordinary UI states across every input route, never
+  // entry-level unhandled rejections. Latest intent supersedes pending reads.
+  const unhandled: unknown[] = [], onUnhandled = (error: unknown) => { unhandled.push(error); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    test.resize(45, 20); test.renderer.clearSelection();
+    const oldPage: BodyPage = { first: 0, last: 9, start: 4, follow: false,
+      segments: [{ blockId: 'old', contentOffset: 0, role: 'assistant', text: 'OLD BODY', final: true }] };
+    const latest: BodyPage = { first: 0, last: 9, start: 8, follow: true,
+      segments: [{ blockId: 'latest', contentOffset: 0, role: 'assistant', text: 'LATEST BODY\n' + 'latest line\n'.repeat(10), final: true }] };
+    for (const route of ['keyboard', 'wheel', 'bottom', 'click'] as const) {
+      await show({ kind: 'conversation', title: '读取恢复', conversationId: `read-${route}`, connected: true });
+      readingReply = undefined; root.receive({ type: 'display-page', page: oldPage }); await flush();
+      const pending = pendingRead();
+      readingReply = () => pending.promise;
+      const start = actions.length;
+      if (route === 'keyboard') test.mockInput.pressKey('\x1b[5~');
+      else if (route === 'wheel') await test.mockMouse.scroll(20, 8, 'up');
+      else if (route === 'bottom') test.mockInput.pressKey('\x1b[1;5F');
+      else { const row = text().split('\n').findIndex(line => line.includes('下方还有内容')); assert.ok(row >= 0); await test.mockMouse.click(5, row); }
+      await flush();
+      assert.ok(actions.slice(start).some(a => a.kind === 'display-page' || a.kind === 'history-previous'));
+      pending.reject(Error('synthetic read unavailable')); await flush(); await flush();
+      assert.match(text(), /读取未完成/); assert.ok(editor());
+      readingReply = async () => { root!.receive({ type: 'display-page', page: latest }); return { accepted: true }; };
+      test.mockInput.pressKey('\x1b[1;5F'); await flush();
+      assert.match(text(), /LATEST BODY|latest line/); assert.doesNotMatch(text(), /读取未完成/);
+    }
+    for (const failed of [true, false]) {
+      readingReply = undefined;
+      await show({ kind: 'conversation', title: '乱序读取', conversationId: `late-read-${failed}`, connected: true });
+      root.receive({ type: 'display-page', page: oldPage }); await flush();
+      const pending = pendingRead();
+      readingReply = async action => {
+        if (action.kind === 'display-page' && action.follow) { root!.receive({ type: 'display-page', page: latest }); return { accepted: true }; }
+        return pending.promise;
+      };
+      test.mockInput.pressKey('\x1b[5~'); await flush();
+      test.mockInput.pressKey('\x1b[1;5F'); await flush();
+      if (failed) pending.reject(Error('late old-page failure')); else pending.resolve({ accepted: true });
+      await flush(); await flush();
+      assert.match(text(), /LATEST BODY|latest line/); assert.doesNotMatch(text(), /读取未完成|正在读取/);
+    }
+    assert.deepEqual(unhandled, []);
+    checks.push('keyboard/wheel/latest read failures remain local and retryable; superseded success/failure cannot alter latest reading state');
+  } finally { readingReply = undefined; process.off('unhandledRejection', onUnhandled); }
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

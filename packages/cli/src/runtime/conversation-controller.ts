@@ -215,6 +215,7 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   projectCommittedOutcome?: (summary: ConversationCommitSummary) => Outcome;
   /** Authoritative completion or terminal status, independent of body drain. */
   onRunTerminal?: (turn: ObservedTurnNotification) => void;
+  onRecoveryState?: (state: 'idle' | 'retrying' | 'blocked') => void;
   /** The terminal reads finite durable pages; live control frames only wake it. */
   pagedRecovery?: boolean;
   onObservedInputFragment?: (input: ConversationInputFragment & { conversationId: string; runId: string }) => Promise<void>;
@@ -375,6 +376,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   private completionRetry?: ReturnType<typeof setTimeout>;
   private completionFailures = 0;
   private recoveryFailures = 0;
+  private recoveryBlocked = false;
+  private recoveryFactProgress?: { key: string; progress: RecoveryProgress };
   private recoveryVersion = 0;
   private presentationRevision = 0;
   private acceptedPresentation: SessionPresentationProfile = 'default';
@@ -1187,7 +1190,9 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (!retrying) {
       clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
       this.recoveryFailures = 0;
+      this.recoveryBlocked = false;
     }
+    if (this.recoveryBlocked) return;
     this.recoveryRequested = true;
     if (this.recoveryWork || this.recoveryTimer) return;
     const conversationId = this.active.conversationId;
@@ -1199,6 +1204,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   private finishRecoveryReset(conversationId: string): void {
+    this.recoveryFactProgress = undefined;
     this.completionCursor = undefined;
     this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear();
     for (const output of this.localOutput.values()) if (output.conversationId === conversationId) {
@@ -1220,7 +1226,6 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
         const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.());
         if (!current()) return;
-        this.recoveryFailures = 0;
         if (page.reset) {
           this.recoveryResetRequested = true;
           await this.opts.onRecoveryReset?.(conversationId, current);
@@ -1231,7 +1236,10 @@ export class ConversationController<Outcome = TurnOutcome> {
         // retry lifetime stays at the same fact; no failed fact is evicted.
         for (const fact of page.facts) {
           let delay = 25;
-          const progress: RecoveryProgress = {};
+          const key = JSON.stringify([conversationId, page.cursor.upper, fact]);
+          const progress = this.recoveryFactProgress?.key === key ? this.recoveryFactProgress.progress : {};
+          this.recoveryFactProgress = { key, progress };
+          let attempts = 0;
           while (current()) {
             try {
               // Completion can precede the send receipt. Preserve the page
@@ -1240,16 +1248,20 @@ export class ConversationController<Outcome = TurnOutcome> {
                 await new Promise<void>(resolve => { this.wakeReceipt = resolve; }); this.wakeReceipt = undefined;
               }
               if (!current()) break;
-              await this.consumeRecoveredFact(conversationId, fact, progress, current, page.cursor.historyThroughCommitRevision ?? 0); break;
+              await this.consumeRecoveredFact(conversationId, fact, progress, current, page.cursor.historyThroughCommitRevision ?? 0);
+              this.recoveryFactProgress = undefined; this.recoveryFailures = 0; break;
             }
             catch (error) {
               if (error instanceof RecoveryGenerationChanged) throw error;
+              if (++attempts >= 3) throw error;
+              this.opts.onRecoveryState?.('retrying');
               await new Promise<void>(resolve => setTimeout(resolve, delay)); delay = Math.min(1000, delay * 2);
             }
           }
         }
         if (!current()) return;
         this.recoveryCursor = page.cursor;
+        this.opts.onRecoveryState?.('idle');
         if (page.hasMore) this.recoveryRequested = true;
         await new Promise<void>(setImmediate);
       }
@@ -1265,11 +1277,16 @@ export class ConversationController<Outcome = TurnOutcome> {
         } catch { /* Retain the old cursor; reset is retried after the same finite backoff. */ }
       }
       if (current()) {
-        const delay = Math.min(5000, 250 * 2 ** Math.min(5, this.recoveryFailures++));
+        if (++this.recoveryFailures >= 3) {
+          this.recoveryBlocked = true; this.opts.onRecoveryState?.('blocked'); return;
+        }
+        const delay = Math.min(5000, 250 * 2 ** Math.min(5, this.recoveryFailures));
         this.recoveryTimer = setTimeout(() => { this.recoveryTimer = undefined; this.wakeRecovery(true); }, delay);
       }
     } finally { if (!current() && !this.disposed) this.recoveryRequested = true; }
   }
+  retryRecovery(): void { this.wakeRecovery(); }
+
   /** Business completion cannot queue behind an unreadable body fact. This
    * cursor consumes only the same bounded authoritative control records;
    * the body cursor below still acknowledges each rendered fact in order. */

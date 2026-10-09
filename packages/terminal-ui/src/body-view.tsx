@@ -56,22 +56,26 @@ declare module '@opentui/solid' { interface OpenTUIComponents { body_text: typeo
 extend({ body_text: BodyTextRenderable });
 
 export interface BodyViewHandle {
+  selectionRange(): { from: BodyAnchor; to: BodyAnchor } | undefined;
   page(direction: -1 | 1, rows?: number): Promise<void>;
   bottom(): Promise<void>;
   anchor(): BodyAnchor | undefined;
   /** Root calls this immediately before replacing page/size signals. */
   beforeUpdate(): void;
+  resetReading(): void;
   close(): Promise<void>;
 }
 export interface BodyViewProps {
   readonly page: BodyPage; readonly width: number; readonly height: number;
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
+  readonly hasEarlier?: boolean;
   readonly requestPage: (start: number | undefined, follow: boolean) => Promise<unknown>;
   readonly requestPrevious: () => Promise<unknown>;
   readonly onAnchor: (anchor: BodyAnchor | undefined) => void;
   readonly onError: (error: unknown) => void;
   readonly onReady?: (handle: BodyViewHandle | undefined) => void;
+  readonly onReading?: (state: { below: boolean; loading: boolean; retry?: -1 | 1 }) => void;
 }
 const teal = tone.brand, gray = tone.dim, codeBackground = tone.history;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -106,6 +110,11 @@ export function BodyView(props: BodyViewProps) {
   wrapMeasure.setWrapMode('char');
   const measured = new WeakMap<BodyRenderBlock, { width: number; height: number }>();
   const [viewport, setViewport] = createSignal<{ page?: BodyPage; width: number; top: number; selecting: boolean }>({ width: 0, top: 0, selecting: false });
+  let pendingScroll = 0, readError: -1 | 1 | undefined;
+  let readingGeneration = 0;
+  let prefetched: BodyPage | undefined;
+  const reportReading = () => props.onReading?.({ below: !!box && (box.scrollTop + box.viewport.height < box.scrollHeight ||
+    props.page.start + props.page.segments.length < props.page.last), loading: paging, retry: readError });
   // Measure the finite page without allocating a native text buffer, selection
   // store and reactive subtree for every offscreen paragraph. Fixed-height
   // placeholders preserve the same scroll geometry and source page.
@@ -154,7 +163,9 @@ export function BodyView(props: BodyViewProps) {
   let saved: BodyAnchor | undefined = props.page.follow ? undefined : props.anchor, align: 'top' | 'bottom' | undefined;
   let lastPage: BodyPage | undefined, lastWidth = 0, lastHeight = 0;
   let restorePending = true;
-  let selection: { from: BodyAnchor; to: BodyAnchor; anchor: SourcePoint; focus: SourcePoint; behavior: NativeSelection['behavior'] } | undefined;
+  let selection: { from: BodyAnchor; to: BodyAnchor; anchor: SourcePoint; focus: SourcePoint; behavior: NativeSelection['behavior'];
+    parts: { key: string; from: BodyAnchor; to: BodyAnchor; fromBias: number; toBias: number }[] } | undefined;
+  let selectionOwner: NativeSelection | undefined, selectionGesture: string | undefined;
   // Native lineStartCols are absolute buffer columns, not columns relative to
   // each logical line. Subtract that line's first wrapped-row origin.
   const lineBase = (info: TextRenderable['lineInfo'], logical: number) => info.lineStartCols[info.lineSources.indexOf(logical)] ?? 0;
@@ -176,32 +187,74 @@ export function BodyView(props: BodyViewProps) {
     }
     return renderedToSource(entry.block, start + prefix.length);
   };
+  const selectedEntries = (current: NativeSelection) => [...mounted.values()].filter(entry => {
+    if (entry.view.isDestroyed) return false;
+    // Empty structured rows have no native text range. Their row boundary
+    // still belongs to a gesture crossing it, including a final blank row.
+    if (!entry.block.text && entry.block.node.decoration !== undefined)
+      return current.anchor.y !== current.focus.y && entry.view.y >= Math.min(current.anchor.y, current.focus.y) &&
+        entry.view.y <= Math.max(current.anchor.y, current.focus.y);
+    if (!current.selectedRenderables.includes(entry.view)) return false;
+    const range = entry.view.getSelection();
+    return range && range.start !== range.end;
+  }).sort((a, b) => a.view.y - b.view.y || a.view.x - b.view.x);
   const captureSelection = (current: NonNullable<ReturnType<CliRenderer['getSelection']>>) => {
+    const owned = new Set([...mounted.values()].filter(entry => !entry.view.isDestroyed).map(entry => entry.view));
+    // Empty source lines have touched leaves but no selected characters. Still
+    // reject fields, stale leaves and mixed selections before claiming Ctrl+C.
+    if (current.isDragging || current.selectedRenderables.some(leaf => !owned.has(leaf as BodyTextRenderable)) ||
+        !current.touchedRenderables.some(leaf => owned.has(leaf as BodyTextRenderable))) return undefined;
     // Read native selected ranges, including word/line expansion and wide
     // graphemes. Pointer endpoints alone do not describe the selected text.
-    const entries = [...mounted.values()].filter(entry => {
-      if (entry.view.isDestroyed || !current.selectedRenderables.includes(entry.view)) return false;
-      const range = entry.view.getSelection();
-      return range && range.start !== range.end;
-    })
-      .sort((a, b) => a.view.y - b.view.y || a.view.x - b.view.x);
+    const entries = selectedEntries(current);
     const first = entries[0], last = entries.at(-1);
     if (!first || !last) return undefined;
-    const start = first.view.getSelection()!, end = last.view.getSelection()!;
-    measure.setText(first.block.text);
-    const from = measure.getTextRange(0, Math.min(start.start, start.end)).length;
-    measure.setText(last.block.text);
-    const prefix = measure.getTextRange(0, Math.max(end.start, end.end));
+    const parts = entries.map(entry => {
+      const range = entry.view.getSelection() ?? { start: 0, end: 0 };
+      measure.setText(entry.block.text);
+      const start = measure.getTextRange(0, Math.min(range.start, range.end)).length;
+      const end = measure.getTextRange(0, Math.max(range.start, range.end)).length;
+      const from = renderedToSource(entry.block, start), to = renderedToSource(entry.block, end);
+      // A source tab can expand into several rendered spaces. Keep the exact
+      // position within that expansion, not just its shared source coordinate.
+      return { key: entry.block.key, from, to,
+        fromBias: start - sourceToRendered(entry.block, from)!, toBias: end - sourceToRendered(entry.block, to)! };
+    });
     const anchor = pointerSource(current.anchor), focus = pointerSource(current.focus);
     if (!anchor || !focus) return undefined;
-    return { from: renderedToSource(first.block, from), to: renderedToSource(last.block, prefix.length),
-      anchor, focus, behavior: current.behavior };
+    return { from: parts[0]!.from, to: parts.at(-1)!.to, anchor, focus, behavior: current.behavior, parts };
   };
-  const sourcePoint = (anchor: BodyAnchor, key?: string) => {
+  // Native anchor is derived from its leaf's CURRENT geometry; it moves even
+  // without input. Focus changes only via updateSelection (user gesture or our
+  // own restore, which explicitly rebinds the snapshot below). A new native
+  // selection object identifies a new anchor; never infer one from layout.
+  const gesture = (current: NativeSelection) => `${current.focus.x}:${current.focus.y}:${current.behavior}`;
+  // Capture when the user changes the gesture, before any layout changes.
+  // Resize and equivalent page updates must never reinterpret old pixels as a
+  // new selection. Copy admission, payload and restoration share this source.
+  const currentSelection = () => {
+    const current = props.renderer.getSelection();
+    if (disposed || !current) { selection = undefined; selectionOwner = undefined; selectionGesture = undefined; return undefined; }
+    if (current.isDragging) return undefined;
+    const identity = gesture(current);
+    if (current !== selectionOwner || identity !== selectionGesture) {
+      selection = captureSelection(current); selectionOwner = current; selectionGesture = identity;
+    }
+    if (!selection || selection.parts.some(part => {
+      const block = mounted.get(part.key)?.block ?? blockIndex().get(part.key);
+      if (!block) return true;
+      const from = sourceToRendered(block, part.from), to = sourceToRendered(block, part.to);
+      return from === undefined || to === undefined || from + part.fromBias > block.text.length || to + part.toBias > block.text.length;
+    })) return undefined;
+    return selection;
+  };
+  const sourcePoint = (anchor: BodyAnchor, key?: string, bias = 0) => {
     const preferred = key ? mounted.get(key) : undefined;
     for (const entry of preferred ? [preferred, ...mounted.values()] : mounted.values()) {
-      const offset = sourceToRendered(entry.block, anchor);
-      if (offset === undefined || entry.view.isDestroyed) continue;
+      const sourceOffset = sourceToRendered(entry.block, anchor);
+      if (sourceOffset === undefined || entry.view.isDestroyed) continue;
+      const offset = sourceOffset + bias;
+      if (offset > entry.block.text.length) continue;
       const lines = sourceLineStarts(entry.block.text);
       let logical = 0;
       while (logical + 1 < lines.length && lines[logical + 1]! <= offset) logical++;
@@ -215,11 +268,11 @@ export function BodyView(props: BodyViewProps) {
     return undefined;
   };
   const pointerSource = (point: { x: number; y: number }): SourcePoint | undefined => {
-    const entries = [...mounted.values()].filter(entry => !entry.view.isDestroyed && entry.block.text);
+    const entries = [...mounted.values()].filter(entry => !entry.view.isDestroyed && (entry.block.text || entry.block.node.decoration !== undefined));
     // A drag may finish in the margin or outside a leaf; use the nearest body
     // leaf while retaining the actual cell offset, rather than snapping to an edge.
     const distance = (entry: typeof entries[number]) => {
-      const v = entry.view, rows = Math.max(v.height, v.lineInfo.lineSources.length);
+      const v = entry.view, rows = Math.max(1, v.height, v.lineInfo.lineSources.length);
       return Math.max(v.y - point.y, 0, point.y - (v.y + rows - 1)) * Math.max(1, props.width)
         + Math.max(v.x - point.x, 0, point.x - (v.x + v.width - 1));
     };
@@ -242,6 +295,25 @@ export function BodyView(props: BodyViewProps) {
       if (!first || entry.view.y < first.view.y) first = entry;
     }
     return first ? position(first, Math.max(0, Math.floor(top - first.view.y))) : saved;
+  };
+  const finishBodySelection = () => {
+    const current = props.renderer.getSelection();
+    if (disposed || !current || current.isDragging || ![...mounted.values()].some(entry => current.touchedRenderables.includes(entry.view))) return;
+    const focus = pointerSource(current.focus), target = focus && mounted.get(focus.key)?.view;
+    if (!target) return;
+    // OpenTUI widens a selection container by one ancestor per movement.
+    // A fast drag across sibling rows can finish before reaching their common
+    // body container. Finish that same native gesture at its actual endpoint.
+    let container = props.renderer.getSelectionContainer();
+    for (let depth = 0; depth < 16; depth++) {
+      props.renderer.updateSelection(target, current.focus.x, current.focus.y, { finishDragging: true });
+      const next = props.renderer.getSelectionContainer();
+      if (!next || next === container) break;
+      container = next;
+    }
+    // Even a pure-newline selection belongs to this source range although the
+    // renderer has no selected character leaf for it.
+    selection = captureSelection(current); selectionOwner = current; selectionGesture = gesture(current);
   };
   const restore = () => {
     if (!box || disposed || !restorePending) return;
@@ -269,9 +341,11 @@ export function BodyView(props: BodyViewProps) {
     // Scrolling changes ancestor positions in the next layout. Restoring a
     // global selection before that layout mixes old geometry with the new text.
     if (box.scrollTop !== scrollTop) { props.renderer.requestRender(); return; }
+    if (pendingScroll) { box.scrollBy(pendingScroll); pendingScroll = 0; props.renderer.requestRender(); }
     restorePending = false;
     if (selection) {
-      const from = sourcePoint(selection.from), to = sourcePoint(selection.to);
+      const first = selection.parts[0]!, last = selection.parts.at(-1)!;
+      const from = sourcePoint(selection.from, first.key, first.fromBias), to = sourcePoint(selection.to, last.key, last.toBias);
       const anchor = sourcePoint(selection.anchor.source, selection.anchor.key), focus = sourcePoint(selection.focus.source, selection.focus.key);
       if (from && to && anchor && focus) {
         for (const entry of mounted.values()) entry.view.restoringSelection = { from, to };
@@ -289,17 +363,19 @@ export function BodyView(props: BodyViewProps) {
         } finally {
           for (const entry of mounted.values()) entry.view.restoringSelection = undefined;
         }
+        const restored = props.renderer.getSelection();
+        selectionOwner = restored ?? undefined; selectionGesture = restored ? gesture(restored) : undefined;
       }
     }
   };
   const handle: BodyViewHandle = {
+    selectionRange() { return currentSelection(); },
     anchor: capture,
     beforeUpdate() {
       if (disposed) return;
       if (!props.page.follow) { saved = capture(); props.onAnchor(saved); }
       if (!restorePending) {
-        const current = props.renderer.getSelection();
-        selection = current ? captureSelection(current) : undefined;
+        selection = currentSelection();
       }
       // Freeze this pre-layout source anchor. A resize can trigger several
       // nested size callbacks before the next frame; none may recapture from
@@ -311,29 +387,46 @@ export function BodyView(props: BodyViewProps) {
       release();
       return highlighter.close();
     },
+    resetReading() {
+      readingGeneration++; paging = false; pauseRequested = false; readError = undefined;
+      pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined; prefetched = undefined;
+      reportReading();
+    },
     async page(direction, rows) {
       if (!box || disposed || paging) return;
+      const generation = ++readingGeneration;
+      const current = () => !disposed && generation === readingGeneration;
       saved = capture(); props.onAnchor(saved);
-      const atEdge = direction < 0 ? box.scrollTop <= 0 : box.scrollTop + box.viewport.height >= box.scrollHeight;
-      if (!atEdge) {
-        box.scrollBy(direction * Math.max(1, rows ?? box.viewport.height - 2));
-        saved = capture(); props.onAnchor(saved);
-        if (props.page.follow) await props.requestPage(props.page.start, false);
-        return;
-      }
       paging = true;
+      readError = undefined; reportReading();
       try {
-        align = direction < 0 ? 'bottom' : 'top';
+        const atEdge = direction < 0 ? box.scrollTop <= 0 : box.scrollTop + box.viewport.height >= box.scrollHeight;
+        if (!atEdge) {
+          box.scrollBy(direction * Math.max(0, rows ?? box.viewport.height - 2));
+          saved = capture(); props.onAnchor(saved);
+          if (props.page.follow) await props.requestPage(props.page.start, false);
+          return;
+        }
+        const before = props.page;
+        align = undefined; pendingScroll = direction * Math.max(0, rows ?? box.viewport.height - 2);
         if (direction < 0 && props.page.start === props.page.first) await props.requestPrevious();
         else if (direction < 0) await props.requestPage(Math.max(props.page.first, props.page.start - 4), false);
         else if (props.page.start + props.page.segments.length < props.page.last) await props.requestPage(props.page.start + props.page.segments.length, false);
         else await handle.bottom();
-      } finally { paging = false; }
+        if (current() && props.page === before) pendingScroll = 0;
+      } catch { if (current()) { pendingScroll = 0; readError = direction; } }
+      finally { if (current()) { paging = false; reportReading(); } }
     },
     async bottom() {
       if (disposed) return;
+      const generation = ++readingGeneration;
+      readError = undefined; pendingScroll = 0;
+      pauseRequested = false;
       saved = undefined; props.onAnchor(undefined); align = 'bottom';
-      await props.requestPage(undefined, true);
+      paging = true; reportReading();
+      try { await props.requestPage(undefined, true); }
+      catch { if (!disposed && generation === readingGeneration) readError = 1; }
+      finally { if (!disposed && generation === readingGeneration) { paging = false; reportReading(); } }
     },
   };
   createEffect(() => {
@@ -354,12 +447,20 @@ export function BodyView(props: BodyViewProps) {
     const page = contentPage();
     if (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting)
       setViewport({ page, width: props.width, top: box.scrollTop, selecting });
+    reportReading();
+    // A transport batch must not leave a short viewport looking like EOF.
+    // Fetch one neighbour at a time; each accepted page is measured again.
+    if (!paging && !readError && !selecting && !restorePending && page !== prefetched && box.scrollHeight < box.viewport.height && page.segments.length) {
+      const direction = page.start + page.segments.length < page.last ? 1 : page.start > page.first || props.hasEarlier ? -1 : undefined;
+      prefetched = page;
+      if (direction) void handle.page(direction, 0).catch(props.onError);
+    }
   };
   props.renderer.addPostProcessFn(postFrame);
   props.onReady?.(handle);
   function release() {
     if (disposed) return;
-    disposed = true; props.onReady?.(undefined);
+    disposed = true; readingGeneration++; props.onReady?.(undefined);
     props.renderer.removePostProcessFn(postFrame); mounted.clear(); projected.clear(); wrapMeasure.destroy(); measureView.destroy(); measure.destroy();
   }
   onCleanup(() => {
@@ -387,12 +488,16 @@ export function BodyView(props: BodyViewProps) {
   };
   return <scrollbox ref={value => { box = value; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
+    onMouseUp={event => { if (event.button === 0) queueMicrotask(finishBodySelection); }}
     onMouseDown={event => {
       if (event.button !== 0) return;
       if (!props.page.follow || pauseRequested || disposed) return;
+      const generation = ++readingGeneration;
+      paging = false; readError = undefined; reportReading();
       saved = capture(); props.onAnchor(saved); pauseRequested = true;
-      void props.requestPage(props.page.start, false).catch(error => { if (!disposed) props.onError(error); })
-        .finally(() => { pauseRequested = false; });
+      void props.requestPage(props.page.start, false).catch(() => {
+        if (!disposed && generation === readingGeneration) { readError = -1; reportReading(); }
+      }).finally(() => { if (!disposed && generation === readingGeneration) pauseRequested = false; });
     }}
     onMouseScroll={event => {
       const direction = event.scroll?.direction;

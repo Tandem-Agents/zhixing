@@ -8,6 +8,9 @@ import { projectHistorySegmentsReverse } from '../history-segments.js';
 import { TerminalBodyProjection, type BodyProjectionChange } from '../body-projection.js';
 import { TerminalManagedFiles } from '../managed-files.js';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
+import { TerminalDisplayReplay, type DisplayReplayRecord, type DisplayReplaySource } from '../display-replay.js';
+import { TerminalOutputProjection } from '../output.js';
+import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
 
 const roots: string[] = [];
 const stores: TerminalDisplayStore[] = [];
@@ -19,7 +22,7 @@ afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
-async function setup() {
+async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment>) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'zhixing-terminal-display-')); roots.push(root);
   await mkdir(path.join(root, 'display'));
   let active = 0, outstanding = 0, stored = 0;
@@ -43,11 +46,32 @@ async function setup() {
       await expect(stat(path.join(root, 'display/data'))).rejects.toMatchObject({ code: 'ENOENT' }); stored -= bytes;
     }),
   };
-  const store = new TerminalDisplayStore(root, capacity, account, new AbortController().signal); stores.push(store);
+  const store = new TerminalDisplayStore(root, capacity, account, new AbortController().signal, undefined, replay); stores.push(store);
   return { root, account, store, counts: () => ({ active, outstanding, stored }) };
 }
 
 describe('display recovery retains the original cache', () => {
+  it('retains only locators for cold durable history and rereads evicted pages without dropping live-only output', async () => {
+    const sourceText = '中文😀\n'.repeat(1600), read = vi.fn(async (_source: DisplayReplaySource, offset: number) => sourceText.slice(offset));
+    const replay = new TerminalDisplayReplay(read), h = await setup(record => replay.read(record));
+    const source: DisplayReplaySource = { kind: 'owner', conversationId: 'test', runId: 'run', length: sourceText.length, markdown: false,
+      cursor: { conversationId: 'test', ownerEpoch: 1, revision: 1, message: 0, block: 0, offset: 0 } };
+    const segment = (blockId: string) => ({ blockId, role: 'user', text: sourceText, contentOffset: 0, final: true });
+    try {
+      await h.store.append({ ...segment('unpersisted'), text: 'live-only receipt' });
+      for (let i = 0; i < 80; i++) await h.store.append(segment(`cold-${i}`), true, undefined, true, source);
+      expect(h.counts().stored).toBeLessThan(Buffer.byteLength(sourceText) * 80 / 5);
+      const page = await h.store.page(-4, false);
+      expect(page.segments.map(item => item.text)).toEqual(Array(4).fill(sourceText));
+      expect(read).toHaveBeenCalled();
+      expect((await h.store.page(0)).segments[0]?.text).toBe('live-only receipt');
+      read.mockRejectedValueOnce(Error('source unavailable'));
+      await expect(h.store.page(-40, false)).rejects.toThrow('source unavailable');
+      expect(h.store.paused).toBe(false);
+      expect((await h.store.page(-40, false)).segments).toHaveLength(4);
+    } finally { replay.close(); }
+  });
+
   it('rejects unavailable capacity, then admits new content without deleting retained pages', async () => {
     const h = await setup();
     await h.store.append({ blockId: 'original', role: 'assistant', text: 'retained prefix', contentOffset: 0, final: false });
@@ -81,6 +105,26 @@ describe('display recovery retains the original cache', () => {
 });
 
 describe('bounded terminal display projection', () => {
+  it('retains a real empty diff EOF row when encoded metadata forces carrier splitting', async () => {
+    const h = await setup(), gap = vi.fn(), code = 'a'.repeat(28000);
+    const artifact = { kind: 'file-diff' as const, path: 'blank.ts', operation: 'modified' as const,
+      changeStats: { kind: 'exact' as const, addedLines: 2, removedLines: 0 },
+      hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 2, lines: [
+        { type: 'added' as const, newLineNumber: 1, content: code }, { type: 'added' as const, newLineNumber: 2, content: '' }] }] };
+    const text = processArtifactText(artifact);
+    const producer = new TerminalOutputProjection(async segment => { await h.store.append(segment); }, async () => {}, gap,
+      { work: action => action(), amend: async () => {}, seal: async () => {} });
+    try {
+      producer.appendProcessBlock({ blockId: 'blank-diff', role: 'tool-diff', text, lines: processArtifactLines(artifact), spans: processArtifactSpans(artifact) });
+      await producer.drain();
+      expect(gap).not.toHaveBeenCalled();
+      const page = await h.store.page(0, false);
+      expect(page.segments.length).toBeGreaterThan(1);
+      expect(page.segments.map(segment => segment.text).join('')).toBe(text);
+      const blank = page.segments.flatMap(segment => segment.body!.context.nodes).filter(node => node.decoration === '+ 2  ');
+      expect(blank).toHaveLength(1); expect(blank[0]).toMatchObject({ from: text.length, to: text.length, runs: [] });
+    } finally { await producer.close(); }
+  });
   it('keeps a partially grown extent charged without publishing or losing the old page', async () => {
     const h = await setup();
     for (let i = 0; i < 3; i++) await h.store.append({ blockId: `old-${i}`, role: 'process', text: 'x'.repeat(32768), contentOffset: 0, final: true });
