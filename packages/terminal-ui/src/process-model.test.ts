@@ -44,17 +44,19 @@ describe('pure process presentation', () => {
     expect(rows.at(-1)?.text).toContain('输入 0');
     expect(rows[0]?.text.startsWith('◆')).toBe(true);
   });
-  it('clips diff rows by actual cells while retaining selection source offsets and semantic colors', () => {
+  it('preserves diff source at narrow widths for shared soft wrap and copying', () => {
     const text = '◆ 已修改 file.ts\n+ 1  汉字汉字汉字\n-    old value';
     const runs = [{ from: 200, to: 200 + text.length, text, style: 0 }];
     const block = { key: 'diff', blockId: 'b', role: 'tool-diff', text, runs,
       node: { kind: 'paragraph' as const, from: 200, to: 200 + text.length, runs } };
     const projected = processBodyBlock(block, 9);
     const lines = projected.text.split('\n');
-    expect(lines[1]).toBe('+ 1  汉字');
+    expect(lines[1]).toBe('+ 1  汉字汉字汉字');
+    expect(projected.text).toBe(text);
     expect(renderedToSource(projected, lines[0]!.length + 1)).toEqual({ blockId: 'b', contentOffset: 200 + text.indexOf('+ 1') });
-    expect(processBodyColor('tool-diff', lines[1]!)).toBe('#84c7a2');
-    expect(processBodyColor('tool-diff', lines[2]!)).toBe('#ef9c9c');
+    // Diff color comes from typed source spans, never inferred from user text.
+    expect(processBodyColor('tool-diff', lines[1]!)).toBe('dim');
+    expect(processBodyColor('tool-diff', lines[2]!)).toBe('dim');
     expect(block.text).toBe(text);
   });
 });

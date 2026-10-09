@@ -104,7 +104,9 @@ describe('terminal process fold', () => {
     expect(s.block.mock.calls.map(c => c[0].text).join('\n')).toContain('阅读了 4 个文件');
     expect(s.block.mock.calls[0]![0].text).toContain('结果片段');
     expect(s.block.mock.calls[1]![0]).toMatchObject({ role: 'tool-action' });
-    expect(s.block.mock.calls.every(c => c[0].text.startsWith('◆'))).toBe(true);
+    // Decoration belongs to U's shared role gutter, never copied source text.
+    expect(s.block.mock.calls.every(c => !c[0].text.startsWith('◆'))).toBe(true);
+    expect(s.block.mock.calls[2]![0].role).toBe('tool-error');
     expect(s.block.mock.calls[2]![0].text).toContain('permission denied');
   });
   it('accepts intentionally filtered assignment sequence gaps but ignores repeats and the other source leg', () => {

@@ -30,7 +30,7 @@ describe('terminal existing run feedback', () => {
     send(3, 'orchestration:node_start', { ...common, nodeId: PERSPECTIVES_CONVERGENCE_NODE_ID, nodeKind: 'agent' });
     send(4, 'orchestration:run_end', { ...common, status: 'failed', durationMs: 5, error: '执行失败' });
     expect(s.block.mock.calls.map(args => args[0].text)).toEqual([
-      '◆ 多视角评议：3 个节点开始协作', '◆ 交叉吸收中', '◆ 收敛最终版本中', '◆ 多视角评议未完成：执行失败',
+      '多视角评议：3 个节点开始协作', '交叉吸收中', '收敛最终版本中', '多视角评议未完成：执行失败',
     ]);
     expect(s.changed).not.toHaveBeenCalled();
     expect(s.gap).not.toHaveBeenCalled();

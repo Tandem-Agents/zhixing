@@ -1,0 +1,43 @@
+import { For, Show } from 'solid-js';
+import type { TerminalView } from './protocol.js';
+import { tone, spacing } from './theme.js';
+import { cleanProcessText } from './process-model.js';
+
+/** Shared identity, frame and environment geometry. Pages supply only content. */
+export function SurfaceChrome(props: { view: TerminalView; width: number; height: number; availableHeight: number }) {
+  const main = () => ['conversation', 'history', 'unavailable'].includes(props.view.kind);
+  const branded = () => main() || props.view.configurationHome;
+  // Input, actions and the shared information bar have priority over decoration.
+  // These fixed chrome rows include its outer margin; remaining space is supplied
+  // by the root from the measured action area, not from a page-specific guess.
+  const brandedRows = () => 7 + (props.view.environment ? 3 : 0) + (props.view.chromeDetails?.length ? 1 + props.view.chromeDetails.length : 0);
+  const compact = () => props.height < 18 || props.width < 24 || (branded() && props.availableHeight < brandedRows());
+  const line = (value: string) => cleanProcessText(value).replace(/[\r\n]/gu, ' ');
+  const status = () => props.view.connectionState === 'starting' ? '正在启动…'
+    : props.view.connected === false ? '暂未连接 · 已有内容保留'
+    : main() && props.view.title !== '知行' ? `当前对话 ${line(props.view.title)}` : props.view.title === '知行' ? '' : line(props.view.title);
+  return <box flexDirection="column" flexShrink={0} marginBottom={1}>
+    <Show when={!compact()} fallback={<text height={1} wrapMode="none" truncate fg={tone.brand}>{branded() ? '知行 ' : ''}{status()}</text>}>
+      <Show when={branded()} fallback={<box border borderStyle="rounded" borderColor={tone.border} title={` ${line(props.view.title)} `} paddingX={spacing.welcomeInner} paddingY={props.view.chromeDescription ? 1 : 0} height={props.view.chromeDescription ? undefined : 2}>
+        <Show when={props.view.chromeDescription}><text fg={tone.text}>{props.view.chromeDescription}</text></Show>
+      </box>}>
+      <text height={1} wrapMode="none" fg={tone.border}>╭──── <span style={{fg: tone.brand}}>╲</span> {'─'.repeat(Math.max(0, props.width - 9))}╮</text>
+      <box border={['left', 'right', 'bottom']} borderStyle="rounded" borderColor={tone.border}
+        paddingLeft={spacing.welcomeInner} paddingRight={1} paddingBottom={1} flexDirection="column">
+        <text height={1} fg={tone.brand}>{props.view.configurationHome ? ' ▄▄▄    知行' : ' ▄▄▄'}</text>
+        <text height={1} fg={tone.brand}>{'▌●●▐    '}<span style={{fg: props.view.configurationHome ? tone.dim : tone.brand}}>{props.view.configurationHome ? line(props.view.title) : '知行'}</span></text>
+        <text height={1} wrapMode="none" truncate fg={tone.brand}>{' ▀▀     '}<span style={{fg: tone.dim}}>{props.view.configurationHome ? '配置你的知行' : status()}</span></text>
+        <Show when={props.view.environment}>
+          <text height={1}> </text>
+          <text height={1} wrapMode="none" truncate fg={tone.dim}>{`工作目录    ${line(props.view.environment?.workspace ?? '未绑定工作目录')}`}</text>
+          <text height={1} wrapMode="none" truncate fg={tone.dim}>{`模型        ${line([props.view.environment?.provider, props.view.environment?.model].filter(Boolean).join(' · ') || '未配置')}`}</text>
+        </Show>
+        <Show when={props.view.chromeDetails?.length}>
+          <text height={1}> </text>
+          <For each={props.view.chromeDetails}>{detail => <text height={1} wrapMode="none" truncate fg={tone.dim}>{line(detail)}</text>}</For>
+        </Show>
+      </box>
+      </Show>
+    </Show>
+  </box>;
+}

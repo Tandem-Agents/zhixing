@@ -54,7 +54,7 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
   for (;;) {
     const pages = pageCount(body);
     const view: TerminalSelectionPage = { kind: 'selection', selectionLayer: 'select', title: request.title,
-      initialItemId: active ? `option:${active.value}` : 'return',
+      ...(active ? { initialItemId: `option:${active.value}` } : {}),
       ...(request.details ? { detailsActionId: 'request-details' } : {}),
       message: pageText(body, page) + (pages > 1 ? `\n（正文 ${page + 1}/${pages}）` : ''),
       choices: [
@@ -63,12 +63,12 @@ export async function chooseTerminalSelection<T extends string>(request: Selecti
         ...(page ? [{ id: 'previous', label: '上一页正文' }] : []),
         ...(page + 1 < pages ? [{ id: 'next', label: '下一页正文' }] : []),
         ...(request.details ? [{ id: 'details', label: request.details.title ?? '查看详情' }] : []),
-        { id: 'return', label: request.cancelLabel ?? '收起，稍后处理' },
       ] };
     terminalSelectionActions(view);
     const response = await choose(view);
     if (!response) return;
     const cancelled = cancellation(response); if (cancelled) return cancelled;
+    // Legacy/noninteractive ports may still represent dismissal with return.
     if (response.itemId === 'return') return { kind: 'cancelled', cause: 'escape' };
     if (response.itemId === 'previous' && page > 0) { page--; continue; }
     if (response.itemId === 'next' && page + 1 < pages) { page++; continue; }

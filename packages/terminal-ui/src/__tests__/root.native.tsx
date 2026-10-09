@@ -53,6 +53,29 @@ try {
     const visit = (node: any): TextareaRenderable | undefined => node.constructor.name === 'TerminalTextarea' ? node : node.getChildren?.().map(visit).find(Boolean);
     const found = visit(test.renderer.root); assert.ok(found, 'mounted editor'); return found;
   };
+  await show({ kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
+  assert.ok(!text().includes('离线'));
+  assert.match(text().split('\n')[0]!, /^╭──── ╲ .*╮$/);
+  await test.mockInput.typeText('启动时输入'); await flush();
+  const startingActions = actions.length; test.mockInput.pressEnter(); await flush();
+  assert.equal(editor().plainText, '启动时输入');
+  assert.ok(!actions.slice(startingActions).some(action => action.kind === 'input-submit'));
+  await show({ kind: 'conversation', title: '知行', connectionState: 'unavailable', connected: false, message: '连接暂未完成，输入保留。' });
+  test.mockInput.pressEnter(); await flush();
+  assert.equal(editor().plainText, '启动时输入');
+  assert.equal(actions.at(-1)?.kind, 'retry-connection');
+  for (const sequence of ['\x1bOQ', '\x1b[12~']) {
+    test.mockInput.pressKey(sequence); await flush();
+    assert.equal(actions.at(-1)?.kind, 'history-open');
+    assert.equal(editor().plainText, '启动时输入');
+  }
+  for (const sequence of ['\x1bOR', '\x1b[13~']) {
+    test.mockInput.pressKey(sequence); await flush();
+    assert.equal(actions.at(-1)?.kind, 'configuration-open');
+    assert.equal(editor().plainText, '启动时输入');
+  }
+  checks.push('framed startup, no false offline label; startup/failure keep the same editable draft and explicit retry');
+  editor().setText(''); await flush();
   await show({ kind: 'conversation', title: '环境投影', conversationId: 'environment', connected: true,
     environment: { provider: 'provider-one', model: 'model-one', workspace: 'D:/workspace-one' } });
   assert.match(text(), /D:\/workspace-one/); assert.match(text(), /provider-one.*model-one/);
@@ -63,6 +86,27 @@ try {
   assert.ok(!text().includes('workspace-one')); assert.equal(editor().plainText, '保留草稿');
   test.resize(40, 12); await flush(); assert.ok(editor().height > 0);
   test.resize(80, 24); await flush(); assert.match(text(), /workspace-two/);
+  const longDraft = '中文多行草稿内容。'.repeat(80);
+  editor().setText(longDraft); await flush();
+  for (const height of [24, 20, 19, 18, 17, 16, 12, 24]) {
+    test.resize(80, height); await flush();
+    assert.match(text(), /Enter 发送/);
+    assert.ok(editor().y + editor().height < height - 1, 'editor border and shared footer fit the viewport');
+    assert.equal(editor().plainText, longDraft);
+  }
+  checks.push('measured action area keeps long drafts, input border and footer visible across chrome collapse thresholds');
+  for (const busy of [false, true]) {
+    await show({ kind: 'conversation', title: '展示暂停', conversationId: 'environment', connected: true,
+      displayPaused: true, displayGap: true, busy,
+      environment: { provider: 'provider-two', model: 'model-two', workspace: 'E:/workspace-two' } });
+    for (const [width, height] of [[40, 12], [40, 16], [80, 24]]) {
+      test.resize(width!, height!); await flush();
+      assert.match(text(), /Enter 发送/);
+      assert.ok(editor().y + editor().height < height! - 1);
+      assert.equal(editor().plainText, longDraft);
+    }
+  }
+  checks.push('multiline notices and busy state share the viewport with a scrollable draft and fixed footer');
   editor().setText(''); await flush();
   checks.push('public model and directory refresh in the main header without resetting draft or blocking small-screen input');
   await show({ kind: 'conversation', title: 'slash alias', conversationId: 'slash-alias' });
@@ -134,7 +178,7 @@ try {
     { token: '[A B]', id: '11111111-1111-1111-1111-111111111111' },
     { token: '[C D]', id: '22222222-2222-2222-2222-222222222222' },
   ] });
-  test.resize(24, 24); await flush();
+  test.resize(22, 24); await flush();
   const atomicPaste = externalPaste?.(); assert.ok(atomicPaste);
   atomicPaste.write(Buffer.from('payload')); atomicPaste.end(); await flush(); await flush();
   assert.equal(editor().plainText, atomicText, 'paste receipt keeps exact text');
@@ -150,7 +194,7 @@ try {
   assert.equal(editor().plainText, atomicText, 'overwide fallback never inserts or truncates text');
   assert.equal(editor().getSelectedText(), '[A B][C D]', 'resize preserves exact selection copy');
   assert.ok(editor().editorView.getTotalVirtualLineCount() > 2, 'narrow token makes bounded char-wrap progress');
-  test.resize(24, 24); await flush();
+  test.resize(22, 24); await flush();
   editor().editorView.resetSelection(); editor().cursorOffset = atomicText.length;
   test.mockInput.pressKey('!'); await flush(); assert.equal(editor().plainText, atomicText + '!');
   assert.ok(editor().undo()); await flush(); assert.equal(editor().plainText, atomicText);
@@ -177,6 +221,26 @@ try {
   await test.mockInput.typeText('很长的内容'.repeat(40)); await flush();
   assert.ok(editor().height > 1 && editor().height <= 8, JSON.stringify({ height: editor().height, width: editor().width, lines: editor().virtualLineCount, total: editor().editorView.getTotalVirtualLineCount(), length: editor().plainText.length, frame: text() }));
   const draft = editor().plainText;
+  await show({ kind: 'selection', title: '长说明确认', requestId: 'long-selection', message: '逐行核对说明。\n'.repeat(70), choices: [{ id: 'back', label: '暂不执行' }, { id: 'confirm', label: '确认执行', danger: true }] });
+  assert.ok(text().includes('暂不执行') && text().includes('确认执行'), 'all actions visible on first long confirmation frame');
+  test.resize(40, 16); await flush();
+  assert.ok(text().includes('确认执行'), 'resize must preserve visible actions');
+  test.resize(80, 24); await flush();
+  test.mockInput.pressArrow('down'); await flush(); await flush();
+  assert.ok(text().includes('确认执行'), 'keyboard selection must reveal the selected action after long content');
+  await show({ kind: 'recovery', title: '保密显示', requestId: 'recovery-hint', recovery: { requestId: 'recovery-hint', pages: 1, input: false } });
+  assert.ok(text().includes('Esc 返回')); assert.ok(!text().includes('Enter 确认'));
+  checks.push('long selection scrolls the selected action into view; private display has truthful contextual hints');
+  test.resize(40, 16); await flush();
+  await show({ kind: 'configuration', title: '模型', editId: 'model-narrow', choices: [
+    { id: 'flash', label: 'deepseek-ai/DeepSeek-V4-Flash', detail: 'main 推荐' },
+    { id: 'pro', label: 'deepseek-ai/DeepSeek-V4-Pro', detail: 'main' },
+  ] });
+  assert.ok(text().includes('deepseek-ai/DeepSeek-V4-Flash'));
+  assert.ok(text().includes('deepseek-ai/DeepSeek-V4-Pro'));
+  test.mockInput.pressArrow('down'); await flush(); test.mockInput.pressEnter(); await flush();
+  assert.ok(actions.at(-1)?.kind === 'configuration-action' && (actions.at(-1) as any).action === 'pro');
+  test.resize(80, 24); await flush();
   await show({ kind: 'configuration', title: '配置', editId: 'edit', choices: [{ id: 'a', label: '第一项' }, { id: 'b', label: '第二项' }] });
   test.mockInput.pressArrow('down'); await flush();
   await show({ kind: 'configuration', title: '配置', editId: 'edit', choices: [{ id: 'a', label: '第一项' }, { id: 'b', label: '第二项' }], message: '状态更新' });
@@ -263,7 +327,9 @@ try {
   const afterPaste = text(); await test.mockMouse.scroll(20, 8, 'up'); await flush();
   assert.notEqual(text(), afterPaste); assert.ok(actions.some(action => action.kind === 'clipboard-read' && action.target === 'draft'));
   checks.push('right-button application event pastes through N without disabling wheel');
-  await test.mockMouse.drag(5, 5, 19, 6); await flush();
+  const historyRows = text().split('\n').map((line, y) => ({ line, y })).filter(row => row.line.includes('history row'));
+  assert.ok(historyRows.length >= 5);
+  await test.mockMouse.drag(historyRows[2]!.line.indexOf('history row'), historyRows[2]!.y, historyRows[3]!.line.indexOf('history row') + 10, historyRows[3]!.y); await flush();
   assert.ok(test.renderer.getSelection()?.getSelectedText().includes('history row'), JSON.stringify({ selection: test.renderer.getSelection()?.getSelectedText(), frame: text() }));
   assert.match(text(), /复制选区/);
   const interrupts = actions.filter(action => action.kind === 'interrupt').length;
@@ -325,12 +391,18 @@ try {
     assert.equal(test.renderer.getSelection()!.getSelectedText(), reverseText, `${mode}: backward selection reflow and append`);
   }
   checks.push('ASCII, CJK and Markdown source selections survive append and narrow/wide reflow');
+  const selectionOrigin = () => {
+    const find = (node: any): any => node.constructor.name === 'BodyTextRenderable' ? node : node.getChildren?.().map(find).find(Boolean);
+    const leaf = find(test.renderer.root); assert.ok(leaf, 'body text mounted'); return leaf;
+  };
+  const sx = (column: number) => selectionOrigin().x + column - 5;
+  const sy = () => selectionOrigin().y;
   root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 1, follow: false, segments: [{ blockId: 'single', contentOffset: 0, role: 'assistant', text: 'A 中 B', final: true }] } }); await flush();
   for (const [start, end, behavior, expected] of [[5, 5, 'word', 'A'], [7, 8, 'cell', '中']] as const) {
-    await test.mockMouse.drag(5, 4, 9, 4); await flush();
+    await test.mockMouse.drag(sx(5), sy(), sx(9), sy()); await flush();
     const leaf = test.renderer.getSelection()!.selectedRenderables[0]!; assert.ok(leaf);
-    test.renderer.startSelection(leaf, start, 4, behavior);
-    test.renderer.updateSelection(leaf, end, 4, { finishDragging: true }); await flush();
+    test.renderer.startSelection(leaf, sx(start), sy(), behavior);
+    test.renderer.updateSelection(leaf, sx(end), sy(), { finishDragging: true }); await flush();
     assert.equal(test.renderer.getSelection()!.getSelectedText(), expected);
     test.resize(60, 24); await flush(); test.resize(100, 34); await flush();
     assert.equal(test.renderer.getSelection()!.getSelectedText(), expected, 'single-grapheme selection');
@@ -339,11 +411,11 @@ try {
     segments: [{ blockId: 'boundary', contentOffset: 0, role: 'assistant', text, final: false }] });
   test.renderer.clearSelection();
   root.receive({ type: 'display-page', page: selectionPage('alpha beta gamma delta\nsecond row unchanged') }); await flush();
-  await test.mockMouse.drag(5, 4, 10, 4); await flush();
+  await test.mockMouse.drag(sx(5), sy(), sx(10), sy()); await flush();
   test.resize(60, 24); await flush();
   const restoredSelection = test.renderer.getSelection()!;
   assert.equal(restoredSelection.getSelectedText(), 'alpha ');
-  await test.mockMouse.click(22, 4, 0, { modifiers: { ctrl: true } }); await flush();
+  await test.mockMouse.click(sx(22), sy(), 0, { modifiers: { ctrl: true } }); await flush();
   assert.equal(test.renderer.getSelection(), restoredSelection, 'Ctrl extends the existing native selection');
   const extendedText = restoredSelection.getSelectedText(); assert.equal(extendedText, 'alpha beta gamma d');
   test.resize(100, 34); await flush();
@@ -351,9 +423,9 @@ try {
   const reverseRanges: string[] = [];
   for (const reflow of [false, true]) {
     test.renderer.clearSelection();
-    await test.mockMouse.drag(22, 4, 10, 4); await flush();
+    await test.mockMouse.drag(sx(22), sy(), sx(10), sy()); await flush();
     if (reflow) { test.resize(60, 24); await flush(); }
-    await test.mockMouse.click(7, 4, 0, { modifiers: { ctrl: true } }); await flush();
+    await test.mockMouse.click(sx(7), sy(), 0, { modifiers: { ctrl: true } }); await flush();
     reverseRanges.push(test.renderer.getSelection()!.getSelectedText());
     test.resize(100, 34); await flush();
   }
@@ -362,11 +434,11 @@ try {
     for (const behavior of ['word', 'line'] as const) {
       test.renderer.clearSelection();
       root.receive({ type: 'display-page', page: selectionPage(initial) }); await flush();
-      await test.mockMouse.doubleClick(5, 4); await flush();
+      await test.mockMouse.doubleClick(sx(5), sy()); await flush();
       if (behavior === 'line') {
         const leaf = test.renderer.getSelection()!.selectedRenderables[0]!;
-        test.renderer.startSelection(leaf, 5, 4, 'line');
-        test.renderer.updateSelection(leaf, 5, 4, { finishDragging: true }); await flush();
+        test.renderer.startSelection(leaf, sx(5), sy(), 'line');
+        test.renderer.updateSelection(leaf, sx(5), sy(), { finishDragging: true }); await flush();
       }
       assert.equal(test.renderer.getSelection()!.getSelectedText(), initial);
       root.receive({ type: 'display-page', page: selectionPage(appended) }); await flush();
@@ -384,7 +456,7 @@ try {
         for (const reflow of [false, true]) {
           test.renderer.clearSelection(); test.resize(80, 30);
           root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B`) }); await flush();
-          await test.mockMouse.drag(reverse ? 8 : 7, 4, reverse ? 7 : 8, 4); await flush();
+          await test.mockMouse.drag(sx(reverse ? 8 : 7), sy(), sx(reverse ? 7 : 8), sy()); await flush();
           assert.equal(test.renderer.getSelection()!.getSelectedText(), glyph);
           if (reflow) {
             for (const width of [60, 100, 60, 80]) {
@@ -394,7 +466,7 @@ try {
             root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B appended`) }); await flush();
             assert.equal(test.renderer.getSelection()!.getSelectedText(), glyph, 'append does not change a single wide selection');
           }
-          await test.mockMouse.click(target, 4, 0, { modifiers: { ctrl: true } }); await flush();
+          await test.mockMouse.click(sx(target), sy(), 0, { modifiers: { ctrl: true } }); await flush();
           extended.push(test.renderer.getSelection()!.getSelectedText());
         }
         assert.equal(extended[1], extended[0], `single wide ${glyph}, reverse=${reverse}, Ctrl target=${target}`);
@@ -408,12 +480,12 @@ try {
       for (const reflow of [false, true]) {
         test.renderer.clearSelection(); test.resize(80, 30);
         root.receive({ type: 'display-page', page: selectionPage(`A ${glyph} B`) }); await flush();
-        await test.mockMouse.drag(anchorX, 4, focusX, 4); await flush();
+        await test.mockMouse.drag(sx(anchorX), sy(), sx(focusX), sy()); await flush();
         const original = test.renderer.getSelection()!.getSelectedText();
         if (reflow) { test.resize(60, 24); await flush(); test.resize(80, 30); await flush(); }
         assert.equal(test.renderer.getSelection()!.getSelectedText(), original, 'range keeps both halves of a selected glyph');
-        assert.deepEqual(test.renderer.getSelection()!.anchor, { x: anchorX, y: 4 }, 'mouse anchor keeps its actual half-cell');
-        await test.mockMouse.click(ctrlX, 4, 0, { modifiers: { ctrl: true } }); await flush();
+        assert.deepEqual(test.renderer.getSelection()!.anchor, { x: sx(anchorX), y: sy() }, 'mouse anchor keeps its actual half-cell');
+        await test.mockMouse.click(sx(ctrlX), sy(), 0, { modifiers: { ctrl: true } }); await flush();
         extended.push(test.renderer.getSelection()!.getSelectedText());
       }
       assert.equal(extended[1], extended[0], `${glyph}: anchor=${anchorX}, focus=${focusX}, Ctrl=${ctrlX}`);
@@ -424,14 +496,14 @@ try {
     for (const reflow of [false, true]) {
       test.renderer.clearSelection();
       root.receive({ type: 'display-page', page: selectionPage('alpha beta gamma') }); await flush();
-      await test.mockMouse.doubleClick(7, 4); await flush();
+      await test.mockMouse.doubleClick(sx(7), sy()); await flush();
       if (behavior === 'line') {
         const leaf = test.renderer.getSelection()!.selectedRenderables[0]!;
-        test.renderer.startSelection(leaf, 7, 4, 'line');
-        test.renderer.updateSelection(leaf, 7, 4, { finishDragging: true }); await flush();
+        test.renderer.startSelection(leaf, sx(7), sy(), 'line');
+        test.renderer.updateSelection(leaf, sx(7), sy(), { finishDragging: true }); await flush();
       }
       if (reflow) { test.resize(60, 24); await flush(); test.resize(80, 30); await flush(); }
-      await test.mockMouse.click(12, 4, 0, { modifiers: { ctrl: true } }); await flush();
+      await test.mockMouse.click(sx(12), sy(), 0, { modifiers: { ctrl: true } }); await flush();
       extended.push(test.renderer.getSelection()!.getSelectedText());
     }
     assert.equal(extended[1], extended[0], `${behavior}: reflow preserves subsequent native expansion behavior`);
@@ -466,7 +538,7 @@ try {
       await show({ kind: 'configuration', title: '响应设置页', editId: `response-${i}` });
       await observe(`${workload}/return`, () => root!.receive({ type: 'view', view: { generation: ++generation, kind: 'conversation', title: '响应验收', conversationId: 'response' } }), () => text().includes(expected) && text().includes('row '));
       const width = i % 2 ? 100 : 60, height = i % 2 ? 34 : 24;
-      await observe(`${workload}/resize`, () => test.resize(width, height), () => text().split('\n').length >= height && editor().width === width - 8 && text().includes(expected));
+      await observe(`${workload}/resize`, () => test.resize(width, height), () => text().split('\n').length >= height && editor().width === width - 6 && text().includes(expected));
       await flush();
     }
   }

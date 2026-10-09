@@ -18,6 +18,8 @@ import { formatRuleDescription } from "./trust-rule-format.js";
 interface SecurityOptions {
   status: () => Promise<SessionSecurityResult>;
   writer: CliWriter;
+  /** Full-screen surfaces already own the surrounding frame. */
+  framed?: boolean;
 }
 
 export async function handleSecurityCommand(
@@ -61,6 +63,7 @@ async function loadSecuritySnapshot(
 
 async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
   const { writer } = opts;
+  const edge = opts.framed === false ? "" : chalk.bold("│");
   const snapshot = await loadSecuritySnapshot(opts);
   if (!snapshot) return false;
 
@@ -78,56 +81,60 @@ async function showSecurityOverview(opts: SecurityOptions): Promise<boolean> {
   const ctxLabel = formatContextKindLabel(snapshot.contextId);
   const ctxIdDisplay = formatContextIdInline(snapshot.contextId);
 
-  writer.line("");
-  writer.line(chalk.bold("╭─ 安全状态 ─────────────────────────────"));
-  writer.line(chalk.bold("│"));
+  if (opts.framed !== false) {
+    writer.line("");
+    writer.line(chalk.bold("╭─ 安全状态 ─────────────────────────────"));
+  }
+  writer.line(edge);
   writer.line(
-    `${chalk.bold("│")} ${chalk.dim("上下文:")}    ${chalk.cyan(ctxLabel)}` +
+    `${edge} ${chalk.dim("上下文:")}    ${chalk.cyan(ctxLabel)}` +
       (snapshot.workspacePath ? `  ${chalk.dim(snapshot.workspacePath)}` : ""),
   );
-  writer.line(`${chalk.bold("│")} ${chalk.dim("contextId:")} ${chalk.dim(ctxIdDisplay)}`);
-  writer.line(chalk.bold("│"));
-  writer.line(`${chalk.bold("│")} ${chalk.bold("── 策略规则 ──")}`);
+  writer.line(`${edge} ${chalk.dim("contextId:")} ${chalk.dim(ctxIdDisplay)}`);
+  writer.line(edge);
+  writer.line(`${edge} ${chalk.bold("── 策略规则 ──")}`);
   writer.line(
-    `${chalk.bold("│")} 内置: ${snapshot.builtinRules.length} 条 (${chalk.red(`${bypassCount} bypassImmune`)} + ${chalk.yellow(`${confirmCount} confirm`)})`,
+    `${edge} 内置: ${snapshot.builtinRules.length} 条 (${chalk.red(`${bypassCount} bypassImmune`)} + ${chalk.yellow(`${confirmCount} confirm`)})`,
   );
-  writer.line(chalk.bold("│"));
-  writer.line(`${chalk.bold("│")} ${chalk.bold("── 权限规则 ──")}`);
+  writer.line(edge);
+  writer.line(`${edge} ${chalk.bold("── 权限规则 ──")}`);
   writer.line(
-    `${chalk.bold("│")} 会话: ${sessionCount} · 上下文: ${ctxCount} · 全局: ${globalCount}` +
+    `${edge} 会话: ${sessionCount} · 上下文: ${ctxCount} · 全局: ${globalCount}` +
       (denyCount > 0 ? chalk.red(`  (含 ${denyCount} 条 deny)`) : ""),
   );
   if (rules.length > 0) {
-    writer.line(chalk.dim(`${chalk.bold("│")} Tip: /trust 查看详情`));
+    writer.line(chalk.dim(`${edge} Tip: /trust 查看详情`));
   }
-  writer.line(chalk.bold("│"));
-  writer.line(`${chalk.bold("│")} ${chalk.bold("── 频率限制（最近窗口）──")}`);
+  writer.line(edge);
+  writer.line(`${edge} ${chalk.bold("── 频率限制（最近窗口）──")}`);
   if (snapshot.rateLimits.length === 0) {
-    writer.line(`${chalk.bold("│")} ${chalk.dim("(无活动)")}`);
+    writer.line(`${edge} ${chalk.dim("(无活动)")}`);
   } else {
     for (const entry of snapshot.rateLimits.slice(0, 8)) {
       const pct = entry.used / entry.limit;
       const bar =
         pct > 0.8 ? chalk.red : pct > 0.5 ? chalk.yellow : chalk.green;
       writer.line(
-        `${chalk.bold("│")}   ${chalk.cyan(entry.key.padEnd(10))} ${bar(`${entry.used}/${entry.limit}`)}`,
+        `${edge}   ${chalk.cyan(entry.key.padEnd(10))} ${bar(`${entry.used}/${entry.limit}`)}`,
       );
     }
   }
-  writer.line(chalk.bold("│"));
-  writer.line(`${chalk.bold("│")} ${chalk.bold("── 确认追踪 ──")}`);
+  writer.line(edge);
+  writer.line(`${edge} ${chalk.bold("── 确认追踪 ──")}`);
   if (snapshot.confirmations.length === 0) {
-    writer.line(`${chalk.bold("│")} ${chalk.dim("(无累计)")}`);
+    writer.line(`${edge} ${chalk.dim("(无累计)")}`);
   } else {
     for (const entry of snapshot.confirmations.slice(0, 8)) {
       const keyShort = entry.key.replace(/^bash::/, "").slice(0, 30);
       writer.line(
-        `${chalk.bold("│")}   ${chalk.cyan(keyShort.padEnd(30))} ${entry.count} 次 ${chalk.dim(`(${entry.highestRisk})`)}`,
+        `${edge}   ${chalk.cyan(keyShort.padEnd(30))} ${entry.count} 次 ${chalk.dim(`(${entry.highestRisk})`)}`,
       );
     }
   }
-  writer.line(chalk.bold("╰────────────────────────────────────────"));
-  writer.line("");
+  if (opts.framed !== false) {
+    writer.line(chalk.bold("╰────────────────────────────────────────"));
+    writer.line("");
+  }
   return true;
 }
 

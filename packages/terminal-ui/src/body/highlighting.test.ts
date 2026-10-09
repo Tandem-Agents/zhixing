@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ requests: [] as { text: string; resolve: (value: unknown) => void; reject: (error: Error) => void }[],
   destroy: vi.fn(), styleDestroy: vi.fn(), styleCreate: vi.fn() }));
 vi.mock('@opentui/core', () => ({
+  RGBA: { fromIndex: (index: number) => index, defaultForeground: () => 'default' },
   SyntaxStyle: { fromStyles: () => { state.styleCreate(); return { destroy: state.styleDestroy }; } },
   StyledText: class { constructor(readonly chunks: unknown[]) {} },
   TreeSitterClient: class {

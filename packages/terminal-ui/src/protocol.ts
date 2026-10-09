@@ -142,10 +142,17 @@ export interface TerminalChoice {
   readonly danger?: boolean;
   readonly hotkey?: string;
   readonly detailsActionId?: string;
+  readonly section?: string;
+  readonly sectionDescription?: string;
+  readonly presentation?: 'button';
+  readonly primary?: boolean;
+  readonly shortcut?: string;
+  readonly status?: 'ready' | 'pending' | 'disabled';
 }
 
 export interface TerminalDisplaySegment {
   readonly blockId: string;
+  readonly groupId?: string;
   readonly contentOffset: number;
   readonly role: string;
   readonly text: string;
@@ -179,12 +186,16 @@ export interface TerminalView {
   readonly displayPaused?: boolean;
   readonly requestId?: string;
   readonly editId?: string;
+  readonly configurationHome?: boolean;
+  readonly chromeDescription?: string;
+  readonly chromeDetails?: readonly string[];
   readonly choices?: readonly TerminalChoice[];
   readonly selectionLayer?: 'select' | 'input' | 'confirm' | 'details';
   readonly initialItemId?: string;
   readonly detailsActionId?: string;
   readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean };
   readonly connected?: boolean;
+  readonly connectionState?: 'starting' | 'unavailable';
   readonly environment?: { readonly provider: string; readonly model: string; readonly workspace: string | null };
   readonly busy?: boolean;
   readonly skills?: TerminalSkillsView;

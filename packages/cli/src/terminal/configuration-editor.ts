@@ -4,7 +4,7 @@ import type { TerminalAction, TerminalChoice, TerminalView } from '@zhixing/term
 import type { ConfigurationEditResult, NodeConfigurationEditSession } from '../runtime/configuration-edit.js';
 import type { ConfigModelContext, ConfigEditorRuntime, PanelAction, PanelDescriptor, SectionId, WorkingState } from '../config-editor/types.js';
 import { createInitialState, setInputBuffer, isMcpServerEnabled, readMcpServer } from '../config-editor/state.js';
-import { buildOptions, handleMainPanelKey } from '../config-editor/model/main.js';
+import { buildOptions, collectAllIssues, handleMainPanelKey } from '../config-editor/model/main.js';
 import { resolveListMeta, handleListPanelKey } from '../config-editor/model/list.js';
 import { resolveEntityMeta, handleEntityPanelKey } from '../config-editor/model/entity.js';
 import { resolveInputField, resolveBudgetRange, handleInputPanelKey, handleAddModelPanelKey, handleThinkingBudgetPanelKey } from '../config-editor/model/input.js';
@@ -50,6 +50,7 @@ export class TerminalConfigurationEditor {
     title: string;
     sections: SectionId[];
     runtime?: ConfigEditorRuntime;
+    headerDetails?: readonly string[];
     publish(view: SurfaceView): Promise<void>;
   }) {
     this.#state = { ...createInitialState(options.session.initialConfig, options.session.initialCredentials),
@@ -208,36 +209,48 @@ export class TerminalConfigurationEditor {
     this.#probeBlocked = false;
     const choices: TerminalChoice[] = [];
     let targetPaging = false;
-    let title = this.options.title, message = '', field: TerminalView['field'];
+    let title = this.options.title, message = '', chromeDescription = '', field: TerminalView['field'];
     const add = (label: string, detail?: string, danger?: boolean) => choices.push({ id: `select:${choices.length}`, label, detail, danger });
     switch (panel.kind) {
       case 'main': {
-        const { options } = buildOptions(this.#context, this.#state);
-        for (const option of options) add(option.label, option.kind === 'section-entry' ? [option.status.text, ...option.issues].join(' · ') : undefined);
-        message = '完成后保存；取消会丢弃本次编辑。'; break;
+        const { sections, options } = buildOptions(this.#context, this.#state);
+        const pending = collectAllIssues(sections).length;
+        for (const option of options) {
+          add(option.kind === 'button' ? option.action === 'complete' ? '完成' : '取消' : option.label,
+            option.kind === 'section-entry' ? option.status.text : option.action === 'cancel' ? '退出' : pending ? '请先补全必填项' : '保存并启动');
+          const choice = choices[choices.length - 1]!;
+          choices[choices.length - 1] = { ...choice,
+            ...(option.kind === 'section-entry'
+              ? { section: sections.find(item => item.section.id === option.sectionId)?.section.title,
+                  sectionDescription: sections.find(item => item.section.id === option.sectionId)?.section.description, status: option.status.level }
+              : { section: '操作', presentation: 'button' as const, primary: option.action === 'complete' && pending === 0,
+                  shortcut: option.action === 'complete' ? 'Ctrl+S' : 'Esc' }) };
+        }
+        break;
       }
       case 'provider-list': case 'model-list': case 'thinking-config': {
         const meta = resolveListMeta(this.#state, panel)!;
-        title = meta.title; message = meta.description;
+        title = meta.title; chromeDescription = meta.description;
         for (const item of meta.items) add(`${item.current ? '● ' : ''}${item.label}`, item.description);
         break;
       }
       case 'provider-config': case 'channel-config': {
         const meta = resolveEntityMeta(this.#state, panel)!;
-        title = meta.title; message = meta.description;
+        title = meta.title; chromeDescription = meta.description;
         for (const row of meta.rows) {
           // Probe the pure transition only; never project masked secret tails.
           const target = row.onEnter(this.#state).action;
           const input = target.type === 'navigate' && target.panel.kind === 'input' ? resolveInputField(target.panel.fieldId, this.#state) : undefined;
           add(row.label, input ? (input.currentValue(this.#state) ? '已设置 · 可替换' : '待填写') : row.status.text);
+          choices[choices.length - 1] = { ...choices[choices.length - 1]!, status: row.status.level };
         }
-        for (const button of meta.buttons) add(button.label, button.hint);
+        for (const button of meta.buttons) { add(button.label, button.hint); choices[choices.length - 1] = { ...choices[choices.length - 1]!, presentation: 'button', primary: button.primary }; }
         break;
       }
       case 'input': {
         const meta = resolveInputField(panel.fieldId, this.#state);
         if (!meta) throw Error('未知配置字段。');
-        title = meta.title; message = [meta.hint, meta.example, meta.docUrl].filter(Boolean).join('\n');
+        title = meta.title; chromeDescription = meta.hint; message = [meta.example, meta.docUrl].filter(Boolean).join('\n');
         field = { id: panel.fieldId, label: meta.title, secret: meta.sensitive, configured: !!meta.currentValue(this.#state),
           ...(!meta.sensitive ? { value: this.#state.inputBuffer || meta.currentValue(this.#state) || '' } : {}) };
         break;
@@ -297,7 +310,9 @@ export class TerminalConfigurationEditor {
     if (!targetPaging && (this.#page + 1) * PAGE_ITEMS < choices.length) visible.push({ id: 'next', label: '下一页' });
     this.#choices = new Set(visible.map(choice => choice.id));
     this.#fieldId = field?.id; this.#fieldSecret = field?.secret ?? false;
-    this.#current = { kind: 'configuration', editId: this.editId, title: this.#safe(title),
+    this.#current = { kind: 'configuration', editId: this.editId, title: this.#safe(title), configurationHome: panel.kind === 'main',
+      chromeDescription: chromeDescription ? this.#safe(chromeDescription) : undefined,
+      chromeDetails: panel.kind === 'main' ? this.options.headerDetails?.map(value => this.#safe(value)) : undefined,
       message: targetPaging ? boundMessage([message, this.#error ? this.#safe(this.#error) : ''].filter(Boolean).join('\n'))
         : this.#safe([message, this.#error].filter(Boolean).join('\n')), field,
       choices: visible.map(choice => ({ ...choice, label: this.#safe(choice.label), detail: choice.detail ? this.#safe(choice.detail) : undefined })) };

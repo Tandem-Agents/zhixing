@@ -63,7 +63,9 @@ describe('terminal decision commands', () => {
     const f = fixture();
     await f.owner.run('security', ''); await f.owner.run('security', 'rules'); await f.owner.run('security', 'help');
     expect(f.management.securityStatus).toHaveBeenCalledTimes(2);
-    expect(f.text()).toContain('安全状态'); expect(f.text()).toContain('策略规则'); expect(f.text()).toContain('/security rules');
+    expect(f.choose.mock.calls[0]![0].title).toBe('安全状态');
+    expect(f.text()).not.toContain('╭─ 安全状态');
+    expect(f.text()).toContain('策略规则'); expect(f.text()).toContain('/security rules');
     f.management.securityStatus.mockRejectedValueOnce(Error('offline'));
     await f.owner.run('security', '');
     expect(f.text()).toContain('安全状态不可用'); expect(f.text()).toContain('offline');

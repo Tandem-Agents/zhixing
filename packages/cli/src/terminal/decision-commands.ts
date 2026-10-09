@@ -70,7 +70,7 @@ export class TerminalDecisionCommands {
       if (name === 'security' || name === 'trust') {
         const collected = collectText(scope);
         const succeeded = name === 'security' ? await handleSecurityCommand(argument, {
-          writer: collected.writer,
+          writer: collected.writer, framed: false,
           status: async () => {
             scope.assertCurrent();
             const result = await this.options.management.securityStatus(conversationId);

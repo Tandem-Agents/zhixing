@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { SyntaxStyle, TreeSitterClient, StyledText, treeSitterToTextChunks } from '@opentui/core';
 import type { BodyRenderBlock } from './layout.js';
+import { tone } from '../theme.js';
 
 const languages: Readonly<Record<string, string>> = { js: 'javascript', javascript: 'javascript', jsx: 'javascript',
   ts: 'typescript', typescript: 'typescript', tsx: 'typescript', zig: 'zig' };
@@ -19,9 +20,9 @@ export class BodyHighlighter {
     if (!assets || !path.isAbsolute(assets)) throw Error('terminal-body-parser-assets');
     this.#changed = changed; this.#failed = failed;
     this.#style = SyntaxStyle.fromStyles({
-      keyword: { fg: '#c8a7d8' }, string: { fg: '#a5c59b' }, comment: { fg: '#858585', italic: true },
-      number: { fg: '#d4b48c' }, function: { fg: '#91b9c6' }, type: { fg: '#c8ba89' },
-      punctuation: { fg: '#b0b0b0' }, variable: { fg: '#dddddd' }, default: { fg: '#dddddd' },
+      keyword: { fg: tone.codeKeyword }, string: { fg: tone.codeString }, comment: { fg: tone.dim, italic: true },
+      number: { fg: tone.codeNumber }, function: { fg: tone.codeFunction }, type: { fg: tone.codeType },
+      punctuation: { fg: tone.text }, variable: { fg: tone.text }, default: { fg: tone.text },
     });
     // The build supplies the pinned read-only worker: it reads these admitted
     // assets and has no runtime download/cache writer path.

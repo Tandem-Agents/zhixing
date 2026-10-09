@@ -1,3 +1,4 @@
+import { tone } from './theme.js';
 import { createEffect, createMemo, For, onCleanup, Show } from 'solid-js';
 import {
   skillsActionForKey, skillsDisplayText, skillsPageSize, skillsVisibleItems, validateSkillsView,
@@ -68,19 +69,19 @@ export function SkillsView(props: SkillsViewProps) {
     const action = skillsActionForKey(view(), { name: direction }, safe());
     if (action) send(action);
   }}>
-    <text height={1} fg="#69b5a5">共 {view().total} 个技能{view().total ? ` · ${view().selectedIndex + 1}/${view().total}` : ''}{view().busy ? ' · 正在处理…' : ''}</text>
+    <text height={1} fg={tone.brand}>共 {view().total} 个技能{view().total ? ` · ${view().selectedIndex + 1}/${view().total}` : ''}{view().busy ? ' · 正在处理…' : ''}</text>
     <Show when={safe()} fallback={<text height={1} wrapMode="none" truncate>{hint('Esc 返回 · 请放大窗口以浏览技能', 'Esc 返回 · 请放大窗口', 'Esc 返回')}</text>}>
       <box flexGrow={1} flexDirection="column" overflow="hidden">
         <Show when={view().total > 0} fallback={<text>{view().state === 'loading' ? '正在读取技能…' : view().state === 'error' ? '技能暂不可用，按 r 重试。' : '还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能，即可在此管理。'}</text>}>
-          <For each={items()}>{item => <box flexDirection="column" height={2} backgroundColor={item.id === view().selectedId ? '#304c45' : undefined}>
-            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? '#69b5a5' : '#e1e7e4'}>{item.id === view().selectedId ? '› ' : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
-            <text height={1} wrapMode="none" truncate fg="#9aa8a1">  [{item.mode}] {item.source}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
+          <For each={items()}>{item => <box flexDirection="column" height={2} backgroundColor={item.id === view().selectedId ? tone.selected : undefined}>
+            <text height={1} wrapMode="none" truncate fg={item.id === view().selectedId ? tone.brand : tone.text}>{item.id === view().selectedId ? '› ' : '  '}{item.pinned ? '★' : ' '}{item.disabled ? '⊘' : ' '} {skillsDisplayText(item.id)}</text>
+            <text height={1} wrapMode="none" truncate fg={tone.dim}>  [{item.mode}] {item.source}{item.hitCount === null ? '' : ` · ${item.hitCount} 次`} · {skillsDisplayText(item.description)}</text>
           </box>}</For>
         </Show>
       </box>
-      <Show when={view().message}><text height={2} fg={view().state === 'error' ? '#e7ba70' : '#9aa8a1'}>{skillsDisplayText(view().message ?? '')}</text></Show>
-      <text height={1} wrapMode="none" truncate fg="#9aa8a1">{hint('Esc 返回 · ↑↓ 导航 · PgUp/PgDn 翻页 · r 刷新', 'Esc返回 ↑↓选择 PgUp/Dn翻页 r刷新', 'Esc返回 ↑↓选择 r刷新')}</text>
-      <text height={1} wrapMode="none" truncate fg="#9aa8a1">{hint('p 置顶 · d 禁用 · m 改 mode · a 归档', 'p置顶 d禁用 m模式 a归档')}</text>
+      <Show when={view().message}><text height={2} fg={view().state === 'error' ? tone.warn : tone.dim}>{skillsDisplayText(view().message ?? '')}</text></Show>
+      <text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('Esc 返回 · ↑↓ 导航 · PgUp/PgDn 翻页 · r 刷新', 'Esc返回 ↑↓选择 PgUp/Dn翻页 r刷新', 'Esc返回 ↑↓选择 r刷新')}</text>
+      <text height={1} wrapMode="none" truncate fg={tone.dim}>{hint('p 置顶 · d 禁用 · m 改 mode · a 归档', 'p置顶 d禁用 m模式 a归档')}</text>
     </Show>
   </box>;
 }

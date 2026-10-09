@@ -10,6 +10,15 @@ const request: SelectionRequest = { title: '选择', initialValue: 'other', deta
 ] };
 
 describe('terminal selection contract', () => {
+  it('preserves the requested actions without adding a duplicate dismissal; Escape still cancels', async () => {
+    const result = await chooseTerminalSelection({ title: '停止', options: [
+      { value: 'stop', label: '停止' }, { value: 'cancel', label: '返回' },
+    ] }, async page => {
+      expect(page.choices?.map(choice => choice.label)).toEqual(['停止', '返回']);
+      return cancelled('escape');
+    });
+    expect(result).toEqual({ kind: 'cancelled', cause: 'escape' });
+  });
   it('projects explicit initial item, hotkeys and details independently from activation', async () => {
     const pages: TerminalSelectionPage[] = [];
     const answers = [{ itemId: 'details:other' }, { itemId: 'return' }, cancelled('escape')];

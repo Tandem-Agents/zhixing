@@ -38,6 +38,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
+    './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2 } },
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
   const jsx = (type: string | ((props: Record<string, unknown>) => unknown), props: Record<string, unknown> | null, ...children: unknown[]) => {

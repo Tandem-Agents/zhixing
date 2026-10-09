@@ -2,6 +2,8 @@ import { bodyWindows, visibleBodyText, type BodyAnchor, type BodyNode, type Body
 
 export interface BodyRenderBlock {
   readonly key: string; readonly blockId: string; readonly role: string;
+  readonly groupId?: string;
+  readonly gapBefore?: number;
   readonly node: BodyNode; readonly text: string; readonly runs: readonly BodyRun[];
 }
 /** A wire page replaces its objects, not every native leaf. Reuse only exact
@@ -11,7 +13,7 @@ export function retainBodyBlocks(next: readonly BodyRenderBlock[], previous: rea
   const result = next.map(block => {
     const prior = old.get(block.key);
     if (prior === block) return block;
-    if (!prior || prior.role !== block.role || prior.text !== block.text) return block;
+    if (!prior || prior.role !== block.role || prior.text !== block.text || prior.groupId !== block.groupId || prior.gapBefore !== block.gapBefore) return block;
     const { runs: _a, ...a } = block.node, { runs: _b, ...b } = prior.node;
     if (JSON.stringify(a) !== JSON.stringify(b) || JSON.stringify(block.runs) !== JSON.stringify(prior.runs)) return block;
     return prior;
@@ -31,7 +33,7 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
       projected = window.context.nodes.map(node => {
         const runs = node.runs.map(run => ({ ...run, text: visibleBodyText(run.text) }));
         return { key: `${window.blockId}:${node.origin ?? node.from}:${node.kind}`, blockId: window.blockId, role: window.role,
-          node, runs, text: runs.map(run => run.text).join('') };
+          groupId: segment.groupId ?? segment.blockId, node, runs, text: runs.map(run => run.text).join('') };
       });
       cache?.set(segment, projected);
     }
@@ -45,7 +47,14 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     } else result.push(block);
     }
   }
-  return result;
+  return result.map((block, index) => {
+    const previous = result[index - 1];
+    const differentGroup = previous && previous.groupId !== block.groupId;
+    // Source blank nodes already supply their own row. A message boundary
+    // contributes at most one row and never changes source/copy offsets.
+    const gapBefore = differentGroup && previous.node.kind !== 'space' && block.node.kind !== 'space' ? 1 : 0;
+    return { ...block, gapBefore };
+  });
 }
 export function renderedToSource(block: BodyRenderBlock, offset: number): BodyAnchor {
   let position = 0;

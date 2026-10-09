@@ -314,8 +314,8 @@ class TerminalApplication {
       this.#sessionCommands?.invalidate();
       this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#candidates.close();
       this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;
-      this.#mainView = { ...this.#mainView, connected: false, message: '连接已断开。可查看已有内容、编辑本机配置或显式重试。',
-        choices: [{ id: 'retry', label: '重试连接' }, { id: 'config', label: '本机配置' }, { id: 'exit', label: '退出终端' }] };
+      this.#mainView = { ...this.#mainView, connected: false, busy: false, connectionState: 'unavailable',
+        message: '连接已断开，输入与已有内容保留。按 Enter 重试。', choices: undefined };
       if (!this.#editor && !this.#operation) void this.#publish(this.#mainView).catch(() => this.#close(70, 'view-undelivered'));
     });
   }
@@ -560,7 +560,11 @@ class TerminalApplication {
   }
 
   async #startup(): Promise<void> {
-    await this.#publish({ kind: 'conversation', title: '知行', message: '正在连接本机服务…', busy: true, connected: false });
+    // A connection notice ends with that attempt. Clear its stored projection,
+    // not just the transient starting frame; later business notices survive.
+    if (this.#mainView.connectionState) this.#mainView = { ...this.#mainView, message: undefined };
+    await this.#publish({ ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
+      message: undefined, choices: undefined, busy: true, connected: false, connectionState: 'starting' });
     this.#invalidateAuxiliary();
     this.#holdNoticeDisplay();
     try {
@@ -671,7 +675,7 @@ class TerminalApplication {
       this.#ensureSessionBinding();
       if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
     }
-    this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined };
+    this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined };
     this.#startupWatch = undefined;
     this.#historyReturn = undefined;
     await this.#publish(this.#mainView);
@@ -687,9 +691,9 @@ class TerminalApplication {
 
   async #unavailable(message: string): Promise<void> {
     this.#invalidateAuxiliary();
-    this.#mainView = { kind: 'unavailable', title: '知行 · 连接暂不可用', message,
-      connected: false, choices: [{ id: 'retry', label: '重试连接' }, { id: 'history-open', label: '查看本机历史' },
-        { id: 'config', label: '编辑本机配置' }, { id: 'exit', label: '退出终端' }] };
+    this.#mainView = { ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
+      message: `${message} 输入与已有内容保留，可重试。`, busy: false,
+      connected: false, connectionState: 'unavailable', choices: undefined };
     await this.#publish(this.#mainView);
   }
 
@@ -1195,7 +1199,7 @@ class TerminalApplication {
     // notification. Waiting for send acceptance retains only this summary.
     const completion = turn.outcome;
     this.#state.activeTurnPromise = completion;
-    this.#mainView = { ...this.#mainView, busy: true, message: turn.advancementContinuation ? '已作为当前任务的补充继续推进。' : '正在处理…' };
+    this.#mainView = { ...this.#mainView, busy: true, message: turn.advancementContinuation ? '已作为当前任务的补充继续推进。' : undefined };
     void this.#publish(this.#mainView).catch(() => {});
     const settled = completion.then(async outcome => {
       this.#processSession.end(conversationId, turnId, runId);
@@ -1236,7 +1240,9 @@ class TerminalApplication {
     const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
-    const editor = new TerminalConfigurationEditor({ session, title, sections, runtime, publish: view => this.#publish(view) });
+    const editor = new TerminalConfigurationEditor({ session, title, sections, runtime,
+      headerDetails: [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'],
+      publish: view => this.#publish(view) });
     this.#editor = editor;
     try { return await editor.run(); }
     finally { editor.dispose(); if (this.#editor === editor) this.#editor = undefined; }
@@ -1285,7 +1291,7 @@ class TerminalApplication {
     this.#resolvedLocalView = undefined;
     if (reconnected) await this.#localView.refresh();
     this.#mainView = { ...this.#mainView, message, connected: reconnected, busy: false,
-      ...(reconnected ? { choices: undefined } : {}) };
+      connectionState: reconnected ? undefined : 'unavailable', choices: undefined };
     void this.#tasks?.refresh();
     await this.#publish(this.#mainView);
   }
@@ -1528,8 +1534,8 @@ class TerminalApplication {
   #deletedCurrent(): void {
     this.#invalidateConversation();
     this.#controller?.dispose(); this.#controller = undefined; this.#sessionCommands = undefined; this.#history = undefined;
-    this.#mainView = { kind: 'unavailable', title: '知行 · 对话已删除', message: '当前对话已删除，重新连接后可打开可用对话。', busy: false, connected: false,
-      choices: [{ id: 'retry', label: '打开可用对话' }, { id: 'exit', label: '退出终端' }] };
+    this.#mainView = { kind: 'conversation', title: '知行', message: '当前对话已删除，按 Enter 打开可用对话。',
+      busy: false, connected: false, connectionState: 'unavailable' };
   }
 
   async #conversationChanged(advancement?: SessionAdvancementStateSnapshot): Promise<void> {
@@ -1654,7 +1660,14 @@ class TerminalApplication {
     if (name === 'skills') { this.#background(() => this.#showSkills()); return { accepted: true }; }
     if (['trust', 'security', 'advancement', 'resolve'].includes(name)) { this.#background(() => this.#decision(name, argument)); return { accepted: true }; }
     if (name === 'help') {
-      await this.#publish({ ...this.#mainView, message: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`).join('\n') });
+      this.#background(() => this.#selectionFlow(async () => {
+        try {
+          await chooseTerminalSelection({ title: '命令帮助',
+            body: this.#candidates.registry.list(this.#candidates.runtime()).map(command => `/${command.name}  ${command.description}`),
+            options: [{ value: 'return', label: '返回对话' }],
+          }, view => this.#choosePage(view));
+        } finally { if (!this.#abort.signal.aborted) await this.#publish(this.#mainView); }
+      }));
       return { accepted: true };
     }
     throw Error('命令不可用，请用 /help 查看当前支持的命令。');

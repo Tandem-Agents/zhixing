@@ -150,40 +150,17 @@ export function processThinkingBodyBlock(block: BodyRenderBlock, columns: number
 }
 
 /** Normalizes only accepted process blocks for the actual BodyView width.
- * Diff lines remain independently selectable and never implicitly wrap. */
+ * Diff lines retain all source characters; U's shared soft wrap owns geometry. */
 export function processBodyBlock(block: BodyRenderBlock, columns: number): BodyRenderBlock {
   if (block.role === 'thinking') return processThinkingBodyBlock(block, columns);
-  if (block.role !== 'tool-diff') return block;
-  const runs: BodyRun[] = [];
-  const coordinate = (offset: number): number => {
-    let position = 0;
-    for (const run of block.runs) {
-      if (offset <= position + run.text.length) return run.from + Math.min(run.to - run.from, Math.max(0, offset - position));
-      position += run.text.length;
-    }
-    return block.runs.at(-1)?.to ?? block.node.to;
-  };
-  let from = 0;
-  while (from < block.text.length) {
-    const newline = block.text.indexOf('\n', from), to = newline < 0 ? block.text.length : newline;
-    const line = processLine(block.text.slice(from, to), columns);
-    runs.push({ from: coordinate(from), to: coordinate(from + line.length), text: line, style: 0 });
-    if (newline >= 0) runs.push({ from: coordinate(newline), to: coordinate(newline + 1), text: '\n', style: 0 });
-    from = to + 1;
-  }
-  return { ...block, text: runs.map(run => run.text).join(''), runs, node: { ...block.node, runs } };
+  return block;
 }
 
 /** U-local colors; never stored in the cache or passed as terminal escapes. */
-export function processBodyColor(role: string, text: string): string | undefined {
-  if (role === 'tool-error') return '#ef9c9c';
-  if (role === 'tool-action') return '#69b5a5';
-  if (role === 'tool') return '#9aa8a1';
-  if (role === 'tool-diff') {
-    if (text.startsWith('+ ')) return '#84c7a2';
-    if (text.startsWith('- ')) return '#ef9c9c';
-    if (text.startsWith('@@') || text.startsWith('◆')) return '#69b5a5';
-    return '#9aa8a1';
-  }
+export function processBodyColor(role: string, _text: string): 'error' | 'brand' | 'dim' | 'success' | undefined {
+  if (role === 'tool-error') return 'error';
+  if (role === 'tool-action') return 'brand';
+  if (role === 'tool') return 'dim';
+  if (role === 'tool-diff') return 'dim';
   return undefined;
 }

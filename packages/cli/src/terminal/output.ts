@@ -3,7 +3,7 @@ import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { textFragments } from './history-segments.js';
 import { TerminalBodyProjection, type BodyAmend } from './body-projection.js';
-import { BODY_PROJECTION_WORK_BYTES } from '@zhixing/terminal-ui/body-model';
+import { BODY_PROJECTION_WORK_BYTES, sliceBodyNodes, type BodyFragmentMetadata, type BodyNode, type BodyRun } from '@zhixing/terminal-ui/body-model';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
 import type { ProcessBlock } from './process-presentation.js';
 
@@ -13,6 +13,7 @@ const OUTPUT_PREFIX_BYTES = 8 * 1024 * 1024;
 
 interface Stream { readonly key: string; block: number; assistantUnits: number; role?: string }
 interface BodyCommand { readonly blockId: string; readonly role: string; readonly text: string; readonly end: boolean;
+  readonly body?: BodyFragmentMetadata;
   /** Complete plain display content, whose source can no longer be amended. */
   readonly snapshotOffset?: number }
 export interface TerminalOutputBody {
@@ -105,8 +106,32 @@ export class TerminalOutputProjection {
   appendProcessBlock(block: ProcessBlock): void {
     if (this.#closed || this.#paused) return;
     const blockId = this.#generation ? `${block.blockId}:display-${this.#generation}` : block.blockId;
-    for (const part of textFragments(block.text)) this.#enqueue({ blockId, role: block.role, text: part.text,
-      end: part.final, snapshotOffset: part.offset });
+    for (const part of textFragments(block.text)) {
+      const runs: BodyRun[] = []; let at = part.offset;
+      const end = at + part.text.length;
+      const add = (to: number, semantic?: BodyRun['semantic']) => {
+        if (to > at) runs.push({ from: at, to, text: block.text.slice(at, to), style: 0, ...(semantic ? { semantic } : {}) }); at = to;
+      };
+      for (const span of block.spans ?? []) {
+        if (span.to <= at || span.from >= end) continue;
+        add(Math.max(at, span.from)); add(Math.min(end, span.to), span.semantic);
+      }
+      add(end);
+      const nodes: BodyNode[] = block.lines ? block.lines.filter(line => line.to > part.offset &&
+        (line.from < end || part.final && line.from === end && line.decoration !== undefined)).map(line => {
+        const from = Math.max(part.offset, line.from), to = Math.min(end, line.to);
+        // The source newline belongs to the row boundary, not a second blank
+        // visual line. Source coordinates retain it for range continuity.
+        // A final empty diff row has no character range, but still owns its
+        // gutter at EOF. Only the final fragment may carry that zero-width row.
+        const contentEnd = to > from && block.text[to - 1] === '\n' ? to - 1 : to;
+        const row = sliceBodyNodes([{ from: part.offset, to: end, kind: 'paragraph', runs }], from, contentEnd)[0];
+        return { from, to, origin: line.from, kind: 'paragraph', runs: row?.runs ?? [],
+          anchor: line.from === 0 && from === 0 && block.role !== 'thinking', decoration: line.decoration };
+      }) : [{ from: part.offset, to: end, origin: 0, kind: 'paragraph', anchor: part.offset === 0 && block.role !== 'thinking', runs }];
+      this.#enqueue({ blockId, role: block.role, text: part.text, end: part.final, snapshotOffset: part.offset,
+        body: { version: 1, revision: 0, kind: 'plain', end: part.final, context: { nodes } } });
+    }
     this.#schedule();
   }
   async reset(current: () => boolean): Promise<void> {
@@ -176,7 +201,7 @@ export class TerminalOutputProjection {
           if (this.#closed || this.#paused) return;
           if (command.snapshotOffset !== undefined) {
             await this.append({ blockId: command.blockId, role: command.role, text: command.text,
-              contentOffset: command.snapshotOffset, final: command.end });
+              contentOffset: command.snapshotOffset, final: command.end, body: command.body }, true);
             return;
           }
           let parser = this.#parsers.get(command.blockId);

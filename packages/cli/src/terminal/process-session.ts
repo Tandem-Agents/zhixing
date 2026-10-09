@@ -78,7 +78,7 @@ export class TerminalProcessSession {
       } else if (value.event === 'orchestration:run_end' && value.payload.status !== 'completed') {
         text = `多视角评议未完成：${processText(value.payload.error ?? value.payload.status, 1024)}`;
       }
-      if (text && !this.#paused) this.ports.block({ blockId: `event-notice:${JSON.stringify([event.conversationId, event.runId, this.#generation, event.seq])}`, role: 'process', text: `◆ ${text}` });
+      if (text && !this.#paused) this.ports.block({ blockId: `event-notice:${JSON.stringify([event.conversationId, event.runId, this.#generation, event.seq])}`, role: 'process', text: `${text}` });
     } catch { this.ports.gap('多视角进度暂不可显示，请核对最终结果。'); }
     return true;
   }

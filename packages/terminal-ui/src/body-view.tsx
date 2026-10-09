@@ -1,6 +1,7 @@
+import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
 import { extend } from '@opentui/solid';
-import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, RGBA, ScrollBoxRenderable,
+import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, ScrollBoxRenderable,
   TextRenderable, type CliRenderer, type TextChunk, type MouseEvent,
 } from '@opentui/core';
 import { BODY_STYLE, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
@@ -72,12 +73,13 @@ export interface BodyViewProps {
   readonly onError: (error: unknown) => void;
   readonly onReady?: (handle: BodyViewHandle | undefined) => void;
 }
-const teal = RGBA.fromHex('#69b5a5'), gray = RGBA.fromHex('#9b9b9b'), codeBackground = RGBA.fromHex('#303030');
+const teal = tone.brand, gray = tone.dim, codeBackground = tone.history;
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 function styled(block: BodyRenderBlock): StyledText {
   return new StyledText(block.runs.map(run => ({ __isChunk: true, text: run.text,
     link: run.href ? { url: run.href } : undefined,
-    fg: processBodyColor(block.role, run.text) ? RGBA.fromHex(processBodyColor(block.role, run.text)!) : (run.style & BODY_STYLE.link) ? teal : block.role === 'user' ? gray : undefined,
+    fg: run.semantic ? tone[run.semantic === 'added' ? 'success' : run.semantic === 'removed' ? 'error' : 'brand'] :
+      processBodyColor(block.role, '') ? tone[processBodyColor(block.role, '')!] : (run.style & BODY_STYLE.link) ? teal : block.role === 'thinking' ? gray : tone.text,
     bg: (run.style & BODY_STYLE.code) ? codeBackground : undefined,
     attributes: createTextAttributes({ bold: !!(run.style & BODY_STYLE.bold), italic: !!(run.style & BODY_STYLE.italic),
       strikethrough: !!(run.style & BODY_STYLE.strike), underline: !!(run.style & BODY_STYLE.link), dim: !!(run.style & BODY_STYLE.dim) }),
@@ -120,15 +122,16 @@ export function BodyView(props: BodyViewProps) {
         if (block.node.kind === 'table') {
           const columns = block.node.columns ?? 1, stacked = width < columns * 6;
           const cellWidth = stacked ? width - 2 : Math.floor((width - 2) / columns);
-          const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, cellWidth - 1));
+          const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, cellWidth - 1) +
+            (stacked && !block.node.header ? rows(`${block.node.labels?.[cell] ?? `列 ${cell + 1}`}：`, cellWidth - 1) : 0));
           height = 1 + (stacked ? sizes.reduce((sum, size) => sum + size, 0) : Math.max(1, ...sizes));
         } else if (!['rule', 'space'].includes(block.node.kind)) {
-          const indent = block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) : 0;
-          height = rows(block.text, width - 4 - indent);
+          const indent = block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) * spacing.nested : 0;
+          height = rows(block.text, width - spacing.marker - indent - (block.node.decoration?.length ?? 0));
         }
         cached = { width, height }; measured.set(block, cached);
       }
-      const item = { key: block.key, top, height: cached.height }; top += cached.height; return item;
+      const item = { key: block.key, top, height: cached.height + (block.gapBefore ?? 0) }; top += item.height; return item;
     });
   });
   const visible = createMemo(() => {
@@ -363,7 +366,7 @@ export function BodyView(props: BodyViewProps) {
     release();
     void highlighter.close().catch(() => {}); // close() exposes the same promise to the root lifecycle owner.
   });
-  const indent = (block: BodyRenderBlock) => block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) : 0;
+  const indent = (block: BodyRenderBlock) => block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) * spacing.nested : 0;
   const stacked = (block: BodyRenderBlock) => props.width < (block.node.columns ?? 1) * 6;
   const cellWidth = (block: BodyRenderBlock) => stacked(block) ? Math.max(1, props.width - 2) : Math.max(1, Math.floor((props.width - 2) / (block.node.columns ?? 1)));
   const Text = (value: { block: BodyRenderBlock; width?: number }) => {
@@ -380,7 +383,7 @@ export function BodyView(props: BodyViewProps) {
       current.content = content();
     });
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
-      width={value.width} wrapMode="char" selectable />;
+      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable />;
   };
   return <scrollbox ref={value => { box = value; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
@@ -399,19 +402,23 @@ export function BodyView(props: BodyViewProps) {
     }}>
     <For each={blockKeys()}>{key => {
       const block = createMemo(() => blockIndex().get(key)!);
-      return <box flexDirection="column" flexShrink={0} paddingLeft={indent(block())} backgroundColor={block().role === 'user' ? '#303030' : undefined}
+      return <box flexDirection="column" flexShrink={0} paddingLeft={indent(block())} paddingTop={block().gapBefore ?? 0}
       height={heights().get(key)}>
       <Show when={visible().has(key)}>
-      <Show when={block().node.kind === 'rule'}><text content={'─'.repeat(Math.max(1, props.width - 2))} fg="#777777" selectable={false} /></Show>
+      <Show when={block().node.kind === 'rule'}><text content={'─'.repeat(Math.max(1, props.width - 2))} fg={tone.dim} selectable={false} /></Show>
       <Show when={!['rule', 'space'].includes(block().node.kind)}>
-      <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0}>
-        <text width={4} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : block().node.kind === 'heading' ? '# ' : ''}
-          fg={block().node.anchor ? processBodyColor(block().role, block().text) ?? '#69b5a5' : '#777777'} selectable={false} />
-        <Text block={block()} width={Math.max(1, props.width - 4 - indent(block()))} />
+      <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0} backgroundColor={block().role === 'user' ? tone.history : undefined}>
+        <text width={Math.min(spacing.marker, Math.max(0, props.width - indent(block()) - 1))} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : block().node.kind === 'heading' ? '# ' : ''}
+          fg={block().node.anchor ? tone[processBodyColor(block().role, block().text) ?? 'brand'] : tone.dim} selectable={false} />
+        <Show when={block().node.decoration}><text width={block().node.decoration?.length ?? 0}
+          content={block().node.from === block().node.origin ? block().node.decoration : ''} fg={tone.dim} selectable={false} /></Show>
+        <Text block={block()} width={Math.max(1, props.width - spacing.marker - indent(block()) - (block().node.decoration?.length ?? 0))} />
       </box>}>
-        <box flexDirection={stacked(block()) ? 'column' : 'row'} flexShrink={0} border={['bottom']} borderColor="#555555">
+        <box flexDirection={stacked(block()) ? 'column' : 'row'} flexShrink={0} border={['bottom']} borderColor={tone.border}>
           <For each={Array.from({ length: block().node.columns ?? 1 }, (_, i) => i)}>{cell =>
-            <box width={cellWidth(block())} paddingRight={1} flexShrink={0}>
+            <box width={cellWidth(block())} paddingRight={1} flexShrink={0} flexDirection="column">
+              <Show when={stacked(block()) && !block().node.header}><text selectable={false} fg={tone.dim} wrapMode="char"
+                width={Math.max(1, cellWidth(block()) - 1)}>{`${block().node.labels?.[cell] ?? `列 ${cell + 1}`}：`}</text></Show>
               <Text block={bodyCell(block(), cell)} width={Math.max(1, cellWidth(block()) - 1)} />
             </box>}
           </For>

@@ -40,7 +40,7 @@ export function mergeBodyAppends(left: BodyAppend, right: BodyAppend): BodyAppen
       const runs: BodyRun[] = [];
       for (const part of [...previous.runs, ...node.runs]) {
         const last = runs.at(-1);
-        if (last && last.to === part.from && last.style === part.style && last.cell === part.cell && last.href === part.href &&
+        if (last && last.to === part.from && last.style === part.style && last.cell === part.cell && last.href === part.href && last.semantic === part.semantic &&
             last.to - last.from === last.text.length && part.to - part.from === part.text.length) {
           runs[runs.length - 1] = { ...last, to: part.to, text: last.text + part.text };
         } else runs.push(part);
@@ -329,7 +329,8 @@ function blocks(tokens: readonly Token[], input: MappedText, depth = 0, quote = 
           runs.push(...inlines(value.tokens, match.value, row === 0 ? BODY_STYLE.bold : 0).map(part => ({ ...part, cell })));
         }
         result.push({ from: mapped.at(0), to: mapped.at(mapped.text.length), kind: 'table', table: from,
-          columns: table.header.length, header: row === 0, runs });
+          columns: table.header.length, header: row === 0,
+          labels: table.header.map(cell => cell.text.slice(0, 512)), runs });
         lineOffset += line.length;
       }
     } else if (token.type === 'paragraph' || token.type === 'text' || token.type === 'heading') {

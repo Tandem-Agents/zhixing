@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalOutputProjection, type TerminalOutputBody } from '../output.js';
+import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
 import type { ConversationOutputSource } from '../../runtime/conversation-output.js';
 import type { AgentYield } from '@zhixing/core/loop';
 const source = { conversationId: 'synthetic', turnId: 'turn', kind: 'delta' } as ConversationOutputSource;
@@ -7,6 +8,53 @@ const body: TerminalOutputBody = { work: action => action(), amend: async () => 
 afterEach(() => vi.useRealTimers());
 
 describe('terminal output projection', () => {
+  it.each([
+    ['trailing', ['alpha();', '']], ['only', ['']], ['two', ['', '']],
+    ['middle', ['alpha();', '', 'omega();']], ['fragmented', ['界'.repeat(12000), '']],
+  ] as [string, string[]][])('preserves real blank diff rows at EOF and fragment boundaries: %s', async (_name, contents) => {
+    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [], gap = vi.fn();
+    const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, gap, body);
+    const artifact = { kind: 'file-diff' as const, path: 'blank.ts', operation: 'modified' as const,
+      changeStats: { kind: 'exact' as const, addedLines: contents.length, removedLines: 0 },
+      hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: contents.length,
+        lines: contents.map((content, index) => ({ type: 'added' as const, newLineNumber: index + 1, content })) }] };
+    const text = processArtifactText(artifact);
+    try {
+      projection.appendProcessBlock({ blockId: 'blank-diff', role: 'tool-diff', text, spans: processArtifactSpans(artifact), lines: processArtifactLines(artifact) });
+      await projection.drain();
+      expect(gap).not.toHaveBeenCalled();
+      expect(segments.map(segment => segment.text).join('')).toBe(text);
+      const rows = new Map<number, string>();
+      for (const segment of segments) for (const node of segment.body!.context.nodes) if (node.decoration) {
+        rows.set(node.origin!, (rows.get(node.origin!) ?? '') + node.runs.map(run => run.text).join(''));
+        if (node.from === node.to) expect(segment.final).toBe(true);
+      }
+      expect([...rows.values()]).toEqual(contents);
+    } finally { await projection.close(); }
+  });
+  it('keeps structured diff gutters out of source across Unicode fragment boundaries', async () => {
+    vi.useFakeTimers();
+    const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
+    const gap = vi.fn();
+    const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, gap, body);
+    const code = 'const 中文 = "🙂";'.repeat(2600);
+    const artifact = { kind: 'file-diff' as const, path: 'a.ts', operation: 'modified' as const,
+      changeStats: { kind: 'exact' as const, addedLines: 1, removedLines: 1 },
+      hunks: [{ oldStart: 12, oldLines: 1, newStart: 12, newLines: 1, lines: [
+        { type: 'removed' as const, oldLineNumber: 12, content: 'old' },
+        { type: 'added' as const, newLineNumber: 12, content: code }] }] };
+    const text = processArtifactText(artifact);
+    projection.appendProcessBlock({ blockId: 'diff', role: 'tool-diff', text, spans: processArtifactSpans(artifact), lines: processArtifactLines(artifact) });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(gap).not.toHaveBeenCalled();
+    expect(segments.map(s => s.text).join('')).toBe(text);
+    const nodes = segments.flatMap(s => s.body!.context.nodes);
+    expect(nodes.filter(n => n.decoration?.startsWith('+')).map(n => n.runs.map(r => r.text).join('')).join('')).toBe(code);
+    expect(nodes.filter(n => n.decoration?.startsWith('-')).map(n => n.runs.map(r => r.text).join('')).join('')).toBe('old');
+    expect(text).not.toContain('+ 12  ');
+    expect(new Set(nodes.filter(n => n.decoration?.startsWith('+')).map(n => n.origin)).size).toBe(1);
+    await projection.close();
+  });
   it('yields between finite batches without adding a coalescing delay to a backlog', async () => {
     vi.useFakeTimers();
     const append = vi.fn(async () => {}), published: number[] = [];
@@ -32,7 +80,7 @@ describe('terminal output projection', () => {
     let offset = 0;
     for (const [index, part] of parts.entries()) {
       expect(part).toMatchObject({ blockId: 'notice', role: 'process', contentOffset: offset, final: index === parts.length - 1 });
-      expect(part.body).toBeUndefined(); expect(Buffer.byteLength(part.text)).toBeLessThanOrEqual(32 * 1024);
+      expect(part.body?.kind).toBe('plain'); expect(Buffer.byteLength(part.text)).toBeLessThanOrEqual(32 * 1024);
       offset += part.text.length;
     }
     expect(amend).not.toHaveBeenCalled(); expect(seal).not.toHaveBeenCalled(); expect(gap).not.toHaveBeenCalled();
@@ -104,7 +152,7 @@ describe('terminal output projection', () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(accept).toHaveBeenCalledTimes(2);
     expect(segments.map(segment => segment.text).join('')).toBe('◆ 已修改 a.ts\n+ 1  actual');
-    expect(segments.every(segment => segment.role === 'tool-diff' && segment.body === undefined)).toBe(true);
+    expect(segments.every(segment => segment.role === 'tool-diff' && segment.body?.kind === 'plain')).toBe(true);
     expect(segments.at(-1)?.final).toBe(true);
     expect(seal).not.toHaveBeenCalled();
     projection.end(source.conversationId, source.turnId, source.runId);

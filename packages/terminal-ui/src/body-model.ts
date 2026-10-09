@@ -15,6 +15,7 @@ export interface BodyRun {
   readonly from: number; readonly to: number;
   /** Bounded rendered characters, never ANSI. Original source stays unchanged. */
   readonly text: string; readonly style: number; readonly cell?: number; readonly href?: string;
+  readonly semantic?: 'added' | 'removed' | 'meta';
 }
 export interface BodyNode {
   readonly from: number; readonly to: number; readonly kind: BodyNodeKind;
@@ -22,8 +23,10 @@ export interface BodyNode {
   readonly runs: readonly BodyRun[];
   readonly depth?: number; readonly language?: string;
   readonly table?: number; readonly columns?: number; readonly header?: boolean;
+  readonly labels?: readonly string[];
   /** Nonselectable decoration, not source. */
   readonly anchor?: boolean;
+  readonly decoration?: string;
 }
 export interface BodyContext { readonly nodes: readonly BodyNode[] }
 export interface BodyFragmentMetadata {
@@ -35,6 +38,7 @@ export interface BodyFragmentMetadata {
 export interface BodyAnchor { readonly blockId: string; readonly contentOffset: number }
 export interface BodySegment {
   readonly blockId: string; readonly contentOffset: number; readonly role: string;
+  readonly groupId?: string;
   readonly text: string; readonly final: boolean; readonly body?: BodyFragmentMetadata;
 }
 export interface BodyPage {
@@ -95,7 +99,7 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
       !keys(value.context, ['nodes']) || !Array.isArray(value.context.nodes) || value.context.nodes.length > BODY_PARSE_NODES) return false;
   let count = 0, previous = contentOffset;
   for (const node of value.context.nodes) {
-    if (++count > BODY_PARSE_NODES || !record(node) || !keys(node, ['from', 'to', 'kind', 'origin', 'runs', 'depth', 'language', 'table', 'columns', 'header', 'anchor']) ||
+    if (++count > BODY_PARSE_NODES || !record(node) || !keys(node, ['from', 'to', 'kind', 'origin', 'runs', 'depth', 'language', 'table', 'columns', 'header', 'labels', 'anchor', 'decoration']) ||
         !integer(node.from) || !integer(node.to) || node.from < contentOffset || node.to < node.from ||
         node.to > contentOffset + sourceLength || node.from < previous || typeof node.kind !== 'string' || !kinds.includes(node.kind) || !Array.isArray(node.runs)) return false;
     previous = node.to;
@@ -104,12 +108,15 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
         (node.language !== undefined && (typeof node.language !== 'string' || node.language.length > 128 || /[\r\n\0]/u.test(node.language))) ||
         (node.table !== undefined && !integer(node.table)) ||
         (node.columns !== undefined && (!integer(node.columns) || node.columns < 1 || node.columns > 128)) ||
-        (node.header !== undefined && typeof node.header !== 'boolean') || (node.anchor !== undefined && typeof node.anchor !== 'boolean')) return false;
+        (node.labels !== undefined && (!Array.isArray(node.labels) || node.labels.length !== node.columns || node.labels.some(label => typeof label !== 'string' || label.length > 512))) ||
+        (node.header !== undefined && typeof node.header !== 'boolean') || (node.anchor !== undefined && typeof node.anchor !== 'boolean') ||
+        (node.decoration !== undefined && (typeof node.decoration !== 'string' || !/^[ +\-\d]{1,24}$/u.test(node.decoration)))) return false;
     let runEnd = node.from;
     for (const run of node.runs) {
-      if (++count > BODY_PARSE_NODES || !record(run) || !keys(run, ['from', 'to', 'text', 'style', 'cell', 'href']) ||
+      if (++count > BODY_PARSE_NODES || !record(run) || !keys(run, ['from', 'to', 'text', 'style', 'cell', 'href', 'semantic']) ||
           !integer(run.from) || !integer(run.to) || run.from < runEnd || run.to < run.from || run.to > node.to ||
           typeof run.text !== 'string' || !integer(run.style) || run.style > 63 ||
+          (run.semantic !== undefined && !['added', 'removed', 'meta'].includes(String(run.semantic))) ||
           (run.href !== undefined && (typeof run.href !== 'string' || /[\u0000-\u001f\u007f-\u009f]/u.test(run.href))) ||
           (run.cell !== undefined && (!integer(run.cell) || typeof node.columns !== 'number' || run.cell >= node.columns))) return false;
       runEnd = run.to;
@@ -118,7 +125,7 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
   if (Buffer.byteLength(JSON.stringify(value)) > BODY_FRAGMENT_ENCODED_BYTES) return false;
   for (const node of value.context.nodes) {
     for (const run of node.runs) Object.freeze(run);
-    Object.freeze(node.runs); Object.freeze(node);
+    Object.freeze(node.runs); if (node.labels) Object.freeze(node.labels); Object.freeze(node);
   }
   Object.freeze(value.context.nodes); Object.freeze(value.context); Object.freeze(value);
   validatedMetadata.set(value, { offset: contentOffset, length: sourceLength });
@@ -128,6 +135,12 @@ export function validateBodyMetadata(value: unknown, contentOffset: number, sour
 export function sliceBodyNodes(nodes: readonly BodyNode[], from: number, to: number): BodyNode[] {
   const result: BodyNode[] = [];
   for (const node of nodes) {
+    // A decorated zero-width EOF row belongs to the nonempty carrier ending
+    // at that boundary. Retain it once when encoded-size splitting recurs.
+    if (node.from === node.to && node.decoration !== undefined) {
+      if (node.from > from && node.from <= to) result.push(node);
+      continue;
+    }
     if (node.to <= from || node.from >= to) continue;
     const runs: BodyRun[] = [];
     for (const run of node.runs) {
@@ -146,7 +159,7 @@ export function bodyWindows(page: BodyPage): readonly BodyWindow[] {
   if (known) return known;
   if (page.segments.length > BODY_PAGE_FRAGMENTS || Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-body-page-capacity');
   const windows = page.segments.map(segment => {
-    if (!segment.blockId || segment.blockId.length > 512 || !integer(segment.contentOffset) || Buffer.byteLength(segment.text) > BODY_FRAGMENT_BYTES ||
+    if (!segment.blockId || segment.blockId.length > 512 || (segment.groupId !== undefined && (!segment.groupId || segment.groupId.length > 512)) || !integer(segment.contentOffset) || Buffer.byteLength(segment.text) > BODY_FRAGMENT_BYTES ||
         (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) throw Error('terminal-body-source-invalid');
     const body = segment.body;
     const context = body?.context ?? { nodes: [{ from: segment.contentOffset, to: segment.contentOffset + segment.text.length,

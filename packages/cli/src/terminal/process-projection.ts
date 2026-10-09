@@ -4,7 +4,7 @@ import { validateSessionEventProjection } from '@zhixing/core/protocol';
 import { boundedProcessValue, processText, projectSessionArtifact, validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource } from '@zhixing/rpc/session-wire';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
-import { getToolRenderStrategy, processArtifactText, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';
+import { getToolRenderStrategy, processArtifactText, processArtifactSpans, processArtifactLines, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';
 
 export interface ProcessScope {
   readonly conversationId: string; readonly turnId?: string; readonly runId?: string;
@@ -155,7 +155,7 @@ export class TerminalProcessProjection {
               this.#sealedChildren.add(artifact.subAgentId);
               this.#emit('tool-error', processArtifactText(artifact), `artifact:${delta.id}`);
             }
-          } else this.#emit('tool-diff', processArtifactText(artifact), `artifact:${delta.id}`);
+          } else this.#emit('tool-diff', processArtifactText(artifact), `artifact:${delta.id}`, processArtifactSpans(artifact), processArtifactLines(artifact));
         } else if (strategy === 'sub-agent-status' && [...this.#children.values()].some(c => c.parentToolCallId === delta.id)) {
           // Lifecycle-backed children already own their aggregate completion.
           // A missing optional artifact must not add a second successful Task card.
@@ -220,13 +220,13 @@ export class TerminalProcessProjection {
         const p = event.payload;
         if (p.decision !== 'safe') break;
         this.#flushBatch();
-        this.#emit('process', `◆ ${main ? '' : '子任务 · '}安全助理放行 ${processText(p.tool, 256)} ${processText(p.operation, 768)}（理由：${processText(p.reason, 1024)}）`);
+        this.#emit('process', `${main ? '' : '子任务 · '}安全助理放行 ${processText(p.tool, 256)} ${processText(p.operation, 768)}（理由：${processText(p.reason, 1024)}）`);
         break;
       }
       case 'security:rule_sedimented': {
         const p = event.payload, scope = p.contextId.kind === 'main' ? '主模式' : '当前工作场景';
         this.#flushBatch();
-        this.#emit('process', `◆ ${main ? '' : '子任务 · '}已在 ${scope} 记住 ${p.contributors.length} 次同类操作，自动建立放行规则：${processText(p.pattern.argument, 1024)}（进 /trust 可查看/撤销）`);
+        this.#emit('process', `${main ? '' : '子任务 · '}已在 ${scope} 记住 ${p.contributors.length} 次同类操作，自动建立放行规则：${processText(p.pattern.argument, 1024)}（进 /trust 可查看/撤销）`);
         break;
       }
       case 'retry:attempt': if (main) this.#notice = `请求重试 ${event.payload.attempt}/${event.payload.maxRetries} · ${event.payload.errorType}`; break;
@@ -261,20 +261,20 @@ export class TerminalProcessProjection {
     const known = children.filter(c => c.inputTokens !== undefined && c.outputTokens !== undefined);
     const tokens = known.length ? known.reduce((sum, c) => sum + c.inputTokens! + c.outputTokens!, 0) : undefined;
     if (tokens !== undefined && !Number.isFinite(tokens)) { this.pause('子任务用量超出展示范围'); return; }
-    this.#emit('process', `◆ ${children.length} 个子任务 · ${count('succeeded')} 成功 ${count('failed')} 失败 ${count('aborted')} 中止` +
+    this.#emit('process', `${children.length} 个子任务 · ${count('succeeded')} 成功 ${count('failed')} 失败 ${count('aborted')} 中止` +
       (tokens === undefined ? ' · 用量未提供' : ` · ${tokens} token${known.length < children.length ? '（部分）' : ''}`));
     for (const child of children) {
       this.#summarizedChildren.add(child.id);
       if (child.status !== 'succeeded' && !this.#sealedChildren.has(child.id)) {
         this.#sealedChildren.add(child.id);
-        this.#emit('tool-error', `◆ 子任务${child.status === 'failed' ? '失败' : '已停止'} · [${child.id}] · ${child.label}`, `child:${child.id}`);
+        this.#emit('tool-error', `子任务${child.status === 'failed' ? '失败' : '已停止'} · [${child.id}] · ${child.label}`, `child:${child.id}`);
       }
     }
   }
-  #emit(role: ProcessBlock['role'], text: string, id?: string): void {
+  #emit(role: ProcessBlock['role'], text: string, id?: string, spans?: ProcessBlock['spans'], lines?: ProcessBlock['lines']): void {
     if (!this.#scope || this.#paused) return;
     const scope = this.#scope;
-    try { this.ports.block({ blockId: `process:${JSON.stringify([scope.conversationId, scope.runId ?? scope.turnId, scope.generation, id ?? this.#block++])}`, role, text }); }
+    try { this.ports.block({ blockId: `process:${JSON.stringify([scope.conversationId, scope.runId ?? scope.turnId, scope.generation, id ?? this.#block++])}`, role, text, ...(spans ? { spans } : {}), ...(lines ? { lines } : {}) }); }
     catch { this.pause('过程展示写入失败'); }
   }
   #publish(): void {

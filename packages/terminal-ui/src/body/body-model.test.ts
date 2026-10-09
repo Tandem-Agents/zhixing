@@ -3,6 +3,13 @@ import { bodyWindows, decodeBodyPage, encodeBodyPage, sameBodyPageContent, slice
 import { bodyCell, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered } from './layout.js';
 
 const source = '甲**🙂文字**尾';
+it('keeps a decorated empty EOF row in exactly one nonempty encoded carrier', () => {
+  const blank: BodyNode = { from: 12, to: 12, origin: 12, kind: 'paragraph', decoration: '+ 2  ', runs: [] };
+  expect(sliceBodyNodes([blank], 0, 6)).toEqual([]);
+  expect(sliceBodyNodes([blank], 6, 12)).toEqual([blank]);
+  expect(sliceBodyNodes([blank], 12, 12)).toEqual([]);
+  expect(sliceBodyNodes([blank], 12, 20)).toEqual([]);
+});
 const node: BodyNode = { from: 0, to: source.length, kind: 'paragraph', anchor: true, runs: [
   { from: 0, to: 1, text: '甲', style: 0 }, { from: 3, to: 7, text: '🙂文字', style: 1 }, { from: 9, to: 10, text: '尾', style: 0 },
 ] };
