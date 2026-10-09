@@ -11,7 +11,12 @@ type Navigation = Extract<PostTurnControlOutcome['intent'], { kind: 'enter' | 'e
 export interface TerminalTurnOutcome {
   readonly reason: TurnOutcome['result']['reason'];
   readonly message: string;
+  readonly bodyPending?: true;
   readonly control?: { readonly navigation?: Navigation; readonly handedOff: boolean; readonly conflict: boolean };
+}
+export function projectCommittedTerminalOutcome(summary: import('@zhixing/core/contracts').ConversationCommitSummary): TerminalTurnOutcome {
+  return { reason: 'completed', message: '本次运行已提交。', bodyPending: true,
+    control: { navigation: summary.navigation, handedOff: summary.handedOff, conflict: summary.conflict } };
 }
 
 /** Keep navigation, never the task handoff body or the complete agent result. */

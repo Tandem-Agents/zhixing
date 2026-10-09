@@ -14,6 +14,8 @@ import { TerminalProcessProjection, type ProcessProjectionPorts, type ProcessSco
 export class TerminalProcessSession {
   readonly #scopes = new Map<string, { scope: ProcessScope; projection: TerminalProcessProjection }>();
   readonly #perspectives = new Map<string, { seq: number; runId: string; cross: boolean; convergence: boolean; started: boolean }>();
+  readonly #retired = new Set<string>();
+  readonly #completed = new Set<string>();
   #generation = 0;
   #active?: string;
   #paused = false;
@@ -24,6 +26,8 @@ export class TerminalProcessSession {
 
   accept(value: SessionProcessProjection): void {
     if (value.source.conversationId !== this.ports.currentConversation()) return;
+    if ((value.payload.kind === 'closed' || value.payload.kind === 'gap') &&
+        !this.#scopes.has(JSON.stringify([value.source.conversationId, 'assignment', value.source.runId ?? value.source.turnId]))) return;
     const entry = this.#entry({ ...value.source, source: 'assignment' });
     if (!entry || entry.projection.closed) return;
     entry.projection.accept(value, this.#generation);
@@ -79,10 +83,15 @@ export class TerminalProcessSession {
     return true;
   }
   end(conversationId: string, turnId?: string, runId?: string): void {
+    if (conversationId !== this.ports.currentConversation()) return;
+    for (const [kind, id] of [['run', runId], ['turn', turnId]]) if (id) {
+      this.#completed.add(JSON.stringify([conversationId, kind, id]));
+      if (this.#completed.size > 512) this.#completed.delete(this.#completed.values().next().value!);
+    }
     for (const entry of this.#scopes.values()) {
-      if (entry.scope.source !== 'legacy' || entry.scope.conversationId !== conversationId ||
+      if (entry.scope.conversationId !== conversationId ||
           !(runId && entry.scope.runId === runId || turnId && entry.scope.turnId === turnId)) continue;
-      entry.projection.end(this.#generation);
+      entry.projection.end(this.#generation, true);
     }
   }
   pause(reason: string): void {
@@ -96,15 +105,20 @@ export class TerminalProcessSession {
   reset(): void {
     this.#generation++; this.#perspectives.clear();
     for (const entry of this.#scopes.values()) entry.projection.dispose();
-    this.#scopes.clear(); this.#active = undefined; this.ports.changed(undefined);
+    this.#scopes.clear(); this.#retired.clear(); this.#completed.clear(); this.#active = undefined; this.ports.changed(undefined);
   }
   #entry(source: Omit<ProcessScope, 'generation'>) {
     const key = JSON.stringify([source.conversationId, source.source, source.runId ?? source.turnId]);
+    if (this.#retired.has(key)) return;
     let entry = this.#scopes.get(key);
     if (entry) return entry;
     if (this.#scopes.size >= 8) {
-      const closed = [...this.#scopes].find(([, value]) => value.projection.closed);
-      if (closed) { closed[1].projection.dispose(); this.#scopes.delete(closed[0]); }
+      const closed = [...this.#scopes].find(([, value]) => value.projection.closed || value.projection.complete);
+      if (closed) {
+        if (!closed[1].projection.closed) this.ports.gap('已有运行完成，但部分过程尾部尚未收齐；可重新读取正文。');
+        closed[1].projection.dispose(); this.#scopes.delete(closed[0]); this.#retired.add(closed[0]);
+        if (this.#retired.size > 256) this.#retired.delete(this.#retired.values().next().value!);
+      }
       else { this.ports.gap('待收束的过程展示超出容量，请刷新正文。'); return; }
     }
     const scope = { ...source, generation: this.#generation };
@@ -115,8 +129,13 @@ export class TerminalProcessSession {
         }
       },
     });
-    entry = { scope, projection }; this.#scopes.set(key, entry); this.#active = key;
-    projection.begin(scope);
+    const completed = !!(source.runId && this.#completed.has(JSON.stringify([source.conversationId, 'run', source.runId])) ||
+      source.turnId && this.#completed.has(JSON.stringify([source.conversationId, 'turn', source.turnId])));
+    entry = { scope, projection }; this.#scopes.set(key, entry);
+    // An old finite tail may fill its body, but cannot take activity ownership
+    // away from the current run or briefly publish a running state.
+    if (!completed || !this.#active) this.#active = key;
+    projection.begin(scope, completed);
     if (this.#paused) projection.pause('过程展示已暂停；请先重试展示。');
     return entry;
   }

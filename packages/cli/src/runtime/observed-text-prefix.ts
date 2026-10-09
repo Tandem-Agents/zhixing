@@ -14,6 +14,29 @@ export class ObservedTextPrefix {
     this.#units += text.length;
   }
   reset(): void { this.#hash = createHash('sha256'); this.#units = 0; }
+  /** Validate an already displayed prefix and replay its suffix using bounded
+   * source pages. The producer can be reopened without retaining its body. */
+  async *remainingStream(source: () => AsyncIterable<string>): AsyncGenerator<string> {
+    let remaining = this.#units;
+    const hash = createHash('sha256');
+    if (remaining) {
+      for await (const text of source()) {
+        const count = Math.min(remaining, text.length);
+        hash.update(Buffer.from(text.slice(0, count), 'utf16le')); remaining -= count;
+        if (!remaining) break;
+      }
+      if (remaining || hash.digest('hex') !== this.#hash.copy().digest('hex')) this.reset();
+    }
+    let skip = this.#units;
+    for await (const text of source()) {
+      const count = Math.min(skip, text.length); skip -= count;
+      for (let at = count; at < text.length;) {
+        let end = Math.min(text.length, at + STRIDE);
+        if (end < text.length && isHigh(text.charCodeAt(end - 1)) && isLow(text.charCodeAt(end))) end--;
+        yield text.slice(at, end); at = end;
+      }
+    }
+  }
   /** Final recovery can resume after an acknowledged fragment without keeping
    * the decoded history page. A mismatching live prefix starts a new prefix. */
   align(message: Message | undefined): void { if (!this.#matches(message)) this.reset(); }

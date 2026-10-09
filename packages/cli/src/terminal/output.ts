@@ -36,7 +36,7 @@ export class TerminalOutputProjection {
   #gapWork?: Promise<void>;
   constructor(readonly append: (segment: TerminalDisplaySegment, stable?: boolean) => Promise<void>, readonly updated: () => Promise<void>,
     readonly gap: (error?: unknown) => Promise<void>, readonly body: TerminalOutputBody,
-    readonly process?: { accept(event: AgentYield, source: ConversationOutputSource): void; end(conversationId: string, turnId?: string, runId?: string): void }) {}
+    readonly process?: { accept(event: AgentYield, source: ConversationOutputSource): void }) {}
   get paused(): boolean { return this.#paused; }
   pause(): void { this.#pause(); }
   async settlePaused(): Promise<void> { await this.#flushing; await this.#gapWork; }
@@ -96,7 +96,7 @@ export class TerminalOutputProjection {
     this.#schedule();
   }
   end(conversationId: string, turnId?: string, runId?: string): void {
-    this.process?.end(conversationId, turnId, runId);
+    // Closing/draining a body observer is not a domain completion receipt.
     const key = this.#streamKey(conversationId, runId ?? turnId), stream = this.#streams.get(key);
     if (stream) { this.#endBlock(stream); this.#streams.delete(key); this.#schedule(); }
   }

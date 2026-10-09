@@ -95,9 +95,9 @@ describe('terminal output projection', () => {
   it('uses the existing body queue for immutable process blocks, with one tool display owner', async () => {
     vi.useFakeTimers();
     const segments: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment[] = [];
-    const seal = vi.fn(async () => {}), accept = vi.fn(), end = vi.fn();
+    const seal = vi.fn(async () => {}), accept = vi.fn();
     const projection = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, async () => {},
-      { ...body, seal }, { accept, end });
+      { ...body, seal }, { accept });
     projection.accept({ type: 'tool_start', id: 't', name: 'edit', input: {} }, source);
     projection.accept({ type: 'tool_end', id: 't', name: 'edit', duration: 1, result: { content: 'modified' } }, source);
     projection.appendProcessBlock({ blockId: 'process:actual-tool', role: 'tool-diff', text: '◆ 已修改 a.ts\n+ 1  actual' });
@@ -108,7 +108,6 @@ describe('terminal output projection', () => {
     expect(segments.at(-1)?.final).toBe(true);
     expect(seal).not.toHaveBeenCalled();
     projection.end(source.conversationId, source.turnId, source.runId);
-    expect(end).toHaveBeenCalledWith(source.conversationId, source.turnId, source.runId);
     await projection.close();
   });
   it('waits for logical EOF amendment and sealing before the completion drain resolves', async () => {

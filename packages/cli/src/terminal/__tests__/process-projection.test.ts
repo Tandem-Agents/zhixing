@@ -29,7 +29,7 @@ describe('terminal process fold', () => {
     expect(s.changed).toHaveBeenCalledOnce();
     expect(s.changed.mock.calls[0]![0].phase).toBe('正在回复');
     s.event(request(5)); expect(s.changed).toHaveBeenCalledTimes(2);
-    s.p.end(1); expect(s.changed).toHaveBeenCalledTimes(3);
+    s.p.end(1, true); expect(s.changed).toHaveBeenCalledTimes(3);
     expect(s.changed.mock.calls.at(-1)![0].phase).toBe('本轮已结束');
     s.p.begin({ conversationId: 'c', turnId: 't2', runId: 'r2', generation: 1, source: 'legacy' });
     expect(s.changed).toHaveBeenCalledTimes(4);
@@ -122,7 +122,10 @@ describe('terminal process fold', () => {
     s.p.accept({ version: 1, source, payload: { kind: 'event', event: request(4) } }, 1);
     const dto = { version: 1 as const, source, payload: kind === 'closed' ? { kind } : { kind, reason: '尾部不可读取' } };
     s.p.accept(dto, 1); s.p.accept(dto, 1);
-    if (kind === 'closed') { expect(s.p.snapshot().phase).toBe('本轮已结束'); expect(s.gap).not.toHaveBeenCalled(); }
+    if (kind === 'closed') {
+      expect(s.p.snapshot().activity).toBe('reconciling'); expect(s.gap).not.toHaveBeenCalled();
+      s.p.end(1, true); expect(s.p.snapshot().activity).toBe('complete');
+    }
     else expect(s.gap).toHaveBeenCalledOnce();
     expect(s.p.snapshot().usage.inputTokens).toBe(4);
   });
@@ -132,7 +135,8 @@ describe('terminal process fold', () => {
     s.p.acceptYield({ type: 'text_delta', text: 'late' }, { conversationId: 'c', turnId: 't' }, 0);
     expect(s.p.snapshot().phase).toBe('正在准备');
     s.p.end(1); s.yieldValue({ type: 'text_delta', text: 'late' }); s.p.resume(1);
-    expect(s.p.snapshot().phase).toBe('本轮已结束');
+    expect(s.p.snapshot().activity).toBe('reconciling');
+    s.p.end(1, true); expect(s.p.snapshot().activity).toBe('complete');
   });
   it('pauses once on capacity, retains finite child finality, and contains display callback failure', () => {
     const s = setup();

@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { thinkingTail, processCellWidth, processThinkingBodyBlock, processBodyBlock, processBodyColor, processViewRows, validateProcessView } from './process-model.js';
 import { renderedToSource } from './body/layout.js';
 describe('pure process presentation', () => {
+  it('renders the completed turn as one compact metadata row without concealing a gap', () => {
+    const view = { revision: 1, phase: '本轮已结束', durationMs: 8200, tools: [], children: [], usage: { inputTokens: 20, outputTokens: 100, contextTokens: 7300 } };
+    expect(processViewRows(view, 80, 6)).toEqual([{ text: '◆ 用时 8s  │  ~ 7.3k' }]);
+    expect(processViewRows({ ...view, notice: '本轮已结束；正文存在缺口' }, 80, 6)[0]!.text).toContain('正文存在缺口');
+    expect(validateProcessView({ ...view, durationMs: Infinity })).toBe(false);
+  });
   it.each([1, 2, 8, 40, 80])('limits rolling thinking to two display rows at width %i', width => {
     const rows = thinkingTail('开头\n' + '汉🦞e\u0301'.repeat(1000) + '尾部', width);
     expect(rows.length).toBeLessThanOrEqual(2);

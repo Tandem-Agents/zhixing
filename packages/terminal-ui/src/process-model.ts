@@ -10,6 +10,8 @@ export interface ProcessChildView {
 export interface TerminalProcessView {
   readonly revision: number;
   readonly phase: string;
+  readonly activity?: 'running' | 'reconciling' | 'complete';
+  readonly durationMs?: number;
   readonly thinking?: { readonly text: string; readonly active: boolean };
   readonly tools: readonly string[];
   readonly children: readonly ProcessChildView[];
@@ -63,6 +65,8 @@ export function validateProcessView(value: unknown): value is TerminalProcessVie
   const v = value as Partial<TerminalProcessView>;
   const short = (s: unknown, max: number) => typeof s === 'string' && s.length <= max;
   return Number.isSafeInteger(v.revision) && v.revision! >= 0 && short(v.phase, 256) &&
+    (v.activity === undefined || ['running', 'reconciling', 'complete'].includes(v.activity)) &&
+    (v.durationMs === undefined || Number.isFinite(v.durationMs) && v.durationMs >= 0) &&
     (!v.thinking || short(v.thinking.text, 8192) && typeof v.thinking.active === 'boolean') &&
     Array.isArray(v.tools) && v.tools.length <= 3 && v.tools.every(s => short(s, 1024)) &&
     Array.isArray(v.children) && v.children.length <= 16 && v.children.every(c => c && short(c.id, 1024) &&
@@ -75,6 +79,11 @@ export function validateProcessView(value: unknown): value is TerminalProcessVie
 
 export interface ProcessViewRow { readonly text: string; readonly failed?: boolean }
 export function processViewRows(view: TerminalProcessView, columns: number, height: number): readonly ProcessViewRow[] {
+  if (view.durationMs !== undefined && !view.notice && view.activity !== 'reconciling') {
+    const tokens = view.usage.contextTokens;
+    const context = tokens === undefined ? '' : `  │  ~ ${tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens}`;
+    return [{ text: processLine(`◆ 用时 ${Math.max(1, Math.round(view.durationMs / 1000))}s${context}`, columns) }];
+  }
   const rows: ProcessViewRow[] = [{ text: processLine(`◆ ${view.notice ?? view.phase}`, columns) }];
   let left = Math.max(0, Math.min(24, Math.floor(height)) - 1);
   const usage = view.usage, parts: string[] = [];

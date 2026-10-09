@@ -178,6 +178,54 @@ describe('bounded authoritative recovery consumer', () => {
   const inputCursor = (offset = 0): ConversationInputCursor => ({ conversationId: 'conv-1', runId: 'old-failed', ownerEpoch: 1, clearedThroughLsn: 0, upper: checkpoint(11), position: 1, part: 0, offset, contentOffset: offset });
   const notice = (revision: number) => ({ v: 1 as const, ref: { execution: 'conversation' as const, conversationId: 'conv-1', ownerEpoch: 1, runId: `run-${revision}` }, state: 'cancelled' as const, statusRevision: revision, actions: [] as [], at: '2026-10-05T00:00:00.000Z' });
 
+  it('settles an observed cancelled run through control metadata while body recovery is blocked', async () => {
+    const f = makeFakes(), onRunTerminal = vi.fn(); let release!: () => void, terminal = false;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const pages = vi.fn(async (): Promise<ConversationControlPage> => ({
+      facts: [{ kind: 'input', cursor: inputCursor() }, ...(terminal ? [{ kind: 'status' as const, notice: notice(12), communication: false }] : [])],
+      cursor: cursor(terminal ? 12 : 11), hasMore: false, reset: false,
+    }));
+    const inputs = vi.fn(async () => { await blocked; throw Error('body unavailable'); });
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage: inputs } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, onRunTerminal, projectCommittedOutcome: value => value,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      await controller.start(); await vi.waitFor(() => expect(inputs).toHaveBeenCalled());
+      terminal = true; f.emit.status(notice(12));
+      await vi.waitFor(() => expect(onRunTerminal).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-12' })));
+    } finally { controller.dispose(); release(); }
+  });
+
+  it.each([false, true])('settles a committed run independently of blocked body reads (transient query failure: %s)', async transient => {
+    const f = makeFakes(); let committed = false, failed = false, release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const final = { v: 1 as const, conversationId: 'conv-1', runId: 'latest', commitRevision: 2, digest: `sha256:${'a'.repeat(64)}` };
+    const summary = { runIndex: 2, handedOff: false, conflict: false };
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => {
+      if (committed && transient && !failed) { failed = true; throw Error('temporary metadata read failure'); }
+      return {
+      facts: [...(!after ? [{ kind: 'input' as const, cursor: inputCursor() }] : []), ...(committed && (after?.after.lsn ?? 0) < 20 ? [{ kind: 'final' as const, frame: final }] : [])],
+      cursor: cursor(committed ? 20 : 11), hasMore: false, reset: false,
+    }; });
+    const inputs = vi.fn(async () => { await blocked; throw Error('body storage unavailable'); });
+    const completion = vi.fn(async () => ({ conversationId: 'conv-1', runId: 'latest', commitRevision: 2, ...(committed ? { summary } : {}) }));
+    f.conversation.send.mockImplementation(async (_text, _id, turnId) => ({ conversationId: 'conv-1', sessionId: 'conv-1', turnId, runId: 'latest' }));
+    const onRunTerminal = vi.fn(), project = vi.fn((value: unknown) => value);
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage: inputs, completion } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, projectCommittedOutcome: project, onRunTerminal,
+    }, { conversationId: 'conv-1', name: 'test', mode: { kind: 'main' } });
+    try {
+      await controller.start(); await vi.waitFor(() => expect(inputs).toHaveBeenCalledOnce());
+      const turn = await controller.beginTurn('new request');
+      committed = true;
+      // No live Final: any fact notification must wake metadata reconciliation.
+      f.emit.status({ ...notice(20), ref: { ...notice(20).ref, runId: 'latest' }, state: 'committed' });
+      await expect(turn.outcome).resolves.toEqual(summary);
+      expect(project).toHaveBeenCalledOnce(); expect(onRunTerminal).toHaveBeenCalledOnce();
+      expect(inputs).toHaveBeenCalledOnce(); // The ordered body consumer is still waiting.
+    } finally { controller.dispose(); release(); }
+  });
+
   it('backs off unavailable recovery, wakes on a new fact, and stops retries after disposal', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const f = makeFakes(), pages = vi.fn().mockRejectedValue(Error('Owner is not durable yet'));

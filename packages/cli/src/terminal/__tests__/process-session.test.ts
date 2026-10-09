@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { projectProcessYield, type SessionProcessProjection } from '@zhixing/rpc/session-wire';
 import { processViewRows } from '@zhixing/terminal-ui/process-model';
 import { TerminalProcessSession } from '../process-session.js';
+import { TerminalOutputProjection } from '../output.js';
 
 function fixture() {
   let conversationId = 'conversation';
@@ -14,6 +15,32 @@ function fixture() {
 }
 
 describe('terminal process session ownership', () => {
+  it('does not turn observer closure or body drain into a domain completion', async () => {
+    const f = fixture();
+    const output = new TerminalOutputProjection(async () => {}, async () => {}, async () => {},
+      { work: action => action(), amend: async () => {}, seal: async () => {} },
+      { accept: (event, source) => f.session.acceptYield(event, source) });
+    for (const kind of ['closed', 'gap'] as const) {
+      f.emit(kind, 1, { kind: 'yield', delta: { type: 'text_delta', text: 'answer' } });
+      f.emit(kind, 1, kind === 'closed' ? { kind } : { kind, reason: 'lost frames' });
+      output.end('conversation', undefined, kind); await output.drain();
+      expect(f.changed.mock.calls.at(-1)![0].view.activity).toBe('reconciling');
+      f.session.end('conversation', undefined, kind);
+      expect(f.changed.mock.calls.at(-1)![0].view.activity).toBe('complete');
+    }
+    await output.close();
+  });
+  it('remembers completion before the first process frame and does not steal a newer activity', () => {
+    const f = fixture(); f.session.end('conversation', undefined, 'early');
+    f.emit('early', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'late body' } });
+    expect(f.changed.mock.calls.every(([status]) => status.view.activity === 'complete')).toBe(true);
+    f.emit('new', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'new body' } });
+    f.session.end('conversation', undefined, 'older'); f.changed.mockClear();
+    f.emit('older', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'old body' } });
+    expect(f.changed).not.toHaveBeenCalled();
+    f.switchConversation(); f.emit('early', 2, { kind: 'closed' });
+    expect(f.changed.mock.calls.at(-1)![0]).toBeUndefined();
+  });
   it('consumes same-watermark closure during pause and keeps finality and the gap visible after resume', () => {
     const f = fixture();
     f.emit('run', 1, { kind: 'yield', delta: { type: 'thinking_delta', thinking: 'old thought' } });
@@ -27,8 +54,8 @@ describe('terminal process session ownership', () => {
     f.session.accept(missed);
     f.emit('run', 2, { kind: 'closed' });
     const view = f.changed.mock.calls.at(-1)![0].view;
-    expect(view.phase).toBe('本轮已结束');
-    expect(processViewRows(view, 80, 4)[0]!.text).toContain('本轮已结束');
+    expect(view.phase).toBe('正在核对运行结果');
+    expect(view.activity).toBe('reconciling');
     expect(view.notice).toContain('正文存在缺口');
     const count = f.changed.mock.calls.length;
     f.session.resume(); f.emit('run', 2, { kind: 'closed' }); f.session.accept(missed);
@@ -45,7 +72,7 @@ describe('terminal process session ownership', () => {
     f.session.resume();
     f.emit('run', 3, { kind: 'yield', delta: { type: 'text_delta', text: 'fresh answer' } });
     f.emit('run', 3, { kind: 'closed' });
-    expect(f.changed.mock.calls.at(-1)![0].view.phase).toBe('本轮已结束');
+    expect(f.changed.mock.calls.at(-1)![0].view.phase).toBe('正在核对运行结果');
     expect(f.block).not.toHaveBeenCalled();
   });
 
@@ -59,7 +86,10 @@ describe('terminal process session ownership', () => {
     f.emit('run', 6, { kind: 'closed' });
     expect(f.changed.mock.calls.at(-1)![0].view.phase).not.toBe('本轮已结束');
     expect(f.changed.mock.calls.at(-1)![0].view.notice).toContain('过程缺口');
-    for (let i = 0; i < 9; i++) f.emit(`gap-${i}`, 1, { kind: 'gap', reason: '过程缺口' });
+    for (let i = 0; i < 9; i++) {
+      f.emit(`gap-${i}`, 0, { kind: 'yield', delta: { type: 'text_delta', text: 'answer' } });
+      f.emit(`gap-${i}`, 1, { kind: 'gap', reason: '过程缺口' });
+    }
     f.emit('fresh', 1, { kind: 'yield', delta: { type: 'text_delta', text: 'new answer' } });
     expect(f.changed.mock.calls.at(-1)![0].runId).toBe('fresh');
     expect(f.gap.mock.calls.every(([reason]) => reason === '过程缺口')).toBe(true);
@@ -76,7 +106,7 @@ describe('terminal process session ownership', () => {
     f.session.acceptEvent({ ...event, lifecycle: 'closed' });
     const count = f.changed.mock.calls.length;
     f.session.resume(); f.session.acceptEvent({ ...event, lifecycle: 'closed' });
-    expect(f.changed.mock.calls.at(-1)![0].view.phase).toBe('本轮已结束');
+    expect(f.changed.mock.calls.at(-1)![0].view.phase).toBe('正在核对运行结果');
     expect(f.changed).toHaveBeenCalledTimes(count); expect(f.block).not.toHaveBeenCalled();
   });
 
@@ -96,7 +126,7 @@ describe('terminal process session ownership', () => {
     const f = fixture();
     f.emit('run', 1, { kind: 'yield', delta: { type: 'thinking_delta', thinking: 'pending thought' } });
     f.session.end('conversation', undefined, 'run');
-    expect(f.changed.mock.calls.at(-1)![0].view.phase).not.toBe('本轮已结束');
+    expect(f.changed.mock.calls.at(-1)![0].view.activity).toBe('complete');
     f.emit('run', 2, { kind: 'yield', delta: { type: 'text_delta', text: 'answer' } });
     f.emit('run', 2, { kind: 'closed' });
     expect(f.changed.mock.calls.at(-1)![0].view.phase).toBe('本轮已结束');

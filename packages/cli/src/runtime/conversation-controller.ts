@@ -30,6 +30,8 @@ import type {
   ConversationControlFact,
   ConversationInputCursor,
   ConversationInputFragment,
+  ConversationCommitSummary,
+  ConversationBodyCursor,
 } from "@zhixing/core/contracts";
 import type {
   SessionAdvancementCancelResult,
@@ -201,7 +203,7 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
   onObservedInputs?: (turn: ObservedTurnNotification & AgentEventMap["agent:input_received"]) => void;
-  /** 同一当前对话里,非本接入面发起的 turn 已落定。 */
+  /** Observer/body stream ended (including closed/gap); not domain finality. */
   onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
   /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
   onActivity?: (activity: SessionActivityPayload) => void;
@@ -210,6 +212,9 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
    * precedes the send receipt. Only this surface's projection remains in its
    * waiter promise; legacy consumers retain the original outcome by default. */
   projectOutcome?: (outcome: TurnOutcome) => Outcome;
+  projectCommittedOutcome?: (summary: ConversationCommitSummary) => Outcome;
+  /** Authoritative completion or terminal status, independent of body drain. */
+  onRunTerminal?: (turn: ObservedTurnNotification) => void;
   /** The terminal reads finite durable pages; live control frames only wake it. */
   pagedRecovery?: boolean;
   onObservedInputFragment?: (input: ConversationInputFragment & { conversationId: string; runId: string }) => Promise<void>;
@@ -339,7 +344,7 @@ export class ConversationController<Outcome = TurnOutcome> {
    */
   private pendingSwitchTarget: ((conversationId: string) => boolean) | null =
     null;
-  private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
+  private readonly waiters = new Map<string, (outcome: TurnOutcome | { committed: ConversationCommitSummary }) => void>();
   // Receipt lifetime only: an already settled execution survives a late RPC
   // error, without retaining completed outcomes or introducing another owner.
   private readonly completedOutcomes = new WeakSet<Promise<Outcome>>();
@@ -364,6 +369,11 @@ export class ConversationController<Outcome = TurnOutcome> {
   private recoveryRequested = false;
   private recoveryWork?: Promise<void>;
   private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private completionCursor?: ConversationControlCursor;
+  private completionScan?: Promise<void>;
+  private completionScanRequested = false;
+  private completionRetry?: ReturnType<typeof setTimeout>;
+  private completionFailures = 0;
   private recoveryFailures = 0;
   private recoveryVersion = 0;
   private presentationRevision = 0;
@@ -380,6 +390,9 @@ export class ConversationController<Outcome = TurnOutcome> {
     settled: boolean;
     terminalInputsReconciled?: boolean;
     recovering?: boolean;
+    localTurnId?: string;
+    completionKnown?: boolean;
+    completion?: ConversationCommitSummary;
   }>();
   private readonly pendingAbortByTurn = new Map<
     string,
@@ -467,11 +480,22 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
       }),
       opts.conversation.onFinal((frame) => {
-        if (this.opts.pagedRecovery) { if (frame.conversationId === this.active.conversationId) this.wakeRecovery(); return; }
+        if (this.opts.pagedRecovery) { if (frame.conversationId === this.active.conversationId) { this.requestCompletion(frame); this.wakeRecovery(); } return; }
         this.consumeFinal(frame);
       }),
       opts.conversation.onStatus((notice) => {
-        if (this.opts.pagedRecovery) { if (notice.ref.conversationId === this.active.conversationId) this.wakeRecovery(); return; }
+        if (this.opts.pagedRecovery) {
+          if (notice.ref.conversationId === this.active.conversationId) {
+            if (notice.state === 'uncertain-closed' && notice.resultingState === 'committed') this.requestCompletion(notice.ref);
+            const result = terminalResultForStatus(notice), watch = this.durableRuns.get(notice.ref.runId);
+            if (result && watch && notice.statusRevision > watch.statusRevision) {
+              watch.statusRevision = notice.statusRevision;
+              this.finishTurn(watch.conversationId, watch.turnId, result);
+            }
+            this.wakeRecovery();
+          }
+          return;
+        }
         this.consumeStatus(notice);
       }),
       opts.conversation.onActivity((p) => {
@@ -872,7 +896,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     options: BeginTurnOptions = {},
   ): Promise<Outcome> {
     let projected!: Promise<Outcome>;
-    const outcome = new Promise<TurnOutcome>((resolve) => {
+    const outcome = new Promise<TurnOutcome | { committed: ConversationCommitSummary }>((resolve) => {
       this.waiters.set(turnId, value => {
         this.completedOutcomes.add(projected);
         resolve(value);
@@ -880,7 +904,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     });
     this.localTurnsByConversation.set(conversationId, turnId);
     if (this.opts.pagedRecovery) this.localOutput.set(turnId, { conversationId, text: new ObservedTextPrefix(), recovering: false, pendingReceipt: true });
-    projected = this.opts.projectOutcome ? outcome.then(this.opts.projectOutcome) : outcome as Promise<Outcome>;
+    projected = outcome.then(value => 'committed' in value ? this.opts.projectCommittedOutcome!(value.committed)
+      : this.opts.projectOutcome ? this.opts.projectOutcome(value) : value as Outcome);
     this.localTurnAcceptances.set(turnId, turn => {
       this.acceptedOutcomes.set(projected, turn);
       options.onAccepted?.(turn);
@@ -951,6 +976,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (runId) this.focusedTaskByConversation.set(conversationId, runId);
     }
     const runId = this.durableRunByTurn.get(turnId);
+    this.opts.onRunTerminal?.({ conversationId, turnId, runId });
     if (runId && (result.reason === "aborted" || result.reason === "error")) {
       // 本地 waiter 已负责终态展示，重复状态不能再进入旁观展示。
       rememberBounded(this.observedContinuations, runId, { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: true });
@@ -993,7 +1019,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.pendingFinals.delete(runId);
       this.consumeFinal(frame);
     }
-    if (this.opts.pagedRecovery) this.wakeRecovery();
+    if (this.opts.pagedRecovery) { this.requestCompletion({ conversationId, runId }); this.wakeRecovery(); }
     else void this.reconcileDurableRun(runId).catch(() => {});
   }
 
@@ -1154,6 +1180,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   private wakeRecovery(retrying = false): void {
     if (this.disposed || this.recoveryDeleted || !this.opts.pagedRecovery) return;
+    if (!retrying) this.wakeCompletionScan();
     // A real lifecycle/fact notification supersedes retry backoff. An empty
     // new conversation has no durable owner yet; repeated read failure must
     // not turn an idle surface into a permanent four-requests/second poller.
@@ -1172,6 +1199,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   private finishRecoveryReset(conversationId: string): void {
+    this.completionCursor = undefined;
     this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear();
     for (const output of this.localOutput.values()) if (output.conversationId === conversationId) {
       output.text.reset(); output.recovering = false;
@@ -1242,6 +1270,62 @@ export class ConversationController<Outcome = TurnOutcome> {
       }
     } finally { if (!current() && !this.disposed) this.recoveryRequested = true; }
   }
+  /** Business completion cannot queue behind an unreadable body fact. This
+   * cursor consumes only the same bounded authoritative control records;
+   * the body cursor below still acknowledges each rendered fact in order. */
+  private wakeCompletionScan(retrying = false): void {
+    if (!this.opts.projectCommittedOutcome || this.disposed || this.recoveryDeleted) return;
+    if (!retrying) {
+      clearTimeout(this.completionRetry); this.completionRetry = undefined;
+      this.completionFailures = 0;
+    }
+    this.completionScanRequested = true;
+    if (this.completionScan) return;
+    const version = this.recoveryVersion, conversationId = this.active.conversationId;
+    const current = () => !this.disposed && !this.recoveryDeleted && version === this.recoveryVersion && conversationId === this.active.conversationId;
+    const scan = async () => {
+      let resets = 0;
+      if (this.completionCursor?.conversationId !== conversationId) this.completionCursor = undefined;
+      do {
+        this.completionScanRequested = false;
+        const page = await this.opts.conversation.controlPage(conversationId, this.completionCursor,
+          this.completionCursor ? undefined : this.opts.historyRunIds?.());
+        if (!current()) return;
+        if (page.reset) {
+          this.completionCursor = undefined;
+          if (++resets >= 3) throw new RecoveryGenerationChanged();
+          this.completionScanRequested = true; continue;
+        }
+        for (const fact of page.facts) {
+          if (!current()) return;
+          if (fact.kind === 'final') await this.confirmCommittedRun(fact.frame, current);
+          else if (fact.kind === 'status') {
+            const notice = fact.notice, watch = this.durableRuns.get(notice.ref.runId), result = terminalResultForStatus(notice);
+            if (result) this.opts.onRunTerminal?.({ conversationId, runId: notice.ref.runId, turnId: watch?.turnId });
+            if (watch && result && notice.statusRevision > watch.statusRevision) this.finishTurn(watch.conversationId, watch.turnId, result);
+          }
+        }
+        this.completionCursor = page.cursor;
+        if (page.hasMore) this.completionScanRequested = true;
+        await new Promise<void>(setImmediate);
+      } while (current() && this.completionScanRequested);
+    };
+    const work = scan().then(() => { if (current()) this.completionFailures = 0; }).catch(() => {
+      // Metadata recovery must not depend on a blocked body request or another
+      // notification. Retry finitely, keeping the last acknowledged cursor.
+      if (!current() || ++this.completionFailures >= 3) return;
+      const delay = 250 * 2 ** this.completionFailures;
+      this.completionRetry = setTimeout(() => {
+        this.completionRetry = undefined;
+        if (current()) this.wakeCompletionScan(true);
+      }, delay);
+    })
+      .finally(() => {
+        if (this.completionScan === work) this.completionScan = undefined;
+        if (!current() && !this.disposed && this.completionScanRequested) this.wakeCompletionScan();
+      });
+    this.completionScan = work;
+  }
 
   private async consumeRecoveredFact(conversationId: string, fact: ConversationControlFact, progress: RecoveryProgress, current: () => boolean, historyThroughCommitRevision: number): Promise<void> {
     if (fact.kind === 'input') {
@@ -1306,7 +1390,77 @@ export class ConversationController<Outcome = TurnOutcome> {
     else this.opts.onYield(event, source);
   }
 
+  private async confirmCommittedRun(frame: { conversationId: string; runId: string; commitRevision?: number }, current: () => boolean): Promise<void> {
+    if (this.opts.projectCommittedOutcome) {
+      const prior = this.observedContinuations.get(frame.runId);
+      if (prior?.completionKnown && !this.durableRuns.has(frame.runId)) return;
+      const completion = prior?.completion ? { conversationId: frame.conversationId, runId: frame.runId,
+        commitRevision: frame.commitRevision, summary: prior.completion } : await this.opts.conversation.completion(frame.conversationId, frame.runId);
+      if (!current()) return;
+      if (this.observedContinuations.get(frame.runId)?.completionKnown && !this.durableRuns.has(frame.runId)) return;
+      if (!completion.summary || completion.conversationId !== frame.conversationId || completion.runId !== frame.runId ||
+          frame.commitRevision !== undefined && completion.commitRevision !== frame.commitRevision) throw Error('Committed result is not yet available');
+      const watch = this.durableRuns.get(frame.runId), output = watch && this.localOutput.get(watch.turnId);
+      const observed = this.observedContinuations.get(frame.runId) ?? {
+        conversationId: frame.conversationId, sequences: new Map(), text: output?.text ?? new ObservedTextPrefix(), settled: false, completionKnown: false, localTurnId: watch?.turnId,
+      };
+      observed.completionKnown = true;
+      Object.assign(observed, { completion: completion.summary });
+      if (watch) observed.localTurnId = watch.turnId;
+      rememberBounded(this.observedContinuations, frame.runId, observed);
+      this.opts.onRunTerminal?.({ conversationId: frame.conversationId, runId: frame.runId, turnId: watch?.turnId });
+      if (watch) {
+        const waiter = this.waiters.get(watch.turnId);
+        this.waiters.delete(watch.turnId); this.localOutput.delete(watch.turnId); this.wakeReceipt?.();
+        this.pendingPostTurnControls.delete(watch.turnId);
+        if (this.localTurnsByConversation.get(watch.conversationId) === watch.turnId) this.localTurnsByConversation.delete(watch.conversationId);
+        this.markLocalTurnAccepted(watch); this.resolvePendingAbort(watch.turnId);
+        if (completion.summary.handedOff) this.focusedTaskByConversation.set(watch.conversationId, frame.runId);
+        this.releaseDurableRun(watch.turnId);
+        waiter?.({ committed: completion.summary });
+      }
+    }
+  }
+
+  private requestCompletion(frame: { conversationId: string; runId: string; commitRevision?: number }): void {
+    if (!this.opts.projectCommittedOutcome || this.finalLookups.has(frame.runId) || this.finalLookups.size >= 4) return;
+    const version = this.recoveryVersion;
+    const current = () => !this.disposed && version === this.recoveryVersion && this.active.conversationId === frame.conversationId;
+    const work = this.confirmCommittedRun(frame, current).catch(() => { if (current()) this.wakeRecovery(); })
+      .finally(() => {
+        if (this.finalLookups.get(frame.runId) === work) this.finalLookups.delete(frame.runId);
+        // Receipt admission can install the waiter after the query completed
+        // but before this promise's finalizer. Consume the cached result then.
+        if (current() && this.observedContinuations.get(frame.runId)?.completionKnown && this.durableRuns.has(frame.runId)) this.requestCompletion(frame);
+      });
+    this.finalLookups.set(frame.runId, work);
+  }
+
   private async presentRecoveredFinal(frame: FinalFrame, progress: RecoveryProgress, current: () => boolean, historyCovered = false): Promise<void> {
+    await this.confirmCommittedRun(frame, current);
+    if (!current()) return;
+    const completed = this.observedContinuations.get(frame.runId);
+    if (historyCovered && completed?.completionKnown) {
+      await this.opts.onRecoveryDrain?.({ conversationId: frame.conversationId, runId: frame.runId, turnId: completed.localTurnId });
+      completed.settled = true; return;
+    }
+    if (completed?.completionKnown) {
+      if (completed.settled) return;
+      completed.recovering = true;
+      const identity = { conversationId: frame.conversationId, runId: frame.runId, turnId: completed.localTurnId };
+      for await (const text of completed.text.remainingStream(() => this.committedText(frame, current))) {
+        if (!current()) return;
+        await this.emitRecoveredYield({ type: 'text_delta', text }, { ...identity, kind: 'history', final: frame });
+        completed.text.append(text);
+      }
+      if (!current()) return;
+      await this.opts.onRecoveryDrain?.(identity);
+      if (!current()) return;
+      this.markProcessHistoryRendered(frame.runId);
+      completed.settled = true; completed.recovering = false;
+      this.opts.onObservedTurnComplete?.(identity);
+      return;
+    }
     while (current()) {
       const done = await this.consumeHistory(frame.conversationId, { limit: 4, ...(progress.before ? { before: progress.before } : {}) }, async page => {
         if (!current()) return true;
@@ -1346,7 +1500,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         observed.recovering = true;
         const message = finalAssistantMessageOf(match.record.messages);
         observed.text.align(message);
-        const identity = { conversationId: frame.conversationId, runId: frame.runId };
+        const identity = { conversationId: frame.conversationId, runId: frame.runId, turnId: observed.localTurnId };
         for (const text of observed.text.remaining(message)) {
           if (!current()) return true;
           await this.emitRecoveredYield({ type: 'text_delta', text }, { ...identity, kind: 'history', final: frame });
@@ -1360,6 +1514,38 @@ export class ConversationController<Outcome = TurnOutcome> {
       });
       if (done) return;
     }
+  }
+
+  private async *committedText(frame: FinalFrame, current: () => boolean): AsyncGenerator<string> {
+    let cursor: ConversationBodyCursor | undefined;
+    // Find the last assistant message by immutable source positions. Large
+    // non-text or tool blocks can be skipped without reading their whole body.
+    while (current()) {
+      const page = await this.opts.conversation.bodyPage(frame.conversationId, cursor, { runId: frame.runId });
+      if (!current()) throw new RecoveryGenerationChanged();
+      if (page.reset) throw new RecoveryGenerationChanged();
+      if (page.preparing) { cursor = page.cursor; await new Promise<void>(setImmediate); continue; }
+      const assistant = page.fragments.find(item => item.role === 'assistant');
+      if (assistant) { cursor = { ...assistant.cursor, block: 0, offset: 0 }; break; }
+      const first = page.fragments[0];
+      if (first) cursor = { ...first.cursor, block: -1, offset: 0 };
+      else if (page.hasMore) cursor = page.cursor;
+      else return;
+    }
+    let textBlocks = 0, previousBlock = -1;
+    while (current() && cursor) {
+      const page = await this.opts.conversation.bodyPage(frame.conversationId, cursor, { runId: frame.runId, direction: 'forward' });
+      if (!current() || page.reset) throw new RecoveryGenerationChanged();
+      if (page.preparing) { await new Promise<void>(setImmediate); continue; }
+      for (const item of page.fragments) if (item.type === 'text') {
+        if (item.block !== previousBlock) { if (textBlocks++) yield '\n'; previousBlock = item.block; }
+        yield item.text;
+      }
+      if (!page.hasMore) return;
+      if (!page.cursor || JSON.stringify(page.cursor) === JSON.stringify(cursor)) throw Error('Committed body cursor did not advance');
+      cursor = page.cursor;
+    }
+    if (!current()) throw new RecoveryGenerationChanged();
   }
 
   private notificationHistory<T>(conversationId: string, options: Parameters<RpcConversationFacade["history"]>[1], consume: (page: RunsPage) => T): Promise<T> {
@@ -2067,6 +2253,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     this.localOutput.clear(); this.wakeReceipt?.();
     clearImmediate(this.lookupScheduled); this.lookupScheduled = undefined;
     clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
+    clearTimeout(this.completionRetry); this.completionRetry = undefined;
     this.observedContinuations.clear();
     for (const unsub of this.unsubscribes) unsub();
     for (const turnId of this.pendingAbortByTurn.keys()) {

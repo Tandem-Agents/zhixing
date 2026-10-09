@@ -31,7 +31,7 @@ import type { TerminalTrustCandidates } from './trust-candidates.js';
 import type { TerminalTasks } from './tasks.js';
 import type { TerminalTaskNotices } from './task-notices.js';
 import type { TerminalInformationCommands } from './information-commands.js';
-import { TerminalSessionCommands, projectTerminalTurnOutcome, type TerminalTurnOutcome } from './session-commands.js';
+import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTerminalOutcome, type TerminalTurnOutcome } from './session-commands.js';
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
@@ -284,7 +284,6 @@ class TerminalApplication {
       seal: blockId => this.#display.seal(blockId),
     }, {
       accept: (event, source) => this.#processSession.acceptYield(event, source),
-      end: (conversationId, turnId, runId) => this.#processSession.end(conversationId, turnId, runId),
     });
     const releaseProcessEvents = this.#connection.onNotification('session.event', value => {
       if (value && typeof value === 'object') this.#processSession.acceptEvent(value as SessionEventEnvelope);
@@ -659,6 +658,8 @@ class TerminalApplication {
           await this.#historyPage(false);
         },
         projectOutcome: projectTerminalTurnOutcome,
+        projectCommittedOutcome: projectCommittedTerminalOutcome,
+        onRunTerminal: source => this.#processSession.end(source.conversationId, source.turnId, source.runId),
         onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
         onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
       }, initial.active);
@@ -1197,14 +1198,17 @@ class TerminalApplication {
     this.#mainView = { ...this.#mainView, busy: true, message: turn.advancementContinuation ? '已作为当前任务的补充继续推进。' : '正在处理…' };
     void this.#publish(this.#mainView).catch(() => {});
     const settled = completion.then(async outcome => {
-      this.#outputProjection.end(conversationId, turnId, runId);
-      await this.#outputProjection.drain();
+      this.#processSession.end(conversationId, turnId, runId);
+      if (!outcome.bodyPending) {
+        this.#outputProjection.end(conversationId, turnId, runId);
+        await this.#outputProjection.drain();
+      }
       if (this.#abort.signal.aborted) return;
       // The local waiter owns this terminal outcome; the controller suppresses
       // its duplicate observer notice. Keep the authoritative error visible,
       // bounded independently of the control frame and detached from its RPC.
       if (this.#controller?.current.conversationId !== conversationId) return;
-      this.#mainView = { ...this.#mainView, busy: false, message: outcome.message };
+      this.#mainView = { ...this.#mainView, busy: false, message: outcome.reason === 'completed' ? undefined : outcome.message };
       if (outcome.control?.handedOff) this.#mainView = { ...this.#mainView, message: '已提交任务交接；后续结果将在原对话中返回。' };
       else if (outcome.control?.navigation) {
         this.#invalidateConversation();
@@ -1477,7 +1481,6 @@ class TerminalApplication {
       try { await this.#information!.run(name, argument); }
       finally {
         if (!this.#abort.signal.aborted) {
-          this.#mainView = { ...this.#mainView, busy: !!this.#state.activeTurnPromise };
           await this.#publish(this.#mainView);
         }
       }

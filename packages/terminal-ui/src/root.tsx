@@ -437,7 +437,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       <Show when={view().recovery?.input}><text height={1}>{`恢复包输入：${recoveryLength()} 字节 · Enter 回读 · Esc 取消`}</text></Show>
     </Show>
     <Show when={shownProcess()}>
-      <ProcessView view={shownProcess()!} indicator={view().busy ? animation() : '◆'} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
+      <ProcessView view={shownProcess()!} indicator={shownProcess()!.activity === 'running' ? animation() : '◆'} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
     </Show>
     <Show when={view().kind === 'conversation' && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.text}>
       <text height={1} fg={taskStatus().summary?.state === 'error' ? '#e7ba70' : '#9aa8a1'}>{displayText(taskStatus().summary?.text ?? '')}</text>
@@ -730,7 +730,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   let animationTimer: ReturnType<typeof setInterval> | undefined;
   const syncAnimation = () => {
-    if (!view().busy) { clearInterval(animationTimer); animationTimer = undefined; }
+    if (!(shownProcess() ? shownProcess()!.activity === 'running' : view().busy)) { clearInterval(animationTimer); animationTimer = undefined; }
     else if (!animationTimer) {
       const tick = () => setAnimation(frames[Math.floor(performance.now() / 300) % frames.length]!);
       tick(); animationTimer = setInterval(tick, 300);
@@ -784,6 +784,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         } else if (message.type === 'process-status') {
           if (message.status && !validateProcessView(message.status.view)) throw Error('terminal-process-view-invalid');
           setProcessStatus(message.status);
+          syncAnimation();
         } else if (message.type === 'recovery-page') {
           if (message.requestId !== view().recovery?.requestId) return;
           if (!Number.isSafeInteger(message.page) || message.page < 0 || message.page >= view().recovery!.pages || Buffer.byteLength(message.text) > 32 * 1024) throw Error('terminal-recovery-page-invalid');

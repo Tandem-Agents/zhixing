@@ -22,7 +22,7 @@ interface Tool { readonly name: string; readonly input: Record<string, unknown>;
 /** Display-only fold over already authorized facts. One current scope, fixed
  * tables and short tails. No domain task state, transcript or artifact store. */
 export class TerminalProcessProjection {
-  #scope?: ProcessScope; #closed = false; #paused = false; #revision = 0; #block = 0;
+  #scope?: ProcessScope; #closed = false; #confirmed = false; #paused = false; #revision = 0; #block = 0;
   #phase = ''; #notice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
   readonly #seq = new Map<string, number>();
   readonly #tools = new Map<string, Tool>(); readonly #children = new Map<string, Child>();
@@ -31,9 +31,12 @@ export class TerminalProcessProjection {
   #batch: ProcessToolSnapshot[] = [];
   #usage: TerminalProcessView['usage'] = {};
   #published?: string;
+  #startedAt = 0;
+  #durationMs?: number;
   constructor(readonly ports: ProcessProjectionPorts) {}
-  begin(scope: ProcessScope): void {
-    this.#scope = { ...scope }; this.#closed = false; this.#paused = false; this.#block = 0;
+  begin(scope: ProcessScope, confirmed = false): void {
+    this.#startedAt = performance.now(); this.#durationMs = undefined;
+    this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
     this.#phase = '正在准备'; this.#notice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
     this.#seq.clear(); this.#tools.clear(); this.#children.clear(); this.#endedParents.clear(); this.#sealedChildren.clear(); this.#summarizedChildren.clear(); this.#batch = []; this.#usage = {}; this.#publish();
   }
@@ -43,6 +46,7 @@ export class TerminalProcessProjection {
       (s.runId && source.runId ? s.runId === source.runId : !!s.turnId && s.turnId === source.turnId);
   }
   get closed(): boolean { return this.#closed; }
+  get complete(): boolean { return this.#confirmed; }
   accept(value: SessionProcessProjection, generation: number): void {
     if (this.#scope?.source !== 'assignment') return;
     try { validateSessionProcessProjection(value); } catch { this.pause('过程展示超出容量或不可读取'); return; }
@@ -284,8 +288,8 @@ export class TerminalProcessProjection {
     } catch { if (!this.#paused) this.pause('过程显示暂不可用'); }
   }
   snapshot(): TerminalProcessView {
-    return { revision: ++this.#revision, phase: this.#phase,
-      ...(this.#thinking ? { thinking: { text: this.#thinking, active: this.#thinkingActive } } : {}),
+    return { revision: ++this.#revision, phase: this.#confirmed ? '本轮已结束' : this.#phase, activity: this.#confirmed ? 'complete' : this.#closed || this.#paused ? 'reconciling' : 'running', ...(this.#durationMs === undefined ? {} : { durationMs: this.#durationMs }),
+      ...(this.#thinking ? { thinking: { text: this.#thinking, active: !this.#confirmed && this.#thinkingActive } } : {}),
       tools: this.#batch.slice(-3).map(e => processText(processToolSummary(e), 1024)), children: [...this.#children.values()].map(({ lineage: _lineage, toolUses: _toolUses, ...child }) => child),
       usage: { ...this.#usage }, ...(this.#notice ? { notice: this.#notice } : {}) };
   }
@@ -296,11 +300,19 @@ export class TerminalProcessProjection {
     this.#notice = processText(reason, 1024); this.#publish();
     try { this.ports.gap(this.#notice); } catch { /* The parent lifecycle handles transport closure. */ }
   }
-  end(generation: number): void {
-    if (this.#closed || generation !== this.#scope?.generation) return;
-    this.#sealThinking(); this.#flushBatch(); this.#flushSubtasks(); this.#closed = true; this.#phase = '本轮已结束';
+  end(generation: number, confirmed = false): void {
+    if (generation !== this.#scope?.generation || (confirmed ? this.#confirmed : this.#closed)) return;
+    // Business completion stops activity immediately. The independent process
+    // stream may still deliver its finite tail; only its own close retires it.
+    this.#confirmed ||= confirmed;
+    if (!confirmed || this.#scope.source === 'legacy') {
+      this.#sealThinking(); this.#flushBatch(); this.#flushSubtasks(); this.#closed = true;
+      this.#tools.clear(); this.#seq.clear();
+    }
+    this.#phase = this.#confirmed ? '本轮已结束' : '正在核对运行结果';
+    this.#durationMs ??= Math.max(0, performance.now() - this.#startedAt);
     if (this.#notice) this.#notice = processText(`${this.#phase}；${this.#notice}`, 1024);
-    this.#tools.clear(); this.#seq.clear(); this.#publish();
+    this.#publish();
   }
   /** Re-enable only this live scope; the Server profile watermark excludes old artifacts. */
   resume(generation: number): void {
