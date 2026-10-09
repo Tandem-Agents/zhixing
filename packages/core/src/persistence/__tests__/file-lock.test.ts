@@ -106,6 +106,39 @@ describe("file lock atomic publication", () => {
   });
 
   it.each([
+    [{ kind: "absent" } as const, true],
+    [{ kind: "present", birth: "successor" } as const, true],
+    [{ kind: "present", birth: "owner" } as const, false],
+    [{ kind: "unknown" } as const, false],
+  ])("uses process evidence, not a fresh heartbeat, for immediate recovery: %j", async (identity, admitted) => {
+    const directory = await createTempDir("file-lock-fresh-owner");
+    const lockPath = path.join(directory, "resource.lock");
+    const original = versionedLockRecord("a".repeat(32), "owner", 424_242);
+    await writeFile(lockPath, original);
+    const acquire = acquireFileLock(lockPath, {
+      staleMs: 30_000, waitMs: 0, processIdentityResolver: fixedResolver(identity),
+    });
+    if (admitted) {
+      const release = await acquire;
+      expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
+      await release();
+    } else {
+      await expect(acquire).rejects.toThrow(/busy/u);
+      expect(await readFile(lockPath, "utf8")).toBe(original);
+    }
+  });
+
+  it.each(["{", lockRecord("a".repeat(32))])("does not reclaim unprovable owner records: %s", async record => {
+    const directory = await createTempDir("file-lock-unprovable-owner");
+    const lockPath = path.join(directory, "resource.lock");
+    await writeFile(lockPath, record);
+    await expect(acquireFileLock(lockPath, {
+      staleMs: 30_000, waitMs: 0, processIdentityResolver: fixedResolver({ kind: "absent" }),
+    })).rejects.toThrow(/busy/u);
+    expect(await readFile(lockPath, "utf8")).toBe(record);
+  });
+
+  it.each([
     ["dead", "acquired"],
     ["alive", "busy"],
     ["unknown", "busy"],
@@ -227,9 +260,11 @@ describe("file lock atomic publication", () => {
       child.kill();
       await new Promise<void>((resolve) => child.once("exit", () => resolve()));
     }
+    const fresh = new Date();
+    await utimes(lockPath, fresh, fresh);
     const release = await acquireFileLock(lockPath, {
-      staleMs: 100,
-      waitMs: 5_000,
+      staleMs: 30_000,
+      waitMs: 0,
       retryMs: 5,
       processIdentityResolver: resolver,
     });

@@ -278,7 +278,7 @@ async function readLockFile(lockPath: string): Promise<LockOwnerReading> {
 }
 
 /**
- * A stale lock may only be reclaimed when the exact recorded process is proven
+ * A lock may only be reclaimed when the exact recorded process is proven
  * gone or replaced. A live process with a matching birth is active even when
  * its heartbeat is stale (pause/sleep); legacy, corrupt or unreadable records
  * always stay busy.
@@ -292,7 +292,9 @@ async function isReclaimable(
   if (reading.kind === "missing") return heartbeatAgeMs > staleMs;
   if (reading.kind === "corrupt" || reading.kind === "legacy") return false;
   if (activeTokens.has(reading.token)) return false;
-  if (heartbeatAgeMs <= staleMs) return false;
+  // A complete owner record is atomically published. Once that process is
+  // proven gone, heartbeat age adds no exclusion: gating on it would reject
+  // immediate crash recovery. The reclaim guard rechecks this exact identity.
   const identity = await resolver.read(reading.pid);
   if (identity.kind === "unknown") return false;
   if (identity.kind === "absent") return true;
