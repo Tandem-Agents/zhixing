@@ -78,7 +78,9 @@ class EmptyTerminalSubmission extends Error {}
 
 /** This private role is only admitted by S. It owns the single application
  * connection and configuration transaction; it never opens a terminal reader. */
-export async function runTerminalApplication(): Promise<void> {
+export async function runTerminalApplication(timing?: {
+  entryMs: number; writerDeclarationMs: number; moduleLoadMs: number; processCpuUserMs: number; processCpuSystemMs: number;
+}): Promise<void> {
   const instance = process.env.ZHIXING_TERMINAL_INSTANCE;
   const home = process.env.ZHIXING_TERMINAL_HOME;
   const directory = process.env.ZHIXING_TERMINAL_DIRECTORY;
@@ -90,7 +92,8 @@ export async function runTerminalApplication(): Promise<void> {
   // Host self-execution inherits environment: never forward a surface role.
   for (const key of ['ZHIXING_TERMINAL_ROLE', 'ZHIXING_TERMINAL_INSTANCE', 'ZHIXING_TERMINAL_HOME', 'ZHIXING_TERMINAL_DIRECTORY', 'ZHIXING_TERMINAL_DIRECTORY_ID', 'ZHIXING_TERMINAL_PIPE']) delete process.env[key];
   const args = normalizeCliArgs(process.argv.slice(2));
-  beginEntryLogging(args.length ? 'independent-command' : 'repl');
+  const early = beginEntryLogging(args.length ? 'independent-command' : 'repl');
+  if (timing) early.records.record({ event: 'terminalApplicationLoad', data: timing, refs: [{ kind: 'terminal', id: instance }] });
   const application = new TerminalApplication(instance, home, directory, transport, directoryIdentity, args);
   await application.run();
 }

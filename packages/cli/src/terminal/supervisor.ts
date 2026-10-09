@@ -26,6 +26,7 @@ interface OwnedProcess {
   readonly listening: Promise<void>; announceListening(): void; announced: boolean;
   created: boolean; resumed: boolean; exited: boolean; code: number | null; birth?: string;
   exitRequested?: boolean;
+  cancelledBeforeListening?: boolean;
   channel?: TerminalChannel;
 }
 interface NativeEvent {
@@ -79,6 +80,8 @@ class TerminalSupervisor {
   #native?: OwnedProcess;
   #application?: OwnedProcess;
   #applicationAdmitted?: Promise<void>;
+  #applicationReady = false;
+  #applicationStartupTimer?: ReturnType<typeof setTimeout>;
   #ui?: OwnedProcess;
   #assets?: TerminalInstanceAssets;
   #filesystem?: CheckpointFilesystemSession;
@@ -238,9 +241,10 @@ class TerminalSupervisor {
     this.#applicationAdmitted = (async () => {
       this.#live();
       const spawnId = this.#roleIntents.application = randomUUID();
-      await this.#assets!.intent('application', this.#abort.signal, spawnId);
+      const deadline = Date.now() + TERMINAL_LIMITS.applicationStartupTimeoutMs;
+      this.#applicationStartupTimer = setTimeout(() => void this.#close(78, 'terminal-application-startup-timeout'), TERMINAL_LIMITS.applicationStartupTimeoutMs);
+      await this.#phase('application-intent', () => this.#assets!.intent('application', this.#abort.signal, spawnId));
       this.#live();
-      const deadline = Date.now() + 5000;
       // Projection creates short-lived DTOs beside another rendering runtime.
       // Adjust GC scheduling without capping the admitted RPC/input capacity.
       const application = this.#spawn('application', process.execPath,
@@ -248,12 +252,18 @@ class TerminalSupervisor {
           ...process.env, ZHIXING_TERMINAL_ROLE: 'application', ZHIXING_TERMINAL_INSTANCE: this.instance,
           ZHIXING_TERMINAL_DIRECTORY: instancePath, ZHIXING_TERMINAL_DIRECTORY_ID: this.#assets!.instanceIdentity, ZHIXING_TERMINAL_HOME: this.options.home,
         }, spawnId);
-      const identity = await this.#processIdentity(application);
-      await this.#assets!.bind('application', identity, this.#abort.signal);
+      const identity = await this.#phase('application-identity', () => this.#processIdentity(application));
+      await this.#phase('application-bind', () => this.#assets!.bind('application', identity, this.#abort.signal));
       this.#resume(application, deadline);
-      if (!await this.#bounded(application.listening, Math.max(0, deadline - Date.now()), this.#abort.signal)) throw Error('terminal-application-listener-timeout');
+      await this.#phase('application-listener', async () => {
+        if (!await this.#bounded(application.listening, Math.max(0, deadline - Date.now()), this.#abort.signal))
+          throw Object.assign(Error('terminal-application-listener-timeout'), { code: 'ETIMEDOUT' });
+      });
       this.#live(deadline);
-      await application.channel!.send({ type: 'hello', role: 'application' });
+      await this.#phase('application-hello', () => application.channel!.send({ type: 'hello', role: 'application' }));
+      this.#live(deadline);
+      this.#applicationReady = true;
+      clearTimeout(this.#applicationStartupTimer);
     })().catch(error => {
       // Normal startup cancellation closes this same gate. Waiting U requests
       // then see #sealed and finish without forwarding or a false failure.
@@ -709,7 +719,9 @@ class TerminalSupervisor {
     });
     child.once('exit', code => {
       item.exited = true; item.code = code; resolveExit();
-      if (!this.#closing) void this.#close(code === 0 && role !== 'recovery' && this.#uiReady ? 0 : code || 71, `${role}-exit`);
+      // A successful foreground close is requested over the control channel.
+      // An unrequested exit is not success merely because a frame was shown.
+      if (!this.#closing) void this.#close(code || 71, `${role}-exit`);
     });
     child.once('close', resolveDrain);
     child.on('disconnect', () => { if (!this.#closing) void this.#close(70, `${role}-disconnected`); });
@@ -725,6 +737,18 @@ class TerminalSupervisor {
 
   async #roleMessage(item: OwnedProcess, message: TerminalMessage, traffic: TerminalTraffic): Promise<void> {
     if (message.type === 'exit') {
+      if (message.bootstrapFailure) {
+        const failure = message.bootstrapFailure;
+        if (item.role !== 'application' || item.announced || message.code !== 71 ||
+          !['writer-declaration', 'module-load'].includes(failure.stage) ||
+          !Number.isFinite(failure.durationMs) || failure.durationMs < 0 ||
+          typeof failure.category !== 'string' || failure.category.length > 64 ||
+          (failure.code !== undefined && (typeof failure.code !== 'string' || failure.code.length > 64))) throw Error('terminal-bootstrap-failure-invalid');
+        this.options.records?.record({ event: 'failed', result: 'failure', refs: [{kind:'terminal',id:this.instance}], data: {
+          reason: 'terminal-application-bootstrap-failed', phase: failure.stage, durationMs: failure.durationMs,
+          failure: { category: failure.category, code: failure.code },
+        } });
+      }
       // This owner has already begun closing. Acknowledge its exit request on
       // the existing channel; do not send a second close across its shutdown.
       // The request is not an actual-exit receipt or permission to release it.
@@ -776,14 +800,16 @@ class TerminalSupervisor {
       if (!this.#modeAdmission || this.#uiReady || !Number.isSafeInteger(message.frameId)) throw Error('terminal-first-frame-order');
       this.#uiReady = true; clearTimeout(this.#startupTimer);
       this.#firstFramePhase?.finish();
-      this.#observe('first-frame', { frameId: message.frameId }); return;
+      this.#observe('first-frame', { frameId: message.frameId });
+      // ACK the first frame immediately; cold N preparation must not occupy
+      // U's five-second delivery window. Admit requests only after N's hello.
+      void this.#openApplicationRequests(item).catch(() => {
+        if (!this.#sealed) void this.#close(71, 'terminal-application-ready-undelivered');
+      });
+      return;
     }
     if (item.role === 'ui' && message.type === 'request' && this.#uiReady) {
-      await this.#applicationAdmitted;
-      // Admission can finish after a concurrent exit sealed this surface.
-      // No domain request has been sent yet; end this forwarding receipt
-      // without turning ordinary close cancellation into a channel failure.
-      if (this.#sealed) return;
+      if (!this.#applicationReady) throw Error('terminal-application-not-ready');
       this.#live();
       await this.#application!.channel!.send(message, traffic); return;
     }
@@ -796,6 +822,12 @@ class TerminalSupervisor {
       await this.#ui.channel!.send(message, traffic); return;
     }
     throw Error('terminal-role-message');
+  }
+
+  async #openApplicationRequests(ui: OwnedProcess): Promise<void> {
+    await this.#applicationAdmitted;
+    if (this.#sealed) return;
+    await this.#phase('application-ready', () => ui.channel!.send({ type: 'application-ready' }));
   }
 
   #attachNative(item: OwnedProcess): void {
@@ -975,7 +1007,7 @@ class TerminalSupervisor {
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#sealed = true;
     for (const item of this.#owned) item.channel?.beginClose();
-    this.#abort.abort(); clearTimeout(this.#startupTimer);
+    this.#abort.abort(); clearTimeout(this.#startupTimer); clearTimeout(this.#applicationStartupTimer);
     this.#firstFramePhase?.finish(code === 0 || code === 130 ? new DOMException(reason, 'AbortError') : Error(reason));
     // Preserve the first finite lifecycle cause before logging is drained.
     // Observation failure must not re-enter or delay this closing path.
@@ -986,9 +1018,13 @@ class TerminalSupervisor {
     this.#deadlineTimer = setTimeout(() => process.exit(this.#result || 75), Math.max(0, this.#deadline - Date.now()));
     void (async () => {
       for (const item of [this.#application, this.#ui]) if (item && !item.exited && !item.exitRequested) {
-        // A suspended process/gate has no business listener. Cancel it now,
-        // then await the same real creation/exit/drain fence below.
-        if (!item.resumed) item.child.kill('SIGKILL');
+        // Resuming an OS process does not establish its control listener.
+        // Cancel cold preparation through its owned process handle instead of
+        // sending into a nonexistent pipe, then retain the real exit/drain.
+        if (!item.resumed || !item.announced) {
+          item.cancelledBeforeListening = true;
+          item.child.kill('SIGKILL');
+        }
         else void item.channel?.send({ type: 'close', deadline: this.#deadline }).catch(() => {});
       }
       const loggingDrain = this.#drainLogging();
@@ -999,7 +1035,8 @@ class TerminalSupervisor {
         for (const item of writers) if (!item.exited) item.child.kill('SIGKILL');
       }
       let ended = await this.#bounded(Promise.all(writers.map(item => item.exit)), this.#remaining(1000));
-      if (!this.#result && writers.some(item => item.exited && item.code !== 0 && (item.resumed || !item.child.cancelled))) this.#result = 74;
+      if (!this.#result && writers.some(item => item.exited && item.code !== 0 &&
+        !(item.cancelledBeforeListening && item.child.cancelled))) this.#result = 74;
       let drained = await this.#bounded(Promise.all(writers.map(item => item.drained)), this.#remaining(500));
       // N's death revokes its creation capability and terminates each directly
       // held helper. Its files cannot be collected merely because N exited.

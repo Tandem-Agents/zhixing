@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
-import type { TerminalEnvelope, TerminalMessage } from '../../../../terminal-ui/src/protocol.js';
+import { TERMINAL_LIMITS, type TerminalEnvelope, type TerminalMessage } from '../../../../terminal-ui/src/protocol.js';
 import { terminalWriterDeadline } from '../close-budget.js';
 import { checkpointFilesystemCompletion, retainCheckpointFilesystemCompletion } from '../../../../mesh/src/checkpoint-filesystem-completion.js';
 import { beginLogPhase } from '@zhixing/core/logging';
@@ -18,10 +18,10 @@ if (!owner) throw Error('Production supervisor missing');
 const declaration = owner.getText(source);
 const emitted = ts.transpileModule(declaration.slice(0, -1) + `
   fixtureOpen(processes, admitted) {
-    this.#processes = processes; this.#uiReady = true;
+    this.#processes = processes; this.#uiReady = true; this.#applicationReady = true;
     this.#applicationAdmitted = admitted;
-    this.#spawn('application', 'fixture-node', [], [], {}).resumed = true;
-    this.#spawn('ui', 'fixture-ui', [], [], {}).resumed = true;
+    Object.assign(this.#spawn('application', 'fixture-node', [], [], {}), {resumed:true,announced:true});
+    Object.assign(this.#spawn('ui', 'fixture-ui', [], [], {}), {resumed:true,announced:true});
     return this.#completion;
   }
   fixtureClose(code = 0) { return this.#close(code, 'user-exit'); }
@@ -32,6 +32,8 @@ const emitted = ts.transpileModule(declaration.slice(0, -1) + `
   fixturePreparingFilesystem(close) { this.#filesystem = { close }; }
   fixtureFixedAssets(completion) { this.#fixedAssets = completion; }
   fixtureSuspend(role) { this.#owned.find(item => item.role === role).resumed = false; }
+  fixtureWithoutListener(role) { this.#owned.find(item => item.role === role).announced = false; }
+  fixturePreparingApplication() { this.#uiReady = false; this.#modeAdmission = true; this.#applicationReady = false; }
   fixtureApplicationAdmission(intent) {
     this.#assets = { intent, async settleRole() {}, async release() {}, async close() {} };
     this.#beginApplication('fixture-instance');
@@ -51,6 +53,8 @@ interface SupervisorPort {
   fixturePreparingFilesystem(close: (remainingMs: number) => Promise<void>): void;
   fixtureFixedAssets(completion: Promise<void>): void;
   fixtureSuspend(role: 'application' | 'ui'): void;
+  fixtureWithoutListener(role: 'application' | 'ui'): void;
+  fixturePreparingApplication(): void;
   fixtureApplicationAdmission(intent: () => Promise<void>): Promise<void>;
   readonly fixtureResult: number;
 }
@@ -84,11 +88,12 @@ class ProcessPort extends EventEmitter {
 function fixture(admitted = Promise.resolve(), args: readonly string[] = [], drain?: () => Promise<void>, loggingAdmission?: () => Promise<void>) {
   const timeoutExit = vi.fn(), peerFailures: string[] = [], children: ProcessPort[] = [];
   const processPort = { platform: 'win32', off: vi.fn(), exit: timeoutExit };
-  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', emitted + '\nreturn TerminalSupervisor;')(
+  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', 'TERMINAL_LIMITS', emitted + '\nreturn TerminalSupervisor;')(
     beginLogPhase,
-    processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, TerminalChannelRetiredError, terminalWriterDeadline, checkpointFilesystemCompletion,
+    processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, TerminalChannelRetiredError, terminalWriterDeadline, checkpointFilesystemCompletion, TERMINAL_LIMITS,
   ) as new (options: unknown) => SupervisorPort;
-  const supervisor = new Owner({ args, drain, admitted: loggingAdmission });
+  const record = vi.fn();
+  const supervisor = new Owner({ args, drain, admitted: loggingAdmission, records: { record } });
   const processes = {
     children: new Set<ProcessPort>(), seal: vi.fn(), terminateExecution: vi.fn(), finish: vi.fn(),
     executionState: () => ({ active: 0, creating: 0 }),
@@ -104,7 +109,7 @@ function fixture(admitted = Promise.resolve(), args: readonly string[] = [], dra
   const completion = supervisor.fixtureOpen(processes, admitted), application = children[0]!, ui = children[1]!;
   for (const child of children) child.emit('spawn');
   const flush = () => vi.advanceTimersByTimeAsync(0);
-  return { supervisor, application, ui, processes, completion, flush, peerFailures, timeoutExit,
+  return { supervisor, application, ui, processes, completion, flush, peerFailures, timeoutExit, record,
     async finish() { for (const child of children) child.finish(); await flush(); return completion; },
   };
 }
@@ -112,6 +117,26 @@ function fixture(admitted = Promise.resolve(), args: readonly string[] = [], dra
 describe('supervisor cooperative role close', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each(['application', 'ui'] as const)('cancels resumed %s before IPC exists without manufacturing a transport failure', async role => {
+    const f = fixture(); f.supervisor.fixtureWithoutListener(role);
+    f[role].sendError = Error('terminal-process-pipe-unavailable');
+    void f.supervisor.fixtureClose(); await f.flush();
+    expect(f[role].kill).toHaveBeenCalledExactlyOnceWith('SIGKILL');
+    expect(f[role].received).toEqual([]); expect(f.processes.finish).not.toHaveBeenCalled();
+    f[role].finish(1); expect(await f.finish()).toBe(0); expect(f.peerFailures).toEqual([]);
+  });
+
+  it('retains bootstrap failure evidence before closing without requiring an application hello', async () => {
+    const f = fixture(); f.supervisor.fixtureWithoutListener('application');
+    const sent = f.application.peer.send({type:'exit',code:71,reason:'terminal-application-bootstrap-failed',
+      bootstrapFailure:{stage:'module-load',durationMs:41,category:'system',code:'ERR_MODULE_NOT_FOUND'}});
+    await f.flush(); await sent;
+    expect(f.record).toHaveBeenCalledWith(expect.objectContaining({event:'failed',result:'failure',data:{
+      reason:'terminal-application-bootstrap-failed',phase:'module-load',durationMs:41,failure:{category:'system',code:'ERR_MODULE_NOT_FOUND'},
+    }}));
+    expect(f.application.kill).not.toHaveBeenCalled(); expect(await f.finish()).toBe(71);
+  });
 
   it.each(['application', 'ui'] as const)('cancels unexecuted %s immediately but waits its actual exit', async role => {
     const f = fixture(); f.supervisor.fixtureSuspend(role);
@@ -197,17 +222,19 @@ describe('supervisor cooperative role close', () => {
     expect(f.timeoutExit).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('cancels pending N admission without forwarding an early request, rejected=%s', async rejected => {
+  it.each([false, true])('cancels pending N admission without granting requests, rejected=%s', async rejected => {
     const f = fixture();
+    f.supervisor.fixturePreparingApplication();
     let settle!: () => void;
     const admitted = f.supervisor.fixtureApplicationAdmission(() => new Promise<void>((resolve, reject) => {
       settle = () => rejected ? reject(Error('admission cancelled')) : resolve();
     }));
-    const request = f.ui.peer.send({ type: 'request', id: 1, action: { kind: 'startup' } }).catch(error => error);
-    await f.flush();
+    const ready = f.ui.peer.send({ type: 'ready', frameId: 1 });
+    await f.flush(); await ready;
     expect(f.application.received).toEqual([]);
     void f.supervisor.fixtureClose(); settle(); await f.flush();
-    await admitted; expect(await request).toBeInstanceOf(TerminalChannelRetiredError);
+    await admitted;
+    expect(f.ui.received.some(message => message.type === 'application-ready')).toBe(false);
     expect(f.application.received).toEqual([expect.objectContaining({ type: 'close' })]);
     expect(f.processes.children.size).toBe(2);
     expect(await f.finish()).toBe(0);
@@ -304,18 +331,39 @@ describe('supervisor cooperative role close', () => {
     expect(await f.finish()).toBe(0);
   });
 
-  it('does not forward a request whose application admission finishes after seal', async () => {
+  it('does not grant requests when application admission finishes after seal', async () => {
     let admit!: () => void;
     const f = fixture(new Promise<void>(resolve => { admit = resolve; }));
-    const request = f.ui.peer.send({ type: 'request', id: 1, action: { kind: 'status' } }).catch(error => error);
-    await f.flush();
+    f.supervisor.fixturePreparingApplication();
+    const ready = f.ui.peer.send({ type: 'ready', frameId: 1 });
+    await f.flush(); await ready;
     f.ui.peer.beginClose();
     const exit = f.ui.peer.send({ type: 'exit', code: 0, reason: 'user-exit' });
     await f.flush(); await exit; admit(); await f.flush();
-    expect(await request).toBeInstanceOf(TerminalChannelRetiredError);
+    expect(f.ui.received.some(message => message.type === 'application-ready')).toBe(false);
     expect(f.application.received.some(message => message.type === 'request')).toBe(false);
     expect(f.supervisor.fixtureResult).toBe(0); expect(await f.finish()).toBe(0);
     expect(f.peerFailures).toEqual([]);
+  });
+
+  it('acknowledges the first frame while cold application preparation takes longer than a delivery window', async () => {
+    let admit!: () => void;
+    const f = fixture(new Promise<void>(resolve => { admit = resolve; }));
+    f.supervisor.fixturePreparingApplication();
+    const ready = f.ui.peer.send({ type: 'ready', frameId: 1 });
+    await f.flush(); await ready;
+    await vi.advanceTimersByTimeAsync(7000);
+    expect(f.ui.received).toEqual([]); expect(f.peerFailures).toEqual([]);
+    expect(f.supervisor.fixtureResult).toBe(0);
+    admit(); await f.flush();
+    expect(f.ui.received).toEqual([{ type: 'application-ready' }]);
+    void f.supervisor.fixtureClose(); await f.flush(); expect(await f.finish()).toBe(0);
+  });
+
+  it.each(['application', 'ui'] as const)('treats an unrequested zero-code %s exit as failure', async role => {
+    const f = fixture(); f[role].emit('exit', 0); await f.flush();
+    expect(f.supervisor.fixtureResult).toBe(71);
+    expect(await f.finish()).toBe(71);
   });
 
   it.each(['invalid-envelope', 'send-error'] as const)('preserves a real %s failure after close starts', async failure => {

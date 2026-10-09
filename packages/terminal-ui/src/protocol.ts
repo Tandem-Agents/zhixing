@@ -16,6 +16,9 @@ export const TERMINAL_LIMITS = Object.freeze({
   // notification lookups 4, asset operations 4, startup/preparation 4.
   pendingRequests: 8,
   deliveryTimeoutMs: 5_000,
+  // Cold application preparation is not an outstanding message delivery.
+  // One absolute deadline, independent of the first rendered frame.
+  applicationStartupTimeoutMs: 30_000,
   historyHotBytes: 64 * 1024 * 1024,
   inputHotBytes: 64 * 1024 * 1024,
   rpcWorkspaceBytes: 256 * 1024 * 1024,
@@ -46,8 +49,12 @@ export type TerminalMessage =
   | { readonly type: "modes"; readonly originalMask: number; readonly mutableMask: number }
   | { readonly type: "grant" }
   | { readonly type: "ready"; readonly frameId: number }
+  | { readonly type: "application-ready" }
   | { readonly type: "close"; readonly deadline: number }
-  | { readonly type: "exit"; readonly code: number; readonly reason: string }
+  | { readonly type: "exit"; readonly code: number; readonly reason: string; readonly bootstrapFailure?: {
+      readonly stage: 'writer-declaration' | 'module-load'; readonly durationMs: number;
+      readonly category: string; readonly code?: string;
+    } }
   | { readonly type: "request"; readonly id: number; readonly action: TerminalAction }
   | { readonly type: "reply"; readonly id: number; readonly value?: unknown; readonly error?: string }
   | { readonly type: "view"; readonly view: TerminalView }

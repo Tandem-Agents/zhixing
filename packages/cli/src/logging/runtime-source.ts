@@ -22,6 +22,9 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     terminalEntry: { message: "终端入口依赖加载耗时", level: "info", tier: "critical", fields: {
       entryMs: "number", prepareMs: "number", loadMs: "number", processCpuUserMs: "number", processCpuSystemMs: "number",
     } },
+    terminalApplicationLoad: { message: "终端应用依赖加载耗时", level: "info", tier: "critical", fields: {
+      entryMs: "number", writerDeclarationMs: "number", moduleLoadMs: "number", processCpuUserMs: "number", processCpuSystemMs: "number",
+    } },
     terminalAssetVerification: { message: "终端固定制品校验耗时", level: "info", tier: "critical", fields: {
       asset: "text", durationMs: "number", openMs: "number", statMs: "number", readMs: "number", hashMs: "number", closeMs: "number", bytes: "number", reads: "number",
     } },
@@ -59,7 +62,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     hostConnected: { message: "前台已连接宿主", level: "info", tier: "critical", fields: { attempt: "number" } },
     startupPhase: { message: "启动阶段已结束", level: "info", tier: "critical", fields: { phase: "text", durationMs: "number" } },
     failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: {
-      reason: "text", error: "text", attempt: "number", failure: { fields: LOG_FAILURE_FIELDS },
+      reason: "text", error: "text", attempt: "number", phase: "text", durationMs: "number", failure: { fields: LOG_FAILURE_FIELDS },
       issues: { items: { fields: { field: "text", reason: "text" } }, maxItems: 16 },
       missing: { items: "text", maxItems: 32 },
     } },

@@ -32,9 +32,9 @@ export async function launchTerminal(args: readonly string[], entryTiming?: {
     });
   } catch (error) {
     if (logging) recordRuntimeFailure(logging.records, error, 'terminal-startup-failed');
-    process.stderr.write('知行交互终端未能启动或安全完成；请用 zz logs 查看记录。\n');
   }
   // R has restored the original terminal before ordinary command results are written.
+  if (result !== 0 && result !== 130) process.stderr.write(`知行终端意外结束（退出码 ${result}）；请用 zz logs 查看此次记录。\n`);
   for (const item of output) await new Promise<void>((resolve, reject) => process[item.stream].write(item.text, error => error ? reject(error) : resolve()));
   return result;
 }

@@ -8,7 +8,7 @@ const endpoint = consumeTerminalParentEndpoint();
 if (!instance || !/^[a-f0-9-]{36}$/.test(instance) || endpoint === undefined) throw Error('The terminal UI requires its foreground supervisor.');
 const transport = new TerminalParentTransport(endpoint);
 const abort = new AbortController();
-const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer?: ReturnType<typeof setTimeout> }>();
 let admitRequests!: () => void, rejectAdmission!: (error: Error) => void;
 const admission = new Promise<void>((resolve, reject) => { admitRequests = resolve; rejectAdmission = reject; });
 void admission.catch(() => {});
@@ -16,24 +16,37 @@ let sequence = 0, phase: 'waiting' | 'querying' | 'ready' | 'active' | 'closing'
 let root: Awaited<ReturnType<typeof import('./root.js').createTerminalRoot>> | undefined;
 let initializing: Promise<void> | undefined;
 let closing: Promise<void> | undefined;
+let applicationReady = false;
+let startupRequested = false;
 const input = new TerminalInputOwner(reason => void close(reason, 71));
 const channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done), receive, reason => void close(reason, 71));
 
 function request(action: TerminalAction): Promise<unknown> {
   if (abort.signal.aborted) return Promise.reject(Error('terminal-closed'));
-  if (pending.size >= TERMINAL_LIMITS.pendingRequests) return Promise.reject(Error('terminal-request-capacity'));
+  if (!applicationReady && (action.kind === 'interrupt' || action.kind === 'exit')) {
+    void close('user-exit', 0); return Promise.resolve({ accepted: true });
+  }
+  // No application operation exists to abort during preparation. In particular,
+  // repeated Esc must not queue cancellations that later act on a new run.
+  if (!applicationReady && action.kind === 'abort') return Promise.resolve({ accepted: true });
+  // First-frame input must not consume the slot required to start the app.
+  // Keep the same total budget, including across the readiness microtasks.
+  const capacity = TERMINAL_LIMITS.pendingRequests - (!startupRequested && action.kind !== 'startup' ? 1 : 0);
+  if (pending.size >= capacity) return Promise.reject(Error('terminal-request-capacity'));
+  if (action.kind === 'startup') startupRequested = true;
   const id = ++sequence;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(Error('操作结果尚未确认；不会自动重发。')); }, 30_000);
-    pending.set(id, { resolve, reject, timer });
-    // The initial render can request candidates before its first-frame ACK.
-    // Keep those requests in the same bounded map until S admits business IPC.
+    pending.set(id, { resolve, reject });
+    // Preparation is bounded by S. A queued local intent has not yet been
+    // delivered, so neither transport nor operation timeouts start here.
     void admission.then(() => {
       abort.signal.throwIfAborted();
-      if (!pending.has(id)) return;
+      const operation = pending.get(id);
+      if (!operation) return;
+      operation.timer = setTimeout(() => { pending.delete(id); reject(Error('操作结果尚未确认；不会自动重发。')); }, 30_000);
       return channel.send({ type: 'request', id, action }, action.kind === 'input-part' || action.kind === 'recovery-part' ? 'body' : 'control');
     }).catch(error => {
-      clearTimeout(timer); pending.delete(id); reject(error);
+      clearTimeout(pending.get(id)?.timer); pending.delete(id); reject(error);
     });
   });
 }
@@ -64,10 +77,14 @@ function receive(message: TerminalMessage): void {
         if (abort.signal.aborted) { await root.dispose(); return; }
         phase = 'active';
         await channel.send({ type: 'ready', frameId: root.firstFrameId });
-        admitRequests();
+        await admission;
         await request({ kind: 'startup' });
       })();
       void initializing.catch(() => { if (!abort.signal.aborted) void close('terminal-initialization-failed', 71); }); return;
+    }
+    case 'application-ready': {
+      if (phase !== 'active' || applicationReady) throw Error('terminal-application-ready-order');
+      applicationReady = true; admitRequests(); return;
     }
     case 'reply': {
       const operation = pending.get(message.id);

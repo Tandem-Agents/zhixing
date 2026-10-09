@@ -10,16 +10,32 @@ const entryAt = performance.now();
 const args = normalizeCliArgs(process.argv.slice(2));
 if (process.env.ZHIXING_TERMINAL_ROLE === 'application' &&
   (process.env.ZHIXING_TERMINAL_PIPE || process.env.ZHIXING_TERMINAL_FD === '3')) {
+  const prepareAt = performance.now(), prepareCpu = process.cpuUsage();
   // Publish the existing process compatibility proof before the heavy graph
   // loads. Other live entry loggers must not mistake N for a legacy writer.
-  const home = process.env.ZHIXING_TERMINAL_HOME;
-  if (home) {
-    const path = await import('node:path');
-    await (await import('./terminal/writer-declaration.js')).beginTerminalWriterDeclaration(home,
-      path.join(path.dirname(resolveCliEntry()), 'terminal', `${process.platform}-${process.arch}`, 'foreground.node'));
+  let stage: 'writer-declaration' | 'module-load' = 'writer-declaration', stageAt = prepareAt, loadAt = prepareAt;
+  let application: typeof import('./terminal/application.js') | undefined;
+  try {
+    const home = process.env.ZHIXING_TERMINAL_HOME;
+    if (home) {
+      const path = await import('node:path');
+      await (await import('./terminal/writer-declaration.js')).beginTerminalWriterDeclaration(home,
+        path.join(path.dirname(resolveCliEntry()), 'terminal', `${process.platform}-${process.arch}`, 'foreground.node'));
+    }
+    stage = 'module-load'; stageAt = loadAt = performance.now();
+    application = await import('./terminal/application.js');
+  } catch (error) {
+    process.exitCode = 71;
+    // The application has not taken the endpoint. Its supervisor can retain
+    // a safe first cause even when the application's heavy import fails.
+    try { await (await import('./terminal/application-bootstrap.js')).reportApplicationBootstrapFailure(error, stage, performance.now() - stageAt); }
+    catch { /* S still observes the actual nonzero process exit. */ }
   }
-  const { runTerminalApplication } = await import('./terminal/application.js');
-  await runTerminalApplication();
+  if (application) {
+    const loadedAt = performance.now(), cpu = process.cpuUsage(prepareCpu);
+    await application.runTerminalApplication({ entryMs: entryAt, writerDeclarationMs: loadAt - prepareAt,
+      moduleLoadMs: loadedAt - loadAt, processCpuUserMs: cpu.user / 1000, processCpuSystemMs: cpu.system / 1000 });
+  }
 } else if (process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY && process.env.TERM !== 'dumb') {
   const interactive = args.length === 0 || (await import('./index.js')).usesInteractiveTerminal(args);
   if (interactive) {
