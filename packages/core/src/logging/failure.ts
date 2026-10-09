@@ -3,6 +3,12 @@ import { LogAppendIndeterminateError, LogStorageError, type LogFailureEvidence, 
 export const LOG_FAILURE_FIELDS = { category: "text", code: "text", operation: "text", exitCode: "number", signal: "text", durationMs: "number", admissionMs: "number", lockWaitMs: "number", ioClaims: "number", writerCount: "number", writerPids: { items: "number", maxItems: 8 } } as const;
 const SYSTEM_CODES = new Set(["EACCES", "EPERM", "ENOSPC", "EDQUOT", "EIO", "ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "EEXIST", "EBADF", "EINVAL", "EAGAIN", "EINTR", "EROFS", "ENAMETOOLONG", "EMFILE", "ENFILE", "EBUSY", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EPIPE", "ERR_IPC_CHANNEL_CLOSED"]);
 const CLASSES = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "AggregateError"]);
+const PROJECTION_FAILURES: Readonly<Record<string, string>> = {
+  "Committed transcript run conflicts with an existing projection": "transcript-run-conflict",
+  "Committed transcript run is not contiguous with the current projection": "transcript-run-gap",
+  "Committed transcript run identity is invalid": "transcript-run-identity",
+  "Committed input contains projection metadata": "transcript-input-metadata",
+};
 for (const code of ["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ERR_INVALID_PACKAGE_CONFIG", "ERR_UNKNOWN_FILE_EXTENSION", "ERR_WORKER_OUT_OF_MEMORY", "ERR_WORKER_INIT_FAILED", "ERR_CHILD_PROCESS_PROTOCOL", "EADDRINUSE", "EADDRNOTAVAIL", "ENOTSUP"]) SYSTEM_CODES.add(code);
 const PLATFORM_GUARDS: Readonly<Record<string, string>> = {
   "Checkpoint file identity changed": "file-identity-changed",
@@ -39,6 +45,7 @@ export function logFailureEvidence(error: unknown): LogFailureEvidence {
           ...(typeof signal === "string" && /^SIG[A-Z0-9]{1,16}$/u.test(signal) ? { signal } : {}) };
       }
       if (typeof lower === "string" && SYSTEM_CODES.has(lower)) return { category: "system", code: lower };
+      if (Object.hasOwn(PROJECTION_FAILURES, cause.message)) return { category: "projection", code: PROJECTION_FAILURES[cause.message]! };
       const native = /\b(?:NTSTATUS 0x[0-9a-f]{1,8}|Win32 \d{1,10}|POSIX errno \d{1,10}|checkpoint-child-missing)\b/iu.exec(cause.message)?.[0];
       if (native) return { category: "platform", code: native };
       if (Object.hasOwn(PLATFORM_GUARDS, cause.message)) return { category: "platform-guard", code: PLATFORM_GUARDS[cause.message]! };

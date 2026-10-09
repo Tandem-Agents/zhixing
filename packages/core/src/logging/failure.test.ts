@@ -3,6 +3,8 @@ import { logFailureEvidence, logStorageFailure } from "./failure.js";
 import { LogAppendIndeterminateError, LogStorageError } from "./contracts.js";
 
 it.each([
+  [Error("Committed transcript run conflicts with an existing projection"), { category: "projection", code: "transcript-run-conflict" }, "storage-unavailable"],
+  [Error("Committed transcript run is not contiguous with the current projection"), { category: "projection", code: "transcript-run-gap" }, "storage-unavailable"],
   [Object.assign(Error("private module"), { code: "ERR_MODULE_NOT_FOUND" }), { category: "system", code: "ERR_MODULE_NOT_FOUND" }, "storage-unavailable"],
   [Object.assign(Error("private child"), { code: "ERR_CHILD_PROCESS_EXITED", exitCode: 7, signal: null }), { category: "process", code: "ERR_CHILD_PROCESS_EXITED", exitCode: 7 }, "storage-unavailable"],
   [Object.assign(Error("private path"), { code: "ENOSPC" }), { category: "system", code: "ENOSPC" }, "disk-full"],

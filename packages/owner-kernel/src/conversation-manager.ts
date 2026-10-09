@@ -1687,7 +1687,7 @@ export class ConversationManager implements ConversationCommitProjection {
     if (!session) return;
     const outcome = session.window.acceptRun({
       runMessages: input.runRecord.messages,
-      runIndex: input.runRecord.runIndex,
+      runIndex: accepted.runIndex,
       windowCompact: input.windowCompact,
     });
     session.turnCount += 1;

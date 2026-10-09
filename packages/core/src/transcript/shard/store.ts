@@ -74,6 +74,8 @@ export const TRANSCRIPT_INDEX_FILE_NAME = "index.json";
 interface OpenState {
   index: TranscriptIndex;
   nextRunIndex: number;
+  /** Derived identities only; built once on committed access, never retained payloads. */
+  runShards?: Map<string, TranscriptShardMeta>;
 }
 
 export class ShardedTranscriptStore {
@@ -188,8 +190,8 @@ export class ShardedTranscriptStore {
   /**
    * 将 AuthorityCommitLog 中已经提交的 run 幂等物化为 transcript 投影。
    *
-   * 新 run 必须恰接当前尾部；重驱既有 run 时逐片核对同一 runIndex/runId 与
-   * 完整载荷，完全相同才视为成功。这样即使进程在分片 append 与投影进度落盘
+   * runId 是重驱身份；来源提交序号与物理位置在 clear 后均保持单调递增。
+   * 重驱时核对来源轮次和完整载荷。这样即使进程在分片 append 与投影进度落盘
    * 之间崩溃，恢复也不会产生第二条 transcript 记录。
    */
   async appendCommittedRunRecord(
@@ -204,24 +206,31 @@ export class ShardedTranscriptStore {
     ) {
       throw new TypeError("Committed transcript run identity is invalid");
     }
-    const record = structuredClone(input);
+    // Compare the persisted JSON contract, including omitted optional fields.
+    const record: TranscriptRunRecord = JSON.parse(JSON.stringify(input));
     return await this.withLock(conversationId, async () => {
       const state = await this.openInLock(conversationId);
-      if (record.runIndex < state.nextRunIndex) {
-        const existing = await this.findRunInLock(conversationId, state.index, record.runIndex);
-        if (!existing || !("runId" in existing.record) || !isDeepStrictEqual(existing.record, record)) {
+      const existing = await this.findRunInLock(conversationId, state, record.runId);
+      if (existing) {
+        const stored = existing.record;
+        if (!isDeepStrictEqual(stored, record)) {
           throw new Error("Committed transcript run conflicts with an existing projection");
         }
-        return { runIndex: record.runIndex, shardId: existing.shardId, appended: false };
+        return { runIndex: stored.runIndex, shardId: existing.shardId, appended: false };
+      }
+      if (record.runIndex < state.nextRunIndex) {
+        throw new Error("Committed transcript run conflicts with an existing projection");
       }
       if (record.runIndex !== state.nextRunIndex) {
         throw new Error("Committed transcript run is not contiguous with the current projection");
       }
       await this.rolloverIfNeededInLock(conversationId, state);
       const shardId = state.index.activeShardId;
+      const runIndex = state.nextRunIndex;
       await this.appendLineInLock(conversationId, state, record);
+      state.runShards!.set(record.runId, activeShardOf(state.index));
       state.nextRunIndex += 1;
-      return { runIndex: record.runIndex, shardId, appended: true };
+      return { runIndex, shardId, appended: true };
     });
   }
 
@@ -367,14 +376,23 @@ export class ShardedTranscriptStore {
 
   private async findRunInLock(
     conversationId: string,
-    index: TranscriptIndex,
-    runIndex: number,
+    state: OpenState,
+    runId: string,
   ): Promise<{ readonly record: RunRecord | TranscriptRunRecord; readonly shardId: string } | undefined> {
-    for (const meta of [...index.shards].reverse()) {
-      for (const line of await this.readShardLines(conversationId, meta)) {
-        if (line.type === "run" && line.runIndex === runIndex) {
-          return { record: line, shardId: meta.id };
+    if (!state.runShards) {
+      const locations = new Map<string, TranscriptShardMeta>();
+      for (const meta of state.index.shards) {
+        for (const line of await this.readShardLines(conversationId, meta)) {
+          if (line.type === "run" && "runId" in line) locations.set(line.runId, meta);
         }
+      }
+      state.runShards = locations;
+    }
+    const meta = state.runShards.get(runId);
+    if (meta) {
+      // Re-read evidence for replay: retention may have removed this shard.
+      for (const line of await this.readShardLines(conversationId, meta)) {
+        if (line.type === "run" && "runId" in line && line.runId === runId) return { record: line, shardId: meta.id };
       }
     }
     return undefined;

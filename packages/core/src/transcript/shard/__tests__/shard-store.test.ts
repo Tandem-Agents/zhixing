@@ -7,7 +7,7 @@
  * 全量自愈——索引是分片的派生投影）、并发串行化。
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
@@ -102,6 +102,64 @@ describe("写入与 runIndex", () => {
         runIndex: 2,
       }),
     ).rejects.toThrow("not contiguous");
+  });
+
+  it("keeps committed ordinals monotonic across clear, rollover and restart", async () => {
+    const first = { type: "run" as const, runId: "before", runIndex: 0, ...runInput("before") };
+    await store.appendCommittedRunRecord("cleared", first);
+    await store.appendClear("cleared");
+    const next = { type: "run" as const, runId: "after", runIndex: 1, ...runInput("after") };
+    const reopened = new ShardedTranscriptStore(convDir, { maxShardBytes: 1 });
+    await expect(reopened.appendCommittedRunRecord("cleared", next)).resolves.toMatchObject({ runIndex: 1, appended: true });
+    const again = new ShardedTranscriptStore(convDir);
+    await expect(again.appendCommittedRunRecord("cleared", next)).resolves.toMatchObject({ runIndex: 1, appended: false });
+    await expect(again.appendCommittedRunRecord("cleared", first)).resolves.toMatchObject({ runIndex: 0, appended: false });
+    await expect(again.appendCommittedRunRecord("cleared", { ...next, messages: [] })).rejects.toThrow("conflicts");
+    await expect(again.appendCommittedRunRecord("cleared", { ...next, runId: "wrong", runIndex: 0 })).rejects.toThrow("conflicts");
+    await expect(again.appendCommittedRunRecord("cleared", { ...next, runId: "gap", runIndex: 3 })).rejects.toThrow("not contiguous");
+    await expect(again.appendCommittedRunRecord("cleared", { ...next, runId: "second", runIndex: 2 })).resolves.toMatchObject({ runIndex: 2 });
+    expect(await countRuns(again, "cleared")).toBe(2);
+    await again.appendClear("cleared");
+    await expect(new ShardedTranscriptStore(convDir).appendCommittedRunRecord("cleared", { ...next, runId: "third", runIndex: 3 })).resolves.toMatchObject({ runIndex: 3 });
+  });
+
+  it("compares committed JSON payloads without treating absent optional fields as conflicts", async () => {
+    const record = { type: "run" as const, runId: "optional", runIndex: 0, ...runInput("same"), usage: undefined };
+    await store.appendCommittedRunRecord("optional", record);
+    await expect(store.appendCommittedRunRecord("optional", record)).resolves.toMatchObject({ appended: false });
+  });
+
+  it("does not rescan history for new commits; reopened replay still reads its evidence", async () => {
+    const writer = new ShardedTranscriptStore(convDir, { maxShardBytes: 1 });
+    const records = Array.from({ length: 10 }, (_, runIndex) => ({
+      type: 'run' as const, runId: `run-${runIndex}`, runIndex, ...runInput('history'),
+    }));
+    for (const record of records) await writer.appendCommittedRunRecord('fast', record);
+    const reads = vi.spyOn(writer, 'readShardLines');
+    await writer.appendCommittedRunRecord('fast', { ...records[0]!, runId: 'next', runIndex: 10 });
+    expect(reads).not.toHaveBeenCalled();
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord('fast', records[0]!)).resolves.toMatchObject({ appended: false });
+    const reopenedReads = vi.spyOn(reopened, 'readShardLines');
+    await reopened.appendCommittedRunRecord('fast', { ...records[0]!, runId: 'next-2', runIndex: 11 });
+    expect(reopenedReads).not.toHaveBeenCalled();
+    await expect(reopened.appendCommittedRunRecord('fast', { ...records[0]!, messages: [] })).rejects.toThrow('conflicts');
+    expect(reopenedReads).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues legacy append records after clear without rewriting them", async () => {
+    await store.appendRunRecord("legacy-clear", runInput("before"));
+    await store.appendClear("legacy-clear");
+    await store.appendRunRecord("legacy-clear", runInput("after"));
+    const file = path.join(convDir, "legacy-clear", "transcript", "000001.jsonl");
+    // The previous writer did not preserve the source ordinal.
+    const original = await fs.readFile(file, "utf8");
+    await fs.writeFile(file, original);
+    const reopened = new ShardedTranscriptStore(convDir);
+    await expect(reopened.appendCommittedRunRecord("legacy-clear", {
+      type: "run", runId: "new-owner", runIndex: 2, ...runInput("next"),
+    })).resolves.toMatchObject({ runIndex: 2, appended: true });
+    expect((await fs.readFile(file, "utf8")).startsWith(original)).toBe(true);
   });
 
   it("完整协议消息序列往返保真（含工具轮）", async () => {
