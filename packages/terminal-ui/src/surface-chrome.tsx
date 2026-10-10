@@ -21,8 +21,8 @@ export function SurfaceChrome(props: { view: TerminalView; width: number; height
       <text height={1} wrapMode="none" fg={tone.border}>╭──── <span style={{fg: tone.brand}}>╲</span> {'─'.repeat(Math.max(0, props.width - 9))}╮</text>
       <box border={['left', 'right', 'bottom']} borderStyle="rounded" borderColor={tone.border}
         paddingLeft={spacing.welcomeInner} paddingRight={1} paddingBottom={1} flexDirection="column">
-        <text height={1} fg={tone.brand}>{props.view.configurationHome ? ' ▄▄▄    知行' : ' ▄▄▄'}</text>
-        <text height={1} fg={tone.brand}>{'▌●●▐    '}<span style={{fg: props.view.configurationHome ? tone.dim : tone.brand}}>{props.view.configurationHome ? line(props.view.title) : '知行'}</span></text>
+        <text height={1} fg={tone.brand}>{' ▄▄▄'}<Show when={props.view.configurationHome}><span style={{bold: true}}>{'    知行'}</span></Show></text>
+        <text height={1} fg={tone.brand}>{'▌●●▐    '}<Show when={props.view.configurationHome} fallback={<span style={{bold: true}}>知行</span>}><span style={{fg: tone.dim}}>{line(props.view.title)}</span></Show></text>
         <text height={1} wrapMode="none" truncate fg={tone.brand}>{' ▀▀     '}<span style={{fg: tone.dim}}>{props.view.configurationHome ? '配置你的知行' : status()}</span></text>
         <Show when={props.view.environment}>
           <text height={1}> </text>

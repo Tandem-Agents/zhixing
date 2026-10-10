@@ -1359,13 +1359,17 @@ class TerminalApplication {
     void settled.catch(() => this.#close(70, 'terminal-outcome-undelivered'));
   }
 
+  #configurationHeaderDetails(): readonly string[] {
+    return [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
+  }
+
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {
     this.#abort.signal.throwIfAborted();
     const { TerminalConfigurationEditor } = await import('./configuration-editor.js');
     this.#abort.signal.throwIfAborted();
     if (this.#editor) throw Error('terminal-editor-already-open');
     const editor = new TerminalConfigurationEditor({ session, title, sections, runtime,
-      headerDetails: [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'],
+      headerDetails: this.#configurationHeaderDetails(),
       publish: view => this.#publish(view) });
     this.#editor = editor;
     try { return await editor.run(); }
@@ -1373,7 +1377,8 @@ class TerminalApplication {
   }
 
   async #configuration(kind: 'config' | 'mcp'): Promise<void> {
-    await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP', message: '正在读取本机配置…', busy: true });
+    await this.#publish({ kind: 'configuration', title: kind === 'config' ? '配置' : 'MCP 管理', configurationHome: true,
+      chromeDetails: this.#configurationHeaderDetails(), message: '正在读取本机配置…', busy: true });
     this.#abort.signal.throwIfAborted();
     const { editRuntimeConfiguration, prepareMcpConfiguration } = await import('../runtime/configuration-application.js');
     this.#abort.signal.throwIfAborted();
@@ -1703,7 +1708,7 @@ class TerminalApplication {
     const abort = new AbortController(); this.#sceneCreateAbort = abort;
     const signal = AbortSignal.any([abort.signal, this.#abort.signal]);
     try {
-      await this.#publish({ ...this.#mainView, busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
+      await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
       await this.#createSceneInner(input, () => { current(); signal.throwIfAborted(); }, signal);
     } finally {
       if (this.#sceneCreateAbort === abort) this.#sceneCreateAbort = undefined;
@@ -1716,9 +1721,12 @@ class TerminalApplication {
     current();
     const ask = async (title: string, prefill = '') => {
       current();
-      const response = await this.#choosePage({ kind: 'selection', title, field: { id: 'scene-input', secret: false, label: '输入说明', value: prefill },
+      const response = await this.#choosePage({ kind: 'selection', title: '创建工作场景', message: title, field: { id: 'scene-input', secret: false, label: '输入说明', value: prefill },
         choices: [{ id: 'submit', label: '继续' }, { id: 'cancel', label: '取消' }] });
-      current(); return response?.itemId === 'submit' ? response.input?.trim() || null : null;
+        current();
+        const value = response?.itemId === 'submit' ? response.input?.trim() || null : null;
+        if (value) await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在准备工作场景；Ctrl+C 可取消。' });
+        return value;
     };
     const result = await runWorksceneCreateAssist(input, {
       listScenes: () => { current(); return this.#workscene.list(); },
@@ -1744,8 +1752,11 @@ class TerminalApplication {
         }, this.home, this.#logging);
       },
       confirm: async proposal => {
-        current(); const selected = await chooseTerminalSelection(createWorksceneCreateSelectionRequest(proposal), view => this.#choosePage(view));
-        current(); return selected?.kind === 'selected' && selected.value === 'create';
+        current(); const selected = await chooseTerminalSelection(createWorksceneCreateSelectionRequest(proposal), view => this.#choosePage({ ...view, title: '创建工作场景', message: [view.title, view.message].filter(Boolean).join('\n') }));
+        current();
+        const accepted = selected?.kind === 'selected' && selected.value === 'create';
+        if (accepted) await this.#publish({ kind: 'selection', title: '创建工作场景', requestId: 'workscene-preparing', busy: true, message: '正在创建工作场景；Ctrl+C 可取消。' });
+        return accepted;
       },
       askUser: question => ask(question),
     }, signal);

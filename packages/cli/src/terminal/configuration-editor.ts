@@ -197,7 +197,10 @@ export class TerminalConfigurationEditor {
   async #loadingView(message: string): Promise<void> {
     this.#revision++;
     this.#fieldId = undefined; this.#choices.clear();
-    this.#current = { kind: 'configuration', editId: this.editId, title: this.options.title,
+    this.#current = { kind: 'configuration', editId: this.editId, title: this.#current?.title ?? this.options.title,
+      configurationHome: this.#current?.configurationHome ?? this.#stack.at(-1)?.kind === 'main',
+      chromeDescription: this.#current?.chromeDescription,
+      chromeDetails: this.#current ? this.#current.chromeDetails : this.options.headerDetails,
       message: this.#safe(message), busy: true, choices: this.#saving ? [] : [{ id: 'back', label: '取消当前操作并返回' }] };
     await this.options.publish(this.#current);
   }

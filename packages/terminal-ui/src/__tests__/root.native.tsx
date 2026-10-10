@@ -2,7 +2,7 @@
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { setRenderLibPath, resolveRenderLib, OptimizedBuffer, RGBA, type TextareaRenderable } from '@opentui/core';
+import { setRenderLibPath, resolveRenderLib, OptimizedBuffer, RGBA, TextAttributes, type TextareaRenderable } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
 import type { TerminalAction, TerminalView } from '../protocol.js';
@@ -826,5 +826,28 @@ try {
   assert.equal(usableFrames.length, 1, 'only one completed usable frame is reported');
   assert.ok(Number.isSafeInteger(usableFrames[0]));
   checks.push('usable-frame is post-render and exactly once');
+  editor().setText(''); test.resize(100, 32); await flush();
+  const spansFor = (value: string) => test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.includes(value));
+  const assertBold = (value: string, expected: boolean) => {
+    const spans = spansFor(value); assert.ok(spans.length, `visible ${value}`);
+    assert.ok(spans.every(span => !!(span.attributes & TextAttributes.BOLD) === expected), `${value}: bold=${expected}`);
+  };
+  for (const title of ['Configuration fixture', 'MCP fixture']) {
+    for (const busy of [true, false, true]) {
+      await show({ kind: 'configuration', title, configurationHome: true, busy,
+        chromeDetails: ['workspace fixture', 'config fixture', 'secret store local'],
+        ...(busy ? { message: 'Loading fixture' } : { choices: [{ id: 'one', label: 'ChoiceOne', detail: 'Ready', status: 'ready' as const }, { id: 'two', label: 'ChoiceTwo', detail: 'Pending', status: 'pending' as const }] }) });
+      const rows = text().split('\n');
+      assert.equal(rows[1]!.indexOf('知行'), 12, 'configuration brand retains the four-column gap');
+      assert.equal(rows[2]!.indexOf(title), 12); assert.equal(rows[3]!.indexOf('配置你的知行'), 12);
+      const nameSpans = test.captureSpans().lines[1]!.spans.filter(span => span.text.includes('知行'));
+      assert.ok(nameSpans.length && nameSpans.every(span => span.attributes & TextAttributes.BOLD));
+      assertBold(title, false);
+    }
+    await show({ kind: 'conversation', title: 'Brand fixture', conversationId: 'brand-fixture', connected: true });
+    root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 0, follow: false, segments: [] } }); await flush();
+    assertBold('知行', true); assertBold('当前对话 Brand fixture', false);
+  }
+  checks.push('configuration/MCP brand columns and bold attributes survive loading and conversation transitions');
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

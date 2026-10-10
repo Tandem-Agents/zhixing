@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { TerminalConfigurationEditor } from '../configuration-editor.js';
 import type { TerminalView } from '@zhixing/terminal-ui/protocol';
 import type { ConfigEditorRuntime } from '../../config-editor/types.js';
@@ -13,6 +15,7 @@ function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secre
     session: { initialConfig: { llm: { main: { provider: 'deepseek', model: 'deepseek-v4-flash' } } },
       initialCredentials: { providers: { deepseek: { apiKey } } }, writers: { save } },
     title: '合成配置', sections: runtime ? ['mcp'] : ['model'], runtime,
+    headerDetails: ['工作目录    fixture-workspace', '配置        fixture.json', '秘密存储    本机安全存储'],
     publish: async view => { views.push(view); },
   });
   const result = editor.run();
@@ -27,6 +30,27 @@ function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secre
 }
 
 describe('single-root Node configuration transaction', () => {
+  it.each(['config', 'mcp'] as const)('keeps the initial %s loading header identical to the prepared editor', async kind => {
+    // Execute the production entry until its first cancellation checkpoint;
+    // no backend or configuration import is needed to render this first frame.
+    const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+    const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
+    const methods = ['#configuration', '#configurationHeaderDetails'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n');
+    const Fixture = new Function(ts.transpile(`class Fixture { ${methods} } return Fixture;`, { target: ts.ScriptTarget.ES2022 }))();
+    const target = new Fixture(), abort = new AbortController(), views: Omit<TerminalView, 'generation'>[] = [];
+    const stopped = Error('stop after initial frame'); abort.abort(stopped);
+    Object.assign(target, { abort, configPath: 'fixture-config.json', resolvedLocalView: { workspaceRoot: 'fixture-workspace' }, publish: async (view: Omit<TerminalView, 'generation'>) => { views.push(view); } });
+    await expect(target.configuration(kind)).rejects.toBe(stopped);
+    const loading = views[0]!;
+    const editor = new TerminalConfigurationEditor({ session: { initialConfig: {}, initialCredentials: {}, writers: { save: vi.fn() } },
+      title: kind === 'config' ? '配置' : 'MCP 管理', sections: kind === 'config' ? ['model', 'messaging'] : ['mcp'],
+      headerDetails: target.configurationHeaderDetails(), publish: async view => { views.push(view); } });
+    const result = editor.run();
+    expect(loading.configurationHome).toBe(true); expect(loading.chromeDetails).toHaveLength(3);
+    for (const key of ['title', 'configurationHome', 'chromeDescription', 'chromeDetails'] as const) expect(loading[key]).toEqual(views.at(-1)![key]);
+    editor.cancel(); await result;
+  });
+
   it('preserves the selected thinking option when completing the provider page', async () => {
     const h = setup();
     await h.choose('主模型'); await h.choose('DeepSeek'); await h.choose('使用模型');
@@ -115,8 +139,12 @@ describe('single-root Node configuration transaction', () => {
     let signal: AbortSignal | undefined;
     const h = setup({ mcpResolve: async (_input, abort) => { signal = abort; return new Promise(resolve => { complete = resolve; }); } });
     await h.choose('其他');
+    const beforeLoading = h.current();
     await h.editor.act({ kind: 'configuration-action', editId: h.editor.editId, action: 'field', value: 'synthetic source' });
     expect(h.current().busy).toBe(true);
+    for (const key of ['title', 'configurationHome', 'chromeDescription', 'chromeDetails'] as const) {
+      expect(h.current()[key]).toEqual(beforeLoading[key]);
+    }
     await h.action('back');
     expect(signal?.aborted).toBe(true);
     const count = h.views.length;

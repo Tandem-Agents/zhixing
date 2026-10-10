@@ -306,6 +306,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const cancelPage = async (cause: TerminalSelectionCancelCause = 'escape') => {
     const current = view(); releaseSecret();
+    if (current.requestId === 'workscene-preparing' && current.busy) { await action({ kind: 'abort' }); return; }
     if (current.kind === 'history') await action({ kind: 'history-close' });
     else if (current.editId) await action({ kind: 'configuration-action', editId: current.editId, action: 'back' });
     else if (current.kind === 'confirmation') await action({ kind: 'confirmation', requestId: current.requestId!, action: 'cancelled', cancelCause: cause });
