@@ -45,6 +45,35 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   } finally { clearInterval(tick); await root?.dispose(); test.renderer.destroy(); }
 }
 try {
+  await scenario('selection-bottom-wheel-and-clear', async h => {
+    await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush();
+    const selected = h.test.renderer.getSelection()?.getSelectedText(); assert.ok(selected);
+    await h.test.mockMouse.scroll(20, 8, 'down'); await h.flush();
+    assert.equal(h.test.renderer.getSelection()?.getSelectedText(), selected);
+    assert.equal(h.page.follow, false);
+    h.capture('selected-after-wheel');
+    await h.test.mockMouse.click(20, 8); await h.flush();
+    assert.ok(!h.test.renderer.getSelection()?.getSelectedText());
+    assert.equal(h.requests.filter((a: TerminalAction) => a.kind === 'display-page').at(-1)?.follow, true);
+    assert.equal(h.page.follow, true);
+    await h.publish({ ...h.page, segments: [{ ...h.page.segments[0], text: h.page.segments[0].text + '\nAFTER CLEAR' }] });
+    assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight);
+  });
+  await scenario('passive-resize-click-preserves-reading', async h => {
+    await h.test.mockMouse.scroll(20, 8, 'up'); await h.flush();
+    h.test.resize(120, 100); await h.flush(); assert.equal(h.box().scrollTop, 0);
+    await h.test.mockMouse.click(20, 14); await h.flush();
+    await h.publish({ ...h.page, segments: [{ ...h.page.segments[0], text: h.page.segments[0].text + '\n' + 'EXTRA\n'.repeat(40) }] });
+    assert.equal(h.box().scrollTop, 0); assert.equal(h.page.follow, false);
+  });
+  for (const bodyFirst of [false, true]) await scenario('conversation-scope-' + bodyFirst, async h => {
+    await h.test.mockMouse.scroll(20, 8, 'up'); await h.flush(); assert.equal(h.page.follow, false);
+    const next = { ...h.page, follow: true, segments: [{ ...h.page.segments[0], blockId: 'different', text: 'NEW CONVERSATION\n'.repeat(100) }] };
+    if (bodyFirst) await h.publish(next);
+    await h.show({ ...h.view, conversationId: 'different-conversation' });
+    if (!bodyFirst) await h.publish(next);
+    assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight);
+  });
   await scenario('thinking-source-copy', async h => {
     for (const text of ['alpha\n\nbeta', 'x'.repeat(150)]) {
       h.test.renderer.clearSelection();
@@ -84,6 +113,97 @@ try {
     await h.show({ kind: 'history', title: '历史', conversationId: h.view.conversationId, connected: false, displayGap: true });
     text = h.test.captureCharFrame(); assert.ok(text.includes('历史展示存在缺口')); h.capture('gap');
   }, 24);
+  for (const route of ['selection', 'clear-body', 'clear-editor', 'scrollbar']) {
+    for (const successor of ['conversation', 'configuration']) await scenario(`late-reading-${route}-${successor}`, async h => {
+      if (route.startsWith('clear')) { await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush(); }
+      let reject!: (error: Error) => void;
+      h.readWith(() => new Promise((_resolve, fail) => { reject = fail; }));
+      if (route === 'selection') await h.test.mockMouse.drag(6, 4, 18, 5);
+      else if (route === 'clear-body') await h.test.mockMouse.click(20, 8);
+      else if (route === 'clear-editor') {
+        const editor = h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
+        await h.test.mockMouse.click(editor.x, editor.y);
+      } else {
+        const bar = h.box().verticalScrollBar;
+        await h.test.mockMouse.click(bar.x, bar.slider.getThumbRect().y - 2);
+      }
+      await h.flush(); assert.ok(reject, 'real interaction issued the retained request');
+      h.readWith(undefined);
+      if (successor === 'conversation') {
+        await h.show({ ...h.view, conversationId: 'new-scope', title: 'NEW_READY', message: 'NEW_READY' });
+        await h.publish({ first: 0, last: 1, start: 0, follow: true, segments: [{ blockId: 'new', role: 'assistant', contentOffset: 0, final: true, text: 'NEW_CONVERSATION_BODY' }] });
+      } else await h.show({ kind: 'configuration', title: 'NEW_READY', editId: 'new-config', choices: [{ id: 'field', label: 'NEW_FIELD' }] });
+      const before = h.test.captureCharFrame();
+      reject(Error('OLD_SCOPE_READ_FAILURE')); await h.flush();
+      assert.equal(h.test.captureCharFrame(), before, 'old rejection cannot alter a successor page');
+      h.capture('after-old-rejection');
+    });
+  }
+  await scenario('latest-navigation-supersedes-pending-failure', async h => {
+    let reject!: (error: Error) => void;
+    h.readWith(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await h.test.mockMouse.scroll(20, 8, 'up'); await h.flush(); assert.ok(reject);
+    h.readWith(undefined); await h.latest();
+    reject(Error('OLD_NAVIGATION_FAILURE')); await h.flush();
+    assert.equal(h.page.follow, true);
+    assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight);
+    assert.ok(!h.test.captureCharFrame().includes('读取未完成'));
+    assert.ok(!h.test.captureCharFrame().includes('OLD_NAVIGATION_FAILURE'));
+  });
+  for (const follow of [false, true]) await scenario('current-reading-failure-retry-' + follow, async h => {
+    if (follow) { await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush(); }
+    h.readWith(async () => { throw Error('CURRENT_READ_FAILURE'); });
+    if (follow) await h.test.mockMouse.click(20, 8); else await h.test.mockMouse.drag(6, 4, 18, 5);
+    await h.flush(); assert.ok(h.test.captureCharFrame().includes('读取未完成'));
+    const before = h.box().scrollTop, selected = h.test.renderer.getSelection()?.getSelectedText();
+    h.capture('failed'); h.readWith(undefined);
+    h.test.mockInput.pressKey('\x1b[6~'); await h.flush();
+    assert.equal(h.page.follow, follow, 'retry repeats the failed intent, not an unrelated navigation');
+    assert.equal(h.box().scrollTop, before);
+    assert.equal(h.test.renderer.getSelection()?.getSelectedText(), selected);
+    assert.ok(!h.test.captureCharFrame().includes('读取未完成'));
+    assert.ok(!h.test.captureCharFrame().includes('CURRENT_READ_FAILURE'));
+  });
+  for (const edit of ['typing', 'paste']) await scenario(`pending-reading-edit-${edit}`, async h => {
+    const editor = () => h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
+    const editDraft = async () => {
+      const expected = editor().plainText + (edit === 'typing' ? 'x' : '中文草稿');
+      if (edit === 'typing') h.test.mockInput.pressKey('x');
+      else await h.test.mockInput.pasteBracketedText('中文草稿');
+      for (let i = 0; i < 25 && editor().plainText !== expected; i++) {
+        await new Promise(resolve => setTimeout(resolve, 10)); await h.flush();
+      }
+      assert.equal(editor().plainText, expected, 'real input or paste completed');
+      await h.flush();
+    };
+    await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush();
+    let reject!: (error: Error) => void;
+    h.readWith(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await h.test.mockMouse.click(20, 8);
+    await h.flush(); assert.ok(reject);
+    const before = h.box().scrollTop;
+    const requestsBeforeEdit = h.requests.filter((a: TerminalAction) => a.kind === 'display-page').length;
+    await editDraft();
+    assert.equal(h.requests.filter((a: TerminalAction) => a.kind === 'display-page').length, requestsBeforeEdit, 'draft editing is not a new reading intent');
+    reject(Error('CURRENT_READ_AFTER_EDIT')); await h.flush();
+    h.capture('failed');
+    assert.ok(h.test.captureCharFrame().includes('读取未完成'), 'current failure remains visible after editing');
+    assert.equal(h.box().scrollTop, before);
+
+    let resolve!: (value: unknown) => void;
+    h.readWith(() => new Promise(done => { resolve = done; }));
+    h.test.mockInput.pressKey('\x1b[6~'); await h.flush(); assert.ok(resolve);
+    await editDraft();
+    assert.ok(editor().plainText.includes(edit === 'typing' ? 'xx' : '中文草稿中文草稿'));
+    assert.equal(h.requests.filter((a: TerminalAction) => a.kind === 'display-page').at(-1)?.follow, true);
+    await h.publish({ ...h.page, follow: true, segments: [{ ...h.page.segments[0], text: h.page.segments[0].text + '\n' + 'EXTRA\n'.repeat(20) }] });
+    resolve({ accepted: true }); await h.flush();
+    assert.ok(!h.test.captureCharFrame().includes('读取未完成'));
+    assert.ok(!h.test.captureCharFrame().includes('CURRENT_READ_AFTER_EDIT'));
+    assert.equal(h.page.follow, true);
+    assert.equal(h.box().scrollTop + h.box().viewport.height, h.box().scrollHeight, 'successful retry restores follow despite concurrent draft editing');
+    h.capture('retry-success');
+  });
   await scenario('configuration-action-group-boundaries', async h => {
     for (const width of [120, 45]) for (const section of [undefined, 'Actions']) {
       h.test.resize(width, 24);

@@ -461,7 +461,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <text marginTop={index() ? 1 : 0} marginBottom={1} fg={tone.brand}>{`▎ ${displayText(choice.section ?? '')}`}</text>
         <Show when={choice.sectionDescription}><text marginLeft={2} marginBottom={1} fg={tone.dim}>{displayText(choice.sectionDescription ?? '')}</text></Show>
       </Show>
-      <ChoiceView choice={choice} selected={selected() === index() + choiceStart()} width={Math.max(1, bodySize().width - 1)} configuration={view().kind === 'configuration'} measure={measureInformation} />
+      <ChoiceView choice={choice} selected={selected() === index() + choiceStart()} width={Math.max(1, bodySize().width - 1 - spacing.content * 2)} configuration={view().kind === 'configuration'} measure={measureInformation} />
     </box>;
     }}</For>
   </box>;
@@ -469,16 +469,16 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
   }}>
     <Show when={!isBody()}><SurfaceChrome view={view()} width={size().width} height={size().height} /></Show>
-    <box ref={value => { bodyBox = value; }} marginX={isBody() ? 0 : spacing.content} flexGrow={1} minHeight={1}
+    <box ref={value => { bodyBox = value; }} marginX={0} flexGrow={1} minHeight={1}
       onSizeChange={function(this: BoxRenderable) {
         bodyView?.beforeUpdate(); setBodySize({ width: this.width, height: this.height });
       }}>
-      <Show when={view().kind === 'skills' && view().skills} fallback={<Show when={isBody()} fallback={<scrollbox ref={value => { historyBox = value; }} flexGrow={1}>
+      <Show when={view().kind === 'skills' && view().skills} fallback={<Show when={isBody()} fallback={<scrollbox ref={value => { historyBox = value; }} flexGrow={1}><box marginX={spacing.content} flexDirection="column">
         <Show when={view().message}><text selectable>{displayText(view().message ?? '')}</text></Show>
         <Show when={view().kind === 'recovery'}><text selectable fg="#111111" bg="#ffffff">{displayText(recoveryPage().text)}</text></Show>
         <Show when={view().kind !== 'configuration' && view().choices?.[selected()]?.detail}><text fg={tone.dim}>{displayText(view().choices?.[selected()]?.detail ?? '')}</text></Show>
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
-      </scrollbox>}>
+      </box></scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
           header={<SurfaceChrome view={view()} width={Math.max(1, bodySize().width - spacing.scrollbar)} height={size().height} />}
           hasEarlier={view().historyHasMore}
@@ -542,7 +542,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     </box>
     </box>
   </box>;
-  const externalPaste = (): TerminalPasteSink | undefined => {
+  const externalPasteSink = (): TerminalPasteSink | undefined => {
     if (disposed) return;
     const current = view(), scope = statusSource, report = reportStatus();
     if (current.kind === 'recovery') {
@@ -590,6 +590,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       abort,
     };
   };
+  const externalPaste = (): TerminalPasteSink | undefined => {
+    const sink = externalPasteSink(); if (!sink) return;
+    let started = false;
+    return { write(bytes) { if (bytes.length && !started) { pointerTakeover(); started = true; } return sink.write(bytes); }, end: () => sink.end(), abort: () => sink.abort() };
+  };
   const renderer = await createRenderer({ exitOnCtrlC: false, consoleMode: 'disabled', useMouse: true, useKittyKeyboard: null, useThread: false, screenMode: 'alternate-screen', stdinParserMaxBufferBytes: 64 * 1024, externalRecoveryOwner: true, externalPaste } as Parameters<typeof createCliRenderer>[0]);
   const informationBuffer = TextBuffer.create(renderer.widthMethod);
   const informationView = TextBufferView.create(informationBuffer);
@@ -607,6 +612,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     candidates?.sync(false);
     renderer.off('resize', resize);
     renderer.off('frame', refreshCopy);
+    renderer.off('pointer-takeover', pointerTakeover); renderer.off('blur', pointerTakeover);
     renderer.keyInput.off('keypress', keypress); renderer.keyInput.off('paste', paste);
     disposing = (async () => {
       try { await bodyView?.close(); await Promise.all(bodyClosures); }
@@ -615,6 +621,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     return disposing;
   };
   const resize = () => { bodyView?.beforeUpdate(); setSize({ width: renderer.terminalWidth, height: renderer.terminalHeight }); };
+  const pointerTakeover = () => { renderer.releasePointerCapture?.(); renderer.emit('terminal-pointer-cancel'); bodyView?.inputTakeover(); };
   createEffect(() => {
     const index = selected(), current = view(), dimensions = size();
     if (current.kind !== 'configuration') return;
@@ -623,6 +630,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     queueMicrotask(() => { if (!disposed && view() === current && size() === dimensions) historyBox?.scrollChildIntoView(`choice-${index}`); });
   });
   const keypress = (event: KeyEvent) => {
+    pointerTakeover();
     const consume = () => { event.preventDefault(); event.stopPropagation(); };
     if (view().kind === 'recovery' && view().recovery) {
       const current = view().recovery!;
@@ -798,6 +806,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   };
   const paste = (event: PasteEvent) => {
     if (!event.bytes.byteLength) { event.preventDefault(); event.stopPropagation(); return; }
+    pointerTakeover();
     if (view().kind === 'recovery') { event.preventDefault(); event.stopPropagation(); appendRecovery(event.bytes); return; }
     if (!view().field?.secret && view().kind !== 'conversation') return;
     event.preventDefault(); event.stopPropagation();
@@ -825,6 +834,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     if (renderFailure) throw renderFailure;
     resize(); renderer.on('resize', resize);
     renderer.on('frame', refreshCopy);
+    renderer.on('pointer-takeover', pointerTakeover); renderer.on('blur', pointerTakeover);
     renderer.keyInput.on('keypress', keypress); renderer.keyInput.on('paste', paste);
     options.inputReady(renderer);
     const firstFrameId = await new Promise<number>((resolve, reject) => {

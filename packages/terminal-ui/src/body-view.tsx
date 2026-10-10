@@ -2,24 +2,16 @@ import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, type JSX } from 'solid-js';
 import { bodyBlockGeometry } from './body/geometry.js';
 import { extend } from '@opentui/solid';
-import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, ScrollBoxRenderable,
-  TextRenderable, type CliRenderer, type TextChunk, type MouseEvent,
+import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes,
+  TextRenderable, type CliRenderer, type TextChunk,
 } from '@opentui/core';
 import { BODY_STYLE, bodyPageSegments, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
 import { bodyCell, bodyBlockGaps, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
 
-/** Core 0.5.14 scrolls even after a consumer prevented the wheel event. Respect
- * ownership here so a retained-body page operation cannot scroll a second time. */
-export class TerminalScrollBox extends ScrollBoxRenderable {
-  // Root owns keyboard navigation; clicking retained text must not steal the
-  // editor focus and silently discard the next typed character.
-  protected override _focusable = false;
-  protected override onMouseEvent(event: MouseEvent): void {
-    if (!event.defaultPrevented) super.onMouseEvent(event);
-  }
-}
+import { TerminalScrollBox } from './scroll-box.js';
+export { TerminalScrollBox } from './scroll-box.js';
 
 type NativeSelection = NonNullable<ReturnType<CliRenderer['getSelection']>>;
 type ScreenRange = { from: { x: number; y: number }; to: { x: number; y: number } };
@@ -66,6 +58,7 @@ export interface BodyViewHandle {
   /** Root calls this immediately before replacing page/size signals. */
   beforeUpdate(): void;
   resetReading(): void;
+  inputTakeover(): void;
   close(): Promise<void>;
 }
 export interface BodyViewProps {
@@ -97,12 +90,18 @@ function styled(block: BodyRenderBlock): StyledText {
 /** The existing root remains the only input/screen owner. This component owns
  * only a finite body page, its native measurements and its reading position. */
 export function BodyView(props: BodyViewProps) {
+  const [following, setFollowing] = createSignal(props.page.follow);
   const contentWidth = () => Math.max(1, props.width - spacing.scrollbar - 2 * spacing.content);
   const [headerHeight, setHeaderHeight] = createSignal(0);
-  const showHeader = () => props.header && props.page.start === props.page.first;
+  // Do not evaluate the JSX-valued header getter from pointer callbacks, or
+  // cache native nodes across a Show unmount (destroyed nodes cannot remount).
+  const showHeader = () => props.page.start === props.page.first;
   const prefixHeight = () => showHeader() ? headerHeight() : 0;
   // Keep live range counters for navigation without reflowing unchanged text.
-  const contentPage = createMemo<BodyPage>(previous => previous && sameBodyPageContent(previous, props.page) ? previous : props.page);
+  const contentPage = createMemo<BodyPage>(previous => {
+    const page = { ...props.page, follow: following() };
+    return previous && sameBodyPageContent(previous, page) ? previous : page;
+  });
   const projected = new Map<BodySegment, readonly BodyRenderBlock[]>();
   const blocks = createMemo<readonly BodyRenderBlock[]>(previous => retainBodyBlocks(
     bodyBlockGaps(bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, bodyBlockGeometry(block, contentWidth()).textWidth)).filter(block => block.role !== 'thinking' || block.text.length > 0)), previous));
@@ -167,7 +166,44 @@ export function BodyView(props: BodyViewProps) {
     return new Set(items.filter(item => state.selecting || (item.top + item.height >= top - height && item.top <= top + 2 * height)).map(item => item.key));
   });
   const heights = createMemo(() => new Map(geometry().map(item => [item.key, item.height])));
-  let box: ScrollBoxRenderable | undefined, disposed = false, paging = false, pauseRequested = false;
+  let box: TerminalScrollBox | undefined, disposed = false, paging = false;
+  let gestureHold = false, gestureIntent = false, gestureHadSelection = false, navigationVersion = 0, heldVersion = 0;
+  let selectionClearPending = false;
+  let anchorOffset = 0, headerTop: number | undefined;
+  let heldContent: BodyPage | undefined;
+  let desiredPage: { start: number | undefined; follow: boolean } | undefined, pageWork: Promise<void> | undefined;
+  let failedIntent: { start: number | undefined; follow: boolean } | undefined;
+  const readingOwner = () => {
+    // Pointer takeover retires mouse callbacks, not an in-flight reading
+    // intent. Only a new reading intent or scope supersedes this owner.
+    const generation = readingGeneration;
+    return () => !disposed && generation === readingGeneration;
+  };
+  const requestPage = (start: number | undefined, follow: boolean): Promise<void> => {
+    const current = readingOwner();
+    desiredPage = { start, follow };
+    if (!pageWork) pageWork = (async () => {
+      while (desiredPage && !disposed) {
+        const next = desiredPage; desiredPage = undefined;
+        try { await props.requestPage(next.start, next.follow); }
+        catch (error) { if (!desiredPage) throw error; }
+      }
+    })().finally(() => { pageWork = undefined; });
+    // The physical queue still drains in order. Each caller owns only its
+    // current interaction: an old rejection must not affect its successor.
+    return pageWork.catch(error => { if (current()) throw error; });
+  };
+  const commitReadingIntent = (follow: boolean) => {
+    readingGeneration++; paging = false;
+    const current = readingOwner();
+    const target = { start: follow ? undefined : props.page.start, follow };
+    readError = undefined; failedIntent = undefined;
+    void requestPage(target.start, target.follow).catch(() => {
+      if (!current()) return;
+      saved = capture(); props.onAnchor(saved); setFollowing(false);
+      failedIntent = target; readError = 1; reportReading();
+    });
+  };
   let saved: BodyAnchor | undefined = props.page.follow ? undefined : props.anchor, align: 'top' | 'bottom' | undefined;
   let lastPage: BodyPage | undefined, lastWidth = 0, lastHeight = 0;
   let restorePending = true;
@@ -293,6 +329,7 @@ export function BodyView(props: BodyViewProps) {
   };
   const capture = (): BodyAnchor | undefined => {
     if (!box || disposed || restorePending) return saved;
+    headerTop = prefixHeight() > box.scrollTop ? box.scrollTop : undefined;
     const top = box.viewport.y;
     let first: { block: BodyRenderBlock; view: TextRenderable } | undefined;
     for (const entry of mounted.values()) {
@@ -303,7 +340,10 @@ export function BodyView(props: BodyViewProps) {
       if (entry.view.y + rows <= top) continue;
       if (!first || entry.view.y < first.view.y) first = entry;
     }
-    return first ? position(first, Math.max(0, Math.floor(top - first.view.y))) : saved;
+    if (!first) return saved;
+    const row = Math.max(0, Math.floor(top - first.view.y));
+    anchorOffset = first.view.y + row - top;
+    return position(first, row);
   };
   const finishBodySelection = () => {
     const current = props.renderer.getSelection();
@@ -331,8 +371,9 @@ export function BodyView(props: BodyViewProps) {
     // Otherwise a narrow/wide transition restores with the previous wrapping.
     if (!layoutReady) { layoutReady = true; props.renderer.requestRender(); return; }
     const scrollTop = box.scrollTop;
-    if (align === 'bottom' || (props.page.follow && !saved)) box.scrollTo(box.scrollHeight);
+    if (align === 'bottom' || (following() && !gestureHold && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
+    else if (headerTop !== undefined && showHeader()) box.scrollTo(headerTop);
     else if (saved) {
       // A bounded thinking tail may have evicted the old anchor. Keep its
       // viewport offset at that same block's first retained source position.
@@ -353,7 +394,7 @@ export function BodyView(props: BodyViewProps) {
         for (let i = 0; i < info.lineSources.length; i++) {
           if (info.lineSources[i] === logical && info.lineStartCols[i]! - base <= column) row = i;
         }
-        box.scrollTo(box.scrollTop + entry.view.y - box.viewport.y + row); break;
+        box.scrollTo(box.scrollTop + entry.view.y - box.viewport.y + row - anchorOffset); break;
       }
     }
     align = undefined;
@@ -391,6 +432,23 @@ export function BodyView(props: BodyViewProps) {
     }
   };
   const handle: BodyViewHandle = {
+    inputTakeover() {
+      // Retire queued mouse callbacks and finish the held gesture. Plain
+      // editing must preserve a current reading request and its loading state.
+      const ownsGesture = heldVersion === navigationVersion;
+      navigationVersion++;
+      if (ownsGesture) heldVersion = navigationVersion;
+      selectionClearPending ||= handle.hasSelection();
+      box?.cancelPointer();
+      props.renderer.releasePointerCapture?.();
+      const current = props.renderer.getSelection();
+      if (current?.isDragging && [...mounted.values()].some(entry => current.touchedRenderables.includes(entry.view))) {
+        const target = pointerSource(current.focus), view = target && mounted.get(target.key)?.view;
+        if (view) props.renderer.updateSelection(view, current.focus.x, current.focus.y, { finishDragging: true });
+      }
+      finishBodySelection();
+      endGesture();
+    },
     hasSelection() { const current = currentSelection(); return !!current && (current.parts.length > 1 || current.parts.some(part =>
       part.from.contentOffset !== part.to.contentOffset || part.fromBias !== part.toBias)); },
     selectionRange() { return currentSelection(); },
@@ -433,7 +491,7 @@ export function BodyView(props: BodyViewProps) {
     anchor: capture,
     beforeUpdate() {
       if (disposed) return;
-      if (!props.page.follow) { saved = capture(); props.onAnchor(saved); }
+      if (!following() || gestureHold) { saved = capture(); props.onAnchor(saved); }
       if (!restorePending) {
         selection = currentSelection();
       }
@@ -449,54 +507,111 @@ export function BodyView(props: BodyViewProps) {
       return highlighter.close();
     },
     resetReading() {
-      readingGeneration++; paging = false; pauseRequested = false; readError = undefined;
+      readingGeneration++; navigationVersion++; paging = false; gestureHold = false; readError = undefined; failedIntent = undefined;
+      // A new conversation starts at latest regardless of whether its view or
+      // body arrives first. The previous page never owns the new scope's intent.
+      setFollowing(true); box?.cancelPointer(); props.renderer.releasePointerCapture?.(); props.renderer.clearSelection();
+      selectionClearPending = false; desiredPage = undefined; headerTop = undefined; anchorOffset = 0;
       pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined; prefetched = undefined;
+      restorePending = true; layoutReady = false; props.onAnchor(undefined); props.renderer.requestRender();
       reportReading();
     },
     async page(direction, rows) {
-      if (!box || disposed || paging) return;
-      const generation = ++readingGeneration;
-      const current = () => !disposed && generation === readingGeneration;
+      if (!box || disposed) return;
+      const retryIntent = readError === direction ? failedIntent : undefined;
+      failedIntent = undefined;
+      navigationVersion++; gestureHold = false; setFollowing(false);
+      // Changing follow intent is not a layout operation. Native scrollTo
+      // already updates child coordinates; keep this navigation's new anchor.
+      restorePending = false;
+      readingGeneration++;
+      const current = readingOwner();
       saved = capture(); props.onAnchor(saved);
       paging = true;
       readError = undefined; reportReading();
       try {
+        if (retryIntent) {
+          await requestPage(retryIntent.start, retryIntent.follow);
+          if (current() && retryIntent.follow && !handle.hasSelection()) {
+            setFollowing(true); saved = undefined; headerTop = undefined; props.onAnchor(undefined);
+            restorePending = true; layoutReady = false; props.renderer.requestRender();
+          }
+          return;
+        }
         const atEdge = direction < 0 ? box.scrollTop <= 0 : box.scrollTop + box.viewport.height >= box.scrollHeight;
         if (!atEdge) {
-          box.scrollBy(direction * Math.max(0, rows ?? box.viewport.height - 2));
+          box.scrollBy(direction * Math.max(0, rows ?? box.viewport.height - 1));
           saved = capture(); props.onAnchor(saved);
-          if (props.page.follow) await props.requestPage(props.page.start, false);
+          if (direction > 0 && atBottom() && !handle.hasSelection()) await handle.bottom();
+          else await requestPage(props.page.start, false);
           return;
         }
         const before = props.page;
         align = undefined; pendingScroll = direction * Math.max(0, rows ?? box.viewport.height - 2);
         if (direction < 0 && props.page.start === props.page.first) await props.requestPrevious();
-        else if (direction < 0) await props.requestPage(Math.max(props.page.first, props.page.start - 4), false);
-        else if (props.page.start + props.page.segments.length < props.page.last) await props.requestPage(props.page.start + props.page.segments.length, false);
-        else await handle.bottom();
+        else if (direction < 0) await requestPage(Math.max(props.page.first, props.page.start - 4), false);
+        else if (props.page.start + props.page.segments.length < props.page.last) await requestPage(props.page.start + props.page.segments.length, false);
+        else if (!handle.hasSelection()) await handle.bottom();
+        else { pendingScroll = 0; await requestPage(props.page.start, false); }
         if (current() && props.page === before) pendingScroll = 0;
-      } catch { if (current()) { pendingScroll = 0; readError = direction; } }
+      } catch { if (current()) { pendingScroll = 0; readError = direction; failedIntent = retryIntent; } }
       finally { if (current()) { paging = false; reportReading(); } }
     },
     async bottom() {
       if (disposed) return;
-      const generation = ++readingGeneration;
-      readError = undefined; pendingScroll = 0;
-      pauseRequested = false;
+      readingGeneration++;
+      readError = undefined; failedIntent = undefined; pendingScroll = 0;
+      navigationVersion++; gestureHold = false; setFollowing(true); box?.cancelPointer();
+      const current = readingOwner();
+      selection = undefined; selectionOwner = undefined; selectionGesture = undefined; props.renderer.clearSelection(); headerTop = undefined;
       saved = undefined; props.onAnchor(undefined); align = 'bottom';
       paging = true; reportReading();
-      try { await props.requestPage(undefined, true); }
-      catch { if (!disposed && generation === readingGeneration) readError = 1; }
-      finally { if (!disposed && generation === readingGeneration) { paging = false; reportReading(); } }
+      restorePending = true; layoutReady = false; props.renderer.requestRender();
+      try { await requestPage(undefined, true); }
+      catch { if (current()) { setFollowing(false); readError = 1; } }
+      finally { if (current()) { paging = false; reportReading(); } }
     },
+  };
+  const atBottom = () => !!box && box.scrollTop + box.viewport.height >= box.scrollHeight && props.page.start + props.page.segments.length >= props.page.last;
+  function beginGesture() {
+    // The renderer has already started the NEW native selection before this
+    // bubbled callback. Retire only our previous hold, never finish that new drag.
+    box?.cancelPointer(); endGesture();
+    gestureIntent = following(); heldVersion = navigationVersion; gestureHold = true;
+    gestureHadSelection = selectionClearPending; selectionClearPending = false;
+    heldContent = props.page;
+    saved = capture(); props.onAnchor(saved);
+  }
+  function endGesture() {
+    if (!gestureHold || disposed) return;
+    gestureHold = false;
+    if (heldVersion !== navigationVersion) return;
+    if (handle.hasSelection()) {
+      setFollowing(false); commitReadingIntent(false);
+    } else if (gestureIntent || gestureHadSelection && atBottom()) {
+      const changed = !following();
+      setFollowing(true);
+      if (changed) commitReadingIntent(true);
+      if (!sameBodyPageContent(heldContent, props.page)) {
+        saved = undefined; headerTop = undefined;
+        restorePending = true; layoutReady = false; props.renderer.requestRender();
+      }
+    }
+  }
+  const navigateScrollbar = () => {
+    if (!box || disposed) return;
+    navigationVersion++; paging = false; gestureHold = false; setFollowing(false);
+    restorePending = false; saved = capture(); props.onAnchor(saved);
+    if (atBottom() && !handle.hasSelection()) { setFollowing(true); saved = undefined; headerTop = undefined; }
+    commitReadingIntent(following());
   };
   createEffect(() => {
     prefixHeight();
     const page = contentPage(), width = props.width, height = props.height;
     if (disposed) return;
     if (lastPage && (page !== lastPage || width !== lastWidth || height !== lastHeight)) {
-      if (!page.follow && !align) saved = untrack(() => props.anchor ?? capture());
-      else if (page.follow && !pauseRequested) saved = undefined;
+      if (!page.follow && !align && !saved) saved = untrack(() => props.anchor ?? capture());
+      else if (page.follow && !gestureHold) { saved = undefined; headerTop = undefined; }
     }
     lastPage = page; lastWidth = width; lastHeight = height; restorePending = true; layoutReady = false;
     props.renderer.requestRender();
@@ -505,6 +620,13 @@ export function BodyView(props: BodyViewProps) {
   const postFrame = () => {
     restore();
     if (!box || disposed) return;
+    if (selectionClearPending && !gestureHold && !props.renderer.getSelection()?.isDragging) {
+      selectionClearPending = false;
+      if (!handle.hasSelection() && atBottom() && !following()) {
+        saved = undefined; headerTop = undefined; setFollowing(true);
+        commitReadingIntent(true);
+      }
+    }
     const state = viewport(), selecting = !!props.renderer.getSelection();
     const page = contentPage();
     if (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting)
@@ -548,19 +670,13 @@ export function BodyView(props: BodyViewProps) {
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
       width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
-  return <scrollbox ref={value => { box = value; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
+  return <scrollbox ref={value => { box = value as TerminalScrollBox; value.on('reading-pointer', () => handle.inputTakeover()); value.on('reading-navigation', navigateScrollbar); }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
     verticalScrollbarOptions={{ width: spacing.scrollbar, showArrows: false }}
-    onMouseUp={event => { if (event.button === 0) queueMicrotask(finishBodySelection); }}
+    onMouseUp={event => { if (event.button === 0) { const version = navigationVersion; queueMicrotask(() => { if (!disposed && version === navigationVersion) { finishBodySelection(); endGesture(); } }); } }}
     onMouseDown={event => {
       if (event.button !== 0) return;
-      if (!props.page.follow || pauseRequested || disposed) return;
-      const generation = ++readingGeneration;
-      paging = false; readError = undefined; reportReading();
-      saved = capture(); props.onAnchor(saved); pauseRequested = true;
-      void props.requestPage(props.page.start, false).catch(() => {
-        if (!disposed && generation === readingGeneration) { readError = -1; reportReading(); }
-      }).finally(() => { if (!disposed && generation === readingGeneration) pauseRequested = false; });
+      event.stopPropagation(); beginGesture();
     }}
     onMouseScroll={event => {
       const direction = event.scroll?.direction;

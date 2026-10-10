@@ -573,7 +573,9 @@ try {
       const expected = editor().plainText + 'k';
       await observe(`${workload}/input`, () => test.mockInput.pressKey('k'), () => text().includes(expected));
       const beforeScroll = text();
-      await observe(`${workload}/scroll`, () => test.mockMouse.scroll(20, 8, i % 2 ? 'up' : 'down'), () => text() !== beforeScroll);
+      // Each new conversation starts at latest; move away from that boundary
+      // first so this measures real scrolling rather than a no-op at EOF.
+      await observe(`${workload}/scroll`, () => test.mockMouse.scroll(20, 8, i % 2 ? 'down' : 'up'), () => text() !== beforeScroll);
       await show({ kind: 'configuration', title: '响应设置页', editId: `response-${i}` });
       await observe(`${workload}/return`, () => root!.receive({ type: 'view', view: { generation: ++generation, kind: 'conversation', title: '响应验收', conversationId: 'response' } }), () => text().includes(expected) && text().includes('row '));
       const width = i % 2 ? 100 : 60, height = i % 2 ? 34 : 24;
@@ -598,6 +600,9 @@ try {
       body: { version: 1, revision: 0, kind: 'markdown', end: true, context: { nodes } } };
   }) };
   const descendants = (node: any): any[] => [node, ...(node.getChildren?.() ?? []).flatMap(descendants)];
+  // Follow is now a U reading intent; installing fresh data cannot overwrite
+  // the user's prior off-bottom navigation. Explicitly request latest first.
+  test.mockInput.pressKey('\x1b[1;5F'); await flush();
   root.receive({ type: 'display-page', page: many }); await flush();
   assert.match(text(), /viewport-399/);
   assert.ok(descendants(test.renderer.root).filter(node => node.constructor.name === 'BodyTextRenderable').length < 100);

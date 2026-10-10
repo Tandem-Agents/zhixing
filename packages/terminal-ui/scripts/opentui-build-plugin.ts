@@ -3,6 +3,8 @@ import path from 'node:path';
 import { patchPasteParser, patchPasteRenderer } from './opentui-paste-patch.js';
 import { patchParserAssets, patchParserClient } from './opentui-parser-patch.js';
 import { patchAtomicWrapFFI } from './opentui-atomic-wrap-patch.js';
+import { patchScrollGeometry } from './opentui-scroll-patch.js';
+import { patchPointerTakeover } from './opentui-pointer-patch.js';
 
 /** Identical admitted-library/FFI/parser/lifecycle policy for UI and native tests. */
 export function createOpenTuiBuildPlugin(root: string) {
@@ -13,11 +15,15 @@ export function createOpenTuiBuildPlugin(root: string) {
   return {
     name: 'zhixing-external-recovery-owner',
     setup(build: any) {
+      build.onLoad({ filter: /@opentui[\\/]core[\\/]index\.bun\.js$/ }, async (args: any) => ({
+        contents: patchScrollGeometry(await readFile(args.path, 'utf8')), loader: 'js', resolveDir: path.dirname(args.path),
+      }));
       build.onResolve({ filter: /^solid-js$/ }, () => ({ path: Bun.resolveSync('solid-js/dist/solid.js', root) }));
       build.onResolve({ filter: /^solid-js\/store$/ }, () => ({ path: Bun.resolveSync('solid-js/store/dist/store.js', root) }));
       build.onLoad({ filter: /chunk-bun-(?:j2z63cdy|sjw2d9bq)\.js$/ }, async (args: any) => {
         let source = await readFile(args.path, 'utf8');
         if (args.path.endsWith('j2z63cdy.js')) {
+          source = patchPointerTakeover(source);
           source = patchPasteRenderer(source);
           source = replaceOnce(source, 'const kittyConfig = config.useKittyKeyboard ?? {};', 'const kittyConfig = config.useKittyKeyboard === undefined ? {} : config.useKittyKeyboard;');
           source = replaceOnce(source, '    try {\n      this.setupInput();\n    } catch (error) {', '    try {\n      if (!config.externalRecoveryOwner) this.setupInput();\n    } catch (error) {');

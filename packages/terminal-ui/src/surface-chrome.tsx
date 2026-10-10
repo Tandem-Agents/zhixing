@@ -15,7 +15,7 @@ export function SurfaceChrome(props: { view: TerminalView; width: number; height
     : main() && props.view.title !== '知行' ? `当前对话 ${line(props.view.title)}` : props.view.title === '知行' ? '' : line(props.view.title);
   return <box flexDirection="column" flexShrink={0} marginBottom={1}>
     <Show when={!compact()} fallback={<text height={1} wrapMode="none" truncate fg={tone.brand}>{branded() ? '知行 ' : ''}{status()}</text>}>
-      <Show when={branded()} fallback={<box border borderStyle="rounded" borderColor={tone.border} title={` ${line(props.view.title)} `} paddingX={spacing.welcomeInner} paddingY={props.view.chromeDescription ? 1 : 0} height={props.view.chromeDescription ? undefined : 2}>
+      <Show when={branded()} fallback={<box border borderStyle="rounded" borderColor={tone.border} title={` ${line(props.view.title)} `} paddingX={spacing.welcomeInner} paddingY={props.view.chromeDescription ? 1 : 0} height={props.view.chromeDescription ? 'auto' : 2}>
         <Show when={props.view.chromeDescription}><text fg={tone.text}>{props.view.chromeDescription}</text></Show>
       </box>}>
       <text height={1} wrapMode="none" fg={tone.border}>╭──── <span style={{fg: tone.brand}}>╲</span> {'─'.repeat(Math.max(0, props.width - 9))}╮</text>

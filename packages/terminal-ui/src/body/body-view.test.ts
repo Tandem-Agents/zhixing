@@ -15,7 +15,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   const effects: (() => void)[] = [], cleanups: (() => void)[] = [], frames = new Set<() => void>();
   const textViews: { content: string | { chunks: { text: string }[] } }[] = [];
   let handle: BodyViewHandle | undefined, reported = anchor, measurement = '';
-  const scroll = { scrollTop: 0, scrollHeight: 3, viewport: { y: 0, height: 1 },
+  const scroll = { on() {}, cancelPointer() {}, scrollTop: 0, scrollHeight: 3, viewport: { y: 0, height: 1 },
     scrollTo(value: number) { this.scrollTop = Math.max(0, Math.min(2, value)); }, scrollBy(value: number) { this.scrollTo(this.scrollTop + value); } };
   const For = (props: { each: unknown[]; children: (value: unknown) => unknown }) => props.each.map(props.children);
   const Show = (props: { when: unknown; children: unknown; fallback: unknown }) => props.when ? props.children : props.fallback;
@@ -39,6 +39,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
     './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2, content: 2, scrollbar: 1, userInner: 2 } },
+    './scroll-box.js': { TerminalScrollBox: core.ScrollBoxRenderable },
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
   const geometry = {};
