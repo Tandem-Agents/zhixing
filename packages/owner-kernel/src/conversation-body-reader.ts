@@ -1,6 +1,6 @@
 import { artifactJsonIndex, assertArtifactRef, type ArtifactStore } from '@zhixing/core/authority';
 import type { ArtifactRef, ConversationBodyCursor, ConversationBodyFragment, ConversationBodyPage, ConversationCommitSummary } from '@zhixing/core/contracts';
-import { ConversationReadIndex, type CommitPointer } from './conversation-read-index.js';
+import { ConversationReadIndex, type CommitPointer, type ReadMeta } from './conversation-read-index.js';
 import { assertConversationCommitSummary } from './conversation-run-contracts.js';
 
 type Keys = readonly (string | number)[];
@@ -97,13 +97,13 @@ export class ConversationBodyReader {
     return { turnCount: state.count, ...(lines.length ? { text: lines.join('\n') } : {}) };
   }
   async page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }): Promise<ConversationBodyPage> {
-    const before = await this.directory.state(this.conversationId);
-    const result = await this.#page(input);
+    const before = { ...await this.directory.state(this.conversationId) };
+    const result = await this.#page(input, before);
     const after = await this.directory.state(this.conversationId);
     return after.deleted || after.clearId !== before.clearId ? { fragments: [], hasMore: !after.deleted, reset: true } : result;
   }
-  async #page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }): Promise<ConversationBodyPage> {
-    const state = await this.directory.state(this.conversationId), cursor = input.cursor;
+  async #page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }, state: ReadMeta): Promise<ConversationBodyPage> {
+    const cursor = input.cursor;
     if (state.deleted || cursor && (cursor.conversationId !== this.conversationId || cursor.ownerEpoch !== this.ownerEpoch || cursor.clearId !== state.clearId || cursor.revision <= state.clearedThrough))
       return { fragments: [], hasMore: !state.deleted, reset: true };
     const reverse = input.direction !== 'forward';
@@ -162,9 +162,8 @@ export class ConversationBodyReader {
       if (!reverse) { block++; offset = 0; return { fragments, hasMore: block < contents.units, reset: false, cursor: position() }; }
       if (offset === 0) { block--; offset = MAX; }
     }
-    // Check the same visibility generation before publishing a possibly slow read.
-    const after = await this.directory.state(this.conversationId);
-    if (after.deleted || after.clearId !== state.clearId) return { fragments: [], hasMore: !after.deleted, reset: true };
+    // page() checks the visibility generation for every return path, including
+    // preparing and forward pages, after all artifact work has finished.
     return { fragments, hasMore: !!commit, reset: false, ...(commit ? { cursor: position() } : {}) };
   }
 }

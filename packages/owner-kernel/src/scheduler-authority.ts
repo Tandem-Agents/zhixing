@@ -636,7 +636,9 @@ export class AnchorScheduler {
         ) {
           throw new Error(`System task registration conflicts for ${spec.id}`);
         }
-        await this.#refreshTask(spec.id, { systemView: systemView(spec) });
+        // prepare() already loaded this task with its registered system view.
+        // No task can execute before activation; retain the conflict check,
+        // without repeating the same journal/projection recovery here.
         continue;
       }
       const definition: TaskDefinition = {

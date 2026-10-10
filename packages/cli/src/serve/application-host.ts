@@ -17,7 +17,7 @@ import {
   prepareMeshRuntimeBootstrap,
   type MeshRuntimeBootstrap,
 } from "./mesh-runtime-bootstrap.js";
-import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
+import type { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
 import { createRecoveryRootPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import {
   createPlannedAnchorTransferStagingInfrastructure,
@@ -396,7 +396,10 @@ export function createPersistentApplicationHost(
       createDisasterRecoveryStagingInfrastructure,
     createRecoveryRootPairedCheckpointReceiver:
       createRecoveryRootPairedCheckpointCommandReceiverInfrastructure,
-    runRecoveryRoot: runRecoveryRootEstablishmentTopology,
+    runRecoveryRoot: async (options) => {
+      const { runRecoveryRootEstablishmentTopology } = await import("./recovery-root-establishment-runtime.js");
+      return runRecoveryRootEstablishmentTopology(options);
+    },
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,
     importAnchorRole: () => import("./command.js"),

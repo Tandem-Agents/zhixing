@@ -590,6 +590,11 @@ describe("AnchorScheduler authority", () => {
     await first.scheduler.stop();
 
     const restarted = fixture({ journals: first.journals, systemTasks });
+    const definitionRead = vi.spyOn(first.journals.get('__transcript-gc')!, 'taskDefinition');
+    await restarted.scheduler.prepare();
+    // Existing system tasks get the new Host registration in the first pass;
+    // preparation must not restore the same journal twice.
+    expect(definitionRead).toHaveBeenCalledTimes(1);
     await restarted.scheduler.start();
     expect(restarted.scheduler.getTask("__transcript-gc")).toMatchObject({
       system: true,

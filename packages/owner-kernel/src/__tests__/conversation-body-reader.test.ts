@@ -5,6 +5,19 @@ import type { ConversationBodyCursor } from '@zhixing/core/contracts';
 import { ConversationBodyReader } from '../conversation-body-reader.js';
 import type { ConversationReadIndex, CommitPointer } from '../conversation-read-index.js';
 
+it.each(['clear', 'delete'] as const)('rechecks %s after an empty lookup without repeating the initial state read', async (mutation) => {
+  const state = { count: 0, clearedThrough: 0, baseRevision: 0, activity: '', clearId: undefined as string | undefined, deleted: false };
+  const read = vi.fn(async () => state);
+  const directory = { state: read, latest: async () => {
+    if (mutation === 'clear') state.clearId = 'clear-during-read'; else state.deleted = true;
+    return undefined;
+  } } as unknown as ConversationReadIndex;
+  const artifacts = new FileArtifactStore(await createTempDir('empty-history-generation'));
+  const reader = new ConversationBodyReader(directory, artifacts, 'c-1', 1);
+  expect(await reader.page({})).toEqual({ fragments: [], hasMore: mutation === 'clear', reset: true });
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
 it('reads a giant single run through bounded source pages and preserves all source positions', async () => {
   const root = await createTempDir('conversation-body'), artifacts = new FileArtifactStore(root);
   const text = '中文😀 line\\\n'.repeat(90000);
