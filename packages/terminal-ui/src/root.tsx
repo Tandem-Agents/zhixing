@@ -523,7 +523,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <text width={2} selectable={false} fg={teal}>❯ </text>
         <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 6)))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
-            {(owner: string) => <textarea ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 6)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
+            {(owner: string) => <textarea selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 6)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
           </Show>
         </Show>
       </box>

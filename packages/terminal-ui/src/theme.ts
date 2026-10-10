@@ -11,6 +11,8 @@ export const tone = {
   error: RGBA.fromIndex(1),
   history: RGBA.fromIndex(236),
   selected: RGBA.fromIndex(236),
+  selectionFg: RGBA.fromHex('#111111'),
+  selectionBg: RGBA.fromHex('#b9d9ee'),
   dangerBackground: RGBA.fromIndex(52),
   codeKeyword: RGBA.fromIndex(5),
   codeString: RGBA.fromIndex(2),

@@ -582,8 +582,34 @@
     {
       "file": "src/buffer.zig",
       "baseSha256": "2bb66161fe9829dbcb5b254a9a0cab6742ccbe38915b47dac300b7bf50ec8ad1",
-      "outputSha256": "0c9dd7c33ac153a7d3e8511a9f4c56bf759b48988da9ba836d588f6fa968c242",
+      "outputSha256": "bd7fb5632aef25f46a555e97a9a5c6446ab51cb3615d69517f61e369ec4c8394",
       "edits": [
+        {
+          "at": 1957,
+          "remove": 1,
+          "insert": [
+            "                    var finalAttributes = lineAttributes;"
+          ]
+        },
+        {
+          "at": 1963,
+          "remove": 1,
+          "insert": [
+            "                            if (isSelected) {",
+            "                                // Selection is a readable overlay, independent of source dim/inverse.",
+            "                                finalAttributes &= ~@as(@TypeOf(finalAttributes), (1 << 1) | (1 << 5));"
+          ]
+        },
+        {
+          "at": 1970,
+          "remove": 3,
+          "insert": [
+            "                                    // A default foreground token becomes default BACKGROUND in",
+            "                                    // the BG lane (SGR49), not an inverted default foreground.",
+            "                                    finalFg = if (ansi.intent(lineBg) != .default and ansi.alpha(lineBg) > 0) lineBg else ansi.rgbColor(17, 17, 17, 255);",
+            "                                    finalBg = if (ansi.intent(lineFg) == .default) ansi.rgbColor(185, 217, 238, 255) else lineFg;"
+          ]
+        },
         {
           "at": 2248,
           "remove": 0,

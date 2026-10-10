@@ -522,7 +522,7 @@ export function BodyView(props: BodyViewProps) {
       current.content = content();
     });
     return <body_text ref={view => { current = view; if (!disposed) mounted.set(key, { block: value.block, view }); }}
-      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable />;
+      width={value.width} minHeight={value.block.node.decoration !== undefined ? 1 : undefined} wrapMode="char" selectable selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} />;
   };
   return <scrollbox ref={value => { box = value; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
