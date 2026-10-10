@@ -2,7 +2,7 @@
 // This exercises actual layout/input; it does not claim OS IME or clipboard evidence.
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { setRenderLibPath, resolveRenderLib, type TextareaRenderable } from '@opentui/core';
+import { setRenderLibPath, resolveRenderLib, OptimizedBuffer, RGBA, type TextareaRenderable } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
 import { createTerminalRoot } from '../root.js';
 import type { TerminalAction, TerminalView } from '../protocol.js';
@@ -66,6 +66,28 @@ try {
     const visit = (node: any): TextareaRenderable | undefined => node.constructor.name === 'TerminalTextarea' ? node : node.getChildren?.().map(visit).find(Boolean);
     const found = visit(test.renderer.root); assert.ok(found, 'mounted editor'); return found;
   };
+  // Borders must obey the same nested viewport clip as text, on every edge.
+  // Exercise the shipped native buffer directly, including its transparent fast path.
+  const clippedBuffer = OptimizedBuffer.create(12, 8, test.renderer.widthMethod);
+  try {
+    const white = RGBA.fromValues(1, 1, 1, 1), transparent = RGBA.fromValues(0, 0, 0, 0);
+    const fill = () => { clippedBuffer.clear(); for (let y = 0; y < 8; y++) clippedBuffer.drawText('.'.repeat(12), 0, y, white); };
+    for (const border of [true, ['bottom']] as const) {
+      const draw = () => clippedBuffer.drawBox({ x: 1, y: 1, width: 8, height: 5, border: border === true ? true : [...border], borderColor: white, backgroundColor: transparent });
+      fill(); draw(); const full = [...clippedBuffer.buffers.char];
+      for (const clips of [[[0, 0, 12, 8]], [[0, 0, 12, 2]], [[0, 4, 12, 4]], [[3, 0, 4, 8]], [[0, 0, 12, 7], [2, 2, 5, 3]], [[10, 0, 2, 8]]]) {
+        fill(); const before = [...clippedBuffer.buffers.char];
+        for (const [x, y, width, height] of clips) clippedBuffer.pushScissorRect(x!, y!, width!, height!);
+        draw();
+        for (let y = 0; y < 8; y++) for (let x = 0; x < 12; x++) {
+          const inside = clips.every(([left, top, width, height]) => x >= left! && y >= top! && x < left! + width! && y < top! + height!);
+          assert.equal(clippedBuffer.buffers.char[y * 12 + x], (inside ? full : before)[y * 12 + x], `border clip at ${x},${y}: ${JSON.stringify(clips)}`);
+        }
+        for (const _ of clips) clippedBuffer.popScissorRect();
+      }
+    }
+  } finally { clippedBuffer.destroy(); }
+  checks.push('native transparent borders obey every viewport edge and nested clips without changing visible cells');
   await show({ kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
   assert.ok(!text().includes('离线'));
   assert.match(text().split('\n')[0]!, /^╭──── ╲ .*╮$/);

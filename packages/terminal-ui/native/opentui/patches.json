@@ -1,7 +1,7 @@
 {
   "version": "0.5.14",
   "upstreamCommit": "31a93fbe66992298d6d0f27481fa781f43d0c1e2",
-  "purpose": "External recovery ownership, synchronous current-frame writes and bounded atomic input wrapping",
+  "purpose": "External recovery ownership, synchronous current-frame writes, bounded atomic input wrapping and clipped border rendering",
   "files": [
     {
       "file": "src/renderer-output.zig",
@@ -575,6 +575,26 @@
           "insert": [
             "        self.emitNativeEvent(\"cursor-changed\");",
             "        self.emitNativeEvent(\"content-changed\");"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "src/buffer.zig",
+      "baseSha256": "2bb66161fe9829dbcb5b254a9a0cab6742ccbe38915b47dac300b7bf50ec8ad1",
+      "outputSha256": "0c9dd7c33ac153a7d3e8511a9f4c56bf759b48988da9ba836d588f6fa968c242",
+      "edits": [
+        {
+          "at": 2248,
+          "remove": 0,
+          "insert": [
+            "        // Direct cell writes bypass per-cell scissor checks. Use them only",
+            "        // when the entire box is inside the active (possibly nested) clip.",
+            "        if (self.getCurrentScissorRect()) |clip| {",
+            "            if (x < clip.x or y < clip.y or",
+            "                @as(i64, x) + width > @as(i64, clip.x) + clip.width or",
+            "                @as(i64, y) + height > @as(i64, clip.y) + clip.height) return false;",
+            "        }"
           ]
         }
       ]
