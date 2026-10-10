@@ -112,6 +112,7 @@ export type TerminalAction =
   | { readonly kind: 'clipboard-write'; readonly text: string };
 
 export interface TerminalCandidates {
+  readonly active?: boolean;
   /** Display-only prefix target. Acceptance is authorized by N's revision. */
   readonly ghost?: { readonly fullValue: string };
   readonly argumentHint?: string;

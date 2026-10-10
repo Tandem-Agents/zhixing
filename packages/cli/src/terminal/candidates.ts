@@ -54,7 +54,7 @@ export class TerminalCandidatesOwner {
       const trust = provider.id === 'argument' && /^\/trust\s/u.test(semanticText);
       const command = provider.id === 'argument' ? /^\/(resume|work)\s/u.exec(semanticText)?.[1] as 'resume' | 'work' | undefined : undefined;
       const chars = Array.from(text);
-      const range = { revision, start: chars.slice(0, match.tokenStart).join('').length, end: chars.slice(0, match.tokenEnd).join('').length };
+      const range = { revision, active: true, start: chars.slice(0, match.tokenStart).join('').length, end: chars.slice(0, match.tokenEnd).join('').length };
       let items: readonly SuggestionItem[];
       try { items = await provider.query(match, query.abort.signal); }
       catch (error) {

@@ -11,11 +11,20 @@ export function inputRows(lines: number, terminalHeight: number): number {
   return Math.max(1, Math.min(Math.max(1, lines), 8, Math.floor(terminalHeight / 3)));
 }
 
+/** Physical rows are reserved for the whole candidate interaction, independent
+ * of response count, loading, errors or process updates. */
+export function candidateLayout(height: number) {
+  const editor = height >= 32 ? 4 : height >= 20 ? 2 : 1;
+  const process = height >= 24 ? 3 : height >= 20 ? 2 : 1;
+  const rows = Math.max(0, Math.min(16, height - 2 - process - (editor + 2) - (height >= 20 ? 4 : 1)));
+  return { editor, process, rows: rows >= 5 ? rows : 0 };
+}
+
 /** Texture marks a selected row, never an input, an unselected row or danger. */
 export function selectedLabel(text: string, selected: boolean, danger: boolean, width: number, measure: (text: string) => number): string {
   const label = fitInformation(text, width, measure);
   if (!selected || danger) return label;
-  return label.replace(/ {2,}/gu, run => '░'.repeat(run.length)) + '░'.repeat(Math.max(0, width - measure(label)));
+  return label + '░'.repeat(Math.max(0, width - measure(label)));
 }
 
 /** Preserve a still-enabled selection, otherwise honor the requested default. */

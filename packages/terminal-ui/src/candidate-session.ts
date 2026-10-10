@@ -7,6 +7,9 @@ export class TerminalCandidateSession {
   value?: TerminalCandidates;
   selected = 0;
   busy = false;
+  open = false;
+  loading = false;
+  error?: string;
   #deleteSignature?: string;
   get deleteArmed(): boolean { return this.#deleteSignature !== undefined; }
   resetDelete(): void { this.#deleteSignature = undefined; }
@@ -39,7 +42,10 @@ export class TerminalCandidateSession {
     if (signature === this.#signature) return;
     this.resetDelete();
     this.#signature = signature;
-    this.value = undefined; this.#snapshot = undefined; this.selected = 0; this.changed();
+    this.value = undefined; this.#snapshot = undefined; this.selected = 0;
+    this.open = active && !this.#accepting && !!draft.text && (this.open || /^[/／]/u.test(draft.text));
+    this.loading = active && !this.#accepting && !!draft.text;
+    this.error = undefined; this.changed();
     const revision = ++this.#revision;
     if (!active || this.#accepting) { this.#pending = undefined; return; }
     // Bound the provider workspace independently from retained original input.
@@ -58,6 +64,7 @@ export class TerminalCandidateSession {
   }
   dismiss(): void {
     this.resetDelete();
+    this.open = false; this.loading = false; this.error = undefined;
     ++this.#revision; this.#pending = undefined; this.value = undefined; this.#snapshot = undefined; this.changed();
   }
   refresh(): void { this.#signature = ''; this.sync(this.#active); }
@@ -123,11 +130,17 @@ export class TerminalCandidateSession {
           const result = await this.request({ kind: 'input-candidates', revision: query.revision, text: query.text, cursor: query.cursor - query.offset, atStart: query.atStart }) as TerminalCandidates;
           if (query.revision !== this.#revision || !this.#active) continue;
           if (result.revision !== query.revision || !Array.isArray(result.items) || result.items.length > 100 ||
-            result.start < 0 || result.end < result.start || result.end > query.text.length || ((query.offset > 0 || this.input.windowStart > 0) && result.start === 0)) continue;
+            !Number.isSafeInteger(result.start) || !Number.isSafeInteger(result.end) || result.start < 0 || result.end < result.start || result.end > query.text.length || ((query.offset > 0 || this.input.windowStart > 0) && result.start === 0)) throw Error('terminal-candidate-result');
           if ((result.ghost !== undefined && (typeof result.ghost?.fullValue !== 'string' || !result.ghost.fullValue || Buffer.byteLength(result.ghost.fullValue) > 4096)) ||
-              (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096))) continue;
-          this.value = result; this.#snapshot = query; this.changed();
+              (result.argumentHint !== undefined && (typeof result.argumentHint !== 'string' || Buffer.byteLength(result.argumentHint) > 4096))) throw Error('terminal-candidate-result');
+          this.value = result; this.#snapshot = query;
+          this.open = result.active ?? !!(result.items.length || result.mode || result.argumentHint);
+          this.loading = false; this.changed();
         } catch (error) {
+          if (query.revision === this.#revision && this.#active) {
+            this.loading = false;
+            this.error = '候选读取未完成 · Ctrl+R 重试'; this.changed();
+          }
           if (query.revision === this.#revision && this.#active && this.value?.mode === 'management') {
             this.value = { ...this.value, items: [], error: error instanceof Error ? error.message.slice(0, 2048) : '规则读取失败，请刷新。' };
             this.changed();

@@ -29,6 +29,7 @@ let clipboardReply: (() => Promise<unknown>) | undefined;
 let pasteReply: (() => unknown) | undefined;
 let externalPaste: (() => TerminalPasteSink | undefined) | undefined;
 let readingReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
+let candidateReply: ((action: Extract<TerminalAction, { kind: 'input-candidates' }>) => Promise<unknown>) | undefined;
 const usableFrames: number[] = [];
 const pendingRead = () => {
   let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
@@ -45,6 +46,7 @@ try {
       if (readingReply && (action.kind === 'display-page' || action.kind === 'history-previous')) return readingReply(action);
       if (action.kind === 'command-route' && ['help', 'clear'].includes(action.name)) return { route: 'local' };
       if (action.kind === 'input-candidates') {
+        if (candidateReply) return candidateReply(action);
         if (action.text === '\u3001he') return { revision: action.revision, start: 0, end: 3, ghost: { fullValue: '/help' }, items: [{ id: 'help:repl', label: '/help' }] };
         if (action.text === '/qui') return { revision: action.revision, start: 0, end: 4, ghost: { fullValue: '/quit' }, items: [{ id: 'exit:repl', label: '/exit' }] };
         if (action.text === '/resume ') return { revision: action.revision, start: 8, end: 8, argumentHint: '暂无可切换对话', items: [] };
@@ -326,7 +328,7 @@ try {
   const local = root.information.source(interactionKey({ kind: 'conversation', title: '知行', conversationId: 'test', generation }));
   local.set('left', 'notice', '主场景公告');
   await show({ kind: 'selection', title: '临时选择', requestId: 'pick', choices: [{ id: 'a', label: '普通  行' }, { id: 'cancel', label: '取消', danger: true }] });
-  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /普通░░行░/);
+  assert.ok(!text().includes('主场景公告')); assert.match(text(), /共享公告/); assert.match(text(), /普通  行 ░/);
   const late = root.information.source(interactionKey({ kind: 'selection', title: '临时选择', requestId: 'pick', generation }));
   await show({ kind: 'conversation', title: '知行', conversationId: 'test' });
   late.set('left', 'notice', '迟到的旧页面'); await flush();
@@ -825,8 +827,32 @@ try {
   await show({ kind: 'conversation', title: '可用帧', conversationId: 'usable', connected: true, readyForInput: true });
   assert.equal(usableFrames.length, 1, 'only one completed usable frame is reported');
   assert.ok(Number.isSafeInteger(usableFrames[0]));
-  checks.push('usable-frame is post-render and exactly once');
-  editor().setText(''); test.resize(100, 32); await flush();
+  const candidateFrames: Record<string, string> = {};
+  for (const height of [32, 20, 16]) {
+    test.resize(100, height); editor().setText(''); await flush();
+    await show({ kind: 'conversation', title: '候选稳定性', conversationId: `candidate-${height}`, connected: true,
+      environment: { provider: 'example', model: 'model', workspace: 'D:/example' } });
+    const items = Array.from({ length: 5 }, (_, i) => ({ id: `c${i}`, label: `选择  ${i}`, detail: `说明 ${i}` }));
+    candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items });
+    editor().setText('/candidate'); await flush(); await flush();
+    const initialY = editor().y;
+    candidateFrames[`h${height}-items`] = text();
+    const pending = pendingRead(); let latest: Extract<TerminalAction, { kind: 'input-candidates' }> | undefined;
+    candidateReply = action => { latest = action; return pending.promise; };
+    editor().setText('/candidate-empty'); await flush();
+    assert.equal(editor().y, initialY, `H${height}: loading must not move editor`);
+    assert.ok(!text().includes('选择  0'), 'stale choices cannot remain selectable while loading');
+    pending.resolve({ revision: latest!.revision, active: true, start: 0, end: latest!.text.length, items: [] });
+    await flush(); assert.equal(editor().y, initialY, `H${height}: empty must not move editor`);
+    candidateReply = async () => { throw Error('fixture unavailable'); };
+    editor().setText('/candidate-error'); await flush(); await flush();
+    assert.equal(editor().y, initialY, `H${height}: failure must not move editor`);
+    candidateFrames[`h${height}-error`] = text();
+    assert.ok(editor().y + editor().height < height - 1);
+    test.mockInput.pressEscape(); await flush();
+  }
+  candidateReply = undefined; editor().setText(''); test.resize(100, 32); await flush();
+  checks.push('usable-frame is post-render and exactly once; candidate loading/empty/error keep the same editor row at 32/20/16 physical rows');
   const spansFor = (value: string) => test.captureSpans().lines.flatMap(line => line.spans).filter(span => span.text.includes(value));
   const assertBold = (value: string, expected: boolean) => {
     const spans = spansFor(value); assert.ok(spans.length, `visible ${value}`);
@@ -843,11 +869,35 @@ try {
       const nameSpans = test.captureSpans().lines[1]!.spans.filter(span => span.text.includes('知行'));
       assert.ok(nameSpans.length && nameSpans.every(span => span.attributes & TextAttributes.BOLD));
       assertBold(title, false);
+      if (!busy) {
+        assertBold('ChoiceOne', true); assertBold('ChoiceTwo', false);
+        const texture = spansFor('░'); assert.ok(texture.length);
+        assert.ok(texture.every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)), 'texture is independently dim, never inherited bold');
+        test.mockInput.pressArrow('down'); await flush();
+        assertBold('ChoiceOne', false); assertBold('ChoiceTwo', true);
+      }
     }
     await show({ kind: 'conversation', title: 'Brand fixture', conversationId: 'brand-fixture', connected: true });
     root.receive({ type: 'display-page', page: { first: 0, start: 0, last: 0, follow: false, segments: [] } }); await flush();
     assertBold('知行', true); assertBold('当前对话 Brand fixture', false);
   }
-  checks.push('configuration/MCP brand columns and bold attributes survive loading and conversation transitions');
-  console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, frame: text() }, null, 2));
+  checks.push('configuration/MCP brand columns and native bold/dim attributes survive loading, selection and conversation transitions');
+  candidateReply = async action => ({ revision: action.revision, active: true, start: 0, end: action.text.length, items: [{ id: 'clip', label: 'ClipChoice', detail: 'Detail' }] });
+  test.resize(100, 16); editor().setText('/clip'); await flush(); await flush();
+  assertBold('ClipChoice', true);
+  assert.ok(spansFor('░').every(span => (span.attributes & TextAttributes.DIM) && !(span.attributes & TextAttributes.BOLD)));
+  const clipSegments: BodyPage['segments'][number][] = [];
+  for await (const part of projectBodyHistory('| A | B | C | D | E | F | G | H |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| alpha | beta | gamma | delta | eps | zeta | eta | theta |\n', 'markdown', 'forward', async () => {}))
+    clipSegments.push({ blockId: 'clip-table', contentOffset: part.contentOffset, role: 'assistant', text: part.text, body: part.body, final: part.body.end });
+  root.receive({ type: 'display-page', page: { first: 0, start: 0, last: clipSegments.length, follow: false, segments: clipSegments } }); await flush();
+  const clippedBody = descendants(test.renderer.root).find(node => node.constructor.name === 'TerminalScrollBox'); assert.ok(clippedBody);
+  assert.equal(clippedBody.viewport.height, 1, 'fixture exercises a one-row reading viewport');
+  for (const top of [2, 3, 2]) {
+    clippedBody.scrollTo(top); await flush();
+    const notice = text().split('\n')[clippedBody.viewport.y + clippedBody.viewport.height]!;
+    assert.equal(notice.trim(), '↓ 下方还有内容 · Ctrl+End 回到最新', `table at ${top} cannot paint into the reading notice`);
+  }
+  candidateReply = undefined;
+  checks.push('production table border crossing a one-row viewport never overwrites the adjacent reading notice');
+  console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, candidateFrames, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

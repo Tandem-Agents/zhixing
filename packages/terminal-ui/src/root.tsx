@@ -16,7 +16,8 @@ import { bodySelection } from './body-selection.js';
 import { BodyReadingWindow } from './body-window.js';
 import { SkillsView, type SkillsViewHandle } from './skills-view.js';
 import { InformationBoard, informationLayout, type InformationSource } from './information-model.js';
-import { interactionKey, inputRows, selectedLabel, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
+import { interactionKey, inputRows, candidateLayout, initialChoiceIndex, nextChoiceIndex } from './surface-layout.js';
+import { CandidateView, type CandidateViewHandle } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
 import { tone, spacing } from './theme.js';
@@ -169,7 +170,12 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const draft = input.draft;
   candidates = new TerminalCandidateSession(input, options.request, () => setCandidateRevision(value => value + 1));
   const candidateItems = () => { candidateRevision(); return candidates?.value?.items ?? []; };
-  const candidateStart = () => { candidateRevision(); return Math.max(0, (candidates?.selected ?? 0) - 4); };
+  let candidateView: CandidateViewHandle | undefined;
+  const candidateOpen = () => { candidateRevision(); return view().kind === 'conversation' && !!candidates?.open; };
+  const candidateLoading = () => { candidateRevision(); return !!candidates?.loading; };
+  const candidateSelected = () => { candidateRevision(); return candidates?.selected ?? 0; };
+  const candidateError = () => { candidateRevision(); return candidates?.error; };
+  const candidateDanger = () => { candidateRevision(); return !!candidates?.deleteArmed; };
   const candidateValue = () => { candidateRevision(); return candidates?.value; };
   const trustSnapshot = () => ({ mode: candidateValue()?.mode, revision: candidateValue()?.revision ?? 0,
     items: candidateItems(), selected: candidates?.selected ?? 0, draftVersion: draft.version, cursor: draft.cursor,
@@ -345,12 +351,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     try { setStatus(renderer.copyToClipboardOSC52(text) ? '已发送复制请求。' : '当前终端无法执行复制请求。'); }
     catch { setStatus('复制请求未完成。'); }
   };
-  const candidateHeight = () => view().kind === 'conversation' && candidateItems().length > 0 && size().height >= 18
-    ? Math.min(5, candidateItems().length) + 2 : 0;
+  const candidateBudget = () => candidateLayout(size().height);
+  const candidateHeight = () => candidateOpen() ? candidateBudget().rows : 0;
   // Reserve compact chrome (2), a body row, input borders (2), the footer
   // and the fixed reading-navigation row on body surfaces.
   // Measure only the preceding context, so editor resizing cannot feed itself.
   const fieldRows = () => view().field?.secret ? 1 : Math.max(1, Math.min(
+    candidateOpen() ? candidateBudget().editor : Infinity,
     inputRows(editorLines(), size().height), size().height - contextHeight() - candidateHeight() - 6 - (isBody() ? 1 : 0),
   ));
   const computeInfo = () => {
@@ -363,7 +370,10 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty()) left.push('输入消息或 / 查看命令');
     const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
-    const keys = candidate?.ghost ? hint(`Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`, `Tab 补全 ${candidate.ghost.fullValue} · Esc 返回`)
+    const keys = candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
+      : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
+      : candidateOpen() && !candidate?.items.length && !candidate?.ghost && !candidate?.mode ? 'Esc 返回'
+      : candidate?.ghost ? hint(`Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`, `Tab 补全 ${candidate.ghost.fullValue} · Esc 返回`)
       : candidate?.hint ? candidate.hint
       : candidate?.items.length || candidate?.mode ? hint('↑↓ 选择 · Tab/Enter 接纳 · Esc 返回', '↑↓ 选择 · Enter 接纳 · Esc 返回')
       : current.kind === 'skills' ? '' // The skill surface owns its two contextual hint rows.
@@ -427,6 +437,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     finally { finish?.(); clipboardPending = false; }
   };
   const shownProcess = () => view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId ? processStatus()?.view : undefined;
+  const candidateNotice = () => displayText(view().displayPaused || view().bodyRecovery === 'blocked' ? '正文待恢复 · Ctrl+R 重试展示' : view().displayGap ? '正文保留存在缺口' : taskStatus().noticeGap || view().message || taskStatus().summary?.text || '');
+  const candidateNoticeColor = () => view().displayGap || view().displayPaused || view().bodyRecovery === 'blocked' || taskStatus().noticeGap || view().connectionState === 'unavailable' || taskStatus().summary?.state === 'error' ? tone.warn : tone.dim;
   const ChoiceList = () => <box flexDirection="column" flexShrink={0} marginTop={view().message && choices().length ? 1 : 0}>
     <For each={choices()}>{(choice, index) => <box id={`choice-${index() + choiceStart()}`} flexDirection="column" flexShrink={0}>
       <Show when={choice.section && (index() === 0 || choices()[index() - 1]?.section !== choice.section)}>
@@ -477,7 +489,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       {view().bodyRecovery === 'blocked' ? '部分正文待恢复 · 点击或 Ctrl+R 重试' : reading().retry ? '读取未完成 · 点击或原方向翻页重试' :
         view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…' : reading().below ? '↓ 下方还有内容 · Ctrl+End 回到最新' : ''}
     </text></Show>
-    <box flexDirection="column" flexShrink={0} onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
+    <box flexDirection="column" flexShrink={0} height={candidateHeight() ? candidateBudget().process : undefined} overflow="hidden" onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
+    <Show when={!candidateHeight()} fallback={<>
+      <Show when={candidateNotice()}><text height={1} marginX={spacing.content} wrapMode="none" truncate fg={candidateNoticeColor()}>{candidateNotice()}</text></Show>
+      <Show when={shownProcess()} fallback={<Show when={view().busy}><text height={1} marginX={spacing.content} fg={tone.dim}>{animation()} 正在处理…</text></Show>}>
+        <ProcessView view={shownProcess()!} indicator={shownProcess()!.activity === 'running' ? animation() : '◆'} width={size().width} height={Math.max(1, candidateBudget().process - (candidateNotice() ? 1 : 0))} />
+      </Show>
+    </>}>
     <Show when={isBody() && view().message && view().connectionState !== 'starting'}><text marginX={spacing.content} selectable fg={view().connectionState === 'unavailable' ? tone.warn : tone.dim}>{displayText(view().message ?? '')}</text></Show>
     <Show when={view().kind === 'recovery'}>
       <text marginX={spacing.content} height={1} wrapMode="none" truncate fg={tone.dim}>{`保密页 ${recoveryPage().page + 1}/${view().recovery?.pages ?? 1} · PgUp/PgDn 翻页`}</text>
@@ -498,6 +516,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     <Show when={view().kind !== 'configuration'}><box marginX={spacing.content} flexShrink={0}><ChoiceList /></box></Show>
     <Show when={!safeAction()}><text fg={tone.warn}>窗口较小：可取消；放大后继续确认。</text></Show>
     <Show when={view().busy && !shownProcess()}><text height={1} marginX={spacing.content} fg={tone.dim}><span style={{fg: teal}}>{animation()}</span> {view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…'}</text></Show>
+    </Show>
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
       <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={spacing.frame} paddingX={spacing.frameInner} flexDirection="row">
@@ -510,12 +529,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       </box>
     </Show>
     <Show when={candidateHeight() > 0}>
-      <box border borderStyle="rounded" borderColor={tone.border} marginX={1} flexShrink={0} height={candidateHeight()} flexDirection="column">
-        <For each={candidateItems().slice(candidateStart(), candidateStart() + 5)}>{(item, index) =>
-          <text height={1} wrapMode="none" truncate bg={index() + candidateStart() === candidates?.selected ? (candidates?.deleteArmed ? tone.dangerBackground : tone.selected) : undefined} fg={index() + candidateStart() === candidates?.selected ? teal : tone.text}>
-            {index() + candidateStart() === candidates?.selected ? '▌ ' : '  '}{selectedLabel(displayText(item.label) + '  ' + displayText(item.detail ?? ''), index() + candidateStart() === candidates?.selected, !!candidates?.deleteArmed, Math.max(0, size().width - 6), measureInformation)}
-          </text>}</For>
-      </box>
+      <CandidateView value={candidateValue()} loading={candidateLoading()} error={candidateError()} selected={candidateSelected()} danger={candidateDanger()}
+        width={size().width} height={candidateHeight()} renderer={renderer} measure={measureInformation} onReady={value => { candidateView = value; }} />
     </Show>
     <box height={1} flexShrink={0} flexDirection="row" paddingX={info().inset}>
       <text height={1} wrapMode="none" fg={tone.dim}>{info().left}</text>
@@ -680,16 +695,19 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (event.name === 'escape') {
       consume();
-      if (candidateItems().length) { candidates?.escape(); return; }
+      if (candidateOpen()) { candidates?.escape(); return; }
       if (view().kind === 'conversation' && draft.text) { input.clear(draft.version); return; }
       if (view().kind === 'conversation' && view().busy) void action({ kind: 'abort' }); else void cancelPage(); return;
     }
     if (view().kind === 'conversation' && candidateValue()?.ghost && event.name === 'tab' && !event.ctrl && !event.shift && !event.meta) {
       consume(); void candidates?.accept(true).catch(reportStatus()); return;
     }
-    if (view().kind === 'conversation' && candidateItems().length && size().height >= 18 && !event.ctrl && !event.shift && !event.meta) {
+    if (candidateOpen() && candidateHeight() && event.ctrl && event.name === 'r' && candidateValue()?.mode !== 'picker') { consume(); candidates?.refresh(); return; }
+    if (candidateOpen() && candidateHeight() && !event.ctrl && !event.shift && !event.meta) {
+      if (event.name === 'pageup' || event.name === 'pagedown') { consume(); candidateView?.page(event.name === 'pageup' ? -1 : 1); return; }
       if (event.name === 'up' || event.name === 'down') { consume(); candidates?.move(event.name === 'up' ? -1 : 1); return; }
       if (event.name === 'tab' || event.name === 'return') {
+        if (candidateLoading() || !candidateItems().length) { consume(); return; }
         consume(); void candidates?.accept().then(execute => { if (execute) return submit(); }).catch(reportStatus()); return;
       }
     }
