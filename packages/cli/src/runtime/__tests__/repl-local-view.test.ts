@@ -22,7 +22,7 @@ describe("ReplLocalView", () => {
   it("refresh 同步最新 config / workspace / proxy 派生视图", async () => {
     let configuration = replConfiguration("anthropic", "claude-a", "off");
     const management = {
-      serverInfo: vi.fn(async () => serverInfo("/ws-a")),
+      serverDescription: vi.fn(async () => serverInfo("/ws-a")),
     };
     const view = new ReplLocalView({
       management,
@@ -35,7 +35,7 @@ describe("ReplLocalView", () => {
     expect(view.networkProxy.mode).toBe("off");
 
     configuration = replConfiguration("openai", "gpt-next", "auto");
-    management.serverInfo.mockResolvedValueOnce(serverInfo("/ws-b"));
+    management.serverDescription.mockResolvedValueOnce(serverInfo("/ws-b"));
 
     await view.refresh();
     expect(view.primaryModel.model).toBe("gpt-next");
@@ -46,7 +46,7 @@ describe("ReplLocalView", () => {
   it("serverInfo 不可用时保留配置派生,workspace 降为 null", async () => {
     const configuration = replConfiguration("openai", "gpt-next", "auto");
     const view = new ReplLocalView({
-      management: { serverInfo: vi.fn(async () => Promise.reject(new Error("down"))) },
+      management: { serverDescription: vi.fn(async () => Promise.reject(new Error("down"))) },
       configuration: { readReplSurface: () => configuration },
     });
 

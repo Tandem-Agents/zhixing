@@ -175,6 +175,12 @@ export function buildServerInfoMethod(): MethodEntry {
     // 握手前的协议兼容判定由 auth 响应自带的 protocol / version 覆盖。
     requiresAuth: true,
     async handler(params, ctx) {
+      if (params && typeof params === 'object' && 'projection' in params) {
+        if (Object.keys(params).length !== 1 || params.projection !== 'description') throw RpcErrors.invalidParams('server.info projection');
+        // Welcome/workspace consumers do not open finality streams or read work,
+        // scheduler and backup projections. Full status retains its own contract.
+        return { workspace: ctx.server.hostInfo?.workspace ?? null };
+      }
       const conversations = ctx.server.conversation?.list() ?? [];
       const serverInfoWork = await buildServerInfoWorkSnapshot(ctx);
       const statusAfter = parseStatusAfter(params);

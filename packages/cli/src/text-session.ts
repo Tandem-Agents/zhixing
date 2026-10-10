@@ -256,7 +256,7 @@ export async function startTextSession(home: string, configPath: string, options
           else if (name === 'help') for (const command of registry.list(runtime())) output.line(`/${command.name}  ${command.description}`);
           else if (name === 'status') {
             await local.refresh();
-            for (const line of serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, local.hostInfo)) output.line(line);
+            for (const line of serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, await management.serverInfo().catch(() => null))) output.line(line);
           } else if (name === 'stop') output.line('当前终端不支持选择交互，未执行停止。请在交互终端使用 /stop。');
           else if (name === 'exit') {
             if (activeController.current.mode.kind === 'workscene') await session!.run('exit', argument);

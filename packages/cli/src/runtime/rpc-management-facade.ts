@@ -71,6 +71,8 @@ export interface ServerInfoResult {
   [key: string]: unknown;
 }
 
+export interface ServerDescriptionResult { readonly workspace?: string | null }
+
 export type ServerShutdownRequest = Omit<ServerShutdownParams, "requestId">;
 
 export interface DutyMigrationTarget {
@@ -159,6 +161,10 @@ export class RpcManagementFacade {
   async serverInfo(): Promise<ServerInfoResult> {
     const client = await this.link.getClient();
     return client.request<ServerInfoResult>("server.info");
+  }
+  async serverDescription(): Promise<ServerDescriptionResult> {
+    const client = await this.link.getClient();
+    return client.request<ServerDescriptionResult>('server.info', { projection: 'description' });
   }
 
   async mcpPending(conversationId: string): Promise<readonly import("@zhixing/core/mcp-management").McpPendingConnection[]> {

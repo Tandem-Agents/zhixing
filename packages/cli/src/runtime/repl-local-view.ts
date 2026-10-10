@@ -6,7 +6,7 @@
  * 刷新,集中在这里避免命令层各自捕获旧快照。
  */
 
-import type { ServerInfoResult } from "./rpc-management-facade.js";
+import type { ServerDescriptionResult } from "./rpc-management-facade.js";
 import {
 
   type ReplRuntimeConfigurationProjection,
@@ -16,7 +16,7 @@ import {
 } from "./runtime-configuration-provider.js";
 
 export interface ReplLocalViewManagement {
-  serverInfo(): Promise<ServerInfoResult>;
+  serverDescription(): Promise<ServerDescriptionResult>;
 }
 
 export interface ReplLocalViewOptions {
@@ -26,7 +26,7 @@ export interface ReplLocalViewOptions {
 
 export interface ReplLocalViewSnapshot {
   readonly primaryModel: RuntimePrimaryModelDisplayProjection;
-  readonly hostInfo: ServerInfoResult | null;
+  readonly hostInfo: ServerDescriptionResult | null;
   readonly workspaceRoot: string | null;
   readonly networkProxy: RuntimeNetworkProxyDisplayProjection;
 }
@@ -50,7 +50,7 @@ export class ReplLocalView {
     return this.snapshot.primaryModel;
   }
 
-  get hostInfo(): ServerInfoResult | null {
+  get hostInfo(): ServerDescriptionResult | null {
     return this.snapshot.hostInfo;
   }
 
@@ -64,14 +64,14 @@ export class ReplLocalView {
 
   async refresh(): Promise<ReplLocalViewSnapshot> {
     const configuration = this.configuration.readReplSurface();
-    const hostInfo = await this.opts.management.serverInfo().catch(() => null);
+    const hostInfo = await this.opts.management.serverDescription().catch(() => null);
     this.snapshot = this.buildSnapshot(configuration, hostInfo);
     return this.snapshot;
   }
 
   private buildSnapshot(
     configuration: ReplRuntimeConfigurationProjection,
-    hostInfo: ServerInfoResult | null,
+    hostInfo: ServerDescriptionResult | null,
   ): ReplLocalViewSnapshot {
     return Object.freeze({
       primaryModel: configuration.primaryModel,

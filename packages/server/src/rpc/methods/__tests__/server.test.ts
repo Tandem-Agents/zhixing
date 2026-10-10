@@ -54,6 +54,17 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
   };
 }
 
+it('serves the authenticated description without reading status or opening finality', async () => {
+  const forbidden = () => { throw Error('full-status-read'); };
+  const method = buildServerInfoMethod();
+  const ctx = mkCtx({ hostInfo: { workspace: '/workspace' } as any, conversation: { list: forbidden } as any,
+    recoveryBackupStatus: forbidden, serverInfoRuntime: { schedulerNotices: forbidden, openFirstPartyFinality: forbidden } as any });
+  expect(method.requiresAuth).toBe(true);
+  await expect(method.handler({ projection: 'description' }, ctx)).resolves.toEqual({ workspace: '/workspace' });
+  await expect(method.handler({ projection: 'description', statusAfter: {} }, ctx)).rejects.toBeInstanceOf(RpcAppError);
+  await expect(method.handler({ projection: 'other' }, ctx)).rejects.toBeInstanceOf(RpcAppError);
+});
+
 function deviceAdministrationProductApi(
   overrides: Partial<DeviceAdministrationApplicationOptions<string, string>> = {},
 ): ProductApiDispatcher {

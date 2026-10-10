@@ -3009,7 +3009,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   for (const [relative, pattern] of [
     ["packages/cli/src/terminal/application.ts", /serverStatusLines\(name, this\.#localView\.primaryModel, this\.#localView\.networkProxy, status\)/u],
-    ["packages/cli/src/text-session.ts", /serverStatusLines\(activeController\.current\.name, local\.primaryModel, local\.networkProxy, local\.hostInfo\)/u],
+    ["packages/cli/src/text-session.ts", /serverStatusLines\(activeController\.current\.name, local\.primaryModel, local\.networkProxy, await management\.serverInfo\(\)\.catch\(\(\) => null\)\)/u],
     ["packages/cli/src/runtime/server-status-presentation.ts", /formatRecoveryBackupState\(info\.recoveryBackup\)/u],
   ]) assert.match(inspectRecoveryBackupAssembly(mutate(relative, text => replaceExactlyOnce(
     text, pattern, "'generic status'", `${relative}: backup recovery projection`,

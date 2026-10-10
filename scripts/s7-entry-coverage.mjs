@@ -10756,7 +10756,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !statusPresentation.includes("case 'restore-backup-connection':") ||
     !statusPresentation.includes("formatRecoveryBackupState(info.recoveryBackup)") ||
     !terminal.includes("serverStatusLines(name, this.#localView.primaryModel, this.#localView.networkProxy, status)") ||
-    !textSession.includes("serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, local.hostInfo)") ||
+    !textSession.includes("serverStatusLines(activeController.current.name, local.primaryModel, local.networkProxy, await management.serverInfo().catch(() => null))") ||
     !backup.includes('case "restore-backup-connection":') ||
     records.some(({ text }) => text.includes("start-authenticated-mesh"))
   ) {
