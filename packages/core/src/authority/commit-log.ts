@@ -22,7 +22,7 @@ import type {
 } from "../contracts/index.js";
 import type { AuthorityAppendAdmissionGuard } from "./interfaces.js";
 import {
-  acquireFileLock,
+  createFileLockAcquirer,
   ensureDurableDirectory,
   syncDirectory,
 } from "../persistence/index.js";
@@ -190,6 +190,7 @@ interface RegisteredDurableProjection {
 }
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
+  readonly #acquireFileLock = createFileLockAcquirer();
   readonly #records: LogRecordPort | undefined;
   readonly #workObserver: AuthorityWorkObserver;
   #work: AuthorityWork | undefined;
@@ -2171,7 +2172,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           const waiting = performance.now();
           observation.stage("authority-file-lock");
           let release: () => Promise<void>;
-          try { release = await acquireFileLock(this.#lockPath, {
+          try { release = await this.#acquireFileLock(this.#lockPath, {
               staleMs: this.#lockStaleMs,
               waitMs: this.#lockWaitMs,
               resourceName: "AuthorityCommitLog",

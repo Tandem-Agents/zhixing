@@ -2,6 +2,9 @@ import { CONFIGURATION_LOG_SOURCE } from "@zhixing/providers/configuration";
 import type { ServeOptions } from "./command.js";
 import { getZhixingHome } from "@zhixing/core/paths";
 import { createPlatformSecretStore } from "@zhixing/secrets";
+import { withFileLockProcessIdentity } from '@zhixing/core/persistence';
+import { nativeSecretPlatform } from '../platform/secret-platform.js';
+import { peekEntryLogging } from '../logging/bootstrap.js';
 import chalk from "chalk";
 import { createStdoutWriter, type CliWriter } from "../screen/index.js";
 import {
@@ -36,6 +39,14 @@ export async function runServeCommand(
   options: ServeOptions,
   writer: CliWriter = createStdoutWriter(),
 ): Promise<void> {
+  // beginRuntimeLogging adopts and clears the bootstrap slot; retain its port
+  // instead of looking it up again after that ownership transfer.
+  const records = peekEntryLogging()?.records;
+  const platform = nativeSecretPlatform(() => records);
+  return withFileLockProcessIdentity(platform.processIdentityResolver, () => runServeWithPlatform(options, writer, platform));
+}
+
+async function runServeWithPlatform(options: ServeOptions, writer: CliWriter, platform: ReturnType<typeof nativeSecretPlatform>): Promise<void> {
   const zhixingHome = getZhixingHome();
   const processMode = resolveHostProcessMode(options.managed);
   const startupEndpoint = consumeTerminalParentEndpoint('ZHIXING_HOST_STARTUP_PIPE');
@@ -48,6 +59,7 @@ export async function runServeCommand(
   let failed = false;
   try {
     const secretStore = createPlatformSecretStore({
+      ...platform,
       homeDir: zhixingHome,
       context: processMode === "managed" ? "managed" : "foreground",
     });

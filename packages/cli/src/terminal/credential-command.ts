@@ -1,19 +1,6 @@
 import type { PlatformSecretStoreOptions } from '@zhixing/secrets';
 import { createTerminalOwnedProcessFactory } from './host-launch.js';
-import { createRequire } from 'node:module';
-import path from 'node:path';
-import { resolveCliEntry } from '../cli-entry.js';
-
-/** N already loads this same-release native asset for its writer declaration.
- * Only read-only process identity is projected into the vault's FileLock port. */
-export function terminalSecretPlatform(): Pick<PlatformSecretStoreOptions, 'processIdentityResolver' | 'windowsProtection'> {
-  if (process.platform !== 'win32') return {};
-  let native: { processIdentity(pid: number): Awaited<ReturnType<NonNullable<PlatformSecretStoreOptions['processIdentityResolver']>['read']>>;
-    protectKey(mode: string, input: Buffer): Promise<Buffer> } | undefined;
-  const load = () => native ??= createRequire(import.meta.url)(path.join(path.dirname(resolveCliEntry()), 'terminal', `${process.platform}-${process.arch}`, 'foreground.node')) as NonNullable<typeof native>;
-  return { processIdentityResolver: { read: async pid => load().processIdentity(pid) },
-    windowsProtection: (mode, input) => load().protectKey(mode, Buffer.from(input.buffer, input.byteOffset, input.byteLength)) };
-}
+export { nativeSecretPlatform as terminalSecretPlatform } from '../platform/secret-platform.js';
 
 /** The terminal's native creation owner already isolates slow process creation.
  * Use the SecretStore's existing runner port; no unmanaged intermediary fork

@@ -4,7 +4,7 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { prepareExclusiveFileClaim } from "../exclusive-file-claim.js";
-import { acquireFileLock } from "../file-lock.js";
+import { acquireFileLock, createFileLockAcquirer, withFileLockProcessIdentity } from "../file-lock.js";
 import {
   createProcessIdentityResolver,
   type ProcessIdentityReading,
@@ -12,6 +12,36 @@ import {
 } from "../process-identity.js";
 
 describe("file lock atomic publication", () => {
+  it('keeps a resource platform port outside its construction context and under another root', async () => {
+    const directory = await createTempDir('file-lock-resource-owner');
+    const port = (birth: string): ProcessIdentityResolver => ({ read: async () => ({ kind: 'present', birth }) });
+    const acquire = withFileLockProcessIdentity(port('owner'), createFileLockAcquirer);
+    const read = async (name: string, explicit?: ProcessIdentityResolver) => {
+      const file = path.join(directory, name);
+      const release = await acquire(file, { staleMs: 1000, waitMs: 0, processIdentityResolver: explicit });
+      try { return JSON.parse(await readFile(file, 'utf8')).birth; } finally { await release(); }
+    };
+    expect(await read('later')).toBe('owner');
+    expect(await withFileLockProcessIdentity(port('caller'), () => read('other-root'))).toBe('owner');
+    expect(await read('explicit', port('explicit'))).toBe('explicit');
+  });
+  it('isolates composition-root identity ports across concurrent and nested lifetimes', async () => {
+    const directory = await createTempDir('file-lock-platform-scope');
+    const port = (birth: string): ProcessIdentityResolver => ({ read: async () => ({ kind: 'present', birth }) });
+    const read = async (name: string, explicit?: ProcessIdentityResolver) => {
+      const file = path.join(directory, name);
+      const release = await acquireFileLock(file, { staleMs: 1000, waitMs: 0, processIdentityResolver: explicit });
+      try { return JSON.parse(await readFile(file, 'utf8')).birth; } finally { await release(); }
+    };
+    const result = await Promise.all([
+      withFileLockProcessIdentity(port('111'), async () => {
+        const child = await withFileLockProcessIdentity(port('222'), () => read('nested'));
+        return [child, await read('outer'), await read('explicit', port('333'))];
+      }),
+      withFileLockProcessIdentity(port('444'), () => read('parallel')),
+    ]);
+    expect(result).toEqual([['222', '111', '333'], '444']);
+  });
   it("publishes only one complete owner when prepared contenders interleave", async () => {
     const directory = await createTempDir("file-lock-publication");
     const lockPath = path.join(directory, "resource.lock");

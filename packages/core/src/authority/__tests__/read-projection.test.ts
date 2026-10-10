@@ -2,9 +2,10 @@ import { expect, it, vi, onTestFinished } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import path from "node:path";
 import { readFile, writeFile, rename, utimes, stat, appendFile, unlink, mkdir } from "node:fs/promises";
-import { acquireFileLock } from "../../persistence/file-lock.js";
+import { acquireFileLock, withFileLockProcessIdentity } from "../../persistence/file-lock.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import { FileArtifactStore } from "../artifact-store.js";
+import { artifactJsonIndex } from "../artifact-json-index.js";
 async function fixture() {
   const root = await createTempDir("read-projection");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -12,6 +13,18 @@ async function fixture() {
   onTestFinished(() => log.stopStorageMaintenance());
   return { log, artifacts };
 }
+it('retains the Authority and artifact platform owner for later requests from another async root', async () => {
+  const read = vi.fn(async () => ({ kind: 'present' as const, birth: 'resource-owner' }));
+  const { log, artifacts } = await withFileLockProcessIdentity({ read }, fixture);
+  const foreign = { read: async () => { throw Error('foreign platform port used'); } };
+  await withFileLockProcessIdentity(foreign, async () => {
+    const ref = await artifacts.put(Buffer.from('{"text":"owned artifact"}'));
+    await log.append([{ stream: 'control', body: { ref } }]);
+    expect((await log.readSnapshot()).commits).toHaveLength(1);
+    expect(await artifactJsonIndex(artifacts).prepare(ref)).toMatchObject({ ready: true });
+  });
+  expect(read).toHaveBeenCalled();
+});
 it("omits decoding proven unrelated streams but includes mixed commits and independent results", async () => {
   const { log, artifacts } = await fixture();
   await log.append([{ stream: "control", body: { marker: "unrelated-proof-payload" } }]);

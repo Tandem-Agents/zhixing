@@ -111,7 +111,7 @@ class TerminalApplication {
   readonly #hosts: TerminalHostLauncher;
   readonly #logging: ReturnType<typeof beginRuntimeLogging>;
   readonly #secretStore: ReturnType<typeof createPlatformSecretStore>;
-  readonly #secretPlatform = terminalSecretPlatform();
+  readonly #secretPlatform = terminalSecretPlatform(() => this.#logging.records);
   readonly #connection: CoreHostConnection;
   readonly #conversation: RpcConversationFacade;
   readonly #workscene: RpcWorksceneFacade;

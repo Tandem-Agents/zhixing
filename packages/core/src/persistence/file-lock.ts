@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, readFile, readdir, rm, stat, utimes } from "node:fs/promises";
 import path from "node:path";
 import { prepareExclusiveFileClaim } from "./exclusive-file-claim.js";
@@ -23,6 +24,23 @@ type LockOwnerReading =
 
 const activeTokens = new Set<string>();
 const defaultProcessIdentityResolver = createProcessIdentityResolver();
+const processIdentityScope = new AsyncLocalStorage<ProcessIdentityResolver>();
+/** A composition root supplies its platform port to its own async lifetime.
+ * Explicit per-lock ports take precedence; unrelated roots remain isolated. */
+export function withFileLockProcessIdentity<T>(resolver: ProcessIdentityResolver | undefined, work: () => T): T {
+  return resolver ? processIdentityScope.run(resolver, work) : work();
+}
+
+/** A persistent resource owns its platform port, even when later requests
+ * arrive through an async boundary created outside the composition root.
+ * Capture only this port, never request/phase/maintenance execution context. */
+export function createFileLockAcquirer(): typeof acquireFileLock {
+  const resolver = processIdentityScope.getStore();
+  return (lockPath, options) => acquireFileLock(lockPath, {
+    ...options,
+    processIdentityResolver: options.processIdentityResolver ?? resolver,
+  });
+}
 
 export interface FileLockOptions {
   readonly staleMs: number;
@@ -52,7 +70,7 @@ export async function acquireFileLock(
   const now = options.now ?? Date.now;
   const retryMs = options.retryMs ?? 25;
   const startedAt = performance.now();
-  const resolver = options.processIdentityResolver ?? defaultProcessIdentityResolver;
+  const resolver = options.processIdentityResolver ?? processIdentityScope.getStore() ?? defaultProcessIdentityResolver;
   const self = await resolver.read(process.pid);
   if (self.kind !== "present") {
     throw new Error(`${resourceName} lock owner identity is unavailable`);

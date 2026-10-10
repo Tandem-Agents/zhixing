@@ -12,7 +12,7 @@ import {
 import path from "node:path";
 import type { ArtifactRef, IsoTime } from "../contracts/index.js";
 import {
-  acquireFileLock,
+  createFileLockAcquirer,
   durablyRemoveDirectory,
   durablyRemoveFile,
   durablyRemoveFiles,
@@ -27,6 +27,7 @@ import {
 import { claimDeviceCapacity, currentDeviceCapacityStep, runHoldingMaintenanceExclusion } from "../resources/index.js";
 import { artifactDigestHex, assertArtifactRef } from "./artifact-references.js";
 import { AuthorityStorageError } from "./errors.js";
+import { artifactJsonIndex } from "./artifact-json-index.js";
 import type {
   ArtifactDeletionResult,
   ArtifactGarbageCollectionResult,
@@ -53,6 +54,7 @@ export interface FileArtifactStoreOptions {
 }
 
 export class FileArtifactStore implements MutableArtifactStore {
+  readonly #acquireFileLock = createFileLockAcquirer();
   readonly rootDir: string;
   get jsonIndexDirectory(): string { return path.join(this.rootDir, '.read-index'); }
   readonly #lockPath: string;
@@ -67,6 +69,9 @@ export class FileArtifactStore implements MutableArtifactStore {
     this.#lockStaleMs = options.lockStaleMs ?? 30_000;
     this.#lockWaitMs = options.lockWaitMs ?? 10_000;
     this.#runReadStep = options.runReadStep;
+    // Bind the derived reader's platform owner now. Opening SQLite and reading
+    // artifacts remain lazy; a later RPC must not choose another root's port.
+    artifactJsonIndex(this);
   }
 
   async put(bytes: Uint8Array): Promise<ArtifactRef> {
@@ -631,7 +636,7 @@ export class FileArtifactStore implements MutableArtifactStore {
   async #withExclusive<T>(operation: () => Promise<T>): Promise<T> {
     return this.#operations.run(async () => {
       await ensureDurableDirectory(this.rootDir);
-      const release = await acquireFileLock(this.#lockPath, {
+      const release = await this.#acquireFileLock(this.#lockPath, {
         staleMs: this.#lockStaleMs,
         waitMs: this.#lockWaitMs,
         resourceName: "ArtifactStore",

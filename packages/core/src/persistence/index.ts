@@ -6,6 +6,6 @@ export {
   durablyRemoveFiles,
   type DurableDirectoryRemoval,
 } from "./durable-removal.js";
-export { acquireFileLock } from "./file-lock.js";
+export { acquireFileLock, createFileLockAcquirer, withFileLockProcessIdentity } from "./file-lock.js";
 export type { FileLockOptions } from "./file-lock.js";
 export { SerialTaskQueue } from "./serial-task-queue.js";

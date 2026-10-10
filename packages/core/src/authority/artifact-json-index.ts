@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdir, unlink } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ArtifactRef } from '../contracts/index.js';
 import type { ArtifactStore } from './interfaces.js';
 import { SerialTaskQueue } from '../persistence/serial-task-queue.js';
-import { acquireFileLock } from '../persistence/file-lock.js';
+import { createFileLockAcquirer } from '../persistence/file-lock.js';
+import { durablyRemoveFiles } from '../persistence/durable-removal.js';
 import { assertArtifactRef } from './artifact-references.js';
 
 /** Disposable byte-position index. Original artifact bytes remain the only
@@ -33,6 +34,7 @@ export async function closeArtifactJsonIndex(store: ArtifactStore): Promise<void
 }
 
 export class ArtifactJsonIndex {
+  readonly #acquireFileLock = createFileLockAcquirer();
   readonly #queue = new SerialTaskQueue();
   #db?: DatabaseSync;
   readonly #scans = new Map<string, Scan>();
@@ -67,10 +69,9 @@ export class ArtifactJsonIndex {
       // Only SQLite's corruption codes authorize rebuilding this disposable
       // index. Permissions, busy/disk-full and original artifacts are untouched.
       if (!this.directory || ![11, 26].includes(Number((error as { errcode?: unknown }).errcode))) throw error;
-      const release = await acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
+      const release = await this.#acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
       try {
-        await unlink(filename).catch(e => { if (e.code !== 'ENOENT') throw e; });
-        await unlink(filename + '-journal').catch(e => { if (e.code !== 'ENOENT') throw e; });
+        await durablyRemoveFiles([filename, filename + '-journal']);
         db = new DatabaseSync(filename); initialize();
       } finally { await release(); }
     }
@@ -140,7 +141,7 @@ export class ArtifactJsonIndex {
         return { ready: true, bytes: ref.bytes, total: ref.bytes };
       }
       if (this.directory && !this.#unlock) {
-        this.#unlock = await acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
+        this.#unlock = await this.#acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
         // A different process may have finished while this caller waited.
         const ready = db.prepare('SELECT ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
         if (ready?.ready === 1 && ready.canonical !== null && (identity === undefined || ready.identity === identity)) {
