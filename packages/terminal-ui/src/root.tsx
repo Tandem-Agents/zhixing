@@ -440,13 +440,17 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const candidateNotice = () => displayText(view().displayPaused || view().bodyRecovery === 'blocked' ? '正文待恢复 · Ctrl+R 重试展示' : view().displayGap ? '正文保留存在缺口' : taskStatus().noticeGap || view().message || taskStatus().summary?.text || '');
   const candidateNoticeColor = () => view().displayGap || view().displayPaused || view().bodyRecovery === 'blocked' || taskStatus().noticeGap || view().connectionState === 'unavailable' || taskStatus().summary?.state === 'error' ? tone.warn : tone.dim;
   const ChoiceList = () => <box flexDirection="column" flexShrink={0} marginTop={view().message && choices().length ? 1 : 0}>
-    <For each={choices()}>{(choice, index) => <box id={`choice-${index() + choiceStart()}`} flexDirection="column" flexShrink={0}>
-      <Show when={choice.section && (index() === 0 || choices()[index() - 1]?.section !== choice.section)}>
+    <For each={choices()}>{(choice, index) => {
+      const startsSection = () => !!choice.section && (index() === 0 || choices()[index() - 1]?.section !== choice.section);
+      return <box id={`choice-${index() + choiceStart()}`} flexDirection="column" flexShrink={0}
+        paddingTop={view().kind === 'configuration' && choice.presentation === 'button' && index() > 0 && choices()[index() - 1]?.presentation !== 'button' && !startsSection() ? 1 : 0}>
+      <Show when={startsSection()}>
         <text marginTop={index() ? 1 : 0} marginBottom={1} fg={tone.brand}>{`▎ ${displayText(choice.section ?? '')}`}</text>
         <Show when={choice.sectionDescription}><text marginLeft={2} marginBottom={1} fg={tone.dim}>{displayText(choice.sectionDescription ?? '')}</text></Show>
       </Show>
       <ChoiceView choice={choice} selected={selected() === index() + choiceStart()} width={Math.max(1, bodySize().width - 1)} configuration={view().kind === 'configuration'} measure={measureInformation} />
-    </box>}</For>
+    </box>;
+    }}</For>
   </box>;
   const App = () => <box width="100%" height="100%" flexDirection="column" onMouseDown={event => {
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }

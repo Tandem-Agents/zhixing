@@ -25,12 +25,12 @@ export function ChoiceView(props: { choice: TerminalChoice; selected: boolean; w
       </Show>
     </box>
   }>
-    <box flexDirection="row" flexShrink={0} alignItems="center">
-      <text width={2} fg={tone.brand}>{props.selected ? '▸ ' : '  '}</text>
-      <box border borderStyle="single" borderColor={props.choice.primary ? tone.success : props.selected ? tone.text : tone.dim} paddingX={2} flexShrink={0}>
-        <text fg={props.choice.primary ? tone.success : props.selected ? tone.text : tone.dim}>{label()}</text>
-      </box>
-      <text marginLeft={3} flexShrink={1} fg={tone.dim}>{[props.choice.detail ? `(${informationText(props.choice.detail)})` : '', props.choice.shortcut].filter(Boolean).join('   ')}</text>
+    <box flexDirection="row" height={1} flexShrink={0}>
+      <text width={2} selectable={false} fg={color()}>{props.selected ? '▸ ' : '  '}</text>
+      <text width={8} height={1} wrapMode="none" truncate fg={props.selected ? color() : props.choice.primary ? tone.text : tone.dim}
+        attributes={props.selected ? TextAttributes.BOLD : 0}>{label()}</text>
+      <text flexGrow={1} height={1} wrapMode="none" truncate fg={tone.dim}>{informationText(props.choice.detail ?? '')}</text>
+      <text marginLeft={2} height={1} wrapMode="none" fg={tone.dim}>{props.choice.shortcut ?? ''}</text>
     </box>
   </Show>;
 }
