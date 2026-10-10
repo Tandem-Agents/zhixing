@@ -472,7 +472,7 @@ function requiredArtifactRef(value: unknown, label: string): ArtifactRef {
     throw new AuthorityStorageError(
       "invalid-authority-record",
       `${label} is invalid`,
-      { cause: error },
+      { cause: error, validation: 'artifact-reference' },
     );
   }
 }
@@ -486,6 +486,7 @@ function assertStoredReference(
     throw new AuthorityStorageError(
       "invalid-authority-record",
       `${label} must contain only ref`,
+      { validation: 'stored-reference-fields' },
     );
   }
 }
@@ -495,6 +496,7 @@ function requiredString(value: unknown, label: string): string {
     throw new AuthorityStorageError(
       "invalid-authority-record",
       `${label} must be a non-empty bounded string`,
+      { validation: 'protocol-identifier' },
     );
   }
   return value;
@@ -505,6 +507,7 @@ function requiredDeliveryItemId(value: unknown): string {
     throw new AuthorityStorageError(
       "invalid-authority-record",
       "Delivery item id must be dlv-<Ulid>",
+      { validation: 'delivery-identifier' },
     );
   }
   return value;
@@ -515,6 +518,7 @@ function requiredExecution(value: unknown, label: string): ExecutionKind {
     throw new AuthorityStorageError(
       "invalid-authority-record",
       `${label} must identify a supported execution kind`,
+      { validation: 'execution-kind' },
     );
   }
   return value;
@@ -538,6 +542,6 @@ function invalidRegisteredArtifact(
   return new AuthorityStorageError(
     "invalid-authority-record",
     `${root.schema} artifact ${root.ref.digest} ${reason}`,
-    { cause },
+    { cause, validation: 'registered-artifact' },
   );
 }

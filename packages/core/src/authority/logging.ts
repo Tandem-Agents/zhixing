@@ -17,7 +17,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
       operation: "text", preparationMs: "number", releaseMs: "number", retryWaitMs: "number", recoveries: "number", operations: "number", scans: "number", readBytes: "number", queueMs: "number", lockWaitMs: "number", executionMs: "number", retries: "number",
     } },
     waiting: { message: "业务权威操作仍在等待或执行", level: "info", tier: "critical", fields: { operation: "text", waitFor: "text", durationMs: "number" } },
-    failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", failure: { fields: LOG_FAILURE_FIELDS } } },
+    failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", validation: "text", failure: { fields: LOG_FAILURE_FIELDS } } },
   },
 };
 
@@ -54,7 +54,7 @@ export class AuthorityWorkObserver {
         if (timer) clearInterval(timer);
         if (failure.length) {
           const error = failure[0];
-          emit("failed", { waitFor, failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);
+          emit("failed", { waitFor, ...(error instanceof AuthorityStorageError && error.validation ? { validation: error.validation } : {}), failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);
         }
         if (!this.records) return;
         try {

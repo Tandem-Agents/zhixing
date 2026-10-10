@@ -15,7 +15,7 @@ import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type Ter
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
-import { beginRuntimeLogging, recordRuntimeFailure } from '../logging/runtime.js';
+import { beginRuntimeLogging, recordRuntimeFailure, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing/core/logging/storage';
 import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
@@ -590,18 +590,18 @@ class TerminalApplication {
     // not just the transient starting frame; later business notices survive.
     if (this.#mainView.connectionState) this.#mainView = { ...this.#mainView, message: undefined };
     await this.#publish({ ...this.#mainView, kind: 'conversation', title: this.#controller?.current.name ?? '知行',
-      message: undefined, choices: undefined, busy: true, connected: false, connectionState: 'starting' });
+      message: undefined, choices: undefined, busy: true, connected: false, connectionState: 'starting', readyForInput: false });
     this.#invalidateAuxiliary();
     this.#holdNoticeDisplay();
     try {
-    await this.#ensureTasksBinding();
+    await observeStartupPhase(this.#logging.records, 'terminal.bind-tasks', () => this.#ensureTasksBinding());
     this.#taskNotices?.resume();
     const result = await connectReplHost({ connection: this.#connection, signal: this.#abort.signal, starting: () => {}, settled: () => {},
       checkConfiguration: async () => {
         this.#abort.signal.throwIfAborted();
         // Configuration/identity backends belong to this operation. Loading
         // them must not prevent the real IPC/close consumer from being installed.
-        const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
+        const { checkStartupConfiguration } = await observeStartupPhase(this.#logging.records, 'terminal.load-configuration', () => import('../runtime/startup-application.js'));
         this.#abort.signal.throwIfAborted();
         return checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
         secretStore: this.#secretStore,
@@ -631,7 +631,7 @@ class TerminalApplication {
       }
       await this.#controller.reattachActiveObserver({ reloadHistory }); await this.#localView.refresh();
     } else {
-      const initial = await selectInitialConversation({
+      const initial = await observeStartupPhase(this.#logging.records, 'terminal.select-conversation', () => selectInitialConversation({
         list: () => this.#conversation.list(), listPage: (page) => this.#conversation.listPage(page), newConversation: () => this.#conversation.newConversation(),
         pendingContinuationConfirmation: () => this.#conversation.pendingContinuationConfirmation(),
         confirmContinuation: () => this.#conversation.confirmContinuation(),
@@ -643,7 +643,7 @@ class TerminalApplication {
           }
           return boundedControlProjection({ ...result, advancement: undefined }, 256 * 1024);
         }); },
-      }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) });
+      }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) }));
       this.#abort.signal.throwIfAborted();
       if (this.#history?.offline || this.#display.first !== this.#display.last) {
         this.#history = undefined;
@@ -697,15 +697,15 @@ class TerminalApplication {
         onObservedTurnComplete: source => this.#outputProjection.end(source.conversationId, source.turnId, source.runId),
         onNotice: () => { /* Durable/current-owner state is refreshed at the next page boundary. */ },
       }, initial.active);
-      await this.#localView.refresh();
+      await observeStartupPhase(this.#logging.records, 'terminal.local-description', () => this.#localView.refresh());
       this.#mainView = { kind: 'conversation', title: initial.active.name, message: initial.resumedConversationName ? '已恢复最近对话。' : '准备就绪，开始你的第一条消息。', connected: true };
       this.#history = { conversationId: initial.active.conversationId, hasMore: true, offline: false };
-      await this.#historyPage();
-      await this.#controller.start();
+      await observeStartupPhase(this.#logging.records, 'terminal.initial-history', () => this.#historyPage());
+      await observeStartupPhase(this.#logging.records, 'terminal.start-observer', () => this.#controller!.start());
       this.#ensureSessionBinding();
       if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
     }
-    this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined };
+    this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined, readyForInput: true };
     this.#startupWatch = undefined;
     this.#historyReturn = undefined;
     await this.#publish(this.#mainView);
@@ -887,7 +887,8 @@ class TerminalApplication {
     };
     const current = () => this.#history === history && !this.#abort.signal.aborted;
     while (current() && projected < 4 && history.hasMore) {
-      const page = await this.#conversation.bodyPage(history.conversationId, history.bodyCursor);
+      const page = await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
+        'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor));
       if (!current()) return;
       if (page.reset) { history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
       if (page.preparing) {
@@ -934,7 +935,11 @@ class TerminalApplication {
       }
       history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
     }
-    if (current()) { progress(originalMessage ?? ''); await this.#displayPage(); await this.#publishHistoryView(); }
+    if (current()) {
+      progress(originalMessage ?? '');
+      await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
+        'terminal.history-display', async () => { await this.#displayPage(); await this.#publishHistoryView(); });
+    }
   }
 
   async #displayPage(): Promise<void> {

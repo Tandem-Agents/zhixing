@@ -738,8 +738,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.runPhysicalStep ??
       (async <T>(operation: () => Promise<T>) => operation());
     const operation = () =>
-      this.#withLogLock("transactProjection", () =>
+      this.#withLogLock("transactProjection", observation =>
         runPhysicalStep(async () => {
+          observation.stage('projection-dependencies');
           const readProjections = new Map<string, DurableProjectionReadContext>();
           for (const projectionId of readProjectionIds) {
             const projection = this.#durableProjections.get(projectionId);
@@ -757,6 +758,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             record: LogicalRecord<Body>;
             envelope: CommitEnvelope<Body>;
           }> = [];
+          observation.stage('projection-read-tail');
           const replayTail = await this.#readProjectionTail(
             options.cursor,
             afterLsn,
@@ -782,11 +784,13 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           }
 
           let state = initial;
+          observation.stage('projection-replay-reduce');
           for (const item of replay) {
             state = await reducer(state, item.record, item.envelope);
           }
           const at = this.#clock();
           assertCanonicalTime(at);
+          observation.stage('projection-decide');
           const decision = await decide(
             state,
             projectionTransactionContext(lastLsn, at, readProjections),
@@ -800,6 +804,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             };
           }
 
+          observation.stage('projection-candidate-validate');
           const entries = normalizeEntries(decision.entries);
           assertTransactionReferencesProtected(
             collectRetainedArtifactRefs(entries),
@@ -807,6 +812,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           );
           const candidate = createCommitEnvelope(lastLsn + 1, at, entries);
           let nextState = state;
+          observation.stage('projection-candidate-reduce');
           for (const record of candidate.entries) {
             if (
               selectedStreams === undefined ||
@@ -815,6 +821,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               nextState = await reducer(nextState, record, candidate);
             }
           }
+          observation.stage('projection-append');
           const commit = await this.#append(entries, at, candidate);
           state = nextState;
           return {
@@ -940,6 +947,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           throw new AuthorityStorageError(
             "invalid-authority-record",
             `Artifact ${candidate.digest} declares conflicting byte counts`,
+            { validation: 'artifact-byte-conflict' },
           );
         }
         if (await this.#isRetainedReference(candidate.digest, options)) {
@@ -2149,10 +2157,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
   }
 
-  async #withLogLock<T>(kind: Parameters<AuthorityWorkObserver["begin"]>[0], operation: () => Promise<T>): Promise<T> {
+  async #withLogLock<T>(kind: Parameters<AuthorityWorkObserver["begin"]>[0], operation: (observation: ReturnType<AuthorityWorkObserver['begin']>) => Promise<T>): Promise<T> {
     const observation = this.#workObserver.begin(kind);
     let failure: [] | [unknown] = [];
-    try { return await this.#withObservedLogLock(operation, observation); }
+    try { return await this.#withObservedLogLock(() => operation(observation), observation); }
     catch (error) { failure = [error]; throw error; }
     finally { observation.finish(...failure); }
   }
@@ -2260,6 +2268,7 @@ function retainReference(
     throw new AuthorityStorageError(
       "invalid-authority-record",
       `Artifact ${ref.digest} declares conflicting byte counts`,
+      { validation: 'artifact-byte-conflict' },
     );
   }
   references.set(ref.digest, ref);

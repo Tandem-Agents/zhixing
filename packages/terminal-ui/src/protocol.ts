@@ -45,6 +45,7 @@ export interface TerminalEnvelope {
 }
 
 export type TerminalMessage =
+  | { readonly type: 'usable-frame'; readonly frameId: number }
   | { readonly type: "hello"; readonly role: TerminalRole }
   | { readonly type: "modes"; readonly originalMask: number; readonly mutableMask: number }
   | { readonly type: "grant" }
@@ -199,6 +200,8 @@ export interface TerminalView {
   readonly field?: { readonly id: string; readonly label: string; readonly secret: boolean; readonly value?: string; readonly configured?: boolean };
   readonly connected?: boolean;
   readonly connectionState?: 'starting' | 'unavailable';
+  /** N completed initial history/observer admission; U acknowledges its frame. */
+  readonly readyForInput?: boolean;
   readonly environment?: { readonly provider: string; readonly model: string; readonly workspace: string | null };
   readonly busy?: boolean;
   readonly skills?: TerminalSkillsView;

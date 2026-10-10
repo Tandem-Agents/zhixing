@@ -20,6 +20,8 @@ import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
 import type { RuntimeLogging } from "./logging/runtime.js";
+import { observeLogPhase } from '@zhixing/core/logging';
+import { peekEntryLogging } from './logging/bootstrap.js';
 import { cliLoggingMode, normalizeCliArgs } from "./logging/entry-mode.js";
 
 let commandLogging: RuntimeLogging | undefined;
@@ -880,7 +882,7 @@ const serveCmd = program
     managedSecretBackend?: string;
   }) => {
     try {
-      const { applyManagedServiceLaunchContext } = await import("./serve/managed-service.js");
+      const { applyManagedServiceLaunchContext } = await observeLogPhase(peekEntryLogging()?.records, 'load-managed-service', () => import("./serve/managed-service.js"));
       applyManagedServiceLaunchContext({
         ...(options.managed ? { managed: true } : {}),
         ...(options.managedHome ? { home: options.managedHome } : {}),
@@ -891,7 +893,7 @@ const serveCmd = program
 
       const {
         runServeCommand,
-      } = await import("./serve/topology-command.js");
+      } = await observeLogPhase(peekEntryLogging()?.records, 'load-topology-command', () => import("./serve/topology-command.js"));
       await runServeCommand({
         ...(options.managed ? { managed: true } : {}),
         ...(options.autoStart ? { autoStart: true } : {}),

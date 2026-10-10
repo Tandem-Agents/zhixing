@@ -29,10 +29,12 @@ export interface TerminalRootOptions {
   readonly signal: AbortSignal;
   readonly request: (action: TerminalAction) => Promise<unknown>;
   readonly inputReady: (renderer: CliRenderer) => void;
+  readonly usableFrame?: (frameId: number) => void;
   readonly exit: () => Promise<void>;
 }
 
 export async function createTerminalRoot(options: TerminalRootOptions, createRenderer = createCliRenderer) {
+  let usableReported = false, usableScheduled = false;
   options.signal.throwIfAborted();
   const [view, setView] = createSignal<TerminalView>({ generation: 0, kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
   const [informationRevision, setInformationRevision] = createSignal(0);
@@ -836,6 +838,15 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           }
           setSelected(initialChoiceIndex(message.view, sameInteraction ? selectedId : undefined));
           setView(message.view);
+          if (!usableReported && !usableScheduled && message.view.kind === 'conversation' && message.view.readyForInput && message.view.connected && !message.view.busy && !message.view.connectionState) {
+            usableScheduled = true;
+            renderer.once('frame', (frame: { frameId: number }) => {
+              usableScheduled = false;
+              if (disposed || view().kind !== 'conversation' || !view().readyForInput || !view().connected || view().busy || view().connectionState) return;
+              usableReported = true; options.usableFrame?.(frame.frameId);
+            });
+            renderer.requestRender();
+          }
           syncAnimation();
           input.activate(message.view.kind === 'conversation');
           candidates?.sync(message.view.kind === 'conversation');

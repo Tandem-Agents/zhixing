@@ -1002,6 +1002,14 @@ test("Workscene product dependencies are statically complete before publication"
   );
 
   assert.deepEqual(inspectWorksceneAnchorProductStaticCompositionBoundary(records), []);
+  for (const mutateCommand of [
+    text => text.replace('await observeLogPhase(startupRecords, "prepare-authority"', 'observeLogPhase(startupRecords, "prepare-authority"'),
+    text => `${text}\nsetupAuthorityRuntime({});`,
+  ]) {
+    assert.match(inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/command.ts", mutateCommand,
+    )).join("\n"), /late-bound or second Workscene product owner/);
+  }
   assert.match(
     inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
@@ -8643,8 +8651,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "await schedulerGenerationOwner.installInitial({",
-        "await Promise.resolve({",
+        'await observeLogPhase(startupRecords, "prepare-scheduler", () => schedulerGenerationOwner.installInitial({',
+        'await observeLogPhase(startupRecords, "prepare-scheduler", () => Promise.resolve({',
       ),
     )).join("\n"),
     /Schedule runtime and lifecycle lack one finite domain application boundary/,

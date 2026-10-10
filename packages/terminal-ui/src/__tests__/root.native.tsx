@@ -29,6 +29,7 @@ let clipboardReply: (() => Promise<unknown>) | undefined;
 let pasteReply: (() => unknown) | undefined;
 let externalPaste: (() => TerminalPasteSink | undefined) | undefined;
 let readingReply: ((action: TerminalAction) => Promise<unknown>) | undefined;
+const usableFrames: number[] = [];
 const pendingRead = () => {
   let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
   const promise = new Promise<unknown>((ok, fail) => { resolve = ok; reject = fail; });
@@ -38,6 +39,7 @@ const tick = setInterval(() => { void test.renderOnce(); }, 15);
 let root: Awaited<ReturnType<typeof createTerminalRoot>> | undefined;
 try {
   root = await createTerminalRoot({ signal: new AbortController().signal, exit: async () => { exits++; }, inputReady() {},
+    usableFrame(frameId) { usableFrames.push(frameId); },
     request: async action => {
       actions.push(action);
       if (readingReply && (action.kind === 'display-page' || action.kind === 'history-previous')) return readingReply(action);
@@ -817,5 +819,12 @@ try {
     test.renderer.clearSelection(); await flush(); await noBodyCopy('cleared table selection must not reappear');
   }
   checks.push('production table cross-cell source selection survives repeated horizontal/stacked layout, equivalent pages, reverse gestures, replacement and clear');
+  test.renderer.clearSelection(); editor().setText(''); await flush();
+  assert.equal(usableFrames.length, 0, 'startup/connected views without real readiness must not report usable');
+  await show({ kind: 'conversation', title: '可用帧', conversationId: 'usable', connected: true, readyForInput: true });
+  await show({ kind: 'conversation', title: '可用帧', conversationId: 'usable', connected: true, readyForInput: true });
+  assert.equal(usableFrames.length, 1, 'only one completed usable frame is reported');
+  assert.ok(Number.isSafeInteger(usableFrames[0]));
+  checks.push('usable-frame is post-render and exactly once');
   console.log(JSON.stringify({ checks, responseMs, renderMs: { max: Math.max(...frameTimes), samples: frameTimes.length }, frame: text() }, null, 2));
 } finally { clearInterval(tick); if (root) await root.dispose(); else test.renderer.destroy(); }

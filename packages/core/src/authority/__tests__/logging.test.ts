@@ -6,6 +6,19 @@ import { FileAuthorityCommitLog } from "../commit-log.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import type { LogDraft, LogRecordPort } from "../../logging/contracts.js";
 import { observeLogPhase } from "../../logging/phase.js";
+import { AuthorityStorageError } from "../errors.js";
+
+it('reports only finite validation branches and the failed transaction stage', () => {
+  const { records, entries } = collector();
+  const observer = new AuthorityWorkObserver(records, () => 'authority-1');
+  const work = observer.begin('transactProjection'); work.stage('candidate-validate');
+  work.finish(new AuthorityStorageError('invalid-authority-record', 'private artifact identifier', { validation: 'artifact-reference' }));
+  observer.flush();
+  expect(entries).toContainEqual(expect.objectContaining({ event: 'failed', data: expect.objectContaining({ waitFor: 'candidate-validate', validation: 'artifact-reference' }) }));
+  expect(JSON.stringify(entries)).not.toContain('private');
+  expect(new AuthorityStorageError('invalid-authority-record', 'private', { validation: 'private' as never }).validation).toBeUndefined();
+  expect(new AuthorityStorageError('invalid-authority-record', 'Commit envelope digest is invalid').validation).toBe('envelope-digest');
+});
 
 function collector() {
   const entries: LogDraft[] = [];

@@ -91,6 +91,7 @@ class TerminalSupervisor {
   #startupTimer?: ReturnType<typeof setTimeout>;
   #modeAdmission = false;
   #uiReady = false;
+  #usableFrame = false;
   #firstFramePhase?: ReturnType<typeof beginLogPhase>;
   #interrupts = 0;
   #lastAssetRequest = 0;
@@ -807,6 +808,11 @@ class TerminalSupervisor {
         if (!this.#sealed) void this.#close(71, 'terminal-application-ready-undelivered');
       });
       return;
+    }
+    if (item.role === 'ui' && message.type === 'usable-frame') {
+      if (!this.#uiReady || !this.#applicationReady || this.#usableFrame || !Number.isSafeInteger(message.frameId) || message.frameId < 0) throw Error('terminal-usable-frame-order');
+      this.#usableFrame = true;
+      this.#observe('usable-frame', { frameId: message.frameId }); return;
     }
     if (item.role === 'ui' && message.type === 'request' && this.#uiReady) {
       if (!this.#applicationReady) throw Error('terminal-application-not-ready');

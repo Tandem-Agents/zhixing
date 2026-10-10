@@ -7800,7 +7800,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /new (?:ScheduleRuntimeApplicationService|ScheduleApplicationService|ScheduleManagementApplicationService|LocalSchedulerFacade)\s*\(/u.test(
       composition,
     ) ||
-    !composition.includes("await schedulerGenerationOwner.installInitial({") ||
+    !composition.includes('await observeLogPhase(startupRecords, "prepare-scheduler", () => schedulerGenerationOwner.installInitial({') ||
     !composition.includes("schedulerGenerationOwner.stopAndRelease()") ||
     !composition.includes("schedulerGenerationOwner.recoverInstalledAuthority({") ||
     composition.split("bind: bindSchedulerGeneration,").length - 1 !== 2 ||
@@ -9572,7 +9572,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     "const localExecutor = executor ?",
   );
   const anchorScheduler = command.indexOf(
-    "await schedulerGenerationOwner.installInitial({",
+    'await observeLogPhase(startupRecords, "prepare-scheduler", () => schedulerGenerationOwner.installInitial({',
   );
   const anchorContribution = command.indexOf(
     "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
@@ -9607,7 +9607,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     anchorAssembly < 0 || anchorScheduler <= anchorAssembly ||
     anchorContribution <= anchorScheduler || anchorMeshStart <= anchorContribution ||
     anchorMeshPublication <= anchorMeshStart ||
-    !command.includes("const authorityServices = await prepareAuthorityServices({") ||
+    !command.includes('const authorityServices = await observeLogPhase(startupRecords, "prepare-authority-services", () => prepareAuthorityServices({') ||
     !command.includes("const inbound = boundInboundRouter === undefined || boundInboundRouter === null") ||
     !command.includes("const jobOwner = boundExecutorJobOwner === undefined") ||
     !command.includes("const delivery = boundDeliveryStack === undefined") ||
@@ -12586,13 +12586,14 @@ export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) 
   if (
     /authorityRuntimeRef|conversationAuthorityRef/u.test(command) ||
     count(command, "createWorksceneDirectory({") !== 0 ||
-    count(command, "await setupAuthorityRuntime({") !== 1 ||
+    count(command, "setupAuthorityRuntime({") !== 1 ||
+    !command.includes('await observeLogPhase(startupRecords, "prepare-authority", () => setupAuthorityRuntime({') ||
     count(command, "createAnchorWorksceneAuthorityProjection({") !== 1 ||
     count(command, "createAnchorRuntimeCapabilityCatalog({") !== 1 ||
     command.indexOf("await mcpRuntime.lifecycle.connect();") < 0 ||
     command.indexOf("await mcpRuntime.lifecycle.connect();") >
-      command.indexOf("await setupAuthorityRuntime({") ||
-    command.indexOf("await setupAuthorityRuntime({") >
+      command.indexOf("setupAuthorityRuntime({") ||
+    command.indexOf("setupAuthorityRuntime({") >
       command.indexOf("createAnchorWorksceneAuthorityProjection({") ||
     command.indexOf("createAnchorWorksceneAuthorityProjection({") >
       command.indexOf("createAnchorRuntimeProjectionAssembly({") ||
@@ -15050,7 +15051,7 @@ export function inspectConversationAdoptionAssembly(records) {
   requireCount(command, /definePostAdoptionReviewLifecycleContribution\s*\(\{/gu, 1, "anchor post-adoption review lifecycle contribution");
   requireCount(command, /schedulerGenerationOwner\.postAdoptionReview/gu, 2, "shared post-adoption review port consumption");
   const reviewOwner = command.text.indexOf("const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({");
-  const reviewInstall = command.text.indexOf("await schedulerGenerationOwner.installInitial({", reviewOwner);
+  const reviewInstall = command.text.indexOf('await observeLogPhase(startupRecords, "prepare-scheduler", () => schedulerGenerationOwner.installInitial({', reviewOwner);
   const reviewContribution = command.text.indexOf("const postAdoptionReviewLifecycle =", reviewInstall);
   const meshStart = command.text.indexOf("const activeMesh = await preparedMesh.start({", reviewContribution);
   const publicServer = command.text.indexOf("runner = await runServer(");

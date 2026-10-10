@@ -734,7 +734,7 @@ async function runServerProcess(
     credentials: credentialExposureCredentials,
     credentialGeneration,
   });
-  const authorityRuntime = await setupAuthorityRuntime({
+  const authorityRuntime = await observeLogPhase(startupRecords, "prepare-authority", () => setupAuthorityRuntime({
     records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     extensionReadiness: createChannelExtensionReadiness(
       new ChannelConfiguration(getGlobalConfigPath({}, zhixingHome), bootstrap.secretStore),
@@ -765,7 +765,7 @@ async function runServerProcess(
     storageMaintenance: deviceCapacity.storage,
     deviceCapacity: deviceCapacity.arbiter,
     startupRollback,
-  });
+  }));
   lifecycleContributions.contribute(
     "authorityRuntime.stopStorageMaintenance",
     authorityRuntime.startupCleanup,
@@ -946,7 +946,7 @@ async function runServerProcess(
   }).then(() => undefined);
 
   const enabledSurfaces = new Set(PROFILES[profile].surfaces);
-  const authorityServices = await prepareAuthorityServices({
+  const authorityServices = await observeLogPhase(startupRecords, "prepare-authority-services", () => prepareAuthorityServices({
     authorityRuntime,
     enabledRoles: bootstrap.mesh.roles,
     localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
@@ -956,7 +956,7 @@ async function runServerProcess(
     advancementCapacity: deviceCapacity.workload("workload-advancement"),
     meshBootstrap: bootstrap.mesh,
     meshExecutorTopologyTrust,
-  });
+  }));
   // The protocol needs the coordinator before it can recover work; the
   // coordinator in turn needs the completed executor and Channel mechanisms.
   // This one-shot port remains closed until that finite construction cycle ends.
@@ -1495,20 +1495,20 @@ async function runServerProcess(
         await runtime.resumeManualSurfaces();
       }
     };
-    const schedulerRuntime = await createSchedulerRuntime();
+    const schedulerRuntime = await observeLogPhase(startupRecords, "create-scheduler", () => createSchedulerRuntime());
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
       () => schedulerGenerationOwner.stopAndRelease(),
     );
     lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
-    await schedulerGenerationOwner.installInitial({
+    await observeLogPhase(startupRecords, "prepare-scheduler", () => schedulerGenerationOwner.installInitial({
       mechanism: schedulerRuntime,
       prepare: prepareSchedulerGeneration,
       bind: bindSchedulerGeneration,
       publish: publishSchedulerGeneration,
       activate: (runtime) => activateSchedulerGeneration(runtime, false),
       resume: (runtime) => resumeSchedulerGeneration(runtime, false),
-    });
+    }));
 
     // The graph is wired here; recovery runs only after the prepared Server
     // has installed the broadcast and confirmation consumers.
