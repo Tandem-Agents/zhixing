@@ -4,6 +4,7 @@ import { validateSessionEventProjection } from '@zhixing/core/protocol';
 import { boundedProcessValue, processText, projectSessionArtifact, validateSessionProcessProjection, type SessionProcessProjection, type SessionProcessSource } from '@zhixing/rpc/session-wire';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import type { TerminalProcessView, ProcessChildView } from '@zhixing/terminal-ui/process-model';
+import { cleanProcessText } from '@zhixing/terminal-ui/process-model';
 import { getToolRenderStrategy, processArtifactText, processArtifactSpans, processArtifactLines, processBatch, processToolInput, processToolSnapshot, processToolSummary, type ProcessBlock, type ProcessToolSnapshot } from './process-presentation.js';
 
 export interface ProcessScope {
@@ -14,6 +15,7 @@ export interface ProcessProjectionPorts {
   readonly changed: (view: TerminalProcessView) => void;
   /** Synchronous enqueue into TerminalOutputProjection's existing finite queue. */
   readonly block: (block: ProcessBlock) => void;
+  readonly thinking?: (block: ProcessBlock, offset: number, final: boolean) => void;
   readonly gap: (reason: string) => void;
   readonly columns: () => number;
 }
@@ -24,6 +26,7 @@ interface Tool { readonly name: string; readonly input: Record<string, unknown>;
 export class TerminalProcessProjection {
   #scope?: ProcessScope; #closed = false; #confirmed = false; #paused = false; #revision = 0; #block = 0;
   #phase = ''; #notice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
+  #thinkingId?: string; #thinkingOffset = 0;
   readonly #seq = new Map<string, number>();
   readonly #tools = new Map<string, Tool>(); readonly #children = new Map<string, Child>();
   readonly #endedParents = new Set<string>(); readonly #sealedChildren = new Set<string>();
@@ -35,6 +38,7 @@ export class TerminalProcessProjection {
   #durationMs?: number;
   constructor(readonly ports: ProcessProjectionPorts) {}
   begin(scope: ProcessScope, confirmed = false): void {
+    this.#thinkingId = undefined; this.#thinkingOffset = 0;
     this.#startedAt = performance.now(); this.#durationMs = undefined;
     this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
     this.#phase = '正在准备'; this.#notice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
@@ -118,12 +122,15 @@ export class TerminalProcessProjection {
   #yield(delta: AgentYield, source: SessionProcessSource, artifactInput?: unknown): void {
     if (!this.#main(source.lineage)) return;
     switch (delta.type) {
-      case 'thinking_block_start': this.#flushBatch(); this.#sealThinking(); this.#thinking = ''; this.#thinkingSealed = false; this.#thinkingActive = true; this.#phase = '正在思考'; break;
+      case 'thinking_block_start': this.#flushBatch(); this.#sealThinking(); this.#thinking = ''; this.#thinkingOffset = 0; this.#thinkingId = undefined; this.#thinkingSealed = false; this.#thinkingActive = true; this.#phase = '正在思考'; break;
       case 'thinking_delta': {
+        if (this.#thinkingSealed) { this.#thinking = ''; this.#thinkingOffset = 0; this.#thinkingId = undefined; }
         this.#thinkingSealed = false; this.#thinkingActive = true;
-        let tail = (this.#thinking + delta.thinking.slice(-8192)).slice(-8192);
-        if (/^[\udc00-\udfff]/u.test(tail)) tail = tail.slice(1);
-        this.#thinking = processText(tail, 32 * 1024); break;
+        const source = this.#thinking + cleanProcessText(delta.thinking);
+        let cut = Math.max(0, source.length - 8192);
+        if (cut) { const boundary = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(source).containing(cut); if (boundary && boundary.index < cut) cut = boundary.index + boundary.segment.length; }
+        this.#thinkingOffset += cut; this.#thinking = source.slice(cut);
+        this.#publishThinking(false); break;
       }
       case 'thinking_block_end': this.#sealThinking(); break;
       case 'text_delta': this.#sealThinking(); this.#flushBatch(); this.#flushSubtasks(); this.#phase = '正在回复'; break;
@@ -251,7 +258,16 @@ export class TerminalProcessProjection {
     if (this.#thinkingSealed) return;
     this.#thinkingActive = false; this.#thinkingSealed = true;
     // Keep only this bounded display tail; U chooses its last two rows on every resize.
-    if (this.#thinking) this.#emit('thinking', this.#thinking);
+    if (this.#thinking) {
+      if (this.ports.thinking) this.#publishThinking(true);
+      else this.#emit('thinking', this.#thinking);
+    }
+  }
+  #publishThinking(final: boolean): void {
+    if (!this.#scope || this.#paused || !this.#thinking || !this.ports.thinking) return;
+    const scope = this.#scope;
+    this.#thinkingId ??= `process:${JSON.stringify([scope.conversationId, scope.runId ?? scope.turnId, scope.generation, this.#block++])}`;
+    this.ports.thinking({ blockId: this.#thinkingId, role: 'thinking', text: this.#thinking }, this.#thinkingOffset, final);
   }
   #flushBatch(): void { if (this.#batch.length) { this.#emit('tool', processBatch(this.#batch)); this.#batch = []; } }
   #flushSubtasks(): void {
@@ -295,7 +311,8 @@ export class TerminalProcessProjection {
   }
   pause(reason = '过程展示已暂停'): void {
     if (this.#paused || this.#closed) return;
-    this.#paused = true; this.#batch = []; this.#thinking = ''; this.#tools.clear();
+    this.#paused = true; this.#batch = []; this.#thinking = ''; this.#thinkingSealed = true;
+    this.#thinkingId = undefined; this.#thinkingOffset = 0; this.#tools.clear();
     for (const child of this.#children.values()) if (child.status !== 'running') this.#summarizedChildren.add(child.id);
     this.#notice = processText(reason, 1024); this.#publish();
     try { this.ports.gap(this.#notice); } catch { /* The parent lifecycle handles transport closure. */ }

@@ -287,10 +287,13 @@ class TerminalApplication {
       currentConversation: () => this.#controller?.current.conversationId,
       changed: status => { this.#processStatus = status; this.#sendProcessStatus(); },
       block: block => this.#outputProjection.appendProcessBlock(block),
+      thinking: (block, offset, final) => this.#outputProjection.updateThinking(block, offset, final),
       gap: () => { void this.#displayGap().catch(() => this.#close(70, 'terminal-process-gap-undelivered')); },
       columns: () => 80, // U applies actual display-cell width to the retained source tail.
     });
-    this.#outputProjection = new TerminalOutputProjection((segment, stable) => this.#display.append(segment, false, undefined, stable), () => this.#displayPage(), error => this.#displayGap(error), {
+    const display = this.#display;
+    this.#outputProjection = new TerminalOutputProjection((segment, stable) => display.append(segment, false, undefined, stable), () => this.#displayPage(), error => this.#displayGap(error), {
+      get last() { return display.last; },
       work: action => this.#bodyWork.run(action),
       amend: (blockId, change) => this.#display.amend(blockId, change),
       seal: blockId => this.#display.seal(blockId),
@@ -943,7 +946,10 @@ class TerminalApplication {
 
   async #displayPage(): Promise<void> {
     const revision = ++this.#displayRevision;
-    const page = await this.#display.page(this.#displayStart);
+    const sourceRevision = this.#outputProjection.revision;
+    let page = await this.#display.page(this.#displayStart);
+    if (revision === this.#displayRevision && sourceRevision !== this.#outputProjection.revision) return this.#displayPage();
+    page = this.#outputProjection.projectPage(page);
     if (revision === this.#displayRevision && !this.#abort.signal.aborted) {
       const patch = encodeBodyPage(page, revision, this.#displaySent);
       // Body delivery is FIFO. Publish this base before yielding so concurrent
@@ -987,7 +993,7 @@ class TerminalApplication {
     // Fixed implementation codes only. Parser input, source paths and arbitrary
     // exception text must not be copied into the runtime record.
     const reason = error instanceof Error && ['terminal-body-source-map', 'terminal-body-active-capacity',
-      'terminal-body-projection-capacity', 'terminal-output-queue-capacity', 'terminal-display-encoding-size',
+      'terminal-body-projection-capacity', 'terminal-output-queue-capacity', 'terminal-output-retained-capacity', 'terminal-display-encoding-size',
       'terminal-display-page-size', 'terminal-frame-too-large'].includes(error.message) ? error.message : 'terminal-display-paused';
     recordRuntimeFailure(this.#logging.records, error, reason);
     this.#displayHadGap = true;

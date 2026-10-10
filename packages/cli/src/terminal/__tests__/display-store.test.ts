@@ -113,7 +113,7 @@ describe('bounded terminal display projection', () => {
         { type: 'added' as const, newLineNumber: 1, content: code }, { type: 'added' as const, newLineNumber: 2, content: '' }] }] };
     const text = processArtifactText(artifact);
     const producer = new TerminalOutputProjection(async segment => { await h.store.append(segment); }, async () => {}, gap,
-      { work: action => action(), amend: async () => {}, seal: async () => {} });
+      { last: 0, work: action => action(), amend: async () => {}, seal: async () => {} });
     try {
       producer.appendProcessBlock({ blockId: 'blank-diff', role: 'tool-diff', text, lines: processArtifactLines(artifact), spans: processArtifactSpans(artifact) });
       await producer.drain();

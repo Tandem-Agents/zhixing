@@ -77,40 +77,39 @@ export function validateProcessView(value: unknown): value is TerminalProcessVie
     (v.notice === undefined || short(v.notice, 1024));
 }
 
-export interface ProcessViewRow { readonly text: string; readonly failed?: boolean }
-export function processViewRows(view: TerminalProcessView, columns: number, height: number): readonly ProcessViewRow[] {
-  if (view.durationMs !== undefined && !view.notice && view.activity !== 'reconciling') {
-    const tokens = view.usage.contextTokens;
-    const context = tokens === undefined ? '' : `  │  ~ ${tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens}`;
-    return [{ text: processLine(`◆ 用时 ${Math.max(1, Math.round(view.durationMs / 1000))}s${context}`, columns) }];
-  }
-  const rows: ProcessViewRow[] = [{ text: processLine(`◆ ${view.notice ?? view.phase}`, columns) }];
-  let left = Math.max(0, Math.min(24, Math.floor(height)) - 1);
-  const usage = view.usage, parts: string[] = [];
-  if (usage.inputTokens !== undefined) parts.push(`输入 ${usage.inputTokens}`);
-  if (usage.outputTokens !== undefined) parts.push(`输出 ${usage.outputTokens}`);
-  if (usage.cacheReadTokens !== undefined) parts.push(`缓存命中 ${usage.cacheReadTokens}`);
-  if (usage.cacheWriteTokens !== undefined) parts.push(`缓存写入 ${usage.cacheWriteTokens}`);
-  if (usage.contextTokens !== undefined) parts.push(`上下文估算 ${usage.contextTokens}`);
-  const reserveUsage = height >= 4 && parts.length ? 1 : 0;
-  if (view.thinking?.active) {
-    const tail = thinkingTail(view.thinking.text, Math.max(1, columns - 2));
-    const count = Math.min(tail.length, Math.max(0, left - reserveUsage));
-    if (count) for (const line of tail.slice(-count)) { rows.push({ text: processLine('  ' + line, columns) }); left--; }
-  }
-  if (view.children.length && left > reserveUsage) {
+export interface ProcessViewRow { readonly text: string; readonly failed?: boolean; readonly status?: boolean }
+export interface ProcessFeedback { readonly failures?: readonly string[]; readonly details?: readonly string[]; readonly notice?: string; readonly candidateCompressed?: boolean }
+export function processViewRows(view: TerminalProcessView, columns: number, height: number, feedback: ProcessFeedback = {}): readonly ProcessViewRow[] {
+  const budget = Math.max(1, Math.min(6, Math.floor(height)));
+  const failures = [...new Set([...(feedback.failures ?? []), ...(view.notice ? [view.notice] : [])].filter(Boolean))];
+  const complete = view.durationMs !== undefined && view.activity !== 'running' && view.activity !== 'reconciling';
+  const tokens = view.usage.contextTokens;
+  const context = tokens === undefined ? '' : '  │  ~ ' + (tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens);
+  const normal = complete ? '用时 ' + Math.max(1, Math.round(view.durationMs! / 1000)) + 's' + context : view.phase || feedback.notice || '';
+  const rows: ProcessViewRow[] = failures.slice(1).map(text => ({ text, failed: true }));
+  if (!complete) for (const text of feedback.details ?? []) rows.push({ text });
+  if (view.children.length && (!complete || view.children.some(child => child.status === 'failed' || child.status === 'aborted'))) {
     const count = (status: ProcessChildView['status']) => view.children.filter(c => c.status === status).length;
-    const failed = count('failed'), aborted = count('aborted'), running = count('running'), done = count('succeeded');
+    const failed = count('failed'), aborted = count('aborted');
     const focus = view.children.find(c => c.status === 'failed') ?? view.children.find(c => c.status === 'running') ?? view.children.at(-1)!;
-    // Outcome/counts precede optional description so narrow terminals cannot hide failure.
-    const required = `子任务 ${view.children.length} · ${failed ? failed + '失败 ' : ''}${aborted ? aborted + '中止 ' : ''}${running}运行 ${done}完成`;
-    rows.push({ text: processLine(required + ` · ${focus.label || focus.id}${focus.latestTool ? ' · ' + focus.latestTool : ''}`, columns),
-      ...(failed ? { failed: true } : {}) }); left--;
+    rows.push({ text: '子任务 ' + view.children.length + ' · ' + (failed ? failed + '失败 ' : '') + (aborted ? aborted + '中止 ' : '') + count('running') + '运行 ' + count('succeeded') + '完成 · ' + (focus.label || focus.id), failed: !!(failed || aborted) });
   }
-  const toolCount = Math.min(view.tools.length, Math.max(0, left - reserveUsage));
-  if (toolCount) for (const line of view.tools.slice(-toolCount)) { rows.push({ text: processLine('  ' + line, columns) }); left--; }
-  if (reserveUsage && left) rows.push({ text: processLine(parts.join(' · '), columns) });
-  return rows;
+  if (!complete) for (const line of view.tools) rows.push({ text: '  ' + line });
+  const usage = view.usage, parts: string[] = [];
+  if (usage.inputTokens !== undefined) parts.push('输入 ' + usage.inputTokens);
+  if (usage.outputTokens !== undefined) parts.push('输出 ' + usage.outputTokens);
+  if (usage.cacheReadTokens !== undefined) parts.push('缓存命中 ' + usage.cacheReadTokens);
+  if (usage.cacheWriteTokens !== undefined) parts.push('缓存写入 ' + usage.cacheWriteTokens);
+  if (usage.contextTokens !== undefined) parts.push('上下文估算 ' + usage.contextTokens);
+  if (!complete && parts.length) rows.push({ text: parts.join(' · ') });
+  // Required failures consume the detail budget before optional tool/usage
+  // text; they remain visible when ordinary body space can yield to feedback.
+  rows.sort((a, b) => Number(!!b.failed) - Number(!!a.failed));
+  const hidden = rows.slice(budget - 1).filter(row => row.failed).length;
+  let status = failures[0] ?? normal;
+  if (hidden) status = '另' + hidden + '项提示，' + (feedback.candidateCompressed ? 'Esc 收起候选查看' : '放大窗口查看') + ' · ' + status;
+  return [...rows.slice(0, budget - 1), { text: status ? '◆ ' + status : '', status: true, failed: !!failures.length || !!hidden }]
+    .map(row => ({ ...row, text: processLine(row.text, columns) }));
 }
 
 /** BodyView applies this at its actual text width (currently width - 4).
@@ -121,7 +120,8 @@ export function processThinkingBodyBlock(block: BodyRenderBlock, columns: number
   const width = Math.max(1, Math.floor(columns));
   const rows: { from: number; to: number; text: string }[] = [];
   let from = Math.max(0, block.text.length - 8192), to = from, text = '', cells = 0;
-  const push = () => { rows.push({ from, to, text }); if (rows.length > 2) rows.shift(); from = to; text = ''; cells = 0; };
+  let omitted = from > 0;
+  const push = () => { if (text.trim()) { rows.push({ from, to, text }); if (rows.length > 2) { rows.shift(); omitted = true; } } from = to; text = ''; cells = 0; };
   const tail = block.text.slice(from);
   for (const part of graphemes().segment(tail)) {
     const segment = part.segment, start = block.text.length - tail.length + part.index, end = start + segment.length;
@@ -131,6 +131,16 @@ export function processThinkingBodyBlock(block: BodyRenderBlock, columns: number
     text += size > width ? '…' : segment; cells += Math.min(size, width); to = end;
   }
   if (text || !rows.length) push();
+  // The ellipsis occupies a real cell. Drop complete source graphemes from
+  // the first visible row instead of adding a third wrapped display row.
+  if (omitted && rows.length) {
+    const row = rows[0]!;
+    let used = [...graphemes().segment(row.text)].reduce((sum, part) => sum + processCellWidth(part.segment), 0);
+    while (row.text && used + 1 > width) {
+      const first = graphemes().segment(row.text).containing(0)!;
+      row.from += first.segment.length; row.text = row.text.slice(first.segment.length); used -= processCellWidth(first.segment);
+    }
+  }
   const coordinate = (offset: number): number => {
     let position = 0;
     for (const run of block.runs) {
@@ -143,9 +153,10 @@ export function processThinkingBodyBlock(block: BodyRenderBlock, columns: number
   for (const [index, row] of rows.entries()) {
     const start = coordinate(row.from), end = coordinate(row.to);
     if (index) runs.push({ from: start, to: start, text: '\n', style: 32 });
+    if (!index && omitted) runs.push({ from: start, to: start, text: '…', style: 32 });
     runs.push({ from: start, to: end, text: row.text, style: 32 });
   }
-  return { ...block, text: rows.map(row => row.text).join('\n'), runs,
+  return { ...block, text: (omitted && rows.length ? '…' : '') + rows.map(row => row.text).join('\n'), runs,
     node: { ...block.node, from: runs[0]?.from ?? block.node.from, to: runs.at(-1)?.to ?? block.node.to, runs } };
 }
 

@@ -365,10 +365,13 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     const current = view(), blocks = information.snapshot(interactionKey(current));
     const candidate = current.kind === 'conversation' ? candidateValue() : undefined;
     const left = [...blocks.left];
+    const process = shownProcess();
+    const operationNotice = process && current.message && current.connectionState !== 'starting' ? displayText(current.message) : '';
+    if (operationNotice && !left.length) left.push(operationNotice);
     if (candidate?.error) left.push(candidate.error);
     else if (candidate?.argumentHint) left.push(candidate.argumentHint);
     else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
-    else if (current.kind === 'conversation' && editorEmpty()) left.push('输入消息或 / 查看命令');
+    else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
     const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
     const keys = candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
       : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
@@ -437,8 +440,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     finally { finish?.(); clipboardPending = false; }
   };
   const shownProcess = () => view().kind === 'conversation' && processStatus()?.conversationId === view().conversationId ? processStatus()?.view : undefined;
-  const candidateNotice = () => displayText(view().displayPaused || view().bodyRecovery === 'blocked' ? '正文待恢复 · Ctrl+R 重试展示' : view().displayGap ? '正文保留存在缺口' : taskStatus().noticeGap || view().message || taskStatus().summary?.text || '');
-  const candidateNoticeColor = () => view().displayGap || view().displayPaused || view().bodyRecovery === 'blocked' || taskStatus().noticeGap || view().connectionState === 'unavailable' || taskStatus().summary?.state === 'error' ? tone.warn : tone.dim;
+  const displayRecoveryNotice = () => view().displayPaused || view().bodyRecovery === 'blocked'
+    ? view().kind === 'history' ? '历史展示已暂停，存在缺口 · 请释放空间后重新打开历史' : '正文保留已暂停 · Ctrl+R 重试展示'
+    : view().displayGap ? view().kind === 'history' ? '历史展示存在缺口 · 请重新打开历史核对' : '展示已恢复；原缺口保留，可查看历史与用量' : '';
+  const footerFeedback = () => view().kind === 'history' ? { failures: [displayRecoveryNotice()].filter(Boolean), notice: displayText(view().message ?? '') } : ({ failures: [
+    displayRecoveryNotice(),
+    taskStatus().noticeGap ?? '',
+    taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state === 'error' ? taskStatus().summary!.text : '',
+    view().connectionState === 'unavailable' ? displayText(view().message ?? '') : '',
+  ].filter(Boolean), details: !!taskStatus().summary && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state !== 'error'
+    ? [taskStatus().summary!.text] : [], notice: displayText(view().message || taskStatus().summary?.text || ''), candidateCompressed: candidateHeight() > 0 });
+  const footerProcess = () => shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
+    activity: view().busy ? 'running' as const : 'complete' as const, tools: [], children: [], usage: {} };
   const ChoiceList = () => <box flexDirection="column" flexShrink={0} marginTop={view().message && choices().length ? 1 : 0}>
     <For each={choices()}>{(choice, index) => {
       const startsSection = () => !!choice.section && (index() === 0 || choices()[index() - 1]?.section !== choice.section);
@@ -473,7 +486,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
           requestPrevious={() => options.request({ kind: 'history-previous' })}
           onReading={setReading}
-          onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : '正文暂不可用，已保留内容仍可回看。'); }} />
+          onError={error => { if (!disposed) setStatus(error instanceof Error ? error.message : typeof error === 'string' ? error : '正文暂不可用，已保留内容仍可回看。'); }} />
       </Show>}>
         <SkillsView view={view().skills!} width={bodySize().width} height={bodySize().height}
           send={async value => {
@@ -487,40 +500,24 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     <box flexDirection="column" flexShrink={0}>
     <Show when={isBody()}><text height={1} marginX={spacing.content} fg={reading().retry ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
       onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
-        if (view().bodyRecovery === 'blocked') { void action({ kind: 'display-retry' }); return; }
+        if (view().bodyRecovery === 'blocked') { if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return; }
         const retry = reading().retry; if (!retry && (!reading().below || reading().loading)) return;
         void (retry ? bodyView?.page(retry) : bodyView?.bottom())?.catch(setStatus); }}>
-      {view().bodyRecovery === 'blocked' ? '部分正文待恢复 · 点击或 Ctrl+R 重试' : reading().retry ? '读取未完成 · 点击或原方向翻页重试' :
-        view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…' : reading().below ? '↓ 下方还有内容 · Ctrl+End 回到最新' : ''}
+      {view().bodyRecovery === 'blocked' ? view().kind === 'history' ? '部分历史待恢复 · 请重新打开历史' : '部分正文待恢复 · 点击或 Ctrl+R 重试' : reading().retry ? '读取未完成 · 点击或原方向翻页重试' :
+        view().bodyRecovery === 'retrying' || reading().loading ? '正在读取…' : reading().below ? process.platform === 'darwin' ? '↓ 下方还有内容 · 点击回到最新' : '↓ 下方还有内容 · Ctrl+End 回到最新' : ''}
     </text></Show>
-    <box flexDirection="column" flexShrink={0} height={candidateHeight() ? candidateBudget().process : undefined} overflow="hidden" onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
-    <Show when={!candidateHeight()} fallback={<>
-      <Show when={candidateNotice()}><text height={1} marginX={spacing.content} wrapMode="none" truncate fg={candidateNoticeColor()}>{candidateNotice()}</text></Show>
-      <Show when={shownProcess()} fallback={<Show when={view().busy}><text height={1} marginX={spacing.content} fg={tone.dim}>{animation()} 正在处理…</text></Show>}>
-        <ProcessView view={shownProcess()!} indicator={shownProcess()!.activity === 'running' ? animation() : '◆'} width={size().width} height={Math.max(1, candidateBudget().process - (candidateNotice() ? 1 : 0))} />
+    <box flexDirection="column" flexShrink={0} height={candidateHeight() ? candidateBudget().process : 'auto'} overflow="hidden" justifyContent="flex-end" onSizeChange={function(this: BoxRenderable) { setContextHeight(this.height); }}>
+      <Show when={isBody()} fallback={<>
+        <Show when={view().kind === 'recovery'}>
+          <text marginX={spacing.content} height={1} wrapMode="none" truncate fg={tone.dim}>{'保密页 ' + (recoveryPage().page + 1) + '/' + (view().recovery?.pages ?? 1) + ' · PgUp/PgDn 翻页'}</text>
+          <Show when={view().recovery?.input}><text marginX={spacing.content} height={1} fg={tone.dim}>{'恢复包输入：' + recoveryLength() + ' 字节'}</text></Show>
+        </Show>
+      </>}>
+        <ProcessView view={footerProcess()} feedback={footerFeedback()} indicator={footerProcess().activity === 'running' ? animation() : '◆'} width={size().width}
+          height={candidateHeight() ? candidateBudget().process : Math.max(1, Math.min(6, size().height - 6))} />
       </Show>
-    </>}>
-    <Show when={isBody() && view().message && view().connectionState !== 'starting'}><text marginX={spacing.content} selectable fg={view().connectionState === 'unavailable' ? tone.warn : tone.dim}>{displayText(view().message ?? '')}</text></Show>
-    <Show when={view().kind === 'recovery'}>
-      <text marginX={spacing.content} height={1} wrapMode="none" truncate fg={tone.dim}>{`保密页 ${recoveryPage().page + 1}/${view().recovery?.pages ?? 1} · PgUp/PgDn 翻页`}</text>
-      <Show when={view().recovery?.input}><text marginX={spacing.content} height={1} fg={tone.dim}>{`恢复包输入：${recoveryLength()} 字节`}</text></Show>
-    </Show>
-    <Show when={shownProcess()}>
-      <ProcessView view={shownProcess()!} indicator={shownProcess()!.activity === 'running' ? animation() : '◆'} width={size().width} height={Math.max(1, Math.min(6, size().height - 20))} />
-    </Show>
-    <Show when={view().kind === 'conversation' && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.text}>
-      <text height={1} fg={taskStatus().summary?.state === 'error' ? tone.warn : tone.dim}>{displayText(taskStatus().summary?.text ?? '')}</text>
-    </Show>
-    <Show when={view().kind === 'conversation' && taskStatus().noticeGap}>
-      <text height={1} fg={tone.warn}>{displayText(taskStatus().noticeGap ?? '')}</text>
-    </Show>
-    <Show when={['conversation', 'history'].includes(view().kind) && view().displayGap}>
-      <text fg={tone.warn}>{view().displayPaused ? '正文保留已暂停，草稿和已有内容保留。Ctrl+R 重试展示；仍可处理确认、中止或退出。' : '展示已恢复；暂停期间的旧缺口仍保留，可查看权威历史与用量。'}</text>
-    </Show>
-    <Show when={view().kind !== 'configuration'}><box marginX={spacing.content} flexShrink={0}><ChoiceList /></box></Show>
-    <Show when={!safeAction()}><text fg={tone.warn}>窗口较小：可取消；放大后继续确认。</text></Show>
-    <Show when={view().busy && !shownProcess()}><text height={1} marginX={spacing.content} fg={tone.dim}><span style={{fg: teal}}>{animation()}</span> {view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…'}</text></Show>
-    </Show>
+      <Show when={view().kind !== 'configuration'}><box marginX={spacing.content} flexShrink={0}><ChoiceList /></box></Show>
+      <Show when={!safeAction()}><text fg={tone.warn}>窗口较小：可取消；放大后继续确认。</text></Show>
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
       <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={spacing.frame} paddingX={spacing.frameInner} flexDirection="row">
@@ -650,7 +647,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     }
     if (event.ctrl && event.name === 'c' && isBody() && (event.shift || bodyView?.hasSelection())) { consume(); void copyBody(); return; }
     if ((view().displayPaused || view().bodyRecovery === 'blocked') && ['conversation', 'history'].includes(view().kind) && event.ctrl && event.name === 'r') {
-      consume(); void action({ kind: 'display-retry' }); return;
+      consume(); if (view().kind === 'history') setStatus(displayRecoveryNotice()); else void action({ kind: 'display-retry' }); return;
     }
     if (event.ctrl && event.name === 'c') {
       consume();

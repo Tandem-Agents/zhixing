@@ -18,7 +18,7 @@ describe('terminal process session ownership', () => {
   it('does not turn observer closure or body drain into a domain completion', async () => {
     const f = fixture();
     const output = new TerminalOutputProjection(async () => {}, async () => {}, async () => {},
-      { work: action => action(), amend: async () => {}, seal: async () => {} },
+      { last: 0, work: action => action(), amend: async () => {}, seal: async () => {} },
       { accept: (event, source) => f.session.acceptYield(event, source) });
     for (const kind of ['closed', 'gap'] as const) {
       f.emit(kind, 1, { kind: 'yield', delta: { type: 'text_delta', text: 'answer' } });

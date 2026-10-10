@@ -3,7 +3,7 @@ import type { TerminalDisplaySegment } from '@zhixing/terminal-ui/protocol';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
 import { textFragments } from './history-segments.js';
 import { TerminalBodyProjection, type BodyAmend } from './body-projection.js';
-import { BODY_PROJECTION_WORK_BYTES, sliceBodyNodes, type BodyFragmentMetadata, type BodyNode, type BodyRun } from '@zhixing/terminal-ui/body-model';
+import { BODY_INTERRUPTED_LIMIT, BODY_PAGE_BYTES, BODY_PAGE_FRAGMENTS, BODY_PROJECTION_WORK_BYTES, sliceBodyNodes, type BodyPage, type BodySegment, type BodyFragmentMetadata, type BodyNode, type BodyRun } from '@zhixing/terminal-ui/body-model';
 import { TERMINAL_LIMITS } from '@zhixing/terminal-ui/protocol';
 import type { ProcessBlock } from './process-presentation.js';
 
@@ -13,10 +13,13 @@ const OUTPUT_PREFIX_BYTES = 8 * 1024 * 1024;
 
 interface Stream { readonly key: string; block: number; assistantUnits: number; role?: string }
 interface BodyCommand { readonly blockId: string; readonly role: string; readonly text: string; readonly end: boolean;
+  readonly transient?: boolean;
   readonly body?: BodyFragmentMetadata;
   /** Complete plain display content, whose source can no longer be amended. */
   readonly snapshotOffset?: number }
 export interface TerminalOutputBody {
+  /** Current committed boundary; never inferred from a later UI page. */
+  readonly last: number;
   work(action: () => Promise<void>): Promise<void>;
   amend(blockId: string, change: BodyAmend): Promise<void>;
   seal(blockId: string): Promise<void>;
@@ -29,6 +32,11 @@ export class TerminalOutputProjection {
   readonly #parsers = new Map<string, TerminalBodyProjection>();
   #bytes = 0; #inflightBytes = 0; #paused = false; #held = 0; #closed = false;
   #generation = 0;
+  #revision = 0; #liveDirty = false;
+  #inflightThinking?: BodyCommand;
+  readonly #failedThinking: { command: BodyCommand; bytes: number; before: number; generation: number; display?: NonNullable<BodyPage['interrupted']>[number] }[] = [];
+  #failedThinkingBytes = 0;
+  #transientCommand?: BodyCommand; #transientSegment?: BodySegment;
   #publishedAt = -Infinity;
   #timer?: ReturnType<typeof setTimeout>;
   #flushing?: Promise<void>;
@@ -39,11 +47,49 @@ export class TerminalOutputProjection {
     readonly gap: (error?: unknown) => Promise<void>, readonly body: TerminalOutputBody,
     readonly process?: { accept(event: AgentYield, source: ConversationOutputSource): void }) {}
   get paused(): boolean { return this.#paused; }
+  get revision(): number { return this.#revision; }
+  projectPage(page: BodyPage): BodyPage {
+    const command = this.#inflightThinking ?? (this.#queue[0]?.command.transient ? this.#queue[0].command : undefined);
+    if (command && command !== this.#transientCommand) {
+      this.#transientCommand = command;
+      this.#transientSegment = { blockId: command.blockId, role: 'thinking', text: command.text, contentOffset: command.snapshotOffset!, final: command.end };
+    }
+    const interrupted = this.#failedThinking.map(item => {
+      const failed = item.command;
+      const blockId = item.generation === this.#generation ? failed.blockId : `${failed.blockId}:recovered-${this.#generation}`;
+      return item.display ??= { before: item.before, segment: { blockId, role: 'thinking', text: failed.text, contentOffset: failed.snapshotOffset!, final: true } };
+    }).filter(item => item.before >= page.start && item.before <= page.start + page.segments.length);
+    let next: BodyPage = { ...page, transient: command && page.start + page.segments.length === page.last ? this.#transientSegment : undefined, interrupted: interrupted.length ? interrupted : undefined };
+    while (next.segments.length && (next.segments.length + (next.transient ? 1 : 0) + (next.interrupted?.length ?? 0) > BODY_PAGE_FRAGMENTS || Buffer.byteLength(JSON.stringify(next)) > BODY_PAGE_BYTES)) {
+      next = next.follow ? { ...next, start: next.start + 1, segments: next.segments.slice(1) }
+        : { ...next, segments: next.segments.slice(0, -1), transient: undefined };
+      const retained = next.interrupted?.filter(item => item.before >= next.start && item.before <= next.start + next.segments.length);
+      next = { ...next, interrupted: retained?.length ? retained : undefined };
+    }
+    return next;
+  }
+  updateThinking(block: ProcessBlock, offset: number, final: boolean): void {
+    if (this.#closed || this.#paused) return;
+    // Reserve the next failed-tail obligation before exposing new thinking.
+    // Existing visible failures stay owned until acknowledgement/scope close;
+    // at the finite wire limit, stop admission rather than replacing one.
+    if (this.#failedThinking.length >= BODY_INTERRUPTED_LIMIT) { this.#pause(Error('terminal-output-retained-capacity')); return; }
+    const blockId = this.#generation ? `${block.blockId}:display-${this.#generation}` : block.blockId;
+    const command: BodyCommand = { blockId, role: 'thinking', text: block.text, snapshotOffset: offset, end: final, transient: true };
+    const index = this.#queue.findIndex(item => item.command.blockId === blockId && item.command.transient);
+    const bytes = this.#commandBytes(command), previous = index < 0 ? 0 : this.#queue[index]!.bytes;
+    if (this.#bytes + this.#inflightBytes + this.#failedThinkingBytes - previous + bytes > OUTPUT_PREFIX_BYTES || index < 0 && this.#queue.length + this.#failedThinking.length >= 128) { this.#pause(Error('terminal-output-queue-capacity')); return; }
+    if (index < 0) this.#queue.push({ command, bytes }); else this.#queue[index] = { command, bytes };
+    this.#bytes += bytes - previous; this.#revision++; this.#liveDirty = true; this.#schedule();
+  }
   pause(): void { this.#pause(); }
   async settlePaused(): Promise<void> { await this.#flushing; await this.#gapWork; }
   resume(): void {
     if (this.#closed || this.#flushing) throw Error('terminal-output-recovery-unavailable');
     this.#generation++; this.#streams.clear(); this.#disposeParsers(); this.#paused = false;
+    for (const item of this.#failedThinking) if (item.display) item.display = { ...item.display,
+      segment: { ...item.display.segment, blockId: `${item.command.blockId}:recovered-${this.#generation}` } };
+    this.#revision++;
   }
   hold(): () => void { this.#held++; let released = false; return () => { if (released) return; released = true; this.#held--; this.#schedule(); this.#wakeDrain?.(); }; }
   /** One recovery consumer can wait for actual append/gap acknowledgement.
@@ -53,7 +99,10 @@ export class TerminalOutputProjection {
     const work = (async () => {
       while (!this.#closed) {
         if (this.#paused) { await this.#gapWork; return; }
-        if (!this.#queue.length && !this.#flushing) return;
+        // A recovered delta must be acknowledged before its producer can send
+        // the block-end. An already-published live head is accepted work, not
+        // an outstanding disk append; waiting for its end would deadlock.
+        if (!this.#flushing && (!this.#queue.length || this.#queue[0]!.command.transient && !this.#queue[0]!.command.end && !this.#liveDirty)) return;
         this.#schedule();
         await new Promise<void>(resolve => { this.#wakeDrain = resolve; });
         this.#wakeDrain = undefined;
@@ -135,7 +184,9 @@ export class TerminalOutputProjection {
     this.#schedule();
   }
   async reset(current: () => boolean): Promise<void> {
-    await this.drain(); if (current()) { this.#streams.clear(); this.#disposeParsers(); }
+    // A scope switch cannot wait forever for an interrupted live thinking leg.
+    for (const item of this.#queue) if (item.command.transient && !item.command.end) item.command = { ...item.command, end: true };
+    await this.drain(); if (current()) { this.#streams.clear(); this.#disposeParsers(); this.#failedThinking.length = 0; this.#failedThinkingBytes = 0; this.#transientCommand = undefined; this.#transientSegment = undefined; this.#revision++; }
   }
   #streamKey(conversationId: string, runId?: string): string {
     return `${conversationId}:${runId ?? 'status'}${this.#generation ? `:display-${this.#generation}` : ''}`;
@@ -144,6 +195,8 @@ export class TerminalOutputProjection {
     this.#closed = true; clearTimeout(this.#timer); this.#queue.length = 0; this.#bytes = 0;
     this.#wakeDrain?.();
     await this.#flushing; this.#streams.clear(); this.#disposeParsers();
+    this.#inflightThinking = undefined; this.#failedThinking.length = 0; this.#failedThinkingBytes = 0;
+    this.#transientCommand = undefined; this.#transientSegment = undefined;
   }
   #text(stream: Stream, role: string, text: string): void {
     stream.role = role;
@@ -153,7 +206,7 @@ export class TerminalOutputProjection {
       const tail = this.#queue.at(-1);
       if (tail?.command.blockId === blockId && !tail.command.end && Buffer.byteLength(tail.command.text) + Buffer.byteLength(part.text) <= 32 * 1024) {
         const command = { ...tail.command, text: tail.command.text + part.text }, bytes = this.#commandBytes(command);
-        if (this.#bytes + this.#inflightBytes - tail.bytes + bytes > OUTPUT_PREFIX_BYTES) { this.#pause(Error('terminal-output-queue-capacity')); return; }
+        if (this.#bytes + this.#inflightBytes + this.#failedThinkingBytes - tail.bytes + bytes > OUTPUT_PREFIX_BYTES) { this.#pause(Error('terminal-output-queue-capacity')); return; }
         this.#bytes += bytes - tail.bytes; this.#queue[this.#queue.length - 1] = { command, bytes };
       } else {
         // A short slice must not retain a much larger decoded RPC event.
@@ -166,7 +219,7 @@ export class TerminalOutputProjection {
   #enqueue(command: BodyCommand): void {
     if (this.#closed || this.#paused) return;
     const bytes = this.#commandBytes(command);
-    if (this.#bytes + this.#inflightBytes + bytes > OUTPUT_PREFIX_BYTES || this.#queue.length >= 128) { this.#pause(Error('terminal-output-queue-capacity')); return; }
+    if (this.#bytes + this.#inflightBytes + this.#failedThinkingBytes + bytes > OUTPUT_PREFIX_BYTES || this.#queue.length + this.#failedThinking.length >= 128) { this.#pause(Error('terminal-output-queue-capacity')); return; }
     this.#queue.push({ command, bytes }); this.#bytes += bytes;
   }
   #endBlock(stream: Stream): void {
@@ -180,6 +233,7 @@ export class TerminalOutputProjection {
   }
   #schedule(backlog = false): void {
     if (this.#closed || this.#held || this.#flushing || this.#timer || !this.#queue.length) return;
+    if (this.#queue[0]!.command.transient && !this.#queue[0]!.command.end && !this.#liveDirty) return;
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       this.#flushing = this.#flush().catch(error => this.#pause(error)).finally(() => {
@@ -191,17 +245,22 @@ export class TerminalOutputProjection {
     }, backlog ? 0 : 40);
   }
   async #flush(): Promise<void> {
+    this.#liveDirty = false;
     let consumed = 0;
     while (this.#queue.length && !this.#closed && !this.#held && consumed++ < 4) {
+      if (this.#queue[0]!.command.transient && !this.#queue[0]!.command.end) break;
       const { command, bytes } = this.#queue.shift()!;
+      if (command.transient) this.#inflightThinking = command;
       this.#inflightBytes = bytes;
       this.#bytes -= this.#inflightBytes;
+      let acknowledged = false;
       try {
         await this.body.work(async () => {
           if (this.#closed || this.#paused) return;
           if (command.snapshotOffset !== undefined) {
             await this.append({ blockId: command.blockId, role: command.role, text: command.text,
               contentOffset: command.snapshotOffset, final: command.end, body: command.body }, true);
+            acknowledged = true;
             return;
           }
           let parser = this.#parsers.get(command.blockId);
@@ -221,6 +280,14 @@ export class TerminalOutputProjection {
           this.#parserCapacity();
           if (command.end) { await this.body.seal(command.blockId); this.#parsers.delete(command.blockId); }
         });
+        if (command.transient) {
+          this.#inflightThinking = undefined;
+          // An explicit pause can race an already-started successful append.
+          // Its real acknowledgement retires the frozen overlay as well.
+          const retained = this.#failedThinking.findIndex(item => item.command === command);
+          if (acknowledged && retained >= 0) this.#failedThinkingBytes -= this.#failedThinking.splice(retained, 1)[0]!.bytes;
+          this.#revision++;
+        }
       } finally { this.#inflightBytes = 0; }
     }
     // Storage must drain a burst without a second quiet-period delay, but
@@ -228,14 +295,20 @@ export class TerminalOutputProjection {
     // same viewport. Coalesce only its display projection, never stored text.
     // The last batch (and a hold boundary) always publishes before drain ends.
     const now = performance.now();
-    if (!this.#closed && (!this.#queue.length || this.#held || now - this.#publishedAt >= 40)) {
+    if (!this.#closed && (!this.#queue.length || this.#queue[0]?.command.transient || this.#held || now - this.#publishedAt >= 40)) {
       this.#publishedAt = now;
       await this.updated();
     }
   }
   #pause(error?: unknown): void {
     if (this.#paused || this.#closed) return;
-    this.#paused = true; this.#queue.length = 0; this.#bytes = 0;
+    const failed = this.#inflightThinking ?? (this.#queue[0]?.command.transient ? this.#queue[0].command : undefined);
+    if (failed && !this.#failedThinking.some(item => item.command === failed)) {
+      const bytes = this.#commandBytes(failed);
+      this.#failedThinking.push({ command: failed, bytes, before: this.body.last, generation: this.#generation }); this.#failedThinkingBytes += bytes;
+    }
+    this.#inflightThinking = undefined;
+    this.#paused = true; this.#queue.length = 0; this.#bytes = 0; this.#revision++;
     if (!this.#flushing) this.#disposeParsers();
     this.#gapWork = this.gap(error); void this.#gapWork.catch(() => {}); this.#wakeDrain?.();
   }

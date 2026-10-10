@@ -2,9 +2,32 @@ import { describe, expect, it } from 'vitest';
 import { thinkingTail, processCellWidth, processThinkingBodyBlock, processBodyBlock, processBodyColor, processViewRows, validateProcessView } from './process-model.js';
 import { renderedToSource } from './body/layout.js';
 describe('pure process presentation', () => {
+  it('normalizes thinking boundaries without trimming user source and keeps required feedback above status', () => {
+    const block = (text: string) => ({ key: 't', blockId: 't', role: 'thinking', text,
+      runs: [{ from: 0, to: text.length, text, style: 0 }], node: { kind: 'paragraph' as const, from: 0, to: text.length, runs: [] } });
+    for (const text of ['reason', '\nreason', '\n\nreason\n\n']) expect(processThinkingBodyBlock(block(text), 40).text).toBe('reason');
+    expect(processThinkingBodyBlock(block('\n \n'), 40).text).toBe('');
+    const view = { revision: 1, phase: '正在回复', activity: 'running' as const, tools: ['tool'], children: [], usage: { inputTokens: 4 }, thinking: { text: 'not in footer', active: true } };
+    const rows = processViewRows(view, 80, 6, { failures: ['恢复阻碍', '任务失败'], details: ['当前任务摘要'], notice: '普通通知' });
+    expect(rows.at(-1)).toMatchObject({ text: '◆ 恢复阻碍', status: true, failed: true });
+    expect(rows[0]!.text).toBe('任务失败');
+    expect(rows[1]!.text).toBe('当前任务摘要');
+    expect(rows.map(row => row.text).join(' ')).not.toContain('not in footer');
+    expect(processViewRows(view, 80, 1, { failures: ['恢复阻碍', '任务失败'], candidateCompressed: true })[0]!.text).toContain('Esc 收起候选查看');
+    expect(processViewRows(view, 80, 1, { failures: ['恢复阻碍', '任务失败'] })[0]!.text).toContain('放大窗口查看');
+  });
+  it('keeps failed children ahead of optional details, including after completion', () => {
+    const view = { revision: 1, phase: 'complete', activity: 'complete' as const, durationMs: 1000, tools: [],
+      children: [{ id: 'child', parentToolCallId: 'parent', label: 'failed task', status: 'failed' as const }], usage: {} };
+    const rows = processViewRows(view, 120, 6, { failures: ['display', 'notice gap', 'task'], details: ['optional'] });
+    expect(rows.some(row => row.failed && row.text.includes('1失败'))).toBe(true);
+    expect(rows.map(row => row.text).join(' ')).not.toContain('另');
+    const running = processViewRows({ ...view, activity: 'running' }, 120, 3, { failures: ['display'], details: ['optional1', 'optional2'] });
+    expect(running[0]?.text).toContain('1失败');
+  });
   it('renders the completed turn as one compact metadata row without concealing a gap', () => {
     const view = { revision: 1, phase: '本轮已结束', durationMs: 8200, tools: [], children: [], usage: { inputTokens: 20, outputTokens: 100, contextTokens: 7300 } };
-    expect(processViewRows(view, 80, 6)).toEqual([{ text: '◆ 用时 8s  │  ~ 7.3k' }]);
+    expect(processViewRows(view, 80, 6)).toEqual([{ text: '◆ 用时 8s  │  ~ 7.3k', status: true, failed: false }]);
     expect(processViewRows({ ...view, notice: '本轮已结束；正文存在缺口' }, 80, 6)[0]!.text).toContain('正文存在缺口');
     expect(validateProcessView({ ...view, durationMs: Infinity })).toBe(false);
   });
@@ -26,7 +49,8 @@ describe('pure process presentation', () => {
     const wide = processThinkingBodyBlock(block, 40), narrow = processThinkingBodyBlock(block, 10);
     expect(wide.text.split('\n')).toHaveLength(2); expect(narrow.text.split('\n')).toHaveLength(2);
     expect(narrow.text.replace(/\n/gu, '')).toHaveLength(20);
-    expect(renderedToSource(narrow, 0)).toEqual({ blockId: 'b', contentOffset: 1180 });
+    expect(renderedToSource(narrow, 0)).toEqual({ blockId: 'b', contentOffset: 1181 });
+    expect(narrow.text.startsWith('…')).toBe(true);
     expect(block.text).toHaveLength(200);
   });
   it('does not transform ordinary body blocks and validates finite DTO rows', () => {
@@ -41,8 +65,8 @@ describe('pure process presentation', () => {
     const rows = processViewRows({ revision: 1, phase: '正在处理', tools: [], children, usage: { inputTokens: 0 } }, 24, 8);
     expect(rows.filter(row => row.text.startsWith('子任务'))).toHaveLength(1);
     expect(rows.find(row => row.failed)?.text).toContain('1失败');
-    expect(rows.at(-1)?.text).toContain('输入 0');
-    expect(rows[0]?.text.startsWith('◆')).toBe(true);
+    expect(rows.some(row => row.text.includes('输入 0'))).toBe(true);
+    expect(rows.at(-1)?.text.startsWith('◆')).toBe(true);
   });
   it('preserves diff source at narrow widths for shared soft wrap and copying', () => {
     const text = '◆ 已修改 file.ts\n+ 1  汉字汉字汉字\n-    old value';

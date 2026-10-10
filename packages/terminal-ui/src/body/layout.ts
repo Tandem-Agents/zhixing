@@ -1,4 +1,4 @@
-import { bodyWindows, visibleBodyText, type BodyAnchor, type BodyNode, type BodyPage, type BodyRun, type BodySegment } from '../body-model.js';
+import { bodyWindows, bodyPageSegments, visibleBodyText, type BodyAnchor, type BodyNode, type BodyPage, type BodyRun, type BodySegment } from '../body-model.js';
 
 export interface BodyRenderBlock {
   readonly key: string; readonly blockId: string; readonly role: string;
@@ -25,9 +25,10 @@ export function retainBodyBlocks(next: readonly BodyRenderBlock[], previous: rea
 export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readonly BodyRenderBlock[]>): readonly BodyRenderBlock[] {
   const result: BodyRenderBlock[] = [];
   const windows = bodyWindows(page);
-  for (const key of cache?.keys() ?? []) if (!page.segments.includes(key)) cache!.delete(key);
+  const segments = bodyPageSegments(page);
+  for (const key of cache?.keys() ?? []) if (!segments.includes(key)) cache!.delete(key);
   for (let index = 0; index < windows.length; index++) {
-    const window = windows[index]!, segment = page.segments[index]!;
+    const window = windows[index]!, segment = segments[index]!;
     let projected = cache?.get(segment);
     if (!projected) {
       projected = window.context.nodes.map(node => {
@@ -47,6 +48,9 @@ export function bodyRenderBlocks(page: BodyPage, cache?: Map<BodySegment, readon
     } else result.push(block);
     }
   }
+  return bodyBlockGaps(result);
+}
+export function bodyBlockGaps(result: readonly BodyRenderBlock[]): readonly BodyRenderBlock[] {
   return result.map((block, index) => {
     const previous = result[index - 1];
     const differentGroup = previous && previous.groupId !== block.groupId;

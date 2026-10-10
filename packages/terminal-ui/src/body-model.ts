@@ -3,6 +3,8 @@ export const BODY_FRAGMENT_BYTES = 32 * 1024;
 export const BODY_FRAGMENT_ENCODED_BYTES = 48 * 1024;
 export const BODY_PAGE_BYTES = 224 * 1024;
 export const BODY_PAGE_FRAGMENTS = 4;
+/** Leave at least one wire slot for committed content or the next live tail. */
+export const BODY_INTERRUPTED_LIMIT = BODY_PAGE_FRAGMENTS - 1;
 export const BODY_PARSE_BYTES = 256 * 1024;
 export const BODY_PARSE_NODES = 4096;
 /** Reservation covers marked tokens/maps, one amend carrier and old/new
@@ -44,6 +46,17 @@ export interface BodySegment {
 export interface BodyPage {
   readonly first: number; readonly last: number; readonly start: number;
   readonly follow: boolean; readonly segments: readonly BodySegment[];
+  /** Ordered live tail after this page's committed EOF. Not a disk ordinal. */
+  readonly transient?: BodySegment;
+  /** Interrupted tails keep their original order and acknowledged boundaries.
+   * Boundaries are between disk ordinals; these never consume an ordinal. */
+  readonly interrupted?: readonly { readonly before: number; readonly segment: BodySegment }[];
+}
+export function bodyPageSegments(page: BodyPage): readonly BodySegment[] {
+  const segments = [...page.segments];
+  for (const [index, item] of (page.interrupted ?? []).entries()) segments.splice(item.before - page.start + index, 0, item.segment);
+  if (page.transient) segments.push(page.transient);
+  return segments;
 }
 /** Same-release wire projection: reuse indexes refer only to the immediately
  * preceding acknowledged-order page, never to a growing remote cache. */
@@ -54,6 +67,8 @@ export interface BodyPageRevision { readonly revision: number; readonly page: Bo
 /** Range counters may advance while an off-bottom reading page stays intact. */
 export function sameBodyPageContent(left: BodyPage | undefined, right: BodyPage): boolean {
   return !!left && left.start === right.start && left.follow === right.follow &&
+    left.transient === right.transient && (left.interrupted?.length ?? 0) === (right.interrupted?.length ?? 0) &&
+    (left.interrupted ?? []).every((item, index) => item === right.interrupted?.[index]) &&
     left.segments.length === right.segments.length && left.segments.every((segment, index) => segment === right.segments[index]);
 }
 export function encodeBodyPage(page: BodyPage, revision: number, previous?: BodyPageRevision): BodyPagePatch {
@@ -64,7 +79,9 @@ export function encodeBodyPage(page: BodyPage, revision: number, previous?: Body
 }
 export function decodeBodyPage(patch: BodyPagePatch, previous?: BodyPageRevision): BodyPageRevision {
   if (!integer(patch.revision) || (previous && patch.revision <= previous.revision) ||
-      (patch.base !== undefined && patch.base !== previous?.revision) || !Array.isArray(patch.segments) || patch.segments.length > BODY_PAGE_FRAGMENTS)
+      (patch.base !== undefined && patch.base !== previous?.revision) || !Array.isArray(patch.segments) ||
+      (patch.interrupted !== undefined && !Array.isArray(patch.interrupted)) ||
+      patch.segments.length + (patch.transient ? 1 : 0) + (patch.interrupted?.length ?? 0) > BODY_PAGE_FRAGMENTS)
     throw Error('terminal-body-page-revision');
   if (![patch.first, patch.last, patch.start].every(Number.isSafeInteger) || patch.first > patch.start || patch.start > patch.last ||
       patch.segments.length > patch.last - patch.start || typeof patch.follow !== 'boolean') throw Error('terminal-body-page-range');
@@ -73,7 +90,7 @@ export function decodeBodyPage(patch: BodyPagePatch, previous?: BodyPageRevision
     if (patch.base === undefined || !integer(segment) || !previous?.page.segments[segment]) throw Error('terminal-body-page-reference');
     return previous.page.segments[segment]!;
   });
-  const page = { first: patch.first, last: patch.last, start: patch.start, follow: patch.follow, segments };
+  const page = { first: patch.first, last: patch.last, start: patch.start, follow: patch.follow, segments, ...(patch.transient ? { transient: patch.transient } : {}), ...(patch.interrupted ? { interrupted: patch.interrupted } : {}) };
   if (Buffer.byteLength(JSON.stringify(page)) > BODY_PAGE_BYTES) throw Error('terminal-body-page-capacity');
   bodyWindows(page);
   return { revision: patch.revision, page };
@@ -160,9 +177,14 @@ export function bodyWindows(page: BodyPage): readonly BodyWindow[] {
   if (known) return known;
   if (![page.first, page.last, page.start].every(Number.isSafeInteger) || page.first > page.start || page.start > page.last ||
       page.segments.length > page.last - page.start || typeof page.follow !== 'boolean') throw Error('terminal-body-page-range');
-  if (page.segments.length > 256 || Buffer.byteLength(JSON.stringify(page)) > 1024 * 1024 ||
-      page.segments.reduce((sum, segment) => sum + (segment.body?.context.nodes.length ?? 1), 0) > 8192) throw Error('terminal-body-page-capacity');
-  const windows = page.segments.map(segment => {
+  if (page.transient && (page.transient.role !== 'thinking' || page.start + page.segments.length !== page.last)) throw Error('terminal-body-transient-range');
+  if (page.interrupted && (!Array.isArray(page.interrupted) || page.interrupted.length > BODY_INTERRUPTED_LIMIT || page.interrupted.some((item, index) =>
+    !item || !integer(item.before) || item.before < page.start || item.before > page.start + page.segments.length ||
+    item.before < (page.interrupted![index - 1]?.before ?? page.start) || item.segment?.role !== 'thinking'))) throw Error('terminal-body-transient-range');
+  const segments = bodyPageSegments(page);
+  if (segments.length > 256 || Buffer.byteLength(JSON.stringify(page)) > 1024 * 1024 ||
+      segments.reduce((sum, segment) => sum + (segment.body?.context.nodes.length ?? 1), 0) > 8192) throw Error('terminal-body-page-capacity');
+  const windows = segments.map(segment => {
     if (!segment.blockId || segment.blockId.length > 512 || (segment.groupId !== undefined && (!segment.groupId || segment.groupId.length > 512)) || !integer(segment.contentOffset) || Buffer.byteLength(segment.text) > BODY_FRAGMENT_BYTES ||
         (segment.body && !validateBodyMetadata(segment.body, segment.contentOffset, segment.text.length))) throw Error('terminal-body-source-invalid');
     const body = segment.body;

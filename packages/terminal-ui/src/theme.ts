@@ -21,4 +21,4 @@ export const tone = {
   codeType: RGBA.fromIndex(3),
 } as const;
 
-export const spacing = { content: 2, marker: 4, userInner: 2, scrollbar: 1, nested: 2, frame: 0, frameInner: 1, welcomeInner: 3 } as const;
+export const spacing = { content: 2, marker: 3, userInner: 2, scrollbar: 1, nested: 2, frame: 0, frameInner: 1, welcomeInner: 3 } as const;

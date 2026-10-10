@@ -672,7 +672,7 @@ try {
     await show({ kind: 'conversation', title: '空白差异行', conversationId: `blank-diff-${name}-${width}-${reverse}`, connected: true });
     const segments: BodyPage['segments'][number][] = [];
     const producer = new TerminalOutputProjection(async segment => { segments.push(segment); }, async () => {}, async error => { throw error; },
-      { work: action => action(), amend: async () => {}, seal: async () => {} });
+      { get last() { return segments.length; }, work: action => action(), amend: async () => {}, seal: async () => {} });
     const artifact = { kind: 'file-diff' as const, path: 'blank.ts', operation: 'modified' as const,
       changeStats: { kind: 'exact' as const, addedLines: contents.length, removedLines: 0 },
       hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: contents.length,

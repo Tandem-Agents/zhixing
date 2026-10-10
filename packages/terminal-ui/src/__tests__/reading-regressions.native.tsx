@@ -45,6 +45,45 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   } finally { clearInterval(tick); await root?.dispose(); test.renderer.destroy(); }
 }
 try {
+  await scenario('thinking-source-copy', async h => {
+    for (const text of ['alpha\n\nbeta', 'x'.repeat(150)]) {
+      h.test.renderer.clearSelection();
+      await h.publish({ first: 0, start: 0, last: 1, follow: true, segments: [{ blockId: text.slice(0, 5), role: 'thinking', contentOffset: 20, final: true, text }] });
+      const leaf = h.nodes().find((n: any) => n.constructor.name === 'BodyTextRenderable' && n.plainText.startsWith(text.slice(0, 5)));
+      assert.ok(leaf);
+      const lines = leaf.plainText.split('\n'); assert.equal(lines.length, 2);
+      await h.test.mockMouse.drag(leaf.x, leaf.y, leaf.x + lines[1].length, leaf.y + 1); await h.flush();
+      h.test.mockInput.pressKey('\x03'); await h.flush();
+      assert.equal(h.copies.at(-1), text, 'source blanks preserved; visual soft wraps omitted');
+    }
+  });
+  await scenario('required-footer-feedback', async h => {
+    await h.show({ ...h.view, displayPaused: true, displayGap: true });
+    h.root.receive({ type: 'task-status', status: { noticeGap: 'TASK_NOTICE_GAP', summary: { conversationId: h.view.conversationId, state: 'error', text: 'TASK_FAILED' } } });
+    h.root.receive({ type: 'process-status', status: { conversationId: h.view.conversationId, view: { revision: 1, phase: 'RUNNING', activity: 'running', notice: 'PROCESS_GAP', tools: ['optional tool'], children: [{ id: 'child', parentToolCallId: 'parent', label: 'CHILD_FAILED', status: 'failed' }], usage: {} } } });
+    await h.flush();
+    const assertComplete = () => {
+      const text = h.test.captureCharFrame();
+      for (const value of ['正文保留已暂停', 'TASK_NOTICE_GAP', 'TASK_FAILED', 'PROCESS_GAP', 'CHILD_FAILED']) assert.ok(text.includes(value), value);
+      assert.ok(!text.includes('Esc 收起候选查看'));
+      const editor = h.nodes().find((n: any) => n.constructor.name === 'TerminalTextarea');
+      assert.equal(text.split('\n').findIndex((row: string) => row.includes('正文保留已暂停')), editor.parent.y - 1);
+    };
+    assertComplete(); h.capture('normal');
+    await h.test.mockInput.typeText('/'); await h.flush(); h.capture('candidates');
+    h.test.mockInput.pressEscape(); await new Promise(resolve => setTimeout(resolve, 25));
+    await h.flush(); assertComplete(); h.capture('candidates-closed');
+  }, 24);
+  await scenario('history-gap-recovery-guidance', async h => {
+    await h.show({ kind: 'history', title: '历史', conversationId: h.view.conversationId, connected: false, displayPaused: true, displayGap: true });
+    let text = h.test.captureCharFrame();
+    for (const value of ['历史展示已暂停', '缺口', '重新打开历史']) assert.ok(text.includes(value), value);
+    assert.ok(!text.includes('Ctrl+R')); h.capture('paused');
+    h.requests.length = 0; h.test.mockInput.pressKey('\x12'); await h.flush();
+    assert.ok(!h.requests.some((a: TerminalAction) => a.kind === 'display-retry'));
+    await h.show({ kind: 'history', title: '历史', conversationId: h.view.conversationId, connected: false, displayGap: true });
+    text = h.test.captureCharFrame(); assert.ok(text.includes('历史展示存在缺口')); h.capture('gap');
+  }, 24);
   await scenario('configuration-action-group-boundaries', async h => {
     for (const width of [120, 45]) for (const section of [undefined, 'Actions']) {
       h.test.resize(width, 24);

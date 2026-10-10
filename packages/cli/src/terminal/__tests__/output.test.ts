@@ -3,11 +3,131 @@ import { TerminalOutputProjection, type TerminalOutputBody } from '../output.js'
 import { processArtifactText, processArtifactLines, processArtifactSpans } from '../process-presentation.js';
 import type { ConversationOutputSource } from '../../runtime/conversation-output.js';
 import type { AgentYield } from '@zhixing/core/loop';
+import { bodyPageSegments, decodeBodyPage, encodeBodyPage, type BodySegment } from '@zhixing/terminal-ui/body-model';
 const source = { conversationId: 'synthetic', turnId: 'turn', kind: 'delta' } as ConversationOutputSource;
-const body: TerminalOutputBody = { work: action => action(), amend: async () => {}, seal: async () => {} };
+const body: TerminalOutputBody = { last: 0, work: action => action(), amend: async () => {}, seal: async () => {} };
 afterEach(() => vi.useRealTimers());
 
 describe('terminal output projection', () => {
+  it('acknowledges a recovered live delta after publication without waiting for its future block-end', async () => {
+    vi.useFakeTimers();
+    const append = vi.fn(async () => {}), updated = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(append, updated, async () => {}, body);
+    projection.updateThinking({ blockId: 'recovered', role: 'thinking', text: 'live' }, 0, false);
+    let finished = false; const drain = projection.drain().then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(45); await drain;
+    expect(finished).toBe(true); expect(append).not.toHaveBeenCalled(); expect(updated).toHaveBeenCalledOnce();
+    projection.updateThinking({ blockId: 'recovered', role: 'thinking', text: 'live end' }, 0, true);
+    const final = projection.drain(); await vi.advanceTimersByTimeAsync(45); await final;
+    expect(append).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ text: 'live end', final: true }), true);
+    await projection.close();
+  });
+  it('publishes live thinking in queue order and replaces it only after final append acknowledgement', async () => {
+    vi.useFakeTimers();
+    const segments: import('@zhixing/terminal-ui/body-model').BodySegment[] = [];
+    let acknowledge: (() => void) | undefined;
+    const projection = new TerminalOutputProjection(async segment => {
+      await new Promise<void>(resolve => { acknowledge = resolve; }); segments.push(segment);
+    }, async () => {}, async () => {}, body);
+    const page = () => ({ first: 0, last: segments.length, start: 0, follow: true, segments: [...segments] });
+    projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'first' }, 90, false);
+    await vi.advanceTimersByTimeAsync(45);
+    expect(segments).toHaveLength(0);
+    expect(projection.projectPage(page()).transient).toMatchObject({ blockId: 'thinking', text: 'first', contentOffset: 90 });
+    projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'last' }, 96, true);
+    projection.updateThinking({ blockId: 'thinking-2', role: 'thinking', text: 'next' }, 0, false);
+    await vi.advanceTimersByTimeAsync(45);
+    expect(projection.projectPage(page()).transient?.text).toBe('last');
+    acknowledge!(); await vi.advanceTimersByTimeAsync(45);
+    const next = projection.projectPage(page());
+    expect(next.segments[0]).toMatchObject({ blockId: 'thinking', text: 'last', contentOffset: 96, final: true });
+    expect(next.transient?.blockId).toBe('thinking-2');
+    const offPage = projection.projectPage({ first: 0, last: 10, start: 0, follow: false, segments: [segments[0]!] });
+    expect(offPage.transient).toBeUndefined();
+    await projection.close();
+  });
+  it('retains a bounded failed thinking tail without pretending append succeeded', async () => {
+    vi.useFakeTimers();
+    const gap = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(async () => { throw Error('disk'); }, async () => {}, gap, body);
+    projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'retained' }, 8, true);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(projection.paused).toBe(true); expect(gap).toHaveBeenCalledOnce();
+    expect(projection.projectPage({ first: 0, last: 0, start: 0, follow: true, segments: [] }).interrupted?.[0]?.segment.text).toBe('retained');
+    await projection.close();
+  });
+  it('keeps an interrupted tail before new output through recovery instead of moving it to the latest message', async () => {
+    vi.useFakeTimers(); let fail = true;
+    const segments: import('@zhixing/terminal-ui/body-model').BodySegment[] = [];
+    const projection = new TerminalOutputProjection(async segment => { if (fail) throw Error('disk'); segments.push(segment); }, async () => {}, async () => {}, body);
+    const page = () => ({ first: 0, last: segments.length, start: 0, follow: true, segments: [...segments] });
+    projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'interrupted' }, 10, true);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(projection.projectPage(page()).interrupted?.[0]?.before).toBe(0);
+    fail = false; projection.resume();
+    projection.appendProcessBlock({ blockId: 'later', role: 'process', text: 'after recovery' });
+    const done = projection.drain(); await vi.advanceTimersByTimeAsync(50); await done;
+    projection.updateThinking({ blockId: 'next-thinking', role: 'thinking', text: 'next' }, 0, false);
+    await vi.advanceTimersByTimeAsync(50);
+    const result = projection.projectPage(page());
+    expect(result.interrupted).toMatchObject([{ before: 0, segment: { text: 'interrupted' } }]);
+    expect(result.interrupted![0]!.segment.blockId).not.toBe('thinking');
+    expect(result.segments.map(segment => segment.text)).toEqual(['after recovery']);
+    expect(result.transient?.text).toBe('next');
+    await projection.close();
+  });
+  it('retires a paused in-flight thinking overlay when that actual append succeeds', async () => {
+    vi.useFakeTimers(); let acknowledge!: () => void;
+    const projection = new TerminalOutputProjection(() => new Promise<void>(resolve => { acknowledge = resolve; }), async () => {}, async () => {}, body);
+    projection.updateThinking({ blockId: 'thinking', role: 'thinking', text: 'retained' }, 0, true);
+    await vi.advanceTimersByTimeAsync(50); projection.pause();
+    acknowledge(); await projection.settlePaused();
+    expect(projection.projectPage({ first: 0, last: 0, start: 0, follow: true, segments: [] }).interrupted).toBeUndefined();
+    await projection.close();
+  });
+  it('retains successive failed tails at their actual boundaries even without an intervening page read', async () => {
+    vi.useFakeTimers(); let fail = true;
+    const segments: BodySegment[] = [], gap = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(async segment => { if (fail) throw Error('disk'); segments.push(segment); },
+      async () => {}, gap, { ...body, get last() { return segments.length; } });
+    const page = (start = 0, follow = false) => projection.projectPage({ first: 0, last: segments.length, start, follow, segments: segments.slice(start, start + 4) });
+    try {
+      for (let i = 0; i < 3; i++) {
+        if (i) {
+          projection.resume(); fail = false;
+          projection.appendProcessBlock({ blockId: `middle-${i}`, role: 'process', text: `middle-${i}` });
+          await vi.advanceTimersByTimeAsync(50);
+        }
+        fail = true;
+        projection.updateThinking({ blockId: `thinking-${i}`, role: 'thinking', text: `failed-${i}` }, i * 10, true);
+        await vi.advanceTimersByTimeAsync(50); expect(projection.paused).toBe(true);
+      }
+      // The first page read happens AFTER all three failures; it cannot move
+      // older tails to the boundary of the latest failure.
+      const first = decodeBodyPage(encodeBodyPage(page(), 1)).page;
+      expect(bodyPageSegments(first).map(segment => segment.text)).toEqual(['failed-0', 'middle-1', 'failed-1']);
+      const second = decodeBodyPage(encodeBodyPage(page(1), 2)).page;
+      expect(bodyPageSegments(second).map(segment => segment.text)).toEqual(['failed-1', 'middle-2', 'failed-2']);
+      projection.resume();
+      projection.updateThinking({ blockId: 'overflow', role: 'thinking', text: 'never admitted' }, 0, false);
+      expect(projection.paused).toBe(true);
+      expect(gap).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'terminal-output-retained-capacity' }));
+      expect(bodyPageSegments(page()).map(segment => segment.text)).toContain('failed-0');
+      expect(bodyPageSegments(page(1)).map(segment => segment.text)).toContain('failed-2');
+      await projection.reset(() => true); expect(page().interrupted).toBeUndefined();
+    } finally { await projection.close(); }
+  });
+  it('does not retire a retained tail when pause skips a queued physical append', async () => {
+    vi.useFakeTimers(); let release!: () => void;
+    const append = vi.fn(async () => {});
+    const projection = new TerminalOutputProjection(append, async () => {}, async () => {}, { ...body,
+      work: async action => { await new Promise<void>(resolve => { release = resolve; }); await action(); } });
+    projection.updateThinking({ blockId: 'held', role: 'thinking', text: 'visible' }, 0, true);
+    await vi.advanceTimersByTimeAsync(50); projection.pause(); release(); await projection.settlePaused();
+    expect(append).not.toHaveBeenCalled();
+    expect(projection.projectPage({ first: 0, last: 0, start: 0, follow: true, segments: [] }).interrupted?.[0]?.segment.text).toBe('visible');
+    await projection.close();
+  });
   it.each([
     ['trailing', ['alpha();', '']], ['only', ['']], ['two', ['', '']],
     ['middle', ['alpha();', '', 'omega();']], ['fragmented', ['界'.repeat(12000), '']],
@@ -164,7 +284,7 @@ describe('terminal output projection', () => {
     const seal = vi.fn(async () => {}), gap = vi.fn(async () => {});
     let latest: import('@zhixing/terminal-ui/protocol').TerminalDisplaySegment | undefined;
     const projection = new TerminalOutputProjection(async segment => { latest = segment; }, async () => {}, gap, {
-      work: action => action(), seal,
+      last: 0, work: action => action(), seal,
       amend: async (_block, change) => {
         const next = change.project(latest!.contentOffset, latest!.text.length, latest!.body);
         if (next.end) await new Promise<void>(resolve => { release = resolve; });

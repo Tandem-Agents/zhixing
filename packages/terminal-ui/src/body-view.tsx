@@ -5,8 +5,8 @@ import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, ScrollBoxRenderable,
   TextRenderable, type CliRenderer, type TextChunk, type MouseEvent,
 } from '@opentui/core';
-import { BODY_STYLE, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
-import { bodyCell, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
+import { BODY_STYLE, bodyPageSegments, sameBodyPageContent, sourceLineStarts, type BodyAnchor, type BodyPage, type BodySegment } from './body-model.js';
+import { bodyCell, bodyBlockGaps, bodyRenderBlocks, retainBodyBlocks, renderedToSource, sourceToRendered, type BodyRenderBlock } from './body/layout.js';
 import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
 
@@ -105,7 +105,7 @@ export function BodyView(props: BodyViewProps) {
   const contentPage = createMemo<BodyPage>(previous => previous && sameBodyPageContent(previous, props.page) ? previous : props.page);
   const projected = new Map<BodySegment, readonly BodyRenderBlock[]>();
   const blocks = createMemo<readonly BodyRenderBlock[]>(previous => retainBodyBlocks(
-    bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, bodyBlockGeometry(block, contentWidth()).textWidth)), previous));
+    bodyBlockGaps(bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, bodyBlockGeometry(block, contentWidth()).textWidth)).filter(block => block.role !== 'thinking' || block.text.length > 0)), previous));
   const blockIndex = createMemo(() => new Map(blocks().map(block => [block.key, block])));
   const blockKeys = createMemo(() => [...blockIndex().keys()]);
   const mounted = new Map<string, { block: BodyRenderBlock; view: BodyTextRenderable }>();
@@ -158,7 +158,8 @@ export function BodyView(props: BodyViewProps) {
       top = page.follow ? Math.max(0, (items.at(-1)?.top ?? 0) + (items.at(-1)?.height ?? 0) - height) : 0;
       const anchor = props.anchor;
       if (!page.follow && anchor) {
-        const index = blocks().findIndex(block => sourceToRendered(block, anchor) !== undefined);
+        let index = blocks().findIndex(block => sourceToRendered(block, anchor) !== undefined);
+        if (index < 0) index = blocks().findIndex(block => block.blockId === anchor.blockId && block.node.from > anchor.contentOffset);
         if (index >= 0) top = items[index]!.top;
       }
     }
@@ -333,6 +334,12 @@ export function BodyView(props: BodyViewProps) {
     if (align === 'bottom' || (props.page.follow && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
     else if (saved) {
+      // A bounded thinking tail may have evicted the old anchor. Keep its
+      // viewport offset at that same block's first retained source position.
+      if (![...mounted.values()].some(entry => sourceToRendered(entry.block, saved!) !== undefined)) {
+        const retained = [...mounted.values()].find(entry => entry.block.blockId === saved!.blockId && !entry.view.isDestroyed);
+        if (retained && saved.contentOffset < retained.block.node.from) saved = { blockId: saved.blockId, contentOffset: retained.block.node.from };
+      }
       for (const entry of mounted.values()) {
         const offset = sourceToRendered(entry.block, saved);
         if (offset === undefined || entry.view.isDestroyed) continue;
@@ -377,6 +384,9 @@ export function BodyView(props: BodyViewProps) {
         }
         const restored = props.renderer.getSelection();
         selectionOwner = restored ?? undefined; selectionGesture = restored ? gesture(restored) : undefined;
+      } else {
+        selection = undefined; selectionOwner = undefined; selectionGesture = undefined;
+        props.renderer.clearSelection(); props.onError('所选内容已离开保留窗口，选区已解除；剪贴板未改变。');
       }
     }
   };
@@ -389,7 +399,21 @@ export function BodyView(props: BodyViewProps) {
       if (!current) return '';
       const selected = current.parts.map(part => {
         const block = (mounted.get(part.key)?.block ?? blockIndex().get(part.key))!;
-        return { block, text: block.text.slice(sourceToRendered(block, part.from)! + part.fromBias, sourceToRendered(block, part.to)! + part.toBias) };
+        if (block.role === 'thinking') {
+          // Thinking hides source blank lines and inserts visual soft wraps.
+          // Copy the retained source interval, not those transformed runs.
+          const text = bodyPageSegments(contentPage()).filter(segment => segment.blockId === block.blockId).map(segment =>
+            segment.text.slice(Math.max(0, part.from.contentOffset - segment.contentOffset),
+              Math.max(0, Math.min(segment.text.length, part.to.contentOffset - segment.contentOffset)))).join('');
+          return { block, text };
+        }
+        const from = sourceToRendered(block, part.from)! + part.fromBias, to = sourceToRendered(block, part.to)! + part.toBias;
+        let at = 0;
+        const text = block.runs.map(run => {
+          const start = at; at += run.text.length;
+          return run.text.slice(Math.max(0, from - start), Math.max(0, Math.min(run.text.length, to - start)));
+        }).join('');
+        return { block, text };
       });
       return selected.map((item, index) => {
         const previous = selected[index - 1];
