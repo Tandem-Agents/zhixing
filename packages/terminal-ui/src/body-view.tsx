@@ -1,5 +1,6 @@
 import { tone, spacing } from './theme.js';
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, type JSX } from 'solid-js';
+import { bodyBlockGeometry } from './body/geometry.js';
 import { extend } from '@opentui/solid';
 import { StyledText, TextBuffer, TextBufferView, resolveRenderLib, createTextAttributes, ScrollBoxRenderable,
   TextRenderable, type CliRenderer, type TextChunk, type MouseEvent,
@@ -68,6 +69,7 @@ export interface BodyViewHandle {
   close(): Promise<void>;
 }
 export interface BodyViewProps {
+  readonly header?: JSX.Element;
   readonly page: BodyPage; readonly width: number; readonly height: number;
   readonly renderer: CliRenderer;
   readonly anchor?: BodyAnchor;
@@ -95,11 +97,15 @@ function styled(block: BodyRenderBlock): StyledText {
 /** The existing root remains the only input/screen owner. This component owns
  * only a finite body page, its native measurements and its reading position. */
 export function BodyView(props: BodyViewProps) {
+  const contentWidth = () => Math.max(1, props.width - spacing.scrollbar - 2 * spacing.content);
+  const [headerHeight, setHeaderHeight] = createSignal(0);
+  const showHeader = () => props.header && props.page.start === props.page.first;
+  const prefixHeight = () => showHeader() ? headerHeight() : 0;
   // Keep live range counters for navigation without reflowing unchanged text.
   const contentPage = createMemo<BodyPage>(previous => previous && sameBodyPageContent(previous, props.page) ? previous : props.page);
   const projected = new Map<BodySegment, readonly BodyRenderBlock[]>();
   const blocks = createMemo<readonly BodyRenderBlock[]>(previous => retainBodyBlocks(
-    bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, Math.max(1, props.width - 4))), previous));
+    bodyRenderBlocks(contentPage(), projected).map(block => processBodyBlock(block, bodyBlockGeometry(block, contentWidth()).textWidth)), previous));
   const blockIndex = createMemo(() => new Map(blocks().map(block => [block.key, block])));
   const blockKeys = createMemo(() => [...blockIndex().keys()]);
   const mounted = new Map<string, { block: BodyRenderBlock; view: BodyTextRenderable }>();
@@ -121,7 +127,7 @@ export function BodyView(props: BodyViewProps) {
   // store and reactive subtree for every offscreen paragraph. Fixed-height
   // placeholders preserve the same scroll geometry and source page.
   const geometry = createMemo(() => {
-    const width = props.width; let top = 0;
+    const width = contentWidth(); let top = prefixHeight();
     return blocks().map(block => {
       let cached = measured.get(block);
       if (!cached || cached.width !== width) {
@@ -130,15 +136,14 @@ export function BodyView(props: BodyViewProps) {
           return Math.max(1, wrapMeasure.getVirtualLineCount());
         };
         let height = 1;
+        const layout = bodyBlockGeometry(block, width);
         if (block.node.kind === 'table') {
-          const columns = block.node.columns ?? 1, stacked = width < columns * 6;
-          const cellWidth = stacked ? width - 2 : Math.floor((width - 2) / columns);
+          const columns = block.node.columns ?? 1, { stacked, cellWidth } = layout;
           const sizes = Array.from({ length: columns }, (_, cell) => rows(bodyCell(block, cell).text, cellWidth - 1) +
             (stacked && !block.node.header ? rows(`${block.node.labels?.[cell] ?? `列 ${cell + 1}`}：`, cellWidth - 1) : 0));
           height = 1 + (stacked ? sizes.reduce((sum, size) => sum + size, 0) : Math.max(1, ...sizes));
         } else if (!['rule', 'space'].includes(block.node.kind)) {
-          const indent = block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) * spacing.nested : 0;
-          height = rows(block.text, width - spacing.marker - indent - (block.node.decoration?.length ?? 0));
+          height = rows(block.text, layout.textWidth);
         }
         cached = { width, height }; measured.set(block, cached);
       }
@@ -165,6 +170,7 @@ export function BodyView(props: BodyViewProps) {
   let saved: BodyAnchor | undefined = props.page.follow ? undefined : props.anchor, align: 'top' | 'bottom' | undefined;
   let lastPage: BodyPage | undefined, lastWidth = 0, lastHeight = 0;
   let restorePending = true;
+  let layoutReady = false;
   let selection: { from: BodyAnchor; to: BodyAnchor; anchor: SourcePoint; focus: SourcePoint; behavior: NativeSelection['behavior'];
     parts: { key: string; from: BodyAnchor; to: BodyAnchor; fromBias: number; toBias: number }[] } | undefined;
   let selectionOwner: NativeSelection | undefined, selectionGesture: string | undefined;
@@ -319,6 +325,10 @@ export function BodyView(props: BodyViewProps) {
   };
   const restore = () => {
     if (!box || disposed || !restorePending) return;
+    // A parent size callback updates the child's explicit width after native
+    // layout. Give that width one complete layout before reading its line map.
+    // Otherwise a narrow/wide transition restores with the previous wrapping.
+    if (!layoutReady) { layoutReady = true; props.renderer.requestRender(); return; }
     const scrollTop = box.scrollTop;
     if (align === 'bottom' || (props.page.follow && !saved)) box.scrollTo(box.scrollHeight);
     else if (align === 'top') box.scrollTo(0);
@@ -407,6 +417,7 @@ export function BodyView(props: BodyViewProps) {
       // nested size callbacks before the next frame; none may recapture from
       // the partially updated layout and replace it with a different row.
       restorePending = true;
+      layoutReady = false;
       props.renderer.requestRender();
     },
     close() {
@@ -456,13 +467,14 @@ export function BodyView(props: BodyViewProps) {
     },
   };
   createEffect(() => {
+    prefixHeight();
     const page = contentPage(), width = props.width, height = props.height;
     if (disposed) return;
     if (lastPage && (page !== lastPage || width !== lastWidth || height !== lastHeight)) {
       if (!page.follow && !align) saved = untrack(() => props.anchor ?? capture());
       else if (page.follow && !pauseRequested) saved = undefined;
     }
-    lastPage = page; lastWidth = width; lastHeight = height; restorePending = true;
+    lastPage = page; lastWidth = width; lastHeight = height; restorePending = true; layoutReady = false;
     props.renderer.requestRender();
   });
   createEffect(() => { if (!disposed) highlighter.setPage(blocks().filter(block => visible().has(block.key))); });
@@ -493,9 +505,9 @@ export function BodyView(props: BodyViewProps) {
     release();
     void highlighter.close().catch(() => {}); // close() exposes the same promise to the root lifecycle owner.
   });
-  const indent = (block: BodyRenderBlock) => block.node.kind === 'list' || block.node.kind === 'quote' ? Math.min(12, block.node.depth ?? 0) * spacing.nested : 0;
-  const stacked = (block: BodyRenderBlock) => props.width < (block.node.columns ?? 1) * 6;
-  const cellWidth = (block: BodyRenderBlock) => stacked(block) ? Math.max(1, props.width - 2) : Math.max(1, Math.floor((props.width - 2) / (block.node.columns ?? 1)));
+  const layout = (block: BodyRenderBlock) => bodyBlockGeometry(block, contentWidth());
+  const stacked = (block: BodyRenderBlock) => layout(block).stacked;
+  const cellWidth = (block: BodyRenderBlock) => layout(block).cellWidth;
   const Text = (value: { block: BodyRenderBlock; width?: number }) => {
     let current: BodyTextRenderable | undefined;
     const key = value.block.key;
@@ -514,6 +526,7 @@ export function BodyView(props: BodyViewProps) {
   };
   return <scrollbox ref={value => { box = value; }} width={Math.max(1, props.width)} height={Math.max(1, props.height)}
     scrollY scrollX={false} stickyScroll={false}
+    verticalScrollbarOptions={{ width: spacing.scrollbar, showArrows: false }}
     onMouseUp={event => { if (event.button === 0) queueMicrotask(finishBodySelection); }}
     onMouseDown={event => {
       if (event.button !== 0) return;
@@ -531,21 +544,22 @@ export function BodyView(props: BodyViewProps) {
       event.preventDefault(); event.stopPropagation();
       void handle.page(direction === 'up' ? -1 : 1, 3).catch(props.onError);
     }}>
+    <Show when={showHeader()}><box width={Math.max(1, props.width - spacing.scrollbar)} flexShrink={0} onSizeChange={function(this: import('@opentui/core').BoxRenderable) { setHeaderHeight(this.height); }}>{props.header}</box></Show>
     <For each={blockKeys()}>{key => {
       const block = createMemo(() => blockIndex().get(key)!);
-      return <box flexDirection="column" flexShrink={0} paddingLeft={indent(block())} paddingTop={block().gapBefore ?? 0}
+      return <box flexDirection="column" flexShrink={0} marginX={spacing.content} width={contentWidth()} paddingLeft={layout(block()).indent} paddingTop={block().gapBefore ?? 0}
       height={heights().get(key)}>
       <Show when={visible().has(key)}>
-      <Show when={block().node.kind === 'rule'}><text content={'─'.repeat(Math.max(1, props.width - 2))} fg={tone.dim} selectable={false} /></Show>
+      <Show when={block().node.kind === 'rule'}><text marginLeft={layout(block()).leading} content={'─'.repeat(layout(block()).bodyWidth)} fg={tone.dim} selectable={false} /></Show>
       <Show when={!['rule', 'space'].includes(block().node.kind)}>
-      <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0} backgroundColor={block().role === 'user' ? tone.history : undefined}>
-        <text width={Math.min(spacing.marker, Math.max(0, props.width - indent(block()) - 1))} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : block().node.kind === 'heading' ? '# ' : ''}
+      <Show when={block().node.kind === 'table'} fallback={<box flexDirection="row" flexShrink={0} paddingRight={layout(block()).trailing} backgroundColor={block().role === 'user' ? tone.history : undefined}>
+        <text width={layout(block()).leading} content={block().role === 'user' ? '' : block().node.anchor ? ' ◆ ' : block().node.kind === 'quote' ? ' │ ' : block().node.kind === 'heading' ? '# ' : ''}
           fg={block().node.anchor ? tone[processBodyColor(block().role, block().text) ?? 'brand'] : tone.dim} selectable={false} />
         <Show when={block().node.decoration}><text width={block().node.decoration?.length ?? 0}
           content={block().node.from === block().node.origin ? block().node.decoration : ''} fg={tone.dim} selectable={false} /></Show>
-        <Text block={block()} width={Math.max(1, props.width - spacing.marker - indent(block()) - (block().node.decoration?.length ?? 0))} />
+        <Text block={block()} width={layout(block()).textWidth} />
       </box>}>
-        <box flexDirection={stacked(block()) ? 'column' : 'row'} flexShrink={0} border={['bottom']} borderColor={tone.border}>
+        <box marginLeft={layout(block()).leading} width={layout(block()).bodyWidth} flexDirection={stacked(block()) ? 'column' : 'row'} flexShrink={0} border={['bottom']} borderColor={tone.border}>
           <For each={Array.from({ length: block().node.columns ?? 1 }, (_, i) => i)}>{cell =>
             <box width={cellWidth(block())} paddingRight={1} flexShrink={0} flexDirection="column">
               <Show when={stacked(block()) && !block().node.header}><text selectable={false} fg={tone.dim} wrapMode="char"

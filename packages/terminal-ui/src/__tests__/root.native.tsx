@@ -92,7 +92,7 @@ try {
   checks.push('native transparent borders obey every viewport edge and nested clips without changing visible cells');
   await show({ kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
   assert.ok(!text().includes('离线'));
-  assert.match(text().split('\n')[0]!, /^╭──── ╲ .*╮$/);
+  assert.match(text().split('\n')[0]!.slice(0, -1), /^╭──── ╲ .*╮$/);
   await test.mockInput.typeText('启动时输入'); await flush();
   const startingActions = actions.length; test.mockInput.pressEnter(); await flush();
   assert.equal(editor().plainText, '启动时输入');

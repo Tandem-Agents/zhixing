@@ -38,9 +38,14 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
     createEffect: (effect: () => void) => { effects.push(effect); }, onCleanup: (cleanup: () => void) => { cleanups.push(cleanup); }, For, Show,
   };
   const dependencies: Record<string, unknown> = { 'solid-js': solid, '@opentui/core': core, '@opentui/solid': { extend() {} },
-    './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2 } },
+    './theme.js': { tone: { brand: 'cyan', dim: 'gray', history: 'gray', text: 'white' }, spacing: { marker: 4, nested: 2, content: 2, scrollbar: 1, userInner: 2 } },
     './body-model.js': model, './body/layout.js': layout, './process-model.js': processModel,
     './body/highlighting.js': { BodyHighlighter: class { setPage() {} get() {} async close() {} } } };
+  const geometry = {};
+  new Function('require', 'exports', ts.transpileModule(readFileSync(new URL('./geometry.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText)(() => dependencies['./theme.js'], geometry);
+  dependencies['./body/geometry.js'] = geometry;
   const jsx = (type: string | ((props: Record<string, unknown>) => unknown), props: Record<string, unknown> | null, ...children: unknown[]) => {
     const values = { ...props, children: children.length === 1 ? children[0] : children };
     if (typeof type === 'function') return type(values);
@@ -71,7 +76,7 @@ function mount(anchor?: model.BodyAnchor, follow = false) {
   for (const effect of effects) effect();
   return { handle: handle!, scroll, get reported() { return reported; },
     text: () => textViews.map(view => typeof view.content === 'string' ? view.content : view.content.chunks.map(chunk => chunk.text).join('')).join(''),
-    frame: () => { for (const frame of frames) frame(); },
+    frame: () => { for (let pass = 0; pass < 2; pass++) for (const frame of frames) frame(); },
     async close() { await handle?.close(); for (const cleanup of cleanups) cleanup(); expect(frames.size).toBe(0); } };
 }
 

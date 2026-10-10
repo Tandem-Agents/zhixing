@@ -4,14 +4,11 @@ import { tone, spacing } from './theme.js';
 import { cleanProcessText } from './process-model.js';
 
 /** Shared identity, frame and environment geometry. Pages supply only content. */
-export function SurfaceChrome(props: { view: TerminalView; width: number; height: number; availableHeight: number }) {
+export function SurfaceChrome(props: { view: TerminalView; width: number; height: number }) {
   const main = () => ['conversation', 'history', 'unavailable'].includes(props.view.kind);
   const branded = () => main() || props.view.configurationHome;
-  // Input, actions and the shared information bar have priority over decoration.
-  // These fixed chrome rows include its outer margin; remaining space is supplied
-  // by the root from the measured action area, not from a page-specific guess.
-  const brandedRows = () => 7 + (props.view.environment ? 3 : 0) + (props.view.chromeDetails?.length ? 1 + props.view.chromeDetails.length : 0);
-  const compact = () => props.height < 18 || props.width < 24 || (branded() && props.availableHeight < brandedRows());
+  // Page identity and real window size select this variant, never query results.
+  const compact = () => props.height < 20 || props.width < 24;
   const line = (value: string) => cleanProcessText(value).replace(/[\r\n]/gu, ' ');
   const status = () => props.view.connectionState === 'starting' ? '正在启动…'
     : props.view.connected === false ? '暂未连接 · 已有内容保留'

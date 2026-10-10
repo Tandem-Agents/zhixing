@@ -131,7 +131,6 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   let bodyBox: BoxRenderable | undefined;
   const bodyClosures = new Set<Promise<void>>();
   const [bodySize, setBodySize] = createSignal({ width: 78, height: 10 });
-  const [actionHeight, setActionHeight] = createSignal(0);
   const [contextHeight, setContextHeight] = createSignal(0);
   const [bodyAnchor, setBodyAnchor] = createSignal<BodyAnchor>();
   // Configuration and other overlays may omit the conversation identity. They
@@ -439,8 +438,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
   const App = () => <box width="100%" height="100%" flexDirection="column" onMouseDown={event => {
     if (event.button === 2) { event.preventDefault(); event.stopPropagation(); void pasteClipboard(); }
   }}>
-    <SurfaceChrome view={view()} width={size().width} height={size().height} availableHeight={size().height - actionHeight() - 1} />
-    <box ref={value => { bodyBox = value; }} marginX={spacing.content} flexGrow={1} minHeight={1}
+    <Show when={!isBody()}><SurfaceChrome view={view()} width={size().width} height={size().height} /></Show>
+    <box ref={value => { bodyBox = value; }} marginX={isBody() ? 0 : spacing.content} flexGrow={1} minHeight={1}
       onSizeChange={function(this: BoxRenderable) {
         bodyView?.beforeUpdate(); setBodySize({ width: this.width, height: this.height });
       }}>
@@ -451,6 +450,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
+          header={<SurfaceChrome view={view()} width={Math.max(1, bodySize().width - spacing.scrollbar)} height={size().height} />}
           hasEarlier={view().historyHasMore}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
@@ -467,7 +467,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           onReady={value => { skillsView = value; }} />
       </Show>
     </box>
-    <box flexDirection="column" flexShrink={0} onSizeChange={function(this: BoxRenderable) { setActionHeight(this.height); }}>
+    <box flexDirection="column" flexShrink={0}>
     <Show when={isBody()}><text height={1} marginX={spacing.content} fg={reading().retry ? tone.warn : tone.dim} selectable={false} wrapMode="none" truncate
       onMouseDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
         if (view().bodyRecovery === 'blocked') { void action({ kind: 'display-retry' }); return; }
