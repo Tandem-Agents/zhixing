@@ -91,6 +91,7 @@ export function beginRuntimeLogging(
     try { return await operation(); } finally { release(); }
   };
   const store: LogSink = local ? {
+    beginClose: deadline => local.beginClose?.(deadline),
     initialize: () => active(() => local.initialize()),
     append: records => active(() => local.append(records)),
     maintain: () => active(() => local.maintain()),

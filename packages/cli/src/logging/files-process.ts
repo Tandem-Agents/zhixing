@@ -219,6 +219,20 @@ class NodeFilesProcess implements LogFileSystem {
 /** Windows has an asynchronous native owner; POSIX isolates synchronous N-API. */
 export class LogFilesProcess implements LogFileSystem {
   readonly #files: LogFileSystem;
+  #deadline = Infinity;
+  #deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  #close: Promise<void> | undefined;
+  beginClose(deadline: number): void {
+    if (!Number.isSafeInteger(deadline) || deadline <= 0) throw Error('log-close-deadline');
+    if (deadline >= this.#deadline) return;
+    this.#deadline = deadline;
+    if (this.#files instanceof WindowsLogFiles) this.#files.beginClose(deadline);
+    clearTimeout(this.#deadlineTimer);
+    // The containing deadline also bounds an operation admitted before drain.
+    // Session/process close still requires its existing actual-exit fence.
+    this.#deadlineTimer = setTimeout(() => { void this.close().catch(() => {}); }, Math.max(0, deadline - Date.now()));
+    this.#deadlineTimer.unref();
+  }
   constructor(home: string, timeoutMs = 5000, options: LogFilesProcessOptions = {}) {
     this.#files =
       process.platform === "win32"
@@ -287,6 +301,7 @@ export class LogFilesProcess implements LogFileSystem {
     return this.#files.unlock();
   }
   close(): Promise<void> {
-    return this.#files.close();
+    clearTimeout(this.#deadlineTimer);
+    return this.#close ??= this.#files.close();
   }
 }

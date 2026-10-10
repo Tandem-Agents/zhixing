@@ -78,6 +78,7 @@ const close = (): void => {
 (parent ?? process).once("disconnect", close);
 parent?.on('error', close);
 (parent ?? process).on("message", (message: StoreWorkerInput) => {
+  if (message.kind === 'drain') { files.beginClose(message.deadline); return; }
   if (message.kind === "capacity") {
     const settle = pending.get(message.id);
     pending.delete(message.id); settle?.(message.result); return;

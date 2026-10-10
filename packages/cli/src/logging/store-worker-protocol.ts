@@ -4,6 +4,7 @@ import type { LogAppendReceipt, LogCapture, LogStatus, LogStorageFailure, LogFai
 export type StoreOperation = "initialize" | "append" | "maintain";
 export type CapacityReply = Exclude<DeviceCapacityAdmission, { kind: "granted" }> | { kind: "granted"; budget: DeviceCapacityBudget };
 export type StoreWorkerInput =
+  | { kind: "drain"; deadline: number }
   | { kind: "call"; id: number; operation: StoreOperation; records?: readonly LogCapture[] }
   | { kind: "capacity"; id: number; result: CapacityReply }
   | { kind: "close" };

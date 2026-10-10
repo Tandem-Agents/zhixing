@@ -20,7 +20,7 @@ import { LocalLogStore } from '@zhixing/core/logging/storage';
 import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
 import { createTerminalLogWorker, runTerminalLogObserver } from '../logging/terminal-worker.js';
-import { terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
+import { terminalCloseDeadline, terminalWriterDeadline, TERMINAL_LOG_EXIT_RESERVE_MS } from './close-budget.js';
 import { CoreHostConnection, defaultCoreHostConnectionDeps, CoreHostUnavailableError } from '../runtime/core-host-connection.js';
 import { connectReplHost } from '../runtime/repl-host-startup.js';
 import type { HostReloadOptions } from '../runtime/configuration-application.js';
@@ -362,8 +362,7 @@ class TerminalApplication {
 
   #receive(message: TerminalMessage): void {
     if (message.type === 'close') {
-      if (!Number.isSafeInteger(message.deadline)) throw Error('terminal-close-deadline');
-      this.#closeDeadline = this.#closeDeadline ? Math.min(this.#closeDeadline, message.deadline) : message.deadline;
+      this.#closeDeadline = terminalCloseDeadline(this.#closeDeadline, message.deadline);
       void this.#close(this.args.length ? 130 : 0, 'supervisor-close', false); return;
     }
     if (this.#abort.signal.aborted) return;
@@ -1879,7 +1878,7 @@ class TerminalApplication {
     let resolveClosing!: () => void;
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#channel.beginClose();
-    this.#closeDeadline ||= Date.now() + (code === 0 ? 2000 : 8000);
+    this.#closeDeadline = terminalCloseDeadline(this.#closeDeadline);
     this.#taskNotices?.dispose(); this.#tasks?.dispose(); this.#information?.dispose();
     this.#resumeNoticeDisplay();
     this.#abort.abort(); this.#decisionCommands?.invalidate(); this.#trustCandidates?.invalidate(); this.#skills?.close(); this.#skillCommands?.dispose(); this.#hosts.close(); this.#candidates.close(); this.#editor?.dispose(); this.#selection?.resolve({ itemId: 'cancelled', cancelCause: 'aborted' }); this.#selection = undefined;
@@ -1887,7 +1886,7 @@ class TerminalApplication {
       // A failed control lane cannot report its own exit. Closing the existing
       // transport immediately lets S start its shared finite recovery deadline
       // while this owner still attempts ordinary cleanup.
-      const notified = notify && this.transport.connected ? this.#channel.send({ type: 'exit', code, reason }) : undefined;
+      const notified = notify && this.transport.connected ? this.#channel.send({ type: 'exit', code, reason, deadline: this.#closeDeadline }) : undefined;
       void notified?.catch(() => this.transport.close());
       this.#controller?.dispose();
       this.#processSession.reset();

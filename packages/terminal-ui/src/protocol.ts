@@ -52,7 +52,7 @@ export type TerminalMessage =
   | { readonly type: "ready"; readonly frameId: number }
   | { readonly type: "application-ready" }
   | { readonly type: "close"; readonly deadline: number }
-  | { readonly type: "exit"; readonly code: number; readonly reason: string; readonly bootstrapFailure?: {
+  | { readonly type: "exit"; readonly code: number; readonly reason: string; readonly deadline?: number; readonly bootstrapFailure?: {
       readonly stage: 'writer-declaration' | 'module-load'; readonly durationMs: number;
       readonly category: string; readonly code?: string;
     } }

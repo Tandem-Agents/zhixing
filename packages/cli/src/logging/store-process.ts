@@ -22,6 +22,8 @@ export class IsolatedLogStore implements LogSink {
   #ready: Promise<void> = Promise.resolve();
   #exit: Promise<void> | undefined;
   #closed = false;
+  #deadline = Infinity;
+  #deadlineTimer?: ReturnType<typeof setTimeout>;
   #failure: LogFailureEvidence | undefined;
   #id = 0;
   #pending: { id: number; operation: StoreOperation; resolve(value: LogStatus | LogAppendReceipt): void; reject(error: Error): void } | undefined;
@@ -31,13 +33,22 @@ export class IsolatedLogStore implements LogSink {
   initialize(): Promise<LogStatus> { return this.#call("initialize") as Promise<LogStatus>; }
   append(records: readonly LogCapture[]): Promise<LogAppendReceipt> { return this.#call("append", records); }
   maintain(): Promise<LogStatus> { return this.#call("maintain") as Promise<LogStatus>; }
+  beginClose(deadline: number): void {
+    if (!Number.isSafeInteger(deadline) || deadline <= 0) throw Error('log-close-deadline');
+    this.#deadline = Math.min(this.#deadline, deadline);
+    clearTimeout(this.#deadlineTimer);
+    this.#deadlineTimer = setTimeout(() => { this.#admission?.abort.abort(); }, Math.max(0, this.#deadline - Date.now()));
+    this.#deadlineTimer.unref();
+    this.#send({ kind: 'drain', deadline: this.#deadline });
+  }
   async close(): Promise<void> {
     this.#closed = true;
+    clearTimeout(this.#deadlineTimer);
     this.#admission?.abort.abort();
     if (this.#worker) { this.#worker.ref(); this.#worker.channel?.ref(); this.#send({ kind: "close" }); await this.#exit; }
   }
   #call(operation: StoreOperation, records?: readonly LogCapture[]): Promise<LogStatus | LogAppendReceipt> {
-    if (this.#closed) return Promise.reject(new LogStorageError("owner-unavailable", "日志写者已关闭"));
+    if (this.#closed || Date.now() >= this.#deadline) return Promise.reject(new LogStorageError("owner-unavailable", "日志写者已关闭"));
     if (this.#pending) return Promise.reject(new LogStorageError("writer-busy", "日志事务仍在执行"));
     const releaseActivity = this.retainCapacityActivity?.();
     try { if (!this.#worker) this.#start(); }
@@ -72,6 +83,7 @@ export class IsolatedLogStore implements LogSink {
     const worker = supplied?.worker ?? fork(compiled ? built : new URL("./store-worker.ts", import.meta.url), [this.home, String(process.pid)], options);
     this.#ready = supplied?.ready ?? Promise.resolve();
     this.#worker = worker;
+    if (Number.isFinite(this.#deadline)) this.#send({ kind: 'drain', deadline: this.#deadline });
     worker.on("message", (message: StoreWorkerOutput) => {
       if (worker !== this.#worker) return;
       if (message.kind === "acquire") { void this.#acquire(worker, message); return; }
@@ -112,12 +124,12 @@ export class IsolatedLogStore implements LogSink {
   async #acquire(worker: LogStoreWorker, message: Extract<StoreWorkerOutput, { kind: "acquire" }>): Promise<void> {
     const abort = new AbortController();
     this.#admission = { id: message.id, abort };
-    if (this.#closed) abort.abort();
+    if (this.#closed || Date.now() >= this.#deadline) abort.abort();
     try {
       const result = await this.capacity.acquire(message.request, abort.signal);
       if (worker !== this.#worker) { if (result.kind === "granted") result.permit.release(); return; }
       if (result.kind !== "granted") { this.#send({ kind: "capacity", id: message.id, result }); return; }
-      if (worker !== this.#worker || this.#closed) { result.permit.release(); this.#send({ kind: "capacity", id: message.id, result: { kind: "cancelled" } }); return; }
+      if (worker !== this.#worker || this.#closed || abort.signal.aborted || Date.now() >= this.#deadline) { result.permit.release(); this.#send({ kind: "capacity", id: message.id, result: { kind: "cancelled" } }); return; }
       const budget = message.request.atomic;
       const step = result.permit.tryBegin(budget);
       if (!step) { result.permit.release(); this.#send({ kind: "capacity", id: message.id, result: { kind: "backpressured", blockedBy: "slots", retryAfterMs: 100 } }); return; }

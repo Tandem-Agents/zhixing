@@ -196,6 +196,8 @@ export interface LogPage {
   };
 }
 export interface LogSink {
+  /** Limit already admitted drain work without closing admission to queued records. */
+  beginClose?(deadline: number): void;
   /** Recovers and performs bounded maintenance before returning. */
   initialize(): Promise<LogStatus>;
   /** Includes bounded maintenance; callers need not maintain again after this commit. */

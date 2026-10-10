@@ -16,7 +16,7 @@ import { TerminalInstanceAssets, type TerminalIdentityResolver, type TerminalPro
 import { TerminalForegroundProcesses, type TerminalForegroundChild } from './foreground-process.js';
 import { LOG_STORE_FRAME_BYTES, type LogStoreWorkerFactory } from '../logging/store-process.js';
 import { resolveSelfExec } from '../serve/self-exec.js';
-import { terminalWriterDeadline } from './close-budget.js';
+import { terminalCloseDeadline, terminalWriterDeadline } from './close-budget.js';
 import { verifyTerminalAssets } from './verify-assets.js';
 
 type Role = 'recovery' | 'application' | 'ui';
@@ -435,7 +435,7 @@ class TerminalSupervisor {
               this.#privateHelpers.has(id) || this.#hosts.has(id) || typeof requestedDeadline !== 'number' || !Number.isSafeInteger(requestedDeadline) || requestedDeadline <= Date.now()) throw Error('terminal-helper-admission');
           // Each process samples wall time independently. Bound the granted
           // lifetime here rather than rejecting a valid peer a few ms ahead.
-          const deadline = Math.min(requestedDeadline, Date.now() + 5000);
+          const deadline = Math.min(requestedDeadline, Date.now() + 5000, this.#deadline ? terminalWriterDeadline(this.#deadline) : Infinity);
           this.#helperLive(authorization.role, role);
           if (this.#processes!.children.size >= 32 || (allowed[role] && this.#creationOwners.size >= 32)) {
             if (socket.writableLength > 4096) { fail(); return; }
@@ -529,7 +529,7 @@ class TerminalSupervisor {
               typeof id !== 'string' || !/^[a-f0-9-]{36}$/u.test(id) || this.#privateHelpers.has(id) ||
               typeof token !== 'string' || !/^[a-f0-9-]{36}$/u.test(token) || typeof endpoint !== 'string' || !isTerminalPrivateEndpoint(endpoint) ||
               typeof requestedDeadline !== 'number' || !Number.isSafeInteger(requestedDeadline) || requestedDeadline <= Date.now()) throw Error('terminal-helper-admission');
-          const deadline = Math.min(requestedDeadline, Date.now() + 5000);
+          const deadline = Math.min(requestedDeadline, Date.now() + 5000, this.#deadline ? terminalWriterDeadline(this.#deadline) : Infinity);
           this.#helperLive(authorization.role, role);
           if (this.#processes!.children.size >= 32 || this.#creationOwners.size >= 32) {
             clearTimeout(timeout);
@@ -755,7 +755,7 @@ class TerminalSupervisor {
       // The request is not an actual-exit receipt or permission to release it.
       item.exitRequested = true;
       const code = item.role === 'ui' && this.options.args.length && message.code === 0 ? 130 : message.code;
-      void this.#close(code, message.reason); return;
+      void this.#close(code, message.reason, message.deadline); return;
     }
     if (this.#sealed) return;
     if (message.type === 'hello') {
@@ -1004,9 +1004,17 @@ class TerminalSupervisor {
     return this.#bounded(Promise.all([owners, ...this.#helpers.filter(item => item.child.options.scope !== 'probe').map(item => item.drained)]), this.#remaining(25));
   }
 
-  #close(code: number, reason: string): Promise<void> {
+  #close(code: number, reason: string, proposedDeadline?: number): Promise<void> {
+    const deadline = terminalCloseDeadline(this.#deadline, proposedDeadline);
     if (!this.#result && code) this.#result = code;
-    if (this.#closing) return this.#closing;
+    if (this.#closing) {
+      if (deadline < this.#deadline) {
+        this.#deadline = deadline;
+        clearTimeout(this.#deadlineTimer);
+        this.#deadlineTimer = setTimeout(() => process.exit(this.#result || 75), Math.max(0, deadline - Date.now()));
+      }
+      return this.#closing;
+    }
     // Publish the single close promise before transport/abort callbacks can
     // synchronously re-enter this method on an already broken connection.
     let resolveClosing!: () => void;
@@ -1018,7 +1026,7 @@ class TerminalSupervisor {
     // Preserve the first finite lifecycle cause before logging is drained.
     // Observation failure must not re-enter or delay this closing path.
     try { this.options.records?.record({ event: 'terminalLifecycle', data: { instance: this.instance, phase: 'closing', reason, exitCode: this.#result } }); } catch { /* Close remains authoritative. */ }
-    this.#deadline = Date.now() + (this.#result === 0 ? 2000 : 8000);
+    this.#deadline = deadline;
     // The deadline also covers unknown native creation or in-process cleanup.
     // Failure cannot authorize R while an old writer remains unproved.
     this.#deadlineTimer = setTimeout(() => process.exit(this.#result || 75), Math.max(0, this.#deadline - Date.now()));
@@ -1044,11 +1052,12 @@ class TerminalSupervisor {
       if (!this.#result && writers.some(item => item.exited && item.code !== 0 &&
         !(item.cancelledBeforeListening && item.child.cancelled))) this.#result = 74;
       let drained = await this.#bounded(Promise.all(writers.map(item => item.drained)), this.#remaining(500));
-      // N's death revokes its creation capability and terminates each directly
-      // held helper. Its files cannot be collected merely because N exited.
+      // N/U exiting does not end S's logging owner. Its lazy helpers may still
+      // be admitted or writing. Fence the owner before judging their lifetime.
+      await this.#bounded(Promise.allSettled([loggingDrain]), Math.max(0, terminalWriterDeadline(this.#deadline) - Date.now()));
       const privateDrained = await this.#bounded(Promise.all([...this.#privateHelpers.values()].filter(({ child }) =>
         process.platform === 'win32' || child.options.scope !== 'probe').map(({ child }) =>
-        new Promise<void>(resolve => child.once('close', resolve)))), this.#remaining(500));
+        new Promise<void>(resolve => child.once('close', resolve)))), Math.max(0, terminalWriterDeadline(this.#deadline) - Date.now()));
       if (!privateDrained && !this.#result) this.#result = 74;
       const writersSettled = await this.#bounded(Promise.all([...this.#writerSettlements]), this.#remaining(1000));
       if (!writersSettled && !this.#result) this.#result = 74;

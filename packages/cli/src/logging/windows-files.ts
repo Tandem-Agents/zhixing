@@ -16,6 +16,9 @@ export class WindowsLogFiles implements LogFileSystem {
   #release: (() => Promise<void>) | undefined;
   #readOnly = true;
   #closed = false;
+  #deadline = Infinity;
+  beginClose(deadline: number): void { this.#deadline = Math.min(this.#deadline, deadline); }
+  #remaining(limit: number): number { return Math.max(0, Math.min(limit, this.#deadline - Date.now())); }
   #legacy: LegacyLogFiles | undefined;
   constructor(home: string, timeout: number, private readonly createSession?: () => CheckpointFilesystemSession) {
     this.#home = home;
@@ -139,12 +142,12 @@ export class WindowsLogFiles implements LogFileSystem {
   }
   async tryLock(): Promise<boolean> {
     if (this.#release) throw Error("日志互斥不可重入");
-    this.#release = await this.#root(true).waitLock("writer.lock", 2000);
+    this.#release = await this.#root(true).waitLock("writer.lock", this.#remaining(2000));
     return this.#release !== undefined;
   }
   async tryReadLock(): Promise<boolean> {
     if (this.#release) throw Error("日志互斥不可重入");
-    this.#release = await this.#root().waitLock("writer.lock", 2000, "shared");
+    this.#release = await this.#root().waitLock("writer.lock", this.#remaining(2000), "shared");
     return this.#release !== undefined;
   }
   async unlock(): Promise<void> {
@@ -164,6 +167,6 @@ export class WindowsLogFiles implements LogFileSystem {
   }
   async close(): Promise<void> {
     this.#closed = true;
-    await this.#session?.close();
+    await this.#session?.close(this.#remaining(this.#timeout));
   }
 }

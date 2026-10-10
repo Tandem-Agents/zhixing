@@ -6,6 +6,26 @@ import { LogAppendIndeterminateError, LogStorageError } from "@zhixing/core/logg
 
 vi.mock("node:child_process", async original => ({ ...await original<typeof import("node:child_process")>(), fork: vi.fn() }));
 
+it('passes the shortened deadline to a late worker and rejects new work after expiry', async () => {
+  vi.useFakeTimers();
+  try {
+    const sent: any[] = [];
+    const child = Object.assign(new EventEmitter(), { connected: true, ref() {}, unref() {}, kill() {},
+      send(message: any, callback: () => void) { sent.push(message); callback();
+        queueMicrotask(() => { if (message.kind === 'call') child.emit('message', { kind: 'result', id: message.id, value: {} });
+          if (message.kind === 'close') child.emit('close', 0); }); },
+    });
+    const store = new IsolatedLogStore('fixture-home', { acquire: vi.fn(), snapshot: vi.fn() }, () => ({worker: child, ready: Promise.resolve()}));
+    const deadline = Date.now() + 100;
+    store.beginClose(deadline); store.beginClose(deadline + 500);
+    await store.initialize();
+    expect(sent[0]).toEqual({ kind: 'drain', deadline });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(store.append([])).rejects.toThrow('日志写者已关闭');
+    await store.close();
+  } finally { vi.useRealTimers(); }
+});
+
 it('retains the first Store call until its supervised private channel is connected', async () => {
   let admit!: () => void;
   const ready = new Promise<void>(resolve => { admit = resolve; });

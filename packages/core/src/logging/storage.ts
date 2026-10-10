@@ -30,6 +30,7 @@ export interface LogFileInfo {
 }
 /** Bound to one private log root. Implementations reject links and operate relative to an open directory. */
 export interface LogFileSystem {
+  beginClose?(deadline: number): void;
   open(readOnly: boolean): Promise<void>;
   list(limit: number): Promise<readonly string[]>;
   stat(name: string): Promise<LogFileInfo>;
@@ -123,6 +124,8 @@ export const logJson = (value: unknown): Buffer => Buffer.from(`${JSON.stringify
 
 /** One Store protocol across processes. Snapshots are governance, never business authority. */
 export class LocalLogStore implements LogSink {
+  readonly #beginClose: (deadline: number) => void;
+  beginClose(deadline: number): void { this.#beginClose(deadline); }
   readonly files: LogFileSystem;
   readonly #capacity: DeviceCapacityArbiterPort;
   readonly #initial: LogPolicy;
@@ -148,6 +151,7 @@ export class LocalLogStore implements LogSink {
     now?: () => number;
     observeWriters?: (signal: AbortSignal) => Promise<LogWriterObservation>;
   }) {
+    this.#beginClose = deadline => options.files.beginClose?.(deadline);
     this.files = meteredFiles(options.files, (dimension, amount) => {
       if (!this.#permit) throw storageFault("resource-permit-missing", "日志物理操作缺少资源许可");
       this.#permit.claim(dimension, amount);

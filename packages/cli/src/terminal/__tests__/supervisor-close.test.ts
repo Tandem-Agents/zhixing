@@ -5,7 +5,7 @@ import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalChannel, TerminalChannelRetiredError } from '../../../../terminal-ui/src/channel.js';
 import { TERMINAL_LIMITS, type TerminalEnvelope, type TerminalMessage } from '../../../../terminal-ui/src/protocol.js';
-import { terminalWriterDeadline } from '../close-budget.js';
+import { terminalWriterDeadline, terminalCloseDeadline } from '../close-budget.js';
 import { checkpointFilesystemCompletion, retainCheckpointFilesystemCompletion } from '../../../../mesh/src/checkpoint-filesystem-completion.js';
 import { beginLogPhase } from '@zhixing/core/logging';
 
@@ -27,6 +27,7 @@ const emitted = ts.transpileModule(declaration.slice(0, -1) + `
   fixtureClose(code = 0) { return this.#close(code, 'user-exit'); }
   fixtureWithoutProcesses() { this.#processes = undefined; }
   fixtureHelperLive(owner, role) { this.#helperLive(owner, role); }
+  fixturePrivateHelper(child) { this.#privateHelpers.set('log-files-test', {owner:'supervisor-log-store',child}); child.once('close', () => this.#privateHelpers.delete('log-files-test')); }
   fixtureCapacity() { this.#capacity = { close() {} }; }
   fixtureAdmitLogging() { return this.#admitLogging(); }
   fixturePreparingFilesystem(close) { this.#filesystem = { close }; }
@@ -48,6 +49,7 @@ interface SupervisorPort {
   fixtureClose(code?: number): Promise<void>;
   fixtureWithoutProcesses(): void;
   fixtureHelperLive(owner: string, role: string): void;
+  fixturePrivateHelper(child: EventEmitter): void;
   fixtureCapacity(): void;
   fixtureAdmitLogging(): Promise<void>;
   fixturePreparingFilesystem(close: (remainingMs: number) => Promise<void>): void;
@@ -88,9 +90,9 @@ class ProcessPort extends EventEmitter {
 function fixture(admitted = Promise.resolve(), args: readonly string[] = [], drain?: () => Promise<void>, loggingAdmission?: () => Promise<void>) {
   const timeoutExit = vi.fn(), peerFailures: string[] = [], children: ProcessPort[] = [];
   const processPort = { platform: 'win32', off: vi.fn(), exit: timeoutExit };
-  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', 'TERMINAL_LIMITS', emitted + '\nreturn TerminalSupervisor;')(
+  const Owner = new Function('beginLogPhase', 'process', 'randomUUID', 'TerminalPrivateEndpoint', 'TerminalChannel', 'TerminalChannelRetiredError', 'terminalWriterDeadline', 'checkpointFilesystemCompletion', 'TERMINAL_LIMITS', 'terminalCloseDeadline', emitted + '\nreturn TerminalSupervisor;')(
     beginLogPhase,
-    processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, TerminalChannelRetiredError, terminalWriterDeadline, checkpointFilesystemCompletion, TERMINAL_LIMITS,
+    processPort, randomUUID, class { address = 'fixture-control'; async close() {} }, TerminalChannel, TerminalChannelRetiredError, terminalWriterDeadline, checkpointFilesystemCompletion, TERMINAL_LIMITS, terminalCloseDeadline,
   ) as new (options: unknown) => SupervisorPort;
   const record = vi.fn();
   const supervisor = new Owner({ args, drain, admitted: loggingAdmission, records: { record } });
@@ -117,6 +119,29 @@ function fixture(admitted = Promise.resolve(), args: readonly string[] = [], dra
 describe('supervisor cooperative role close', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each([400, 700])('waits for the logging owner before judging its %sms helper', async delay => {
+    const child = new EventEmitter();
+    const f = fixture(Promise.resolve(), [], () => new Promise<void>(resolve => setTimeout(() => { child.emit('close'); resolve(); }, delay)));
+    f.supervisor.fixturePrivateHelper(child);
+    void f.supervisor.fixtureClose(); await f.flush(); f.application.finish(); f.ui.finish();
+    await vi.advanceTimersByTimeAsync(delay + 1);
+    expect(await f.completion).toBe(0);
+    expect(f.timeoutExit).not.toHaveBeenCalled();
+  });
+
+  it('accepts a peer deadline without renewing or borrowing the restoration reserve', async () => {
+    const now = Date.now();
+    expect(terminalCloseDeadline(0, now + 20_000, now)).toBe(now + 8000);
+    expect(terminalCloseDeadline(now + 1000, now + 5000, now)).toBe(now + 1000);
+    expect(terminalCloseDeadline(0, now + 700, now)).toBe(now + 700);
+    expect(() => terminalCloseDeadline(0, NaN, now)).toThrow('terminal-close-deadline');
+    const f = fixture();
+    const sent = f.ui.peer.send({ type: 'exit', code: 0, reason: 'user-exit', deadline: now + 1000 });
+    await f.flush(); await sent;
+    expect(await f.finish()).toBe(0);
+    expect(f.application.received).toContainEqual(expect.objectContaining({ type: 'close', deadline: now + 1000 }));
+  });
 
   it.each(['application', 'ui'] as const)('cancels resumed %s before IPC exists without manufacturing a transport failure', async role => {
     const f = fixture(); f.supervisor.fixtureWithoutListener(role);
@@ -280,7 +305,7 @@ describe('supervisor cooperative role close', () => {
 
   it('never extends the writer deadline for a late logging helper', async () => {
     const f = fixture(); void f.supervisor.fixtureClose(); await f.flush();
-    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(7500);
     expect(() => f.supervisor.fixtureHelperLive('log-store', 'log-files')).toThrow('terminal-admission-closed');
     expect(await f.finish()).toBe(74);
   });

@@ -188,6 +188,8 @@ export class LogRecorder {
     this.#timer = undefined;
     this.#closePromise = (async () => {
       const deadline = Date.now() + boundedDelay(deadlineMs);
+      try { this.#sink.beginClose?.(deadline); }
+      catch { this.#lastFailure = "close-failed"; }
       await this.#drain(deadline, this.#seq);
       this.#stopping = true;
       this.#stopped.abort();

@@ -3,6 +3,12 @@
 // every writer, including N's logger, must use the same earlier phase deadline.
 export const TERMINAL_RECOVERY_RESERVE_MS = 500;
 export const TERMINAL_LOG_EXIT_RESERVE_MS = 150;
+export const TERMINAL_CLOSE_MS = 8000;
+/** One bounded deadline for either initiator. Peers may only tighten it. */
+export function terminalCloseDeadline(existing = 0, proposed?: number, now = Date.now()): number {
+  if (proposed !== undefined && (!Number.isSafeInteger(proposed) || proposed <= 0)) throw Error('terminal-close-deadline');
+  return Math.min(existing || Infinity, proposed ?? Infinity, now + TERMINAL_CLOSE_MS);
+}
 export const terminalWriterDeadline = (deadline: number): number => deadline - TERMINAL_RECOVERY_RESERVE_MS;
 
 /** File owners share S's absolute deadline, including a stuck open/close RPC.
