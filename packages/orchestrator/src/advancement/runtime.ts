@@ -318,14 +318,14 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     return {
       id: this.idGenerator(),
       runIndex: input.runIndex,
-      runRecordRef: input.runRecordRef,
+      ...(input.runRecordRef ? { runRecordRef: input.runRecordRef } : {}),
       reviewedAt: this.now().toISOString(),
       decision: "exit",
       evidence,
       attribution: { criteria: [] },
       unmetCriteria: [message],
       exitReason: "system-error",
-      contextWindow,
+      ...(contextWindow ? { contextWindow } : {}),
     };
   }
 }

@@ -218,14 +218,16 @@ function buildSubmittedReview(
     review: {
       id: context.idGenerator(),
       runIndex: context.runIndex,
-      runRecordRef: context.runRecordRef,
+      ...(context.runRecordRef ? { runRecordRef: context.runRecordRef } : {}),
       reviewedAt: context.now().toISOString(),
       decision: decision as AdvancementReviewDecision,
       evidence: evidenceResult.evidence,
       attribution,
       unmetCriteria,
-      selectedFailureHandlingId: selectedFailureHandlingId.value,
-      exitReason: exitReason.value,
+      ...(selectedFailureHandlingId.value !== undefined
+        ? { selectedFailureHandlingId: selectedFailureHandlingId.value }
+        : {}),
+      ...(exitReason.value !== undefined ? { exitReason: exitReason.value } : {}),
     },
   };
 }

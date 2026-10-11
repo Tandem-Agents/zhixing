@@ -953,7 +953,7 @@ export class AdvancementReviewAttemptApplicationService
     return {
       id: this.#reviewIdGenerator(),
       runIndex: input.runIndex,
-      runRecordRef: input.runRecordRef,
+      ...(input.runRecordRef ? { runRecordRef: input.runRecordRef } : {}),
       reviewedAt: this.#now(),
       decision: "exit",
       evidence: [],

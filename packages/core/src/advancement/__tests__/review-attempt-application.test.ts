@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { isAdvancementControlEvent } from "../event-codec.js";
+import { runReviewedEvents } from "../reducer.js";
 import type {
   ImmediateRootReservationInspection,
   ImmediateRootResourceLease,
@@ -713,6 +715,14 @@ class ReviewAttemptState implements AdvancementReviewAttemptStatePort {
   async commitReviewOutcome(
     decision: AdvancementReviewPersistenceDecision,
   ): Promise<AdvancementSession> {
+    for (const event of runReviewedEvents(
+      decision.sessionId,
+      decision.review,
+      decision.timestamp,
+      undefined,
+    )) {
+      expect(isAdvancementControlEvent(event, { verify() {} })).toBe(true);
+    }
     if (this.failNextDecision) {
       this.failNextDecision = false;
       throw new Error("outcome commit failed");

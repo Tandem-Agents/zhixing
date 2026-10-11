@@ -7,7 +7,12 @@ import {
   userMessage,
 } from "@zhixing/core/types";
 import { MockLLMProvider } from "@zhixing/core/loop";
-import { type AdvancementRunReview, type AdvancementWindowState } from "@zhixing/core/advancement";
+import {
+  isAdvancementControlEvent,
+  runReviewedEvents,
+  type AdvancementRunReview,
+  type AdvancementWindowState,
+} from "@zhixing/core/advancement";
 import { type RunRecordInput } from "@zhixing/core/transcript";
 import type {
   ConfirmedRubricSnapshot,
@@ -1266,11 +1271,24 @@ function createAdvancementRuntime(
         }
       }
       canonicalEvidence ??= [];
-      return runtime.review(
+      const outcome = await runtime.review(
         { ...input, canonicalEvidence },
         lease,
         abort,
       );
+      if (outcome.kind === "reviewed") {
+        // Validate the in-memory boundary before serialization can hide own undefined
+        // properties. Every decision and infrastructure fallback must reach the owner.
+        for (const event of runReviewedEvents(
+          input.sessionId,
+          outcome.review,
+          outcome.review.reviewedAt,
+          undefined,
+        )) {
+          expect(isAdvancementControlEvent(event, { verify() {} })).toBe(true);
+        }
+      }
+      return outcome;
     },
   };
 }
