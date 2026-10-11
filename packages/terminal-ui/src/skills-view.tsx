@@ -1,4 +1,4 @@
-import { tone } from './theme.js';
+import { tone, spacing } from './theme.js';
 import { createEffect, createMemo, For, onCleanup, Show } from 'solid-js';
 import {
   skillsActionForKey, skillsDisplayText, skillsPageSize, skillsVisibleItems, validateSkillsView,
@@ -23,11 +23,11 @@ export function SkillsView(props: SkillsViewProps) {
     if (!validateSkillsView(props.view)) throw Error('terminal-skills-view');
     return props.view;
   });
-  const safe = () => props.width >= 30 && props.height >= 7;
+  const safe = () => props.width - 2 * spacing.content >= 30 && props.height >= 7;
   // These fixed hints contain only ASCII, arrows, separators and Han text.
   // Count Han as two terminal cells; string.length undercounts Chinese labels.
   const hint = (...variants: string[]) => variants.find(text =>
-    Array.from(text).reduce((cells, char) => cells + (/\p{Script=Han}/u.test(char) ? 2 : 1), 0) <= props.width) ?? 'Esc';
+    Array.from(text).reduce((cells, char) => cells + (/\p{Script=Han}/u.test(char) ? 2 : 1), 0) <= props.width - 2 * spacing.content) ?? 'Esc';
   const items = createMemo(() => skillsVisibleItems(view(), props.height));
   const send = (action: TerminalSkillsAction) => {
     if (disposed || closing || (pending && action.kind !== 'cancel')) return;
@@ -62,7 +62,7 @@ export function SkillsView(props: SkillsViewProps) {
   props.onReady?.(handle);
   createEffect(syncSize);
   onCleanup(() => { disposed = true; props.onReady?.(undefined); });
-  return <box flexGrow={1} flexDirection="column" overflow="hidden" onMouseScroll={event => {
+  return <box marginX={spacing.content} flexGrow={1} flexDirection="column" overflow="hidden" onMouseScroll={event => {
     const direction = event.scroll?.direction;
     if (direction !== 'up' && direction !== 'down') return;
     event.preventDefault(); event.stopPropagation();

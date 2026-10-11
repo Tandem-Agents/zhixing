@@ -21,4 +21,11 @@ export const tone = {
   codeType: RGBA.fromIndex(3),
 } as const;
 
-export const spacing = { content: 2, marker: 3, userInner: 2, scrollbar: 1, nested: 2, frame: 0, frameInner: 1, welcomeInner: 3 } as const;
+export const spacing = { content: 2, marker: 3, userInner: 2, scrollbar: 1, nested: 2, frame: 1, frameInner: 1, welcomeInner: 3 } as const;
+
+/** All frames are measured against the same addressable terminal grid. */
+export function surfaceGeometry(columns: number) {
+  const margin = columns >= 10 ? spacing.frame : 0;
+  const frameWidth = Math.max(1, columns - 2 * margin);
+  return { margin, frameWidth, editorWidth: Math.max(1, frameWidth - 2 - 2 * spacing.frameInner - 2) };
+}

@@ -8,7 +8,7 @@
  *
  * 导航：↑↓ 选 / Enter 进入 / Esc pop / Ctrl+C 退出
  */
-import { getPreset, ROLE_RECOMMENDATIONS } from "@zhixing/providers/configuration";
+import { getPreset, ROLE_RECOMMENDATIONS, ROLE_SPECS } from "@zhixing/providers/configuration";
 import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type { PanelAction, PanelDescriptor, WorkingState } from "../types.js";
 import { readModelRole, readModelThinking, readProviderEntry, writeModelRole, writeModelThinking } from "../state.js";
@@ -42,7 +42,7 @@ export function buildProviderListMeta(
   _state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "provider-list" }>,
 ): ListPanelMeta {
-  const roleLabel = descriptor.role === "main" ? "主模型" : "辅助模型";
+  const roleLabel = ROLE_SPECS.find(spec => spec.id === descriptor.role)!.labelZh;
   return {
     title: `${roleLabel} · 选择服务商`,
     description: `选择 API 服务商作为${roleLabel}来源`,

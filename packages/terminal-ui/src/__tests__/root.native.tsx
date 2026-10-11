@@ -94,7 +94,7 @@ try {
   checks.push('native transparent borders obey every viewport edge and nested clips without changing visible cells');
   await show({ kind: 'conversation', title: '知行', connectionState: 'starting', connected: false, busy: true });
   assert.ok(!text().includes('离线'));
-  assert.match(text().split('\n')[0]!.slice(0, -1), /^╭──── ╲ .*╮$/);
+  assert.match(text().split('\n')[0]!.slice(0, -1), /^ ╭──── ╲ .*╮$/);
   await test.mockInput.typeText('启动时输入'); await flush();
   const startingActions = actions.length; test.mockInput.pressEnter(); await flush();
   assert.equal(editor().plainText, '启动时输入');
@@ -579,7 +579,7 @@ try {
       await show({ kind: 'configuration', title: '响应设置页', editId: `response-${i}` });
       await observe(`${workload}/return`, () => root!.receive({ type: 'view', view: { generation: ++generation, kind: 'conversation', title: '响应验收', conversationId: 'response' } }), () => text().includes(expected) && text().includes('row '));
       const width = i % 2 ? 100 : 60, height = i % 2 ? 34 : 24;
-      await observe(`${workload}/resize`, () => test.resize(width, height), () => text().split('\n').length >= height && editor().width === width - 6 && text().includes(expected));
+      await observe(`${workload}/resize`, () => test.resize(width, height), () => text().split('\n').length >= height && editor().width === width - 8 && text().includes(expected));
       await flush();
     }
   }
@@ -869,8 +869,8 @@ try {
         chromeDetails: ['workspace fixture', 'config fixture', 'secret store local'],
         ...(busy ? { message: 'Loading fixture' } : { choices: [{ id: 'one', label: 'ChoiceOne', detail: 'Ready', status: 'ready' as const }, { id: 'two', label: 'ChoiceTwo', detail: 'Pending', status: 'pending' as const }] }) });
       const rows = text().split('\n');
-      assert.equal(rows[1]!.indexOf('知行'), 12, 'configuration brand retains the four-column gap');
-      assert.equal(rows[2]!.indexOf(title), 12); assert.equal(rows[3]!.indexOf('配置你的知行'), 12);
+      assert.equal(rows[1]!.indexOf('知行'), 13, 'configuration brand retains the four-column gap');
+      assert.equal(rows[2]!.indexOf(title), 13); assert.equal(rows[3]!.indexOf('配置你的知行'), 13);
       const nameSpans = test.captureSpans().lines[1]!.spans.filter(span => span.text.includes('知行'));
       assert.ok(nameSpans.length && nameSpans.every(span => span.attributes & TextAttributes.BOLD));
       assertBold(title, false);

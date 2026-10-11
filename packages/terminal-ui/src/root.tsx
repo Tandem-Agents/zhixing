@@ -20,7 +20,7 @@ import { interactionKey, inputRows, candidateLayout, initialChoiceIndex, nextCho
 import { CandidateView, type CandidateViewHandle } from './candidate-view.js';
 import { SurfaceChrome } from './surface-chrome.js';
 import { ChoiceView } from './choice-view.js';
-import { tone, spacing } from './theme.js';
+import { tone, spacing, surfaceGeometry } from './theme.js';
 
 extend({ textarea: TerminalTextarea, scrollbox: TerminalScrollBox });
 
@@ -480,7 +480,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
         <Show when={view().kind === 'configuration'}><ChoiceList /></Show>
       </box></scrollbox>}>
         <BodyView page={display()} renderer={renderer} width={bodySize().width} height={bodySize().height}
-          header={<SurfaceChrome view={view()} width={Math.max(1, bodySize().width - spacing.scrollbar)} height={size().height} />}
+          header={<SurfaceChrome view={view()} width={bodySize().width} height={size().height} />}
           hasEarlier={view().historyHasMore}
           anchor={bodyAnchor()} onAnchor={setBodyAnchor} onReady={bodyReady}
           requestPage={(start, follow) => options.request({ kind: 'display-page', start, follow })}
@@ -520,11 +520,11 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       <Show when={!safeAction()}><text fg={tone.warn}>窗口较小：可取消；放大后继续确认。</text></Show>
     </box>
     <Show when={view().kind === 'conversation' || view().field}>
-      <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={spacing.frame} paddingX={spacing.frameInner} flexDirection="row">
+      <box border borderStyle="rounded" borderColor={tone.border} height={fieldRows() + 2} flexShrink={0} marginX={surfaceGeometry(size().width).margin} paddingX={spacing.frameInner} flexDirection="row">
         <text width={2} selectable={false} fg={teal}>❯ </text>
-        <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), Math.max(1, size().width - 6)))}</text>}>
+        <Show when={!view().field?.secret} fallback={<text height={1}>{'•'.repeat(Math.min(secretLength(), surfaceGeometry(size().width).editorWidth))}</text>}>
           <Show when={view().kind === 'conversation' ? 'conversation' : `${view().kind}:${view().editId ?? view().requestId}:${view().field?.id}`} keyed>
-            {(owner: string) => <textarea selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={Math.max(1, size().width - 6)} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
+            {(owner: string) => <textarea selectionFg={tone.selectionFg} selectionBg={tone.selectionBg} ref={attach} initialValue={owner === 'conversation' ? draft.text : view().field?.value ?? ''} width={surfaceGeometry(size().width).editorWidth} height={fieldRows()} wrapMode="char" onSizeChange={syncEditor} onContentChange={() => { atomicLayoutDirty = true; if (view().field) fieldEditVersion++; preserveDraft(); }} onCursorChange={preserveCursor} />}
           </Show>
         </Show>
       </box>
