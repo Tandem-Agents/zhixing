@@ -123,3 +123,27 @@ describe("mesh protocol cryptography", () => {
     ).rejects.toThrow("Device root certificate is not valid at TLS issuance time");
   });
 });
+
+
+it("reuses parsed keys without caching signatures or mutable identity fields", async () => {
+  const a = await DeviceKey.generate({ now: () => NOW }), b = await DeviceKey.generate({ now: () => NOW });
+  const enrollment = { displayName: "key-cache", platform: "headless" as const, enrolledAt: new Date(NOW).toISOString() };
+  const identity = { ...enrollDeviceIdentity(a, enrollment) }, other = enrollDeviceIdentity(b, enrollment);
+  const payload = { text: "original" }, signature = a.sign("CacheProbe", 1, payload);
+  const check = (value = payload, sig = signature, schema = "CacheProbe", version = 1) => verifyDeviceSignature(identity, schema, version, value, sig);
+  check(); check();
+  expect(() => check({text:"changed"})).toThrow(MeshProtocolError);
+  expect(() => check(payload, {...signature, sig: signature.sig.slice(1)})).toThrow(MeshProtocolError);
+  expect(() => check(payload, {...signature, keyId:other.deviceId})).toThrow(MeshProtocolError);
+  expect(() => check(payload, {...signature, alg:"rsa" as "ed25519"})).toThrow(MeshProtocolError);
+  expect(() => check(payload, signature, "OtherProbe")).toThrow(MeshProtocolError);
+  expect(() => check(payload, signature, "CacheProbe", 2)).toThrow(MeshProtocolError);
+  identity.deviceId = other.deviceId; expect(() => check()).toThrow(MeshProtocolError);
+  identity.publicKey = other.publicKey;
+  expect(() => check(payload, b.sign("CacheProbe", 1, payload))).not.toThrow();
+  expect(() => check()).toThrow(MeshProtocolError);
+  identity.publicKey = other.publicKey + "="; expect(() => check()).toThrow(TypeError);
+  identity.publicKey = "ed25519:invalid"; expect(() => check()).toThrow(TypeError);
+  identity.publicKey = a.publicKey; identity.deviceId = a.deviceId;
+  expect(() => check()).not.toThrow();
+});

@@ -45,6 +45,37 @@ const verifier = {
 };
 
 describe("resource governor protocol", () => {
+  it.each([false, true])("verifies once per public replay and never trusts a prior call (timed=%s)", (timed) => {
+    const state = emptyGovernorProjection();
+    const lease = rootLease("single-validation", "interactive");
+    let calls = 0;
+    let trusted = true;
+    const currentVerifier = {
+      verify: (...args: Parameters<typeof verifier.verify>) => {
+        calls += 1;
+        if (!trusted) throw new Error("trust revoked");
+        verifier.verify(...args);
+      },
+    };
+    const apply = (record: GovernorRecord) => timed
+      ? applyGovernorRecordAt(state, record, NOW, 24 * 60 * 60_000, currentVerifier)
+      : applyGovernorRecord(state, record, currentVerifier);
+    apply({ t: "queued", reservationId: lease.reservationId, admissionClass: lease.admissionClass, workload: lease.workload });
+    apply({ t: "reserve", lease });
+    expect(calls).toBe(1);
+    expect(state.reservations.get(lease.reservationId)!.lease).not.toBe(lease);
+    const before = structuredClone(state);
+    trusted = false;
+    expect(() => apply({ t: "reserve", lease })).toThrow("trust revoked");
+    expect(calls).toBe(2);
+    expect(state).toEqual(before);
+    trusted = true;
+    const corrupt = structuredClone(lease);
+    (corrupt as { expiry: string }).expiry = "2027-01-01T00:00:00.000Z";
+    expect(() => apply({ t: "reserve", lease: corrupt })).toThrow();
+    expect(state).toEqual(before);
+  });
+
   it("replays the durable weighted admission order", () => {
     const state = emptyGovernorProjection();
     const classes = [

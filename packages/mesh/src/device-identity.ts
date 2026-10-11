@@ -25,6 +25,9 @@ import { protocolBytes } from "./canonical.js";
 import { MeshProtocolError } from "./errors.js";
 
 const PUBLIC_KEY_PREFIX = "ed25519:";
+// Cache parsing, never trust or signature decisions. Weak ownership follows
+// the caller's identity lifetime; changing the wire key invalidates the entry.
+const decodedIdentityKeys = new WeakMap<DeviceIdentity, { publicKey: string; fingerprint: string; key: KeyObject }>();
 const DEFAULT_TLS_VALIDITY_MS = 24 * 60 * 60_000;
 const CERTIFICATE_BACKDATE_MS = 2 * 60_000;
 const DEVICE_IDENTITY_NOT_AFTER_MS = Date.parse("9999-12-31T23:59:59.000Z");
@@ -298,7 +301,7 @@ export function validateDeviceTrustRoot(
 }
 
 export function deviceIdFromPublicKey(publicKey: string): string {
-  const der = decodePublicKey(publicKey);
+  const { der } = decodePublicKey(publicKey);
   return `fp:u${createHash("sha256").update(der).digest("base64url")}`;
 }
 
@@ -309,13 +312,21 @@ export function verifyDeviceSignature(
   payload: unknown,
   signature: Signature,
 ): void {
-  if (deviceIdFromPublicKey(identity.publicKey) !== identity.deviceId) {
+  const { publicKey, deviceId } = identity;
+  const { alg, keyId, sig } = signature;
+  let parsed = decodedIdentityKeys.get(identity);
+  if (!parsed || parsed.publicKey !== publicKey) {
+    const { der, key } = decodePublicKey(publicKey);
+    parsed = { publicKey, key, fingerprint: `fp:u${createHash("sha256").update(der).digest("base64url")}` };
+    decodedIdentityKeys.set(identity, parsed);
+  }
+  if (parsed.fingerprint !== deviceId) {
     throw new MeshProtocolError(
       "identity-mismatch",
       "Device id does not match its public key",
     );
   }
-  if (signature.alg !== "ed25519" || signature.keyId !== identity.deviceId) {
+  if (alg !== "ed25519" || keyId !== deviceId) {
     throw new MeshProtocolError(
       "invalid-signature",
       "Signature algorithm or key id does not match the device identity",
@@ -326,8 +337,8 @@ export function verifyDeviceSignature(
     valid = verify(
       null,
       protocolBytes(schemaId, version, payload),
-      createPublicKey({ key: decodePublicKey(identity.publicKey), format: "der", type: "spki" }),
-      decodeSignature(signature.sig),
+      parsed.key,
+      decodeSignature(sig),
     );
   } catch {
     valid = false;
@@ -383,7 +394,7 @@ function encodePublicKey(publicKey: KeyObject): string {
     .toString("base64url")}`;
 }
 
-function decodePublicKey(publicKey: string): Buffer {
+function decodePublicKey(publicKey: string): { der: Buffer; key: KeyObject } {
   if (!publicKey.startsWith(PUBLIC_KEY_PREFIX)) {
     throw new TypeError("Device public key must use the Ed25519 wire encoding");
   }
@@ -404,7 +415,7 @@ function decodePublicKey(publicKey: string): Buffer {
   if (key.asymmetricKeyType !== "ed25519") {
     throw new TypeError("Device public key must use Ed25519");
   }
-  return der;
+  return { der, key };
 }
 
 function rootSubject(deviceId: string): string {

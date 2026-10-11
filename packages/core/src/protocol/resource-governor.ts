@@ -201,7 +201,7 @@ export function applyGovernorRecordAt(
   const existing = record.t === "reserve"
     ? state.leaseAcceptances.get(record.lease.reservationId)
     : undefined;
-  const next = applyValidatedGovernorRecord(state, record, verifier);
+  const next = applyValidatedGovernorRecord(state, record);
   if (record.t === "dequeue" && !wasDequeued) {
     next.dequeuedAt.set(dequeuedWorkloadKey!, envelopeAt);
   }
@@ -645,14 +645,12 @@ export function applyGovernorRecord(
   return applyValidatedGovernorRecord(
     state,
     validateGovernorRecord(input, verifier),
-    verifier,
   );
 }
 
 function applyValidatedGovernorRecord(
   state: GovernorProjection,
   record: GovernorRecord,
-  verifier: ResourceLeaseSignatureVerifier,
 ): GovernorProjection {
   switch (record.t) {
     case "queued": {
@@ -738,7 +736,8 @@ function applyValidatedGovernorRecord(
       return state;
     }
     case "reserve": {
-      const lease = validateReservableResourceLease(record.lease, verifier);
+      // Public entry points already cloned and verified this record in this call.
+      const lease = record.lease;
       const existing = state.reservations.get(lease.reservationId);
       if (existing !== undefined) {
         if (canonicalize(existing.lease) !== canonicalize(lease)) {
