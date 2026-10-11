@@ -137,6 +137,8 @@ export interface DurableLogCheckpoint {
 
 export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
   readonly cursor?: ProjectionCursor;
+  /** A second cached basis consumed by decide; verified under the same writer lock. */
+  readonly requiredPrefix?: ProjectionCursor;
   /** Durable read models that must be caught up to the locked log prefix. */
   readonly readProjectionIds?: readonly string[];
   /** Artifact references that a new commit may introduce. */
@@ -192,14 +194,23 @@ export interface AuthorityCommitLog {
     limit: number,
   ): Promise<{
     readonly commits: readonly CommitEnvelope<Body>[];
+    /** Verified boundary for each returned envelope, in the same order. */
+    readonly checkpoints: readonly DurableLogCheckpoint[];
     readonly checkpoint: DurableLogCheckpoint;
     readonly hasMore: boolean;
   }>;
   readEnvelopeAt<Body = JsonValue>(
     checkpoint: DurableLogCheckpoint,
   ): Promise<CommitEnvelope<Body>>;
+  /** Up to 64 nonempty source checkpoints in strictly increasing LSN order. */
+  readEnvelopesAt<Body = JsonValue>(
+    checkpoints: readonly DurableLogCheckpoint[],
+  ): Promise<readonly CommitEnvelope<Body>[]>;
   originCheckpoint(): Promise<DurableLogCheckpoint>;
-  checkpoint(): Promise<DurableLogCheckpoint>;
+  /** May return the same issued object only to preserve an already validated
+   * read view of an unchanged log. A new checkpoint never authorizes reusing
+   * previously reduced state without checking its old prefix. */
+  checkpoint(previous?: DurableLogCheckpoint): Promise<DurableLogCheckpoint>;
   durableProjection<Body = JsonValue>(
     definition: DurableProjectionDefinition<Body>,
   ): RebuildableDurableProjectionIndex;

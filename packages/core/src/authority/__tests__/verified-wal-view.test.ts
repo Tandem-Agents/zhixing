@@ -10,6 +10,7 @@ import { VerifiedWalViews, type VerifiedWalView } from "../verified-wal-view.js"
 import * as verified from "../verified-wal-view.js";
 import type { LogDraft } from "../../logging/contracts.js";
 import type { DurableLogCheckpoint } from "../interfaces.js";
+import { AUTHORITY_WAL_FILE_HEADER_BYTES } from "../wal-frame.js";
 
 function view(id = "log"): VerifiedWalView {
   return { physicalBytes: Buffer.from("test"), tail: { logId: id, device: 1n, inode: 2n, bytes: 100,
@@ -170,21 +171,24 @@ it.each([
   };
   const origin = await log.originCheckpoint();
   await log.readSnapshot();
-  expect(await read(origin, 1)).toEqual({ commits: [], checkpoint: origin, hasMore: false });
+  expect(await read(origin, 1)).toEqual({ commits: [], checkpoints: [], checkpoint: origin, hasMore: false });
+  const checkpoints: DurableLogCheckpoint[] = [];
   for (let value = 1; value <= 3; value++) {
     await log.append([{ stream: "control", body: { value } }]);
+    checkpoints.push(await log.checkpoint());
   }
   const snapshot = await log.readSnapshot();
   const head = await log.checkpoint();
   const first = await read(origin, 1);
   expect(first.commits).toEqual(snapshot.commits.slice(0, 1));
+  expect(first.checkpoints).toEqual(checkpoints.slice(0, 1));
   expect(first.hasMore).toBe(true);
   expect(await log.readEnvelopeAt(first.checkpoint)).toEqual(first.commits[0]);
   expect(await read(first.checkpoint, 2)).toEqual({
-    commits: snapshot.commits.slice(1), checkpoint: head, hasMore: false,
+    commits: snapshot.commits.slice(1), checkpoints: checkpoints.slice(1), checkpoint: head, hasMore: false,
   });
-  expect(await read(origin, 256)).toEqual({ commits: snapshot.commits, checkpoint: head, hasMore: false });
-  expect(await read(head, 1)).toEqual({ commits: [], checkpoint: head, hasMore: false });
+  expect(await read(origin, 256)).toEqual({ commits: snapshot.commits, checkpoints, checkpoint: head, hasMore: false });
+  expect(await read(head, 1)).toEqual({ commits: [], checkpoints: [], checkpoint: head, hasMore: false });
   let cursor = origin;
   const pages = [];
   for (let count = 0; count < 4; count++) {
@@ -207,12 +211,12 @@ it.each([
   // stopping before it must keep a resumable cursor, then recover on the next page.
   await appendFile(log.logPath, Buffer.from([1]));
   const beforeRecovery = await read(next.checkpoint, 1);
-  expect(beforeRecovery).toEqual({ commits: [], checkpoint: next.checkpoint, hasMore: false });
+  expect(beforeRecovery).toEqual({ commits: [], checkpoints: [], checkpoint: next.checkpoint, hasMore: false });
   expect((await stat(log.logPath)).size).toBe(next.checkpoint.frameEndOffset);
   await log.readSnapshot();
   await appendFile(log.logPath, Buffer.from([1]));
   const beforeSuffix = await read(head, 1);
-  expect(beforeSuffix).toEqual({ commits: [fourth], checkpoint: next.checkpoint, hasMore: true });
+  expect(beforeSuffix).toEqual({ commits: [fourth], checkpoints: [next.checkpoint], checkpoint: next.checkpoint, hasMore: true });
   expect(await read(beforeSuffix.checkpoint, 1)).toEqual(beforeRecovery);
   const fifth = await log.append([{ stream: "control", body: { value: 5 } }]);
   expect((await read(next.checkpoint, 1)).commits).toEqual([fifth]);
@@ -242,4 +246,82 @@ it.each([false, true])("lets pending I/O advance during projection replay, cache
     if (pending) clearImmediate(pending);
     miss?.mockRestore();
   }
+}, 20000);
+
+
+it("verifies one WAL view for a multi-reference query and still detects changed bytes", async () => {
+  const root = await createTempDir("verified-wal-retained-query");
+  const events: LogDraft[] = [];
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    records: { record: draft => { events.push(typeof draft === "function" ? draft() : draft); } },
+  });
+  onTestFinished(() => log.stopStorageMaintenance());
+  const refs = await Promise.all(Array.from({ length: 12 }, (_, i) => artifacts.put(Buffer.from("retained-" + i))));
+  await log.append(refs.map((ref, i) => ({ stream: "run:conversation-" + i,
+    body: { t: "admitted", runId: "run-" + i, attachments: [{ ...ref, kind: "file" }] } })));
+  await new Promise(resolve => setTimeout(resolve, 1050)); events.length = 0;
+  expect(await log.retainedArtifactReferences(refs)).toEqual(refs);
+  await new Promise(resolve => setTimeout(resolve, 1050));
+  const work = events.filter(event => event.event === "work");
+  expect(work.reduce((total, event) => total + Number(event.data!.scans), 0)).toBe(1);
+  expect(work.reduce((total, event) => total + Number(event.data!.readBytes), 0)).toBe((await stat(log.logPath)).size - AUTHORITY_WAL_FILE_HEADER_BYTES);
+  expect(await log.releasedLeafReferences()).toEqual([]);
+  const peer = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
+  onTestFinished(() => peer.stopStorageMaintenance());
+  const next = await artifacts.put(Buffer.from("peer-reference"));
+  await peer.append([{ stream: "run:peer", body: { t: "admitted", runId: "peer-run", attachments: [{ ...next, kind: "file" }] } }]);
+  expect(await log.retainedArtifactReferences([next])).toEqual([next]);
+  const version = await verified.readWalVersion(log.logPath);
+  const unchanged = vi.spyOn(verified, "readWalVersion").mockResolvedValue(version);
+  try {
+    const bytes = await readFile(log.logPath);
+    bytes[bytes.indexOf(Buffer.from("peer-run"))] ^= 1;
+    await writeFile(log.logPath, bytes);
+    await expect(log.retainedArtifactReferences([next])).rejects.toThrow();
+  } finally { unchanged.mockRestore(); }
+}, 20000);
+
+it("bounds ordered multi-key reads to one strict proof without trusting metadata aliases", async () => {
+  const root = await createTempDir("verified-wal-multi-key");
+  const events: LogDraft[] = [];
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    records: { record: draft => { events.push(typeof draft === "function" ? draft() : draft); } },
+  });
+  onTestFinished(() => log.stopStorageMaintenance());
+  const index = log.durableProjection<{ key: string; value?: string }>({
+    projectionId: "multi-key", reducerVersion: 1,
+    reduce: envelope => envelope.entries.map(({ body }) => body.value === undefined
+      ? { kind: "tombstone" as const, key: body.key }
+      : { kind: "put" as const, key: body.key, value: body.value }),
+  });
+  await log.append([{ stream: "control", body: { key: "a", value: "original" } },
+    { stream: "control", body: { key: "gone", value: "old" } }]);
+  await log.append([{ stream: "control", body: { key: "gone" } }]);
+  await index.get("a");
+  await new Promise(resolve => setTimeout(resolve, 1050)); events.length = 0;
+  const keys = ["a", "absent", "gone", "a"];
+  const result = index.getMany(keys); keys[0] = "gone";
+  expect(await result).toEqual(["original", undefined, undefined, "original"]);
+  await new Promise(resolve => setTimeout(resolve, 1050));
+  const work = events.filter(event => event.event === "work" && event.data?.operation === "projection.getMany");
+  expect(work.reduce((total, event) => total + Number(event.data!.scans), 0)).toBe(1);
+  expect(work.reduce((total, event) => total + Number(event.data!.readBytes), 0)).toBe((await stat(log.logPath)).size - AUTHORITY_WAL_FILE_HEADER_BYTES);
+  expect(await index.getMany(Array.from({ length: 256 }, () => "a"))).toHaveLength(256);
+  const peer = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
+  onTestFinished(() => peer.stopStorageMaintenance());
+  await peer.append([{ stream: "control", body: { key: "a", value: "changed!" } }]);
+  expect(await index.getMany(["a"])).toEqual(["changed!"]);
+  const version = await verified.readWalVersion(log.logPath);
+  const unchanged = vi.spyOn(verified, "readWalVersion").mockResolvedValue(version);
+  try {
+    const bytes = await readFile(log.logPath);
+    bytes[bytes.indexOf(Buffer.from("changed!"))] ^= 1;
+    await writeFile(log.logPath, bytes);
+    expect(await index.getMany([])).toEqual([]);
+    await expect(index.getMany(Array.from({ length: 257 }, () => "a"))).rejects.toThrow(TypeError);
+    await expect(index.getMany(Array(1))).rejects.toThrow(TypeError);
+    await expect(index.getMany(["a"])).rejects.toThrow();
+  } finally { unchanged.mockRestore(); }
 }, 20000);

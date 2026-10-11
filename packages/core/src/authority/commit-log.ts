@@ -193,6 +193,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #acquireFileLock = createFileLockAcquirer();
   readonly #records: LogRecordPort | undefined;
   readonly #workObserver: AuthorityWorkObserver;
+  readonly #checkpointViews = new WeakMap<DurableLogCheckpoint, FileProjectionCursor>();
   #work: AuthorityWork | undefined;
   /** One verified snapshot per exclusive operation; never survives lock release. */
   #operationView: VerifiedWalView | undefined;
@@ -211,7 +212,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
   // Only byte-validation proofs, never shared mutable envelopes or business state.
-  readonly #retainedReferenceIndex: RebuildableDurableProjectionIndex;
   #verifiedTail: VerifiedLogTail | undefined;
   #logId: string | undefined;
   #logFormat: "legacy" | "versioned" | undefined;
@@ -237,7 +237,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.storageMaintenance,
     );
     this.#storageMaintenance = options.storageMaintenance;
-    this.#retainedReferenceIndex = this.durableProjection({
+    this.durableProjection({
       projectionId: RETAINED_REFERENCE_PROJECTION_ID,
       reducerVersion: 4,
       reduce: (envelope, current) =>
@@ -331,10 +331,16 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     return this.#boundProjection(registered);
   }
 
-  async checkpoint(): Promise<DurableLogCheckpoint> {
+  async checkpoint(previous?: DurableLogCheckpoint): Promise<DurableLogCheckpoint> {
+    const proof = previous && this.#checkpointViews.get(previous);
+    if (previous && proof && previous.logId === proof.logId && previous.lsn === proof.lsn &&
+        previous.frameEndOffset === proof.byteOffset && previous.prefixDigest === proof.prefixDigest &&
+        await this.#hasUnchangedReadView("checkpoint", proof)) return previous;
     return this.#withLogLock("checkpoint", async () => {
       const lastLsn = await this.#loadLastLsn();
-      return this.#durableCheckpoint(lastLsn);
+      const checkpoint = Object.freeze(this.#durableCheckpoint(lastLsn));
+      this.#checkpointViews.set(checkpoint, this.#projectionCursor(lastLsn));
+      return checkpoint;
     });
   }
 
@@ -509,6 +515,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       operation(),
   ): Promise<{
     readonly commits: readonly CommitEnvelope<Body>[];
+    readonly checkpoints: readonly DurableLogCheckpoint[];
     readonly checkpoint: DurableLogCheckpoint;
     readonly hasMore: boolean;
   }> {
@@ -519,12 +526,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       runPhysicalStep(async () => {
         await this.#validateDurableCheckpoint(checkpoint);
         const commits: Array<CommitEnvelope<JsonValue>> = [];
+        const checkpoints: DurableLogCheckpoint[] = [];
         const scanned = await this.#scanLogFrom(
           checkpoint.frameEndOffset,
           checkpoint.lsn,
           checkpoint.prefixDigest,
-          (envelope) => {
+          (envelope, boundary) => {
             commits.push(envelope);
+            checkpoints.push(boundary);
             return commits.length < limit;
           },
         );
@@ -539,6 +548,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         }
         return {
           commits: commits as Array<CommitEnvelope<Body>>,
+          checkpoints,
           checkpoint: scanned.stopped
             ? {
               logId: this.#requireLogId(),
@@ -610,6 +620,34 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  async readEnvelopesAt<Body = JsonValue>(
+    checkpoints: readonly DurableLogCheckpoint[],
+  ): Promise<readonly CommitEnvelope<Body>[]> {
+    if (checkpoints.length > 64 || checkpoints.some((item, index) =>
+      !Number.isSafeInteger(item.lsn) || item.lsn <= (checkpoints[index - 1]?.lsn ?? 0))) {
+      throw new TypeError("Authority envelope batch requires up to 64 ordered nonempty checkpoints");
+    }
+    if (!checkpoints.length) return [];
+    return this.#withLogLock("readEnvelopeAt", async () => {
+      const wanted = new Map(checkpoints.map(checkpoint => [checkpoint.lsn, checkpoint]));
+      const result: CommitEnvelope<Body>[] = [];
+      // The same physical prefix proof serves this bounded read. Domain reducers
+      // run only after returning, outside the writer/maintenance exclusion.
+      await this.#readAndRecover((envelope, observed) => {
+        const checkpoint = wanted.get(envelope.lsn)!;
+        if (checkpoint.logId !== observed.logId || checkpoint.frameEndOffset !== observed.frameEndOffset ||
+            checkpoint.prefixDigest !== observed.prefixDigest) {
+          throw new AuthorityStorageError("commit-log-corrupt", "Authority envelope batch checkpoint does not match its verified source");
+        }
+        result.push(envelope as CommitEnvelope<Body>);
+      }, checkpoints[0]!.lsn, proof => wanted.has(proof.lsn));
+      if (result.length !== checkpoints.length) {
+        throw new AuthorityStorageError("commit-log-corrupt", "Authority envelope batch source is incomplete");
+      }
+      return result;
+    });
+  }
+
   async rebuildProjection<State, Body = JsonValue>(
     initial: State,
     reducer: ProjectionReducer<State, Body>,
@@ -664,38 +702,43 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       throw new TypeError("Projection cursor and afterLsn must identify the same prefix");
     }
     assertReplayLsn(cursor?.lsn ?? options.afterLsn ?? 0);
-    if (cursor) {
-      const observation = this.#workObserver.begin("readProjection");
-      const queued = performance.now();
-      let failure: [] | [unknown] = [];
-      let unchanged: boolean;
-      try {
-        unchanged = await this.#operations.run(async () => {
-          observation.data.queueMs += performance.now() - queued;
-          const started = performance.now();
-          observation.stage("verify-read-view");
-          this.#work = observation.data;
-          try {
-            if (!this.#logId) return false;
-            const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
-              if (isNodeError(error, "ENOENT")) return undefined;
-              throw error;
-            });
-            // Preserve the caller's already validated read view when its file
-            // version is unchanged. No bytes or decisions are adopted here;
-            // materializing new data and every write still verify actual bytes.
-            return metadata !== undefined && canResumeProjectionCursor(cursor as FileProjectionCursor, this.logPath, this.#logId, metadata);
-          } finally {
-            this.#operationView = undefined;
-            this.#work = undefined;
-            observation.data.executionMs += performance.now() - started;
-          }
-        });
-      } catch (error) { failure = [error]; throw error; }
-      finally { observation.finish(...failure); }
-      if (unchanged) return { state: initial, cursor, lastLsn: cursor.lsn };
+    if (cursor && await this.#hasUnchangedReadView("readProjection", cursor as FileProjectionCursor)) {
+      return { state: initial, cursor, lastLsn: cursor.lsn };
     }
     return this.transactProjection(initial, reducer, () => ({ kind: "return", value: undefined }), options);
+  }
+
+  /** Reuses only a caller's existing read view; never admits new bytes or a write. */
+  async #hasUnchangedReadView(kind: "readProjection" | "checkpoint", cursor: FileProjectionCursor): Promise<boolean> {
+    const observation = this.#workObserver.begin(kind);
+    const queued = performance.now();
+    let failure: [] | [unknown] = [];
+    let unchanged: boolean;
+    try {
+      unchanged = await this.#operations.run(async () => {
+        observation.data.queueMs += performance.now() - queued;
+        const started = performance.now();
+        observation.stage("verify-read-view");
+        this.#work = observation.data;
+        try {
+          if (!this.#logId) return false;
+          const metadata = await readWalVersion(this.logPath).catch((error: unknown) => {
+            if (isNodeError(error, "ENOENT")) return undefined;
+            throw error;
+          });
+          // Preserve the caller's already validated read view when its file
+          // version is unchanged. No bytes or decisions are adopted here;
+          // materializing new data and every write still verify actual bytes.
+          return metadata !== undefined && canResumeProjectionCursor(cursor, this.logPath, this.#logId, metadata);
+        } finally {
+          this.#operationView = undefined;
+          this.#work = undefined;
+          observation.data.executionMs += performance.now() - started;
+        }
+      });
+    } catch (error) { failure = [error]; throw error; }
+    finally { observation.finish(...failure); }
+    return unchanged;
   }
 
   async transactProjection<State, Body = JsonValue, Value = void>(
@@ -776,6 +819,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             selectedStreams,
           );
           const { lastLsn } = replayTail;
+          if (options.requiredPrefix) {
+            const required = await this.#readProjectionTail(options.requiredPrefix, options.requiredPrefix.lsn, () => {});
+            if (options.requiredPrefix.lsn > required.lastLsn) throw new AuthorityStorageError("commit-log-corrupt", "Required projection prefix is ahead of the log");
+          }
           if (afterLsn > lastLsn) {
             throw new AuthorityStorageError(
               "commit-log-corrupt",
@@ -921,14 +968,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     candidates?: readonly ArtifactRef[],
     options: RetainedReferenceQueryOptions = {},
   ): Promise<readonly ArtifactRef[]> {
-    return this.#withRetainedProjectionValueRecovery(async () => {
+    return this.#withRetainedProjectionValueRecovery(async (reader) => {
       if (candidates === undefined) {
         const retained: ArtifactRef[] = [];
         await this.#scanRetainedPrefix(
+      reader,
           RETAINED_REFERENCE_PREFIX,
           async ({ key, value }) => {
             const ref = retainedArtifactRef(value, key);
-            if (await this.#isRetainedReference(ref.digest, options)) {
+            if (await this.#isRetainedReference(reader, ref.digest, options)) {
               retained.push(ref);
             }
           },
@@ -940,7 +988,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const retained: ArtifactRef[] = [];
       for (const candidate of unique.values()) {
         const key = retainedReferenceKey(candidate.digest);
-        const stored = await this.#retainedReferenceIndex.get(key);
+        const stored = await reader.get(key);
         if (stored === undefined) continue;
         const ref = retainedArtifactRef(stored, key);
         if (ref.digest !== candidate.digest || ref.bytes !== candidate.bytes) {
@@ -950,7 +998,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             { validation: 'artifact-byte-conflict' },
           );
         }
-        if (await this.#isRetainedReference(candidate.digest, options)) {
+        if (await this.#isRetainedReference(reader, candidate.digest, options)) {
           retained.push(ref);
         }
       }
@@ -960,9 +1008,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   /** 当前日志已耐久的会话删除 tombstone 快照(内容叶所有权削除单源)。 */
   async deadConversations(): Promise<ReadonlySet<string>> {
-    return this.#withRetainedProjectionValueRecovery(async () => {
+    return this.#withRetainedProjectionValueRecovery(async (reader) => {
       const dead = new Set<string>();
       await this.#scanRetainedPrefix(
+      reader,
         RETAINED_DEAD_PREFIX,
         async ({ key, value }) => {
           dead.add(retainedConversationId(value, key));
@@ -977,7 +1026,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
    * 保证"释放→崩溃→重启"不会使已接管资产脱离回收周期。
    */
   async releasedLeafReferences(): Promise<readonly ArtifactRef[]> {
-    return this.#withRetainedProjectionValueRecovery(async () => {
+    return this.#withRetainedProjectionValueRecovery(async (reader) => {
       const released: ArtifactRef[] = [];
       let currentDigest: string | undefined;
       let currentRef: ArtifactRef | undefined;
@@ -988,10 +1037,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         }
       };
       await this.#scanRetainedPrefix(
+      reader,
         RETAINED_LEAF_PREFIX,
         async ({ key, value }) => {
           const leaf = await resolveRetainedLeaf(
-            this.#retainedReferenceIndex,
+            reader,
             value,
             key,
           );
@@ -1007,7 +1057,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           }
           if (
             currentAllDead &&
-            !(await this.#isConversationDead(leaf.conversationId))
+            !(await this.#isConversationDead(reader, leaf.conversationId))
           ) {
             currentAllDead = false;
           }
@@ -1018,26 +1068,32 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  /** One logical reference query uses one strictly verified WAL view. */
   async #withRetainedProjectionValueRecovery<Result>(
-    operation: () => Promise<Result>,
+    operation: (reader: DurableProjectionReadContext) => Promise<Result>,
   ): Promise<Result> {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!(error instanceof RetainedReferenceProjectionValueError)) {
-        throw error;
-      }
-      await this.#retainedReferenceIndex.rebuild();
-      return operation();
-    }
+    const projection = this.#durableProjections.get(RETAINED_REFERENCE_PROJECTION_ID)!;
+    return this.#withLogLock("projection.retainedReferences", () =>
+      this.#withDurableProjectionRecovery(projection, async () => {
+        await this.#synchronizeDurableProjection(projection);
+        try {
+          return await operation(projection.read);
+        } catch (error) {
+          if (!(error instanceof RetainedReferenceProjectionValueError)) throw error;
+          await this.#rebuildDurableProjection(projection);
+          return operation(projection.read);
+        }
+      }),
+    );
   }
 
   async #isRetainedReference(
+    reader: DurableProjectionReadContext,
     digest: string,
     options: RetainedReferenceQueryOptions,
   ): Promise<boolean> {
     if (
-      await this.#retainedReferenceIndex
+      await reader
         .get(retainedUnconditionalKey(digest))
         .then((value) => {
           if (value === undefined) return false;
@@ -1049,17 +1105,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     let retained = false;
     await this.#scanRetainedPrefix(
+      reader,
       retainedLeafPrefix(digest),
       async ({ key, value }) => {
         if (retained) return;
         const leaf = await resolveRetainedLeaf(
-          this.#retainedReferenceIndex,
+          reader,
           value,
           key,
         );
         if (
           !(options.deadConversations?.has(leaf.conversationId) ?? false) &&
-          !(await this.#isConversationDead(leaf.conversationId))
+          !(await this.#isConversationDead(reader, leaf.conversationId))
         ) {
           retained = true;
         }
@@ -1068,15 +1125,16 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     return retained;
   }
 
-  async #isConversationDead(conversationId: string): Promise<boolean> {
+  async #isConversationDead(reader: DurableProjectionReadContext, conversationId: string): Promise<boolean> {
     const key = retainedDeadKey(conversationId);
-    const value = await this.#retainedReferenceIndex.get(key);
+    const value = await reader.get(key);
     if (value === undefined) return false;
     retainedConversationId(value, key);
     return true;
   }
 
   async #scanRetainedPrefix(
+    reader: DurableProjectionReadContext,
     prefix: string,
     visit: (entry: {
       readonly key: string;
@@ -1085,7 +1143,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   ): Promise<void> {
     let continuation: string | undefined;
     do {
-      const page = await this.#retainedReferenceIndex.scan(
+      const page = await reader.scan(
         { gte: prefix, lt: `${prefix}\uffff` },
         RETAINED_SCAN_PAGE_SIZE,
         continuation,
@@ -1108,6 +1166,24 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             return await projection.read.get(key);
           }),
         ),
+      getMany: async (keys) => {
+        if (!Array.isArray(keys) || keys.length > 256) {
+          throw new TypeError("Projection multi-key read requires at most 256 string keys");
+        }
+        const selected = [...keys];
+        if (selected.some(key => typeof key !== "string")) throw new TypeError("Projection multi-key read requires string keys");
+        if (!selected.length) return [];
+        return this.#withLogLock("projection.getMany", () =>
+          this.#withDurableProjectionRecovery(projection, async () => {
+            await this.#synchronizeDurableProjection(projection);
+            const values: (JsonValue | undefined)[] = [];
+            // Physical reads stay sequential: one atomic step must not compete
+            // with its siblings for the same device admission slot.
+            for (const key of selected) values.push(await projection.read.get(key));
+            return values;
+          }),
+        );
+      },
       scan: (range, limit, continuation) =>
         this.#withLogLock("projection.scan", () =>
           this.#withDurableProjectionRecovery(
@@ -1166,6 +1242,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await projection.state.reset({ authority: emptyCheckpoint });
       checkpoint = emptyCheckpoint;
     }
+    // Reuse the existing full-byte proof even when a WAL exceeds the view cache.
+    // A durable index already at that exact tail has no incremental work; metadata
+    // alone never authorizes this return (#loadLastLsn verifies current bytes).
+    const lastLsn = await this.#loadLastLsn();
+    const provenTail = this.#verifiedTail;
+    if (provenTail && checkpoint.logId === provenTail.logId &&
+        checkpoint.lsn === lastLsn && checkpoint.frameEndOffset === provenTail.bytes &&
+        checkpoint.prefixDigest === provenTail.prefixDigest) return;
     try {
       await this.#validateDurableCheckpoint(checkpoint);
     } catch (error) {
@@ -1826,7 +1910,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       : undefined;
   }
 
-  #projectionCursor(lastLsn: number): ProjectionCursor {
+  #projectionCursor(lastLsn: number): FileProjectionCursor {
     const tail = this.#verifiedTail;
     if (tail?.lastLsn === lastLsn) {
       return new FileProjectionCursor(

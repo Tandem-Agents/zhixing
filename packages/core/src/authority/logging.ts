@@ -23,7 +23,7 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
 
 export type AuthorityOperation = "append" | "readSnapshot" | "readStream" | "readProjection" | "checkpoint" | "installPlannedAnchorPrefix"
   | "installAppendAdmissionGuard" | "originCheckpoint" | "readTail" | "readEnvelopeAt" | "rebuildProjection"
-  | "transactProjection" | "transactDurableProjection" | "projection.get" | "projection.scan" | "projection.checkpoints" | "projection.rebuild";
+  | "transactProjection" | "transactDurableProjection" | "projection.get" | "projection.getMany" | "projection.scan" | "projection.checkpoints" | "projection.rebuild" | "projection.retainedReferences";
 export interface AuthorityWork {
   scans: number; readBytes: number; recoveries: number; queueMs: number; preparationMs: number;
   lockWaitMs: number; executionMs: number; releaseMs: number; retryWaitMs: number; retries: number;

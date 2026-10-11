@@ -101,6 +101,9 @@ export interface DurableProjectionIndex {
 
 export interface RebuildableDurableProjectionIndex
   extends DurableProjectionIndex {
+  /** One verified authority view, in input order; missing/tombstoned keys are undefined.
+   * At most 256 keys, including duplicates. An empty list performs no I/O. */
+  getMany(keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]>;
   rebuild(): Promise<void>;
 }
 

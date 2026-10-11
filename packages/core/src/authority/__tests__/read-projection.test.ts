@@ -166,3 +166,61 @@ it("checks bytes beyond the first read window before accepting an appended tail"
   await writeFile(log.logPath, bytes);
   await expect(log.readProjection(first.state, state => state + 1, { cursor: first.cursor })).rejects.toThrow();
 });
+
+it('keeps an independently verifiable boundary for every frame in a bounded tail page', async () => {
+  const {log} = await fixture();
+  const origin = await log.originCheckpoint();
+  for (let value = 0; value < 4; value++) await log.append([{stream:'control',body:{value}}]);
+  const page = await log.readTail(origin, 3);
+  expect(page.checkpoints).toHaveLength(3);
+  for (let index = 0; index < 3; index++) expect(await log.readEnvelopeAt(page.checkpoints[index]!)).toEqual(page.commits[index]);
+  expect((await log.readTail(page.checkpoints[0]!, 3)).commits.map(e => e.lsn)).toEqual([2,3,4]);
+});
+
+it.each(['legacy', 'versioned'] as const)('reads sparse verified envelope batches without separate writer turns: %s', async format => {
+  const {log} = await fixture();
+  if (format === 'legacy') { await mkdir(log.rootDir,{recursive:true}); await writeFile(log.logPath,Buffer.alloc(0)); }
+  const origin = await log.originCheckpoint();
+  for (let value=0;value<5;value++) await log.append([{stream:'control',body:{text:'original',value}}]);
+  const page = await log.readTail<{text:string;value:number}>(origin,5);
+  const checkpoints = [page.checkpoints[0]!,page.checkpoints[2]!,page.checkpoints[4]!];
+  const single = vi.spyOn(log,'readEnvelopeAt').mockRejectedValue(Error('separate writer turn forbidden'));
+  const selected = await log.readEnvelopesAt<{text:string;value:number}>(checkpoints);
+  expect(selected.map(e=>e.lsn)).toEqual([1,3,5]);
+  selected[0]!.entries[0]!.body.text='caller mutation';
+  expect((await log.readEnvelopesAt<{text:string}>(checkpoints))[0]!.entries[0]!.body.text).toBe('original');
+  expect(single).not.toHaveBeenCalled();
+  await expect(log.readEnvelopesAt([{...checkpoints[0]!,prefixDigest:'sha256:'+'0'.repeat(64)}])).rejects.toThrow();
+  await expect(log.readEnvelopesAt([{...checkpoints[0]!,logId:'another-log'}])).rejects.toThrow();
+  await expect(log.readEnvelopesAt([{...checkpoints[0]!,frameEndOffset:checkpoints[0]!.frameEndOffset+1}])).rejects.toThrow();
+  await expect(log.readEnvelopesAt([checkpoints[1]!,checkpoints[0]!])).rejects.toThrow();
+  await expect(log.readEnvelopesAt(Array.from({length:65},(_,i)=>({...checkpoints[0]!,lsn:i+1})))).rejects.toThrow();
+  const bytes=await readFile(log.logPath); bytes[bytes.indexOf(Buffer.from('original'),bytes.indexOf(Buffer.from('original'))+1)]^=1; await writeFile(log.logPath,bytes);
+  await expect(log.readEnvelopesAt(checkpoints)).rejects.toThrow();
+  single.mockRestore();
+});
+
+// Exercise the actual durable-index get used by conversation recovery, not readProjection.
+it.each(["legacy", "versioned"] as const)("reuses a byte-proven durable index above the WAL view budget: %s", async format => {
+  const { log, artifacts } = await fixture();
+  if (format === "legacy") { await mkdir(log.rootDir, { recursive: true }); await writeFile(log.logPath, Buffer.alloc(0)); }
+  await log.append(Array.from({ length: 300 }, (_, i) => ({ stream: "control", body: { marker: "large-proof-" + i, text: "x".repeat(30000) } })));
+  const projection = log.durableProjection<{value:number}>({ projectionId: "test.large-recovery", reducerVersion: 1,
+    reduce: commit => commit.entries.filter(e => e.stream === "extensions").map(e => ({ kind: "put" as const, key: "value", value: e.body.value })) });
+  await log.append([{ stream: "extensions", body: { value: 1 } }]);
+  expect(await projection.get("value")).toBe(1);
+  const parse = vi.spyOn(JSON, "parse");
+  try {
+    expect(await projection.get("value")).toBe(1);
+    expect(parse.mock.calls.some(([input]) => String(input).includes("large-proof-"))).toBe(false);
+  } finally { parse.mockRestore(); }
+  const peer = new FileAuthorityCommitLog(log.rootDir, artifacts);
+  onTestFinished(() => peer.stopStorageMaintenance());
+  await peer.append([{ stream: "extensions", body: { value: 2 } }]);
+  expect(await projection.get("value")).toBe(2);
+  const metadata = await stat(log.logPath);
+  const bytes = await readFile(log.logPath);
+  bytes[bytes.indexOf(Buffer.from("large-proof-299"))] ^= 1;
+  await writeFile(log.logPath, bytes); await utimes(log.logPath, metadata.atime, metadata.mtime);
+  await expect(projection.get("value")).rejects.toThrow();
+}, 30000);
