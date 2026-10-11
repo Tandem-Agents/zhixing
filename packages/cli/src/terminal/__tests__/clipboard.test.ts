@@ -22,6 +22,35 @@ function factory(outputs: { chunks: Buffer[]; code?: number; unknown?: boolean; 
 }
 
 describe('owned clipboard reader', () => {
+  it.each([
+    [65, 'size'], [66, 'encoding'], [67, 'unavailable'], [68, 'timeout'], [69, 'read-failed'], [99, 'read-failed'],
+  ] as const)('preserves finite native failure %i without fallback', async (code, reason) => {
+    const create = factory([{ chunks: [], code }]);
+    await expect(new TerminalClipboard(new AbortController().signal, create as any, 'win32', {}, () => '/owned/index.js').read(async () => {}))
+      .rejects.toThrow('terminal-clipboard-' + reason);
+    expect(create).toHaveBeenCalledOnce();
+  });
+  it('rejects remote-desktop authority and invalid limits before creating a reader', async () => {
+    const create = factory([]);
+    for (const key of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']) {
+      await expect(new TerminalClipboard(new AbortController().signal, create as any, 'win32', { [key]: 'remote' }).read(async () => {}))
+        .rejects.toThrow('terminal-clipboard-unavailable');
+    }
+    for (const limit of [0, -1, NaN, Infinity, 1.5, 16 * 1024 * 1024 + 1]) {
+      await expect(new TerminalClipboard(new AbortController().signal, create as any, 'win32', {}).read(async () => {}, limit))
+        .rejects.toThrow('terminal-clipboard-size');
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+  it('keeps the existing macOS command and strips injection variables from children', async () => {
+    const create = factory([{ chunks: [Buffer.from('mac')] }]);
+    await new TerminalClipboard(new AbortController().signal, create as any, 'darwin', { NODE_OPTIONS: 'private', PATH: '/bin' })
+      .read(async () => {});
+    const [executable, args, options] = create.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }];
+    expect(executable).toBe('pbpaste'); expect(args).toEqual([]);
+    expect(options.env.NODE_OPTIONS).toBeUndefined(); expect(options.env.PATH).toBe('/bin');
+  });
+
   it('reports an empty successful clipboard without inserting or trying another reader', async () => {
     const create = factory([{ chunks: [] }]), write = vi.fn();
     expect(await new TerminalClipboard(new AbortController().signal, create as any, 'linux').read(write)).toBe(false);
@@ -52,11 +81,15 @@ describe('owned clipboard reader', () => {
   it('streams split UTF-8 exactly into bounded store pages', async () => {
     const original = '\uFEFF' + '中文🙂\r\n'.repeat(4000), bytes = Buffer.from(original), parts: string[] = [];
     const create = factory([{ chunks: [bytes.subarray(0, 4), bytes.subarray(4)] }]);
-    const reader = new TerminalClipboard(new AbortController().signal, create as any, 'win32');
+    const reader = new TerminalClipboard(new AbortController().signal, create as any, 'win32', {}, () => '/owned/cli/index.js');
     await reader.read(async text => { expect(Buffer.byteLength(text)).toBeLessThanOrEqual(32 * 1024); parts.push(text); });
     expect(parts.join('')).toBe(original);
     expect(create).toHaveBeenCalledOnce();
-    expect(create.mock.calls[0]?.[0]).toBe('powershell.exe');
+    expect(create.mock.calls[0]?.[0]).toBe(process.execPath);
+    const [, args, options] = create.mock.calls[0] as unknown as [string, string[], { deadline: number }];
+    expect(args.slice(0, 2).join(' ')).toContain('native.readClipboard');
+    expect(args[2]).toMatch(/terminal[\\/]win32-.+[\\/]foreground\.node$/u);
+    expect(args.slice(3)).toEqual([String(16 * 1024 * 1024), String(options.deadline)]);
   });
   it('falls back only before any output and never after partial text or unknown completion', async () => {
     const create = factory([{ chunks: [], code: 127 }, { chunks: [Buffer.from('ok')] }]);

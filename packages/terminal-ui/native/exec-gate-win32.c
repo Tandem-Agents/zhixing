@@ -119,11 +119,17 @@ int wmain(int argc, wchar_t **argv) {
   char extra; DWORD more = 0; BOOL trailing = ReadFile(plan, &extra, 1, &more, NULL);
   if (more || (!trailing && GetLastError() != ERROR_BROKEN_PIPE)) fail(); CloseHandle(plan);
   uint32_t args = integer(data + 4), incoming = integer(data + 8), at = 12;
-  if (integer(data) != 1 || args > ITEMS || incoming > ITEMS) fail();
+  uint32_t version = integer(data);
+  if ((version != 1 && version != 2) || args > ITEMS || incoming > ITEMS) fail();
   wchar_t *executable = text(data, size, &at), *directory = text(data, size, &at);
   if (!*executable || !*directory) fail();
   wchar_t *command = calloc(32768, sizeof(wchar_t)); if (!command) fail(); size_t used = 0; argument(command, &used, executable);
-  for (uint32_t i = 0; i < args; i++) { wchar_t *arg = text(data, size, &at); argument(command, &used, arg); erase(arg); }
+  for (uint32_t i = 0; i < args; i++) {
+    wchar_t *arg = text(data, size, &at);
+    if (version == 2) { character(command, &used, L' '); for (size_t j = 0; arg[j]; j++) character(command, &used, arg[j]); }
+    else argument(command, &used, arg);
+    erase(arg);
+  }
   wchar_t *entries[ITEMS + 2] = {0}; uint32_t count = 0;
   for (uint32_t i = 0; i < incoming; i++) {
     wchar_t *entry = text(data, size, &at), *equals = wcschr(entry, L'=');

@@ -354,6 +354,60 @@ static napi_value process_identity(napi_env env, napi_callback_info info) {
   if (birth[0]) { napi_create_string_utf8(env, birth, NAPI_AUTO_LENGTH, &value); napi_set_named_property(env, result, "birth", value); }
   return result;
 }
+static BOOL clipboard_desktop_available(void) {
+  HDESK input=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS);
+  WCHAR currentName[256], inputName[256]; DWORD needed=0;
+  BOOL desktop=input&&GetUserObjectInformationW(input,UOI_NAME,inputName,sizeof inputName,&needed)&&
+    GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,currentName,sizeof currentName,&needed)&&!wcscmp(inputName,currentName);
+  if(input)CloseDesktop(input);
+  return desktop;
+}
+/* Runs only in S's deadline-bound clipboard child, never in N/S's event loop.
+   A delayed-render clipboard owner may block GetClipboardData; S still owns
+   and terminates this helper when the original paste budget expires. */
+static napi_value clipboard_read(napi_env env, napi_callback_info info) {
+  size_t argc=2; napi_value args[2], result=NULL; double limitValue=0, budgetValue=0;
+  napi_get_cb_info(env,info,&argc,args,NULL,NULL);
+  if(argc!=2||napi_get_value_double(env,args[0],&limitValue)!=napi_ok||
+     !(limitValue>=1&&limitValue<=16*1024*1024)||limitValue!=(double)(size_t)limitValue)
+    return fail(env,"terminal-clipboard-size");
+  if(napi_get_value_double(env,args[1],&budgetValue)!=napi_ok||
+     !(budgetValue>0&&budgetValue<=1500)) return fail(env,"terminal-clipboard-timeout");
+  if(!clipboard_desktop_available())return fail(env,"terminal-clipboard-unavailable");
+  ULONGLONG until=GetTickCount64()+(ULONGLONG)budgetValue;
+  while(!OpenClipboard(NULL)){
+    if(GetTickCount64()>=until)return fail(env,"terminal-clipboard-timeout");
+    Sleep(5);
+  }
+  const char *error=NULL; HGLOBAL allocation=NULL; WCHAR *text=NULL; void *output=NULL;
+  size_t limit=(size_t)limitValue, length=0;
+  if(!IsClipboardFormatAvailable(CF_UNICODETEXT)){
+    if(napi_create_buffer(env,0,&output,&result)!=napi_ok)error="terminal-clipboard-read-failed";
+    goto finished;
+  }
+  allocation=GetClipboardData(CF_UNICODETEXT);
+  if(!allocation){error="terminal-clipboard-read-failed";goto finished;}
+  SIZE_T size=GlobalSize(allocation);
+  if(size<sizeof(WCHAR)||size%sizeof(WCHAR)){error="terminal-clipboard-encoding";goto finished;}
+  text=GlobalLock(allocation);
+  if(!text){error="terminal-clipboard-read-failed";goto finished;}
+  /* Bound the scan even for malformed handles. Valid UTF-16 cannot produce
+     fewer UTF-8 bytes than code units; the exact byte bound follows below. */
+  size_t units=size/sizeof(WCHAR), scan=units<limit+1?units:limit+1;
+  while(length<scan&&text[length])length++;
+  if(length==scan){error=scan==units?"terminal-clipboard-encoding":"terminal-clipboard-size";goto finished;}
+  int bytes=length?WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text,(int)length,NULL,0,NULL,NULL):0;
+  if(length&&!bytes){error="terminal-clipboard-encoding";goto finished;}
+  if((size_t)bytes>limit){error="terminal-clipboard-size";goto finished;}
+  if(napi_create_buffer(env,(size_t)bytes,&output,&result)!=napi_ok){error="terminal-clipboard-read-failed";goto finished;}
+  if(bytes&&WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,text,(int)length,output,bytes,NULL,NULL)!=bytes)
+    error="terminal-clipboard-encoding";
+finished:
+  if(text)GlobalUnlock(allocation);
+  CloseClipboard(); /* The OS owns allocation: never GlobalFree it. */
+  if(error)return fail(env,error);
+  return result;
+}
 /* A short-lived helper publishes an eager CF_UNICODETEXT allocation. The OS,
    not this process, owns its lifetime after SetClipboardData succeeds. */
 static napi_value clipboard_write(napi_env env, napi_callback_info info) {
@@ -361,11 +415,7 @@ static napi_value clipboard_write(napi_env env, napi_callback_info info) {
   napi_get_cb_info(env,info,&argc,args,NULL,NULL);
   if(argc!=1||napi_get_value_string_utf16(env,args[0],NULL,0,&length)!=napi_ok||length>224*1024) return fail(env,"terminal-clipboard-size");
   const char *status="unavailable";
-  HDESK input=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS);
-  WCHAR currentName[256], inputName[256]; DWORD needed=0;
-  BOOL desktop=input&&GetUserObjectInformationW(input,UOI_NAME,inputName,sizeof inputName,&needed)&&
-    GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,currentName,sizeof currentName,&needed)&&!wcscmp(inputName,currentName);
-  if(input)CloseDesktop(input);
+  BOOL desktop=clipboard_desktop_available();
   if(desktop){
     HWND window=CreateWindowExW(0,L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,NULL,GetModuleHandleW(NULL),NULL);
     HGLOBAL allocation=GlobalAlloc(GMEM_MOVEABLE,(length+1)*sizeof(WCHAR));
@@ -391,6 +441,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!executionJob || !SetInformationJobObject(executionJob, JobObjectExtendedLimitInformation, &limits, sizeof limits)) return fail(env, "terminal-execution-job-unavailable");
   napi_property_descriptor methods[] = {
+    { "readClipboard", NULL, clipboard_read, NULL, NULL, NULL, napi_default, NULL },
     { "writeClipboard", NULL, clipboard_write, NULL, NULL, NULL, napi_default, NULL },
     { "protectKey", NULL, protect_key, NULL, NULL, NULL, napi_default, NULL },
     { "processIdentity", NULL, process_identity, NULL, NULL, NULL, napi_default, NULL },

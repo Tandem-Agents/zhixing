@@ -8,6 +8,7 @@ import type { TerminalMessage } from '@zhixing/terminal-ui/protocol';
 import { adoptTerminalSocket, TerminalPrivateEndpoint, isTerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
 import { PassThrough } from 'node:stream';
 import type { DaemonChild } from '../serve/daemon.js';
+import { windowsProcessPlan } from './windows-process-plan.js';
 
 /** The existing N daemon owner receives only its original launch-plan channel.
  * S receives fixed creation metadata, never this channel's business payload. */
@@ -277,7 +278,10 @@ class TerminalPrivateChild extends EventEmitter {
     if (!pipe || !isTerminalPrivateEndpoint(pipe) || !owner || !/^[a-f0-9-]{36}$/u.test(owner) || !Number.isSafeInteger(this.#creationDeadline) || this.#creationDeadline <= Date.now()) throw Error('terminal-helper-owner-unavailable');
     this.#signal?.throwIfAborted();
     if (this.#cancelled) throw Error('terminal-helper-cancelled');
-    this.#plan = encodePrivatePlan(executable, args, env, cwd);
+    const launch = await windowsProcessPlan(executable, args, env, cwd);
+    this.#signal?.throwIfAborted();
+    if (this.#cancelled || Date.now() >= this.#creationDeadline) throw Error('terminal-helper-cancelled');
+    this.#plan = encodePrivatePlan(launch.executable, launch.args, env, cwd, launch.verbatim);
     const deadline = Math.min(this.#creationDeadline, Date.now() + 5000);
     this.#deadline = setTimeout(() => { this.kill('SIGKILL'); this.#rejectReady(Error('terminal-helper-creation-timeout')); }, Math.max(0, deadline - Date.now()));
     await this.#endpoint.listen(this.#server);
@@ -450,7 +454,7 @@ class TerminalPrivateChild extends EventEmitter {
   }
 }
 
-function encodePrivatePlan(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, cwd: string): Buffer {
+function encodePrivatePlan(executable: string, args: readonly string[], env: NodeJS.ProcessEnv, cwd: string, verbatim = false): Buffer {
   const environment = Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined).map(([key, value]) => {
     if (!key || key.includes('=') || key.includes('\0')) throw Error('terminal-helper-environment');
     return `${key}=${value}`;
@@ -459,7 +463,7 @@ function encodePrivatePlan(executable: string, args: readonly string[], env: Nod
   const strings = [executable, cwd, ...args, ...environment]; let length = 12;
   for (const value of strings) { const bytes = Buffer.byteLength(value); if (value.includes('\0') || bytes > 32768) throw Error('terminal-helper-plan-text'); length += 4 + bytes; }
   if (length > 2 * 1024 * 1024) throw Error('terminal-helper-plan-capacity');
-  const result = Buffer.allocUnsafe(length + 4); result.writeUInt32BE(length, 0); result.writeUInt32BE(1, 4); result.writeUInt32BE(args.length, 8); result.writeUInt32BE(environment.length, 12);
+  const result = Buffer.allocUnsafe(length + 4); result.writeUInt32BE(length, 0); result.writeUInt32BE(verbatim ? 2 : 1, 4); result.writeUInt32BE(args.length, 8); result.writeUInt32BE(environment.length, 12);
   let at = 16;
   for (const value of strings) { const size = Buffer.byteLength(value); result.writeUInt32BE(size, at); at += 4; result.write(value, at, size, 'utf8'); at += size; }
   return result;
