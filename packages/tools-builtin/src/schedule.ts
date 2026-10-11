@@ -280,8 +280,16 @@ function buildSchedule(
   switch (kind) {
     case "once": {
       const at = input.schedule_at as string;
-      if (!at) return null;
-      return { kind: "once", at };
+      // Public input accepts ISO 8601 with an explicit timezone; persistence
+      // uses canonical UTC. Never silently interpret an unzoned local time.
+      if (typeof at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(at)) return null;
+      const instant = new Date(at);
+      if (!Number.isFinite(instant.getTime())) return null;
+      const [year, month, day] = at.slice(0, 10).split('-').map(Number);
+      const leap = year! % 4 === 0 && (year! % 100 !== 0 || year! % 400 === 0);
+      const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      if (month! < 1 || month! > 12 || day! < 1 || day! > days[month! - 1]!) return null;
+      return { kind: "once", at: instant.toISOString() };
     }
     case "interval": {
       const everyMs = input.schedule_every_ms as number;

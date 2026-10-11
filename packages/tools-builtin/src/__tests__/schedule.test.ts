@@ -110,6 +110,20 @@ function onceInput(overrides?: Record<string, unknown>) {
 // ─── 核心测试 ───
 
 describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
+  it.each(['2030-01-01T00:00:00Z', '2030-01-01T08:00:00+08:00'])("公开 ISO 时间 %s 在工具边界规范化", async at => {
+    await withScheduler(async (scheduler, facade) => {
+      const result = await createScheduleTool(() => facade).call(onceInput({ schedule_at: at }), baseContext());
+      expect(result.isError).toBeFalsy();
+      expect(scheduler.listTasks()[0]!.schedule).toEqual({ kind: 'once', at: '2030-01-01T00:00:00.000Z' });
+    });
+  });
+  it('不把无效日历时间自动归一成另一天', async () => {
+    await withScheduler(async (scheduler, facade) => {
+      const result = await createScheduleTool(() => facade).call(onceInput({ schedule_at: '2030-02-30T00:00:00Z' }), baseContext());
+      expect(result.isError).toBe(true);
+      expect(scheduler.listTasks()).toHaveLength(0);
+    });
+  });
   it("create 成功 → 返回 formatTask 内容，不设 committedToUser", async () => {
     await withScheduler(async (scheduler, facade) => {
       const tool = createScheduleTool(() => facade);
