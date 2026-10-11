@@ -11,6 +11,7 @@ import type {
 } from "../contracts/index.js";
 import { skillNameToId } from "./id.js";
 import { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
+import { validateGlobalQueryResult } from "../protocol/global-query-validation.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
@@ -171,6 +172,7 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     );
     if (current.kind !== "skill-get" || !current.entry) throw new Error("missing entry");
     expect(current.entry.usage).toEqual({ lastHitAt: NOW, hitCount: 2 });
+    expect(() => validateGlobalQueryResult({ kind: 'skill-get', skillId: id }, current)).not.toThrow();
 
     await fixture.adapter.mutate(
       {
@@ -191,6 +193,7 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     );
     expect(product.kind === "skill-catalog" ? product.entries : []).toEqual([]);
     expect(management.kind === "skill-catalog" ? management.entries : []).toHaveLength(1);
+    expect(() => validateGlobalQueryResult({ kind: 'skill-catalog', includeDisabled: true }, management)).not.toThrow();
   });
 });
 

@@ -645,7 +645,11 @@ function readSkillEntry(value: JsonValue | undefined): SkillCatalogEntry | undef
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("Skill entry projection is invalid");
   }
-  return cloneEntry(value as unknown as SkillCatalogEntry) ?? undefined;
+  // This is a local projection read from the verified Authority log/index,
+  // not a remote DTO. Re-derive its public digest from committed fields so
+  // old projections that accidentally hashed their previous digest remain
+  // readable. Remote query validation still rejects any invalid digest.
+  return withDigest(value as unknown as SkillCatalogEntry);
 }
 
 function readSkillAuthorityRecord(value: unknown): SkillAuthorityRecord {
@@ -710,9 +714,10 @@ function mutationDigest(mutation: SkillMutation): string {
 function withDigest(
   entry: Omit<SkillCatalogEntry, "digest">,
 ): SkillCatalogEntry {
+  const { digest: _previous, ...content } = entry as SkillCatalogEntry;
   return {
-    ...structuredClone(entry),
-    digest: protocolDigest("SkillCatalogEntry", 1, entry),
+    ...structuredClone(content),
+    digest: protocolDigest("SkillCatalogEntry", 1, content),
   };
 }
 
