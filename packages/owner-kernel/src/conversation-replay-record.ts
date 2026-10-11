@@ -40,7 +40,7 @@ export async function readConversationReplayRecord(artifacts: ArtifactStore, ref
     if (node.field !== 'messages') metadata[node.field] = await value([node.field]);
   // Validate the metadata through its one existing closed schema. The small
   // validation witness is not returned, stored, or published as a user message.
-  validateTranscriptRunRecord({ ...metadata, messages: [{ role: 'user', content: [] }] } as TranscriptRunRecord, runId);
+  validateTranscriptRunRecord({ ...metadata, messages: [{ role: 'user', content: [] }] } as unknown as TranscriptRunRecord, runId);
   const messages = await index.node(ref, ['messages']);
   if (messages?.kind !== 'array' || !messages.units) throw Error('Transcript run messages are invalid');
   let identified = 0;

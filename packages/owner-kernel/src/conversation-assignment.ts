@@ -1,12 +1,16 @@
 import { Buffer } from "node:buffer";
+import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
 import { userMessageFromTurnInput, type Message } from "@zhixing/core";
 import type { RunInputPort } from "@zhixing/core/loop";
 import type { ConversationMessageStatus } from "@zhixing/core/conversation/application";
 import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, worksceneTaskConflictsWithAdvancement, type WorksceneContinuationSource } from "@zhixing/core/workscene/application";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
-import { ConversationReadIndex } from './conversation-read-index.js';
+import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
+import { ConversationReadIndex, type ControlRead } from './conversation-read-index.js';
+import { ConversationSessionReadModel } from './conversation-session-read-model.js';
 import { conversationCommitSummary } from './conversation-commit-summary.js';
+import { readInputTextPage } from './conversation-input-reader.js';
 import { ConversationBodyReader } from './conversation-body-reader.js';
 import { readConversationReplayRecord } from './conversation-replay-record.js';
 import {
@@ -40,7 +44,6 @@ import type {
   AssignmentActivationProof,
   AuthorityCallContext,
   AuthorityError,
-  ConversationUncertainClosure,
   ConversationRunState,
   ConversationStatusNotice,
   ConversationInvocation,
@@ -204,8 +207,6 @@ import {
   corruptRunJournal,
   historicalBundleFenceMatches,
   nextActiveRunIdForReplay,
-  conversationUncertainClosure,
-  projectUncertainStatusTransition,
   resolutionFactDigest,
   resolutionTargetState,
   terminationProofBindsDurableSource,
@@ -302,17 +303,6 @@ interface FinalOutboxProjection {
   readonly lastPendingRevisionByConversation: Map<string, number>;
 }
 
-type StatusHistoryEntry = {
-  readonly state: ConversationRunState;
-  readonly statusRevision: number;
-  readonly at: IsoTime;
-  readonly reason?: string;
-} & (
-  | { readonly uncertainTransition?: undefined }
-  | { readonly uncertainTransition: "opened"; readonly openFactDigest: string }
-  | ({ readonly uncertainTransition: "closed"; readonly openFactDigest: string } &
-      ConversationUncertainClosure)
-);
 
 const FINAL_OUTBOX_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
@@ -690,6 +680,7 @@ interface RunProjection {
     string,
     { readonly digest: string; readonly domainRevision: number }
   >;
+  readonly taskListRequestIds: Set<string>;
   taskList: TaskListState;
   readonly segments: SegmentRecord[];
   readonly worksceneControls: Map<string, { readonly record: TranscriptRunRecord; readonly advancementSessionId?: string }>;
@@ -996,6 +987,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
   readonly #log: AuthorityCommitLog;
   readonly #readIndex: ConversationReadIndex;
+  readonly #sessionRead: ConversationSessionReadModel<RunProjection>;
   readonly #artifacts: ArtifactStore;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
@@ -1012,6 +1004,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly executorId?: string;
   } | undefined;
   readonly #operations = new SerialTaskQueue();
+  #readBaseGeneration = 0;
   readonly #statusListeners = new Set<
     (notice: ConversationStatusNotice) => void | Promise<void>
   >();
@@ -1036,6 +1029,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#ownerEpoch = options.ownerEpoch;
     this.#log = options.log;
     this.#readIndex = new ConversationReadIndex(options.log, options.artifacts, options.verifier);
+    this.#sessionRead = new ConversationSessionReadModel(options.log, this.#readIndex, options.conversationId,
+      () => emptyProjection(this.#conversationId), this.#reduceSessionRead);
     this.#artifacts = options.artifacts;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
@@ -1092,49 +1087,32 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async taskList(): Promise<TaskListState> {
-    return this.#select((state) => snapshot(state.taskList, "Session task list"));
+    return this.#sessionRead.read((state) => snapshot(state.taskList, "Session task list"));
   }
 
   /** Retry decisions use their original input, never a later list or a new index target. */
   async taskListBeforeMutation(requestId: string): Promise<TaskListState | undefined> {
     assertIdentifier(requestId, "Task-list mutation request id");
-    if (!await this.#select(state => state.sessionMutationDigests.has(requestId))) return undefined;
-    return this.#operations.run(async () => {
-      let before: TaskListState | undefined;
-      const replay = () => this.#log.transactProjection<RunProjection, unknown, void>(
-        emptyProjection(this.#conversationId),
-        async (state, record, envelope) => {
-          if (before !== undefined) return state;
-          const body = record.body as ConversationRunJournalRecord;
-          if (record.stream === runStream(this.#conversationId) &&
-              "t" in body && body.t === "session-control" && body.requestId === requestId) {
-            if (body.mutation.kind !== "task-list-op") throw new Error("Request belongs to another session mutation");
-            before = snapshot(state.taskList, "Task-list mutation base");
-            return state;
-          }
-          return this.#reduce(state, record, envelope);
-        },
-        () => ({ kind: "return", value: undefined }),
-        { stream: runStream(this.#conversationId) },
-      );
-      await (this.#resources ? this.#resources.coordinate(replay) : replay());
-      if (before === undefined) throw new Error("Task-list retry base is unavailable");
-      return before;
-    });
+    return this.#sessionRead.beforeRevision(state => {
+      const request = state.sessionMutationDigests.get(requestId);
+      if (!request) return undefined;
+      if (!state.taskListRequestIds.has(requestId)) throw new Error('Request belongs to another session mutation');
+      return request.domainRevision;
+    }, state => snapshot(state.taskList, 'Task-list mutation base'));
   }
 
   async sessionMutationRequest(requestId: string): Promise<
     { readonly digest: string; readonly domainRevision: number } | undefined
   > {
     assertIdentifier(requestId, "Session mutation request id");
-    return this.#select((state) => state.sessionMutationDigests.get(requestId));
+    return this.#sessionRead.read((state) => structuredClone(state.sessionMutationDigests.get(requestId)));
   }
 
   async advancementWriteRequest(requestId: string): Promise<
     { readonly eventsDigest: string; readonly domainRevision: number } | undefined
   > {
     assertIdentifier(requestId, "Advancement write request id");
-    return this.#select((state) => state.advancementWrites.get(requestId));
+    return this.#sessionRead.read((state) => structuredClone(state.advancementWrites.get(requestId)));
   }
 
   async pendingChannelChallenges(): Promise<readonly PendingChannelChallenge[]> {
@@ -1411,76 +1389,110 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async primeImportedReadBase(records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[]): Promise<void> {
-    await this.#readIndex.installBase(records);
+    await this.#operations.run(async () => {
+      this.#readBaseGeneration++;
+      await this.#readIndex.installBase(records);
+      this.#sessionRead.installBase(records);
+    });
   }
 
-  async primeRecoverySnapshot(
-    snapshot: AuthorityLogSnapshot<unknown>,
-  ): Promise<void> {
-    const replay = async () => {
-      let run = emptyProjection(this.#conversationId);
-      let submission = emptySubmissionGuardProjection();
-      let publish = emptyPublishProjection();
-      let final = emptyFinalProjection();
-      const assignments = new Set<string>();
-      for (const envelope of snapshot.commits) {
-        for (const record of envelope.entries) {
-          if (record.stream === runStream(this.#conversationId)) {
-            run = await this.#reduce(run, record, envelope);
-            const assignmentId = (
-              record.body && typeof record.body === "object" && !Array.isArray(record.body)
-                ? (record.body as { assignmentId?: unknown }).assignmentId
-                : undefined
-            );
-            if (typeof assignmentId === "string") assignments.add(assignmentId);
-            submission = await this.#reduceSubmissionGuard(
-              submission,
-              record as LogicalRecord<ConversationCommitLogRecord>,
-              envelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
-            );
-          } else if (
-            record.stream === "publish" &&
-            record.body &&
-            typeof record.body === "object" &&
-            !Array.isArray(record.body) &&
-            typeof (record.body as { assignmentId?: unknown }).assignmentId === "string" &&
-            assignments.has((record.body as { assignmentId: string }).assignmentId)
-          ) {
-            publish = await reducePublishRecord(
-              publish,
-              record as LogicalRecord<PublishRecord>,
-              envelope as import("@zhixing/core/contracts").CommitEnvelope<PublishRecord>,
-              this.#artifacts,
-            );
-          } else if (
-            record.stream === "final-outbox" &&
-            record.body &&
-            typeof record.body === "object" &&
-            !Array.isArray(record.body) &&
-            (record.body as { conversationId?: unknown }).conversationId ===
-              this.#conversationId
-          ) {
-            await applyFinalRecord(
-              final,
-              record.body as FinalOutboxRecord,
-              envelope.at,
-              envelope as import("@zhixing/core/contracts").CommitEnvelope<FinalOutboxRecord>,
-              this.#artifacts,
-            );
-          }
+  get hasRecoveredInputProjection(): boolean { return this.#runProjection !== undefined; }
+
+  async primeRecoverySnapshot(snapshot: AuthorityLogSnapshot<unknown>): Promise<void> {
+    // Only private candidate state is folded outside the queues. Each physical
+    // artifact leaf retains its normal bounded admission wait; no successful
+    // earlier leaf must be read again merely to reach a later one.
+    const baseGeneration = this.#readBaseGeneration;
+    const abort = currentMaintenanceAbortSignal();
+    let run = emptyProjection(this.#conversationId);
+    let submission = emptySubmissionGuardProjection();
+    let publish = emptyPublishProjection();
+    const final = emptyFinalProjection();
+    const assignments = new Set<string>();
+    const records = (function* () {
+      for (const envelope of snapshot.commits) for (const record of envelope.entries) yield { envelope, record };
+    })();
+    let next = records.next();
+    const checks: Array<() => void> = [];
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      if (this.#readBaseGeneration !== baseGeneration) throw new Error("Conversation recovery read base changed");
+      const yieldAt = performance.now() + 8;
+      let processed = 0;
+      while (!next.done && (processed === 0 || (processed < 64 && checks.length < 64 && performance.now() < yieldAt))) {
+        const { envelope, record } = next.value;
+        if (record.stream === runStream(this.#conversationId)) {
+          run = await this.#reduce(run, record, envelope, checks);
+          const assignmentId = record.body && typeof record.body === "object" && !Array.isArray(record.body)
+            ? (record.body as { assignmentId?: unknown }).assignmentId : undefined;
+          if (typeof assignmentId === "string") assignments.add(assignmentId);
+          submission = await this.#reduceSubmissionGuard(submission,
+            record as LogicalRecord<ConversationCommitLogRecord>,
+            envelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>, checks);
+        } else if (record.stream === "publish" && record.body && typeof record.body === "object" && !Array.isArray(record.body) &&
+          typeof (record.body as { assignmentId?: unknown }).assignmentId === "string" &&
+          assignments.has((record.body as { assignmentId: string }).assignmentId)) {
+          publish = await reducePublishRecord(publish, record as LogicalRecord<PublishRecord>,
+            envelope as import("@zhixing/core/contracts").CommitEnvelope<PublishRecord>, this.#artifacts);
+        } else if (record.stream === "final-outbox" && record.body && typeof record.body === "object" && !Array.isArray(record.body) &&
+          (record.body as { conversationId?: unknown }).conversationId === this.#conversationId) {
+          await applyFinalRecord(final, record.body as FinalOutboxRecord, envelope.at,
+            envelope as import("@zhixing/core/contracts").CommitEnvelope<FinalOutboxRecord>, this.#artifacts);
+        }
+        next = records.next();
+        processed++;
+      }
+
+      // Yield scanning independently of resource validation. Most entries in a
+      // selected envelope have no resource checks; syncing the governor for
+      // each scan slice makes unrelated sidecars contend with input recovery.
+      if (!next.done && checks.length < 64) {
+        await new Promise<void>(setImmediate);
+        continue;
+      }
+
+      // Keep the prepared batch intact if coordinator post-synchronization
+      // encounters pressure. Only revalidate; never apply that batch twice.
+      let retryDeadline: number | undefined;
+      for (;;) {
+        try {
+          await this.#operations.run(async () => {
+            if (abort.aborted) throw new StorageMaintenanceCancelledError();
+            if (this.#readBaseGeneration !== baseGeneration) throw new Error("Conversation recovery read base changed");
+            const validate = async () => { for (const check of checks) check(); };
+            if (checks.length && this.#resources) await this.#resources.coordinate(validate);
+            else await validate();
+            // coordinate may wait and performs a final synchronization. A base
+            // replacement/cancellation during that wait must not publish a view.
+            if (abort.aborted) throw new StorageMaintenanceCancelledError();
+            if (this.#readBaseGeneration !== baseGeneration) throw new Error("Conversation recovery read base changed");
+            if (!next.done) return;
+            // All cursors belong to this journal's fixed log and read-base
+            // generation. Retain independently refreshed newer projections;
+            // an invalidated/missing cache is installed, never called success.
+            if (!this.#runProjection || this.#runProjection.cursor.lsn <= snapshot.cursor.lsn)
+              this.#runProjection = { state: run, cursor: snapshot.cursor };
+            if (!this.#submissionGuardProjection || this.#submissionGuardProjection.cursor.lsn <= snapshot.cursor.lsn)
+              this.#submissionGuardProjection = { state: submission, cursor: snapshot.cursor };
+            if (!this.#publishProjection || this.#publishProjection.cursor.lsn <= snapshot.cursor.lsn)
+              this.#publishProjection = { state: publish, cursor: snapshot.cursor };
+            if (!this.#finalProjection || this.#finalProjection.cursor.lsn <= snapshot.cursor.lsn)
+              this.#finalProjection = { state: final, cursor: snapshot.cursor };
+          });
+          checks.length = 0;
+          break;
+        } catch (error) {
+          const delay = maintenanceRetryDelayMs(error);
+          if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+          retryDeadline ??= performance.now() + 5_000;
+          const remaining = retryDeadline - performance.now();
+          if (remaining <= 0) throw error;
+          await waitForMaintenanceRetry(Math.min(delay, remaining));
         }
       }
-      this.#runProjection = { state: run, cursor: snapshot.cursor };
-      this.#submissionGuardProjection = {
-        state: submission,
-        cursor: snapshot.cursor,
-      };
-      this.#publishProjection = { state: publish, cursor: snapshot.cursor };
-      this.#finalProjection = { state: final, cursor: snapshot.cursor };
-    };
-    await this.#operations.run(() =>
-      this.#resources ? this.#resources.coordinate(replay) : replay(),
-    );
+      if (next.done) return;
+      await new Promise<void>(setImmediate);
+    }
   }
 
   async authorityState(): Promise<{
@@ -1912,6 +1924,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       source: input.source,
       stream: runStream(this.#conversationId),
       initial: emptyProjection(this.#conversationId),
+      ...(this.#runProjection ? { targetBase: { state: structuredClone(this.#runProjection.state), cursor: this.#runProjection.cursor } } : {}),
       reducer: (state, record, commit) =>
         this.#reduce(
           state,
@@ -2077,7 +2090,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       },
     });
     const transact = () => this.#delivery ? this.#delivery.coordinate(apply) : apply();
-    return this.#resources ? this.#resources.coordinate(transact) : transact();
+    return this.#operations.run(() => this.#resources ? this.#resources.coordinate(transact) : transact());
   }
 
   /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
@@ -2186,13 +2199,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if ('ready' in summary) throw Error('Committed metadata index is being prepared');
       return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch, commitRevision: commit.commitRevision, summary };
     }
+    const readGeneration = this.#readBaseGeneration;
     const head = await this.#log.checkpoint();
-    const lifecycleOf = (state: RunProjection) => {
-      let clearId: string | undefined;
-      for (const record of state.lifecycleByRequest.values()) if (record.mutation === 'clear') clearId = record.requestId;
-      return { cleared: state.clearedThroughLsn, clearId, deleted: state.deleted };
+    const lifecycleOf = async () => {
+      const meta = await this.#readIndex.state(this.#conversationId);
+      return { cleared: meta.clearedLsn ?? 0, clearId: meta.clearId, deleted: !!meta.deleted };
     };
-    const lifecycle = await this.#select(lifecycleOf);
+    const lifecycle = await lifecycleOf();
     const baseVisible = !!base && lifecycle.clearId === base.clearId;
     const targetClear = baseVisible ? 0 : lifecycle.cleared;
     const supplied = request.cursor;
@@ -2206,53 +2219,29 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch,
         clearedThroughLsn: lifecycle.cleared, clearId: lifecycle.clearId, baseId: base?.id, upper: head, position: 0, part: 0, offset: 0, contentOffset: 0,
       };
-      return this.#select(state => {
-        const currentLifecycle = lifecycleOf(state);
-        if (state.deleted || currentLifecycle.cleared !== cursor.clearedThroughLsn || currentLifecycle.clearId !== cursor.clearId || (cursor.imported && !baseVisible)) return { cursor, hasMore: false, reset: true };
-        let selected: { input: UserTurnInput; identity: NonNullable<Message['inputIdentity']>; position: number } | undefined;
-        const consider = (position: number, lsn: number, input: UserTurnInput, identity: Message['inputIdentity'], key: string): void => {
-          if (!identity || (cursor.inputKey && cursor.inputKey !== key) ||
-              (cursor.imported ? lsn <= (base?.clearedThroughLsn ?? 0) : lsn <= targetClear || lsn > cursor.upper.lsn) ||
-              position < cursor.position || (selected && selected.position <= position)) return;
-          selected = { input, identity, position };
-        };
-        const initial = state.admittedByRun.get(request.runId);
-        if (initial) consider(initial.record.queuedPosition, initial.lsn, initial.input, initial.record.ingress.turnOrigin?.messageIdentity, initial.record.ingressKey);
-        for (const entry of state.appendedInputs.values()) if (entry.record.runId === request.runId) {
-          consider(entry.record.position, entry.lsn, entry.input, entry.record.ingress.turnOrigin?.messageIdentity, entry.record.ingressKey);
-        }
-        if (!selected) return { cursor, hasMore: false, reset };
-        const { input, identity, position } = selected;
-        let part = position === cursor.position ? cursor.part : 0;
-        let offset = position === cursor.position ? cursor.offset : 0;
-        const contentOffset = position === cursor.position ? cursor.contentOffset : 0;
-        while (part < input.parts.length && (input.parts[part]!.type !== 'text' || offset >= (input.parts[part] as { text: string }).text.length)) { part++; offset = 0; }
-        const current = input.parts[part];
-        let text = '';
-        if (current?.type === 'text') {
-          let end = Math.min(current.text.length, offset + 8192);
-          if (end < current.text.length && /[\uD800-\uDBFF]/u.test(current.text[end - 1]!)) end--;
-          text = current.text.slice(offset, end); offset = end;
-          if (offset === current.text.length) { part++; offset = 0; }
-        }
-        while (part < input.parts.length && (input.parts[part]!.type !== 'text' || !(input.parts[part] as { text: string }).text.length)) part++;
-        const final = part >= input.parts.length;
-        const next: ConversationInputCursor = { ...cursor, position: final ? position + 1 : position,
-          part: final ? 0 : part, offset: final ? 0 : offset, contentOffset: final ? 0 : contentOffset + text.length };
-        const page: ConversationInputPage = { input: { identity: structuredClone(identity), text, contentOffset, final }, cursor: next, hasMore: true, reset };
-        return page;
-      });
+      if (lifecycle.deleted || (cursor.imported && !baseVisible)) return { cursor, hasMore: false, reset: true };
+      const selected = await this.#readIndex.input(this.#conversationId, request.runId, cursor.position, cursor.inputKey, !!cursor.imported, cursor.imported ? base?.clearedThroughLsn ?? 0 : targetClear, cursor.upper.lsn);
+      if (!selected) {
+        const current = await lifecycleOf();
+        return { cursor, hasMore: false, reset: reset || readGeneration !== this.#readBaseGeneration || current.deleted || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId };
+      }
+      const position = selected.pointer.position;
+      const contentOffset = position === cursor.position ? cursor.contentOffset : 0;
+      const piece = await readInputTextPage(this.#artifacts, selected.input, position === cursor.position ? cursor.part : 0, position === cursor.position ? cursor.offset : 0);
+      const current = await lifecycleOf();
+      if (readGeneration !== this.#readBaseGeneration || current.deleted || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId) return { cursor, hasMore: false, reset: true };
+      if ('preparing' in piece) return { cursor, hasMore: true, reset };
+      const next: ConversationInputCursor = { ...cursor, position: piece.final ? position + 1 : position, part: piece.final ? 0 : piece.part, offset: piece.final ? 0 : piece.offset, contentOffset: piece.final ? 0 : contentOffset + piece.text.length };
+      const page: ConversationInputPage = { input: { identity: structuredClone(selected.pointer.identity), text: piece.text, contentOffset, final: piece.final }, cursor: next, hasMore: true, reset };
+      return page;
     }
     if (request.historyRunIds && (request.historyRunIds.length > 4 || request.cursor)) throw new TypeError('Invalid consumed history boundary');
-    const historyThroughCommitRevision = request.historyRunIds?.length ? await this.#select(state => {
-      let revision = 0;
-      for (const runId of request.historyRunIds!) {
-        assertIdentifier(runId, 'Consumed history run id');
-        const commit = state.commits.find(record => record.runId === runId);
-        if (commit) revision = Math.max(revision, commit.commitRevision);
-      }
-      return revision;
-    }) : 0;
+    let historyThroughCommitRevision = 0;
+    for (const runId of request.historyRunIds ?? []) assertIdentifier(runId, 'Consumed history run id');
+    const consumed = await this.#readIndex.control(this.#conversationId, request.historyRunIds ?? []);
+    for (const { commit } of consumed.values()) {
+      if (commit) historyThroughCommitRevision = Math.max(historyThroughCommitRevision, commit.commitRevision);
+    }
     let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
       conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
       clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.records.length ?? 0,
@@ -2262,17 +2251,29 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (cursor.after.lsn === cursor.upper.lsn && cursor.item === 0) cursor = { ...cursor, upper: head };
     if (cursor.after.logId !== head.logId || cursor.after.lsn > cursor.upper.lsn) throw new TypeError('Recovery cursor boundary is invalid');
     const facts: ConversationControlFact[] = [];
-    const collect = async (record: LogicalRecord<unknown>, upper: ConversationControlCursor['upper'], imported = false) => {
+    const controlFor = async (records: readonly LogicalRecord<unknown>[]) => {
+      const ids = new Set<string>();
+      for (const record of records) {
+        const body = record.body as ConversationCommitLogRecord | undefined;
+        if (!body || typeof body !== 'object' || !('t' in body)) continue;
+        if (record.stream === runStream(this.#conversationId) && (body.t === 'state' ||
+            cursor.historyThroughCommitRevision && (body.t === 'admitted' || body.t === 'run-input-appended')) ||
+            record.stream === 'final-outbox' && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
+          ids.add(body.runId);
+        }
+      }
+      return this.#readIndex.control(this.#conversationId, [...ids]);
+    };
+    const collect = async (record: LogicalRecord<unknown>, upper: ConversationControlCursor['upper'], controls: ReadonlyMap<string, ControlRead>, imported = false) => {
       if (!record.body || typeof record.body !== 'object' || !('t' in record.body)) return;
       // Both sources have already passed the journal reducers; the transfer
       // carrier deliberately exposes JSON rather than this journal's union.
       const body = record.body as ConversationCommitLogRecord;
       if (record.stream === runStream(this.#conversationId) && 't' in body && (body.t === 'admitted' || body.t === 'run-input-appended')) {
-        if (cursor.historyThroughCommitRevision && await this.#select(state => {
-          const assignment = state.assignmentByRun.get(body.runId);
-          const commit = assignment ? state.committedByAssignment.get(assignment) : undefined;
-          return !!commit && commit.commitRevision <= cursor.historyThroughCommitRevision!;
-        })) return;
+        if (cursor.historyThroughCommitRevision) {
+          const commit = controls.get(body.runId)?.commit;
+          if (commit && commit.commitRevision <= cursor.historyThroughCommitRevision) return;
+        }
         if (body.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation') facts.push({ kind: 'input', cursor: {
           conversationId: this.#conversationId, runId: body.runId, ownerEpoch: this.#ownerEpoch,
           clearedThroughLsn: cursor.clearedThroughLsn, clearId: cursor.clearId, baseId: base?.id,
@@ -2280,45 +2281,63 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           position: body.t === 'admitted' ? body.queuedPosition : body.position, part: 0, offset: 0, contentOffset: 0,
         } });
       } else if (record.stream === runStream(this.#conversationId) && 't' in body && body.t === 'state') {
-        const fact = await this.#select(state => {
-          const status = state.statusHistoryByRun.get(body.runId)?.at(-1);
-          if (!status || status.statusRevision !== body.statusRevision) return undefined;
-          let communication = state.admittedByRun.get(body.runId)?.record.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation';
-          if (!communication) for (const entry of state.appendedInputs.values()) {
-            if (entry.record.runId === body.runId && entry.record.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation') { communication = true; break; }
-          }
-          const notice = conversationStatusNotice(this.#conversationId, this.#ownerEpoch, body.runId, status);
-          if (!notice) return undefined;
-          return { kind: 'status' as const, notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication };
-        });
+        const status = controls.get(body.runId)!;
+        const notice = status.entry?.statusRevision === body.statusRevision ? conversationStatusNotice(this.#conversationId, this.#ownerEpoch, body.runId, status.entry) : undefined;
+        const fact = notice ? { kind: 'status' as const, notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication: status.communication } : undefined;
         if (fact) facts.push(fact);
       } else if (record.stream === 'final-outbox' && 't' in body && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
-        const assignmentId = await this.#select(state => state.assignmentByCommitRevision.get(body.commitRevision));
-        const conflicts = assignmentId ? await this.#selectPublish(state => state.conflictsByAssignment.get(assignmentId)?.length ?? 0) : 0;
-        facts.push({ kind: 'final', frame: finalFrame(body, conflicts) });
+        const commit = controls.get(body.runId)?.commit;
+        if (!commit || commit.commitRevision !== body.commitRevision) throw Error('Conversation final commit binding is unavailable');
+        facts.push({ kind: 'final', frame: finalFrame(body, await this.#readIndex.finalConflicts(commit)) });
       }
     };
-    // Imported authority is the existing verified immutable prefix. Its source
-    // LSN space is distinct from this device's WAL; retain an index in that
-    // prefix rather than pretending it can be read through readTail here.
-    for (let scanned = 0; base && cursor.baseItem < base.records.length && scanned < 64 && facts.length < 32; scanned++) {
-      const record = base.records[cursor.baseItem]!;
-      if (baseVisible && record.lsn > base.clearedThroughLsn) await collect(record, cursor.upper, true);
+    // Each finite chunk reads its control keys against one verified authority
+    // view. It is discarded before the next chunk; lifecycle is rechecked below.
+    const imported = base?.records.slice(cursor.baseItem, cursor.baseItem + 64) ?? [];
+    const importedControls = await controlFor(baseVisible ? imported.filter(record => record.lsn > base!.clearedThroughLsn) : []);
+    for (const record of imported) {
+      if (facts.length >= 32) break;
+      if (baseVisible && record.lsn > base!.clearedThroughLsn) await collect(record, cursor.upper, importedControls, true);
       cursor = { ...cursor, baseItem: cursor.baseItem + 1 };
     }
     // A bounded scan also yields on logs containing unrelated conversation facts.
-    for (let scanned = 0; scanned < 64 && facts.length < 32 && cursor.baseItem >= (base?.records.length ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted; scanned++) {
-      const tail = await this.#log.readTail<ConversationCommitLogRecord>(cursor.after, 1);
-      const envelope = tail.commits[0];
-      if (!envelope || envelope.lsn > cursor.upper.lsn || cursor.item > envelope.entries.length) throw new TypeError('Recovery cursor envelope is unavailable');
-      let item = cursor.item;
-      for (; item < envelope.entries.length && facts.length < 32; item++) {
-        if (envelope.lsn > targetClear) await collect(envelope.entries[item]!, tail.checkpoint);
+    if (facts.length < 32 && cursor.baseItem >= (base?.records.length ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
+      const tail = await this.#log.readTail<ConversationCommitLogRecord>(cursor.after, 64);
+      const firstItem = cursor.item;
+      function* pending() {
+        for (let frame = 0; frame < tail.commits.length; frame++) {
+          const envelope = tail.commits[frame]!, boundary = tail.checkpoints[frame]!;
+          if (envelope.lsn > cursor.upper.lsn) break;
+          const start = frame === 0 ? firstItem : 0;
+          if (start > envelope.entries.length) throw new TypeError('Recovery cursor envelope is unavailable');
+          if (start === envelope.entries.length) yield { record: undefined, boundary, after: boundary, item: 0 };
+          for (let item = start; item < envelope.entries.length; item++) {
+            const complete = item + 1 === envelope.entries.length;
+            yield { record: envelope.lsn > targetClear ? envelope.entries[item] : undefined, boundary,
+              after: complete ? boundary : undefined, item: complete ? 0 : item + 1 };
+          }
+        }
       }
-      cursor = item === envelope.entries.length ? { ...cursor, after: tail.checkpoint, item: 0 } : { ...cursor, item };
+      const iterator = pending();
+      while (facts.length < 32) {
+        const chunk: Exclude<ReturnType<typeof iterator.next>['value'], void>[] = [];
+        while (chunk.length < 64) {
+          const next = iterator.next();
+          if (next.done) break;
+          chunk.push(next.value);
+        }
+        if (!chunk.length) break;
+        const controls = await controlFor(chunk.flatMap(item => item.record ? [item.record] : []));
+        for (const item of chunk) {
+          if (item.record) await collect(item.record, item.boundary, controls);
+          cursor = { ...cursor, ...(item.after ? { after: item.after } : {}), item: item.item };
+          if (facts.length >= 32) break;
+        }
+      }
+      if (!tail.commits.length) throw new TypeError('Recovery cursor envelope is unavailable');
     }
-    const current = await this.#select(lifecycleOf);
-    if (current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
+    const current = await lifecycleOf();
+    if (readGeneration !== this.#readBaseGeneration || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
     return { facts, cursor, hasMore: cursor.baseItem < (base?.records.length ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
   }
 
@@ -5400,11 +5419,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         "Last-seen status revision",
       );
     }
-    return this.#select((state) =>
-      requests.map(({ runId, afterStatusRevision }) => {
-        const page = (state.statusHistoryByRun.get(runId) ?? [])
-          .filter((record) => record.statusRevision > afterStatusRevision)
-          .slice(0, 65);
+    return Promise.all(
+      requests.map(async ({ runId, afterStatusRevision }) => {
+        const page = await this.#readIndex.statusHistory(this.#conversationId, runId, afterStatusRevision);
         const selected = page.slice(0, 64);
         const notices = selected
           .map((record) =>
@@ -5497,9 +5514,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
   async advancementSessions(): Promise<AdvancementSession[]> {
-    return this.#select((state) =>
-      freezeAdvancementSessions(state.advancementSessions),
-    );
+    return this.#sessionRead.read(state => freezeAdvancementSessions(state.advancementSessions));
   }
 
   /**
@@ -5917,42 +5932,91 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async #select<Value>(select: (state: RunProjection) => Value): Promise<Value> {
-    return this.#operations.run(async () => {
-      const cached = this.#runProjection;
-      const replay = async () => {
-        try {
-          return await this.#log.readProjection<
-            RunProjection,
-            unknown
-          >(
-            cached?.state ?? emptyProjection(this.#conversationId),
-            this.#reduce,
-            {
-              stream: runStream(this.#conversationId),
-              ...(cached ? { cursor: cached.cursor } : {}),
-            },
+    const abort = currentMaintenanceAbortSignal();
+    let retryDeadline: number | undefined;
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      let selecting = false;
+      try {
+        return await this.#operations.run(async () => {
+          const cached = this.#runProjection;
+          const replay = async () => {
+            try {
+              return await this.#log.readProjection<
+                RunProjection,
+                unknown
+              >(
+                cached?.state ?? emptyProjection(this.#conversationId),
+                (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
+                {
+                  stream: runStream(this.#conversationId),
+                  ...(cached ? { cursor: cached.cursor } : {}),
+                },
+              );
+            } catch (error) {
+              // The failed candidate is private; retain the verified prefix.
+              throw error;
+            }
+          };
+          const transaction = await (
+            this.#resources ? this.#resources.coordinate(replay) : replay()
           );
-        } catch (error) {
-          this.#runProjection = undefined;
-          throw error;
-        }
-      };
-      const transaction = await (
-        this.#resources ? this.#resources.coordinate(replay) : replay()
-      );
-      this.#runProjection = {
-        state: transaction.state,
-        cursor: transaction.cursor,
-      };
-      return select(transaction.state);
-    });
+          if (abort.aborted) throw new StorageMaintenanceCancelledError();
+          this.#runProjection = {
+            state: transaction.state,
+            cursor: transaction.cursor,
+          };
+          selecting = true;
+          return select(transaction.state);
+        });
+      } catch (error) {
+        const delay = maintenanceRetryDelayMs(error);
+        if (selecting || delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        retryDeadline ??= performance.now() + 5_000;
+        const remaining = retryDeadline - performance.now();
+        if (remaining <= 0) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, remaining));
+      }
+    }
   }
+
+  readonly #reduceSessionRead = async (state: RunProjection, record: LogicalRecord<unknown>, rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>, throughRevision = Infinity): Promise<RunProjection> => {
+    const body = record.body as ConversationRunJournalRecord;
+    if (!('t' in body) || body.t !== 'committed') {
+      if ('domainRevision' in body && typeof body.domainRevision === 'number' && body.domainRevision > throughRevision) return state;
+      return this.#reduce(state, record, rawEnvelope);
+    }
+    assertConversationRunRecord(body, this.#verifier);
+    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
+    // The validated authority commit already supplies the atomic publish locator.
+    // Read its session batch, never the dispatch, transcript or execution closure.
+    const sidecars = submissionCommitSidecars(envelope, this.#conversationId, body);
+    if (!sidecars.publish?.sessionCount) return state;
+    const bytes = await this.#artifacts.get(sidecars.publish.batch.ref);
+    const text = Buffer.from(bytes).toString('utf8');
+    const batch = validateMutationBatch(JSON.parse(text));
+    if (canonicalize(batch) !== text || batch.assignmentId !== body.assignmentId) throw corruptRunJournal('Advancement read mutation batch binding is invalid');
+    const decision = envelope.entries.find(entry => entry.stream === 'publish' &&
+      (entry.body as { t?: string; assignmentId?: string }).t === 'publish-decision' &&
+      (entry.body as { assignmentId?: string }).assignmentId === body.assignmentId)!;
+    validatePublishDecisionForBatch(decision.body, batch);
+    applyCommittedSessionMutations(state, batch.records, throughRevision);
+    return state;
+  };
 
   readonly #reduce = async (
     state: RunProjection,
     record: LogicalRecord<unknown>,
     rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    checks?: Array<() => void>,
   ): Promise<RunProjection> => {
+    const verify = (check: () => void) => checks ? void checks.push(check) : check();
+    const legacyTickets = checks && this.#legacyAbortTickets ? {
+      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
+        checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
+      },
+    } : this.#legacyAbortTickets;
+
     if (record.stream !== runStream(this.#conversationId)) {
       return state;
     }
@@ -6091,6 +6155,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           digest,
           domainRevision: body.domainRevision,
         });
+        if (body.mutation.kind === 'task-list-op') state.taskListRequestIds.add(body.requestId);
         applyProjectedSessionMutation(state, body.mutation);
         state.lastActiveAt = envelope.at;
         return state;
@@ -6211,11 +6276,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (!this.#resources) {
             throw corruptRunJournal("Anchor assignment has no resource coordinator");
           }
-          this.#resources.assertActivationRecords({
+          verify(() => { this.#resources!.assertActivationRecords({
             lease: dispatch.resourceLease,
             records: envelope.entries,
             acceptedAt: envelope.at,
-          });
+          }); });
         }
         state.assignedById.set(body.assignmentId, {
           record: body,
@@ -6295,7 +6360,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           observationAlreadyExists: state.supersedeStartedObservations.has(
             body.assignmentId,
@@ -6432,7 +6497,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             assigned,
             proof,
             this.#conversationId,
-            this.#legacyAbortTickets,
+            legacyTickets,
           ) ||
           (terminatesForRedispatch &&
             (!envelopeHasResolution(
@@ -6494,7 +6559,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             assigned,
             proof,
             this.#conversationId,
-            this.#legacyAbortTickets,
+            legacyTickets,
           )
         ) {
           throw corruptRunJournal("Cancellation containment is invalid or duplicated");
@@ -6526,7 +6591,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           hasAtomicCancelledState:
             assigned !== undefined &&
@@ -6551,12 +6616,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Accepted cancellation has no durable assignment");
         }
-        this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           proof.decision === "not-started" ? "release" : "settle-release",
           envelope.entries,
-        );
+        ); });
         state.acceptedCancellations.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         return state;
@@ -6581,7 +6646,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             assigned,
             proof,
             this.#conversationId,
-            this.#legacyAbortTickets,
+            legacyTickets,
           );
         const rejectionKey = rejectedNotStartedKey(body.assignmentId, kind);
         if (
@@ -6651,7 +6716,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           proofKind: kind,
           hasAtomicTargetState:
@@ -6702,11 +6767,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
         }
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "release",
           envelope.entries,
-        );
+        ); });
         state.superseded.set(body.assignmentId, body);
         state.recoveryAssignments.delete(body.assignmentId);
         if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
@@ -7086,13 +7151,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           const assigned = state.assignedById.get(body.assignmentId);
           if (!assigned) throw corruptRunJournal("Assigned failure has no assignment");
           if (body.usageFinal) {
-            this.#assertResourceUsageFinal(assigned.record, body.usageFinal);
+            const usageFinal = body.usageFinal;
+            verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
           }
-          this.#assertResourceTerminalRecords(
+          verify(() => { this.#assertResourceTerminalRecords(
             assigned.record,
             body.usageFinal ? "settle-release" : "reclaim",
             envelope.entries,
-          );
+          ); });
         }
         if (body.state === "uncertain" && current?.state !== "uncertain") {
           const assignmentId = state.assignmentByRun.get(body.runId);
@@ -7140,37 +7206,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (history.length + 1 !== body.statusRevision) {
           throw corruptRunJournal("Run status history index is not contiguous");
         }
-        const uncertainStatus = projectUncertainStatusTransition({
-          currentState: current?.state,
-          nextState: body.state,
-          resolutionFacts: conversationResolutionFactsInEnvelope(
-            envelope,
-            this.#conversationId,
-            body.runId,
-          ),
-        });
-        history.push({
-          state: body.state,
-          statusRevision: body.statusRevision,
-          at: envelope.at,
-          ...(body.reason ? { reason: body.reason } : {}),
-          ...(uncertainStatus.kind === "opened"
-            ? {
-                uncertainTransition: "opened" as const,
-                openFactDigest: uncertainStatus.openFactDigest,
-              }
-            : uncertainStatus.kind === "closed"
-              ? {
-                  uncertainTransition: "closed" as const,
-                  openFactDigest: uncertainStatus.openFactDigest,
-                  ...conversationUncertainClosure(
-                    requireConversationResolutionKind(
-                      uncertainStatus.resolutionKind,
-                    ),
-                  ),
-                }
-              : {}),
-        });
+        history.push(projectStatusEntry(body, envelope.at, current?.state,
+          conversationResolutionFactsInEnvelope(envelope, this.#conversationId, body.runId)));
         state.statusHistoryByRun.set(body.runId, history);
         return state;
       }
@@ -7291,11 +7328,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 )),
           });
           if (conversationFact.resolution.kind.startsWith("user-")) {
-            this.#assertResourceTerminalRecords(
+            verify(() => { this.#assertResourceTerminalRecords(
               assigned.record,
               "reclaim",
               envelope.entries,
-            );
+            ); });
           }
         }
         state.resolutionsByRun.set(body.runId, conversationFact);
@@ -7416,12 +7453,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ) {
           throw corruptRunJournal("Committed bundle does not bind its run journal fact");
         }
-        this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal);
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal); });
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "settle-release",
           envelope.entries,
-        );
+        ); });
         const admitted = state.admittedByRun.get(body.runId);
         if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
         let closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
@@ -7433,6 +7470,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           validateWorksceneContinuationCommit('metadata' in closure ? closure.metadata : closure.runRecord, assigned.envelope.work);
           if (!('metadata' in closure)) assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
         } catch (error) {
+          if (isOperationalArtifactFailure(error)) throw error;
           throw corruptRunJournal(
             error instanceof Error
               ? `Committed bundle closure is invalid: ${error.message}`
@@ -7502,27 +7540,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ...(advancement ? { advancementSessionId: advancement.id } : {}),
           });
         }
-        for (const record of closure.batch?.records ?? []) {
-          if (record.domain !== "session") continue;
-          const digest = protocolDigest("SessionStagedMutation", 1, record.mutation);
-          const existing = state.sessionMutationDigests.get(record.requestId);
-          if (existing !== undefined && existing.digest !== digest) {
-            throw corruptRunJournal(
-              "Staged session request is already bound to another payload",
-            );
-          }
-          if (existing === undefined) {
-            state.domainRevision += 1;
-            state.sessionMutationDigests.set(record.requestId, {
-              digest,
-              domainRevision: state.domainRevision,
-            });
-            applyProjectedSessionMutation(
-              state,
-              record.mutation as SessionStagedMutation,
-            );
-          }
-        }
+        applyCommittedSessionMutations(state, closure.batch?.records ?? []);
         state.lastActiveAt = envelope.at;
         return state;
       }
@@ -7554,7 +7572,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     state: SubmissionGuardProjection,
     record: LogicalRecord<ConversationCommitLogRecord>,
     envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+    checks?: Array<() => void>,
   ): Promise<SubmissionGuardProjection> => {
+    const verify = (check: () => void) => checks ? void checks.push(check) : check();
+    const legacyTickets = checks && this.#legacyAbortTickets ? {
+      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
+        checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
+      },
+    } : this.#legacyAbortTickets;
+
     if (record.stream !== runStream(this.#conversationId)) {
       throw corruptRunJournal("Submission guard projection received a different stream");
     }
@@ -7799,7 +7825,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           observationAlreadyExists: state.supersedeStartedAssignments.has(
             body.assignmentId,
@@ -7868,7 +7894,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           hasAtomicCancelledState:
             assigned !== undefined &&
@@ -7896,12 +7922,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Submission guard cancellation has no assignment");
         }
-        this.#assertResourceUsageFinal(assigned.record, proof.usageFinal);
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           proof.decision === "not-started" ? "release" : "settle-release",
           envelope.entries,
-        );
+        ); });
         state.acceptedCancellations.add(body.assignmentId);
         return state;
       }
@@ -7931,7 +7957,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               assigned,
               proof,
               this.#conversationId,
-              this.#legacyAbortTickets,
+              legacyTickets,
             ),
           proofKind: kind,
           hasAtomicTargetState:
@@ -7983,11 +8009,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ),
         });
         if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "release",
           envelope.entries,
-        );
+        ); });
         state.assignmentByRun.delete(assigned.record.runId);
         state.closedAssignments.add(assignmentId);
         state.openConflictAssignments.delete(assignmentId);
@@ -8109,11 +8135,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 )),
           });
           if (fact.resolution.kind.startsWith("user-") && assigned) {
-            this.#assertResourceTerminalRecords(
+            verify(() => { this.#assertResourceTerminalRecords(
               assigned.record,
               "reclaim",
               envelope.entries,
-            );
+            ); });
           }
         }
         state.resolutionsByRun.set(runId, fact);
@@ -8319,13 +8345,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         });
         if (next === "failed" && assigned) {
           if (body.usageFinal) {
-            this.#assertResourceUsageFinal(assigned.record, body.usageFinal);
+            const usageFinal = body.usageFinal;
+            verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
           }
-          this.#assertResourceTerminalRecords(
+          verify(() => { this.#assertResourceTerminalRecords(
             assigned.record,
             body.usageFinal ? "settle-release" : "reclaim",
             envelope.entries,
-          );
+          ); });
         }
         const nextActiveRunId = nextActiveRunIdForReplay({
           activeRunId: state.activeRunId,
@@ -8389,11 +8416,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Submission guard commit has no assignment");
         }
-        this.#assertResourceTerminalRecords(
+        verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "settle-release",
           envelope.entries,
-        );
+        ); });
         state.committedByAssignment.set(assignmentId, {
           bundle: body.bundle,
           commitRevision: body.commitRevision,
@@ -8686,7 +8713,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           unknown,
           Value
         >(
-          cached?.state ?? emptyProjection(this.#conversationId),
+          cached ? structuredClone(cached.state) : emptyProjection(this.#conversationId),
           this.#reduce,
           async (state, context) => {
             if (this.#currentAuthority) {
@@ -8756,7 +8783,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         return transaction;
       } catch (error) {
-        this.#runProjection = undefined;
+        // Coordinator post-sync can fail after append. The original basis is
+        // still intact; the next transaction validates it and replays the tail.
         throw error;
       }
     });
@@ -9444,6 +9472,7 @@ function emptyProjection(conversationId: string): RunProjection {
     advancementSessions: new Map(),
     advancementWrites: new Map(),
     sessionMutationDigests: new Map(),
+    taskListRequestIds: new Set(),
     taskList: { items: [] },
     segments: [],
     worksceneControls: new Map(),
@@ -10283,74 +10312,6 @@ function conversationResolutionFactsInEnvelope(
   });
 }
 
-function requireConversationResolutionKind(
-  kind: NonNullable<UncertainResolutionFact["resolution"]>["kind"],
-): Exclude<
-  NonNullable<UncertainResolutionFact["resolution"]>["kind"],
-  "proven-not-started-cancelled"
-> {
-  if (kind === "proven-not-started-cancelled") {
-    throw corruptRunJournal("Conversation uncertainty uses a job-only closure kind");
-  }
-  return kind;
-}
-
-function conversationStatusNotice(
-  conversationId: string,
-  ownerEpoch: number,
-  runId: string,
-  entry: StatusHistoryEntry,
-): ConversationStatusNotice | undefined {
-  const ref = {
-    execution: "conversation" as const,
-    conversationId,
-    runId,
-    ownerEpoch,
-  };
-  if (entry.uncertainTransition === "opened") {
-    if (entry.state !== "uncertain") {
-      throw corruptRunJournal("Uncertain opening notice has a non-uncertain state");
-    }
-    return {
-      v: 1,
-      ref,
-      state: "uncertain",
-      statusRevision: entry.statusRevision,
-      actions: ["verify-side-effects", "abandon", "retry-risk-ack"],
-      at: entry.at,
-      openFactDigest: entry.openFactDigest,
-    };
-  }
-  if (entry.uncertainTransition === "closed") {
-    if (entry.resultingState !== entry.state) {
-      throw corruptRunJournal("Uncertain closure notice has a mismatched successor state");
-    }
-    return {
-      v: 1,
-      ref,
-      state: "uncertain-closed",
-      statusRevision: entry.statusRevision,
-      actions: [],
-      at: entry.at,
-      openFactDigest: entry.openFactDigest,
-      closedBy: entry.closedBy,
-      resultingState: entry.resultingState,
-    } as ConversationStatusNotice;
-  }
-  if (entry.state === "committed") return undefined;
-  if (entry.state === "uncertain") {
-    throw corruptRunJournal("Uncertain state has no durable open fact identity");
-  }
-  return {
-    v: 1,
-    ref,
-    state: entry.state,
-    statusRevision: entry.statusRevision,
-    actions: [],
-    at: entry.at,
-    ...(entry.reason ? { reason: entry.reason } : {}),
-  };
-}
 
 function conversationStatusNoticesForCommit(
   state: RunProjection,
@@ -10645,7 +10606,12 @@ async function validateConversationBundleClosure(
     : { artifact, ...(batch ? { batch } : {}), runRecord: runRecord!, references };
 }
 
-function bundleClosureReadError(error: unknown, message: string): BundleClosureError {
+function isOperationalArtifactFailure(error: unknown): boolean {
+  return error instanceof StorageMaintenanceAdmissionError || error instanceof StorageMaintenanceCancelledError || error instanceof DeviceCapacityAdmissionError;
+}
+
+function bundleClosureReadError(error: unknown, message: string): Error {
+  if (isOperationalArtifactFailure(error)) return error as Error;
   return error instanceof AuthorityStorageError && error.code === "artifact-missing"
     ? new BundleClosureError("missing-base", `${message}: artifact is not present`, {
         cause: error,
@@ -10865,6 +10831,32 @@ function envelopeHasConversationCommitSidecars(
       );
     });
   });
+}
+
+function applyCommittedSessionMutations(state: RunProjection, records: readonly MutationBatch["records"][number][], throughRevision = Infinity): void {
+  for (const record of records) {
+    if (record.domain !== "session") continue;
+    const digest = protocolDigest("SessionStagedMutation", 1, record.mutation);
+    const existing = state.sessionMutationDigests.get(record.requestId);
+    if (existing !== undefined && existing.digest !== digest) {
+      throw corruptRunJournal(
+        "Staged session request is already bound to another payload",
+      );
+    }
+    if (existing === undefined) {
+      if (state.domainRevision >= throughRevision) return;
+      state.domainRevision += 1;
+      state.sessionMutationDigests.set(record.requestId, {
+        digest,
+        domainRevision: state.domainRevision,
+      });
+      if (record.mutation.kind === 'task-list-op') state.taskListRequestIds.add(record.requestId);
+      applyProjectedSessionMutation(
+        state,
+        record.mutation as SessionStagedMutation,
+      );
+    }
+  }
 }
 
 function submissionCommitSidecars(

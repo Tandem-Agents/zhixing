@@ -4674,7 +4674,11 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
 
   it("rejects invalid durable admission values before they reach queue indexes", async () => {
     const harness = await createHarness();
-    await harness.log.append([
+    // Inject through a peer without owner projections so this still exercises
+    // replay rejection; the live read index also rejects this on append now.
+    const corruptPeer = new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {clock: () => NOW});
+    onTestFinished(() => corruptPeer.stopStorageMaintenance());
+    await corruptPeer.append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {

@@ -1166,3 +1166,68 @@ describe("workscene session owner metadata", { timeout: DURABLE_IO_TEST_TIMEOUT_
     );
   });
 });
+
+it("uses a verified target prefix while independently replaying control receipts and the target tail", async () => {
+  const { log, journal } = await createHarness();
+  const stream = "run:test-target";
+  for (let i = 0; i < 8; i++) await log.append([{ stream, body: { count: 1 } }]);
+  const snapshot = await log.readSnapshot();
+  await log.append([{ stream, body: { count: 2 } }]);
+  const source = inputSource("ingress-seeded");
+  const envelope = inputEnvelope("seeded-first-send", source);
+  let decided = 0;
+  const apply = () => journal.applyAuthority({
+    envelope, source, stream, initial: { count: 0 }, targetBase: { state: { count: 8 }, cursor: snapshot.cursor },
+    reducer: (state, record, commit) => {
+      expect(commit.lsn).toBeGreaterThan(snapshot.cursor.lsn);
+      state.count += (record.body as { count: number }).count; return state;
+    },
+    decide: (state, context) => {
+      decided++; expect(state.count).toBe(10);
+      return { result: { v: 1 as const, status: "ok" as const, body: { t: "input" as const, runId: "run-seeded", queuedPosition: context.authorityPrefix.nextLsn } },
+        authorityEntries: [{ stream, body: { count: 1 } }] };
+    },
+  });
+  expect((await apply()).kind).toBe("applied");
+  expect((await apply()).kind).toBe("replayed");
+  expect(decided).toBe(1);
+  expect((await log.readStream(stream))).toHaveLength(10);
+  const other = inputEnvelope("seeded-second-send", inputSource("ingress-second"));
+  await expect(journal.lookup({ envelope: other, source: inputSource("ingress-second") })).resolves.toEqual({kind:"absent"});
+}, 20000);
+
+it("rejects a control receipt removed between receipt and target completion", async () => {
+  const { log, journal } = await createHarness();
+  await log.append([{ stream: "run:seed", body: { count: 1 } }]);
+  const snapshot = await log.readSnapshot();
+  const disk = await import("node:fs/promises");
+  const prefixBytes = (await disk.stat(log.logPath)).size;
+  const transact = log.transactProjection.bind(log);
+  const interceptor = vi.spyOn(log, "transactProjection").mockImplementation(async (...args) => {
+    const options = args[3];
+    if (options?.requiredPrefix) await disk.truncate(log.logPath, prefixBytes);
+    return transact(...args);
+  });
+  const source = inputSource("removed-receipt");
+  const decide = vi.fn(() => ({ result: inputResult("must-not-apply"), authorityEntries: [] }));
+  try {
+    await expect(journal.applyAuthority({
+      source, envelope: inputEnvelope("removed-receipt", source), stream: "run:seed",
+      initial: {}, targetBase: { state: {}, cursor: snapshot.cursor }, reducer: state => state, decide,
+    })).rejects.toThrow();
+    expect(decide).not.toHaveBeenCalled();
+  } finally { interceptor.mockRestore(); }
+});
+
+it("rejects a foreign target cursor and an observer with a seeded target", async () => {
+  const a = await createHarness(); const b = await createHarness();
+  await a.log.append([{stream:"run:seed",body:{}}]);
+  await b.log.append([{stream:"run:seed",body:{}}]);
+  const source = inputSource("foreign-seed");
+  const decide = vi.fn(() => ({ result: inputResult("must-not-apply"), authorityEntries: [] }));
+  const input = { source, envelope: inputEnvelope("foreign-seed",source), stream:"run:seed", initial:{},
+    targetBase:{state:{},cursor:(await b.log.readSnapshot()).cursor}, reducer:(state:object)=>state, decide };
+  await expect(a.journal.applyAuthority(input)).rejects.toThrow();
+  expect(decide).not.toHaveBeenCalled();
+  await expect(a.journal.applyAuthority({...input,observe:()=>{}})).rejects.toThrow("independent observer");
+});

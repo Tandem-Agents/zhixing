@@ -23,13 +23,15 @@ import {
   type AdvancementControlEvent,
 } from "@zhixing/core/advancement";
 import {
+  canonicalize, createMutationBatch, createConversationSealedBundle, sealedBundleArtifact,
   createSignedEvidenceRequest,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { isHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import {
   ControlAdmissionJournal,
   createConversationControlEnvelope,
@@ -629,3 +631,163 @@ describe("ConversationSessionStateAdapter advancement", { timeout: DURABLE_IO_TE
     );
   });
 });
+
+
+it('directory advancement reads skip historical execution artifacts and load external events outside exclusions', async () => {
+  const h = await createHarness();
+  await h.journal.admit({ ingressKey: 'old-input', runId: 'old-run', queuedPosition: 0,
+    userInput: task('historical input '.repeat(4000)), invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'old-input', receivedAt: NOW } });
+  await h.journal.cancelRun({ runId: 'old-run', requestId: 'cancel-old' });
+  await h.write([createdEvent({ originalUserTask: task('advancement '.repeat(4000)) })]);
+  const records = await h.log.readStream('run:conv-1');
+  const eventRef = (records.find(entry => (entry.body as any).t === 'advancement-event')!.body as any).event.ref;
+  const get = h.artifacts.get.bind(h.artifacts);
+  const reads = vi.spyOn(h.artifacts, 'get').mockImplementation(async ref => {
+    expect(ref.digest).toBe(eventRef.digest);
+    expect(isHoldingMaintenanceExclusion()).toBe(false);
+    return get(ref);
+  });
+  try {
+    const restarted = h.makeJournal();
+    expect((await restarted.advancementSessions())[0]?.id).toBe('session-1');
+    expect(reads).toHaveBeenCalledTimes(1);
+    await restarted.advancementSessions();
+    expect(reads).toHaveBeenCalledTimes(1);
+  } finally { reads.mockRestore(); }
+}, 20000);
+
+it('advancement reads combine verified imported authority with the local tail', async () => {
+  const source = await createHarness(); await source.write([createdEvent()]);
+  const sourceSnapshot = await source.log.readSnapshot<unknown>();
+  const target = await createHarness(), local = await target.log.readSnapshot<unknown>();
+  await target.journal.primeRecoverySnapshot({ commits: sourceSnapshot.commits, cursor: local.cursor });
+  await target.journal.primeImportedReadBase(sourceSnapshot.commits.flatMap(envelope => envelope.entries.map(record => ({ ...record, lsn: envelope.lsn, at: envelope.at }))) as any);
+  expect((await target.journal.advancementSessions())[0]?.status).toBe('awaiting-rubric-confirmation');
+  await target.journal.applyAdvancementEvents({ requestId: 'local-confirm', events: [confirmedEvent()] });
+  expect((await target.journal.advancementSessions())[0]?.status).toBe('active');
+}, 20000);
+
+it('advancement cold read recovers temporary artifact pressure without entering a serial exclusion', async () => {
+  const h = await createHarness(); await h.write([createdEvent({ originalUserTask: task('large '.repeat(10000)) })]);
+  const get = h.artifacts.get.bind(h.artifacts); let calls = 0;
+  const spy = vi.spyOn(h.artifacts, 'get').mockImplementation(async ref => {
+    expect(isHoldingMaintenanceExclusion()).toBe(false);
+    if (++calls === 1) throw new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'probe-unavailable', retryAfterMs: 1 });
+    return get(ref);
+  });
+  try { expect((await h.makeJournal().advancementSessions())[0]?.id).toBe('session-1'); expect(calls).toBe(2); }
+  finally { spy.mockRestore(); }
+}, 20000);
+
+it('advancement reads preserve the shared session revision guard', async () => {
+  const h = await createHarness(); await h.write([createdEvent()]);
+  await h.log.append([{ stream: 'run:conv-1', body: { t: 'session-control', requestId: 'rename', domainRevision: 2, mutation: { kind: 'session-meta', patch: { name: 'renamed' } } } }]);
+  const entry = (await h.log.readStream('run:conv-1')).find(entry => (entry.body as any).t === 'advancement-event')!;
+  await h.log.append([{ stream: 'run:conv-1', body: { ...(entry.body as any), requestId: 'conflicting-new-write', domainRevision: 2, event: confirmedEvent() } }]);
+  await expect(h.makeJournal().advancementSessions()).rejects.toThrow('Advancement event domain revision is not monotonic');
+});
+
+
+it.each(['cold', 'warm', 'imported'] as const)('session read includes committed session mutations: %s', async mode => {
+  const source = await createHarness(); await source.write([createdEvent()]);
+  const reader = source.makeJournal(); if (mode === 'warm') await reader.advancementSessions();
+  const firstTasks = {items:[{id:'staged',content:'staged task',status:'pending' as const}]};
+  const batch = createMutationBatch('commit-assignment', [
+    { v:1, t:'staged-mutation', seq:1, domain:'session', requestId:'commit-first', mutation:{kind:'task-list-op',op:{op:'set',state:firstTasks}}},
+    { v:1, t:'staged-mutation', seq:2, domain:'session', requestId:'commit-rename', mutation:{kind:'task-list-op',op:{op:'set',state:{items:[]}}}},
+  ]);
+  const ref = await source.artifacts.put(Buffer.from(canonicalize(batch)));
+  const bundle = createConversationSealedBundle({ assignmentId:'commit-assignment', executorId:'executor-test',
+    streamFinal:{finalSeq:1,streamDigest:'sha256:'+'0'.repeat(64)},usage:{inputTokens:0,outputTokens:0,toolCalls:0},usageFinal:{reportDigest:'sha256:'+'0'.repeat(64),upToUsageSeq:0},dependencyArtifacts:[],
+    body:{t:'conversation',runId:'committed-run',conversationId:'conv-1',ownerEpoch:1,baseRevision:0,
+      runRecord:{type:'run',runId:'committed-run',runIndex:1,timestamp:NOW,messages:[{role:'user',content:[{type:'text',text:'session mutation'}]}]},
+      contentAssets:[],mutationBatch:{ref,sessionCount:2,globalCount:0}}});
+  const dummy = await source.artifacts.put(sealedBundleArtifact(bundle).bytes);
+  await source.log.append([
+    {stream:'run:conv-1',body:{t:'committed',runId:'committed-run',assignmentId:'commit-assignment',commitRevision:1,bundle:{ref:dummy}}},
+    {stream:'run:conv-1',body:{kind:'content-asset-index',entries:[]}},
+    {stream:'final-outbox',body:{t:'final',conversationId:'conv-1',runId:'committed-run',commitRevision:1,digest:dummy.digest,state:'pending'}},
+    {stream:'publish',body:{t:'publish-decision',assignmentId:'commit-assignment',batch:{ref},sessionCount:2,globalCount:0,outcomes:[{seq:1,outcome:{t:'granted',targetRevision:2}},{seq:2,outcome:{t:'granted',targetRevision:3}}]}},
+    {stream:'publish',body:{t:'publish-progress',assignmentId:'commit-assignment',domain:'session',state:'pending',upToSeq:0}},
+  ]);
+  const later = {stream:'run:conv-1',body:{t:'session-control',requestId:'after-commit',domainRevision:4,mutation:{kind:'session-meta',patch:{name:'later name'}}}};
+  if (mode === 'imported') {
+    const target = await createHarness(); await target.artifacts.put(Buffer.from(canonicalize(batch)));
+    const snapshot = await source.log.readSnapshot<unknown>();
+    await target.journal.primeImportedReadBase(snapshot.commits.flatMap(e => e.entries.map(r => ({...r,lsn:e.lsn,at:e.at}))) as any);
+    await target.log.append([later]);
+    expect(await target.journal.taskListBeforeMutation('commit-rename')).toEqual(firstTasks);
+    expect(await target.journal.taskListBeforeMutation('commit-first')).toEqual({items:[]});
+    expect((await target.journal.advancementSessions())[0]?.id).toBe('session-1');
+    expect(await target.journal.sessionMutationRequest('commit-rename')).toMatchObject({domainRevision:3});
+    expect(await target.journal.sessionMutationRequest('after-commit')).toMatchObject({domainRevision:4});
+  } else {
+    await source.log.append([later]);
+    expect(await reader.taskListBeforeMutation('commit-rename')).toEqual(firstTasks);
+    expect(await reader.taskListBeforeMutation('commit-first')).toEqual({items:[]});
+    expect((await reader.advancementSessions())[0]?.id).toBe('session-1');
+    expect(await reader.sessionMutationRequest('after-commit')).toMatchObject({domainRevision:4});
+  }
+}, 20000);
+
+it('warm session read recovers external advancement tails outside the owner queue', async () => {
+  const h = await createHarness(), reader = h.makeJournal();
+  expect(await reader.advancementSessions()).toEqual([]);
+  await h.write([createdEvent({originalUserTask:task('external '.repeat(8000))})]);
+  const get = h.artifacts.get.bind(h.artifacts); let blocked = false;
+  const spy = vi.spyOn(h.artifacts,'get').mockImplementation(async ref => {
+    if (isHoldingMaintenanceExclusion()) { blocked = true; throw new StorageMaintenanceAdmissionError({kind:'backpressured',blockedBy:'probe-unavailable',retryAfterMs:1}); }
+    return get(ref);
+  });
+  try {expect((await reader.advancementSessions())[0]?.id).toBe('session-1');expect(blocked).toBe(false);}
+  finally {spy.mockRestore();}
+}, 20000);
+
+it('task-list retry base remains the original session input after later mutations and restart', async () => {
+  const h = await createHarness();
+  const first = {items:[{id:'first',content:'first task',status:'pending'}]};
+  await h.log.append([{stream:'run:conv-1',body:{t:'session-control',requestId:'first',domainRevision:1,mutation:{kind:'task-list-op',op:{op:'set',state:first}}}}]);
+  await h.log.append([{stream:'run:conv-1',body:{t:'session-control',requestId:'second',domainRevision:2,mutation:{kind:'task-list-op',op:{op:'set',state:{items:[]}}}}}]);
+  const reader = h.makeJournal(), all = vi.spyOn(h.log,'readSnapshot').mockRejectedValue(Error('whole log forbidden'));
+  try {
+    expect(await reader.taskListBeforeMutation('second')).toEqual(first);
+    expect(await reader.taskList()).toEqual({items:[]});
+    expect(await reader.taskListBeforeMutation('first')).toEqual({items:[]});
+    expect(await reader.taskListBeforeMutation('missing')).toBeUndefined();
+    expect(all).not.toHaveBeenCalled();
+  } finally {all.mockRestore();}
+});
+
+it('task-list late retries preserve no-op and pre-clear inputs within one envelope', async () => {
+  const h = await createHarness();
+  const first = {items:[{id:'a',content:'original',status:'pending'}]};
+  const control = (requestId: string, domainRevision: number, state: unknown) => ({stream:'run:conv-1',body:{t:'session-control',requestId,domainRevision,mutation:{kind:'task-list-op',op:{op:'set',state}}}});
+  await h.log.append([control('first',1,first),control('no-effect',2,first)]);
+  await h.log.append([{stream:'run:conv-1',body:{t:'session-lifecycle',requestId:'clear-list',domainRevision:3,mutation:'clear'}}]);
+  await h.log.append([control('after-clear',4,{items:[]})]);
+  const reader = h.makeJournal();
+  expect(await reader.taskListBeforeMutation('no-effect')).toEqual(first);
+  expect(await reader.taskListBeforeMutation('after-clear')).toEqual({items:[]});
+  expect(await reader.taskListBeforeMutation('first')).toEqual({items:[]});
+  expect(await reader.taskList()).toEqual({items:[]});
+});
+
+it('session batch read crosses 64 frames and discards failed partial state', async () => {
+  const h = await createHarness();
+  for (let revision=1;revision<=66;revision++) await h.log.append([{stream:'run:conv-1',body:{t:'session-control',requestId:'batch-'+revision,domainRevision:revision,
+    mutation:{kind:'task-list-op',op:{op:'set',state:{items:[{id:'item-'+revision,content:'task '+revision,status:'pending'}]}}}}}]);
+  const reader=h.makeJournal(), read=h.log.readEnvelopesAt.bind(h.log); let failed=false;
+  const spy=vi.spyOn(h.log,'readEnvelopesAt').mockImplementation(async points=>{
+    if (!failed && points[0]?.lsn>64) {failed=true;throw Error('second batch unavailable');}
+    return read(points);
+  });
+  try {
+    await expect(reader.taskList()).rejects.toThrow('second batch unavailable');
+    expect((await reader.taskList()).items[0]?.id).toBe('item-66');
+    expect((await reader.taskListBeforeMutation('batch-66'))?.items[0]?.id).toBe('item-65');
+    expect((await reader.taskList()).items[0]?.id).toBe('item-66');
+    expect(spy.mock.calls.some(([points])=>points.length===64)).toBe(true);
+  } finally {spy.mockRestore();}
+},30000);
+

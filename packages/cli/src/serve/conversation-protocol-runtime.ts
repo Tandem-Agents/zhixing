@@ -729,7 +729,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     // first authority write. Reading them must neither create facts nor replay
     // every historical body. A durable deletion always wins over stored files.
     const exists = this.#adoptedConversations.has(id) ||
-      (await this.#authority.controlAdmission.listCreatedConversationIds()).includes(id) ||
+      await this.#authority.controlAdmission.hasCreatedConversation(id) ||
       (await this.#storedIdentityExists?.(id)) === true;
     if (!exists || await this.#journal(id).recoveryDeleted()) throw Error('Conversation recovery owner is unavailable');
     const base = this.#adoptedConversations.get(request.conversationId);
@@ -2007,8 +2007,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async sessionExists(conversationId: string): Promise<boolean> {
     if (!this.#acceptsConversationId(conversationId)) return false;
     if (!this.#adoptedConversations.has(conversationId)) {
-      const ids = await this.#authority.controlAdmission.listCreatedConversationIds();
-      if (!ids.includes(conversationId)) return false;
+      if (!await this.#authority.controlAdmission.hasCreatedConversation(conversationId)) return false;
     }
     return !await this.#journalForQuery(conversationId).recoveryDeleted();
   }
@@ -2343,8 +2342,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         throw new Error("Conversation identity does not belong to this owner domain");
       }
     }
-    const snapshot = await this.#authority.authorityLog.readSnapshot();
-    const conversationSnapshots = partitionConversationSnapshots(snapshot);
     const grouped = new Map<
       string,
       Array<{ runId: string; afterStatusRevision: number }>
@@ -2371,9 +2368,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           if (!entry) return;
           const [conversationId, cursors] = entry;
           const journal = this.#journalForQuery(conversationId);
-          await journal.primeRecoverySnapshot(
-            conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot),
-          );
           const pages = await journal.statusHistoryBatch(cursors);
           for (let index = 0; index < pages.length; index += 1) {
             const page = pages[index]!;
@@ -2511,8 +2505,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async #snapshotWithImportedBase(
     records: readonly ConversationTransferAuthorityRecord[],
+    snapshot?: AuthorityLogSnapshot<unknown>,
   ): Promise<AuthorityLogSnapshot<unknown>> {
-    const current = await this.#authority.authorityLog.readSnapshot<unknown>();
+    const current = snapshot ?? await this.#authority.authorityLog.readSnapshot<unknown>();
     const grouped = new Map<string, {
       readonly lsn: number;
       readonly at: string;
@@ -2931,9 +2926,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     );
     for (const conversationId of conversationIds) {
       this.#markRecovery(conversationId);
-      await this.#journal(conversationId).primeRecoverySnapshot(
-        conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot),
-      );
+      const localSnapshot = conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot);
+      const imported = this.#adoptedConversations.get(conversationId);
+      await this.#journal(conversationId).primeRecoverySnapshot(imported
+        ? await this.#snapshotWithImportedBase(imported.records, localSnapshot) : localSnapshot);
     }
     let resumed = 0;
     const queue = [...conversationIds];

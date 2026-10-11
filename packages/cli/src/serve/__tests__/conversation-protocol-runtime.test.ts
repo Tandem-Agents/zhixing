@@ -1,3 +1,4 @@
+import { StorageMaintenanceAdmissionError } from '@zhixing/core/resources';
 import type {
   ConversationStatusNotice,
   SecretRef,
@@ -2567,6 +2568,11 @@ describe("ConversationProtocolRuntime", () => {
     // Input admission is also a full journal replay entry, independently of
     // startup recovery. Give it a fresh resource owner over the same history.
     const inputAuthority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    const coordinate = vi.fn(inputAuthority.resourceGovernor.coordinate.bind(inputAuthority.resourceGovernor));
+    const recoveryResources = new Proxy(inputAuthority.resourceGovernor, { get(target, key) {
+      if (key === "coordinate") return coordinate;
+      const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+    } });
     const inputJournal = new ConversationRunJournal({
       conversationId: "conversation-1", ownerEpoch: inputAuthority.anchorEpoch,
       log: inputAuthority.authorityLog, artifacts: inputAuthority.artifacts,
@@ -2574,8 +2580,24 @@ describe("ConversationProtocolRuntime", () => {
       submission: { authenticate() {}, authorize() {} },
       authority: { decideAtPrefix() { throw new Error("admission must not commit a turn"); } },
       projection: { async project() { throw new Error("admission must not project a turn"); } },
-      resources: inputAuthority.resourceGovernor,
+      resources: recoveryResources,
     });
+    // Preserve real governor checks across post-check pressure without folding
+    // artifacts twice; scanner slices without checks do not synchronize it.
+    const recoverySnapshot = await inputAuthority.authorityLog.readSnapshot();
+    const artifactReads = vi.spyOn(inputAuthority.artifacts, 'get');
+    const realCoordinate = inputAuthority.resourceGovernor.coordinate.bind(inputAuthority.resourceGovernor);
+    let readsAfterFirstCheck = 0;
+    coordinate.mockImplementationOnce(async operation => {
+      await realCoordinate(operation);
+      readsAfterFirstCheck = artifactReads.mock.calls.length;
+      throw new StorageMaintenanceAdmissionError({kind: 'backpressured', blockedBy: 'probe-unavailable', retryAfterMs: 1});
+    });
+    await inputJournal.primeRecoverySnapshot(recoverySnapshot);
+    expect(coordinate).toHaveBeenCalledTimes(2);
+    expect(artifactReads.mock.calls.length).toBe(readsAfterFirstCheck);
+    expect(inputJournal.hasRecoveredInputProjection).toBe(true);
+    coordinate.mockClear(); artifactReads.mockRestore();
     const at = new Date().toISOString();
     const source = {
       principal: { surfacePrincipal: "rpc:owner", deviceId: inputAuthority.deviceId, connectionId: "cold-input" },
@@ -3224,8 +3246,32 @@ describe("ConversationProtocolRuntime", () => {
       runId: admitted.runId,
       afterStatusRevision: 0,
     }]);
-    expect(snapshotRead).toHaveBeenCalledTimes(1);
+    expect(snapshotRead).not.toHaveBeenCalled();
     expect(history.notices.some((notice) => notice.state === "cancelled")).toBe(true);
+    // The adopted prefix belongs to the source. A target-local status snapshot
+    // must not erase it, with either an empty or later target WAL cursor.
+    const target = await setupAuthorityRuntime({ zhixingHome: await createTempDir("status-import-target"), secretStore: new MemorySecretStore() });
+    const transferred = createProtocol({ authority: target, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    const records = (await authority.authorityLog.readAll())
+      .filter(commit => commit.entries.some(entry => entry.stream === "run:conversation-cancel"))
+      .flatMap(commit => commit.entries.map(entry => ({ ...entry, lsn: commit.lsn, at: commit.at })));
+    expect(records.length).toBeGreaterThan(0);
+    const baseRef = await target.artifacts.put(Buffer.from(JSON.stringify(records)));
+    const token = await transferred.prepareCommittedConversationTransfer({
+      manifest: { v: 1, requestId: "status-import", transferId: "status-import", sourceDeviceId: authority.deviceId,
+        targetDeviceId: target.deviceId, conversationId: "conversation-cancel", sourceOwnerEpoch: authority.anchorEpoch,
+        nextOwnerEpoch: authority.anchorEpoch + 1, lastLsn: records.at(-1)!.lsn, streams: [], contentAssets: [],
+        authorityBase: { checkpoint: { logId: "source", lsn: records.at(-1)!.lsn, frameEndOffset: 0, prefixDigest: baseRef.digest },
+          records: baseRef, sessionState: baseRef, reducerVersion: "1" } }, records,
+    });
+    token.publish();
+    for (const appendTargetTail of [false, true]) {
+      if (appendTargetTail) await transferred.ensureSession("conversation-status-other");
+      const importedHistory = await transferred.statusHistory([{ conversationId: "conversation-cancel", runId: admitted.runId, afterStatusRevision: 0 }]);
+      expect(importedHistory.notices.some(notice => notice.state === "cancelled")).toBe(true);
+      expect((await transferred.sessionAuthorityState("conversation-cancel")).hasDurableIdentity).toBe(true);
+    }
+
     expect(history.next).toEqual([{
       conversationId: "conversation-cancel",
       runId: admitted.runId,

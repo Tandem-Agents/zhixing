@@ -1,5 +1,7 @@
 import { Buffer } from "node:buffer";
+import { currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
 import {
+  artifactJsonIndex,
   AuthorityStorageError,
   collectArtifactRefs,
   describeControlArtifactClosure,
@@ -414,6 +416,7 @@ export class ControlAdmissionJournal {
   readonly #log: AuthorityCommitLog;
   readonly #artifacts: ArtifactStore;
   readonly #operations = new SerialTaskQueue();
+  readonly #identities: ReturnType<AuthorityCommitLog['durableProjection']>;
   #projection = emptyProjection();
   #projectionCursor: ProjectionCursor | undefined;
   readonly #authorityProjections = new Map<
@@ -428,7 +431,7 @@ export class ControlAdmissionJournal {
   constructor(log: AuthorityCommitLog, artifacts: ArtifactStore) {
     this.#log = log;
     this.#artifacts = artifacts;
-    registerConversationIdentityProjection(log, artifacts);
+    this.#identities = registerConversationIdentityProjection(log, artifacts);
   }
 
   /**
@@ -437,36 +440,22 @@ export class ControlAdmissionJournal {
    * registry; artifact-backed results are materialized through the same store.
    */
   async listCreatedConversationIds(): Promise<readonly string[]> {
-    return this.#operations.run(async () => {
-      const transaction = await this.#transact<readonly Stored<ControlResult>[]>(
-        (state) => {
-          const requests = new Map(state.base.requests);
-          for (const [requestId, request] of state.requests) {
-            requests.set(requestId, request);
-          }
-          const results = [...requests.values()]
-            .filter(
-              (request) =>
-                request.requestType === "session-create" &&
-                request.storedResult !== undefined,
-            )
-            .map((request) => request.storedResult!);
-          return { kind: "return", value: results };
-        },
-        [],
-      );
-      const ids = new Set<string>();
-      for (const stored of transaction.value) {
-        const result = await loadStored(stored, this.#artifacts, "ControlResult");
-        if (
-          result.status === "ok" &&
-          result.body.t === "session-create"
-        ) {
-          ids.add(result.body.conversationId);
-        }
+    const ids: string[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await this.#identities.scan({ gte: CONVERSATION_IDENTITY_PREFIX, lt: CONVERSATION_IDENTITY_PREFIX + '\uffff' }, 128, continuation);
+      for (const entry of page.entries) {
+        const id = entry.key.slice(CONVERSATION_IDENTITY_PREFIX.length);
+        if (!isPlainRecord(entry.value) || entry.value.conversationId !== id || Object.keys(entry.value).length !== 1) throw invalidControlRecord('Conversation identity projection is invalid');
+        ids.push(id);
       }
-      return [...ids].sort();
-    });
+      continuation = page.continuation;
+    } while (continuation);
+    return ids.sort();
+  }
+
+  async hasCreatedConversation(conversationId: string): Promise<boolean> {
+    return conversationIdentityExistsAt(this.#identities, conversationId);
   }
 
   async lookup(input: {
@@ -547,6 +536,8 @@ export class ControlAdmissionJournal {
     readonly source: TrustedControlSource;
     readonly stream: string;
     readonly initial: State;
+    /** Verified target prefix; control receipts keep their independent current watermark. */
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -581,6 +572,7 @@ export class ControlAdmissionJournal {
     }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
+    if (input.targetBase && input.observe) throw new TypeError("A target prefix cannot skip an independent observer");
     assertIdentifier(input.stream, "Authority control target stream");
     if (input.stream === "control") {
       throw new TypeError("Authority control target stream cannot be control");
@@ -632,6 +624,8 @@ export class ControlAdmissionJournal {
     readonly canonicalRequestId: string;
     readonly stream: string;
     readonly initial: State;
+    /** Verified target prefix; control receipts keep their independent current watermark. */
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -669,9 +663,19 @@ export class ControlAdmissionJournal {
           readonly cursor: ProjectionCursor;
         }
       | undefined;
+    // The supplied owner basis belongs to its current import generation; a
+    // numerically newer combined cache must not replace it.
+    const targetBase = input.targetBase;
+    const controlThrough = targetBase ? this.#projectionCursor?.lsn : undefined;
+    if (targetBase && (controlThrough === undefined || controlThrough < targetBase.cursor.lsn)) {
+      throw invalidControlRecord("Target projection is ahead of the verified control receipt");
+    }
     const initial: CombinedProjection = {
-      control: beginProjectionDraft(cached?.control ?? emptyProjection()),
-      target: cached?.target ?? input.initial,
+      // Never share mutable maps with the ordinary control projection cache.
+      control: beginProjectionDraft(targetBase
+        ? { requests: new Map(this.#projection.requests), ingresses: new Map(this.#projection.ingresses) }
+        : cached?.control ?? emptyProjection()),
+      target: targetBase?.state ?? cached?.target ?? input.initial,
     };
     try {
       const transaction = await this.#log.transactProjection<
@@ -682,6 +686,7 @@ export class ControlAdmissionJournal {
         initial,
         async (state, record, commit) => {
           if (record.stream === "control") {
+            if (controlThrough !== undefined && commit.lsn <= controlThrough) return state;
             await reduceControlProjection(
               state.control,
               record,
@@ -756,7 +761,7 @@ export class ControlAdmissionJournal {
           ...(input.readProjectionIds
             ? { readProjectionIds: input.readProjectionIds }
             : {}),
-          ...(cached ? { cursor: cached.cursor } : {}),
+          ...(targetBase ? { cursor: targetBase.cursor, requiredPrefix: this.#projectionCursor! } : cached ? { cursor: cached.cursor } : {}),
           candidateReferences: collectArtifactRefs([
             ...input.preparedEnvelope.references,
             ...(input.candidateReferences ?? []),
@@ -931,6 +936,32 @@ export class ControlAdmissionJournal {
       transaction.commit?.lsn,
     );
   }
+
+
+  /** Prepare large stored control records outside serial exclusion before admission. */
+  async primeRecoverySnapshot(snapshot: import("@zhixing/core/authority").AuthorityLogSnapshot<unknown>): Promise<void> {
+    const candidate = beginProjectionDraft(emptyProjection());
+    const abort = currentMaintenanceAbortSignal();
+    let yieldAt = performance.now() + 8;
+    for (const commit of snapshot.commits) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      if (performance.now() >= yieldAt) { await new Promise<void>(setImmediate); yieldAt = performance.now() + 8; }
+      for (const record of commit.entries) {
+        if (record.stream === "control") await reduceControlProjection(candidate, record, commit, this.#artifacts);
+      }
+    }
+    await this.#operations.run(async () => {
+      // Install only a private basis. The next transaction validates the opaque
+      // prefix and catches up under its writer lock before making any decision.
+      if (!this.#projectionCursor || this.#projectionCursor.lsn <= snapshot.cursor.lsn) {
+        this.#projection = commitProjectionDraft(candidate);
+        this.#projectionCursor = snapshot.cursor;
+        this.#authorityProjections.clear();
+      }
+    });
+  }
+
+  get hasRecoveredProjection(): boolean { return this.#projectionCursor !== undefined; }
 
   async #transact(
     decide: (
@@ -1607,10 +1638,10 @@ function isDeliveryControlEnvelope(
 export function registerConversationIdentityProjection(
   log: AuthorityCommitLog,
   artifacts: ArtifactStore,
-): void {
-  log.durableProjection<ControlRecord>({
+) {
+  return log.durableProjection<ControlRecord>({
     projectionId: CONVERSATION_IDENTITY_PROJECTION_ID,
-    reducerVersion: 1,
+    reducerVersion: 2,
     reduce: (envelope, current) =>
       reduceConversationIdentityProjection(envelope, current, artifacts),
   });
@@ -1651,6 +1682,12 @@ async function reduceConversationIdentityProjection(
   for (const entry of envelope.entries) {
     if (entry.stream !== "control") continue;
     if (entry.body.t === "received") {
+      const stored = snapshotStored<AdmittedControlEnvelope>(entry.body.envelope);
+      if ('ref' in stored) {
+        const json = artifactJsonIndex(artifacts);
+        while (!(await json.prepare(stored.ref)).ready) await new Promise<void>(setImmediate);
+        if (await json.value(stored.ref, ['body', 't'], 128) !== 'session-create') continue;
+      } else if (stored.body.t !== 'session-create') continue;
       const admitted = snapshotAdmittedControlEnvelope(
         await loadStored(
           snapshotStored<AdmittedControlEnvelope>(entry.body.envelope),
