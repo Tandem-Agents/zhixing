@@ -1,3 +1,4 @@
+import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
 import { Buffer } from "node:buffer";
 import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
 import { userMessageFromTurnInput, type Message } from "@zhixing/core";
@@ -674,7 +675,7 @@ interface RunProjection {
   readonly advancementSessions: AdvancementFoldMap;
   readonly advancementWrites: Map<
     string,
-    { readonly domainRevision: number; readonly eventsDigest: string }
+    { readonly domainRevision: number; readonly eventsDigest: string; readonly receipt?: AdvancementSubmissionReceipt }
   >;
   readonly sessionMutationDigests: Map<
     string,
@@ -1109,7 +1110,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async advancementWriteRequest(requestId: string): Promise<
-    { readonly eventsDigest: string; readonly domainRevision: number } | undefined
+    { readonly eventsDigest: string; readonly domainRevision: number; readonly receipt?: AdvancementSubmissionReceipt } | undefined
   > {
     assertIdentifier(requestId, "Advancement write request id");
     return this.#sessionRead.read((state) => structuredClone(state.advancementWrites.get(requestId)));
@@ -5513,6 +5514,25 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
+  async advancementSession(sessionId: string): Promise<AdvancementSession | null> {
+    assertIdentifier(sessionId, "Advancement session id");
+    return this.#sessionRead.read(state => {
+      const value = state.advancementSessions.get(sessionId);
+      return value ? freezeAdvancementSessions(new Map([[sessionId, value]]))[0]! : null;
+    });
+  }
+
+  async pendingAdvancementOriginalTasks(after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }> {
+    return this.#sessionRead.read(state => {
+      const ids = [...state.advancementSessions.values()]
+        .filter(session => session.originalTaskAdmission?.status === "pending" &&
+          (session.status === "active" || (session.status === "cancelled" && session.originalTaskAdmission.mode === "direct")))
+        .map(session => session.id).filter(id => after === undefined || id > after).sort();
+      const page = ids.slice(0, 50);
+      return { sessionIds: page, ...(ids.length > page.length ? { next: page[page.length - 1]! } : {}) };
+    });
+  }
+
   async advancementSessions(): Promise<AdvancementSession[]> {
     return this.#sessionRead.read(state => freezeAdvancementSessions(state.advancementSessions));
   }
@@ -5529,8 +5549,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (input.events.length === 0) {
       throw new TypeError("Advancement write requires at least one event");
     }
-    const sessionIds = new Set(input.events.map((event) => event.sessionId));
-    if (sessionIds.size !== 1) {
+    const sessionIds = new Set(input.events.filter(event => event.type !== "submission_settled").map(event => event.sessionId));
+    if (sessionIds.size > 1) {
       throw new TypeError(
         "Advancement write events must bind exactly one advancement session",
       );
@@ -5539,6 +5559,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (!isAdvancementControlEvent(event, this.#verifier)) {
         throw new TypeError("Advancement event contract failed");
       }
+      if ((event.type === "session_created" || event.type === "submission_settled") && event.conversationId !== this.#conversationId) throw new TypeError("Advancement event conversation mismatch");
+      if (event.type === "submission_settled" && input.requestId !== advancementSubmissionRequestId(this.#conversationId, event.receipt.identity.surfacePrincipal, event.receipt.identity.submissionId)) throw new TypeError("Advancement submission key mismatch");
     }
     const eventsDigest = byteDigest(
       Buffer.from(canonicalize(input.events), "utf8"),
@@ -7377,6 +7399,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             eventsDigest: body.eventsDigest,
           });
           state.domainRevision = body.domainRevision;
+        }
+        if (event.type === "submission_settled") {
+          if (event.conversationId !== this.#conversationId || body.requestId !== advancementSubmissionRequestId(this.#conversationId, event.receipt.identity.surfacePrincipal, event.receipt.identity.submissionId)) throw corruptRunJournal("Advancement submission identity mismatch");
+          const write = state.advancementWrites.get(body.requestId)!;
+          if (write.receipt && canonicalize(write.receipt) !== canonicalize(event.receipt)) throw corruptRunJournal("Conflicting advancement receipt");
+          state.advancementWrites.set(body.requestId, { ...write, receipt: structuredClone(event.receipt) });
         }
         applyAdvancementEvent(state.advancementSessions, event);
         return state;

@@ -176,6 +176,49 @@ async function makeStore() {
 }
 
 describe("AdvancementStore", () => {
+  it("regeneration replaces an active contract with one legal event and preserves the original task", async () => {
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric("conv-1", "session-1", confirmed(), originalTaskAdmissionIntent());
+    const replacement = { ...draft("draft-new"), originalTurnId: "turn-revision" };
+    const exit: AdvancementExit = { reason: "superseded", message: "修订契约", occurredAt: "2026-01-01T00:02:00.000Z" };
+    await expect(store.regenerateSession("conv-1", "session-1", "session-1", replacement, exit)).rejects.toThrow("atomically replace");
+    expect((await store.loadSession("conv-1", "session-1"))?.status).toBe("active");
+    const result = await store.regenerateSession("conv-1", "session-1", "session-2", replacement, exit);
+    expect(result.exited.status).toBe("exited");
+    expect(result.created).toMatchObject({ status: "awaiting-rubric-confirmation", originalUserTask: createInput().originalUserTask, pendingRubricDraft: replacement });
+    const recovered = new AdvancementStore(root);
+    expect((await recovered.loadActiveSession("conv-1"))?.id).toBe("session-2");
+    expect((await recovered.readEvents("conv-1")).at(-1)?.type).toBe("session_regenerated");
+  });
+  it("direct intent survives a new head and reload, while pure cancellation creates no obligation", async () => {
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+    const intent = originalTaskAdmissionIntent();
+    const exit: AdvancementExit = { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" };
+    await expect(store.directOriginalTask("conv-1", "session-1", { ...intent, turnId: "wrong-turn" }, exit)).rejects.toThrow("does not bind");
+    const directed = await store.directOriginalTask("conv-1", "session-1", intent, exit);
+    expect(directed).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: "pending", intent } });
+    await store.createSession(createInput({ id: "session-2", createdAt: "2026-01-01T00:02:00.000Z" }));
+    const recovered = new AdvancementStore(root);
+    expect(await recovered.listPendingOriginalTasks("conv-1")).toEqual({ sessionIds: ["session-1"] });
+    await recovered.settleOriginalTaskAdmission("conv-1", "session-1", { turnId: intent.turnId, inputDigest: intent.inputDigest, runId: "run-direct" });
+    expect(await recovered.loadSession("conv-1", "session-1")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: "admitted", runId: "run-direct" } });
+    await recovered.cancelSession("conv-1", "session-2", exit);
+    expect(await recovered.listPendingOriginalTasks("conv-1")).toEqual({ sessionIds: [] });
+    expect((await recovered.loadSession("conv-1", "session-2"))?.originalTaskAdmission).toBeUndefined();
+  });
+
+  it("permanent direct rejection is durable and no longer recoverable", async () => {
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+    const intent = originalTaskAdmissionIntent();
+    await store.directOriginalTask("conv-1", "session-1", intent, { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" });
+    await store.rejectOriginalTaskAdmission("conv-1", "session-1", { turnId: intent.turnId, inputDigest: intent.inputDigest, reason: "idempotency-conflict" });
+    const recovered = new AdvancementStore(root);
+    expect(await recovered.listPendingOriginalTasks("conv-1")).toEqual({ sessionIds: [] });
+    expect(await recovered.loadSession("conv-1", "session-1")).toMatchObject({ originalTaskAdmission: { mode: "direct", status: "rejected", reason: "idempotency-conflict" } });
+  });
   it("重放控制日志得到草案、确认、review、proxy 与完成状态", async () => {
     const { root, store } = await makeStore();
 

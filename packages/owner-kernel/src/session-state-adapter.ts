@@ -14,7 +14,7 @@ import {
   assertPrincipalAllowsAuthorityMethod,
   assertProtocolIdentifier,
 } from "@zhixing/core/protocol";
-import { advancementHeadSession } from "@zhixing/core/advancement";
+import { advancementHeadSession, advancementSubmissionRequestId } from "@zhixing/core/advancement";
 import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface ConversationSessionStateAdapterOptions {
@@ -49,14 +49,36 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
   async readAdvancementState(
     conversationId: string,
     ctx: AuthorityCallContext,
+    sessionId?: string,
   ): Promise<AdvancementSnapshot | null> {
     assertProtocolIdentifier(conversationId, "Session conversationId");
     assertPrincipalAllowsAuthorityMethod(ctx.principal.kind,
       "session.readAdvancementState",
     );
+    if (sessionId !== undefined) {
+      assertProtocolIdentifier(sessionId, "Advancement sessionId");
+      return this.#journal(conversationId).advancementSession(sessionId);
+    }
     return advancementHeadSession(
       await this.#journal(conversationId).advancementSessions(),
     );
+  }
+
+  async readAdvancementSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }, ctx: AuthorityCallContext) {
+    assertProtocolIdentifier(conversationId, "Session conversationId");
+    assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.readAdvancementSubmission");
+    assertProtocolIdentifier(identity.surfacePrincipal, "Submission principal");
+    assertProtocolIdentifier(identity.submissionId, "Submission id");
+    const write = await this.#journal(conversationId).advancementWriteRequest(advancementSubmissionRequestId(conversationId, identity.surfacePrincipal, identity.submissionId));
+    const receipt = write?.receipt;
+    return receipt && receipt.identity.surfacePrincipal === identity.surfacePrincipal && receipt.identity.submissionId === identity.submissionId ? receipt : null;
+  }
+
+  async listPendingAdvancementOriginalTasks(conversationId: string, ctx: AuthorityCallContext, after?: string) {
+    assertProtocolIdentifier(conversationId, "Session conversationId");
+    assertPrincipalAllowsAuthorityMethod(ctx.principal.kind, "session.listPendingAdvancementOriginalTasks");
+    if (after !== undefined) assertProtocolIdentifier(after, "Advancement cursor");
+    return this.#journal(conversationId).pendingAdvancementOriginalTasks(after);
   }
 
   async mutate(

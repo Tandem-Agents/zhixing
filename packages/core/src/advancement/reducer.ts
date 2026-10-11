@@ -65,6 +65,15 @@ export function applyAdvancementEvent(
   event: AdvancementStoreEvent,
 ): void {
   switch (event.type) {
+    case "submission_settled": return;
+    case "session_regenerated": {
+      const previous = sessions.get(event.sessionId);
+      if (!previous) return;
+      applyAdvancementEvent(sessions, { type: "exited", sessionId: event.sessionId, timestamp: event.timestamp, exit: event.exit });
+      applyAdvancementEvent(sessions, { type: "session_created", sessionId: event.nextSessionId, timestamp: event.timestamp,
+        conversationId: previous.conversationId, originalUserTask: previous.originalUserTask, pendingRubricDraft: event.pendingRubricDraft });
+      break;
+    }
     case "session_created":
       sessions.set(event.sessionId, {
         id: event.sessionId,
@@ -90,9 +99,29 @@ export function applyAdvancementEvent(
       session.confirmedRubric = event.confirmedRubric;
       session.originalTaskAdmission = {
         status: "pending",
+        mode: "advancement",
         intent: event.admissionIntent,
       };
       session.pendingRubricDraft = undefined;
+      break;
+    }
+    case "original_task_directed": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      session.status = "cancelled";
+      session.updatedAt = event.timestamp;
+      session.exit = event.exit;
+      session.originalTaskAdmission = { status: "pending", mode: "direct", intent: event.admissionIntent };
+      break;
+    }
+    case "original_task_admission_rejected": {
+      const session = sessions.get(event.sessionId);
+      const pending = session?.originalTaskAdmission;
+      if (!session || !pending) return;
+      session.updatedAt = event.timestamp;
+      session.originalTaskAdmission = { ...pending, status: "rejected", reason: event.reason };
+      session.status = "cancelled";
+      session.exit = { reason: "system-error", message: "原始任务未被接纳，任务已停止。", occurredAt: event.timestamp };
       break;
     }
     case "original_task_admitted": {
@@ -102,6 +131,7 @@ export function applyAdvancementEvent(
       session.updatedAt = event.timestamp;
       session.originalTaskAdmission = {
         status: "admitted",
+        ...(pending.mode ? { mode: pending.mode } : {}),
         intent: pending.intent,
         runId: event.runId,
       };

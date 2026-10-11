@@ -34,8 +34,10 @@ export function assertAdvancementEventBatchLegal(
   if (events.length === 0) {
     throw new Error("AdvancementStore: write requires at least one event");
   }
-  const sessionIds = new Set(events.map((event) => event.sessionId));
-  if (sessionIds.size !== 1) {
+  const sessionIds = new Set(events.filter(event => event.type !== "submission_settled").map(event => event.sessionId));
+  const receipts = events.filter(event => event.type === "submission_settled");
+  if (receipts.length > 1 || (receipts.length === 1 && events.at(-1) !== receipts[0])) throw Error("AdvancementStore: receipt must be the final unique event");
+  if (sessionIds.size > 1 || (sessionIds.size === 0 && receipts.length !== 1)) {
     throw new Error(
       "AdvancementStore: write events must bind exactly one advancement session",
     );
@@ -49,6 +51,34 @@ export function assertAdvancementEventBatchLegal(
   let batchReview: AdvancementRunReview | undefined;
   for (const event of events) {
     switch (event.type) {
+      case "submission_settled": {
+        const outcome = event.receipt.outcome;
+        if (outcome.kind === "contract-failed" || outcome.kind === "rejected") break;
+        const session = requireSession(work, outcome.sessionId);
+        if (session.conversationId !== event.conversationId) throw Error("Advancement receipt conversation mismatch");
+        if (outcome.kind === "draft-saved" || outcome.kind === "not-saved") {
+          const draft = session.pendingRubricDraft;
+          if (session.status !== "awaiting-rubric-confirmation" || !draft || draft.draftId !== outcome.draftId ||
+              draft.originalTurnId !== outcome.originalTurnId ||
+              (outcome.kind === "draft-saved" && session.rubricDraftVersion !== outcome.draftVersion)) {
+            throw Error("Advancement receipt does not bind the committed draft");
+          }
+        } else if (outcome.kind === "original-task-intent") {
+          const admission = session.originalTaskAdmission;
+          if (!admission || admission.intent.turnId !== outcome.originalTurnId ||
+              admission.intent.surfacePrincipal !== event.receipt.identity.surfacePrincipal ||
+              (admission.mode ?? "advancement") !== outcome.mode) throw Error("Advancement receipt does not bind the original-task intent");
+        } else if (session.status !== "cancelled") throw Error("Advancement cancellation receipt requires a cancelled session");
+        break;
+      }
+      case "session_regenerated": {
+        const prior = requireActive(work, event.sessionId);
+        if (work.has(event.nextSessionId) || event.exit.reason !== "superseded" ||
+            [...work.values()].some(session => session.id !== prior.id && isOpenAdvancementSession(session))) {
+          throw new Error("AdvancementStore: regenerated session must atomically replace its active predecessor");
+        }
+        break;
+      }
       case "session_created": {
         if (work.has(event.sessionId)) {
           throw new Error(
@@ -87,8 +117,22 @@ export function assertAdvancementEventBatchLegal(
         }
         break;
       }
+      case "original_task_directed": {
+        const session = requireAwaiting(work, event.sessionId);
+        const intent = event.admissionIntent;
+        if (intent.turnId !== session.pendingRubricDraft?.originalTurnId ||
+            intent.inputDigest !== protocolDigest("AdvancementOriginalTaskInput", 1, session.originalUserTask) ||
+            intent.turnOrigin.triggeredBy !== intent.surfacePrincipal || event.exit.reason !== "user-cancelled") {
+          throw new Error("AdvancementStore: direct admission does not bind the original task and principal");
+        }
+        break;
+      }
+      case "original_task_admission_rejected":
       case "original_task_admitted": {
-        const session = requireActive(work, event.sessionId);
+        const session = requireSession(work, event.sessionId);
+        if (session.status !== "active" && !(session.status === "cancelled" && session.originalTaskAdmission?.mode === "direct")) {
+          throw new Error("AdvancementStore: original-task settlement requires active or directed pending admission");
+        }
         const admission = session.originalTaskAdmission;
         if (!admission || admission.status !== "pending") {
           throw new Error(

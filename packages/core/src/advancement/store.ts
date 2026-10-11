@@ -1,3 +1,5 @@
+import { advancementSubmissionOutcome, type AdvancementSubmissionIdentity, type AdvancementSubmissionReceipt, type AdvancementSubmissionOutcome } from "./submission.js";
+import { canonicalize } from "../protocol/index.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isAdvancementControlEvent } from "./event-codec.js";
@@ -81,6 +83,57 @@ export class AdvancementStore {
     });
   }
 
+  async readSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }): Promise<AdvancementSubmissionReceipt | null> {
+    return this.withConversationLock(conversationId, async () => this.findSubmission(await this.readEventsInLock(conversationId), identity));
+  }
+
+  private findSubmission(events: readonly AdvancementStoreEvent[], identity: { readonly surfacePrincipal: string; readonly submissionId: string }): AdvancementSubmissionReceipt | null {
+    for (const event of events) {
+      if (event.type === "submission_settled" && event.receipt.identity.surfacePrincipal === identity.surfacePrincipal && event.receipt.identity.submissionId === identity.submissionId) return event.receipt;
+    }
+    return null;
+  }
+
+  async settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void> {
+    return this.withConversationLock(conversationId, async () => {
+      const receipt = { identity, outcome };
+      const existing = this.findSubmission(await this.readEventsInLock(conversationId), identity);
+      if (existing) { if (canonicalize(existing) !== canonicalize(receipt)) throw Error("Advancement submission identity conflict"); return; }
+      await this.appendEventInLock(conversationId, { type: "submission_settled", conversationId, timestamp: new Date().toISOString(), receipt });
+    });
+  }
+
+  async regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }> {
+    return this.withConversationLock(conversationId, async () => {
+      await this.appendEventInLock(conversationId, { type: "session_regenerated", sessionId: previousSessionId, nextSessionId, timestamp: draft.createdAt, pendingRubricDraft: draft, exit }, submission);
+      const sessions = await this.loadConversationSessionsInLock(conversationId);
+      return { exited: this.requireSession(sessions, previousSessionId), created: this.requireSession(sessions, nextSessionId) };
+    });
+  }
+
+  async directOriginalTask(conversationId: string, sessionId: string, admissionIntent: import("./types.js").AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp = new Date().toISOString(), submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+    return this.withConversationLock(conversationId, async () => {
+      await this.appendEventInLock(conversationId, { type: "original_task_directed", sessionId, timestamp, admissionIntent, exit }, submission);
+      return this.requireSession(await this.loadConversationSessionsInLock(conversationId), sessionId);
+    });
+  }
+
+  async rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("../types/distributed.js").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp = new Date().toISOString()): Promise<AdvancementSession> {
+    return this.withConversationLock(conversationId, async () => {
+      await this.appendEventInLock(conversationId, { type: "original_task_admission_rejected", sessionId, timestamp, turnId: rejection.turnId, inputDigest: rejection.inputDigest, reason: rejection.reason });
+      return this.requireSession(await this.loadConversationSessionsInLock(conversationId), sessionId);
+    });
+  }
+
+  async listPendingOriginalTasks(conversationId: string, after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }> {
+    const ids = (await this.loadConversationSessions(conversationId)).filter(session =>
+      session.originalTaskAdmission?.status === "pending" && (session.status === "active" ||
+        (session.status === "cancelled" && session.originalTaskAdmission.mode === "direct")))
+      .map(session => session.id).filter(id => after === undefined || id > after).sort();
+    const page = ids.slice(0, 50);
+    return { sessionIds: page, ...(ids.length > page.length ? { next: page[page.length - 1]! } : {}) };
+  }
+
   async createSession(
     input: CreateAdvancementSessionInput,
   ): Promise<AdvancementSession> {
@@ -107,7 +160,7 @@ export class AdvancementStore {
         conversationId: input.conversationId,
         originalUserTask: input.originalUserTask,
         pendingRubricDraft: input.pendingRubricDraft,
-      });
+      }, input.submission);
       return this.requireSession(
         await this.loadConversationSessionsInLock(input.conversationId),
         input.id,
@@ -121,6 +174,7 @@ export class AdvancementStore {
     confirmedRubric: ConfirmedRubricSnapshot,
     admissionIntent: import("./types.js").AdvancementOriginalTaskAdmissionIntent,
     timestamp = new Date().toISOString(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       const session = this.requireSession(
@@ -138,7 +192,7 @@ export class AdvancementStore {
         sessionId,
         confirmedRubric,
         admissionIntent,
-      });
+      }, submission);
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
@@ -171,6 +225,7 @@ export class AdvancementStore {
     sessionId: string,
     pendingRubricDraft: RubricContractDraftSnapshot,
     timestamp = new Date().toISOString(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       const session = this.requireSession(
@@ -196,7 +251,7 @@ export class AdvancementStore {
         timestamp,
         sessionId,
         pendingRubricDraft,
-      });
+      }, submission);
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
@@ -509,6 +564,7 @@ export class AdvancementStore {
     sessionId: string,
     exit?: AdvancementExit,
     timestamp = new Date().toISOString(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       const session = this.requireSession(
@@ -525,7 +581,7 @@ export class AdvancementStore {
         timestamp,
         sessionId,
         exit,
-      });
+      }, submission);
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
@@ -623,8 +679,13 @@ export class AdvancementStore {
   private async appendEventInLock(
     conversationId: string,
     event: AdvancementStoreEvent,
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<void> {
-    await this.appendEventsInLock(conversationId, [event]);
+    if (!submission) return this.appendEventsInLock(conversationId, [event]);
+    if (event.type === "submission_settled") throw Error("Cannot wrap a submission receipt");
+    const previous = (await this.loadConversationSessionsInLock(conversationId)).find(session => session.id === event.sessionId);
+    const receipt = { identity: submission, outcome: advancementSubmissionOutcome(event, previous) };
+    await this.appendEventsInLock(conversationId, [event, { type: "submission_settled", conversationId, timestamp: event.timestamp, receipt }]);
   }
 
   private async appendEventsInLock(
@@ -632,6 +693,14 @@ export class AdvancementStore {
     events: readonly AdvancementStoreEvent[],
   ): Promise<void> {
     if (events.length === 0) return;
+    const last = events.at(-1)!;
+    if (last.type === "submission_settled") {
+      const existing = this.findSubmission(await this.readEventsInLock(conversationId), last.receipt.identity);
+      if (existing) {
+        if (canonicalize(existing) !== canonicalize(last.receipt)) throw Error("Advancement submission identity conflict");
+        return;
+      }
+    }
     const persistedEvents: AdvancementStoreEvent[] = [];
     for (const event of events) {
       const eventType = event.type;

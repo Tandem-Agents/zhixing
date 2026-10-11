@@ -336,6 +336,7 @@ export interface AdvancementSession {
 }
 
 export interface CreateAdvancementSessionInput {
+  readonly submission?: import("./submission.js").AdvancementSubmissionIdentity;
   readonly id: string;
   readonly conversationId: string;
   readonly originalUserTask: UserTurnInput;
@@ -344,9 +345,13 @@ export interface CreateAdvancementSessionInput {
 }
 
 export type AdvancementStoreEvent =
+  | import("./submission.js").AdvancementSubmissionSettledEvent
+  | AdvancementSessionRegeneratedEvent
   | AdvancementSessionCreatedEvent
   | AdvancementRubricDraftRevisedEvent
   | AdvancementRubricConfirmedEvent
+  | AdvancementOriginalTaskDirectedEvent
+  | AdvancementOriginalTaskAdmissionRejectedEvent
   | AdvancementOriginalTaskAdmittedEvent
   | AdvancementRunReviewedEvent
   | AdvancementWindowUpdatedEvent
@@ -365,6 +370,15 @@ export type AdvancementControlEvent = AdvancementStoreEvent;
 
 /** 分布式读取复用现有推进会话快照。 */
 export type AdvancementSnapshot = AdvancementSession;
+
+export interface AdvancementSessionRegeneratedEvent {
+  readonly type: "session_regenerated";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly nextSessionId: string;
+  readonly pendingRubricDraft: RubricContractDraftSnapshot;
+  readonly exit: AdvancementExit;
+}
 
 export interface AdvancementSessionCreatedEvent {
   readonly type: "session_created";
@@ -402,7 +416,7 @@ export interface AdvancementOriginalTaskAdmissionIntent {
   readonly inputDigest: Digest;
 }
 
-export type AdvancementOriginalTaskAdmission =
+export type AdvancementOriginalTaskAdmission = { readonly mode?: "advancement" | "direct" } & (
   | {
       readonly status: "pending";
       readonly intent: AdvancementOriginalTaskAdmissionIntent;
@@ -411,7 +425,25 @@ export type AdvancementOriginalTaskAdmission =
       readonly status: "admitted";
       readonly intent: AdvancementOriginalTaskAdmissionIntent;
       readonly runId: string;
-    };
+    }
+  | { readonly status: "rejected"; readonly intent: AdvancementOriginalTaskAdmissionIntent; readonly reason: "conversation-not-found" | "idempotency-conflict" });
+
+export interface AdvancementOriginalTaskDirectedEvent {
+  readonly type: "original_task_directed";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly exit: AdvancementExit;
+  readonly admissionIntent: AdvancementOriginalTaskAdmissionIntent;
+}
+
+export interface AdvancementOriginalTaskAdmissionRejectedEvent {
+  readonly type: "original_task_admission_rejected";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly inputDigest: Digest;
+  readonly reason: "conversation-not-found" | "idempotency-conflict";
+}
 
 export interface AdvancementOriginalTaskAdmittedEvent {
   readonly type: "original_task_admitted";

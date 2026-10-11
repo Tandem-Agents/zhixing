@@ -1,3 +1,4 @@
+import type { AdvancementSubmissionIdentity, AdvancementSubmissionOutcome } from "@zhixing/core/advancement";
 import {
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
@@ -132,6 +133,7 @@ export class AdvancementController implements
   }
 
   persistNewTaskAwaitingSession(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     originalUserTask: Readonly<UserTurnInput>;
     draft: RubricContractDraftSnapshot;
@@ -142,6 +144,7 @@ export class AdvancementController implements
       originalUserTask: input.originalUserTask,
       pendingRubricDraft: input.draft,
       createdAt: input.draft.createdAt,
+      submission: input.submission,
     });
   }
 
@@ -223,18 +226,11 @@ export class AdvancementController implements
   }
 
   async persistRegeneratedRubricSession(input: Readonly<{
-    advancementSessionId: string;
-    conversationId: string;
-    originalUserTask: AdvancementSession["originalUserTask"];
-    draft: RubricContractDraftSnapshot;
-  }>): Promise<AdvancementSession> {
-    return await this.store.createSession({
-      id: input.advancementSessionId,
-      conversationId: input.conversationId,
-      originalUserTask: input.originalUserTask,
-      pendingRubricDraft: input.draft,
-      createdAt: input.draft.createdAt,
-    });
+    submission?: AdvancementSubmissionIdentity;
+    advancementSessionId: string; previousSessionId: string; conversationId: string;
+    exit: import("@zhixing/core/advancement").AdvancementExit; draft: RubricContractDraftSnapshot;
+  }>): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }> {
+    return this.store.regenerateSession(input.conversationId, input.previousSessionId, input.advancementSessionId, input.draft, input.exit, input.submission);
   }
 
   async settleInterruptedProxy(input: Readonly<{
@@ -274,6 +270,7 @@ export class AdvancementController implements
   }
 
   persistRubricConfirmation(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     readonly conversationId: string;
     readonly advancementSessionId: string;
     readonly confirmedRubric: ConfirmedRubricSnapshot;
@@ -284,9 +281,30 @@ export class AdvancementController implements
       input.advancementSessionId,
       input.confirmedRubric,
       input.admissionIntent,
-      input.confirmedRubric.confirmedAt,
+      input.confirmedRubric.confirmedAt, input.submission,
     );
   }
+
+  persistDirectOriginalTask(input: Readonly<{ submission?: AdvancementSubmissionIdentity; conversationId: string; advancementSessionId: string; admissionIntent: import("@zhixing/core/advancement").AdvancementOriginalTaskAdmissionIntent; exit: import("@zhixing/core/advancement").AdvancementExit }>): Promise<AdvancementSession> {
+    return this.store.directOriginalTask(input.conversationId, input.advancementSessionId, input.admissionIntent, input.exit, undefined, input.submission);
+  }
+
+  persistOriginalTaskAdmissionRejection(input: Readonly<{ conversationId: string; advancementSessionId: string; turnId: string; inputDigest: import("@zhixing/core").Digest; reason: "conversation-not-found" | "idempotency-conflict" }>): Promise<AdvancementSession> {
+    return this.store.rejectOriginalTaskAdmission(input.conversationId, input.advancementSessionId, { turnId: input.turnId, inputDigest: input.inputDigest, reason: input.reason });
+  }
+
+
+  readSubmission(conversationId: string, identity: { surfacePrincipal: string; submissionId: string }) { return this.store.readSubmission(conversationId, identity); }
+  settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome) { return this.store.settleSubmission(conversationId, identity, outcome); }
+  persistRubricCancellation(input: Readonly<{ conversationId: string; advancementSessionId: string; reason: AdvancementExit["reason"]; message: string; submission?: AdvancementSubmissionIdentity }>) {
+    const timestamp = this.now();
+    return this.store.cancelSession(input.conversationId, input.advancementSessionId,
+      { reason: input.reason, message: input.message, occurredAt: timestamp }, timestamp, input.submission);
+  }
+
+  loadExactSession(conversationId: string, sessionId: string) { return this.store.loadSession(conversationId, sessionId); }
+
+  listPendingOriginalTasks(conversationId: string, after?: string) { return this.store.listPendingOriginalTasks(conversationId, after); }
 
   persistOriginalTaskAdmissionSettlement(input: Readonly<{
     readonly conversationId: string;
@@ -330,6 +348,7 @@ export class AdvancementController implements
   }
 
   persistRubricDraftRevision(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     advancementSessionId: string;
     draft: RubricContractDraftSnapshot;
@@ -338,7 +357,7 @@ export class AdvancementController implements
       input.conversationId,
       input.advancementSessionId,
       input.draft,
-      input.draft.createdAt,
+      input.draft.createdAt, input.submission,
     );
   }
 

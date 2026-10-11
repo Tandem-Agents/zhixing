@@ -1232,6 +1232,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       proxyMessages: [],
     };
     const advancement = {
+      listPendingOriginalTasks: async () => ({ sessionIds: [] }),
       loadActiveSession: vi.fn(async (conversationId: string) =>
         conversationId === "conv-bad" ? active : null,
       ),
@@ -1297,7 +1298,9 @@ describe("AdvancementRecoveryMaintenance", () => {
       },
     };
     const advancement = {
-      loadActiveSession: vi.fn(async () => pending),
+      listPendingOriginalTasks: async () => ({ sessionIds: [pending.id] }),
+      loadExactSession: async () => pending,
+      loadActiveSession: vi.fn(async () => admitted),
       persistOriginalTaskAdmissionSettlement: vi.fn(async () => admitted),
     };
     const originalTasks = {
@@ -1360,7 +1363,10 @@ describe("AdvancementRecoveryMaintenance", () => {
       proxyMessages: [],
     };
     const advancement = {
-      loadActiveSession: vi.fn(async () => pending),
+      listPendingOriginalTasks: async () => ({ sessionIds: [pending.id] }),
+      loadExactSession: async () => pending,
+      persistOriginalTaskAdmissionRejection: vi.fn(async () => ({ ...pending, status: "cancelled" })),
+      loadActiveSession: vi.fn(async () => ({ ...pending, status: "cancelled" })),
       persistOriginalTaskAdmissionSettlement: vi.fn(),
     };
     const cancelSession = vi.fn(async () => ({
@@ -1394,13 +1400,10 @@ describe("AdvancementRecoveryMaintenance", () => {
       status: "not-active",
       conversationId: "conv-1",
     });
-    expect(cancelSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        conversationId: "conv-1",
-        advancementSessionId: "adv-admission-rejected",
-        reason: "system-error",
-      }),
-    );
+    expect(cancelSession).not.toHaveBeenCalled();
+    expect(advancement.persistOriginalTaskAdmissionRejection).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conv-1", advancementSessionId: "adv-admission-rejected", reason: "idempotency-conflict",
+    }));
     expect(advancement.persistOriginalTaskAdmissionSettlement).not.toHaveBeenCalled();
   });
 
@@ -1428,6 +1431,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       proxyMessages: [],
     };
     const advancement = {
+      listPendingOriginalTasks: async () => ({ sessionIds: [] }),
       loadActiveSession: vi.fn(async () => active),
     };
     const reviewAcceptedRun = vi.fn();
@@ -1473,3 +1477,43 @@ function userMessage(text: string): Message {
 function assistantMessage(text: string): Message {
   return { role: "assistant", content: [{ type: "text", text }] };
 }
+
+it.each(["admitted", "rejected"] as const)("recovers old direct obligation beneath a new head and settles %s without entering review", async (outcome) => {
+  const root = await createTempDir("direct-original-recovery");
+  const store = new AdvancementStore(root);
+  const originalUserTask = task("完成原任务");
+  const pendingRubricDraft = { ...draft(), originalTurnId: "turn-direct" };
+  await store.createSession({ id: "adv-direct", conversationId: "conv-1", originalUserTask, pendingRubricDraft });
+  const intent = { turnId: "turn-direct", surfacePrincipal: "surface:user-1",
+    turnOrigin: { channel: "rpc" as const, triggeredBy: "surface:user-1" },
+    inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, originalUserTask) };
+  await store.directOriginalTask("conv-1", "adv-direct", intent, { reason: "user-cancelled", message: "直接执行", occurredAt: "2026-01-01T00:01:00.000Z" });
+  await store.createSession({ id: "adv-new", conversationId: "conv-1", originalUserTask: task("新任务"), pendingRubricDraft: { ...draft(), originalTurnId: "turn-new" } });
+  const reloaded = new AdvancementStore(root);
+  const advance = {
+    listPendingOriginalTasks: (id: string, after?: string) => reloaded.listPendingOriginalTasks(id, after),
+    loadExactSession: (id: string, sid: string) => reloaded.loadSession(id, sid),
+    loadActiveSession: (id: string) => reloaded.loadActiveSession(id),
+    persistOriginalTaskAdmissionSettlement: (input: any) => reloaded.settleOriginalTaskAdmission(input.conversationId, input.advancementSessionId, { turnId: input.turnId, inputDigest: input.inputDigest, runId: input.runId }),
+    persistOriginalTaskAdmissionRejection: (input: any) => reloaded.rejectOriginalTaskAdmission(input.conversationId, input.advancementSessionId, input),
+  };
+  const admit = vi.fn(async (session: any) => {
+    expect(session.id).toBe("adv-direct");
+    expect(session.originalTaskAdmission).toMatchObject({ mode: "direct", status: "pending", intent });
+    return outcome === "admitted" ? { status: "admitted" as const, runId: "run-direct" } :
+      { status: "rejected" as const, reason: "idempotency-conflict" as const, message: "conflicting durable payload" };
+  });
+  const schedule = vi.fn(), reviewAcceptedRun = vi.fn();
+  const recovery = createOwnerAdvancementRecoveryMaintenance({
+    advancement: advance as never, reviews: fakeReviewApplication({ reviewAcceptedRun }), reviewResults: emptyReviewResults(),
+    originalTasks: { admit }, directory: { list: async () => [] as never, exists: async () => true, readRunsReverse: vi.fn() },
+    proxyTurns: { isRunning: () => false, inspectDurableClaim: async () => ({ status: "unclaimed" }), schedule },
+  });
+  await expect(recovery.recoverConversation("conv-1")).resolves.toEqual({ status: "not-active", conversationId: "conv-1" });
+  await recovery.recoverConversation("conv-1");
+  expect(admit).toHaveBeenCalledTimes(1);
+  expect(schedule).not.toHaveBeenCalled();
+  expect(reviewAcceptedRun).not.toHaveBeenCalled();
+  expect(await reloaded.loadSession("conv-1", "adv-direct")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: outcome } });
+  expect((await reloaded.loadActiveSession("conv-1"))?.id).toBe("adv-new");
+});

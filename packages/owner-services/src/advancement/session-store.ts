@@ -1,3 +1,4 @@
+import { advancementSubmissionOutcome, advancementSubmissionRequestId, type AdvancementSubmissionIdentity, type AdvancementSubmissionReceipt, type AdvancementSubmissionOutcome } from "@zhixing/core/advancement";
 import { randomUUID } from "node:crypto";
 import {
   runReviewedEvents,
@@ -28,13 +29,21 @@ import type {
  * 控制器只依赖接口，不感知持久化形态。
  */
 export interface AdvancementSessionStore {
+  readSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }): Promise<AdvancementSubmissionReceipt | null>;
+  settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void>;
+  regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }>;
   createSession(input: CreateAdvancementSessionInput): Promise<AdvancementSession>;
+  directOriginalTask(conversationId: string, sessionId: string, admissionIntent: AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp?: string, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession>;
+  rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp?: string): Promise<AdvancementSession>;
+  listPendingOriginalTasks(conversationId: string, after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }>;
+
   confirmRubric(
     conversationId: string,
     sessionId: string,
     confirmedRubric: ConfirmedRubricSnapshot,
     admissionIntent: AdvancementOriginalTaskAdmissionIntent,
     timestamp?: string,
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession>;
   settleOriginalTaskAdmission(
     conversationId: string,
@@ -51,6 +60,7 @@ export interface AdvancementSessionStore {
     sessionId: string,
     pendingRubricDraft: RubricContractDraftSnapshot,
     timestamp?: string,
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession>;
   appendEvidenceRequest(
     conversationId: string,
@@ -140,6 +150,7 @@ export interface AdvancementSessionStore {
     sessionId: string,
     exit?: AdvancementExit,
     timestamp?: string,
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession>;
   loadSession(
     conversationId: string,
@@ -178,6 +189,45 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
+  readSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }) {
+    return this.#port.readAdvancementSubmission(conversationId, identity, this.#ctx(this.#requestIdFor()));
+  }
+
+  async settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void> {
+    const receipt = { identity, outcome };
+    const existing = await this.readSubmission(conversationId, identity);
+    if (existing) {
+      if (!canonicalEqual(existing, receipt)) throw Error("Advancement submission identity conflict");
+      return;
+    }
+    const requestId = advancementSubmissionRequestId(conversationId, identity.surfacePrincipal, identity.submissionId);
+    try {
+      await this.#port.mutate(conversationId, { kind: "advancement-event", events: [{ type: "submission_settled", conversationId, timestamp: this.#now(), receipt }] }, this.#ctx(requestId));
+    } catch (error) {
+      const recovered = await this.readSubmission(conversationId, identity).catch(() => null);
+      if (!recovered || !canonicalEqual(recovered, receipt)) throw error;
+    }
+  }
+
+  async regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }> {
+    const exited = await this.#write(conversationId, [{ type: "session_regenerated", sessionId: previousSessionId, nextSessionId, timestamp: draft.createdAt, pendingRubricDraft: draft, exit }], undefined, submission);
+    const created = await this.loadSession(conversationId, nextSessionId);
+    if (!created) throw Error("Advancement regenerated session missing after commit");
+    return { exited, created };
+  }
+
+  async directOriginalTask(conversationId: string, sessionId: string, admissionIntent: AdvancementOriginalTaskAdmissionIntent, exit: AdvancementExit, timestamp = this.#now(), submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+    return this.#write(conversationId, [{ type: "original_task_directed", sessionId, timestamp, admissionIntent, exit }], undefined, submission);
+  }
+
+  async rejectOriginalTaskAdmission(conversationId: string, sessionId: string, rejection: { readonly turnId: string; readonly inputDigest: import("@zhixing/core").Digest; readonly reason: "conversation-not-found" | "idempotency-conflict" }, timestamp = this.#now()): Promise<AdvancementSession> {
+    return this.#write(conversationId, [{ type: "original_task_admission_rejected", sessionId, timestamp, turnId: rejection.turnId, inputDigest: rejection.inputDigest, reason: rejection.reason }]);
+  }
+
+  listPendingOriginalTasks(conversationId: string, after?: string) {
+    return this.#port.listPendingAdvancementOriginalTasks(conversationId, this.#ctx(this.#requestIdFor()), after);
+  }
+
   async createSession(
     input: CreateAdvancementSessionInput,
   ): Promise<AdvancementSession> {
@@ -191,7 +241,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
         originalUserTask: input.originalUserTask,
         pendingRubricDraft: input.pendingRubricDraft,
       },
-    ]);
+    ], undefined, input.submission);
   }
 
   async confirmRubric(
@@ -200,6 +250,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     confirmedRubric: ConfirmedRubricSnapshot,
     admissionIntent: AdvancementOriginalTaskAdmissionIntent,
     timestamp = this.#now(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       {
@@ -209,7 +260,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
         confirmedRubric,
         admissionIntent,
       },
-    ]);
+    ], undefined, submission);
   }
 
   async settleOriginalTaskAdmission(
@@ -237,10 +288,11 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     sessionId: string,
     pendingRubricDraft: RubricContractDraftSnapshot,
     timestamp = this.#now(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       { type: "rubric_draft_revised", timestamp, sessionId, pendingRubricDraft },
-    ]);
+    ], undefined, submission);
   }
 
   async appendEvidenceRequest(
@@ -447,18 +499,18 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     sessionId: string,
     exit?: AdvancementExit,
     timestamp = this.#now(),
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
     return await this.#write(conversationId, [
       { type: "cancelled", timestamp, sessionId, exit },
-    ]);
+    ], undefined, submission);
   }
 
   async loadSession(
     conversationId: string,
     sessionId: string,
   ): Promise<AdvancementSession | null> {
-    const head = await this.#read(conversationId);
-    return head?.id === sessionId ? head : null;
+    return this.#port.readAdvancementState(conversationId, this.#ctx(this.#requestIdFor()), sessionId);
   }
 
   async loadActiveSession(
@@ -496,7 +548,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     conversationId: string,
     sessionId: string,
   ): Promise<AdvancementSession> {
-    const head = await this.#read(conversationId);
+    const head = await this.loadSession(conversationId, sessionId);
     if (!head || head.id !== sessionId) {
       throw new Error(`AdvancementStore: session "${sessionId}" not found`);
     }
@@ -514,17 +566,43 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     conversationId: string,
     events: readonly AdvancementControlEvent[],
     requestId?: string,
+    submission?: AdvancementSubmissionIdentity,
   ): Promise<AdvancementSession> {
+    const sessionId = events[0]?.sessionId;
+    if (!sessionId || events.some(event => event.type === "submission_settled")) throw Error("Business write requires session events");
+    let batch: readonly AdvancementControlEvent[] = events;
+    let receipt: AdvancementSubmissionReceipt | undefined;
+    if (submission) {
+      const existing = await this.readSubmission(conversationId, submission);
+      if (existing) {
+        if (existing.identity.requestDigest !== submission.requestDigest) throw Error("Advancement submission identity conflict");
+        const outcome = existing.outcome;
+        if (!("sessionId" in outcome)) throw Error("Advancement submission already has another disposition");
+        const committed = await this.loadSession(conversationId, sessionId);
+        if (!committed) throw Error("Advancement submission session is unavailable");
+        return committed;
+      }
+      receipt = { identity: submission, outcome: await this.#submissionOutcome(conversationId, events) };
+      requestId = advancementSubmissionRequestId(conversationId, submission.surfacePrincipal, submission.submissionId);
+      batch = [...events, { type: "submission_settled", conversationId, timestamp: events.at(-1)!.timestamp, receipt }];
+    }
     try {
       await this.#port.mutate(
         conversationId,
-        { kind: "advancement-event", events },
+        { kind: "advancement-event", events: batch },
         this.#ctx(requestId ?? this.#requestIdFor()),
       );
     } catch (error) {
       if (requestId === undefined) throw error;
+      if (receipt) {
+        const recovered = await this.readSubmission(conversationId, receipt.identity).catch(() => null);
+        if (!recovered || !canonicalEqual(recovered, receipt)) throw error;
+        const committed = await this.loadSession(conversationId, sessionId);
+        if (committed) return committed;
+        throw error;
+      }
       try {
-        const head = await this.#read(conversationId);
+        const head = await this.loadSession(conversationId, sessionId);
         if (head && events.every((event) => advancementEventIsReflected(head, event))) {
           return head;
         }
@@ -533,11 +611,18 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
       }
       throw error;
     }
-    const head = await this.#read(conversationId);
+    const head = await this.loadSession(conversationId, sessionId);
     if (!head) {
       throw new Error("AdvancementStore: session disappeared after write");
     }
     return head;
+  }
+
+  async #submissionOutcome(conversationId: string, events: readonly AdvancementControlEvent[]): Promise<AdvancementSubmissionOutcome> {
+    if (events.length !== 1) throw Error("Submission must bind one finite business transition");
+    const event = events[0]!;
+    if (event.type === "submission_settled") throw Error("Submission receipt cannot settle itself");
+    return advancementSubmissionOutcome(event, event.type === "rubric_draft_revised" ? await this.loadSession(conversationId, event.sessionId) : undefined);
   }
 
   #ctx(requestId: string): AuthorityCallContext {
@@ -553,7 +638,7 @@ function advancementEventIsReflected(
   session: AdvancementSession,
   event: AdvancementControlEvent,
 ): boolean {
-  if (event.sessionId !== session.id) return false;
+  if (event.type === "submission_settled" || event.sessionId !== session.id) return false;
   switch (event.type) {
     case "review_attempt_transitioned": {
       const current = session.reviewAttempts?.find(

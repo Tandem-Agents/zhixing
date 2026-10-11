@@ -200,6 +200,7 @@ export type DurableConversationSessionWriteResult =
  * 测试夹具必须提供显式完整 adapter。
  */
 export interface DurableConversationTurnExecutor {
+  inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing/core/conversation/application').ConversationInputReceipt>;
   admit(
     input: DurableConversationAdmissionInput,
   ): Promise<DurableConversationAdmissionResult>;

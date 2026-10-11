@@ -1,3 +1,4 @@
+import type { AdvancementSubmissionIdentity, AdvancementSubmissionReceipt, AdvancementSubmissionOutcome } from "./submission.js";
 import { randomUUID } from "node:crypto";
 import {
   bindProductApiOperation,
@@ -1945,6 +1946,7 @@ export interface AdvancementNewTaskMechanismPort {
     originalUserTask: Readonly<UserTurnInput>;
   }>): Promise<RubricContractDraftSnapshot>;
   persistNewTaskAwaitingSession(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     originalUserTask: Readonly<UserTurnInput>;
     draft: RubricContractDraftSnapshot;
@@ -1981,11 +1983,13 @@ export interface AdvancementActiveUserTurnMechanismPort {
     session: AdvancementSession,
   ): Promise<AdvancementClosureReport>;
   persistRegeneratedRubricSession(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     advancementSessionId: string;
+    previousSessionId: string;
     conversationId: string;
-    originalUserTask: AdvancementSession["originalUserTask"];
+    exit: AdvancementExit;
     draft: RubricContractDraftSnapshot;
-  }>): Promise<AdvancementSession>;
+  }>): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }>;
   settleInterruptedProxy(input: Readonly<{
     conversationId: string;
     advancementSessionId: string;
@@ -2017,6 +2021,7 @@ export interface AdvancementRubricRevisionMechanismPort {
     userFeedback: string;
   }>): Promise<RubricContractDraftSnapshot>;
   persistRubricDraftRevision(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     advancementSessionId: string;
     draft: RubricContractDraftSnapshot;
@@ -2025,11 +2030,13 @@ export interface AdvancementRubricRevisionMechanismPort {
 
 /** Path-free mechanisms for the durable Advancement cancellation transition. */
 export interface AdvancementRubricCancellationMechanismPort {
+  persistDirectOriginalTask(input: Readonly<{ submission?: AdvancementSubmissionIdentity; conversationId: string; advancementSessionId: string; admissionIntent: AdvancementOriginalTaskAdmissionIntent; exit: AdvancementExit }>): Promise<AdvancementSession>;
   loadRubricCancellationSession(
     conversationId: string,
     advancementSessionId: string,
   ): Promise<AdvancementSession | null>;
   persistRubricCancellation(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     advancementSessionId: string;
     reason: AdvancementExit["reason"];
@@ -2057,6 +2064,7 @@ export interface AdvancementAwaitingRubricAdmissionMechanismPort {
 
 /** Path-free mechanisms for confirming a Rubric and settling its durable handoff. */
 export interface AdvancementRubricConfirmationMechanismPort {
+  persistOriginalTaskAdmissionRejection(input: Readonly<{ conversationId: string; advancementSessionId: string; turnId: string; inputDigest: AdvancementOriginalTaskAdmissionIntent["inputDigest"]; reason: "conversation-not-found" | "idempotency-conflict" }>): Promise<AdvancementSession>;
   loadRubricConfirmationSession(
     conversationId: string,
     advancementSessionId: string,
@@ -2065,6 +2073,7 @@ export interface AdvancementRubricConfirmationMechanismPort {
     draft: RubricContractDraftSnapshot,
   ): Promise<ConfirmedRubricSnapshot>;
   persistRubricConfirmation(input: Readonly<{
+    submission?: AdvancementSubmissionIdentity;
     conversationId: string;
     advancementSessionId: string;
     confirmedRubric: ConfirmedRubricSnapshot;
@@ -2098,21 +2107,6 @@ export interface RubricPublicationPort {
     draft: RubricContractDraftSnapshot;
     persistence: RubricDraftPersistenceChoice;
   }>): Promise<RubricPublicationOutcome>;
-}
-
-/** Cross-domain execution effect invoked only after the cancellation Fact is visible. */
-export interface AdvancementOriginalTaskExecutionPort {
-  execute(input: Readonly<{
-    conversationId: string;
-    originalTurnId: string;
-    originalUserTask: Readonly<UserTurnInput>;
-    surface: AdvancementOriginalTaskSurfacePort;
-  }>): Promise<Readonly<{
-    conversationId: string;
-    turnId: string;
-    runId?: string;
-    runStatus: "immediate" | "queued";
-  }>>;
 }
 
 export type AdvancementOriginalTaskAdmissionFailureReason =
@@ -2192,6 +2186,22 @@ export interface AdvancementRubricConfirmationFactPort {
   ): void | Promise<void>;
 }
 
+
+export interface AdvancementSubmissionMechanismPort {
+  readSubmission(conversationId: string, identity: { surfacePrincipal: string; submissionId: string }): Promise<AdvancementSubmissionReceipt | null>;
+  settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void>;
+  loadExactSession(conversationId: string, sessionId: string): Promise<AdvancementSession | null>;
+}
+export interface AdvancementSubmissionQuery {
+  readonly conversationId: string;
+  readonly submissionId: string;
+  readonly surfacePrincipal: string;
+}
+export interface AdvancementSubmissionResolution {
+  readonly receipt: AdvancementSubmissionReceipt;
+  readonly draft?: RubricContractDraftSnapshot;
+  readonly originalTaskAdmission?: AdvancementSession["originalTaskAdmission"];
+}
 export interface AdvancementApplicationOptions {
   readonly activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly detail: AdvancementDetailReadPort;
@@ -2205,11 +2215,12 @@ export interface AdvancementApplicationOptions {
   readonly awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
   readonly rubricConfirmation: AdvancementRubricConfirmationMechanismPort;
   readonly rubricPublication?: RubricPublicationPort;
-  readonly originalTask: AdvancementOriginalTaskExecutionPort;
+  readonly submissions: AdvancementSubmissionMechanismPort;
   readonly confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
 }
 
 export interface AdvancementNewTaskCommand {
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly conversationScope: "existing" | "new";
   readonly turnId: string;
@@ -2239,6 +2250,7 @@ export interface AdvancementActiveUserTurnSurfacePort {
 }
 
 export interface AdvancementActiveUserTurnCommand {
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly turnId: string;
   readonly userInput: Readonly<UserTurnInput>;
@@ -2395,6 +2407,8 @@ export interface AdvancementActiveStateProjection {
 export type AdvancementActiveStateResult = AdvancementActiveStateProjection | null;
 
 export interface AdvancementRubricRevisionCommand {
+  readonly expectedRubricDraftId?: string;
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly advancementSessionId: string;
   readonly userFeedback: string;
@@ -2420,6 +2434,8 @@ export interface AdvancementContractDraftRevisedFact extends ProductApiFact {
 }
 
 export interface AdvancementRubricCancellationCommand {
+  readonly expectedRubricDraftId?: string;
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly advancementSessionId: string;
   readonly executeOriginal: boolean;
@@ -2428,6 +2444,7 @@ export interface AdvancementRubricCancellationCommand {
 }
 
 export interface AdvancementAwaitingRubricControlCommand {
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly userInput: Readonly<UserTurnInput>;
   readonly fact: AdvancementRubricCancellationFactPort;
@@ -2457,6 +2474,7 @@ export type AdvancementAwaitingRubricControlResult =
     }>;
 
 export interface AdvancementRubricConfirmationCommand {
+  readonly submission?: AdvancementSubmissionIdentity;
   readonly conversationId: string;
   readonly advancementSessionId: string;
   readonly expectedRubricDraftId: string;
@@ -2539,6 +2557,7 @@ export class AdvancementApplicationError extends Error {
 }
 
 export interface AdvancementApplication {
+  querySubmission(query: AdvancementSubmissionQuery): Promise<AdvancementSubmissionResolution | null>;
   queryActiveState(
     query: AdvancementActiveStateQuery,
   ): Promise<AdvancementActiveStateResult>;
@@ -2586,6 +2605,7 @@ export interface AdvancementApplication {
 
 /** Advancement-owned application decisions exposed through one finite Product API contribution. */
 export class AdvancementApplicationService implements AdvancementApplication {
+  readonly #submissions: AdvancementSubmissionMechanismPort;
   readonly #activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly #detail: AdvancementDetailReadPort;
   readonly #maintenance: AdvancementConversationMaintenancePort;
@@ -2598,10 +2618,10 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
   readonly #rubricConfirmation: AdvancementRubricConfirmationMechanismPort;
   readonly #rubricPublication?: RubricPublicationPort;
-  readonly #originalTask: AdvancementOriginalTaskExecutionPort;
   readonly #confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
 
   constructor(options: AdvancementApplicationOptions) {
+    this.#submissions = options.submissions;
     this.#activeState = options.activeState;
     this.#detail = options.detail;
     this.#maintenance = options.maintenance;
@@ -2614,8 +2634,26 @@ export class AdvancementApplicationService implements AdvancementApplication {
     this.#awaitingRubricAdmission = options.awaitingRubricAdmission;
     this.#rubricConfirmation = options.rubricConfirmation;
     this.#rubricPublication = options.rubricPublication;
-    this.#originalTask = options.originalTask;
     this.#confirmedOriginalTask = options.confirmedOriginalTask;
+  }
+
+
+  async querySubmission(query: AdvancementSubmissionQuery): Promise<AdvancementSubmissionResolution | null> {
+    assertConversationId(query.conversationId);
+    assertRubricRevisionIdentity(query.submissionId, "Submission");
+    assertRubricRevisionIdentity(query.surfacePrincipal, "Surface");
+    const receipt = await this.#submissions.readSubmission(query.conversationId, query);
+    if (!receipt) return null;
+    if (receipt.identity.surfacePrincipal !== query.surfacePrincipal || receipt.identity.submissionId !== query.submissionId) throw new TypeError("Submission receipt identity mismatch");
+    const outcome = receipt.outcome;
+    const session = "sessionId" in outcome ? await this.#submissions.loadExactSession(query.conversationId, outcome.sessionId) : null;
+    const draft = (outcome.kind === "draft-saved" || outcome.kind === "not-saved") &&
+      session?.status === "awaiting-rubric-confirmation" &&
+      session.pendingRubricDraft?.draftId === outcome.draftId &&
+      (outcome.kind !== "draft-saved" || session.rubricDraftVersion === outcome.draftVersion)
+      ? session.pendingRubricDraft : undefined;
+    return freezeSnapshot({ receipt, ...(draft ? { draft } : {}),
+      ...(outcome.kind === "original-task-intent" && session?.originalTaskAdmission ? { originalTaskAdmission: session.originalTaskAdmission } : {}) });
   }
 
   async queryActiveState(
@@ -2760,6 +2798,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
             userFeedback: extractUserTurnInputText(command.userInput).trim(),
           });
         } catch (error) {
+          if (command.submission) await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "contract-failed", code: "rubric-revision-failed" });
           const failure = Object.freeze({
             kind: "contract-failed" as const,
             conversationId: command.conversationId,
@@ -2774,21 +2813,12 @@ export class AdvancementApplicationService implements AdvancementApplication {
           message: "用户修正验收标准，原契约退出，按修正后的标准重新确认。",
           occurredAt: this.#activeUserTurn.activeUserTurnNow(),
         };
-        const exited = await this.#activeUserTurn.persistActiveUserTurnExit({
-          conversationId: command.conversationId,
-          advancementSessionId: current.id,
-          exit,
+        const { exited, created } = await this.#activeUserTurn.persistRegeneratedRubricSession({
+          advancementSessionId: `adv_${revised.draftId}`, previousSessionId: current.id,
+          conversationId: command.conversationId, exit, draft: revised, submission: command.submission,
         });
         assertCommittedActiveExit(exited, current, exit);
-        const closure = await this.#activeUserTurn.composeActiveUserTurnClosure(
-          exited,
-        );
-        const created = await this.#activeUserTurn.persistRegeneratedRubricSession({
-          advancementSessionId: `adv_${revised.draftId}`,
-          conversationId: command.conversationId,
-          originalUserTask: current.originalUserTask,
-          draft: revised,
-        });
+        const closure = await this.#activeUserTurn.composeActiveUserTurnClosure(exited);
         assertCommittedRegeneratedSession(created, command, current, revised);
         const admissionSnapshot = freezeSnapshot(admission);
         const draftSnapshot = freezeSnapshot(revised);
@@ -2993,6 +3023,10 @@ export class AdvancementApplicationService implements AdvancementApplication {
           originalUserTask: command.userInput,
         });
       } catch (error) {
+        if (command.submission) {
+          if (command.conversationScope === "new") await this.#newTaskConversation.ensureShell(command.conversationId);
+          await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "contract-failed", code: "rubric-generation-failed" });
+        }
         return Object.freeze({
           result: Object.freeze<AdvancementNewTaskResult>({
             kind: "contract-failed",
@@ -3009,7 +3043,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
       const committed = await this.#newTask.persistNewTaskAwaitingSession({
         conversationId: command.conversationId,
         originalUserTask: command.userInput,
-        draft,
+        draft, submission: command.submission,
       });
       assertCommittedNewTaskSession(committed, command, draft);
       const admissionSnapshot = freezeSnapshot(admission);
@@ -3051,6 +3085,14 @@ export class AdvancementApplicationService implements AdvancementApplication {
     return maintained.value;
   }
 
+  /** Only explicit pre-commit exits call this; uncertain writes are never reclassified. */
+  async #rejectSubmission(command: { conversationId: string; submission?: AdvancementSubmissionIdentity }, error: AdvancementApplicationError): Promise<AdvancementApplicationError> {
+    if (command.submission) await this.#submissions.settleSubmission(command.conversationId, command.submission, {
+      kind: "rejected", code: error.code as import("./submission.js").AdvancementSubmissionRejectionCode,
+    });
+    return error;
+  }
+
   async reviseRubricDraft(
     command: AdvancementRubricRevisionCommand,
   ): Promise<Readonly<{
@@ -3071,38 +3113,38 @@ export class AdvancementApplicationService implements AdvancementApplication {
           command.advancementSessionId,
         );
         if (!session) {
-          throw new AdvancementApplicationError(
-            "advancement-session-not-found",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("advancement-session-not-found",
             `Advancement session not found: ${command.advancementSessionId}`,
             { advancementSessionId: command.advancementSessionId },
-          );
+          ));
         }
         if (session.status !== "awaiting-rubric-confirmation") {
-          throw new AdvancementApplicationError(
-            "not-awaiting-rubric-confirmation",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("not-awaiting-rubric-confirmation",
             `Advancement session is not awaiting rubric confirmation: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
         const currentDraft = session.pendingRubricDraft;
         if (!currentDraft) {
-          throw new AdvancementApplicationError(
-            "pending-rubric-draft-missing",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("pending-rubric-draft-missing",
             `Advancement session has no pending rubric draft: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
-        const revisedDraft =
-          await this.#rubricRevision.reviseRubricDraftContent({
-            currentDraft,
-            originalUserTask: session.originalUserTask,
-            userFeedback,
-          });
+
+        if (command.expectedRubricDraftId && command.expectedRubricDraftId !== currentDraft.draftId) throw await this.#rejectSubmission(command, new AdvancementApplicationError("rubric-draft-stale", "草案已变化，请查看最新版本。"));
+        let revisedDraft: RubricContractDraftSnapshot;
+        try {
+          revisedDraft = await this.#rubricRevision.reviseRubricDraftContent({ currentDraft, originalUserTask: session.originalUserTask, userFeedback });
+        } catch (error) {
+          if (command.submission) await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "contract-failed", code: "rubric-revision-failed" });
+          throw error;
+        }
         const updated =
           await this.#rubricRevision.persistRubricDraftRevision({
             conversationId: command.conversationId,
             advancementSessionId: command.advancementSessionId,
-            draft: revisedDraft,
+            draft: revisedDraft, submission: command.submission,
           });
         const committedDraft = updated.pendingRubricDraft;
         if (!committedDraft) {
@@ -3140,10 +3182,9 @@ export class AdvancementApplicationService implements AdvancementApplication {
       );
     }
     if (maintained.status === "busy") {
-      throw new AdvancementApplicationError(
-        "conversation-busy",
+      throw await this.#rejectSubmission(command, new AdvancementApplicationError("conversation-busy",
         `Conversation is busy: ${command.conversationId}`,
-      );
+      ));
     }
     return maintained.value;
   }
@@ -3182,34 +3223,30 @@ export class AdvancementApplicationService implements AdvancementApplication {
             command.advancementSessionId,
           );
         if (!session) {
-          throw new AdvancementApplicationError(
-            "advancement-session-not-found",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("advancement-session-not-found",
             `Advancement session not found: ${command.advancementSessionId}`,
             { advancementSessionId: command.advancementSessionId },
-          );
+          ));
         }
         assertAdvancementSessionIdentity(session, command);
         if (session.status !== "awaiting-rubric-confirmation") {
-          throw new AdvancementApplicationError(
-            "not-awaiting-rubric-confirmation",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("not-awaiting-rubric-confirmation",
             `Advancement session is not awaiting rubric confirmation: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
         const draft = session.pendingRubricDraft;
         if (!draft) {
-          throw new AdvancementApplicationError(
-            "pending-rubric-draft-missing",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("pending-rubric-draft-missing",
             `Advancement session has no pending rubric draft: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
         if (draft.draftId !== command.expectedRubricDraftId) {
-          throw new AdvancementApplicationError(
-            "rubric-draft-stale",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("rubric-draft-stale",
             "推进准则草案已被修订，请查看最新内容后再确认。",
             { advancementSessionId: session.id },
-          );
+          ));
         }
 
         const confirmedRubric =
@@ -3229,7 +3266,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
             conversationId: command.conversationId,
             advancementSessionId: command.advancementSessionId,
             confirmedRubric,
-            admissionIntent,
+            admissionIntent, submission: command.submission,
           });
         assertCommittedRubricConfirmation(committed, command, admissionIntent);
         const committedRubric = committed.confirmedRubric!;
@@ -3260,10 +3297,9 @@ export class AdvancementApplicationService implements AdvancementApplication {
       );
     }
     if (maintained.status === "busy") {
-      throw new AdvancementApplicationError(
-        "conversation-busy",
+      throw await this.#rejectSubmission(command, new AdvancementApplicationError("conversation-busy",
         `Conversation is busy: ${command.conversationId}`,
-      );
+      ));
     }
 
     const decision = maintained.value;
@@ -3286,16 +3322,14 @@ export class AdvancementApplicationService implements AdvancementApplication {
       });
     } catch (error) {
       if (error instanceof AdvancementOriginalTaskAdmissionError) {
-        if (
-          error.reason === "conversation-not-found" ||
-          error.reason === "idempotency-conflict"
-        ) {
-          await this.#cancelFailedOriginalTaskAdmission(
-            command,
-            decision.committed,
-            error.reason,
-          );
+        if (error.reason === "idempotency-conflict") {
+          const intent = decision.committed.originalTaskAdmission!.intent;
+          await this.#rubricConfirmation.persistOriginalTaskAdmissionRejection({
+            conversationId: decision.committed.conversationId, advancementSessionId: decision.committed.id,
+            turnId: intent.turnId, inputDigest: intent.inputDigest, reason: error.reason,
+          });
         }
+        // Deleted conversations are closed by their existing lifecycle transaction.
         throw error.originalError;
       }
       throw error;
@@ -3375,54 +3409,6 @@ export class AdvancementApplicationService implements AdvancementApplication {
     }
   }
 
-  async #cancelFailedOriginalTaskAdmission(
-    command: AdvancementRubricConfirmationCommand,
-    confirmed: AdvancementSession | undefined,
-    reason: "conversation-not-found" | "idempotency-conflict" =
-      "conversation-not-found",
-  ): Promise<void> {
-    try {
-      const source =
-        confirmed ??
-        (await this.#rubricCancellation.loadRubricCancellationSession(
-          command.conversationId,
-          command.advancementSessionId,
-        ));
-      if (!source) return;
-      assertAdvancementSessionIdentity(source, command);
-      const cancelled =
-        await this.#rubricCancellation.persistRubricCancellation({
-          conversationId: command.conversationId,
-          advancementSessionId: command.advancementSessionId,
-          reason: "system-error",
-          message:
-            reason === "idempotency-conflict"
-              ? "原始任务的耐久准入身份发生冲突，推进会话已安全取消。"
-              : "原始对话已不存在，推进会话已取消以避免悬空状态。",
-        });
-      if (cancelled.status !== "cancelled") return;
-      const originalTurnId =
-        source.originalTaskAdmission?.intent.turnId ??
-        source.pendingRubricDraft?.originalTurnId ??
-        source.id;
-      await command.fact.publish(
-        Object.freeze<AdvancementContractCancelledFact>({
-          kind: "advancement-contract-cancelled",
-          conversationId: cancelled.conversationId,
-          originalTurnId,
-          advancementSessionId: cancelled.id,
-          controlSeq:
-            source.rubricDraftVersion +
-            (source.originalTaskAdmission ? 2 : 1),
-          executeOriginal: false,
-          reason: "original-task-admission-failed",
-        }),
-      );
-    } catch {
-      // Preserve the original Conversation error; recovery can retry cancellation.
-    }
-  }
-
   #publishRubric(
     conversationId: string,
     draft: RubricContractDraftSnapshot,
@@ -3440,6 +3426,52 @@ export class AdvancementApplicationService implements AdvancementApplication {
         kind: "failed",
         message: "任务已继续执行，但准则暂未保存；稍后可重新保存。",
       }));
+  }
+
+  async #persistDirectOriginalTask(session: AdvancementSession, surface: AdvancementOriginalTaskSurfacePort, submission?: AdvancementSubmissionIdentity): Promise<AdvancementSession> {
+    const draft = session.pendingRubricDraft;
+    if (!draft) throw new TypeError("Direct original task requires its pending draft");
+    const principal = surface.caller.surfacePrincipal;
+    const intent: AdvancementOriginalTaskAdmissionIntent = {
+      turnId: draft.originalTurnId, surfacePrincipal: principal,
+      turnOrigin: { channel: "rpc", triggeredBy: principal },
+      inputDigest: protocolDigest("AdvancementOriginalTaskInput", 1, session.originalUserTask),
+    };
+    return this.#rubricCancellation.persistDirectOriginalTask({
+      conversationId: session.conversationId, advancementSessionId: session.id, admissionIntent: intent, submission,
+      exit: { reason: "user-cancelled", message: "用户选择直接执行原始任务", occurredAt: new Date().toISOString() },
+    });
+  }
+
+  async #executeDirectOriginalTask(session: AdvancementSession, surface: AdvancementOriginalTaskSurfacePort) {
+    const obligation = session.originalTaskAdmission;
+    if (!obligation || obligation.mode !== "direct" || obligation.status !== "pending") throw new TypeError("Direct original-task intent is missing");
+    let admitted: Awaited<ReturnType<AdvancementConfirmedOriginalTaskAdmissionPort["admit"]>>;
+    try {
+      admitted = await this.#confirmedOriginalTask.admit({ conversationId: session.conversationId,
+        originalUserTask: session.originalUserTask, admissionIntent: obligation.intent, surface });
+    } catch (error) {
+      if (error instanceof AdvancementOriginalTaskAdmissionError) {
+        if (error.reason === "idempotency-conflict") {
+          await this.#rubricConfirmation.persistOriginalTaskAdmissionRejection({ conversationId: session.conversationId,
+            advancementSessionId: session.id, turnId: obligation.intent.turnId, inputDigest: obligation.intent.inputDigest, reason: error.reason });
+        }
+        // A deleted conversation is closed by its existing deletion transaction.
+        throw error.originalError;
+      }
+      throw error;
+    }
+    if (admitted.conversationId !== session.conversationId || admitted.turnId !== obligation.intent.turnId || !admitted.runId) {
+      throw new TypeError("Direct original-task admission returned a mismatched identity");
+    }
+    try {
+      await this.#rubricConfirmation.persistOriginalTaskAdmissionSettlement({ conversationId: session.conversationId,
+        advancementSessionId: session.id, turnId: obligation.intent.turnId, inputDigest: obligation.intent.inputDigest, runId: admitted.runId });
+    } catch {
+      // The run is durable. The pending obligation remains owned by recovery.
+    }
+    return { conversationId: admitted.conversationId, turnId: admitted.turnId, runId: admitted.runId,
+      runStatus: admitted.status === "replayed" ? "queued" as const : admitted.status };
   }
 
   async controlAwaitingRubric(
@@ -3479,11 +3511,10 @@ export class AdvancementApplicationService implements AdvancementApplication {
         }
         const draft = session.pendingRubricDraft;
         if (!draft) {
-          throw new AdvancementApplicationError(
-            "pending-rubric-draft-missing",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("pending-rubric-draft-missing",
             `Advancement session has no pending rubric draft: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
         const admission =
           await this.#awaitingRubricAdmission.decideAwaitingRubricAdmission({
@@ -3491,6 +3522,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
             userInput: freezeSnapshot(command.userInput),
           });
         if (admission.action === "keep-awaiting-confirmation") {
+          if (command.submission) await this.#submissions.settleSubmission(command.conversationId, command.submission, { kind: "not-saved", sessionId: session.id, draftId: draft.draftId, originalTurnId: draft.originalTurnId });
           return Object.freeze({
             kind: "keep-awaiting" as const,
             session,
@@ -3507,14 +3539,11 @@ export class AdvancementApplicationService implements AdvancementApplication {
         }
 
         const executeOriginal = admission.action === "downgrade-to-direct";
-        const committed =
-          await this.#rubricCancellation.persistRubricCancellation({
-            conversationId: command.conversationId,
-            advancementSessionId: session.id,
-            reason: "user-cancelled",
-            message: executeOriginal
-              ? "用户选择直接执行原始任务"
-              : "用户取消待确认任务",
+        const committed = executeOriginal
+          ? await this.#persistDirectOriginalTask(session, command.surface, command.submission)
+          : await this.#rubricCancellation.persistRubricCancellation({
+            conversationId: command.conversationId, advancementSessionId: session.id,
+            reason: "user-cancelled", message: "用户取消待确认任务", submission: command.submission,
           });
         if (committed.status !== "cancelled") {
           throw new AdvancementApplicationError(
@@ -3560,10 +3589,9 @@ export class AdvancementApplicationService implements AdvancementApplication {
       );
     }
     if (maintained.status === "busy") {
-      throw new AdvancementApplicationError(
-        "conversation-busy",
+      throw await this.#rejectSubmission(command, new AdvancementApplicationError("conversation-busy",
         `Conversation is busy: ${command.conversationId}`,
-      );
+      ));
     }
 
     const decision = maintained.value;
@@ -3593,12 +3621,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
       });
     }
 
-    const executed = await this.#originalTask.execute({
-      conversationId: decision.committed.conversationId,
-      originalTurnId: decision.draft.originalTurnId,
-      originalUserTask: decision.originalUserTask,
-      surface: command.surface,
-    });
+    const executed = await this.#executeDirectOriginalTask(decision.committed, command.surface);
     if (
       executed.conversationId !== decision.committed.conversationId ||
       executed.turnId !== decision.draft.originalTurnId
@@ -3657,11 +3680,10 @@ export class AdvancementApplicationService implements AdvancementApplication {
             command.advancementSessionId,
           );
         if (!session) {
-          throw new AdvancementApplicationError(
-            "advancement-session-not-found",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("advancement-session-not-found",
             `Advancement session not found: ${command.advancementSessionId}`,
             { advancementSessionId: command.advancementSessionId },
-          );
+          ));
         }
         if (
           session.conversationId !== command.conversationId ||
@@ -3674,21 +3696,18 @@ export class AdvancementApplicationService implements AdvancementApplication {
           );
         }
         if (session.status !== "awaiting-rubric-confirmation") {
-          throw new AdvancementApplicationError(
-            "not-awaiting-rubric-confirmation",
+          throw await this.#rejectSubmission(command, new AdvancementApplicationError("not-awaiting-rubric-confirmation",
             `Advancement session is not awaiting rubric confirmation: ${session.id}`,
             { advancementSessionId: session.id },
-          );
+          ));
         }
 
-        const committed =
-          await this.#rubricCancellation.persistRubricCancellation({
-            conversationId: command.conversationId,
-            advancementSessionId: command.advancementSessionId,
-            reason: "user-cancelled",
-            message: command.executeOriginal
-              ? "用户选择直接执行原始任务"
-              : "用户取消 Rubric 确认",
+        if (command.expectedRubricDraftId && session.pendingRubricDraft?.draftId !== command.expectedRubricDraftId) throw await this.#rejectSubmission(command, new AdvancementApplicationError("rubric-draft-stale", "草案已变化，请查看最新版本。"));
+        const committed = command.executeOriginal
+          ? await this.#persistDirectOriginalTask(session, command.surface, command.submission)
+          : await this.#rubricCancellation.persistRubricCancellation({
+            conversationId: command.conversationId, advancementSessionId: command.advancementSessionId,
+            reason: "user-cancelled", message: "用户取消 Rubric 确认", submission: command.submission,
           });
         if (committed.status !== "cancelled") {
           throw new AdvancementApplicationError(
@@ -3733,10 +3752,9 @@ export class AdvancementApplicationService implements AdvancementApplication {
       );
     }
     if (maintained.status === "busy") {
-      throw new AdvancementApplicationError(
-        "conversation-busy",
+      throw await this.#rejectSubmission(command, new AdvancementApplicationError("conversation-busy",
         `Conversation is busy: ${command.conversationId}`,
-      );
+      ));
     }
 
     const decision = maintained.value;
@@ -3752,12 +3770,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
       });
     }
 
-    const executed = await this.#originalTask.execute({
-      conversationId: decision.committed.conversationId,
-      originalTurnId: decision.draft.originalTurnId,
-      originalUserTask: decision.originalUserTask,
-      surface: command.surface,
-    });
+    const executed = await this.#executeDirectOriginalTask(decision.committed, command.surface);
     if (
       executed.conversationId !== decision.committed.conversationId ||
       executed.turnId !== decision.draft.originalTurnId
@@ -3779,6 +3792,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
     });
   }
 }
+
+export const ADVANCEMENT_SUBMISSION_QUERY = defineProductApiQuery<"advancement.query.submission", AdvancementSubmissionQuery, AdvancementSubmissionResolution | null>("advancement.query.submission");
 
 export const ADVANCEMENT_DETAIL_QUERY = defineProductApiQuery<
   "advancement.query.detail",
@@ -3887,6 +3902,7 @@ export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     ADVANCEMENT_ACTIVE_STATE_QUERY,
     ADVANCEMENT_DETAIL_QUERY,
+    ADVANCEMENT_SUBMISSION_QUERY,
     ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
     ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
     ADVANCEMENT_REVISE_RUBRIC_COMMAND,
@@ -3912,6 +3928,7 @@ export function createAdvancementProductApiContribution(
         result: await application.queryActiveState(query),
         facts: [],
       })),
+      bindProductApiOperation(ADVANCEMENT_SUBMISSION_QUERY, async (query) => ({ result: await application.querySubmission(query), facts: [] })),
       bindProductApiOperation(ADVANCEMENT_DETAIL_QUERY, async (query) => ({
         result: await application.queryDetail(query),
         facts: [],

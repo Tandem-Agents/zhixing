@@ -415,15 +415,16 @@ describe("ConversationSessionStateAdapter advancement", { timeout: DURABLE_IO_TE
     expect(await log.readAll()).toHaveLength(0);
 
     const known = await createHarness("conv-known");
+    const knownEvents = [createdEvent({ conversationId: "conv-known" })];
     const first = await known.adapter.mutate(
       "conv-known",
-      { kind: "advancement-event", events: [createdEvent()] },
+      { kind: "advancement-event", events: knownEvents },
       hostCtx("req-replay"),
     );
     known.removeDirectoryIdentity();
     const replay = await known.adapter.mutate(
       "conv-known",
-      { kind: "advancement-event", events: [createdEvent()] },
+      { kind: "advancement-event", events: knownEvents },
       hostCtx("req-replay"),
     );
     expect(replay).toEqual(first);
@@ -791,3 +792,44 @@ it('session batch read crosses 64 frames and discards failed partial state', asy
   } finally {spy.mockRestore();}
 },30000);
 
+it("retains exact cancelled direct intent across a new head and authority replay", async () => {
+  const h = await createHarness();
+  await h.write([createdEvent()]);
+  const confirmation = confirmedEvent();
+  if (confirmation.type !== "rubric_confirmed") throw Error("fixture");
+  await h.write([{ type: "original_task_directed", timestamp: NOW, sessionId: "session-1", admissionIntent: confirmation.admissionIntent,
+    exit: { reason: "user-cancelled", message: "直接执行", occurredAt: NOW } }]);
+  await h.write([createdEvent({ id: "session-new" })]);
+  const recovered = h.makeJournal();
+  const adapter = new ConversationSessionStateAdapter({ journalFor: () => recovered, sessionExists: async () => true });
+  expect((await adapter.readAdvancementState("conv-1", hostCtx("head")))?.id).toBe("session-new");
+  expect(await adapter.listPendingAdvancementOriginalTasks("conv-1", hostCtx("pending"))).toEqual({ sessionIds: ["session-1"] });
+  expect(await adapter.readAdvancementState("conv-1", hostCtx("exact"), "session-1")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: "pending" } });
+  await adapter.mutate("conv-1", { kind: "advancement-event", events: [{ type: "original_task_admitted", sessionId: "session-1", timestamp: NOW, turnId: "turn-1", inputDigest: confirmation.admissionIntent.inputDigest, runId: "run-direct" }] }, hostCtx("settle-direct"));
+  expect(await adapter.listPendingAdvancementOriginalTasks("conv-1", hostCtx("done"))).toEqual({ sessionIds: [] });
+  await expect(adapter.listPendingAdvancementOriginalTasks("conv-1", { ...hostCtx("forbidden"), principal: { kind: "surface", surfacePrincipal: "surface:test", connectionId: "conn-test" } } as never)).rejects.toThrow();
+}, DURABLE_IO_TEST_TIMEOUT_MS);
+
+it("advancement submission receipt shares the business commit and survives head replacement", async () => {
+  const { advancementSubmissionRequestId } = await import("@zhixing/core/advancement");
+  const h = await createHarness();
+  const identity = { surfacePrincipal: "surface:test", submissionId: "turn-submission", requestDigest: protocolDigest("Submission", 1, { text: "task" }) };
+  const requestId = advancementSubmissionRequestId("conv-1", identity.surfacePrincipal, identity.submissionId);
+  const created = createdEvent();
+  if (created.type !== "session_created") throw Error("fixture");
+  const receipt = { identity, outcome: { kind: "draft-saved" as const, disposition: "original-saved" as const, sessionId: "session-1",
+    draftId: created.pendingRubricDraft.draftId, draftVersion: 0, originalTurnId: created.pendingRubricDraft.originalTurnId } };
+  const events: AdvancementControlEvent[] = [created, { type: "submission_settled", conversationId: "conv-1", timestamp: NOW, receipt }];
+  await expect(h.write([created, { ...events[1]!, receipt: { ...receipt, outcome: { ...receipt.outcome, draftId: "wrong-draft" } } } as AdvancementControlEvent], requestId)).rejects.toThrow("does not bind");
+  expect(await h.read()).toBeNull();
+  await h.write(events, requestId);
+  await h.write([{ type: "cancelled", timestamp: NOW, sessionId: "session-1" }]);
+  await h.write([createdEvent({ id: "session-new" })]);
+  const replayed = h.makeJournal();
+  const adapter = new ConversationSessionStateAdapter({ journalFor: () => replayed });
+  expect(await adapter.readAdvancementSubmission("conv-1", identity, hostCtx("receipt"))).toEqual(receipt);
+  expect(await adapter.readAdvancementSubmission("conv-1", { ...identity, surfacePrincipal: "surface:other" }, hostCtx("other"))).toBeNull();
+  expect((await adapter.readAdvancementState("conv-1", hostCtx("head")))?.id).toBe("session-new");
+  await h.write(events, requestId);
+  await expect(h.write([created, { type: "submission_settled", conversationId: "conv-1", timestamp: NOW, receipt: { ...receipt, identity: { ...identity, requestDigest: protocolDigest("Submission", 1, { text: "changed" }) } } }], requestId)).rejects.toThrow("conflicting durable payloads");
+}, DURABLE_IO_TEST_TIMEOUT_MS);

@@ -153,12 +153,42 @@ class DefaultAdvancementRecoveryMaintenance
     return recovery;
   }
 
+  private async recoverOriginalAdmissions(conversationId: string): Promise<void> {
+    let after: string | undefined;
+    do {
+      const page = await this.options.advancement.listPendingOriginalTasks(conversationId, after);
+      for (const sessionId of page.sessionIds) {
+        const session = await this.options.advancement.loadExactSession(conversationId, sessionId);
+        const obligation = session?.originalTaskAdmission;
+        if (!session || !obligation || obligation.status !== "pending") continue;
+        const originalTasks = this.options.originalTasks;
+        if (!originalTasks) throw new Error("Original-task admission recovery is not assembled");
+        const admitted = await originalTasks.admit(session);
+        if (admitted.status === "rejected") {
+          // Deletion owns closure; never recreate a deleted conversation to record a rejection.
+          if (admitted.reason === "conversation-not-found") continue;
+          await this.options.advancement.persistOriginalTaskAdmissionRejection({
+            conversationId, advancementSessionId: session.id, turnId: obligation.intent.turnId,
+            inputDigest: obligation.intent.inputDigest, reason: admitted.reason,
+          });
+          continue;
+        }
+        await this.options.advancement.persistOriginalTaskAdmissionSettlement({
+          conversationId, advancementSessionId: session.id, turnId: obligation.intent.turnId,
+          inputDigest: obligation.intent.inputDigest, runId: admitted.runId,
+        });
+      }
+      after = page.next;
+    } while (after !== undefined);
+  }
+
   private async recoverConversationOnce(
     conversationId: string,
     options?: AdvancementRecoveryOptions,
   ): Promise<AdvancementRecoveryResult> {
     let session: AdvancementSession | null;
     try {
+      await this.recoverOriginalAdmissions(conversationId);
       await this.options.reviews.reconcileConversation(conversationId);
       session = await this.options.advancement.loadActiveSession(conversationId);
     } catch (err) {
@@ -167,42 +197,6 @@ class DefaultAdvancementRecoveryMaintenance
     if (!session) return { status: "no-active-session", conversationId };
     if (session.status !== "active") {
       return { status: "not-active", conversationId };
-    }
-
-    if (session.originalTaskAdmission?.status === "pending") {
-      const originalTasks = this.options.originalTasks;
-      if (!originalTasks) {
-        return this.failed(
-          conversationId,
-          session.id,
-          undefined,
-          new Error("Original-task admission recovery is not assembled"),
-        );
-      }
-      try {
-        const admitted = await originalTasks.admit(session);
-        if (admitted.status === "rejected") {
-          await this.options.reviews.cancelSession({
-            conversationId,
-            advancementSessionId: session.id,
-            reason: "system-error",
-            message:
-              admitted.reason === "conversation-not-found"
-                ? "原始对话已不存在，推进会话已取消以避免悬空状态。"
-                : "原始任务的耐久准入身份发生冲突，推进会话已安全取消。",
-          });
-          return { status: "not-active", conversationId };
-        }
-        session = await this.options.advancement.persistOriginalTaskAdmissionSettlement({
-          conversationId,
-          advancementSessionId: session.id,
-          turnId: session.originalTaskAdmission.intent.turnId,
-          inputDigest: session.originalTaskAdmission.intent.inputDigest,
-          runId: admitted.runId,
-        });
-      } catch (error) {
-        return this.failed(conversationId, session.id, undefined, error);
-      }
     }
 
     let lastRecoveredRun: AdvancementRecoveryResult | undefined;

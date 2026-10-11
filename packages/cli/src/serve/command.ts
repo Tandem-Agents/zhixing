@@ -175,7 +175,6 @@ import { AdvancementEvidenceHostBinding } from "./advancement-evidence-topology.
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
-  createAnchorAdvancementOriginalTaskExecutionPort,
 } from "./advancement-original-task-application.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
@@ -2801,6 +2800,7 @@ async function runServerProcess(
                 operation,
               ),
           },
+          submissions: advancementDetailController,
           newTask: advancementDetailController,
           newTaskConversation: {
             ensureShell: (conversationId) =>
@@ -2840,13 +2840,14 @@ async function runServerProcess(
           },
           rubricRevision: advancementDetailController,
           rubricCancellation: {
+            persistDirectOriginalTask: (input) => advancementDetailController.persistDirectOriginalTask(input),
             loadRubricCancellationSession: (conversationId, sessionId) =>
               advancementDetailController.loadRubricCancellationSession(
                 conversationId,
                 sessionId,
               ),
             persistRubricCancellation: (input) =>
-              advancementReviews.cancelSession(input),
+              advancementDetailController.persistRubricCancellation(input),
           },
           awaitingRubricAdmission: advancementDetailController,
           rubricConfirmation: advancementDetailController,
@@ -2854,10 +2855,6 @@ async function runServerProcess(
             publish: (input) =>
               advancementDetailController.publishRubric(input),
           },
-          originalTask:
-            createAnchorAdvancementOriginalTaskExecutionPort(
-              conversationApplication,
-            ),
           confirmedOriginalTask:
             createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(
               conversationApplication,

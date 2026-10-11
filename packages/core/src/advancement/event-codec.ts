@@ -1,3 +1,4 @@
+import { isAdvancementSubmissionReceipt } from "./submission.js";
 import type {
   AdvancementControlEvent,
   AdvancementEvidenceAttempt,
@@ -32,8 +33,13 @@ export function isAdvancementControlEvent(
   const event = value as Record<string, unknown>;
   if (typeof event.type !== "string") return false;
   if (typeof event.timestamp !== "string") return false;
+  if (event.type === "submission_settled") return hasExactKeys(event, ["type", "timestamp", "conversationId", "receipt"]) &&
+    isNonEmptyString(event.conversationId) && isAdvancementSubmissionReceipt(event.receipt);
   if (typeof event.sessionId !== "string") return false;
   switch (event.type) {
+    case "session_regenerated":
+      return hasExactKeys(event, ["exit", "nextSessionId", "pendingRubricDraft", "sessionId", "timestamp", "type"]) &&
+        isNonEmptyString(event.nextSessionId) && isRubricDraftShape(event.pendingRubricDraft) && isExitShape(event.exit);
     case "session_created":
       return (
         hasExactKeys(event, [
@@ -70,6 +76,12 @@ export function isAdvancementControlEvent(
         isConfirmedRubricShape(event.confirmedRubric) &&
         isAdmissionIntentShape(event.admissionIntent)
       );
+    case "original_task_directed":
+      return hasExactKeys(event, ["admissionIntent", "exit", "sessionId", "timestamp", "type"]) && isAdmissionIntentShape(event.admissionIntent) && isExitShape(event.exit);
+    case "original_task_admission_rejected":
+      return hasExactKeys(event, ["inputDigest", "reason", "sessionId", "timestamp", "turnId", "type"]) &&
+        isNonEmptyString(event.turnId) && isDigest(event.inputDigest) &&
+        (event.reason === "conversation-not-found" || event.reason === "idempotency-conflict");
     case "original_task_admitted":
       return (
         hasExactKeys(event, [

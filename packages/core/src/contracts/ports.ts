@@ -100,7 +100,13 @@ export interface SessionStatePort {
   readAdvancementState(
     conversationId: string,
     ctx: AuthorityCallContext,
+    sessionId?: string,
   ): Promise<AdvancementSnapshot | null>;
+  readAdvancementSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string },
+    ctx: AuthorityCallContext): Promise<import("../advancement/submission.js").AdvancementSubmissionReceipt | null>;
+  listPendingAdvancementOriginalTasks(
+    conversationId: string, ctx: AuthorityCallContext, after?: string,
+  ): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }>;
   mutate(
     conversationId: string,
     mutation: SessionControlMutation | SessionStagedMutation,

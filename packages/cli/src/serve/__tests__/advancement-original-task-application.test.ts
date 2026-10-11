@@ -10,7 +10,6 @@ import {
 } from "@zhixing/core/advancement/application";
 import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
-  createAnchorAdvancementOriginalTaskExecutionPort,
 } from "../advancement-original-task-application.js";
 
 describe("Anchor Advancement original-task execution adapter", () => {
@@ -41,21 +40,21 @@ describe("Anchor Advancement original-task execution adapter", () => {
       prepareAgentTurnIdentity,
       admitAgentTurn,
     } as unknown as ConversationDirectoryApplication;
-    const adapter = createAnchorAdvancementOriginalTaskExecutionPort(application);
+    const adapter = createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(application);
     const originalUserTask = {
       parts: [{ type: "text" as const, text: "继续原任务" }],
     };
 
-    await expect(adapter.execute({
+    await expect(adapter.admit({
       conversationId: "conv-1",
-      originalTurnId: "turn-1",
+      admissionIntent: { turnId: "turn-1", surfacePrincipal: "surface-1", turnOrigin: { channel: "rpc", triggeredBy: "surface-1" }, inputDigest: `sha256:${"1".repeat(64)}` },
       originalUserTask,
       surface,
     })).resolves.toEqual({
       conversationId: "conv-1",
       turnId: "turn-1",
       runId: "run-1",
-      runStatus: "queued",
+      status: "replayed",
     });
     expect(prepareAgentTurnIdentity).toHaveBeenCalledOnce();
     expect(prepareAgentTurnIdentity).toHaveBeenCalledWith({
@@ -74,7 +73,7 @@ describe("Anchor Advancement original-task execution adapter", () => {
       conversationId: "conv-1",
       input: originalUserTask,
       turnIdentity: prepared,
-      turnOrigin: { channel: "rpc", triggeredBy: "connection-1" },
+      turnOrigin: { channel: "rpc", triggeredBy: "surface-1" },
     }));
     expect(surfaceExecute).toHaveBeenCalledWith({
       conversationId: "conv-1",
@@ -94,11 +93,11 @@ describe("Anchor Advancement original-task execution adapter", () => {
         throw new Error("conversation admission failed");
       },
     } as unknown as ConversationDirectoryApplication;
-    const adapter = createAnchorAdvancementOriginalTaskExecutionPort(application);
+    const adapter = createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(application);
 
-    await expect(adapter.execute({
+    await expect(adapter.admit({
       conversationId: "conv-1",
-      originalTurnId: "turn-1",
+      admissionIntent: { turnId: "turn-1", surfacePrincipal: "surface-1", turnOrigin: { channel: "rpc", triggeredBy: "surface-1" }, inputDigest: `sha256:${"1".repeat(64)}` },
       originalUserTask: {
         parts: [{ type: "text", text: "继续原任务" }],
       },

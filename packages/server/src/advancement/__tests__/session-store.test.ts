@@ -38,10 +38,22 @@ function createFakePort() {
   const folds = new Map<string, AdvancementFoldMap>();
   const writes: Array<{ conversationId: string; events: readonly AdvancementControlEvent[] }> = [];
   let failNextResponse = false;
+  const receipts = new Map<string, import("@zhixing/core/advancement").AdvancementSubmissionReceipt>();
   const port: SessionStatePort = {
-    async readAdvancementState(conversationId) {
+    async readAdvancementSubmission(conversationId, identity) {
+      return receipts.get(JSON.stringify([conversationId, identity.surfacePrincipal, identity.submissionId])) ?? null;
+    },
+    async readAdvancementState(conversationId, _ctx, sessionId) {
       const fold = folds.get(conversationId) ?? new Map();
-      return advancementHeadSession(freezeAdvancementSessions(fold));
+      const sessions = freezeAdvancementSessions(fold);
+      return sessionId === undefined ? advancementHeadSession(sessions) : sessions.find(session => session.id === sessionId) ?? null;
+    },
+    async listPendingAdvancementOriginalTasks(conversationId, _ctx, after) {
+      const sessions = freezeAdvancementSessions(folds.get(conversationId) ?? new Map());
+      const ids = sessions.filter(session => session.originalTaskAdmission?.status === "pending" &&
+        (session.status === "active" || (session.status === "cancelled" && session.originalTaskAdmission.mode === "direct")))
+        .map(session => session.id).filter(id => after === undefined || id > after).sort();
+      return { sessionIds: ids.slice(0, 50), ...(ids.length > 50 ? { next: ids[49]! } : {}) };
     },
     async mutate(
       conversationId: string,
@@ -55,6 +67,7 @@ function createFakePort() {
       assertAdvancementEventBatchLegal(fold, mutation.events);
       for (const event of mutation.events) {
         applyAdvancementEvent(fold, event);
+        if (event.type === "submission_settled") receipts.set(JSON.stringify([conversationId, event.receipt.identity.surfacePrincipal, event.receipt.identity.submissionId]), event.receipt);
       }
       folds.set(conversationId, fold);
       writes.push({ conversationId, events: mutation.events });
@@ -268,6 +281,7 @@ describe("SessionAdvancementStore", () => {
       NOW,
     );
     expect(active.originalTaskAdmission).toEqual({
+      mode: "advancement",
       status: "pending",
       intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
     });
@@ -278,7 +292,7 @@ describe("SessionAdvancementStore", () => {
       { turnId: "turn-1", inputDigest, runId: "run-1" },
     );
     expect(settled.originalTaskAdmission).toEqual({
-      status: "admitted",
+      status: "admitted", mode: "advancement",
       intent: expect.objectContaining({ inputDigest, turnId: "turn-1" }),
       runId: "run-1",
     });
