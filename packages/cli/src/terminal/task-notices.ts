@@ -5,9 +5,10 @@ import type { RpcSchedulerFacade } from '../runtime/rpc-scheduler-facade.js';
 import { PublishResultPresenter } from '../runtime/publish-result-presenter.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
 import { stripAnsi } from '../tui/ansi.js';
+import { renderAdvancementControlEventLines } from '../advancement-presentation.js';
 
 export interface TerminalTaskNotice {
-  readonly kind: 'schedule' | 'publish';
+  readonly kind: 'schedule' | 'publish' | 'advancement';
   readonly message: string;
   readonly conversationId?: string;
   readonly taskId?: string;
@@ -27,9 +28,10 @@ export interface TerminalTaskNoticesOptions {
   /** One finite gap notice per failed/overflowed connection generation. */
   readonly gap: (message: string) => void;
 }
-interface QueuedNotice { readonly notice: TerminalTaskNotice; readonly generation: number; readonly bytes: number; readonly signal: AbortSignal }
+interface QueuedNotice { readonly notice: TerminalTaskNotice; readonly generation: number; readonly bytes: number; readonly signal: AbortSignal; readonly identity?: string }
 const MAX_QUEUE = 32;
 const MAX_BYTES = 128 * 1024;
+const MAX_SEEN = 1024;
 
 /** Passive notification adaptation, never a scheduler, current-conversation
  * owner or renderer. All writes use one bounded queue and the caller's sink. */
@@ -38,6 +40,8 @@ export class TerminalTaskNotices {
   readonly #unsubscribeScheduler: () => void;
   #publishConversationId?: string;
   #queue: QueuedNotice[] = [];
+  readonly #seen = new Set<string>();
+  readonly #pending = new Map<string, number>();
   #bytes = 0;
   #generation = 0;
   #abort = new AbortController();
@@ -53,13 +57,18 @@ export class TerminalTaskNotices {
       link: { onNotification: (method, handler) => options.link.onNotification(method, value => {
         if (!this.#accepting()) return;
         if (!value || typeof value !== 'object' || !('scope' in value) || value.scope !== 'control' ||
-            !('event' in value) || value.event !== 'publish:result') return;
-        if (!this.#room()) { this.#gap(); return; }
+            !('event' in value) || typeof value.event !== 'string') return;
+        if (value.event !== 'publish:result' && !value.event.startsWith('advancement:')) return;
         const previous = this.#publishConversationId;
         try {
           boundedControlProjection(value, 256 * 1024);
           this.#publishConversationId = 'conversationId' in value && isProtocolIdentifier(value.conversationId) ? value.conversationId : undefined;
-          handler(value);
+          if (value.event === 'publish:result') handler(value);
+          else if (value.event.startsWith('advancement:') && this.#publishConversationId && options.watching(this.#publishConversationId)) {
+            const lines = renderAdvancementControlEventLines(value.event, 'payload' in value ? value.payload : undefined, 2048);
+            if (lines.length) this.#enqueue({ kind: 'advancement', conversationId: this.#publishConversationId,
+              message: lines.map(line => stripAnsi(line).trim()).join('\n') }, advancementIdentity(value));
+          }
         } catch { this.#gap(); }
         finally { this.#publishConversationId = previous; }
       }) },
@@ -83,7 +92,7 @@ export class TerminalTaskNotices {
     if (this.#disposed) return;
     const pending = this.#queue.length > 0 || !!this.#draining;
     this.#active = false; ++this.#generation; this.#abort.abort(); this.#abort = new AbortController();
-    this.#queue = []; this.#bytes = 0;
+    this.#queue = []; this.#bytes = 0; this.#pending.clear();
     if (pending && !this.options.signal.aborted) this.#gap();
   }
   /** Resume before authority recovery can emit the new generation's notices. */
@@ -94,15 +103,16 @@ export class TerminalTaskNotices {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true; this.#active = false; ++this.#generation; this.#abort.abort();
-    this.#queue = []; this.#bytes = 0; this.#publish.dispose(); this.#unsubscribeScheduler();
+    this.#queue = []; this.#bytes = 0; this.#pending.clear(); this.#seen.clear(); this.#publish.dispose(); this.#unsubscribeScheduler();
   }
   /** Useful to the existing close/display owner; never starts another producer. */
   drain(): Promise<void> { return this.#draining ?? Promise.resolve(); }
 
   #accepting(): boolean { return this.#active && !this.#disposed && !this.#failed && !this.options.signal.aborted; }
   #room(): boolean { return this.#queue.length < MAX_QUEUE && this.#bytes + 8192 <= MAX_BYTES; }
-  #enqueue(notice: TerminalTaskNotice): void {
+  #enqueue(notice: TerminalTaskNotice, identity?: string): void {
     if (!this.#accepting()) return;
+    if (identity && (this.#seen.has(identity) || this.#pending.has(identity))) return;
     if (!this.#room()) { this.#gap(); return; }
     const message = plain(notice.message), limited = { ...notice, message: message.slice(0, 2048) + (message.length > 2048 ? '…（详细状态请重新查看）' : '') };
     // Non-message identity fields also share the finite slot, never a hidden
@@ -110,7 +120,8 @@ export class TerminalTaskNotices {
     boundedControlProjection(limited, 8192);
     const bytes = Buffer.byteLength(JSON.stringify(limited));
     this.#queue.push({ notice: limited, generation: this.#generation, bytes,
-      signal: AbortSignal.any([this.options.signal, this.#abort.signal]) });
+      signal: AbortSignal.any([this.options.signal, this.#abort.signal]), identity });
+    if (identity) this.#pending.set(identity, this.#generation);
     this.#bytes += bytes;
     this.#startDrain();
   }
@@ -127,20 +138,42 @@ export class TerminalTaskNotices {
       const item = this.#queue.shift()!; this.#bytes -= item.bytes;
       const isCurrent = () => this.#accepting() && item.generation === this.#generation && !item.signal.aborted &&
         (!item.notice.conversationId || this.options.watching(item.notice.conversationId));
-      if (!isCurrent()) continue;
-      try { await this.options.emit(item.notice, { signal: item.signal, isCurrent }); }
+      try {
+        if (!isCurrent()) continue;
+        await this.options.emit(item.notice, { signal: item.signal, isCurrent });
+        if (item.identity && isCurrent()) {
+          this.#seen.add(item.identity);
+          if (this.#seen.size > MAX_SEEN) this.#seen.delete(this.#seen.values().next().value!);
+        }
+      }
       catch {
         if (!isCurrent()) continue;
-        this.#failed = true; this.#queue = []; this.#bytes = 0; this.#gap();
+        this.#failed = true; this.#queue = []; this.#bytes = 0; this.#pending.clear(); this.#gap();
+      } finally {
+        if (item.identity && this.#pending.get(item.identity) === item.generation) this.#pending.delete(item.identity);
       }
     }
   }
   #gap(): void {
     if (this.#disposed || this.options.signal.aborted || this.#gapReported) return;
     this.#gapReported = true;
-    this.options.gap('任务或发布通知的显示可能不完整；请查看 /tasks 和当前会话状态核对。不会自动重发任务或修改。');
+    this.options.gap('任务或发布通知的显示可能不完整；请查看 /tasks、/advancement 和当前会话状态核对。不会自动重发任务或修改。');
   }
 }
+
+/** Live review and recovery may project the same durable result. Dedupe only
+ * those results with a real review identity, never text or the reused seq=0
+ * of review_deferred/run_reviewed. Retention belongs to this bounded sink. */
+function advancementIdentity(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.payload)) return;
+  const { event, conversationId, runId, payload } = value;
+  if (!['advancement:run_reviewed', 'advancement:completed', 'advancement:exited', 'advancement:proxy_enqueued'].includes(String(event))) return;
+  const reviewId = event === 'advancement:run_reviewed' && isRecord(payload.review) ? payload.review.id : payload.reviewId;
+  const parts = [conversationId, payload.advancementSessionId, runId, event, reviewId];
+  if (parts.every(isProtocolIdentifier)) return JSON.stringify(parts);
+  return;
+}
+function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 
 function schedulerMessage(event: SchedulerFacadeEvent): string | undefined {
   // started/completed lack a run/sequence identity in the existing contract.

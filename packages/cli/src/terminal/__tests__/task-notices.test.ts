@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SESSION_NOTIFICATIONS } from '@zhixing/rpc/session-wire';
+import { AdvancementReviewResultProjectionApplicationService } from '@zhixing/core/advancement/application';
+import { buildClosureFacts, type AdvancementSession, type AdvancementRunReview } from '@zhixing/core/advancement';
 import { RpcSchedulerFacade } from '../../runtime/rpc-scheduler-facade.js';
 import { makeFakeHostLink } from '../../runtime/__tests__/fake-host-link.js';
 import { TerminalTaskNotices, type TerminalTaskNotice, type TerminalTaskNoticeDelivery, type TerminalTaskNoticesOptions } from '../task-notices.js';
@@ -28,6 +30,59 @@ function fixture() {
 }
 
 describe('terminal task notification adaptation', () => {
+  function advancement(f: ReturnType<typeof fixture>, reviewId = 'review-1') {
+    const review: AdvancementRunReview = {id:reviewId,runIndex:0,reviewedAt:'2026-01-01T00:02:00.000Z',decision:'passed',evidence:[],attribution:{criteria:[]},unmetCriteria:[]};
+    const session: AdvancementSession = {id:'adv-1',conversationId:'conv-1',status:'completed',originalUserTask:{parts:[{type:'text',text:'完成任务'}]},
+      createdAt:'2026-01-01T00:00:00.000Z',updatedAt:'2026-01-01T00:04:00.000Z',rubricDraftVersion:1,runs:[review],proxyMessages:[]};
+    const application = new AdvancementReviewResultProjectionApplicationService({events:{emit:event => f.fake.notify(SESSION_NOTIFICATIONS.event,{...event,scope:'control',meta:{}})}});
+    return () => application.projectReviewResult({conversationId:'conv-1',runId:'run-1',result:{kind:'completed',session,review,
+      exit:{reason:'passed',message:'完成',occurredAt:session.updatedAt},closure:{summary:'已完成',synthesized:false,facts:buildClosureFacts(session)}}});
+  }
+  it('renders the real live/recovery projection once per review identity, not once per matching text', async () => {
+    const f=fixture(), project=advancement(f);
+    await project(); await project(); await f.notices.drain();
+    expect(f.emitted).toHaveLength(2); // reviewed + completed
+    f.notices.invalidate(); f.notices.resume(); await project(); await f.notices.drain();
+    expect(f.emitted).toHaveLength(2);
+    await advancement(f,'review-2')(); await f.notices.drain();
+    expect(f.emitted).toHaveLength(4);
+    expect(f.emitted[0]!.message).toEqual(f.emitted[2]!.message);
+  });
+  it('allows a replay whose old generation never committed its display', async () => {
+    const f=fixture(), gate=deferred<void>(), project=advancement(f);
+    f.emit.mockImplementationOnce(async (notice,delivery)=>{await gate.promise;if(delivery.isCurrent())f.emitted.push(notice);});
+    await project(); await vi.waitFor(()=>expect(f.emit).toHaveBeenCalledOnce());
+    f.notices.invalidate();f.notices.resume();await project();gate.resolve();await f.notices.drain();
+    expect(f.emitted).toHaveLength(2);
+    await project();await f.notices.drain();expect(f.emitted).toHaveLength(2);
+  });
+  it('preserves deferred attempts and a later reviewed result that reuse seq zero', async () => {
+    const f=fixture();
+    const deferredEvent={conversationId:'conv-1',runId:'run-1',seq:0,scope:'control',event:'advancement:review_deferred',payload:{advancementSessionId:'adv-1',cause:'infrastructure'}};
+    f.fake.notify(SESSION_NOTIFICATIONS.event,deferredEvent);
+    f.fake.notify(SESSION_NOTIFICATIONS.event,deferredEvent);
+    await advancement(f)(); await f.notices.drain();
+    expect(f.emitted).toHaveLength(4);
+    expect(f.emitted[0]!.message).toContain('暂缓');
+    expect(f.emitted[2]!.message).toContain('已通过');
+  });
+  it('呈现推进暂缓/完成通知并隔离非当前对话和旧连接代际', async () => {
+    const f = fixture();
+    const notice = (conversationId: string, event: string) => ({ conversationId, scope: 'control', event, payload: {}, meta: {} });
+    f.fake.notify(SESSION_NOTIFICATIONS.event, notice('conv-1', 'advancement:review_deferred'));
+    await f.notices.drain();
+    expect(f.emitted).toHaveLength(1);
+    expect(f.emitted[0]).toMatchObject({ kind: 'advancement', conversationId: 'conv-1' });
+    expect(f.emitted[0]!.message).toContain('验收暂缓');
+    f.fake.notify(SESSION_NOTIFICATIONS.event, notice('other', 'advancement:completed'));
+    f.fake.notify(SESSION_NOTIFICATIONS.event, notice('conv-1', 'advancement:completed'));
+    f.notices.invalidate(); await f.notices.drain();
+    expect(f.emitted).toHaveLength(1);
+    f.notices.resume();
+    f.fake.notify(SESSION_NOTIFICATIONS.event, notice('conv-1', 'advancement:completed'));
+    await f.notices.drain();
+    expect(f.emitted[1]!.message).toContain('任务推进完成');
+  });
   it('subscribes once through the real scheduler facade without connecting or querying', async () => {
     const f = fixture();
     for (const method of ['schedule.accepted', 'schedule.started', 'schedule.completed', 'schedule.disabled', SESSION_NOTIFICATIONS.event]) expect(f.fake.handlerCount(method)).toBe(1);
@@ -90,6 +145,15 @@ describe('terminal task notification adaptation', () => {
     for (let index = 0; index < 100; index++) f.complete(`通知 ${index}`);
     await f.notices.drain(); expect(f.emitted).toHaveLength(32); expect(f.gap).toHaveBeenCalledOnce(); expect(f.fake.requests).toEqual([]);
     expect(f.gap.mock.calls[0]![0]).toContain('不会自动重发');
+  });
+  it('does not report a lost notice for unrelated control traffic when the queue is full', async () => {
+    const f = fixture();
+    for (let index = 0; index < 32; index++) f.complete(`通知 ${index}`);
+    f.fake.notify(SESSION_NOTIFICATIONS.event, publication('other'));
+    f.fake.notify(SESSION_NOTIFICATIONS.event, { conversationId: 'other', scope: 'control', event: 'advancement:completed', payload: {} });
+    f.fake.notify(SESSION_NOTIFICATIONS.event, { conversationId: 'conv-1', scope: 'control', event: 'unknown:event', payload: {} });
+    await f.notices.drain();
+    expect(f.emitted).toHaveLength(32); expect(f.gap).not.toHaveBeenCalled();
   });
   it('halts a failed sink with an explicit gap and resumes only future notifications', async () => {
     const f = fixture(); f.emit.mockRejectedValueOnce(Error('display full'));

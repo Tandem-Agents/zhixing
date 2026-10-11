@@ -25,7 +25,7 @@ interface Tool { readonly name: string; readonly input: Record<string, unknown>;
  * tables and short tails. No domain task state, transcript or artifact store. */
 export class TerminalProcessProjection {
   #scope?: ProcessScope; #closed = false; #confirmed = false; #paused = false; #revision = 0; #block = 0;
-  #phase = ''; #notice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
+  #phase = ''; #notice?: string; #activityNotice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
   #thinkingId?: string; #thinkingOffset = 0;
   readonly #seq = new Map<string, number>();
   readonly #tools = new Map<string, Tool>(); readonly #children = new Map<string, Child>();
@@ -41,7 +41,7 @@ export class TerminalProcessProjection {
     this.#thinkingId = undefined; this.#thinkingOffset = 0;
     this.#startedAt = performance.now(); this.#durationMs = undefined;
     this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
-    this.#phase = '正在准备'; this.#notice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
+    this.#phase = '正在准备'; this.#notice = undefined; this.#activityNotice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
     this.#seq.clear(); this.#tools.clear(); this.#children.clear(); this.#endedParents.clear(); this.#sealedChildren.clear(); this.#summarizedChildren.clear(); this.#batch = []; this.#usage = {}; this.#publish();
   }
   #matches(source: Pick<SessionProcessSource, 'conversationId' | 'turnId' | 'runId'>, generation: number): boolean {
@@ -236,8 +236,8 @@ export class TerminalProcessProjection {
         this.#emit('process', `${main ? '' : '子任务 · '}已在 ${scope} 记住 ${p.contributors.length} 次同类操作，自动建立放行规则：${processText(p.pattern.argument, 1024)}（进 /trust 可查看/撤销）`);
         break;
       }
-      case 'retry:attempt': if (main) this.#notice = `请求重试 ${event.payload.attempt}/${event.payload.maxRetries} · ${event.payload.errorType}`; break;
-      case 'retry:success': if (main) this.#notice = undefined; break;
+      case 'retry:attempt': if (main) this.#activityNotice = `请求重试 ${event.payload.attempt}/${event.payload.maxRetries} · ${event.payload.errorType}`; break;
+      case 'retry:success': if (main) this.#activityNotice = undefined; break;
       case 'retry:exhausted': if (main) this.#notice = `重试未成功：${processText(event.payload.lastError, 768)}`; break;
       case 'segment:transition_start': if (main) this.#phase = '正在整理上下文'; break;
       case 'segment:new_started': if (main) this.#notice = '上下文已整理'; break;
@@ -245,9 +245,9 @@ export class TerminalProcessProjection {
       case 'segment:emergency_floor': if (main) this.#notice = `上下文已紧急截断 ${event.payload.droppedTurns} 轮：${processText(event.payload.error, 512)}`; break;
       case 'interrupt:warn': if (main) {
         const remaining = Math.max(0, Math.ceil((event.payload.timeoutMs - event.payload.elapsedMs) / 1000));
-        this.#notice = `模型流暂未响应；若仍无响应，约 ${remaining} 秒后自动取消`;
+        this.#activityNotice = `模型流暂未响应；若仍无响应，约 ${remaining} 秒后自动取消`;
       } break;
-      case 'interrupt:fired': if (main) this.#notice = '正在停止'; break;
+      case 'interrupt:fired': if (main) this.#activityNotice = '正在停止'; break;
       case 'lifecycle:hook_failed': if (main) this.#notice = `运行钩子未完成：${processText(event.payload.error, 768)}`; break;
       case 'lifecycle:warning': if (main) this.#notice = processText(event.payload.message, 1024); break;
       // agent:run_end may be a nested child; explicit parent closure owns end().
@@ -304,10 +304,15 @@ export class TerminalProcessProjection {
     } catch { if (!this.#paused) this.pause('过程显示暂不可用'); }
   }
   snapshot(): TerminalProcessView {
-    return { revision: ++this.#revision, phase: this.#confirmed ? '本轮已结束' : this.#phase, activity: this.#confirmed ? 'complete' : this.#closed || this.#paused ? 'reconciling' : 'running', ...(this.#durationMs === undefined ? {} : { durationMs: this.#durationMs }),
+    const phase = this.#confirmed ? '本轮已结束' : this.#phase;
+    // Observer closure and business completion can arrive in either order.
+    // Derive presentation without repeatedly decorating the stored diagnostic.
+    const notice = this.#notice ? processText(`${this.#closed || this.#confirmed ? phase + '；' : ''}${this.#notice}`, 1024)
+      : !this.#confirmed ? this.#activityNotice : undefined;
+    return { revision: ++this.#revision, phase, activity: this.#confirmed ? 'complete' : this.#closed || this.#paused ? 'reconciling' : 'running', ...(this.#durationMs === undefined ? {} : { durationMs: this.#durationMs }),
       ...(this.#thinking ? { thinking: { text: this.#thinking, active: !this.#confirmed && this.#thinkingActive } } : {}),
       tools: this.#batch.slice(-3).map(e => processText(processToolSummary(e), 1024)), children: [...this.#children.values()].map(({ lineage: _lineage, toolUses: _toolUses, ...child }) => child),
-      usage: { ...this.#usage }, ...(this.#notice ? { notice: this.#notice } : {}) };
+      usage: { ...this.#usage }, ...(notice ? { notice } : {}) };
   }
   pause(reason = '过程展示已暂停'): void {
     if (this.#paused || this.#closed) return;
@@ -328,7 +333,6 @@ export class TerminalProcessProjection {
     }
     this.#phase = this.#confirmed ? '本轮已结束' : '正在核对运行结果';
     this.#durationMs ??= Math.max(0, performance.now() - this.#startedAt);
-    if (this.#notice) this.#notice = processText(`${this.#phase}；${this.#notice}`, 1024);
     this.#publish();
   }
   /** Re-enable only this live scope; the Server profile watermark excludes old artifacts. */

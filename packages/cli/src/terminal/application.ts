@@ -1631,7 +1631,7 @@ class TerminalApplication {
             (!notice.conversationId || this.#controller?.isWatching(notice.conversationId) === true || this.#startupWatch === notice.conversationId);
           if (!current()) return;
           await this.#display.append({ blockId: `notice:${randomUUID()}`, role: 'notice',
-            text: `${notice.kind === 'schedule' ? '定时任务' : '发布结果'} · ${notice.message}`, contentOffset: 0, final: true }, false, current);
+            text: `${notice.kind === 'schedule' ? '定时任务' : notice.kind === 'advancement' ? '任务推进' : '发布结果'} · ${notice.message}`, contentOffset: 0, final: true }, false, current);
           if (current()) await this.#displayPage();
         },
         gap: noticeGap => { this.#taskStatus = { ...this.#taskStatus, noticeGap }; this.#sendTaskStatus(); },

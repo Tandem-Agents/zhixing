@@ -17,11 +17,33 @@ const child = { parentToolCallId: 'task', childLineage: 'main/sub-child', childA
 const request = (inputTokens: number, extra = {}) => ({ event: 'llm:request_end' as const,
   payload: { model: 'model', duration: 1, usage: { inputTokens, outputTokens: 2, ...extra }, stopReason: 'end_turn' as const } });
 describe('terminal process fold', () => {
+  it.each([true, false])('retires stopping only after business completion, regardless of stream close order (%s)', confirmedFirst => {
+    const s = setup('assignment');
+    const source = { conversationId: 'c', runId: 'r', assignmentId: 'a', streamEpoch: 1, sourceSeq: 1, lineage: 'main' };
+    s.p.accept({ version: 1, source, payload: { kind: 'event', event: {
+      event: 'interrupt:fired', payload: { reason: null, interruptedTurnIndex: 0, exitDelayMs: 100, toolGraceMs: 0 },
+    } } }, 1);
+    expect(s.p.snapshot().notice).toBe('正在停止');
+    s.p.end(1, confirmedFirst);
+    expect(s.p.snapshot().notice).toBe(confirmedFirst ? undefined : '正在停止');
+    s.p.end(1, !confirmedFirst);
+    expect(s.p.snapshot()).toMatchObject({ activity: 'complete', phase: '本轮已结束' });
+    expect(s.p.snapshot().notice).toBeUndefined();
+  });
+  it('keeps real diagnostics once through both closure signals and repeated snapshots', () => {
+    const s = setup('assignment'); s.p.pause('正文存在缺口');
+    s.p.end(1); s.p.end(1, true);
+    expect(s.p.snapshot().notice).toBe('本轮已结束；正文存在缺口');
+    s.p.end(1); s.p.end(1, true);
+    expect(s.p.snapshot().notice).toBe('本轮已结束；正文存在缺口');
+  });
   it('explains watchdog auto-cancellation without inventing a keyboard action', () => {
     const s = setup();
     s.event({ event: 'interrupt:warn', payload: { kind: 'idle-timeout-warn', elapsedMs: 8001, timeoutMs: 10000, chunksReceived: 0 } });
     expect(s.p.snapshot().notice).toBe('模型流暂未响应；若仍无响应，约 2 秒后自动取消');
     expect(s.p.snapshot().notice).not.toContain('再次取消');
+    s.p.end(1, true);
+    expect(s.p.snapshot().notice).toBeUndefined();
   });
   it('publishes changed activity and real termination without resending it for every text delta', () => {
     const s = setup(); s.changed.mockClear();
