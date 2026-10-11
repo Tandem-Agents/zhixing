@@ -3797,6 +3797,105 @@ describe("ConversationProtocolRuntime", () => {
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("recovers first lookup pressure before admitting the exact same input", async () => {
+    const home = await createTempDir("conversation-protocol-admission-lookup-pressure");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    const resources = await import("@zhixing/core/resources");
+    const apply = vi.spyOn(authority.controlAdmission, "lookup").mockImplementationOnce(async () => {
+      expect(resources.isHoldingMaintenanceExclusion()).toBe(false);
+      throw new resources.StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:1});
+    });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    manager = new ConversationManager(
+      { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
+      undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
+    );
+    try {
+      await registerActiveConversation(
+        authority,
+        "conversation-admission-lookup-pressure",
+        new Date().toISOString(),
+      );
+      const admission = await protocol.admit({
+        conversationId: "conversation-admission-lookup-pressure",
+        input: "recover the response",
+        invocation: { kind: "agent", source: "interactive" },
+        options: {
+          source: "interactive",
+          turnContext: { turnId: "rpc:admission-lookup-pressure" },
+        },
+        surfacePrincipal: "rpc:owner",
+      });
+      expect(admission.shouldSchedule).toBe(true);
+      expect(admission.runId).toMatch(/^run:/u);
+      const admitted = (await authority.authorityLog.readAll())
+        .flatMap((commit) => commit.entries)
+        .map((entry) => entry.body as { t?: string; runId?: string })
+        .filter((record) => record.t === "admitted");
+      expect(admitted).toEqual([
+        expect.objectContaining({ runId: admission.runId }),
+      ]);
+    } finally {
+      apply.mockRestore();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("recovers control pressure while establishing the input session identity", async () => {
+    const home = await createTempDir("conversation-protocol-admission-identity-pressure");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    const resources = await import("@zhixing/core/resources");
+    const apply = vi.spyOn(authority.controlAdmission, "apply").mockImplementationOnce(async () => {
+      expect(resources.isHoldingMaintenanceExclusion()).toBe(false);
+      throw new resources.StorageMaintenanceAdmissionError({kind:"backpressured",blockedBy:"probe-unavailable",retryAfterMs:1});
+    });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({
+      authority,
+      manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    manager = new ConversationManager(
+      { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
+      undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
+    );
+    try {
+      const admission = await protocol.admit({
+        conversationId: "conversation-admission-identity-pressure",
+        input: "recover the response",
+        invocation: { kind: "agent", source: "interactive" },
+        options: {
+          source: "interactive",
+          turnContext: { turnId: "rpc:admission-identity-pressure" },
+        },
+        surfacePrincipal: "rpc:owner",
+      });
+      expect(admission.shouldSchedule).toBe(true);
+      expect(admission.runId).toMatch(/^run:/u);
+      const admitted = (await authority.authorityLog.readAll())
+        .flatMap((commit) => commit.entries)
+        .map((entry) => entry.body as { t?: string; runId?: string })
+        .filter((record) => record.t === "admitted");
+      expect(admitted).toEqual([
+        expect.objectContaining({ runId: admission.runId }),
+      ]);
+    } finally {
+      apply.mockRestore();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("recovers a queued perspective with its durable question and execution kind", async () => {
     const home = await createTempDir("conversation-protocol-perspective-recovery");
     const secretStore = new MemorySecretStore();

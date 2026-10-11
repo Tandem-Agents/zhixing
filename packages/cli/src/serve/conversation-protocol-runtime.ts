@@ -1,3 +1,5 @@
+import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
+import { retryControlAdmission } from "./conversation-admission-retry.js";
 import { randomUUID } from "node:crypto";
 import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
@@ -766,7 +768,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!key) {
       throw new Error("Durable conversation admission requires a stable turn id");
     }
-    await this.ensureSession(input.conversationId);
     const admission = await this.#applyInputAdmission(input);
     // New user input also invalidates unconsumed continuations from older runs.
     this.#markRecovery(input.conversationId);
@@ -1777,40 +1778,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const at = this.#clock();
     const ingress = ingressForTurn(input, this.#authority.deviceId, at);
     const requestId = inputControlRequestId(ingress);
-    const durablePending = allowPendingReplay
-      ? (await this.#journal(input.conversationId).pendingInputs()).find(
-          (candidate) =>
-            candidate.ingress.ingressId === ingress.ingressId &&
-            candidate.ingress.surfacePrincipal === ingress.surfacePrincipal,
-        )
-      : undefined;
-    if (durablePending) {
-      if (
-        canonicalize(durablePending.input) !==
-          canonicalize(normalizeUserTurnInput(input.input)) ||
-        canonicalize(durablePending.attachments) !==
-          canonicalize(input.attachments ?? []) ||
-        canonicalize(durablePending.invocation) !== canonicalize(input.invocation)
-        ||
-        canonicalize(durablePending.environment ?? null) !==
-          canonicalize(input.environment ?? null)
-      ) {
-        throw new DurableConversationAdmissionRejectedError(
-          "idempotency-conflict",
-          "Conversation ingress is already bound to another invocation",
-        );
-      }
-      await this.#markAttachmentsAdopted(durablePending.attachments);
-      return {
-        runId: durablePending.runId,
-        ingress: durablePending.ingress,
-        attachments: durablePending.attachments,
-        ...(durablePending.environment
-          ? { environment: structuredClone(durablePending.environment) }
-          : {}),
-        replayed: true,
-      };
-    }
     const source = {
       principal: {
         surfacePrincipal: ingress.surfacePrincipal,
@@ -1846,6 +1813,52 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       source,
       runId: `run:${randomUUID()}`,
     } as const;
+    const recover = async () => {
+      const snapshot = await this.#authority.authorityLog.readSnapshot();
+      await this.#authority.controlAdmission.primeRecoverySnapshot(snapshot);
+      const imported = this.#adoptedConversations.get(input.conversationId);
+      const local = partitionConversationSnapshots(snapshot).get(input.conversationId) ?? emptyConversationSnapshot(snapshot);
+      await journal.primeRecoverySnapshot(imported ? await this.#snapshotWithImportedBase(imported.records, local) : local);
+    };
+    return retryControlAdmission(async () => {
+      if (!journal.hasRecoveredInputProjection || !this.#authority.controlAdmission.hasRecoveredProjection) await recover();
+      if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+      await this.ensureSession(input.conversationId);
+      if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+    const durablePending = allowPendingReplay
+      ? (await this.#journal(input.conversationId).pendingInputs()).find(
+          (candidate) =>
+            candidate.ingress.ingressId === ingress.ingressId &&
+            candidate.ingress.surfacePrincipal === ingress.surfacePrincipal,
+        )
+      : undefined;
+    if (durablePending) {
+      if (
+        canonicalize(durablePending.input) !==
+          canonicalize(normalizeUserTurnInput(input.input)) ||
+        canonicalize(durablePending.attachments) !==
+          canonicalize(input.attachments ?? []) ||
+        canonicalize(durablePending.invocation) !== canonicalize(input.invocation)
+        ||
+        canonicalize(durablePending.environment ?? null) !==
+          canonicalize(input.environment ?? null)
+      ) {
+        throw new DurableConversationAdmissionRejectedError(
+          "idempotency-conflict",
+          "Conversation ingress is already bound to another invocation",
+        );
+      }
+      await this.#markAttachmentsAdopted(durablePending.attachments);
+      return {
+        runId: durablePending.runId,
+        ingress: durablePending.ingress,
+        attachments: durablePending.attachments,
+        ...(durablePending.environment
+          ? { environment: structuredClone(durablePending.environment) }
+          : {}),
+        replayed: true,
+      };
+    }
     const admissionState = await this.#authority.controlAdmission.lookup({
       envelope,
       source,
@@ -1906,9 +1919,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       // exact envelope recovers the stable runId instead of reporting an ordinary
       // admission failure for work already owned by the durable scheduler.
       this.#markRecovery(input.conversationId);
+      if (maintenanceRetryDelayMs(firstError) !== undefined) throw firstError;
       try {
         admission = await journal.applyInputControl(control);
       } catch (replayError) {
+        if (maintenanceRetryDelayMs(replayError) !== undefined) throw replayError;
         if (
           firstError instanceof DurableConversationAdmissionRejectedError &&
           replayError instanceof DurableConversationAdmissionRejectedError
@@ -1964,6 +1979,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ...(durableEnvironment ? { environment: durableEnvironment } : {}),
       replayed: admission.kind === "replayed",
     };
+    }, recover, input.options?.abortSignal);
   }
 
   async #markAttachmentsAdopted(
@@ -2061,9 +2077,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     try {
       outcome = await apply();
     } catch (firstError) {
+      if (maintenanceRetryDelayMs(firstError) !== undefined) throw firstError;
       try {
         outcome = await apply();
       } catch (replayError) {
+        if (maintenanceRetryDelayMs(replayError) !== undefined) throw replayError;
         throw new AggregateError(
           [firstError, replayError],
           "Conversation creation could not determine its durable disposition",
