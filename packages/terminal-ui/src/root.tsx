@@ -678,6 +678,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
           consume();
           if (size().height < 18 || size().width < 40) { candidates?.resetDelete(); setStatus('请放大窗口后管理；Esc 返回。'); return; }
           if (operation === 'delete' && !candidates?.confirmDelete(view().generation)) { setStatus('再次按 Ctrl+D 删除当前候选；其他按键取消准备。'); return; }
+          setStatus('');
           void candidates?.manage(operation).catch(reportStatus());
           return;
         }

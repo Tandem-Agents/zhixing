@@ -111,6 +111,8 @@ describe("LocalWorkspaceManagementHost", () => {
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
       list: async () => [],
+      viewByReference: vi.fn(async () => null),
+
       viewByName: vi.fn(),
       create,
       authorizeForControl: async () => ({
@@ -164,6 +166,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create,
         authorizeForControl: async () => ({
@@ -237,6 +241,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(async () => authorization),
@@ -361,6 +367,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(async () => { throw viewFailure; }),
         create: vi.fn(),
         authorizeForControl: vi.fn(async () => ({
@@ -477,6 +485,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(async () => ({
@@ -527,6 +537,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async () => {
           throw new WorkspaceAdministrationBusinessError(
@@ -581,6 +593,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
           name: displayName,
@@ -626,6 +640,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
           name: displayName,
@@ -690,6 +706,8 @@ describe("LocalWorkspaceManagementHost", () => {
           impact: string;
         }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(),
@@ -764,6 +782,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create,
         authorizeForControl: vi.fn(),
@@ -832,6 +852,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create,
         authorizeForControl: vi.fn(),
@@ -904,6 +926,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async () => { throw error; },
         authorizeForControl: vi.fn(),
@@ -947,6 +971,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async () => {
           throw new WorkspaceBindingCatalogConflictError("request generation changed");
@@ -995,6 +1021,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async (_input, execution) => {
           executionStarted();
@@ -1041,6 +1069,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
           name: displayName,
@@ -1080,6 +1110,8 @@ describe("LocalWorkspaceManagementHost", () => {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
+        viewByReference: vi.fn(async () => null),
+
         viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(),

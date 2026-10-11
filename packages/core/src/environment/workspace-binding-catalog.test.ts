@@ -22,6 +22,9 @@ import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   StorageMaintenanceTaskRunner,
+  StorageMaintenanceAdmissionError,
+  isHoldingMaintenanceExclusion,
+  runHoldingMaintenanceExclusion,
 } from "../resources/index.js";
 import {
   WorkspaceBindingCatalog,
@@ -279,6 +282,7 @@ async function createFixture(
   initialLog?: AuthorityCommitLog,
   existingRoot?: string,
   rootPersistence = new MemoryWorkspaceBindingCatalogPersistence(),
+  beforePublication?: () => Promise<void>,
 ) {
   const root =
     existingRoot ?? (await createTempDir("zhixing-workspace-catalog"));
@@ -338,6 +342,7 @@ async function createFixture(
       verifier: identity,
       capacity,
       capabilitySnapshot: async (publication) => {
+        await beforePublication?.();
         published.push(
           publication.workspaces.map((workspace) => ({ ...workspace })),
         );
@@ -515,3 +520,36 @@ function inventory(): ExecutorVersionInventory {
     signature: identity.sign("ExecutorVersionInventory", 1, {}),
   };
 }
+
+it('recovers startup publication pressure after unwinding catalog ownership', async () => {
+  let calls = 0;
+  const failure = new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 1 });
+  const fixture = await createFixture(undefined, undefined, undefined, async () => {
+    expect(isHoldingMaintenanceExclusion()).toBe(true);
+    if (++calls === 1) throw failure;
+  });
+  await fixture.catalog.initialize();
+  expect(calls).toBe(2);
+  expect(fixture.published).toHaveLength(1);
+  expect(await fixture.catalog.status()).toMatchObject({ state: 'healthy' });
+});
+
+it('does not retry capability publication under another owner or for non-transient failures', async () => {
+  let failure: Error | undefined;
+  let calls = 0;
+  const fixture = await createFixture(undefined, undefined, undefined, async () => {
+    calls++;
+    if (failure) throw failure;
+  });
+  await fixture.catalog.initialize();
+  calls = 0;
+  failure = new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 1 });
+  await expect(runHoldingMaintenanceExclusion(() => fixture.catalog.capabilitySnapshot())).rejects.toBe(failure);
+  expect(calls).toBe(1);
+  calls = 0; failure = new Error('publication integrity failure');
+  await expect(fixture.catalog.capabilitySnapshot()).rejects.toBe(failure);
+  expect(calls).toBe(1);
+  calls = 0; failure = new StorageMaintenanceAdmissionError({ kind: 'cancelled' });
+  await expect(fixture.catalog.capabilitySnapshot()).rejects.toBe(failure);
+  expect(calls).toBe(1);
+});

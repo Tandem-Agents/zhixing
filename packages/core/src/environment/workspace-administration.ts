@@ -220,6 +220,7 @@ export interface WorkspaceAdministrationDurableLifecycleApplication {
   catalogStatus(): Promise<WorkspaceAdministrationCatalogStatus>;
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  viewByReference(reference: WorkspaceControlAuthorization): Promise<WorkspaceAdministrationView | null>;
   assertDeliveryMechanismReady(): void;
   pending(afterSeq: number): Promise<WorkspaceAdministrationPendingDeliveryPage>;
   acknowledge(
@@ -286,6 +287,7 @@ export type WorkspaceAdministrationDurableLifecycleDelegate = Pick<
   | "status"
   | "list"
   | "viewByName"
+  | "viewByReference"
   | "previewReset"
   | "executeDurableOperation"
 >;
@@ -314,6 +316,7 @@ export interface WorkspaceAdministrationApplication {
   status(): Promise<WorkspaceAdministrationCatalogStatus>;
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  viewByReference(reference: WorkspaceControlAuthorization): Promise<WorkspaceAdministrationView | null>;
   previewReset(input: {
     readonly expectedCatalogGeneration: string;
     readonly impact: string;
@@ -415,6 +418,15 @@ export class WorkspaceAdministrationApplicationService
     return this.#execute("workspace-view", undefined, async (control) =>
       toView(await this.#bindingByName(displayName, control)),
     );
+  }
+
+  async viewByReference(reference: WorkspaceControlAuthorization): Promise<WorkspaceAdministrationView | null> {
+    const identity = validateWorkspaceControlAuthorization(reference);
+    if (identity.deviceId !== this.#deviceId) return null;
+    return this.#execute("workspace-view-reference", undefined, async control => {
+      const binding = (await this.#admin.list(control)).find(item => item.bindingRef === identity.bindingRef);
+      return binding ? toView(binding) : null;
+    });
   }
 
   async previewReset(input: {
@@ -1038,6 +1050,10 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
 
   viewByName(displayName: string): Promise<WorkspaceAdministrationView> {
     return this.#application.viewByName(displayName);
+  }
+
+  viewByReference(reference: WorkspaceControlAuthorization): Promise<WorkspaceAdministrationView | null> {
+    return this.#application.viewByReference(reference);
   }
 
   assertDeliveryMechanismReady(): void {

@@ -35,9 +35,9 @@ export class TerminalCandidatesOwner {
     const result = { command: query.command, ...(typeof value === 'string' ? { value } : {}) };
     query.abort.abort(); return result;
   }
-  constructor(readonly runtime: () => RuntimeContext) {
+  constructor(readonly runtime: () => RuntimeContext, fileRoot: () => string | null = () => runtime().cwd) {
     for (const definition of Object.values(BUILTIN_COMMANDS)) if (available.has(definition.name)) this.registry.register(definition);
-    this.#providers = [new CommandProvider({ registry: this.registry }), new ArgumentProvider({ registry: this.registry }), new FileProvider({ root: () => runtime().cwd, maxResults: 100, maxResultBytes: 96 * 1024 })]
+    this.#providers = [new CommandProvider({ registry: this.registry }), new ArgumentProvider({ registry: this.registry }), new FileProvider({ root: fileRoot, maxResults: 100, maxResultBytes: 96 * 1024 })]
       .sort((left, right) => left.priority - right.priority);
   }
   async query(revision: number, text: string, cursor: number, atStart = true): Promise<TerminalCandidates> {
@@ -89,7 +89,7 @@ export class TerminalCandidatesOwner {
   accept(revision: number, id: string): SuggestionItem {
     const query = this.#query, item = query?.items.find(item => item.id === id);
     if (!query || query.revision !== revision || query.abort.signal.aborted || !item) throw Error('terminal-candidate-expired');
-    if (item.acceptPayload.metadata?.commandId === 'trust:repl') throw Error('信任管理候选不可提交。');
+    if (item.providerId === 'argument' && item.acceptPayload.metadata?.commandId === 'trust:repl') throw Error('信任管理候选不可提交。');
     query.items = []; query.ghost = undefined; return item;
   }
   acceptGhost(revision: number): { text: string; execute: false } {

@@ -30,6 +30,14 @@ async function fixture() {
 }
 
 describe('terminal fixed-schema session.send preparation', () => {
+  it('未解析工作目录时拒绝相对引用，显式本机绝对文件仍可发送', async () => {
+    const h = await fixture();
+    const options = { workspaceRoot: null, materialRegistry: h.registry, signal: new AbortController().signal };
+    await expect(prepareSessionSendSnapshot('@file:note.txt', identity, options, async () => {})).rejects.toThrow();
+    const pages: Buffer[] = [];
+    await prepareSessionSendSnapshot(h.fileToken, identity, options, async bytes => { pages.push(Buffer.from(bytes)); });
+    expect(Buffer.concat(pages).toString()).toContain('material first');
+  });
   it('matches existing text/material/file ordering and engage whitespace without a second material read', async () => {
     const h = await fixture();
     const options = { workspaceRoot: h.directory, materialRegistry: h.registry };

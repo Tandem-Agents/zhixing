@@ -33,7 +33,7 @@ export interface FileProviderOptions {
    * FileProvider 不自己调 `process.cwd()`。传函数时每次 query 读取当前值,
    * 用于宿主换代后 workspace root 动态更新的接入面。
    */
-  readonly root: string | (() => string);
+  readonly root: string | null | (() => string | null);
   /**
    * 单次查询最大返回条目数。防止大目录撑爆渲染器。
    * 默认 100。
@@ -81,16 +81,16 @@ export class FileProvider implements SuggestionProvider {
   readonly supportsGhostText = false;
   readonly supportsChaining = false;
 
-  private readonly root: () => string;
+  private readonly root: () => string | null;
   private readonly maxResults: number;
   private readonly maxResultBytes: number;
 
   constructor(options: FileProviderOptions) {
     const root = options.root;
-    this.root =
-      typeof root === "function"
-        ? () => path.resolve(root())
-        : () => path.resolve(root);
+    this.root = () => {
+      const value = typeof root === "function" ? root() : root;
+      return value === null ? null : path.resolve(value);
+    };
     this.maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS;
     this.maxResultBytes = options.maxResultBytes ?? Infinity;
   }
@@ -157,7 +157,8 @@ export class FileProvider implements SuggestionProvider {
       };
 
     const root = this.root();
-    const resolved = this.resolvePath(query, root);
+    if (!root && !path.isAbsolute(expandUserHome(query))) return [];
+    const resolved = this.resolvePath(query, root ?? path.parse(expandUserHome(query)).root);
     if (signal.aborted) return [];
 
     let entries: import("node:fs").Dir;
@@ -194,7 +195,7 @@ export class FileProvider implements SuggestionProvider {
           ? `${resolved.relativeDir}/${entry.name}`
           : entry.name;
         const resolvedAbsPath = path.resolve(resolved.resolvedDir, entry.name);
-        const isOutsideWorkspace = !this.isInsideWorkspace(resolvedAbsPath, root);
+        const isOutsideWorkspace = !root || !this.isInsideWorkspace(resolvedAbsPath, root);
 
         const item: SuggestionItem = {
           id: `file:${relativePath}`,

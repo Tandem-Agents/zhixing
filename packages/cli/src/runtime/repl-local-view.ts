@@ -22,12 +22,15 @@ export interface ReplLocalViewManagement {
 export interface ReplLocalViewOptions {
   readonly management: ReplLocalViewManagement;
   readonly configuration: Pick<RuntimeConfigurationProvider, "readReplSurface">;
+  readonly currentSceneId?: () => string | undefined;
+  readonly resolveSceneWorkspace?: (sceneId: string) => Promise<{ root: string | null; label: string }>;
 }
 
 export interface ReplLocalViewSnapshot {
   readonly primaryModel: RuntimePrimaryModelDisplayProjection;
   readonly hostInfo: ServerDescriptionResult | null;
   readonly workspaceRoot: string | null;
+  readonly workspaceLabel?: string;
   readonly networkProxy: RuntimeNetworkProxyDisplayProjection;
 }
 
@@ -37,6 +40,8 @@ export class ReplLocalView {
     "readReplSurface"
   >;
   private snapshot: ReplLocalViewSnapshot;
+  private sceneId: string | undefined;
+  private generation = 0;
 
   constructor(private readonly opts: ReplLocalViewOptions) {
     this.configuration = opts.configuration;
@@ -55,7 +60,12 @@ export class ReplLocalView {
   }
 
   get workspaceRoot(): string | null {
+    if (this.opts.currentSceneId?.() !== this.sceneId) return null;
     return this.snapshot.workspaceRoot;
+  }
+  get workspaceLabel(): string | undefined {
+    if (this.opts.currentSceneId?.() !== this.sceneId) return '正在读取工作目录…';
+    return this.snapshot.workspaceLabel;
   }
 
   get networkProxy(): RuntimeNetworkProxyDisplayProjection {
@@ -63,9 +73,16 @@ export class ReplLocalView {
   }
 
   async refresh(): Promise<ReplLocalViewSnapshot> {
+    const generation = ++this.generation, sceneId = this.opts.currentSceneId?.();
     const configuration = this.configuration.readReplSurface();
-    const hostInfo = await this.opts.management.serverDescription().catch(() => null);
-    this.snapshot = this.buildSnapshot(configuration, hostInfo);
+    const [hostInfo, workspace] = await Promise.all([
+      this.opts.management.serverDescription().catch(() => null),
+      sceneId ? this.opts.resolveSceneWorkspace?.(sceneId).catch(() => ({ root: null, label: '工作目录暂不可用' })) : undefined,
+    ]);
+    if (generation !== this.generation || sceneId !== this.opts.currentSceneId?.()) return this.snapshot;
+    this.sceneId = sceneId;
+    this.snapshot = Object.freeze({ ...this.buildSnapshot(configuration, hostInfo),
+      ...(sceneId ? { workspaceRoot: workspace?.root ?? null, workspaceLabel: workspace?.label ?? '未设置工作目录' } : {}) });
     return this.snapshot;
   }
 

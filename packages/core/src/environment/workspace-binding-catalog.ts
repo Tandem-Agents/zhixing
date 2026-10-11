@@ -21,6 +21,7 @@ import { SerialTaskQueue } from "../persistence/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
+  isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   runInMaintenanceContext,
   runStorageMaintenanceStep,
@@ -384,17 +385,28 @@ export class WorkspaceBindingCatalog
   }
 
   async capabilitySnapshot(): Promise<CapabilityDescriptor> {
-    await this.#ensureOpen();
-    await this.#refreshRootFromDisk();
-    const manifest = this.#requireManifest();
-    if (manifest.state === "degraded") {
-      return this.#publishCatalogState({
-        catalogGeneration: manifest.catalogGeneration,
-        state: "degraded",
-        workspaces: [],
-      });
+    const deadline = performance.now() + 5_000;
+    for (;;) {
+      try {
+        await this.#ensureOpen();
+        await this.#refreshRootFromDisk();
+        const manifest = this.#requireManifest();
+        if (manifest.state === "degraded") {
+          return await this.#publishCatalogState({
+            catalogGeneration: manifest.catalogGeneration,
+            state: "degraded",
+            workspaces: [],
+          });
+        }
+        return await this.#withHealthy((service) => service.capabilitySnapshot());
+      } catch (error) {
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || performance.now() >= deadline) throw error;
+        // All catalog/publication queues have unwound. Re-read the current
+        // generation and workspaces on retry instead of republishing stale data.
+        await waitForMaintenanceRetry(Math.min(delay, Math.max(0, deadline - performance.now())));
+      }
     }
-    return this.#withHealthy((service) => service.capabilitySnapshot());
   }
 
   versionInventory(): Promise<ExecutorVersionInventory> {

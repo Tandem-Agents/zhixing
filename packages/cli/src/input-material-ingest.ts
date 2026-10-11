@@ -10,7 +10,7 @@ import {
 } from "./input-material-registry.js";
 
 export interface PasteMaterialIngestOptions {
-  readonly workspaceRoot: string;
+  readonly workspaceRoot: string | null;
   readonly tokenMaxWidth?: number;
   /** Combined UTF-8 shadow records retained while recognizing a path batch. */
   readonly maxWorkspaceBytes?: number;
@@ -297,9 +297,10 @@ function unquote(input: string): { readonly value: string; readonly quoted: bool
   return { value: input, quoted: false };
 }
 
-function resolvePastedPath(input: string, workspaceRoot: string): string {
+function resolvePastedPath(input: string, workspaceRoot: string | null): string {
   const expanded = expandUserHome(input);
   if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  if (!workspaceRoot) throw Error("当前工作目录不在本机或暂不可用；请使用本机绝对路径添加材料。");
   return path.resolve(workspaceRoot, expanded);
 }
 

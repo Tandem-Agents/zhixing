@@ -211,6 +211,8 @@ function durableLifecycleHarness(input?: {
       catalogGeneration: "catalog-a",
     })),
     list: vi.fn(async () => []),
+    viewByReference: vi.fn(async () => null),
+
     viewByName: vi.fn(async () => {
       throw new Error("not used");
     }),
@@ -775,6 +777,13 @@ describe("WorkspaceAdministrationResultDeliveryApplicationService", () => {
 });
 
 describe("WorkspaceAdministrationDurableLifecycleApplicationService", () => {
+  it('按设备和稳定绑定标识查询，不按可变名称误配另一目录', async () => {
+    const { application, admin } = harness([binding('id-a', 'renamed', '/workspace-a'), binding('id-b', 'old-name', '/workspace-b')]);
+    expect(await application.viewByReference({ deviceId: 'device-a', bindingRef: 'id-a' })).toMatchObject({ name: 'renamed', path: '/workspace-a' });
+    expect(await application.viewByReference({ deviceId: 'another-device', bindingRef: 'id-a' })).toBeNull();
+    expect(await application.viewByReference({ deviceId: 'device-a', bindingRef: 'missing' })).toBeNull();
+    expect(admin.list).toHaveBeenCalledTimes(2);
+  });
   const createInput: WorkspaceAdministrationDurableOperation = {
     kind: "create",
     purpose: "settings",

@@ -1,3 +1,4 @@
+import { boundedControlProjection } from './control-projection.js';
 /**
  * ConversationController —— repl 的会话域控制器(纯接入面形态)。
  *
@@ -2034,6 +2035,13 @@ export class ConversationController<Outcome = TurnOutcome> {
   }
 
   async rename(name: string): Promise<void> {
+    if (this.active.mode.kind === 'workscene') {
+      const current = this.active;
+      const scene = await this.opts.workscene.rename(this.active.mode.sceneId, name);
+      if (this.active === current) this.active = { ...current, name: scene.name,
+        mode: { kind: 'workscene', sceneId: scene.sceneId, sceneName: scene.name } };
+      return;
+    }
     const renamed = await this.opts.conversation.rename(
       this.active.conversationId,
       name,

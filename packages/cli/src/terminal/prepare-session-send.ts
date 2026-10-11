@@ -15,7 +15,7 @@ const CAPACITY_ERROR = '输入准备工作区不足，草稿已保留。';
 const ENGAGE_IMAGE_ERROR = '多视角评议目前只支持文本内容；请将图片转成文字说明，或移除图片后再触发 @。';
 
 export interface PrepareSessionSendOptions {
-  readonly workspaceRoot: string;
+  readonly workspaceRoot: string | null;
   readonly materialRegistry: InputMaterialRegistry;
   readonly signal: AbortSignal;
   readonly maximumParamsBytes?: number;
@@ -287,8 +287,10 @@ class MaterialSnapshots {
     const key = `ref:${raw}`;
     const cached = this.#values.get(key);
     if (cached) { await emitValue(cached, sink); return; }
-    this.#charge(512 + Buffer.byteLength(raw) * 8 + Buffer.byteLength(this.options.workspaceRoot) * 4);
-    const absolute = path.resolve(this.options.workspaceRoot, expandUserHome(raw));
+    this.#charge(512 + Buffer.byteLength(raw) * 8 + Buffer.byteLength(this.options.workspaceRoot ?? "") * 4);
+    const expanded = expandUserHome(raw);
+    if (!path.isAbsolute(expanded) && !this.options.workspaceRoot) throw Error("当前工作目录不在本机或暂不可用；请使用本机绝对路径添加材料。");
+    const absolute = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(this.options.workspaceRoot!, expanded);
     const value = await this.#textFile(absolute);
     await emitValue(value, sink);
     this.#values.set(key, value);

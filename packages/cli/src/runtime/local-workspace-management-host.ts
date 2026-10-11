@@ -19,6 +19,7 @@ import {
   type WorkspaceControlAuthorization,
   type WorkspaceAdministrationView,
   validateWorkspaceAdministrationDurableOperation,
+  validateWorkspaceControlAuthorization,
   validateWorkspaceAdministrationDurableResult,
   workspaceAdministrationResultValue,
 } from "@zhixing/core/environment/workspace-administration";
@@ -44,6 +45,7 @@ type HostRequest =
   | { readonly kind: "status" }
   | { readonly kind: "list" }
   | { readonly kind: "view"; readonly displayName: string }
+  | { readonly kind: "view-reference"; readonly reference: WorkspaceControlAuthorization }
   | {
       readonly kind: "prepare";
       readonly input: WorkspaceAdministrationDurableOperation;
@@ -70,6 +72,7 @@ export interface LocalWorkspaceClient {
   status(): Promise<LocalWorkspaceCatalogStatus>;
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  viewByReference(reference: WorkspaceControlAuthorization): Promise<WorkspaceAdministrationView | null>;
   create(displayName: string, absolutePath: string): Promise<WorkspaceAdministrationView>;
   authorizeForControl(
     displayName: string,
@@ -184,6 +187,7 @@ export class LocalWorkspaceManagementHost {
     if (request.kind === "view") {
       return this.#lifecycle.viewByName(request.displayName);
     }
+    if (request.kind === "view-reference") return this.#lifecycle.viewByReference(request.reference);
     this.#lifecycle.assertDeliveryMechanismReady();
     if (request.kind === "pending") {
       return this.#lifecycle.pending(request.afterSeq);
@@ -284,6 +288,10 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
     status: read("status") as () => Promise<LocalWorkspaceCatalogStatus>,
     list: read("list") as () => Promise<readonly WorkspaceAdministrationView[]>,
     viewByName,
+    async viewByReference(reference) {
+      const result = await callLocalWorkspaceHost(zhixingHome, { kind: "view-reference", reference: validateWorkspaceControlAuthorization(reference) });
+      return result === null ? null : validateWorkspaceView(result);
+    },
     create: (displayName, absolutePath) => write({ kind: "create", purpose: "settings", displayName, absolutePath }) as Promise<WorkspaceAdministrationView>,
     authorizeForControl: async (displayName, absolutePath) => {
       return write({
@@ -486,6 +494,7 @@ function validateHostRequest(value: unknown): HostRequest {
     status: ["kind"],
     list: ["kind"],
     view: ["displayName", "kind"],
+    "view-reference": ["kind", "reference"],
     prepare: ["input", "kind"],
     commit: "confirmation" in request
       ? ["confirmation", "identity", "kind"]
@@ -502,6 +511,8 @@ function validateHostRequest(value: unknown): HostRequest {
     case "status":
     case "list":
       return { kind: request.kind };
+    case "view-reference":
+      return { kind: "view-reference", reference: validateWorkspaceControlAuthorization(request.reference) };
     case "view":
       if (
         typeof request.displayName !== "string" ||

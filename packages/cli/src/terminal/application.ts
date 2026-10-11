@@ -42,6 +42,7 @@ import { RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
+import { createLocalWorkspaceClient } from '../runtime/local-workspace-management-host.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
 import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
@@ -264,7 +265,7 @@ class TerminalApplication {
     this.#workscene = new RpcWorksceneFacade(this.#connection);
     this.#management = new RpcManagementFacade(this.#connection);
     this.#candidates = new TerminalCandidatesOwner(() => ({ sessionBusy: !!this.#state.activeTurnPromise, workspaceId: null,
-      cwd: this.#resolvedLocalView?.workspaceRoot ?? process.cwd(), target: 'cli', features: { chrome: true }, now: Date.now() }));
+      cwd: this.#resolvedLocalView?.workspaceRoot ?? process.cwd(), target: 'cli', features: { chrome: true }, now: Date.now() }), () => this.#inputWorkspaceRoot);
     this.#assets = new TerminalAssetClient(this.#channel, this.#abort.signal);
     const createFilesystem = createTerminalOwnedProcessFactory('filesystem');
     const filesystemSession = CheckpointDirectoryHandle.createSession(5000, (executable, args) => {
@@ -344,8 +345,21 @@ class TerminalApplication {
 
   // A malformed local configuration is a recoverable startup result. Do not
   // read it while constructing the surface, before its IPC/lifecycle exists.
+  get #inputWorkspaceRoot(): string | null {
+    if (this.#controller?.current.mode.kind === 'workscene') return this.#resolvedLocalView?.workspaceRoot ?? null;
+    return this.#resolvedLocalView?.workspaceRoot ?? process.cwd();
+  }
   get #localView(): ReplLocalView {
     return this.#resolvedLocalView ??= new ReplLocalView({ management: this.#management,
+      currentSceneId: () => { const mode = this.#controller?.current.mode; return mode?.kind === 'workscene' ? mode.sceneId : undefined; },
+      resolveSceneWorkspace: async sceneId => {
+        const scene = (await this.#workscene.list()).find(item => item.sceneId === sceneId);
+        if (!scene?.workspace) return { root: null, label: '未设置工作目录' };
+        const binding = await createLocalWorkspaceClient(this.home).viewByReference({
+          deviceId: scene.workspace.deviceId, bindingRef: scene.workspace.bindingRef,
+        });
+        return { root: binding?.path ?? null, label: binding?.path ?? `${scene.workspace.deviceName ?? '其他设备'} · ${scene.workspace.workspaceName ?? '工作目录不可用'}` };
+      },
       configuration: createRuntimeConfigurationProvider(() => loadConfig({ configPath: this.#configPath })) });
   }
 
@@ -1091,7 +1105,7 @@ class TerminalApplication {
     if (draft) return { edit: await this.#inputs.applyPaste(draft.inputId, draft.start, draft.end, inputId, draft.cursor) };
     if (paste.bytes <= 64 * 1024) {
       const text = await this.#inputs.text(inputId, 1024 * 1024 * 2);
-      const material = ingestPastedMaterials(text, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), maxWorkspaceBytes: 2 * 1024 * 1024 });
+      const material = ingestPastedMaterials(text, this.#materials, { workspaceRoot: this.#inputWorkspaceRoot, maxWorkspaceBytes: 2 * 1024 * 1024 });
       if (material.kind === 'ingested') {
         if (Buffer.byteLength(material.insertText) > 128 * 1024) throw Error('材料引用工作区不足，原有草稿和材料保留。');
         const handles = this.#inputs.registerHandles(inputId, material.insertText);
@@ -1112,7 +1126,7 @@ class TerminalApplication {
     if (item.providerId !== 'file' || payload.metadata?.isDirectory || typeof filePath !== 'string') {
       return { text: payload.replacement, execute: payload.execute };
     }
-    const token = ingestSelectedMaterial(filePath, this.#materials, { workspaceRoot: this.#localView.workspaceRoot ?? process.cwd() });
+    const token = ingestSelectedMaterial(filePath, this.#materials, { workspaceRoot: this.#inputWorkspaceRoot });
     const inputId = randomUUID(); this.#inputs.begin(inputId, 'paste');
     await this.#inputs.part(inputId, 0, filePath, true);
     return { text: `${token} `, execute: false, inputId, handles: this.#inputs.registerHandles(inputId, token) };
@@ -1228,7 +1242,7 @@ class TerminalApplication {
     const text = await this.#inputs.expand(inputId, TERMINAL_LIMITS.rpcWorkspaceBytes - 4 * 1024 * 1024);
     await new Promise<void>(resolve => setImmediate(resolve));
     const source = await this.#pendingSend.prepare(write => prepareSessionSendSnapshot(text, identity, {
-      workspaceRoot: this.#localView.workspaceRoot ?? process.cwd(), materialRegistry: this.#materials,
+      workspaceRoot: this.#inputWorkspaceRoot, materialRegistry: this.#materials,
       signal, maximumParamsBytes, commandAliasOffset,
     }, write), signal);
     if (!source) throw new EmptyTerminalSubmission();
@@ -1402,7 +1416,7 @@ class TerminalApplication {
   }
 
   #configurationHeaderDetails(): readonly string[] {
-    return [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
+    return [`工作目录    ${this.#resolvedLocalView?.workspaceRoot ?? this.#resolvedLocalView?.workspaceLabel ?? process.cwd()}`, `配置        ${this.#configPath}`, '秘密存储    本机安全存储'];
   }
 
   async #edit(session: NodeConfigurationEditSession, title: string, sections: SectionId[], runtime?: ConfigEditorRuntime) {

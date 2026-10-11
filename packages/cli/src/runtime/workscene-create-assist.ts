@@ -69,6 +69,8 @@ export async function runWorksceneCreateAssist(
   const exchanges: Exchange[] = [{ role: "user", text: prefill }];
   let createdScene: WorksceneSummary | null = null;
   let cancelled = false;
+  const interaction = new AbortController();
+  const executionSignal = signal ? AbortSignal.any([signal, interaction.signal]) : interaction.signal;
 
   for (let clarificationCount = 0; clarificationCount <= MAX_CLARIFICATIONS; clarificationCount++) {
     if (signal?.aborted) return { kind: "cancelled" };
@@ -78,6 +80,7 @@ export async function runWorksceneCreateAssist(
       getCreatedScene: () => createdScene,
       isCancelled: () => cancelled,
       create: async (input, sig) => {
+        if (cancelled) return { ok: false, cancelled: true, message: '用户取消了本次创建' };
         if (createdScene) {
           return {
             ok: true,
@@ -91,6 +94,7 @@ export async function runWorksceneCreateAssist(
         const confirmed = await deps.confirm(proposal, sig);
         if (!confirmed) {
           cancelled = true;
+          interaction.abort();
           return {
             ok: false,
             cancelled: true,
@@ -120,7 +124,7 @@ export async function runWorksceneCreateAssist(
               deps.onProgress?.(worksceneCreateAssistProgressText(progress), progress),
           }
         : {}),
-    }, signal);
+    }, executionSignal);
 
     if (createdScene) return { kind: "created", scene: createdScene };
     if (cancelled) return { kind: "cancelled" };

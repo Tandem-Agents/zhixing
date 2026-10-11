@@ -19,6 +19,33 @@ function serverInfo(workspace: string): ServerInfoResult {
 }
 
 describe("ReplLocalView", () => {
+  it("切换场景立刻撤销旧目录，迟到的解析不能覆盖当前场景", async () => {
+    let scene: string | undefined;
+    let finishA!: (value: { root: string; label: string }) => void;
+    const view = new ReplLocalView({
+      management: { serverDescription: async () => serverInfo('/default') },
+      configuration: { readReplSurface: () => replConfiguration('openai', 'model', 'off') },
+      currentSceneId: () => scene,
+      resolveSceneWorkspace: async id => id === 'a'
+        ? new Promise(resolve => { finishA = resolve; })
+        : { root: null, label: '另一设备的工作目录' },
+    });
+    await view.refresh();
+    expect(view.workspaceRoot).toBe('/default');
+    scene = 'a';
+    expect(view.workspaceRoot).toBeNull();
+    const pending = view.refresh();
+    scene = 'b';
+    await view.refresh();
+    finishA({ root: '/workspace-a', label: 'a' });
+    await pending;
+    expect(view.workspaceRoot).toBeNull();
+    expect(view.workspaceLabel).toBe('另一设备的工作目录');
+    scene = undefined;
+    expect(view.workspaceRoot).toBeNull();
+    await view.refresh();
+    expect(view.workspaceRoot).toBe('/default');
+  });
   it("refresh 同步最新 config / workspace / proxy 派生视图", async () => {
     let configuration = replConfiguration("anthropic", "claude-a", "off");
     const management = {

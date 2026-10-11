@@ -211,7 +211,7 @@ describe("FileProvider.query", () => {
   });
 
   it("root 函数在每次 query 读取当前 workspace", async () => {
-    let root = path.join(tmpRootDir.getDir(), "dynamic-a");
+    let root: string | null = path.join(tmpRootDir.getDir(), "dynamic-a");
     const dynamicProvider = new FileProvider({ root: () => root });
     const match = dynamicProvider.matchTrigger(makeCtx("@file:"))!;
 
@@ -220,6 +220,8 @@ describe("FileProvider.query", () => {
 
     root = path.join(tmpRootDir.getDir(), "dynamic-b");
     const second = await dynamicProvider.query(match, noAbort());
+    root = null;
+    expect(await dynamicProvider.query(match, noAbort())).toEqual([]);
     expect(second.map((i) => i.displayText)).toEqual(["b-only.txt"]);
   });
 });
