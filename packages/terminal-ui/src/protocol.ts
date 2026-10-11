@@ -205,6 +205,7 @@ export interface TerminalView {
   readonly readyForInput?: boolean;
   readonly environment?: { readonly provider: string; readonly model: string; readonly workspace: string | null };
   readonly busy?: boolean;
+  readonly inputReceiptPending?: boolean;
   readonly skills?: TerminalSkillsView;
   readonly recovery?: { readonly requestId: string; readonly input: boolean; readonly pages: number; readonly settled?: boolean };
 }

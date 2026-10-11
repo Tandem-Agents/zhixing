@@ -528,6 +528,10 @@ export class ConversationManager implements ConversationCommitProjection {
     );
   }
 
+  inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }) {
+    return this.#requireDurableExecutor("input receipt").inputReceipt(input);
+  }
+
   async findDurableInteractionOutcome(
     conversationId: string,
     requestId: string,

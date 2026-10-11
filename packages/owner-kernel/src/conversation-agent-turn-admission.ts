@@ -16,6 +16,9 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
   return Object.freeze({
     requiresStableTurnIdentity: input.manager.usesDurableTurnProtocol(),
     createTurnIdentity: generateTurnId,
+    async queryReceipt(query: Parameters<ConversationAgentTurnAdmissionPort['queryReceipt']>[0]) {
+      return input.manager.inputReceipt({ conversationId: query.conversationId, turnId: query.turnId, surfacePrincipal: query.caller.surfacePrincipal });
+    },
     async admit(
       request: Parameters<ConversationAgentTurnAdmissionPort["admit"]>[0],
     ) {

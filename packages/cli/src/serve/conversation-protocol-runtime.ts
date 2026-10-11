@@ -1755,6 +1755,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
   }
 
+  inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }) {
+    return this.#authority.controlAdmission.inputReceipt(input);
+  }
+
   async #prepareRunEndUntilAvailable(
     effect: ConversationExecutorExecutionEffect,
     context: AuthorityCallContext,

@@ -36,21 +36,39 @@ describe("RpcConversationFacade · 方法域", () => {
     expect(receipt).toEqual({ turnId: 'turn' }); expect(inside).toBe(false);
     expect(client.requestEncoded).not.toHaveBeenCalled(); expect(source.dispose).toHaveBeenCalledOnce();
   });
-  it('replays the same cold source once prepared and never reruns the material producer', async () => {
+  it('recovers a lost prepared receipt by read-only query without replaying the source', async () => {
     const fake = makeFakeHostLink(), client = await fake.link.getClient();
     const source = { byteLength: 2, open: vi.fn(), dispose: vi.fn(async () => {}) };
     const prepare = vi.fn(async () => source), abort = new AbortController();
-    client.maximumRequestSourceBytes = () => 100 * 1024 * 1024 - 256;
-    client.prepareRequestSource = async producer => ({ source: await producer(abort.signal), deadline: Date.now() + 2_000 });
-    const request = vi.fn().mockRejectedValueOnce(new RpcClientClosedError()).mockResolvedValueOnce({ status: 'accepted', turnId: 'turn' });
-    client.requestEncoded = request;
-    const facade = new RpcConversationFacade(fake.link);
-    expect(await facade.sendPrepared(prepare, 'conversation', 'turn', abort.signal)).toEqual({ status: 'accepted', turnId: 'turn' });
-    expect(prepare).toHaveBeenCalledOnce(); expect(prepare.mock.calls[0]![0]).toMatchObject({ turnId: 'turn', conversationId: 'conversation', surfaceCapabilities: { postTurnControl: true } });
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(request.mock.calls[0]![1]).toBe(source); expect(request.mock.calls[1]![1]).toBe(source);
-    expect(request.mock.calls[0]![2].deadline).toBeGreaterThan(Date.now());
-    expect(request.mock.calls[1]![2]).toEqual({ signal: abort.signal }); expect(source.dispose).toHaveBeenCalledOnce();
+    client.maximumRequestSourceBytes = () => 1000;
+    client.prepareRequestSource = async producer => ({ source: await producer(abort.signal), deadline: Date.now() + 2000 });
+    client.requestEncoded = vi.fn().mockRejectedValue(new RpcClientClosedError());
+    let checks = 0;
+    fake.setResponder((method, params) => {
+      expect(method).toBe('session.inputReceipt'); expect(params).toEqual({ conversationId: 'conversation', turnId: 'turn' });
+      expect(source.dispose).toHaveBeenCalledOnce();
+      return checks++ === 0 ? { status: 'unknown' } : { status: 'accepted', conversationId: 'conversation', turnId: 'turn', runId: 'run-1' };
+    });
+    const pending = vi.fn(), retry = vi.fn();
+    const result = await new RpcConversationFacade(fake.link).sendPrepared(prepare, 'conversation', 'turn', abort.signal, undefined, { pending, waitForRetry: retry });
+    expect(result).toEqual({ conversationId: 'conversation', sessionId: 'conversation', turnId: 'turn', runId: 'run-1' });
+    expect(prepare).toHaveBeenCalledOnce(); expect(client.requestEncoded).toHaveBeenCalledOnce(); expect(retry).not.toHaveBeenCalled();
+    expect(checks).toBe(2); expect(source.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('stops automatic queries at the finite budget and preserves unknown until manual recheck', async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient(), abort = new AbortController();
+    client.maximumRequestSourceBytes = () => 1000;
+    client.prepareRequestSource = async producer => ({ source: await producer(abort.signal), deadline: Date.now() + 1000 });
+    client.requestEncoded = vi.fn().mockRejectedValue(new RpcClientClosedError());
+    const gate = Promise.withResolvers<void>(), stopped = Promise.withResolvers<void>(); let ready = false;
+    fake.setResponder(() => { if (!ready) throw new RpcClientClosedError(); return { status: 'accepted', conversationId: 'conv', turnId: 'turn', runId: 'run' }; });
+    const pending = vi.fn((_error, automatic) => { if (!automatic) stopped.resolve(); });
+    const work = new RpcConversationFacade(fake.link).sendPrepared(async () => ({ byteLength: 2, open: vi.fn(), dispose: vi.fn(async () => {}) }), 'conv', 'turn', abort.signal, undefined,
+      { pending, waitForRetry: () => gate.promise });
+    await stopped.promise; expect(fake.requests).toHaveLength(3); expect(client.requestEncoded).toHaveBeenCalledOnce();
+    await Promise.resolve(); expect(fake.requests).toHaveLength(3);
+    ready = true; gate.resolve(); expect(await work).toMatchObject({ runId: 'run' }); expect(fake.requests).toHaveLength(4);
   });
 
   it('does not replay unpublished preparation failure or retract acceptance after cleanup uncertainty', async () => {
@@ -187,63 +205,20 @@ describe("RpcConversationFacade · 方法域", () => {
     ]);
   });
 
-  it("response loss reconnect reuses the exact durable send identity", async () => {
-    const fake = makeFakeHostLink();
-    let attempt = 0;
-    fake.setResponder(() => {
-      attempt += 1;
-      if (attempt <= 2) throw new RpcClientClosedError("response lost");
-      return {
-        conversationId: "conv-1",
-        sessionId: "conv-1",
-        turnId: "turn-stable",
-        runId: "run-authority",
-      };
+
+  it.each([false, true])("send response loss checks its receipt without replay (limited=%s)", async limited => {
+    const fake = makeFakeHostLink(); let sends = 0;
+    fake.setResponder((method, params) => {
+      if (method === "session.list") return { conversations: [], availability: { capabilitySet: "limited", continuationConfirmation: "required", unavailableCapabilities: ["排程暂不可用"] } };
+      if (method === "session.send") { sends++; throw new RpcClientClosedError("response lost"); }
+      expect(method).toBe("session.inputReceipt"); expect(params).toEqual({ conversationId: "conv-1", turnId: "turn-stable" });
+      return { status: "accepted", conversationId: "conv-1", turnId: "turn-stable", runId: "run-authority" };
     });
     const facade = new RpcConversationFacade(fake.link);
-
-    await expect(
-      facade.send("retry safely", "conv-1", "turn-stable"),
-    ).resolves.toMatchObject({ runId: "run-authority" });
-    expect(fake.requests).toHaveLength(3);
-    expect(fake.requests[1]).toEqual(fake.requests[0]);
-    expect(fake.requests[2]).toEqual(fake.requests[0]);
-  });
-
-  it("能力受限确认随响应丢失使用完全相同的请求重放", async () => {
-    const fake = makeFakeHostLink();
-    let sendAttempt = 0;
-    fake.setResponder((method) => {
-      if (method === "session.list") {
-        return {
-          conversations: [],
-          availability: {
-            capabilitySet: "limited",
-            continuationConfirmation: "required",
-            unavailableCapabilities: ["排程暂不可用"],
-          },
-        };
-      }
-      sendAttempt += 1;
-      if (sendAttempt === 1) throw new RpcClientClosedError("response lost");
-      return {
-        conversationId: "conv-1",
-        sessionId: "conv-1",
-        turnId: "turn-stable",
-        runId: "run-authority",
-      };
-    });
-    const facade = new RpcConversationFacade(fake.link);
-
-    await facade.list();
-    facade.confirmContinuation();
-    await facade.send("retry safely", "conv-1", "turn-stable");
-
-    expect(fake.requests).toHaveLength(3);
-    expect(fake.requests[1]?.params).toMatchObject({
-      acceptLimitedCapabilities: true,
-    });
-    expect(fake.requests[2]).toEqual(fake.requests[1]);
+    if (limited) { await facade.list(); facade.confirmContinuation(); }
+    expect(await facade.send("retry safely", "conv-1", "turn-stable")).toMatchObject({ runId: "run-authority" });
+    expect(sends).toBe(1);
+    if (limited) expect(fake.requests.find(r => r.method === "session.send")?.params).toMatchObject({ acceptLimitedCapabilities: true });
   });
 
   it("response loss reconnect reuses the exact durable abort identity", async () => {
@@ -564,6 +539,7 @@ describe("RpcConversationFacade · 方法域", () => {
       {
         method: "session.advancementConfirm",
         params: {
+          submissionId: expect.stringMatching(/^turn_/u),
           conversationId: "conv-1",
           advancementSessionId: "adv-1",
           rubricDraftId: "draft-1",
@@ -576,6 +552,7 @@ describe("RpcConversationFacade · 方法域", () => {
       {
         method: "session.advancementRevise",
         params: {
+          submissionId: expect.stringMatching(/^turn_/u),
           conversationId: "conv-1",
           advancementSessionId: "adv-1",
           userFeedback: "补充文档验收",
@@ -584,6 +561,7 @@ describe("RpcConversationFacade · 方法域", () => {
       {
         method: "session.advancementCancel",
         params: {
+          submissionId: expect.stringMatching(/^turn_/u),
           conversationId: "conv-1",
           advancementSessionId: "adv-1",
           executeOriginal: true,
@@ -820,3 +798,66 @@ describe("RpcConversationFacade · 通知还原", () => {
     expect(fake.handlerCount("session.delta")).toBe(0);
   });
 });
+
+
+describe("Advancement response recovery", () => {
+  it.each(["original-saved", "revision-saved", "not-saved", "cancelled", "contract-failed", "direct"] as const)("recovers %s without a second submission", async kind => {
+    const fake = makeFakeHostLink(); let sends = 0;
+    const base = { conversationId: "conv", sessionId: "conv", turnId: "current-input" };
+    const result = kind === "direct" ? { ...base, turnId: "original-input", runId: "original-run" }
+      : kind === "cancelled" ? { ...base, status: "cancelled", advancementSessionId: "adv" }
+      : kind === "contract-failed" ? { ...base, status: "contract-failed", error: { message: "failed" } }
+      : { ...base, turnId: "original-input", status: "awaiting-rubric-confirmation", advancementSessionId: "adv",
+          rubricDraftId: "draft", rubricDraft: { draftId: "draft" }, submission: { turnId: "current-input", disposition: kind } };
+    fake.setResponder(method => {
+      if (method === "session.send") { sends++; throw new RpcClientClosedError(); }
+      return { status: "settled", conversationId: "conv", turnId: "current-input", result };
+    });
+    expect(await new RpcConversationFacade(fake.link).send("control", "conv", "current-input")).toEqual(result);
+    expect(sends).toBe(1);
+  });
+
+  it("keeps a button identity across the finite automatic budget and manual retry", async () => {
+    const fake = makeFakeHostLink(); let sends = 0, savedId = "", ready = false;
+    fake.setResponder((method, params: any) => {
+      if (method === "session.advancementConfirm") { sends++; savedId = params.submissionId; throw new RpcClientClosedError(); }
+      expect(params.turnId).toBe(savedId);
+      if (!ready) throw new RpcClientClosedError();
+      return { status: "settled", conversationId: "conv", turnId: savedId,
+        result: { conversationId: "conv", sessionId: "conv", turnId: "original", runId: "run-original" } };
+    });
+    const facade = new RpcConversationFacade(fake.link);
+    await expect(facade.confirmAdvancement("conv", "adv", "draft")).rejects.toThrow("只查询原结果");
+    expect(fake.requests).toHaveLength(4);
+    ready = true;
+    expect(await facade.confirmAdvancement("conv", "adv", "draft")).toMatchObject({ status: "confirmed", turnId: "original", runId: "run-original" });
+    expect(sends).toBe(1); expect(fake.requests).toHaveLength(5);
+  });
+
+  it("holds revision response ownership through projection and never recovers a consumer exception", async () => {
+    const fake = makeFakeHostLink(), client = await fake.link.getClient();
+    let held = false;
+    client.consume = async (_method, _params, consumer) => { held = true; try { return await consumer({ status: "revised" } as any); } finally { held = false; } };
+    const facade = new RpcConversationFacade(fake.link);
+    await expect(facade.consumeReviseAdvancement("conv", "adv", "feedback", () => { expect(held).toBe(true); throw Error("projection failed"); }, "seen-draft")).rejects.toThrow("projection failed");
+    expect(fake.requests).toHaveLength(0);
+    expect(facade.hasPendingAdvancement("conv")).toBe(true);
+    delete client.consume;
+    fake.setResponder((_method, params:any) => ({status: "settled", conversationId: "conv", turnId: params.turnId,
+      result: {status:"awaiting-rubric-confirmation", conversationId:"conv", turnId:"original", advancementSessionId:"adv",rubricDraftId:"new",rubricDraft:{draftId:"new"}}}));
+    await expect(facade.consumePendingAdvancement("conv", result => (result as any).rubricDraftId)).resolves.toBe("new");
+    expect(facade.hasPendingAdvancement("conv")).toBe(false);
+  });
+});
+
+ it("releases a known rejected button before the next explicit action", async () => {
+  const fake = makeFakeHostLink(); let sends = 0; const identities: string[] = [];
+  fake.setResponder((method, params: any) => {
+    if (method === "session.advancementConfirm") { sends++; identities.push(params.submissionId); if (sends === 1) throw new RpcClientClosedError(); return { status: "confirmed", conversationId: "conv", turnId: "original", runId: "run" }; }
+    return { status: "rejected", code: "TURN_NOT_ADMITTED" };
+  });
+  const facade = new RpcConversationFacade(fake.link);
+  await expect(facade.confirmAdvancement("conv", "adv", "draft")).rejects.toThrow("未被接纳");
+  await expect(facade.confirmAdvancement("conv", "adv", "draft")).resolves.toMatchObject({ status: "confirmed" });
+  expect(sends).toBe(2); expect(new Set(identities).size).toBe(2);
+ });

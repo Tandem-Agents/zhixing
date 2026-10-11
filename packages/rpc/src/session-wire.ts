@@ -202,7 +202,17 @@ export interface SessionContractFailedResult extends SessionAcceptedSendResult {
   error: { message: string };
 }
 
+
+export interface SessionSettledSubmissionResult extends SessionAcceptedSendResult {
+  status: "submission-settled";
+  submission: { turnId: string; disposition: "original-saved" | "revision-saved" | "not-saved" };
+  message: string;
+}
+export type SessionInputReceipt = import("@zhixing/core/conversation/application").ConversationInputReceipt
+  | { readonly status: "settled"; readonly conversationId: string; readonly turnId: string; readonly result: SessionSendResult };
+
 export type SessionSendResult =
+  | SessionSettledSubmissionResult
   | SessionAcceptedSendResult
   | SessionAwaitingRubricResult
   | SessionCancelledRubricResult

@@ -63,9 +63,20 @@ export class RpcClientError extends Error {
 }
 
 export class RpcClientClosedError extends Error {
+  readonly code = 'RPC_CONNECTION_CLOSED';
   constructor(message = "RPC client is closed") {
     super(message);
     this.name = "RpcClientClosedError";
+  }
+}
+
+/** A transport wait ending says nothing about the server command's outcome. */
+export class RpcRequestInterruptedError extends Error {
+  readonly code: 'RPC_DEADLINE_EXCEEDED' | 'RPC_CALLER_CANCELLED';
+  constructor(readonly stage: 'before-send' | 'waiting-receipt', cancelled: boolean) {
+    super(cancelled ? 'RPC request cancelled' : 'RPC request deadline exceeded');
+    this.name = 'RpcRequestInterruptedError';
+    this.code = cancelled ? 'RPC_CALLER_CANCELLED' : 'RPC_DEADLINE_EXCEEDED';
   }
 }
 
@@ -79,9 +90,9 @@ export interface RpcClient {
   /** 发送 auth 方法，成功后服务端会标记此连接为 authenticated */
   authenticate(token: string, clientInfo?: { id?: string; version?: string }): Promise<AuthResult>;
   /** 发送 RPC 请求，返回 result（错误以 RpcClientError 抛出） */
-  request<T = unknown>(method: string, params?: unknown): Promise<T>;
+  request<T = unknown>(method: string, params?: unknown, options?: Partial<RpcRequestDeadline>): Promise<T>;
   /** 消费完成前保留接收背压，用于异步分页写入；不重发或重置请求超时。 */
-  consume?<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>): Promise<R>;
+  consume?<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>): Promise<R>;
   /** Prepare one immutable JSON value at an idle receive-message boundary.
    * The returned deadline includes waiting and preparation, not just sending. */
   prepareRequestSource?<T extends RpcEncodedJsonSource | undefined>(prepare: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<{ source: T; deadline: number }>;
@@ -209,14 +220,14 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   }
 
   function request<T>(method: string, params?: unknown, consume?: (value: unknown) => unknown | Promise<unknown>,
-    encoded?: { source: RpcEncodedJsonSource; options?: Partial<RpcRequestDeadline> }): Promise<T> {
+    encoded?: { source: RpcEncodedJsonSource; options?: Partial<RpcRequestDeadline> }, options?: Partial<RpcRequestDeadline>): Promise<T> {
     if (closed) return Promise.reject(new RpcClientClosedError());
     if (!ws || ws.readyState !== ws.OPEN) return Promise.reject(new RpcClientClosedError("Not connected"));
     if (liveRequests.size >= (opts.maximumPendingRequests ?? 32)) return Promise.reject(Error('RPC pending request capacity'));
-    const deadline = encoded?.options?.deadline ?? Date.now() + timeout;
+    const deadline = encoded?.options?.deadline ?? options?.deadline ?? Date.now() + timeout;
     drainDeadline = Math.max(drainDeadline, deadline);
-    const signal = encoded?.options?.signal;
-    if (deadline <= Date.now() || signal?.aborted) return Promise.reject(Error('RPC request deadline or cancellation'));
+    const signal = encoded?.options?.signal ?? options?.signal;
+    if (deadline <= Date.now() || signal?.aborted) return Promise.reject(new RpcRequestInterruptedError('before-send', !!signal?.aborted));
     let release: (() => void) | undefined;
     try { release = opts.acquireRequest?.(); }
     catch (error) { return Promise.reject(error); }
@@ -229,7 +240,7 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
       const cancel = () => {
         pending.delete(id);
         const partialSend = cancelSend?.();
-        entry.reject(new Error(encoded ? `RPC request deadline or cancellation: ${method}` : `RPC request timeout after ${timeout}ms: ${method}`));
+        entry.reject(new RpcRequestInterruptedError('waiting-receipt', !!signal?.aborted));
         // A held result cannot be discarded while its consumer still owns it.
         // End this connection on the original deadline instead of admitting
         // another large message or waiting indefinitely for consumer IO.
@@ -366,12 +377,12 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
       return this.request<AuthResult>("auth", { token, client: clientInfo });
     },
 
-    request<T = unknown>(method: string, params?: unknown): Promise<T> {
-      return request<T>(method, params);
+    request<T = unknown>(method: string, params?: unknown, options?: Partial<RpcRequestDeadline>): Promise<T> {
+      return request<T>(method, params, undefined, undefined, options);
     },
 
-    consume<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>): Promise<R> {
-      return request<R>(method, params, value => consumer(value as T));
+    consume<T, R>(method: string, params: unknown, consumer: (result: T) => R | Promise<R>, options?: Partial<RpcRequestDeadline>): Promise<R> {
+      return request<R>(method, params, value => consumer(value as T), undefined, options);
     },
 
     onNotification<T = unknown>(method: string, handler: NotificationHandler<T>): Unsubscribe {

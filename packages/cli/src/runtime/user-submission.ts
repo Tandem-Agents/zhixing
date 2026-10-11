@@ -22,6 +22,10 @@ export function createUserSubmission(draft: { commit(): void; reject(): void } |
       } else if (result.kind === "contract-failed") {
         reject();
       } else {
+        if (result.kind === "submission-settled") {
+          if (result.submission.disposition === "original-saved" || result.submission.disposition === "revision-saved") accept(); else reject();
+          return result.message;
+        }
         switch (result.submission?.disposition) {
           case "original-saved":
             accept();

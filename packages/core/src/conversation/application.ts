@@ -277,9 +277,23 @@ export type ConversationAgentTurnInvocation =
   | Readonly<{ kind: "agent" }>
   | Readonly<{ kind: "perspectives"; question: string }>;
 
+/** Absence is not rejection: a submitted command may still be in admission. */
+export type ConversationInputReceipt =
+  | Readonly<{ status: "unknown" }>
+  | Readonly<{ status: "accepted"; conversationId: string; turnId: string; runId: string }>
+  | Readonly<{ status: "rejected" }>;
+
+export interface ConversationInputReceiptQuery {
+  readonly kind: "input-receipt";
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly caller: Extract<ConversationCommandCaller, { readonly kind: "surface" }>;
+}
+
 export interface ConversationAgentTurnAdmissionPort {
   readonly requiresStableTurnIdentity: boolean;
   createTurnIdentity(): string;
+  queryReceipt(query: ConversationInputReceiptQuery): Promise<ConversationInputReceipt>;
   admit(input: Readonly<{
     identity: ConversationAgentTurnIdentity;
     input: UserTurnInput;
@@ -798,6 +812,7 @@ export interface ConversationAdvancementProjectionReader {
 }
 
 export type ConversationDirectoryQuery =
+  | ConversationInputReceiptQuery
   | Readonly<{ kind: "list"; page?: ConversationDirectoryPageRequest }>
   | Readonly<{
       kind: "identity-exists";
@@ -1077,6 +1092,7 @@ export class ConversationApplicationError extends Error {
 }
 
 export interface ConversationDirectoryApplication {
+  queryInputReceipt(query: ConversationInputReceiptQuery): Promise<ConversationInputReceipt>;
   queryList(page?: ConversationDirectoryPageRequest): Promise<ConversationDirectoryView>;
   queryIdentityExists(
     query: Extract<
@@ -1233,6 +1249,14 @@ export class ConversationDirectoryApplicationService
         ? { availability: this.input.availability }
         : {}),
     });
+  }
+
+  async queryInputReceipt(query: ConversationInputReceiptQuery): Promise<ConversationInputReceipt> {
+    assertConversationControlCaller(query.caller);
+    assertConversationIdentity(query.conversationId, "input receipt");
+    if (!isProtocolIdentifier(query.turnId)) throw new ConversationApplicationError("invalid-input", "Invalid input receipt identity");
+    if (!this.input.agentTurns) throw new Error("Conversation agent-turn application is not assembled");
+    return this.input.agentTurns.queryReceipt(query);
   }
 
   async queryIdentityExists(
@@ -2416,6 +2440,10 @@ export const CONVERSATION_USAGE_QUERY = defineProductApiQuery<
   ConversationUsageResult
 >("conversation-window.query.usage");
 
+export const CONVERSATION_INPUT_RECEIPT_QUERY = defineProductApiQuery<
+  "conversation-run.query.input-receipt", ConversationInputReceiptQuery, ConversationInputReceipt
+>("conversation-run.query.input-receipt");
+
 export const CONVERSATION_SECURITY_QUERY = defineProductApiQuery<
   "conversation-security.query.current",
   Extract<ConversationDirectoryQuery, { readonly kind: "security" }>,
@@ -2541,6 +2569,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_TASK_LIST_QUERY,
       CONVERSATION_CONTEXT_BUDGET_QUERY,
       CONVERSATION_USAGE_QUERY,
+      CONVERSATION_INPUT_RECEIPT_QUERY,
       CONVERSATION_SECURITY_QUERY,
       CONVERSATION_CREATE_COMMAND,
       CONVERSATION_ENSURE_SHELL_COMMAND,
@@ -2598,6 +2627,9 @@ export function createConversationDirectoryProductApiContribution(
       bindProductApiOperation(CONVERSATION_USAGE_QUERY, async (query) => ({
         result: await application.queryUsage(query),
         facts: [],
+      })),
+      bindProductApiOperation(CONVERSATION_INPUT_RECEIPT_QUERY, async (query) => ({
+        result: await application.queryInputReceipt(query), facts: [],
       })),
       bindProductApiOperation(CONVERSATION_SECURITY_QUERY, async (query) => ({
         result: await application.querySecurity(query),

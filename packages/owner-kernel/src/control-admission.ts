@@ -509,6 +509,26 @@ export class ControlAdmissionJournal {
     });
   }
 
+  /** Read the original input outcome without replaying input or admission effects. */
+  async inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing/core/conversation/application').ConversationInputReceipt> {
+    const requestId = `input:${protocolDigest("ConversationInputIdentity", 1, { surfacePrincipal: input.surfacePrincipal, ingressId: input.turnId })}`;
+    return this.#operations.run(async () => {
+      const transaction = await this.#transact<StoredControlAdmissionValue | undefined>((state) => {
+        const request = getRequest(state, requestId);
+        if (!request || request.surfacePrincipal !== input.surfacePrincipal || request.envelope.body.t !== 'input' ||
+          request.envelope.body.conversationId !== input.conversationId || request.envelope.body.ingress.ingressId !== input.turnId || !request.storedResult) {
+          return { kind: 'return', value: undefined };
+        }
+        return replayWithoutAppend(request);
+      }, []);
+      if (!transaction.value) return { status: 'unknown' };
+      const outcome = await materializeOutcome(transaction.value, this.#artifacts);
+      if (outcome.kind === 'rejected' || outcome.result.status === 'rejected') return { status: 'rejected' };
+      if (outcome.result.body.t !== 'input') throw invalidControlRecord('Input receipt contains another control result');
+      return { status: 'accepted', conversationId: input.conversationId, turnId: input.turnId, runId: outcome.result.body.runId };
+    });
+  }
+
   async apply(input: {
     readonly envelope: InitialControlEnvelope;
     readonly source: TrustedControlSource;

@@ -1,3 +1,6 @@
+import { protocolDigest } from "@zhixing/core/protocol";
+import type { AdvancementSubmissionIdentity } from "@zhixing/core/advancement";
+import type { SessionInputReceipt } from "@zhixing/rpc/session-wire";
 /**
  * session.* RPC 方法
  *
@@ -62,6 +65,7 @@ import {
   CONVERSATION_TASK_LIST_QUERY,
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   CONVERSATION_USAGE_QUERY,
+  CONVERSATION_INPUT_RECEIPT_QUERY,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
@@ -74,6 +78,7 @@ import {
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
+  ADVANCEMENT_SUBMISSION_QUERY,
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
@@ -151,6 +156,70 @@ interface SessionSurfaceCapabilities {
   readonly postTurnControl: boolean;
 }
 
+
+async function querySessionInputReceipt(ctx: Parameters<MethodEntry["handler"]>[1], conversationId: string, submissionId: string): Promise<SessionInputReceipt> {
+  const surfacePrincipal = requireRpcSurfacePrincipal(ctx.connection);
+  const api = requireConversationProductApi(ctx.server, CONVERSATION_INPUT_RECEIPT_QUERY);
+  const caller = { kind: "surface" as const, surfacePrincipal, connectionId: String(ctx.connection.id) };
+  const ordinary = await api.query(CONVERSATION_INPUT_RECEIPT_QUERY, { kind: "input-receipt", conversationId, turnId: submissionId, caller });
+  if (ordinary.status !== "unknown" || !api.supports(ADVANCEMENT_SUBMISSION_QUERY)) return ordinary;
+  const resolution = await api.query(ADVANCEMENT_SUBMISSION_QUERY, { conversationId, submissionId, surfacePrincipal });
+  if (!resolution) return ordinary;
+  const out = resolution.receipt.outcome;
+  const base = { conversationId, sessionId: conversationId, turnId: submissionId };
+  let result: SessionSendResult;
+  if (out.kind === "rejected") return { status: "rejected" };
+  if (out.kind === "original-task-intent") {
+    const admission = resolution.originalTaskAdmission;
+    if (admission?.status === "rejected") return { status: "rejected" };
+    const admitted = admission?.status === "admitted"
+      ? { status: "accepted" as const, conversationId, turnId: admission.intent.turnId, runId: admission.runId }
+      : { status: "unknown" as const };
+    if (admitted.status !== "accepted") return ordinary;
+    result = { ...base, turnId: admitted.turnId, runId: admitted.runId };
+  } else if (out.kind === "draft-saved" || out.kind === "not-saved") {
+    const disposition = out.kind === "not-saved" ? "not-saved" : out.disposition;
+    result = resolution.draft
+      ? awaitingRubricResult(conversationId, out.sessionId, resolution.draft, { turnId: submissionId, disposition })
+      : { ...base, status: "submission-settled", submission: { turnId: submissionId, disposition },
+          message: out.kind === "not-saved" ? "本次输入未保存；待确认任务已经变化，请查看当前任务。" : "本次输入已保存；任务状态已经变化，请查看当前任务。" };
+  } else if (out.kind === "cancelled") result = { ...base, status: "cancelled", advancementSessionId: out.sessionId };
+  else result = contractFailedResult(conversationId, submissionId, { message: "准则未能生成，原输入已保留。" });
+  return { status: "settled", conversationId, turnId: submissionId, result };
+}
+
+
+async function recoverSubmission(ctx: Parameters<MethodEntry["handler"]>[1], conversationId: string, identity: AdvancementSubmissionIdentity | undefined): Promise<SessionSendResult | undefined> {
+  const api = ctx.server.productApi;
+  if (!identity || !api?.supports(ADVANCEMENT_SUBMISSION_QUERY)) return undefined;
+  const existing = await api.query(ADVANCEMENT_SUBMISSION_QUERY, { conversationId, submissionId: identity.submissionId, surfacePrincipal: identity.surfacePrincipal });
+  if (!existing) return undefined;
+  if (existing.receipt.identity.requestDigest !== identity.requestDigest) throw RpcErrors.invalidParams("Submission identity is already bound to different input");
+  const receipt = await querySessionInputReceipt(ctx, conversationId, identity.submissionId);
+  if (receipt.status === "rejected") throw RpcErrors.invalidParams("原操作未被接纳，请查看当前任务后重新操作。");
+  if (receipt.status === "settled") return receipt.result;
+  if (receipt.status === "accepted") return { conversationId, sessionId: conversationId, turnId: receipt.turnId, runId: receipt.runId };
+  throw new RpcAppError(RPC_ERROR_CODES.INTERNAL_ERROR, "原操作已保存，执行接纳结果尚待核对。");
+}
+
+function submissionIdentity(ctx: Parameters<MethodEntry["handler"]>[1], submissionId: unknown, operation: string, request: unknown): AdvancementSubmissionIdentity | undefined {
+  if (submissionId === undefined) return undefined;
+  if (!isProtocolIdentifier(submissionId)) throw RpcErrors.invalidParams("Invalid submission identity");
+  return { surfacePrincipal: requireRpcSurfacePrincipal(ctx.connection), submissionId,
+    requestDigest: protocolDigest("AdvancementSubmissionRequest", 1, { operation, request }) };
+}
+
+export function buildSessionInputReceiptMethod(): MethodEntry {
+  return { name: "session.inputReceipt", requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as { conversationId?: unknown; turnId?: unknown };
+      const conversationId = requireConversationId(params, "session.inputReceipt");
+      if (!isProtocolIdentifier(params.turnId)) throw RpcErrors.invalidParams("Invalid input receipt identity");
+      return querySessionInputReceipt(ctx, conversationId, params.turnId);
+    },
+  };
+}
+
 export function buildSessionSendMethod(): MethodEntry {
   return {
     name: "session.send",
@@ -181,6 +250,7 @@ export function buildSessionSendMethod(): MethodEntry {
         params.turnId,
       );
       const { turnId } = turnIdentity;
+      const submission = submissionIdentity(ctx, turnId, "session.send", { conversationId: id ?? null, input, engage: engage ?? null, environment: environment ?? null });
       const manager = requireConversations(ctx.server);
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
@@ -188,6 +258,10 @@ export function buildSessionSendMethod(): MethodEntry {
         ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
       );
 
+      if (advancementEnabled && id) {
+        const recovered = await recoverSubmission(ctx, id, submission);
+        if (recovered) return recovered;
+      }
       if (advancementEnabled) {
         const broadcast = requireSessionBroadcast(ctx.server);
         const dispatchActiveAdvancementUserTurn = async () => {
@@ -201,7 +275,7 @@ export function buildSessionSendMethod(): MethodEntry {
             {
               conversationId: id,
               turnId,
-              userInput: input,
+              userInput: input, submission,
               surface: {
                 publishExit: (fact: AdvancementSessionExitedFact) => {
                   manager.addObserver(fact.conversationId, connectionId, {
@@ -330,7 +404,7 @@ export function buildSessionSendMethod(): MethodEntry {
                   conversationId: preparedId,
                   conversationScope: id ? "existing" : "new",
                   turnId,
-                  userInput: input,
+                  userInput: input, submission,
                 },
               );
             } catch (error) {
@@ -450,7 +524,7 @@ export function buildSessionSendMethod(): MethodEntry {
                 ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
                 {
                   conversationId: id,
-                  userInput: input,
+                  userInput: input, submission,
                   fact: {
                     publish: (fact) => {
                       if (!fact.executeOriginal) {
@@ -571,6 +645,7 @@ export function buildSessionSendMethod(): MethodEntry {
 // ─── session.advancementConfirm / session.advancementCancel ───
 
 interface SessionAdvancementActionParams extends ConversationIdParams {
+  submissionId?: unknown;
   advancementSessionId?: unknown;
   /** 发起端所见草案版本——confirm 据此拒绝「确认到没看过的修订」。 */
   rubricDraftId?: unknown;
@@ -610,6 +685,9 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         params,
         "session.advancementConfirm",
       );
+      const submission = submissionIdentity(ctx, params.submissionId, "session.advancementConfirm", { conversationId, advancementSessionId, rubricDraftId, persistence: persistence ?? null });
+      const recovered = await recoverSubmission(ctx, conversationId, submission);
+      if (recovered) { if ("status" in recovered || !recovered.runId) throw RpcErrors.invalidParams("确认状态已变化，请查看当前任务。"); return { ...recovered, status: "confirmed", advancementSessionId, runStatus: "queued" }; }
       const manager = requireConversations(ctx.server);
       const broadcast = requireSessionBroadcast(ctx.server);
       const productApi = requireAdvancementProductApi(
@@ -623,6 +701,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
             conversationId,
             advancementSessionId,
             expectedRubricDraftId: rubricDraftId,
+            submission,
             ...(persistence ? { persistence } : {}),
             originalTaskTurnOrigin: {
               channel: "rpc",
@@ -689,6 +768,9 @@ export function buildSessionAdvancementReviseMethod(): MethodEntry {
         params,
         "session.advancementRevise",
       );
+      const submission = submissionIdentity(ctx, params.submissionId, "session.advancementRevise", { conversationId, advancementSessionId, userFeedback, rubricDraftId: params.rubricDraftId ?? null });
+      const recovered = await recoverSubmission(ctx, conversationId, submission);
+      if (recovered) { if (!("status" in recovered) || recovered.status !== "awaiting-rubric-confirmation") throw RpcErrors.invalidParams("修订状态已变化，请查看当前任务。"); return { conversationId, sessionId: conversationId, status: "revised", advancementSessionId, rubricDraftId: recovered.rubricDraftId, rubricDraft: recovered.rubricDraft }; }
       const productApi = requireAdvancementProductApi(
         ctx.server,
         ADVANCEMENT_REVISE_RUBRIC_COMMAND,
@@ -697,7 +779,10 @@ export function buildSessionAdvancementReviseMethod(): MethodEntry {
         try {
           return await productApi.command(
             ADVANCEMENT_REVISE_RUBRIC_COMMAND,
-            { conversationId, advancementSessionId, userFeedback },
+            { conversationId, advancementSessionId, userFeedback,
+              submission,
+              ...(typeof params.rubricDraftId === "string" ? { expectedRubricDraftId: params.rubricDraftId } : {}),
+            },
           );
         } catch (error) {
           throw mapAdvancementRubricRevisionError(
@@ -757,6 +842,9 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
         "session.advancementCancel",
       );
       const executeOriginal = params.executeOriginal === true;
+      const submission = submissionIdentity(ctx, params.submissionId, "session.advancementCancel", { conversationId, advancementSessionId, executeOriginal, rubricDraftId: params.rubricDraftId ?? null });
+      const recovered = await recoverSubmission(ctx, conversationId, submission);
+      if (recovered) { if ("status" in recovered && recovered.status === "cancelled") return { conversationId, sessionId: conversationId, status: "cancelled", advancementSessionId }; if ("status" in recovered || !recovered.runId) throw RpcErrors.invalidParams("任务状态已变化，请查看当前任务。"); return { ...recovered, status: "direct-execution", advancementSessionId, runStatus: "queued" }; }
       const manager = requireConversations(ctx.server);
       const broadcast = requireSessionBroadcast(ctx.server);
       const productApi = requireAdvancementProductApi(
@@ -770,6 +858,8 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
             conversationId,
             advancementSessionId,
             executeOriginal,
+            submission,
+            ...(typeof params.rubricDraftId === "string" ? { expectedRubricDraftId: params.rubricDraftId } : {}),
             fact: {
               publish: (fact) =>
                 publishAdvancementCancellationFact(

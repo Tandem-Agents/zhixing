@@ -38,7 +38,7 @@ import { TerminalSessionCommands, projectTerminalTurnOutcome, projectCommittedTe
 import type { SessionAdvancementStateSnapshot } from '@zhixing/rpc';
 import type { SkillCatalogClient } from '@zhixing/core/skills/catalog';
 import { ConversationController, selectInitialConversation, type AcceptedTurn, type AwaitingRubricConfirmationTurn, type BeginReferencedUserTurnResult, type SessionSendReferenceResult } from '../runtime/conversation-controller.js';
-import { RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
+import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-conversation-facade.js';
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
@@ -144,6 +144,7 @@ class TerminalApplication {
   readonly #candidates: TerminalCandidatesOwner;
   readonly #inputHistory: string[] = [];
   #pendingRubric?: AwaitingRubricConfirmationTurn;
+  #pendingRubricResolution?: { controller: ConversationController<TerminalTurnOutcome>; conversationId: string; result: BeginReferencedUserTurnResult<TerminalTurnOutcome> };
   #deferredRubric?: Omit<AwaitingRubricConfirmationTurn, 'rubricDraft'>;
   #pendingRubricNotice?: string;
   readonly #configPath: string;
@@ -168,6 +169,9 @@ class TerminalApplication {
   #hello = false;
   #started = false;
   #operation?: Promise<void>;
+  #submittingInput = false;
+  #receiptRetry?: () => void;
+  #receiptRetryRequested = false;
   #skills?: TerminalSkillsOwner;
   #skillCommands?: TerminalSkillCommands;
   #decisionCommands?: TerminalDecisionCommands;
@@ -445,7 +449,9 @@ class TerminalApplication {
         this.#started = true; this.#background(() => this.args.length ? this.#independentCommand() : this.#startup()); return { accepted: true };
       case 'recovery-part': case 'recovery-page': case 'recovery-cancel':
         await this.#recovery.act(action); return { accepted: true };
-      case 'retry-connection': this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
+      case 'retry-connection':
+        if (this.#mainView.inputReceiptPending) { this.#receiptRetryRequested = true; this.#receiptRetry?.(); return { accepted: true }; }
+        this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
       case 'display-retry': this.#controller?.retryRecovery(); this.#background(() => this.#retryDisplay()); return { accepted: true };
       case 'exit': void this.#close(this.args.length ? 130 : 0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
@@ -568,6 +574,13 @@ class TerminalApplication {
         return { accepted: true };
       case 'interrupt':
         if (this.#sceneCreateAbort) { this.#sceneCreateAbort.abort(); return { accepted: true }; }
+        if (this.#submittingInput) {
+          // Record cancellation against the existing turn even before runId is
+          // known. Do not block this action reply on admission itself.
+          void this.#controller?.abort().catch(error => recordTerminalFailure(this.#logging.records, error, 'terminal-input-cancel-failed'));
+          this.#mainView = { ...this.#mainView, message: '已请求中止；正在核对原输入，确认接纳后停止。Ctrl+R 再次核对 · 连按 Ctrl+C 退出' };
+          await this.#publish(this.#mainView); this.#receiptRetry?.(); return { accepted: true };
+        }
         if (this.#state.activeTurnPromise) { await this.#controller?.abort(); return { accepted: true }; }
         if (this.#controller && await this.#controller.abortBackgroundTask()) {
           this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
@@ -1133,6 +1146,7 @@ class TerminalApplication {
   }
 
   async #submit(inputId: string, version: number): Promise<void> {
+    this.#submittingInput = true;
     let settled = false;
     const settle = (accepted: boolean) => {
       if (settled) return; settled = true;
@@ -1167,14 +1181,16 @@ class TerminalApplication {
           this.#pendingRubricNotice = undefined;
           this.#mainView = { ...this.#mainView, choices: this.#mainView.choices?.filter(choice => choice.id !== 'rubric-resume') };
         }
-        this.#mainView = { ...this.#mainView, busy: false, message: result.kind === 'contract-failed' ? '推进准则生成失败；输入已保留。' : '已取消这次任务。' };
+        this.#mainView = { ...this.#mainView, busy: false, message: result.kind === 'submission-settled' ? result.message : result.kind === 'contract-failed' ? '推进准则生成失败；输入已保留。' : '已取消这次任务。' };
         await this.#publish(this.#mainView);
       }
     } catch (error) {
-      submission.reject();
+      if (!this.#abort.signal.aborted) submission.reject();
       this.#mainView = { ...this.#mainView, busy: false };
       throw error;
     } finally {
+      this.#submittingInput = false; this.#receiptRetry = undefined; this.#receiptRetryRequested = false;
+      this.#mainView = { ...this.#mainView, inputReceiptPending: false };
       releaseOutput();
       await this.#display.cancelAdmission();
       this.#inputs.forget(`frozen:${inputId}`); this.#inputs.published([inputId]);
@@ -1187,10 +1203,11 @@ class TerminalApplication {
    * history owners, not the preparation strings, retain the original input. */
   async #submitPrepared(inputId: string, submission: ReturnType<typeof createUserSubmission>): Promise<{ result: BeginReferencedUserTurnResult<TerminalTurnOutcome>; notice?: string } | undefined> {
     const result = await this.#beginPrepared(inputId, submission);
+    this.#mainView = { ...this.#mainView, inputReceiptPending: false };
     if (!result) return;
     const notice = submission.settle(result);
     if (notice) this.#mainView = { ...this.#mainView, message: notice };
-    if (result.kind === 'accepted' || (result.kind === 'awaiting-rubric-confirmation' && ['original-saved', 'revision-saved'].includes(result.submission?.disposition ?? ''))) {
+    if (result.kind === 'accepted' || ((result.kind === 'awaiting-rubric-confirmation' || result.kind === 'submission-settled') && ['original-saved', 'revision-saved'].includes(result.submission?.disposition ?? ''))) {
       try {
         let offset = 0;
         let pending: { text: string; contentOffset: number } | undefined;
@@ -1212,6 +1229,7 @@ class TerminalApplication {
     await this.#display.admit();
     this.#mainView = { ...this.#mainView, busy: true, message: '正在提交…' };
     await this.#publish(this.#mainView);
+    let recorded = false;
     try {
       return await this.#controller!.beginReferencedUserTurn((conversationId, turnId) =>
         this.#conversation.sendPrepared((identity, signal, maximum) => this.#prepareSendSource(inputId, identity, signal, maximum),
@@ -1221,6 +1239,21 @@ class TerminalApplication {
               return boundedControlProjection(identity, 8192);
             }
             return boundedControlProjection(result, 256 * 1024);
+          }, {
+            pending: async (error, automatic) => {
+              if (!recorded) { recorded = true; recordTerminalFailure(this.#logging.records, error, 'terminal-input-receipt-unknown'); }
+              this.#mainView = { ...this.#mainView, inputReceiptPending: true, message: automatic
+                ? '正在核对原输入的接纳结果；草稿已保留，不会重复发送。'
+                : '尚未确认原输入的接纳结果；Ctrl+R 再次核对 · Ctrl+C 中止' };
+              await this.#publish(this.#mainView);
+            },
+            waitForRetry: signal => new Promise<void>((resolve, reject) => {
+              const finish = () => { signal?.removeEventListener('abort', abort); this.#receiptRetry = undefined; this.#receiptRetryRequested = false; resolve(); };
+              const abort = () => { signal?.removeEventListener('abort', abort); this.#receiptRetry = undefined; reject(signal?.reason); };
+              this.#receiptRetry = finish;
+              signal?.addEventListener('abort', abort, { once: true });
+              if (signal?.aborted) abort(); else if (this.#receiptRetryRequested) finish();
+            }),
           }), { onAccepted: submission.accept });
     } catch (error) {
       if (!(error instanceof EmptyTerminalSubmission)) throw error;
@@ -1258,6 +1291,45 @@ class TerminalApplication {
           epoch !== this.#conversationEpoch || !this.#mainView.connected || this.#abort.signal.aborted) throw Error('对话或连接已变化，请重新打开确认。');
     };
     current();
+    const original = this.#pendingRubric ?? this.#deferredRubric;
+    const resolved = this.#pendingRubricResolution;
+    if (original && ((resolved && resolved.controller === controller && resolved.conversationId === conversationId) || this.#conversation.hasPendingAdvancement(conversationId!))) {
+      try {
+        const result = resolved && resolved.controller === controller && resolved.conversationId === conversationId
+          ? resolved.result : await controller!.reconcileRubricSubmission(original);
+        // Take ownership before checking a connection generation that may have
+        // changed during receipt recovery. The next visit consumes this exact
+        // result/Outcome, even if the run completes while the page is offline.
+        if (result) this.#holdRubricResolution(controller!, conversationId!, result);
+        current();
+        this.#pendingRubric = undefined; this.#deferredRubric = undefined;
+        this.#pendingRubricNotice = undefined;
+        this.#pendingRubricResolution = undefined;
+        if (result?.kind === 'accepted') {
+          this.#mainView = { ...this.#mainView, choices: undefined };
+          this.#followTurn(result.turn); return;
+        }
+        if (result?.kind === 'awaiting-rubric-confirmation') {
+          this.#deferredRubric = boundedControlProjection(result, 8192);
+          this.#pendingRubricNotice = '已核对上次操作，请确认当前验收方式。';
+        } else if (result) {
+          this.#mainView = { ...this.#mainView, busy: false, choices: undefined, message: result.kind === 'cancelled'
+            ? '已取消这次任务。' : result.kind === 'contract-failed' ? '任务未开始执行，请查看错误后重新处理。' : result.message };
+          await this.#publish(this.#mainView); return;
+        }
+      } catch (error) {
+        current();
+        if (error instanceof PendingInputReceiptError) {
+          this.#mainView = { ...this.#mainView, busy: false, message: '上次操作结果尚待核对；不会重复执行。',
+            choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+          await this.#publish(this.#mainView); return;
+        }
+        if (!this.#conversation.hasPendingAdvancement(conversationId!)) {
+          this.#pendingRubric = undefined; this.#deferredRubric = undefined;
+        }
+        throw error;
+      }
+    }
     if (!this.#pendingRubric && !this.#deferredRubric) {
       const pending = await this.#conversation.consumeResume(conversationId!, result => {
         current();
@@ -1306,8 +1378,21 @@ class TerminalApplication {
           const confirmed = await this.#choose({ kind: 'selection', title: '取消这次任务？', message: '取消后不会执行原任务。', choices: [{ id: 'cancel', label: '确认取消' }, { id: 'return', label: '返回' }] });
           current();
           if (confirmed !== 'cancel') continue;
-          await this.#controller!.cancelRubricContract(identity);
-          current();
+          const controller = this.#controller!;
+          this.#mainView = { ...this.#mainView, choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+          try {
+            await controller.cancelRubricContract(identity);
+            this.#holdRubricResolution(controller, identity.conversationId, { kind: 'cancelled',
+              conversationId: identity.conversationId, turnId: identity.turnId, advancementSessionId: identity.advancementSessionId });
+            current();
+          } catch (error) {
+            current();
+            if (!(error instanceof PendingInputReceiptError)) throw error;
+            this.#mainView = { ...this.#mainView, busy: false, message: '上次操作结果尚待核对；不会重复执行。',
+              choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+            await this.#publish(this.#mainView); return;
+          }
+          this.#pendingRubricResolution = undefined;
           this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined;
           this.#mainView = { ...this.#mainView, busy: false, message: '已取消这次任务。', choices: undefined };
         } else this.#mainView = { ...this.#mainView, busy: false, message: '任务保持待确认，可以继续核对。', choices: [{ id: 'rubric-resume', label: '继续确认任务' }] };
@@ -1332,30 +1417,40 @@ class TerminalApplication {
         current();
         try {
           const revised = await this.#conversation.consumeReviseAdvancement(pending.conversationId, pending.advancementSessionId, selected.input, result => {
-            current();
             if (result.conversationId !== pending.conversationId || result.advancementSessionId !== pending.advancementSessionId ||
                 result.rubricDraft.originalTurnId !== pending.turnId || result.rubricDraftId !== result.rubricDraft.draftId) throw Error('修订结果身份不一致，请重新核对任务。');
             return boundedControlProjection({ kind: 'awaiting-rubric-confirmation' as const, conversationId: result.conversationId,
               turnId: pending.turnId, advancementSessionId: result.advancementSessionId, rubricDraftId: result.rubricDraftId }, 8192);
-          });
+          }, pending.rubricDraftId);
+          this.#holdRubricResolution(controller, pending.conversationId, revised);
           current(); this.#deferredRubric = revised;
+          this.#pendingRubricResolution = undefined;
           this.#pendingRubric = undefined;
           this.#pendingRubricNotice = '准则修订已保存，等待确认。';
         }
-        catch {
+        catch (error) {
           current();
           const { rubricDraft: _draft, ...identity } = pending;
           this.#pendingRubric = undefined; this.#deferredRubric = identity;
+          if (error instanceof PendingInputReceiptError) {
+            this.#mainView = { ...this.#mainView, busy: false, message: '修订结果尚待核对；不会重复提交。',
+              choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+            await this.#publish(this.#mainView); return;
+          }
           await this.#choose({ kind: 'selection', title: '修订结果待核对', message: '尚未开始任务；返回后会重新读取当前验收方式，不会恢复旧快照。', choices: [{ id: 'return', label: '返回' }] });
           current();
         }
         continue;
       }
       let turn: AcceptedTurn<TerminalTurnOutcome> | undefined;
+      this.#mainView = { ...this.#mainView, choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+      try {
       if (selected.value === 'cancel' || selected.value === 'direct') {
         const result = await controller.cancelRubricContract(pending, { executeOriginal: selected.value === 'direct' });
-        current();
         if (result.kind === 'direct-execution') turn = result.turn;
+        this.#holdRubricResolution(controller, pending.conversationId, turn ? { kind: 'accepted', turn }
+          : { kind: 'cancelled', conversationId: pending.conversationId, turnId: pending.turnId, advancementSessionId: pending.advancementSessionId });
+        current();
       } else {
         const candidate = primaryNearbyCandidate(pending.rubricDraft);
         if (selected.value === 'update-existing' && !candidate) continue;
@@ -1363,14 +1458,30 @@ class TerminalApplication {
           ...(selected.value === 'update-existing' ? { rubricPersistence: { kind: 'update-existing' as const, rubricId: candidate!.id } }
             : selected.value === 'save-new' ? { rubricPersistence: { kind: 'save-new' as const } } : {}),
         });
+        this.#holdRubricResolution(controller, pending.conversationId, { kind: 'accepted', turn });
         current();
+      }
+      } catch (error) {
+        current();
+        if (!(error instanceof PendingInputReceiptError)) throw error;
+        this.#mainView = { ...this.#mainView, busy: false, message: '上次操作结果尚待核对；不会重复执行。',
+          choices: [{ id: 'rubric-resume', label: '核对上次操作' }] };
+        await this.#publish(this.#mainView); return;
       }
       this.#pendingRubric = undefined;
       this.#deferredRubric = undefined;
       this.#pendingRubricNotice = undefined;
+      this.#pendingRubricResolution = undefined;
       this.#mainView = { ...this.#mainView, choices: undefined, message: turn ? '开始执行…' : '已取消这次任务。', busy: !!turn };
       if (turn) this.#followTurn(turn); else await this.#publish(this.#mainView);
     }
+  }
+
+  #holdRubricResolution(controller: ConversationController<TerminalTurnOutcome>, conversationId: string,
+    result: BeginReferencedUserTurnResult<TerminalTurnOutcome>): void {
+    if (this.#abort.signal.aborted || this.#controller !== controller || controller.current.conversationId !== conversationId) return;
+    this.#pendingRubricResolution = { controller, conversationId, result };
+    this.#mainView = { ...this.#mainView, choices: [{ id: 'rubric-resume', label: '查看任务结果' }] };
   }
 
   #followTurn(turn: AcceptedTurn<TerminalTurnOutcome>): void {
@@ -1728,7 +1839,7 @@ class TerminalApplication {
     const controller = this.#controller; if (!controller) return;
     this.#invalidateConversation();
     this.#holdNoticeDisplay();
-    this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined;
+    this.#pendingRubric = undefined; this.#deferredRubric = undefined; this.#pendingRubricNotice = undefined; this.#pendingRubricResolution = undefined;
     this.#mainView = { kind: 'conversation', title: controller.current.name, busy: false, connected: true };
     this.#taskNotices?.resume();
     await controller.reattachActiveObserver().finally(() => this.#resumeNoticeDisplay());

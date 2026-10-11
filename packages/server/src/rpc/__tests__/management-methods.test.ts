@@ -479,7 +479,7 @@ describe("skill.*", () => {
     expect(conflict.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
       message: "Internal error",
-      data: { message: "Skill changed" },
+      data: { diagnostic: { failure: { category: "Error" }, sourceFrames: expect.any(Array) } },
     });
 
     const commitFailure = await dispatchSkillRequest({
@@ -490,7 +490,7 @@ describe("skill.*", () => {
     expect(commitFailure.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
       message: "Internal error",
-      data: { message: "commit failed" },
+      data: { diagnostic: { failure: { category: "Error" }, sourceFrames: expect.any(Array) } },
     });
   });
 });
@@ -681,7 +681,7 @@ describe("schedule management Product API", () => {
     expect(runSystem.sendError).toHaveBeenCalledWith("schedule-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
       message: "Internal error",
-      data: { message: "Cannot modify system task: system" },
+      data: { diagnostic: { failure: { category: "Error" }, sourceFrames: expect.any(Array) } },
     });
   });
 
@@ -732,7 +732,7 @@ describe("schedule management Product API", () => {
       expect(result.sendError).toHaveBeenCalledWith("schedule-wire", {
         code: RPC_ERROR_CODES.INTERNAL_ERROR,
         message: "Internal error",
-        data: { message: "Cannot modify system task: system" },
+        data: { diagnostic: { failure: { category: "Error" }, sourceFrames: expect.any(Array) } },
       });
     }
 
@@ -749,7 +749,7 @@ describe("schedule management Product API", () => {
     expect(invalidUpdate.sendError).toHaveBeenCalledWith("schedule-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
       message: "Internal error",
-      data: { message: "Schedule task name must be a bounded string" },
+      data: { diagnostic: { failure: { category: "Error" }, sourceFrames: expect.any(Array) } },
     });
 
     for (const method of ["schedule.update", "schedule.delete"] as const) {

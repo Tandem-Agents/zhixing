@@ -13,15 +13,17 @@ import type {
 } from "@zhixing/core/types";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  CONVERSATION_INPUT_RECEIPT_QUERY,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   type ConversationRunControlPort,
   type ConversationAgentTurnAdmissionPort,
   type ConversationAgentTurnIdentityPort,
 } from "@zhixing/core/conversation/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { ProductApiDispatcher, bindProductApiOperation } from "@zhixing/core/product-api";
 import {
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+  ADVANCEMENT_SUBMISSION_QUERY,
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
 } from "@zhixing/core/advancement/application";
@@ -38,6 +40,7 @@ import {
   buildSessionAbortMethod,
   buildSessionResolveMethod,
   buildSessionSendMethod,
+  buildSessionInputReceiptMethod,
   buildSessionSubscribeMethod,
 } from "../methods/session.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -748,5 +751,42 @@ describe("session durable control 方法", () => {
     expect(observedSignal?.aborted).toBe(false);
     expect(abortRuntime).not.toHaveBeenCalled();
     await manager.disposeAll();
+  });
+});
+
+describe("session.inputReceipt Advancement projection", () => {
+  it.each(["saved", "stale", "not-saved", "direct", "pending-collision", "rejected", "cancelled", "failed"] as const)("projects %s from authenticated authority reads", async kind => {
+    const currentInput = "current-input", principal = "rpc:owned";
+    const identity = { surfacePrincipal: principal, submissionId: currentInput, requestDigest: `sha256:${"a".repeat(64)}` };
+    const outcome = kind === "rejected" ? { kind: "rejected", code: "rubric-draft-stale" } : (kind === "direct" || kind === "pending-collision") ? { kind: "original-task-intent", mode: "direct", sessionId: "adv-old", originalTurnId: "original-input" }
+      : kind === "cancelled" ? { kind: "cancelled", sessionId: "adv-old" }
+      : kind === "failed" ? { kind: "contract-failed", code: "rubric-generation-failed" }
+      : kind === "not-saved" ? { kind: "not-saved", sessionId: "adv-old", draftId: "draft", originalTurnId: "original-input" }
+      : { kind: "draft-saved", disposition: "original-saved", sessionId: "adv-old", draftId: "draft", draftVersion: 0, originalTurnId: "original-input" };
+    const query = vi.fn(async (operation, input) => {
+      if (operation.identity === ADVANCEMENT_SUBMISSION_QUERY.identity) {
+        expect(input).toEqual({ conversationId: "conv", submissionId: currentInput, surfacePrincipal: principal });
+        return { receipt: { identity, outcome }, ...(kind === "direct" ? { originalTaskAdmission: { status: "admitted", intent: { turnId: "original-input" }, runId: "run-original" } } : {}), ...(["saved", "not-saved"].includes(kind) ? { draft: { draftId: "draft", originalTurnId: "original-input" } } : {}) };
+      }
+      expect(input.caller.surfacePrincipal).toBe(principal);
+      return input.turnId === "original-input" ? { status: "accepted", conversationId: "conv", turnId: "original-input", runId: "run-original" } : { status: "unknown" };
+    });
+    const operations = [ADVANCEMENT_SUBMISSION_QUERY, CONVERSATION_INPUT_RECEIPT_QUERY];
+    const productApi = new ProductApiDispatcher({ operations, factEvents: [] }, [{ operations: operations.map(operation => bindProductApiOperation(operation, async input => ({ result: await query(operation, input) as any, facts: [] }))), factEvents: [] }]);
+    const command = vi.spyOn(ProductApiDispatcher.prototype, 'command');
+    const result: any = await buildSessionInputReceiptMethod().handler({ conversationId: "conv", turnId: currentInput, surfacePrincipal: "spoof" }, {
+      connection: { id: "connection", surfacePrincipal: principal, surfaceGeneration: 1 },
+      server: { productApi },
+    } as any);
+    if (kind === "rejected" || kind === "pending-collision") {
+      expect(result.status).toBe(kind === "rejected" ? "rejected" : "unknown");
+      expect(query.mock.calls.some(([, input]) => input.turnId === "original-input")).toBe(false);
+      return;
+    }
+    expect(result).toMatchObject({ status: "settled", conversationId: "conv", turnId: currentInput });
+    if (kind === "direct") expect(result.result).toMatchObject({ turnId: "original-input", runId: "run-original" });
+    if (kind === "saved" || kind === "not-saved") expect(result.result.submission).toEqual({ turnId: currentInput, disposition: kind === "saved" ? "original-saved" : "not-saved" });
+    if (kind === "stale") { expect(result.result.status).toBe("submission-settled"); expect(result.result.rubricDraft).toBeUndefined(); }
+    expect(command).not.toHaveBeenCalled();
   });
 });

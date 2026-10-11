@@ -16,6 +16,7 @@ import { buildSessionStatusHistoryMethod } from "./conversation-status.js";
 export { parseConversationStatusRequest, parseConversationRecoveryRequest } from "./conversation-status.js";
 import {
   buildSessionSendMethod,
+  buildSessionInputReceiptMethod,
   buildSessionAdvancementConfirmMethod,
   buildSessionAdvancementDetailMethod,
   buildSessionAdvancementReviseMethod,
@@ -108,6 +109,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     ...buildLogMethods(),
     // session.*
     buildSessionSendMethod(),
+    buildSessionInputReceiptMethod(),
     buildSessionAdvancementConfirmMethod(),
     buildSessionAdvancementDetailMethod(),
     buildSessionAdvancementReviseMethod(),

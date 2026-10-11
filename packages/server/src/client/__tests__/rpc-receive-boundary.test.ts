@@ -130,7 +130,7 @@ describe("RPC receive boundary with a real WebSocket receiver", () => {
     await new Promise(resolve => setTimeout(resolve, 100));
     const first = client.consume!("held", {}, async () => { entered.resolve(); await release.promise; });
     await entered.promise;
-    expect(await queued).toMatchObject({ message: "RPC request timeout after 350ms: queued" });
+    expect(await queued).toMatchObject({ code: "RPC_DEADLINE_EXCEEDED", stage: "waiting-receipt" });
     release.resolve();
     await first;
     expect(await client.request("after-expiry")).toBe(3);
@@ -145,7 +145,7 @@ describe("RPC receive boundary with a real WebSocket receiver", () => {
       jsonrpc: "2.0", id: JSON.parse(data.toString()).id, result: {},
     })));
     try {
-      await expect(client.consume!("held", {}, () => release.promise)).rejects.toThrow("timeout after 100ms");
+      await expect(client.consume!("held", {}, () => release.promise)).rejects.toMatchObject({ code: 'RPC_DEADLINE_EXCEEDED', stage: 'waiting-receipt' });
       expect(client.closed).toBe(true);
       await expect(client.request("late")).rejects.toBeInstanceOf(RpcClientClosedError);
     } finally { release.resolve(); }

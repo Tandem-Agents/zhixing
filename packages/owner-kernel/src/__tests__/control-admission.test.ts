@@ -184,6 +184,26 @@ function inputResult(runId: string, queuedPosition = 0): ControlResult {
 }
 
 describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it('reads only the authenticated original input receipt without replay or inference from absence', async () => {
+    const { log, journal, artifacts } = await createHarness();
+    const source = inputSource('turn-receipt');
+    const query = { conversationId: 'conversation-1', turnId: 'turn-receipt', surfacePrincipal: source.principal.surfacePrincipal };
+    const requestId = `input:${protocolDigest('ConversationInputIdentity', 1, { surfacePrincipal: query.surfacePrincipal, ingressId: query.turnId })}`;
+    const envelope = inputEnvelope(requestId, source);
+    expect(await journal.inputReceipt(query)).toEqual({ status: 'unknown' });
+    await log.append<ControlRecord>([{ stream: 'control', body: { t: 'received', requestId, envelope, ingress: source.ingress! } }]);
+    expect(await journal.inputReceipt(query)).toEqual({ status: 'unknown' });
+    await log.append<ControlRecord>([{ stream: 'control', body: { t: 'applied', requestId, result: inputResult('run-receipt'), authorityRevision: 1 } }]);
+    const before = await log.readSnapshot();
+    expect(await journal.inputReceipt({ ...query, surfacePrincipal: 'surface:other' })).toEqual({ status: 'unknown' });
+    expect(await journal.inputReceipt({ ...query, conversationId: 'conversation-other' })).toEqual({ status: 'unknown' });
+    expect(await journal.inputReceipt({ ...query, turnId: 'turn-other' })).toEqual({ status: 'unknown' });
+    expect(await journal.inputReceipt(query)).toEqual({ status: 'accepted', conversationId: 'conversation-1', turnId: 'turn-receipt', runId: 'run-receipt' });
+    expect((await log.readSnapshot()).cursor).toEqual(before.cursor);
+    const recovered = new ControlAdmissionJournal(log, artifacts);
+    // Inline receipt remains available after its in-memory projection is gone.
+    expect(await recovered.inputReceipt(query)).toMatchObject({ status: 'accepted', runId: 'run-receipt' });
+  });
   it("distinguishes absent, durable pending and settled admission states", async () => {
     const { log, journal } = await createHarness();
     const source = sessionSource();

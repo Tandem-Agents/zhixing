@@ -55,6 +55,7 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.resume",
   "session.security",
   "session.send",
+  "session.inputReceipt",
   "session.subscribe",
   "session.taskList",
   "session.taskListUpdate",
@@ -389,6 +390,11 @@ export class LocalConversationRpcRouter
       }
       case "session.send":
         return this.#send(params, connection);
+      case "session.inputReceipt":
+        return this.#application.queryInputReceipt({
+          kind: 'input-receipt', conversationId: this.#conversationId(params, method), turnId: requiredIdentifier(params.turnId, '输入回执'),
+          caller: { kind: 'surface', surfacePrincipal: requireRpcSurfacePrincipal(connection), connectionId: String(connection.id) },
+        });
       case "session.abort": {
         requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);

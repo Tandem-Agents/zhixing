@@ -19,6 +19,7 @@ import type {
   ConversationHistoryCursor as RunsPageCursor,
 } from "@zhixing/core/conversation/application";
 import type {
+  SessionInputReceipt,
   SessionChangedPayload,
   SessionActivityPayload,
   SessionAdvancementCancelResult,
@@ -54,6 +55,7 @@ import type {
 import {
   RpcClientError,
   RpcClientClosedError,
+  RpcRequestInterruptedError,
   RPC_ERROR_CODES,
   type RpcClient,
   type RpcEncodedJsonSource,
@@ -84,9 +86,23 @@ export interface SessionSendSnapshotIdentity {
 }
 export interface DisposableSessionSendSource extends RpcEncodedJsonSource { dispose(): Promise<void> }
 
+export interface SessionSendRecovery {
+  pending(error: unknown, automatic: boolean): void | Promise<void>;
+  waitForRetry(signal?: AbortSignal): Promise<void>;
+}
+
+class InputReceiptRejectedError extends RpcClientError {
+  constructor() { super(RPC_ERROR_CODES.INVALID_PARAMS, "原输入未被接纳，草稿已保留。"); }
+}
+
+export class PendingInputReceiptError extends Error {
+  constructor(message = "操作结果尚待核对；请重试同一操作，系统只查询原结果，不会重复执行。") { super(message); this.name = "PendingInputReceiptError"; }
+}
+
 export class RpcConversationFacade {
   #continuationRequirement: readonly string[] | null = null;
   #limitedCapabilitiesAccepted = false;
+  #pendingAdvancement = new Map<string, { method: string; key: string; submissionId: string }>();
 
   constructor(private readonly link: CoreHostRpcLink) {}
 
@@ -115,20 +131,24 @@ export class RpcConversationFacade {
     turnId: string,
     options: { readonly engage?: SessionSendEngage } = {},
   ): Promise<SessionSendResult> {
-    return this.#requestWithReconnect<SessionSendResult>("session.send", {
+    const client = await this.link.getClient();
+    try { return await client.request<SessionSendResult>("session.send", {
       ...(typeof input === "string" ? { text: input } : { input }),
       ...this.#sendIdentity(conversationId, turnId),
       ...(options.engage ? { engage: options.engage } : {}),
-    });
+    }); } catch (error) {
+      if (!conversationId || definitelyUnsubmitted(error)) throw error;
+      return this.#recoverInput<SessionSendResult>(conversationId, turnId, error, { pending: () => undefined, waitForRetry: async () => { throw error; } }, undefined);
+    }
   }
 
-  /** Only ordinary session.send inputs have a cold exact-replay source.
-   * Freeze consent/operation identity now, prepare once, then change only the
-   * transport request ID on a ClosedError replay. Never re-read materials. */
+  /** Freeze once. A lost response is recovered by its read-only receipt;
+   * session.send can enter Advancement and must not be blindly replayed. */
   async sendPrepared<T = SessionSendResult>(
     prepare: (identity: SessionSendSnapshotIdentity, signal: AbortSignal, maximumBytes: number) => Promise<DisposableSessionSendSource>,
     conversationId: string | undefined, turnId: string, signal?: AbortSignal,
     consume?: (result: SessionSendResult) => T,
+    recovery?: SessionSendRecovery,
   ): Promise<T> {
     const identity = this.#sendIdentity(conversationId, turnId);
     let source: DisposableSessionSendSource | undefined;
@@ -143,7 +163,15 @@ export class RpcConversationFacade {
         if (preparationSignal.aborted) { await value.dispose().catch(() => {}); preparationSignal.throwIfAborted(); }
         source = value; return value;
       }, signal);
-      return await this.#sendSource(source!, client, prepared.deadline, signal, consume);
+      try {
+        return await this.#sendSource(source!, client, prepared.deadline, signal, consume);
+      } catch (error) {
+        if (!recovery || !conversationId || definitelyUnsubmitted(error)) throw error;
+        // Release the cold transport source before a user-paced receipt wait.
+        // The terminal's frozen draft remains owned independently.
+        await source?.dispose().catch(() => {}); source = undefined;
+        return await this.#recoverInput(conversationId, turnId, error, recovery, signal, consume);
+      }
     } finally {
       // Physical/account uncertainty remains charged by the source owner. A
       // late cleanup failure cannot retract the server's D06 acceptance.
@@ -156,22 +184,123 @@ export class RpcConversationFacade {
   }
 
   async #sendSource<T>(source: RpcEncodedJsonSource, first: RpcClient, deadline: number, signal: AbortSignal | undefined, consume?: (result: SessionSendResult) => T): Promise<T> {
-    let client = first;
-    let options: { deadline?: number; signal?: AbortSignal } = { deadline, signal };
+    signal?.throwIfAborted();
+    if (!first.requestEncoded) throw Error('当前连接不支持有界输入发送，草稿已保留。');
+    if (consume && first.consumeEncoded) return first.consumeEncoded<SessionSendResult, T>('session.send', source, consume, { deadline, signal });
+    const result = await first.requestEncoded<SessionSendResult>('session.send', source, { deadline, signal });
+    return consume ? consume(result) : result as T;
+  }
+
+  async #recoverInput<T>(conversationId: string, turnId: string, firstError: unknown, recovery: SessionSendRecovery,
+    signal: AbortSignal | undefined, consume?: (result: SessionSendResult) => T): Promise<T> {
+    let cause = firstError;
     for (;;) {
-      signal?.throwIfAborted();
-      if (!client.requestEncoded) throw Error('重连接入面不支持有界输入发送，草稿已保留。');
-      try {
-        if (consume && client.consumeEncoded) return await client.consumeEncoded<SessionSendResult, T>('session.send', source, consume, options);
-        const result = await client.requestEncoded<SessionSendResult>('session.send', source, options);
-        return consume ? consume(result) : result as T;
-      } catch (error) {
-        if (!(error instanceof RpcClientClosedError)) throw error;
-        client = await this.link.getClient();
-        // Each existing transport attempt has its own original timeout. Only
-        // the first includes preparation; none receives a per-fragment reset.
-        options = { signal };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        signal?.throwIfAborted();
+        await recovery.pending(cause, true);
+        let receipt: SessionInputReceipt;
+        let consuming = false;
+        try {
+          const client = await this.link.getClient();
+          const project = (value: SessionInputReceipt): { done: true; value: T } | { done: false; receipt: SessionInputReceipt } => {
+            let result: SessionSendResult | undefined;
+            if (value.status === 'settled' && value.conversationId === conversationId && value.turnId === turnId && value.result.conversationId === conversationId) result = value.result;
+            else if (value.status === 'accepted' && value.conversationId === conversationId && value.turnId === turnId && value.runId) result = { conversationId, sessionId: conversationId, turnId, runId: value.runId };
+            if (!result) return { done: false, receipt: value };
+            consuming = true;
+            return { done: true, value: consume ? consume(result) : result as T };
+          };
+          const params = { conversationId, turnId }, options = { signal, deadline: Date.now() + 5000 };
+          const checked = client.consume
+            ? await client.consume('session.inputReceipt', params, project, options)
+            : project(await client.request<SessionInputReceipt>('session.inputReceipt', params, options));
+          if (checked.done) return checked.value;
+          receipt = checked.receipt;
+        } catch (error) { if (consuming) throw error; cause = error; continue; }
+        if (receipt.status === 'accepted' || receipt.status === 'settled') { cause = Error('Input receipt identity mismatch'); continue; }
+        if (receipt.status === 'rejected') throw new InputReceiptRejectedError();
+        // An absent receipt can precede the original authority commit. Never
+        // turn it into a rejection or issue another session.send.
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(signal?.reason); };
+          const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, 500);
+          signal?.addEventListener('abort', abort, { once: true });
+          if (signal?.aborted) abort();
+        });
       }
+      await recovery.pending(cause, false);
+      await recovery.waitForRetry(signal);
+    }
+  }
+
+
+  hasPendingAdvancement(conversationId: string): boolean {
+    return this.#pendingAdvancement.has(conversationId);
+  }
+
+  /** Read the saved submission, independently of the currently displayed draft
+   * or button. The consumer takes responsibility before the identity retires. */
+  async consumePendingAdvancement<T>(conversationId: string, consume: (result: SessionSendResult) => T): Promise<T | undefined> {
+    const identity = this.#pendingAdvancement.get(conversationId);
+    if (!identity) return undefined;
+    try {
+      return await this.#recoverInput<T>(conversationId, identity.submissionId, new PendingInputReceiptError(), {
+        pending: () => undefined,
+        waitForRetry: async () => { throw new PendingInputReceiptError(); },
+      }, undefined, result => {
+        const value = consume(result);
+        if (this.#pendingAdvancement.get(conversationId) === identity) this.#pendingAdvancement.delete(conversationId);
+        return value;
+      });
+    } catch (error) {
+      if (error instanceof InputReceiptRejectedError && this.#pendingAdvancement.get(conversationId) === identity) this.#pendingAdvancement.delete(conversationId);
+      throw error;
+    }
+  }
+
+  /** A button retry checks the previous identity; it never replays a mutation. */
+  async #advancementRequest<T, R = T>(method: string, conversationId: string, params: Record<string, unknown>,
+    project: (result: SessionSendResult) => T, consume?: (result: T) => R): Promise<R> {
+    const key = JSON.stringify({ method, params });
+    const pending = this.#pendingAdvancement.get(conversationId);
+
+    if (pending && pending.key !== key) throw new PendingInputReceiptError("上次操作结果尚待核对；请先重试上一次操作，再选择其他操作。");
+    const identity = pending ?? { method, key, submissionId: generateTurnId() };
+    if (!pending && this.#pendingAdvancement.size >= 64) throw Error("尚有未核对的任务操作，请先核对其结果。");
+    this.#pendingAdvancement.set(conversationId, identity);
+    let cause: unknown = Error("上次操作结果待核对");
+    if (!pending) {
+      let client: RpcClient;
+      try { client = await this.link.getClient(); } catch (error) { this.#pendingAdvancement.delete(conversationId); throw error; }
+      let delivered = false;
+      try {
+        const input = { ...params, submissionId: identity.submissionId };
+        const accept = (value: T): R => {
+          delivered = true;
+          const result = consume ? consume(value) : value as unknown as R;
+          if (this.#pendingAdvancement.get(conversationId) === identity) this.#pendingAdvancement.delete(conversationId);
+          return result;
+        };
+        const result = consume && client.consume ? await client.consume<T, R>(method, input, accept)
+          : accept(await client.request<T>(method, input));
+        this.#pendingAdvancement.delete(conversationId); return result;
+      } catch (error) {
+        if (delivered) throw error;
+        if (definitelyUnsubmitted(error)) { this.#pendingAdvancement.delete(conversationId); throw error; }
+        cause = error;
+      }
+    }
+    try { return await this.#recoverInput<R>(conversationId, identity.submissionId, cause, {
+      pending: () => undefined,
+      waitForRetry: async () => { throw new PendingInputReceiptError(); },
+    }, undefined, result => {
+      const projected = project(result);
+      const value = consume ? consume(projected) : projected as unknown as R;
+      if (this.#pendingAdvancement.get(conversationId) === identity) this.#pendingAdvancement.delete(conversationId);
+      return value;
+    }); } catch (error) {
+      if (error instanceof InputReceiptRejectedError) this.#pendingAdvancement.delete(conversationId);
+      throw error;
     }
   }
 
@@ -329,16 +458,12 @@ export class RpcConversationFacade {
     rubricDraftId: string,
     rubricPersistence?: SessionRubricPersistenceChoice,
   ): Promise<SessionAdvancementConfirmResult> {
-    const client = await this.link.getClient();
-    return client.request<SessionAdvancementConfirmResult>(
-      "session.advancementConfirm",
-      {
-        conversationId,
-        advancementSessionId,
-        rubricDraftId,
-        ...(rubricPersistence ? { rubricPersistence } : {}),
-      },
-    );
+    return this.#advancementRequest<SessionAdvancementConfirmResult>("session.advancementConfirm", conversationId,
+      { conversationId, advancementSessionId, rubricDraftId, ...(rubricPersistence ? { rubricPersistence } : {}) },
+      result => {
+        if ("status" in result || !result.runId) throw Error("任务确认状态已变化，请重新查看。");
+        return { ...result, status: "confirmed", advancementSessionId, runStatus: "queued" };
+      });
   }
 
   /**
@@ -347,17 +472,15 @@ export class RpcConversationFacade {
   async cancelAdvancement(
     conversationId: string,
     advancementSessionId: string,
-    opts: { executeOriginal?: boolean } = {},
+    opts: { executeOriginal?: boolean; rubricDraftId?: string } = {},
   ): Promise<SessionAdvancementCancelResult> {
-    const client = await this.link.getClient();
-    return client.request<SessionAdvancementCancelResult>(
-      "session.advancementCancel",
-      {
-        conversationId,
-        advancementSessionId,
-        executeOriginal: opts.executeOriginal ?? false,
-      },
-    );
+    return this.#advancementRequest<SessionAdvancementCancelResult>("session.advancementCancel", conversationId,
+      { conversationId, advancementSessionId, executeOriginal: opts.executeOriginal ?? false, ...(opts.rubricDraftId ? { rubricDraftId: opts.rubricDraftId } : {}) },
+      result => {
+        if ("status" in result && result.status === "cancelled") return { conversationId, sessionId: conversationId, status: "cancelled", advancementSessionId };
+        if ("status" in result || !result.runId) throw Error("任务状态已变化，请重新查看。");
+        return { ...result, status: "direct-execution", advancementSessionId, runStatus: "queued" };
+      });
   }
 
   /** 按用户反馈修订待审 Rubric 草案，仍停留在确认控制面。 */
@@ -365,12 +488,15 @@ export class RpcConversationFacade {
     conversationId: string,
     advancementSessionId: string,
     userFeedback: string,
+    rubricDraftId?: string,
   ): Promise<SessionAdvancementReviseResult> {
-    const client = await this.link.getClient();
-    return client.request<SessionAdvancementReviseResult>(
-      "session.advancementRevise",
-      { conversationId, advancementSessionId, userFeedback },
-    );
+    return this.#advancementRequest<SessionAdvancementReviseResult>("session.advancementRevise", conversationId,
+      { conversationId, advancementSessionId, userFeedback, ...(rubricDraftId ? { rubricDraftId } : {}) },
+      result => {
+        if (!("status" in result) || result.status !== "awaiting-rubric-confirmation") throw Error("修订结果已核对，当前任务状态已变化，请重新查看。");
+        return { conversationId, sessionId: conversationId, status: "revised", advancementSessionId: result.advancementSessionId,
+          rubricDraftId: result.rubricDraftId, rubricDraft: result.rubricDraft };
+      });
   }
 
   /** 建一个新对话(宿主写 meta + transcript 壳),返回身份供切指针。 */
@@ -462,10 +588,15 @@ export class RpcConversationFacade {
     });
   }
 
-  async consumeReviseAdvancement<T>(conversationId: string, advancementSessionId: string, userFeedback: string, consume: (result: SessionAdvancementReviseResult) => T): Promise<T> {
-    const client = await this.link.getClient(), params = { conversationId, advancementSessionId, userFeedback };
-    return client.consume ? client.consume<SessionAdvancementReviseResult, T>('session.advancementRevise', params, consume)
-      : consume(await client.request<SessionAdvancementReviseResult>('session.advancementRevise', params));
+  async consumeReviseAdvancement<T>(conversationId: string, advancementSessionId: string, userFeedback: string, consume: (result: SessionAdvancementReviseResult) => T, rubricDraftId?: string): Promise<T> {
+
+    return this.#advancementRequest<SessionAdvancementReviseResult, T>("session.advancementRevise", conversationId,
+      { conversationId, advancementSessionId, userFeedback, ...(rubricDraftId ? { rubricDraftId } : {}) },
+      result => {
+        if (!("status" in result) || result.status !== "awaiting-rubric-confirmation") throw Error("修订结果已核对，当前任务状态已变化，请重新查看。");
+        return { conversationId, sessionId: conversationId, status: "revised", advancementSessionId: result.advancementSessionId,
+          rubricDraftId: result.rubricDraftId, rubricDraft: result.rubricDraft };
+      }, consume);
   }
 
   async consumeResume<T>(conversationId: string, consume: (result: SessionResumeResult) => T): Promise<T> {
@@ -624,6 +755,12 @@ function isRpcNotFound(err: unknown): err is RpcClientError {
     err instanceof RpcClientError &&
     err.code === RPC_ERROR_CODES.NOT_FOUND
   );
+}
+
+function definitelyUnsubmitted(error: unknown): boolean {
+  if (error instanceof RpcRequestInterruptedError && error.stage === 'before-send') return true;
+  return error instanceof RpcClientError && [RPC_ERROR_CODES.PARSE_ERROR, RPC_ERROR_CODES.INVALID_REQUEST,
+    RPC_ERROR_CODES.METHOD_NOT_FOUND, RPC_ERROR_CODES.UNAUTHORIZED].some(code => code === error.code);
 }
 
 function sameCapabilities(

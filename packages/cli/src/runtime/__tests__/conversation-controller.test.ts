@@ -12,19 +12,21 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentYield } from "@zhixing/core/loop";
 import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
-import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
+import { RPC_ERROR_CODES, RpcClientError, RpcClientClosedError } from "@zhixing/server";
 import {
   ConversationController,
   AcceptedTurnOutcomeUnknownError,
   selectInitialConversation,
   type ActiveConversation,
 } from "../conversation-controller.js";
-import type { RpcConversationFacade } from "../rpc-conversation-facade.js";
+import { RpcConversationFacade, PendingInputReceiptError } from "../rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "../rpc-workscene-facade.js";
 import { createObservedTurnPresenter } from "../observed-turn-presenter.js";
 import { TerminalOutputProjection } from '../../terminal/output.js';
 import { createUserSubmission } from "../user-submission.js";
 import { projectProcessYield } from '@zhixing/rpc/session-wire';
+
+import { makeFakeHostLink } from "./fake-host-link.js";
 
 type Handler<T> = (p: T) => void;
 
@@ -217,10 +219,13 @@ describe('bounded authoritative recovery consumer', () => {
     try {
       await controller.start(); await vi.waitFor(() => expect(inputs).toHaveBeenCalledOnce());
       const turn = await controller.beginTurn('new request');
+      const retained = (controller as unknown as { turnOutcomes: Map<string, unknown> }).turnOutcomes;
+      expect(retained.size).toBe(1);
       committed = true;
       // No live Final: any fact notification must wake metadata reconciliation.
       f.emit.status({ ...notice(20), ref: { ...notice(20).ref, runId: 'latest' }, state: 'committed' });
       await expect(turn.outcome).resolves.toEqual(summary);
+      expect(retained.size).toBe(0);
       expect(project).toHaveBeenCalledOnce(); expect(onRunTerminal).toHaveBeenCalledOnce();
       expect(inputs).toHaveBeenCalledOnce(); // The ordered body consumer is still waiting.
     } finally { controller.dispose(); release(); }
@@ -1885,7 +1890,7 @@ describe("ConversationController", () => {
     expect(f.conversation.cancelAdvancement).toHaveBeenCalledWith(
       "conv-1",
       "adv-1",
-      { executeOriginal: true },
+      { executeOriginal: true, rubricDraftId: pending.rubricDraftId },
     );
     expect(result.kind).toBe("direct-execution");
     if (result.kind !== "direct-execution") throw new Error("unexpected result");
@@ -2486,4 +2491,79 @@ describe("ConversationController", () => {
       }),
     ).toEqual({ kind: "deleted" });
   });
+});
+
+
+it.each(["confirm", "direct", "confirm-save"] as const)("preserves Ctrl+C through %s receipt budget, changed action and manual recovery", async kind => {
+  const transport = makeFakeHostLink(), f = makeFakes();
+  let ready = false, submitted = "", mutationCount = 0;
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const facade = new RpcConversationFacade(transport.link);
+  const controller = new ConversationController({ conversation: facade, workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: () => {} }, initial);
+  const pending = { kind: "awaiting-rubric-confirmation" as const, conversationId: "conv-1", turnId: "original-turn", advancementSessionId: "adv-1", rubricDraftId: "draft-1", rubricDraft: rubricDraft("original-turn") };
+  transport.setResponder(async (method, raw: any) => {
+    if (method === "session.advancementConfirm" || method === "session.advancementCancel") {
+      mutationCount++; submitted = raw.submissionId; entered.resolve(); await release.promise; throw new RpcClientClosedError();
+    }
+    if (method === "session.inputReceipt") {
+      expect(raw.turnId).toBe(submitted);
+      if (!ready) throw new RpcClientClosedError();
+      return { status: "settled", conversationId: "conv-1", turnId: submitted, result: { conversationId: "conv-1", sessionId: "conv-1", turnId: "original-turn", runId: "original-run" } };
+    }
+    return {};
+  });
+  const execute = () => kind === "direct" ? controller.cancelRubricContract(pending, { executeOriginal: true }) : controller.confirmRubricContract(pending);
+  try {
+    const first = execute(); const failed = expect(first).rejects.toBeInstanceOf(PendingInputReceiptError);
+    await entered.promise;
+    let cancelled = false;
+    const cancellation = controller.abort().then(() => { cancelled = true; });
+    release.resolve(); await failed;
+    expect(cancelled).toBe(false);
+    ready = true;
+    const changed = kind === "direct" ? controller.confirmRubricContract(pending)
+      : kind === "confirm-save" ? controller.confirmRubricContract(pending, { rubricPersistence: { kind: "save-new" } })
+      : controller.cancelRubricContract(pending, { executeOriginal: true });
+    await expect(changed).rejects.toBeInstanceOf(PendingInputReceiptError);
+    expect(cancelled).toBe(false);
+    expect(mutationCount).toBe(1);
+    const recovered = await controller.reconcileRubricSubmission({ ...pending, rubricDraftId: "draft-refreshed" });
+    expect(recovered?.kind).toBe("accepted");
+    await cancellation;
+    expect(mutationCount).toBe(1);
+    const aborts = transport.requests.filter(item => item.method === "session.abort");
+    expect(aborts).toHaveLength(1);
+    expect(aborts[0]?.params).toMatchObject({ conversationId: "conv-1", runId: "original-run" });
+    expect(cancelled).toBe(true);
+  } finally { controller.dispose(); }
+});
+
+
+it("reconciles a lost revision receipt after the page has loaded the new draft", async () => {
+  const transport = makeFakeHostLink(), f = makeFakes(), facade = new RpcConversationFacade(transport.link);
+  const controller = new ConversationController({ conversation: facade, workscene: f.workscene as unknown as RpcWorksceneFacade, onYield: () => {} }, initial);
+  let ready = false, submission = "", mutations = 0;
+  const revised = { ...rubricDraft("original-turn"), draftId: "draft-new", userGoal: "large goal ".repeat(40000) };
+  transport.setResponder(async (method, raw: any) => {
+    if (method === "session.advancementRevise") { mutations++; submission = raw.submissionId; expect(raw.rubricDraftId).toBe("draft-old"); throw new RpcClientClosedError(); }
+    if (method === "session.inputReceipt") {
+      expect(raw.turnId).toBe(submission);
+      if (!ready) throw new RpcClientClosedError();
+      return { status: "settled", conversationId: "conv-1", turnId: submission, result: {
+        status: "awaiting-rubric-confirmation", conversationId: "conv-1", sessionId: "conv-1", turnId: "original-turn",
+        advancementSessionId: "adv-1", rubricDraftId: "draft-new", rubricDraft: revised,
+      } };
+    }
+    return {};
+  });
+  try {
+    await expect(facade.reviseAdvancement("conv-1", "adv-1", "feedback", "draft-old")).rejects.toBeInstanceOf(PendingInputReceiptError);
+    const displayed = { kind: "awaiting-rubric-confirmation" as const, conversationId: "conv-1", turnId: "original-turn", advancementSessionId: "adv-1", rubricDraftId: "draft-new", rubricDraft: revised };
+    await expect(controller.reconcileRubricSubmission(displayed)).rejects.toBeInstanceOf(PendingInputReceiptError);
+    expect(facade.hasPendingAdvancement("conv-1")).toBe(true);
+    ready = true;
+    await expect(controller.reconcileRubricSubmission(displayed)).resolves.toMatchObject({ kind: "awaiting-rubric-confirmation", rubricDraftId: "draft-new" });
+    expect(facade.hasPendingAdvancement("conv-1")).toBe(false); expect(mutations).toBe(1);
+    expect((controller as unknown as { turnOutcomes: Map<string, unknown> }).turnOutcomes.size).toBe(0);
+  } finally { controller.dispose(); }
 });

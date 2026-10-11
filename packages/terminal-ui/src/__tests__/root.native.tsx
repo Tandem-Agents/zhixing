@@ -114,6 +114,20 @@ try {
     assert.equal(editor().plainText, '启动时输入');
   }
   checks.push('framed startup, no false offline label; startup/failure keep the same editable draft and explicit retry');
+  await show({ kind: 'conversation', title: '知行', connected: true, busy: true });
+  test.mockInput.pressEnter(); await flush();
+  await show({ kind: 'conversation', title: '知行', connected: true, busy: true, inputReceiptPending: true, message: '尚未确认原输入的接纳结果；草稿已保留。' });
+  assert.ok(text().includes('原输入结果待核对'));
+  assert.ok(text().includes('Ctrl+R 核对'));
+  assert.ok(!text().includes('正在保存并提交输入'));
+  test.mockInput.pressKey('\x12'); await flush();
+  assert.equal(actions.at(-1)?.kind, 'retry-connection');
+  test.mockInput.pressKey('\x03'); await flush();
+  assert.equal(actions.at(-1)?.kind, 'interrupt');
+  checks.push('pending input receipt overrides stale submit hints and exposes actual recovery/cancel actions');
+  const receiptSubmission = actions.findLast(action => action.kind === 'input-submit') as Extract<TerminalAction, {kind: 'input-submit'}>;
+  assert.ok(receiptSubmission);
+  root.receive({type: 'submission', inputId: receiptSubmission.inputId, version: receiptSubmission.version, accepted: false}); await flush();
   editor().setText(''); await flush();
   await show({ kind: 'conversation', title: '环境投影', conversationId: 'environment', connected: true,
     environment: { provider: 'provider-one', model: 'model-one', workspace: 'D:/workspace-one' } });

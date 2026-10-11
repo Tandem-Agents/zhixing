@@ -364,7 +364,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     informationRevision();
     const current = view(), blocks = information.snapshot(interactionKey(current));
     const candidate = current.kind === 'conversation' ? candidateValue() : undefined;
-    const left = [...blocks.left];
+    const left = current.inputReceiptPending ? [displayText(current.message ?? "输入结果待核对；草稿已保留。")] : [...blocks.left];
     const process = shownProcess();
     const operationNotice = process && current.message && current.connectionState !== 'starting' ? displayText(current.message) : '';
     if (operationNotice && !left.length) left.push(operationNotice);
@@ -373,7 +373,8 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     else if (current.field) left.push(current.field.label + (current.field.configured ? ' · 已设置，留空保留' : ''));
     else if (current.kind === 'conversation' && editorEmpty() && !left.length) left.push('输入消息或 / 查看命令');
     const hint = (full: string, compact: string) => measureInformation(full) <= size().width - 4 ? full : compact;
-    const keys = candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
+    const keys = current.inputReceiptPending ? hint('Ctrl+R 核对 · Ctrl+C 中止 · 连按退出', 'Ctrl+R 核对 · Ctrl+C 中止')
+      : candidateOpen() && candidateError() ? 'Ctrl+R 重试 · Esc 返回'
       : candidateOpen() && candidateLoading() ? '正在读取候选 · Esc 返回'
       : candidateOpen() && !candidate?.items.length && !candidate?.ghost && !candidate?.mode ? 'Esc 返回'
       : candidate?.ghost ? hint(`Tab 补全 ${candidate.ghost.fullValue} · ↑↓ 选择 · Enter 接纳 · Esc 返回`, `Tab 补全 ${candidate.ghost.fullValue} · Esc 返回`)
@@ -450,7 +451,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     view().connectionState === 'unavailable' ? displayText(view().message ?? '') : '',
   ].filter(Boolean), details: !!taskStatus().summary && taskStatus().summary?.conversationId === view().conversationId && taskStatus().summary?.state !== 'error'
     ? [taskStatus().summary!.text] : [], notice: displayText(view().message || taskStatus().summary?.text || ''), candidateCompressed: candidateHeight() > 0 });
-  const footerProcess = () => shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
+  const footerProcess = () => view().inputReceiptPending ? { revision: 0, phase: '原输入结果待核对，草稿已保留', activity: 'reconciling' as const, tools: [], children: [], usage: {} } : shownProcess() ?? { revision: 0, phase: view().busy ? view().connectionState === 'starting' ? '正在启动知行…' : '正在处理…' : '',
     activity: view().busy ? 'running' as const : 'complete' as const, tools: [], children: [], usage: {} };
   const ChoiceList = () => <box flexDirection="column" flexShrink={0} marginTop={view().message && choices().length ? 1 : 0}>
     <For each={choices()}>{(choice, index) => {
@@ -648,6 +649,7 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
       return;
     }
     if (view().kind === 'skills') { consume(); skillsView?.key(event); return; }
+    if (view().inputReceiptPending && event.ctrl && event.name === 'r') { consume(); void action({ kind: 'retry-connection' }); return; }
     if (view().connectionState === 'unavailable') {
       if (event.name === 'f2') { consume(); void action({ kind: 'history-open' }); return; }
       if (event.name === 'f3') { consume(); void action({ kind: 'configuration-open' }); return; }

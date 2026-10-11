@@ -1,4 +1,5 @@
 import { boundedControlProjection } from './control-projection.js';
+import { PendingInputReceiptError } from "./rpc-conversation-facade.js";
 /**
  * ConversationController —— repl 的会话域控制器(纯接入面形态)。
  *
@@ -121,7 +122,10 @@ export interface CancelledRubricTurn {
   readonly advancementSessionId: string;
 }
 
+export type SettledSubmissionTurn = { readonly kind: "submission-settled"; readonly conversationId: string; readonly turnId: string; readonly submission: { readonly turnId: string; readonly disposition: "original-saved" | "revision-saved" | "not-saved" | "unknown" }; readonly message: string };
+
 export type BeginUserTurnResult<Outcome = TurnOutcome> =
+  | SettledSubmissionTurn
   | { readonly kind: "accepted"; readonly turn: AcceptedTurn<Outcome> }
   | AwaitingRubricConfirmationTurn
   | ContractFailedTurn
@@ -398,6 +402,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     completionKnown?: boolean;
     completion?: ConversationCommitSummary;
   }>();
+  private readonly turnOutcomes = new Map<string, Promise<Outcome>>();
   private readonly pendingAbortByTurn = new Map<
     string,
     {
@@ -640,8 +645,15 @@ export class ConversationController<Outcome = TurnOutcome> {
   async beginReferencedUserTurn(send: (conversationId: string, turnId: string) => Promise<SessionSendReferenceResult>, options: BeginTurnOptions = {}): Promise<BeginReferencedUserTurnResult<Outcome>> {
     const target = this.active.conversationId, turnId = generateTurnId();
     const outcome = this.attachTurnWaiter(target, turnId, options);
+    let request: Promise<SessionSendReferenceResult>;
+    try { request = send(target, turnId); } catch (error) { request = Promise.reject(error); }
+    return this.finishReferencedUserTurn(request, target, turnId, outcome, options);
+  }
+
+  private async finishReferencedUserTurn(request: Promise<SessionSendReferenceResult>, target: string, turnId: string,
+    outcome: Promise<Outcome>, options: BeginTurnOptions): Promise<BeginReferencedUserTurnResult<Outcome>> {
     try {
-      const result = await send(target, turnId);
+      const result = await request;
       if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
         this.observedConversationId = target; this.discardTurnWaiter(target, turnId);
         return { kind: 'awaiting-rubric-confirmation', conversationId: result.conversationId, turnId: result.turnId,
@@ -652,7 +664,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     } catch (error) {
       const accepted = this.completedTurnAfterError(target, turnId, outcome);
       if (accepted) return { kind: 'accepted', turn: accepted };
-      this.discardTurnWaiter(target, turnId); throw this.turnReceiptFailure(error, outcome);
+      if (!(error instanceof PendingInputReceiptError)) this.discardTurnWaiter(target, turnId);
+      throw this.turnReceiptFailure(error, outcome);
     }
   }
 
@@ -681,6 +694,13 @@ export class ConversationController<Outcome = TurnOutcome> {
               : "unknown",
           },
         };
+      }
+
+      if ("status" in sendResult && sendResult.status === "submission-settled") {
+        this.discardTurnWaiter(target, turnId);
+        return { kind: "submission-settled", conversationId: target, turnId,
+          submission: { turnId, disposition: sendResult.submission.turnId === turnId ? sendResult.submission.disposition : "unknown" },
+          message: sendResult.message };
       }
       if (isContractFailedResult(sendResult)) {
         this.discardTurnWaiter(target, turnId);
@@ -728,7 +748,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     } catch (err) {
       const accepted = this.completedTurnAfterError(target, currentTurnId, outcome);
       if (accepted) return { kind: 'accepted', turn: accepted };
-      this.discardTurnWaiter(target, currentTurnId);
+      if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(target, currentTurnId);
       throw this.turnReceiptFailure(err, outcome);
     }
   }
@@ -736,6 +756,25 @@ export class ConversationController<Outcome = TurnOutcome> {
   /** 发送一个 turn 并等待落定。 */
   async sendTurn(input: string | UserTurnInput): Promise<Outcome> {
     return (await this.beginTurn(input)).outcome;
+  }
+
+  /** Reconcile the original operation even after a refreshed draft changed its
+   * parameters. This follows/cancels the original run, never the new button. */
+  async reconcileRubricSubmission(pending: AwaitingRubricReferenceTurn): Promise<BeginReferencedUserTurnResult<Outcome> | undefined> {
+    if (!this.opts.conversation.hasPendingAdvancement(pending.conversationId)) return undefined;
+    const outcome = this.attachTurnWaiter(pending.conversationId, pending.turnId);
+    const receipt = this.opts.conversation.consumePendingAdvancement<SessionSendReferenceResult>(pending.conversationId,
+      result => {
+        if ('status' in result && result.status === 'awaiting-rubric-confirmation') {
+          const { rubricDraft: _draft, ...identity } = result;
+          return boundedControlProjection(identity, 8192);
+        }
+        return boundedControlProjection(result, 8192);
+      }).then(result => {
+        if (!result) throw new Error("待核对操作身份已变化，请重新查看。");
+        return result;
+      });
+    return this.finishReferencedUserTurn(receipt, pending.conversationId, pending.turnId, outcome, {});
   }
 
   async confirmRubricContract(
@@ -783,7 +822,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     } catch (err) {
       const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
       if (accepted) return accepted;
-      this.discardTurnWaiter(pending.conversationId, pending.turnId);
+      if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, pending.turnId);
       throw this.turnReceiptFailure(err, outcome);
     }
   }
@@ -802,7 +841,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       const result = await this.opts.conversation.cancelAdvancement(
         pending.conversationId,
         pending.advancementSessionId,
-        { executeOriginal },
+        { executeOriginal, rubricDraftId: pending.rubricDraftId },
       );
       if (isDirectExecutionCancelResult(result)) {
         if (!outcome) {
@@ -848,7 +887,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (outcome) {
         const accepted = this.completedTurnAfterError(pending.conversationId, pending.turnId, outcome);
         if (accepted) return { kind: 'direct-execution', advancementSessionId: pending.advancementSessionId, turn: accepted };
-        this.discardTurnWaiter(pending.conversationId, pending.turnId);
+        if (!(err instanceof PendingInputReceiptError)) this.discardTurnWaiter(pending.conversationId, pending.turnId);
         throw this.turnReceiptFailure(err, outcome);
       }
       throw err;
@@ -899,6 +938,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     turnId: string,
     options: BeginTurnOptions = {},
   ): Promise<Outcome> {
+    const previous = this.turnOutcomes.get(turnId);
+    if (previous) return previous;
     let projected!: Promise<Outcome>;
     const outcome = new Promise<TurnOutcome | { committed: ConversationCommitSummary }>((resolve) => {
       this.waiters.set(turnId, value => {
@@ -914,6 +955,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.acceptedOutcomes.set(projected, turn);
       options.onAccepted?.(turn);
     });
+    this.turnOutcomes.set(turnId, projected);
     return projected;
   }
 
@@ -932,6 +974,7 @@ export class ConversationController<Outcome = TurnOutcome> {
 
   private discardTurnWaiter(conversationId: string, turnId: string): void {
     this.waiters.delete(turnId);
+    this.turnOutcomes.delete(turnId);
     this.localOutput.delete(turnId); this.wakeReceipt?.();
     this.pendingPostTurnControls.delete(turnId);
     this.localTurnAcceptances.delete(turnId);
@@ -967,6 +1010,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     const waiter = this.waiters.get(turnId);
     if (!waiter) return;
     this.waiters.delete(turnId);
+    this.turnOutcomes.delete(turnId);
     this.localOutput.delete(turnId); this.wakeReceipt?.();
     const intent = this.pendingPostTurnControls.get(turnId);
     this.pendingPostTurnControls.delete(turnId);
@@ -1429,7 +1473,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.opts.onRunTerminal?.({ conversationId: frame.conversationId, runId: frame.runId, turnId: watch?.turnId });
       if (watch) {
         const waiter = this.waiters.get(watch.turnId);
-        this.waiters.delete(watch.turnId); this.localOutput.delete(watch.turnId); this.wakeReceipt?.();
+        this.waiters.delete(watch.turnId); this.turnOutcomes.delete(watch.turnId); this.localOutput.delete(watch.turnId); this.wakeReceipt?.();
         this.pendingPostTurnControls.delete(watch.turnId);
         if (this.localTurnsByConversation.get(watch.conversationId) === watch.turnId) this.localTurnsByConversation.delete(watch.conversationId);
         this.markLocalTurnAccepted(watch); this.resolvePendingAbort(watch.turnId);
@@ -2285,6 +2329,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.resolvePendingAbort(turnId);
     }
     this.waiters.clear();
+    this.turnOutcomes.clear();
     this.pendingPostTurnControls.clear();
     this.localTurnsByConversation.clear();
     this.localTurnAcceptances.clear();
