@@ -6,6 +6,7 @@ import {
   FileAuthorityCommitLog,
   collectArtifactRefs,
   type ArtifactStore,
+  type FileArtifactStoreOptions,
   type PhysicalStorageStepRunner,
   type ProjectionCursor,
   type ProjectionTransactionDecision,
@@ -59,6 +60,7 @@ const TOMBSTONE_VERSION = 1;
 const IDENTITY_VERSION = 1;
 
 export interface AssignmentStreamSpoolOptions {
+  readonly runReadStep?: FileArtifactStoreOptions['runReadStep'];
   readonly capacityBytes?: number;
   readonly clock?: () => IsoTime;
   readonly reclaimDelayMs?: number;
@@ -397,6 +399,7 @@ interface AssignmentHandle {
   readonly waiters: Set<() => void>;
   cache?: CachedProjection;
   cleanupComplete: boolean;
+  producers: number;
 }
 
 type AppendAttempt =
@@ -464,6 +467,7 @@ export class AssignmentStreamSpool {
   readonly #clock: () => IsoTime;
   readonly #reclaimDelayMs: number;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  readonly #runReadStep: FileArtifactStoreOptions['runReadStep'];
   readonly #removeRetiredArtifact: NonNullable<
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
@@ -483,6 +487,7 @@ export class AssignmentStreamSpool {
     this.#reclaimDelayMs =
       options.reclaimDelayMs ?? DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS;
     this.#storageMaintenance = options.storageMaintenance;
+    this.#runReadStep = options.runReadStep;
     this.#removeRetiredArtifact =
       options.removeRetiredArtifact ??
       ((store, ref) => rm(store.pathFor(ref), { force: true }));
@@ -495,9 +500,22 @@ export class AssignmentStreamSpool {
     ref: ExecutionRef,
   ): Promise<StreamSpoolSnapshot> {
     const handle = this.#handle(assignmentId);
-    return handle.queue.run(async () => {
-      await this.#assertNotReclaimed(handle);
-      const result = await this.#transact(handle, (state) => {
+    return handle.queue.run(async () => snapshotOf(await this.#openUnlocked(handle, ref)));
+  }
+
+  /** Only called while this assignment's queue is held. */
+  async #openUnlocked(handle: AssignmentHandle, ref: ExecutionRef): Promise<SpoolProjection> {
+      const assignmentId = handle.assignmentId;
+      if (await this.#isTombstoned(handle)) {
+        throw new TypeError("Assignment stream spool was permanently reclaimed");
+      }
+      const current = await this.#select(handle);
+      if (current.reclaimed) throw new TypeError("Assignment stream spool was permanently reclaimed");
+      if (current.ref !== undefined) assertSameExecution(current, ref);
+      const opened = current.ref !== undefined ? { state: current } : await this.#transact(handle, (state) => {
+        if (state.reclaimed) {
+          throw new TypeError("Assignment stream spool was permanently reclaimed");
+        }
         if (state.ref !== undefined) {
           assertSameExecution(state, ref);
           return { kind: "return", value: undefined };
@@ -527,10 +545,9 @@ export class AssignmentStreamSpool {
         handle.assignmentId,
         handle.directory,
       );
-      await this.#cleanupOrphanFrames(handle, result.state);
-      await this.#drainPendingDeletes(handle);
-      return snapshotOf(await this.#select(handle));
-    });
+      // Orphan bytes have no authority. The bounded maintenance sweep owns
+      // their directory scan; reopening a valid stream only restores state.
+      return this.#drainPendingDeletes(handle, opened.state);
   }
 
   async beginConnection(
@@ -566,7 +583,6 @@ export class AssignmentStreamSpool {
     readonly consumer: StreamConsumerAuth;
     readonly expiresAt?: IsoTime;
   }): Promise<StreamSpoolSnapshot> {
-    await this.open(input.assignmentId, input.ref);
     if (input.expiresAt !== undefined) assertCanonicalTime(input.expiresAt);
     if (
       input.consumer.kind === "owner-relay" &&
@@ -582,7 +598,12 @@ export class AssignmentStreamSpool {
     }
     const handle = this.#handle(input.assignmentId);
     return handle.queue.run(async () => {
+      const opened = await this.#openUnlocked(handle, input.ref);
       const key = streamConsumerKey(input.consumer);
+      const qualified = opened.consumers.get(key);
+      if (qualified?.qualified && qualified.kind === input.consumer.kind && qualified.expiresAt === input.expiresAt) {
+        return snapshotOf(opened);
+      }
       const result = await this.#transact(handle, (state) => {
         assertOpen(state);
         assertSameExecution(state, input.ref);
@@ -662,7 +683,7 @@ export class AssignmentStreamSpool {
   async append(input: AppendStreamFrameInput): Promise<StreamFrame> {
     await this.open(input.assignmentId, input.ref);
     const handle = this.#handle(input.assignmentId);
-    try {
+    return this.#withProducer(handle, async () => {
       const prepared = await prepareStreamDataPayload(
         input.payload,
         this.#sourceArtifacts,
@@ -677,13 +698,7 @@ export class AssignmentStreamSpool {
         if (attempt.kind === "retry") continue;
         await this.#waitForCapacity(handle, input.signal);
       }
-    } catch (error) {
-      await handle.queue.run(async () => {
-        const state = await this.#select(handle);
-        await this.#cleanupOrphanFrames(handle, state, true);
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -700,7 +715,7 @@ export class AssignmentStreamSpool {
   ): Promise<DurableInteractionProjectionReceipt> {
     await this.open(input.assignmentId, input.ref);
     const handle = this.#handle(input.assignmentId);
-    try {
+    return this.#withProducer(handle, async () => {
       const prepared = await prepareStreamDataPayload(
         input.payload,
         this.#sourceArtifacts,
@@ -721,13 +736,7 @@ export class AssignmentStreamSpool {
         if (attempt.kind === "retry") continue;
         await this.#waitForCapacity(handle, input.signal);
       }
-    } catch (error) {
-      await handle.queue.run(async () => {
-        const state = await this.#select(handle);
-        await this.#cleanupOrphanFrames(handle, state, true);
-      });
-      throw error;
-    }
+    });
   }
 
   async finalize(input: {
@@ -1004,6 +1013,7 @@ export class AssignmentStreamSpool {
     const step = runPhysicalStep ?? ((operation) => operation());
     return handle.queue.run(() =>
       step(async () => {
+        if (handle.producers > 0) return false;
         if (await this.#isTombstoned(handle)) {
           await rm(handle.directory, { recursive: true, force: true });
           this.#handles.delete(assignmentId);
@@ -1017,6 +1027,8 @@ export class AssignmentStreamSpool {
           this.#handles.delete(assignmentId);
           return true;
         }
+        await this.#cleanupOrphanFrames(handle, state);
+        state = await this.#drainPendingDeletes(handle);
         if (
           state.terminal &&
           state.reclaimAfter === undefined &&
@@ -1403,10 +1415,13 @@ export class AssignmentStreamSpool {
   }
 
   async #select(handle: AssignmentHandle): Promise<SpoolProjection> {
-    const result = await this.#transact(handle, () => ({
-      kind: "return",
-      value: undefined,
-    }));
+    const cached = handle.cache;
+    const result = await handle.log.readProjection<SpoolProjection, SpoolRecord>(
+      cached?.state ?? emptyProjection(handle.assignmentId),
+      (state, record, envelope) => reduceSpoolRecord(state === cached?.state ? cloneProjection(state) : state, record, envelope),
+      { stream: STREAM, ...(cached ? { cursor: cached.cursor } : {}) },
+    );
+    handle.cache = { state: result.state, cursor: result.cursor };
     return result.state;
   }
 
@@ -1447,7 +1462,7 @@ export class AssignmentStreamSpool {
     if (current !== undefined) return current;
     const key = assignmentKey(assignmentId);
     const directory = path.join(this.#rootDir, "assignments", key);
-    const frames = new FileArtifactStore(path.join(directory, "frames"));
+    const frames = new FileArtifactStore(path.join(directory, "frames"), { runReadStep: this.#runReadStep });
     const handle: AssignmentHandle = {
       assignmentId,
       directory,
@@ -1459,6 +1474,7 @@ export class AssignmentStreamSpool {
       queue: new SerialTaskQueue(),
       waiters: new Set(),
       cleanupComplete: false,
+      producers: 0,
     };
     this.#handles.set(assignmentId, handle);
     return handle;
@@ -1490,6 +1506,10 @@ export class AssignmentStreamSpool {
     state: SpoolProjection,
     force = false,
   ): Promise<void> {
+    if (handle.producers > 0) {
+      if (force) handle.cleanupComplete = false;
+      return;
+    }
     if (handle.cleanupComplete && !force) return;
     const indexArtifacts = collectArtifactRefs(await handle.log.readAll());
     const retained = new Set(
@@ -1524,14 +1544,38 @@ export class AssignmentStreamSpool {
     handle.cleanupComplete = true;
   }
 
-  async #drainPendingDeletes(handle: AssignmentHandle): Promise<void> {
-    const before = await this.#select(handle);
+  /** Payload preparation writes content before its stream record exists. Own
+   * that interval, including capacity waits, before leaving the same queue as
+   * reclamation. No physical permit is held while waiting for capacity. */
+  async #withProducer<T>(handle: AssignmentHandle, operation: () => Promise<T>): Promise<T> {
+    await handle.queue.run(async () => {
+      if (this.#handles.get(handle.assignmentId) !== handle || handle.cache?.state.reclaimed) {
+        throw new TypeError("Assignment stream spool was permanently reclaimed");
+      }
+      handle.producers++;
+    });
+    let failed = false;
+    try { return await operation(); }
+    catch (error) { failed = true; throw error; }
+    finally {
+      await handle.queue.run(async () => {
+        handle.producers--;
+        if (failed) {
+          handle.cleanupComplete = false;
+          await this.#cleanupOrphanFrames(handle, await this.#select(handle), true);
+        }
+      });
+    }
+  }
+
+  async #drainPendingDeletes(handle: AssignmentHandle, current?: SpoolProjection): Promise<SpoolProjection> {
+    const before = current ?? await this.#select(handle);
     const pending = [...before.pendingDeletes.values()];
-    if (pending.length === 0) return;
+    if (pending.length === 0) return before;
     for (const ref of pending) {
       await this.#removeRetiredArtifact(handle.frames, ref);
     }
-    await this.#transact(handle, (state) => {
+    const result = await this.#transact(handle, (state) => {
       const stillPending = pending.filter(
         (ref) => state.pendingDeletes.get(ref.digest)?.bytes === ref.bytes,
       );
@@ -1549,6 +1593,7 @@ export class AssignmentStreamSpool {
           };
     });
     this.#notifyCapacity(handle);
+    return result.state;
   }
 
   async #waitForCapacity(
@@ -1646,7 +1691,7 @@ export class AssignmentStreamSpool {
       });
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
-      const frames = new FileArtifactStore(path.join(directory, "frames"));
+      const frames = new FileArtifactStore(path.join(directory, "frames"), { runReadStep: this.#runReadStep });
       const log = new FileAuthorityCommitLog(
         path.join(directory, "index"),
         frames,

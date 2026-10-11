@@ -1761,33 +1761,39 @@ export class ConversationAssignmentLedger implements
     return { kind: "authorized", grant, outcome };
   }
 
-  async dataPlaneBinding(
-    assignmentId: string,
-    use?: DataPlaneTicketUse,
-  ): Promise<
-    {
-      readonly ref: ExecutionRef;
-      readonly executorId: string;
-      readonly ownerKeyId: string;
-    } | undefined
-  > {
+  async dataPlaneBinding(assignmentId: string, use?: DataPlaneTicketUse) {
     assertIdentifier(assignmentId, "Data-plane assignment id");
-    return this.#select(assignmentId, (state) => {
-      if (!state.received) return undefined;
-      const acceptsActiveUse =
-        (state.phase === "received" || state.phase === "started") &&
-        state.aborts.length === 0 &&
-        !state.supersedeFence;
-      if (!acceptsActiveUse && use !== "observe") return undefined;
-      return {
-        ref: snapshot(
-          state.received.body.activation.ref,
-          "Data-plane execution reference",
-        ),
-        executorId: this.#executorId,
-        ownerKeyId: state.received.body.activation.signature.keyId,
-      };
+    return this.#select(assignmentId, state => this.#dataPlaneBinding(state, use));
+  }
+
+  /** Bounded recovery read: one verified prefix, no live cache/deadline mutations. */
+  async dataPlaneBindings(requests: readonly { readonly assignmentId: string; readonly use?: DataPlaneTicketUse }[]) {
+    if (requests.length > 64) throw new RangeError("Data-plane binding batch exceeds 64 requests");
+    for (const request of requests) assertIdentifier(request.assignmentId, "Data-plane assignment id");
+    if (requests.length === 0) return [];
+    return this.#operations.run(async () => {
+      const states = new Map(requests.map(request => [assignmentStream(request.assignmentId), emptyProjection(request.assignmentId)]));
+      const read = await this.#log.readProjection(states, async (candidate, record, commit) => {
+        if (record.stream === leaseClockStream(this.#executorId)) {
+          for (const state of candidate.values()) await this.#reduce(state, record, commit);
+          return candidate;
+        }
+        const state = candidate.get(record.stream);
+        if (!state) throw corruptLedger("Binding batch received an unselected stream");
+        await this.#reduce(state, record, commit);
+        return candidate;
+      }, { streams: [...states.keys(), leaseClockStream(this.#executorId)] });
+      return requests.map(request => this.#dataPlaneBinding(read.state.get(assignmentStream(request.assignmentId))!, request.use));
     });
+  }
+
+  #dataPlaneBinding(state: LedgerProjection, use?: DataPlaneTicketUse) {
+    if (!state.received) return undefined;
+    const acceptsActiveUse = (state.phase === "received" || state.phase === "started") &&
+      state.aborts.length === 0 && !state.supersedeFence;
+    if (!acceptsActiveUse && use !== "observe") return undefined;
+    return { ref: snapshot(state.received.body.activation.ref, "Data-plane execution reference"),
+      executorId: this.#executorId, ownerKeyId: state.received.body.activation.signature.keyId };
   }
 
   async authorizeOwnerRelay(input: {
@@ -3616,14 +3622,12 @@ export class ConversationAssignmentLedger implements
       const cached = this.#takeCachedProjection(assignmentId);
       let state: LedgerProjection;
       try {
-        const transaction = await this.#log.transactProjection<
+        const transaction = await this.#log.readProjection<
           LedgerProjection,
-          AssignmentEntry,
-          void
+          AssignmentEntry
         >(
           cached?.state ?? emptyProjection(assignmentId),
-          this.#reduce,
-          () => ({ kind: "return", value: undefined }),
+          (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
           {
             streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
             ...(cached ? { cursor: cached.cursor } : {}),

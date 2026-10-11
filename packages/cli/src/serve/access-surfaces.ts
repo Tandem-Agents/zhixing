@@ -494,6 +494,7 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
   readonly onFailure?: import("./conversation-protocol-runtime.js").ConversationProtocolRuntimeOptions["onFailure"];
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
@@ -613,6 +614,7 @@ export async function createConversationServices(
             zhixingHome: inputZhixingHome,
             authority: inputAuthorityRuntime!,
             module: inputExecutorRoleModule!,
+            deviceCapacity: input.deviceCapacity,
             ...(inputStorageMaintenance
               ? { storageMaintenance: inputStorageMaintenance }
               : {}),

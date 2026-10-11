@@ -5239,14 +5239,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     return this.#operations.run(async () => {
       const cached = this.#projection;
       try {
-        const replay = () => this.#log.transactProjection<
+        const replay = () => this.#log.readProjection<
           JobProjection,
-          unknown,
-          void
+          unknown
         >(
           cached?.state ?? emptyProjection(),
-          this.#reduce,
-          () => ({ kind: "return", value: undefined }),
+          (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
           {
             stream: jobStream(this.#taskId),
             ...(cached ? { cursor: cached.cursor } : {}),

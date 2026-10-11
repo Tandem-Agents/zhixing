@@ -460,6 +460,7 @@ async function runExecutorProcess(
         authority,
         module: executor,
         storageMaintenance: deviceCapacity.storage,
+        deviceCapacity: deviceCapacity.arbiter,
         onError: (error) => writer.notify(`[data-plane] ${error.message}`),
       },
       (dataPlaneAssembly) => {

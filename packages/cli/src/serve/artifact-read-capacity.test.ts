@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileArtifactStore } from "@zhixing/core/authority";
+import { AssignmentStreamSpool } from '@zhixing/executor';
 import {
   createDefaultDeviceCapacityPolicy,
   currentDeviceCapacityStep,
@@ -56,6 +57,29 @@ afterEach(async () => {
 });
 
 describe("artifact read capacity", () => {
+  it('子任务流发布及重启核验共享Host读取准入，不消耗零I/O的外层预算', async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'artifact-read-capacity-')); roots.push(home);
+    const runtime = createDeviceCapacityRuntime(home, { activityDriven: true });
+    const arbiter = runtime.arbiter;
+    const store = new FileArtifactStore(path.join(home, 'artifacts'), { runReadStep: artifactReadCapacity(arbiter) });
+    const root = path.join(home, 'stream-spool');
+    const options = { runReadStep: artifactReadCapacity(arbiter), storageMaintenance: runtime.storage };
+    const spool = new AssignmentStreamSpool(root, store, options);
+    const restarted = new AssignmentStreamSpool(root, store, options);
+    try {
+      await runWithDeviceCapacity(arbiter, runtime.workload('workload-interactive'), abort, async () => {
+        const ref = { execution: 'conversation' as const, conversationId: 'parent', runId: 'run', ownerEpoch: 0 };
+        await spool.open('child', ref);
+        await spool.append({ assignmentId: 'child', ref, payload: { kind: 'agent-yield', yield: { type: 'text_delta', text: 'child-output' } } });
+        expect((await restarted.snapshot('child')).lastSeq).toBeGreaterThan(0);
+      });
+      expect(arbiter.snapshot().lastViolation).toBeUndefined();
+      expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    } finally {
+      await Promise.all([spool.stopStorageMaintenance(), restarted.stopStorageMaintenance(), spool.closeAssignmentScan(), restarted.closeAssignmentScan()]);
+      runtime.close();
+    }
+  });
   it("publishes and verifies artifacts from an occupancy-only workload", async () => {
     const { store, arbiter } = await fixture();
     const bytes = Buffer.from("new job assignment");

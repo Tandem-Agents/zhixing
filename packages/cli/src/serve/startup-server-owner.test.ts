@@ -165,7 +165,7 @@ describe("production startup server ownership", () => {
     expect(source).toContain("rubricConfirmation: advancementDetailController");
     expect(source).toContain("rubricPublication: {");
     expect(source).toContain(
-      "createAnchorAdvancementOriginalTaskExecutionPort(\n              conversationApplication",
+      "createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(\n              conversationApplication",
     );
     expect(source).toContain(
       "createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(\n              conversationApplication",

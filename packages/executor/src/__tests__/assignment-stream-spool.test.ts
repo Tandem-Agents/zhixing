@@ -22,7 +22,7 @@ import type {
   StorageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
@@ -95,6 +95,75 @@ describe(
   "AssignmentStreamSpool",
   { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
   () => {
+  it.each(['append', 'appendInteractionProjection'] as const)('protects an in-flight %s artifact from the first maintenance sweep', async method => {
+    const fixture = await createFixture();
+    const epoch = await qualifyAndConnect(fixture.spool, 'assignment-fixed', ref, surface, SURFACE_EXPIRY);
+    let release!: () => void, wrote!: () => void, filename = '';
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const written = new Promise<void>(resolve => { wrote = resolve; });
+    const put = FileArtifactStore.prototype.put;
+    const spy = vi.spyOn(FileArtifactStore.prototype, 'put').mockImplementation(async function (this: FileArtifactStore, ...args: Parameters<typeof put>) {
+      const result = await put.apply(this, args);
+      if (this.rootDir.startsWith(fixture.spoolRoot) && !filename) {
+        filename = this.pathFor(result); wrote(); await gate;
+      }
+      return result;
+    });
+    onTestFinished(() => { release(); spy.mockRestore(); });
+    const pending = fixture.spool[method]({assignmentId:'assignment-fixed',ref,sourceId:'source-protected',
+      payload:{kind:'agent-yield',yield:{type:'text_delta',text:'protected'.repeat(6000)}}});
+    await written;
+    await expect(fixture.spool.reclaimDue('assignment-fixed')).resolves.toBe(false);
+    expect((await readFile(filename)).byteLength).toBeGreaterThan(32000);
+    release(); await pending;
+    await fixture.spool.reclaimDue('assignment-fixed');
+    const frames = await fixture.spool.subscribe({request:subscribe(surface,0),streamEpoch:epoch,expiresAt:SURFACE_EXPIRY});
+    expect(frames).toHaveLength(1);
+    expect((await readFile(filename)).byteLength).toBeGreaterThan(32000);
+  });
+  it('protects prepared content across a capacity wait and releases it on cancellation', async () => {
+    const fixture = await createFixture(64 * 1024);
+    await fixture.spool.append({assignmentId:'assignment-fixed',ref,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'a'.repeat(40000)}}});
+    const before = await storedArtifactFiles(fixture.spoolRoot), abort = new AbortController();
+    let filename = '', wrote!: () => void;
+    const written = new Promise<void>(resolve => { wrote = resolve; });
+    const put = FileArtifactStore.prototype.put;
+    const spy = vi.spyOn(FileArtifactStore.prototype, 'put').mockImplementation(async function (this: FileArtifactStore, ...args: Parameters<typeof put>) {
+      const result = await put.apply(this, args);
+      if (this.rootDir.startsWith(fixture.spoolRoot) && !filename) { filename = this.pathFor(result); wrote(); }
+      return result;
+    });
+    onTestFinished(() => { abort.abort(); spy.mockRestore(); });
+    const pending = fixture.spool.append({assignmentId:'assignment-fixed',ref,signal:abort.signal,
+      payload:{kind:'agent-yield',yield:{type:'text_delta',text:'b'.repeat(40000)}}});
+    const rejected = expect(pending).rejects.toThrow('producer cancelled');
+    await written;
+    await fixture.spool.snapshot('assignment-fixed');
+    await fixture.spool.reclaimDue('assignment-fixed');
+    expect((await readFile(filename)).byteLength).toBeGreaterThan(32000);
+    abort.abort(new Error('producer cancelled')); await rejected;
+    expect(await storedArtifactFiles(fixture.spoolRoot)).toEqual(before);
+  });
+  it("restores qualified streams before sweeping orphan bytes and preserves committed frames during maintenance", async () => {
+    const fixture = await createFixture();
+    await fixture.spool.qualifyConsumer({ assignmentId: 'assignment-fixed', ref, consumer: surface, expiresAt: SURFACE_EXPIRY });
+    const data = await fixture.spool.append({assignmentId:'assignment-fixed',ref,payload:{kind:'agent-yield',yield:{type:'text_delta',text:'retained'}}});
+    const directory = path.join(fixture.spoolRoot,'assignments',byteDigest(Buffer.from('assignment-fixed')).slice(7),'frames');
+    const orphan = Buffer.from('uncommitted bytes'), digest = byteDigest(orphan).slice(7);
+    const prefix = path.join(directory,'sha256',digest.slice(0,2));
+    await mkdir(prefix,{recursive:true}); const filename = path.join(prefix,digest); await writeFile(filename,orphan);
+    const restarted = restartedSpool(fixture);
+    await restarted.qualifyConsumer({assignmentId:'assignment-fixed',ref,consumer:surface,expiresAt:SURFACE_EXPIRY});
+    expect(await readFile(filename)).toEqual(orphan);
+    // Closing before the first sweep must not lose the durable obligation.
+    await restarted.stopStorageMaintenance();
+    const afterQuickRestart = restartedSpool(fixture);
+    expect(await afterQuickRestart.reclaimDue('assignment-fixed')).toBe(false);
+    await expect(readFile(filename)).rejects.toMatchObject({code:'ENOENT'});
+    const epoch = await afterQuickRestart.beginConnection('assignment-fixed',ref,surface);
+    const replay = await afterQuickRestart.subscribe({request:subscribe(surface,0),streamEpoch:epoch,expiresAt:SURFACE_EXPIRY});
+    expect(replay.map(streamLogicalFrameDigest)).toEqual([streamLogicalFrameDigest(data)]);
+  });
   it("fails closed on every class of malformed durable spool record", async () => {
     const invalidKind = await createFixture();
     await invalidKind.spool.open("assignment-fixed", ref);

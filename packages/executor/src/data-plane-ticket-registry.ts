@@ -79,6 +79,7 @@ export interface DataPlaneAssignmentBinding {
 }
 
 export interface DataPlaneAssignmentBindingResolver {
+  dataPlaneBindings?(requests: readonly { readonly assignmentId: string; readonly use?: DataPlaneTicketUse }[]): Promise<readonly (DataPlaneAssignmentBinding | undefined)[]>;
   dataPlaneBinding(
     assignmentId: string,
     use?: DataPlaneTicketUse,
@@ -395,27 +396,44 @@ export class DataPlaneTicketRegistry {
     await this.maintain();
     await this.#operations.run(async () => {
       const projection = await this.#load();
-      for (const entry of [...projection.state.accepted.values()]) {
-        const authorization = await this.#authorizeUnlocked(
-          entry.ticket.ticketId,
-          entry.ticket.kind === "abort" ? "abort" : "observe",
-          {
-            assignmentId: entry.ticket.assignmentId,
-            ref: entry.ticket.ref,
-            executorId: entry.ticket.executorId,
-            surfacePrincipal: entry.ticket.surfacePrincipal,
-          },
-        );
-        if (entry.ticket.kind === "abort") continue;
-        if (authorization.kind !== "authorized") {
-          await this.#revokeConsumer(entry.ticket);
-          continue;
+      const entries = [...projection.state.accepted.values()];
+      const pending = new Set<Promise<void>>();
+      let failed = false;
+      let failure: unknown;
+      const fail = (error: unknown) => { if (!failed) { failed = true; failure = error; } };
+      try {
+        for (let offset = 0; offset < entries.length && !failed; offset += 32) {
+          const batch = entries.slice(offset, offset + 32);
+          const bindings = this.#assignments.dataPlaneBindings
+            ? await this.#assignments.dataPlaneBindings(batch.map(entry => ({ assignmentId: entry.ticket.assignmentId,
+              use: entry.ticket.kind === "abort" ? "abort" as const : "observe" as const }))) : undefined;
+          if (bindings && bindings.length !== batch.length) throw new Error("Assignment binding batch length mismatch");
+          for (const [index, entry] of batch.entries()) {
+            if (failed) break;
+            const authorization = await this.#authorizeUnlocked(entry.ticket.ticketId,
+              entry.ticket.kind === "abort" ? "abort" : "observe",
+              { assignmentId: entry.ticket.assignmentId, ref: entry.ticket.ref, executorId: entry.ticket.executorId,
+                surfacePrincipal: entry.ticket.surfacePrincipal }, this.#projection!.state,
+              bindings ? { value: bindings[index] } : undefined);
+            if (entry.ticket.kind === "abort") continue;
+            if (authorization.kind !== "authorized") {
+              // Earlier qualifications must finish before any later revocation.
+              await Promise.all(pending);
+              if (failed) break;
+              await this.#revokeConsumer(entry.ticket);
+              continue;
+            }
+            if (failed) break;
+            const work = this.#qualify(entry.ticket, authorization.value.expiresAt).catch(fail);
+            pending.add(work);
+            void work.then(() => pending.delete(work));
+            if (pending.size >= 4) await Promise.race(pending);
+          }
         }
-        await this.#qualify(
-          entry.ticket,
-          authorization.value.expiresAt,
-        );
-      }
+      } catch (error) { fail(error); }
+      // No background writes may outlive recovery or a failed startup.
+      await Promise.all(pending);
+      if (failed) throw failure;
     });
   }
 
@@ -505,16 +523,20 @@ export class DataPlaneTicketRegistry {
     ticketId: string,
     use: DataPlaneTicketUse,
     binding: DataPlaneTicketBinding,
+    recovered?: TicketRegistryProjection,
+    recoveredBinding?: { readonly value: DataPlaneAssignmentBinding | undefined },
   ): Promise<TicketAuthorizationDisposition> {
-    const projection = await this.#load();
-    if (projection.state.retired.has(ticketId)) {
+    // Recovery alone holds the registry queue across the entire batch. Ticket
+    // retirements update #projection; public authorization still reloads.
+    const state = recovered ?? (await this.#load()).state;
+    if (state.retired.has(ticketId)) {
       return { kind: "retired" };
     }
-    const accepted = projection.state.accepted.get(ticketId);
+    const accepted = state.accepted.get(ticketId);
     if (!accepted) return { kind: "unknown" };
     assertDataPlaneTicketUse(accepted.ticket, use);
     assertDataPlaneTicketBinding(accepted.ticket, binding);
-    const currentActivation = await this.#assignments.dataPlaneBinding(
+    const currentActivation = recoveredBinding ? recoveredBinding.value : await this.#assignments.dataPlaneBinding(
       accepted.ticket.assignmentId,
       use,
     );

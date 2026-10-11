@@ -1,5 +1,7 @@
 import path from "node:path";
-import { StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { artifactReadCapacity } from './artifact-read-capacity.js';
+import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError, StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
   DataPlaneTicket,
   ExecutionRef,
@@ -13,6 +15,7 @@ import type {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
   DataPlaneAssignmentBinding,
+  DataPlaneAssignmentBindingResolver,
   DataPlaneTicketRegistry,
 } from "@zhixing/executor";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
@@ -47,12 +50,14 @@ export interface ExecutorDataPlaneRuntimeOptions {
   >;
   /** 设备唯一容量裁决入口;缺省即不装配治理的嵌入场景,维护直通执行。 */
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly deviceCapacity?: DeviceCapacityArbiterPort;
   readonly clock?: () => string;
   readonly onError?: (error: Error) => void;
 }
 
 /** Finite assignment authority required by the executor data-plane mechanism. */
 export interface ExecutorDataPlaneAssignmentAuthorityPort {
+  readonly dataPlaneBindings?: DataPlaneAssignmentBindingResolver["dataPlaneBindings"];
   dataPlaneBinding(
     assignmentId: string,
     use?: DataPlaneTicketUse,
@@ -128,6 +133,8 @@ export class ExecutorDataPlaneRuntime {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #maintenance: Promise<number> | undefined;
   #closed = false;
+  readonly #startupAbort = new AbortController();
+  #startup: Promise<void> | undefined;
 
   constructor(
     options: ExecutorDataPlaneRuntimeOptions,
@@ -153,6 +160,7 @@ export class ExecutorDataPlaneRuntime {
       {
         clock,
         storageMaintenance: options.storageMaintenance,
+        runReadStep: artifactReadCapacity(options.deviceCapacity),
       },
     );
     this.#tickets = new options.module.DataPlaneTicketRegistry({
@@ -160,6 +168,7 @@ export class ExecutorDataPlaneRuntime {
       executorId: options.authority.executorId,
       verifier: options.authority.verifier,
       assignments: {
+        ...(this.#assignmentAuthority.dataPlaneBindings ? { dataPlaneBindings: requests => this.#assignmentAuthority.dataPlaneBindings!(requests) } : {}),
         dataPlaneBinding: async (assignmentId, use) =>
           this.#assignmentAuthority.dataPlaneBinding(assignmentId, use),
       },
@@ -326,11 +335,42 @@ export class ExecutorDataPlaneRuntime {
     });
   }
 
-  async start(): Promise<void> {
-    if (this.#closed) throw new Error("Executor data plane is closed");
-    await this.#tickets.recover();
-    await this.maintain();
-    this.#scheduleMaintenance();
+  start(): Promise<void> {
+    if (this.#closed) return Promise.reject(new Error("Executor data plane is closed"));
+    return this.#startup ??= this.#recoverTickets();
+  }
+
+  async #recoverTickets(): Promise<void> {
+    const abort = AbortSignal.any([currentMaintenanceAbortSignal(), this.#startupAbort.signal]);
+    let retryUntil: number | undefined;
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      try {
+        await runWithMaintenanceUrgency(() => "recovery", abort, () => this.#tickets.recover());
+        if (abort.aborted) throw new StorageMaintenanceCancelledError();
+        // Only authority/consumer recovery gates readiness; physical history
+        // reclamation stays in the bounded periodic sweep.
+        this.#scheduleMaintenance();
+        return;
+      } catch (error) {
+        if (abort.aborted) throw new StorageMaintenanceCancelledError();
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion()) throw error;
+        retryUntil ??= Date.now() + 5_000;
+        const remaining = retryUntil - Date.now();
+        if (remaining <= 0) throw error;
+        // recover has drained its queue/locks before rejecting. Never race an
+        // in-flight recovery against a timer or sleep while holding its lock.
+        await new Promise<void>(resolve => {
+          const finish = () => { clearTimeout(timer); abort.removeEventListener("abort", finish); resolve(); };
+          const timer = setTimeout(finish, Math.min(remaining, Math.max(1, Math.min(delay, 250))));
+          abort.addEventListener("abort", finish, { once: true });
+          if (abort.aborted) finish();
+        });
+        if (abort.aborted) throw new StorageMaintenanceCancelledError();
+        if (Date.now() >= retryUntil) throw error;
+      }
+    }
   }
 
   async maintain(): Promise<number> {
@@ -346,8 +386,10 @@ export class ExecutorDataPlaneRuntime {
 
   async close(): Promise<void> {
     this.#closed = true;
+    this.#startupAbort.abort();
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
+    await this.#startup?.catch(() => undefined);
     await this.#maintenanceRunner.stop();
     await this.#maintenance?.catch(() => undefined);
     await this.#spool.closeAssignmentScan();
@@ -489,6 +531,13 @@ class ExecutorDataPlaneAssignmentComposition<Assignment>
     use?: DataPlaneTicketUse,
   ): Promise<DataPlaneAssignmentBinding | undefined> {
     return this.#authority.dataPlaneBinding(assignmentId, use);
+  }
+
+  async dataPlaneBindings(requests: Parameters<NonNullable<DataPlaneAssignmentBindingResolver["dataPlaneBindings"]>>[0]) {
+    if (this.#authority.dataPlaneBindings) return this.#authority.dataPlaneBindings(requests);
+    const results: (DataPlaneAssignmentBinding | undefined)[] = [];
+    for (const request of requests) results.push(await this.#authority.dataPlaneBinding(request.assignmentId, request.use));
+    return results;
   }
 
   authorizeOwnerRelay(

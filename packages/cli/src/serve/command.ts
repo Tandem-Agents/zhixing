@@ -965,6 +965,7 @@ async function runServerProcess(
     createConversationLosslessDataPlaneAssemblyHandle();
   const conversationServices = await createConversationServices({
     onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
+    deviceCapacity: deviceCapacity.arbiter,
     onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,

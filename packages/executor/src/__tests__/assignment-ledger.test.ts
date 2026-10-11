@@ -583,6 +583,28 @@ async function createFormalReceiptHarness(options: { clock?: () => string; monot
 }
 
 describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("preserves live monotonic permission anchors across successful and failed binding batches", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    await h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease);
+    await h.ledger.queryLedger(ASSIGNMENT_ID, ownerContext(ASSIGNMENT_ID, "executor.queryLedger"));
+    mono = 60001; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    const checkExpired = async () => {
+      await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+      await expect(h.ledger.queryLedger(ASSIGNMENT_ID, ownerContext(ASSIGNMENT_ID, "executor.queryLedger"))).rejects.toThrow("no longer active");
+    };
+    const requests = [{ assignmentId: ASSIGNMENT_ID, use: "observe" as const }];
+    await checkExpired();
+    expect((await h.ledger.dataPlaneBindings(requests))[0]?.ref).toEqual(h.activation.ref);
+    await checkExpired();
+    const get = vi.spyOn(h.artifacts, "get").mockRejectedValueOnce(new Error("batch closure read failed"));
+    try { await expect(h.ledger.dataPlaneBindings(requests)).rejects.toThrow("batch closure read failed"); }
+    finally { get.mockRestore(); }
+    await checkExpired();
+  });
+
   it("durably rejects expiry after cache failure and independent reopen without repeated writes", async () => {
     let wall = NOW, mono = 0;
     const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
@@ -658,6 +680,23 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID, frontier: NOW } }]);
     await h.log.append<unknown>([{ stream: "assignment:legacy-other", body: record }]);
     await expect(h.ledger.dataPlaneBinding("legacy-other", "observe")).rejects.toThrow("Legacy lease writer");
+  });
+
+  it("reads binding batches once and preserves each requested use and missing entry", async () => {
+    const h = await createFormalReceiptHarness();
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.supersede(ASSIGNMENT_ID, { fenceSeq: 1, requestId: "batch-supersede" }, ownerContext(ASSIGNMENT_ID, "executor.supersede"));
+    const read = vi.spyOn(h.log, "readProjection");
+    try {
+      const batch = await h.ledger.dataPlaneBindings([
+        { assignmentId: ASSIGNMENT_ID, use: "observe" }, { assignmentId: ASSIGNMENT_ID, use: "abort" },
+        { assignmentId: "unknown", use: "observe" },
+      ]);
+      expect(batch).toEqual([{ ref: h.activation.ref, executorId: h.envelope.executorId, ownerKeyId: h.activation.signature.keyId }, undefined, undefined]);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(await h.ledger.dataPlaneBindings(Array.from({ length: 64 }, () => ({ assignmentId: ASSIGNMENT_ID, use: "observe" as const })))).toHaveLength(64);
+      await expect(h.ledger.dataPlaneBindings(Array.from({ length: 65 }, () => ({ assignmentId: ASSIGNMENT_ID })))).rejects.toThrow("64");
+    } finally { read.mockRestore(); }
   });
 
   it("authorizes a surface abort through the owner-issued durable ticket chain", async () => {

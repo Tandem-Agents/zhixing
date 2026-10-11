@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
 import { MeshServiceRegistry } from "@zhixing/mesh";
 import {
   createExecutorDataPlaneAssignmentPair,
@@ -60,6 +61,9 @@ describe("ExecutorDataPlaneRuntime", () => {
 
     await runtime.start();
     expect(recover).toHaveBeenCalledOnce();
+    expect(maintainTickets).not.toHaveBeenCalled();
+    expect(reclaimDue).not.toHaveBeenCalled();
+    await runtime.maintain();
     expect(maintainTickets).toHaveBeenCalledOnce();
     expect(reclaimDue.mock.calls.map(([assignmentId]) => assignmentId)).toEqual([
       "assignment-1",
@@ -168,6 +172,7 @@ describe("ExecutorDataPlaneRuntime", () => {
     expect(spoolOptions?.storageMaintenance).toBe(storageMaintenance);
 
     await runtime.start();
+    await runtime.maintain();
     // 单轮上界:40 个 assignment 只发现并回收前 32 个；目录页、
     // 每个 assignment 物理步骤与票据批都独立准入。
     expect(reclaimed).toEqual(manyAssignments.slice(0, 32));
@@ -213,9 +218,10 @@ describe("ExecutorDataPlaneRuntime", () => {
     expect(createAssignment).toHaveBeenCalledOnce();
   });
 
-  it("constructs one frozen pair whose tickets resolve through the same assignment authority", async () => {
+  it.each([false, true])("constructs one frozen pair with optional binding batch support=%s", async batching => {
     let ticketAssignments:
       | {
+        dataPlaneBindings(requests: readonly { assignmentId: string; use?: string }[]): Promise<readonly unknown[]>;
         dataPlaneBinding(
           assignmentId: string,
           use?: unknown,
@@ -230,7 +236,9 @@ describe("ExecutorDataPlaneRuntime", () => {
     }
     class Writer {}
     const binding = Object.freeze({ assignmentId: "assignment-1" });
+    const batch = vi.fn(async (requests: readonly unknown[]) => requests.map(() => binding));
     const authority = {
+      ...(batching ? { dataPlaneBindings: batch } : {}),
       dataPlaneBinding: vi.fn(async () => binding),
       authorizeOwnerRelay: vi.fn(async () => undefined),
     };
@@ -260,6 +268,10 @@ describe("ExecutorDataPlaneRuntime", () => {
     expect(pair.assignment).toBe(authority);
     expect(assemblyTickets).toBe(pair.dataPlane.assignmentTickets);
     expect("bindAssignmentAuthority" in pair.dataPlane).toBe(false);
+    const requests = [{ assignmentId: "assignment-1", use: "observe" as const }];
+    await expect(ticketAssignments!.dataPlaneBindings(requests)).resolves.toEqual([binding]);
+    if (batching) { expect(batch).toHaveBeenCalledWith(requests); expect(authority.dataPlaneBinding).not.toHaveBeenCalled(); }
+    else expect(authority.dataPlaneBinding).toHaveBeenCalledWith("assignment-1", "observe");
     await expect(
       ticketAssignments?.dataPlaneBinding("assignment-1"),
     ).resolves.toBe(binding);
@@ -306,5 +318,65 @@ describe("ExecutorDataPlaneRuntime", () => {
     dispose();
     dispose();
     expect(services.list()).toEqual([]);
+  });
+});
+
+
+describe("ticket startup recovery ownership", () => {
+  const pressure = () => new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "probe-unavailable", retryAfterMs: 20 });
+  function fixture(recover: () => Promise<void>) {
+    const closeScan = vi.fn(async () => undefined);
+    class Spool { closeAssignmentScan = closeScan; stopStorageMaintenance = vi.fn(); }
+    class Tickets { recover = recover; }
+    const runtime = composeRuntime({ zhixingHome: "X:/recovery", authority: { artifacts: {}, executorLog: {}, executorId: "executor-1", verifier: {} } as never,
+      module: { AssignmentStreamSpool: Spool, AssignmentStreamWriter: class {}, DataPlaneTicketRegistry: Tickets } as unknown as ExecutorRoleModule });
+    return { runtime, closeScan };
+  }
+  it("shares startup and retries only after the failed recovery has released exclusion", async () => {
+    vi.useFakeTimers(); let calls = 0;
+    const recover = vi.fn(async () => {
+      expect(isHoldingMaintenanceExclusion()).toBe(false);
+      expect(currentMaintenanceAbortSignal().aborted).toBe(false);
+      await runHoldingMaintenanceExclusion(async () => { if (++calls === 1) throw pressure(); });
+    });
+    const { runtime } = fixture(recover);
+    try {
+      const first = runtime.start(); expect(runtime.start()).toBe(first);
+      await vi.advanceTimersByTimeAsync(20); await first;
+      expect(recover).toHaveBeenCalledTimes(2); expect(runtime.start()).toBe(first);
+    } finally { await runtime.close(); vi.useRealTimers(); }
+  });
+  it("returns the original typed error after a finite retry window", async () => {
+    vi.useFakeTimers(); const failure = pressure();
+    const recover = vi.fn(async () => { throw failure; }), { runtime } = fixture(recover);
+    try {
+      const done = expect(runtime.start()).rejects.toBe(failure);
+      await vi.advanceTimersByTimeAsync(5_000); await done;
+      const attempts = recover.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000); expect(recover).toHaveBeenCalledTimes(attempts);
+    } finally { await runtime.close(); vi.useRealTimers(); }
+  });
+  it.each([new Error("corrupt ticket"), new StorageMaintenanceAdmissionError({ kind: "capacity-gap", blockedBy: "temporaryBytes", required: 2, available: 1 })])("does not retry permanent failures: %s", async failure => {
+    const recover = vi.fn(async () => { throw failure; }), { runtime } = fixture(recover);
+    try { await expect(runtime.start()).rejects.toBe(failure); expect(recover).toHaveBeenCalledOnce(); }
+    finally { await runtime.close(); }
+  });
+  it("close cancels retry waiting without starting another pass", async () => {
+    vi.useFakeTimers(); const recover = vi.fn(async () => { throw pressure(); }), { runtime } = fixture(recover);
+    try {
+      const done = expect(runtime.start()).rejects.toBeInstanceOf(StorageMaintenanceCancelledError);
+      await vi.advanceTimersByTimeAsync(1); await runtime.close(); await done;
+      await vi.advanceTimersByTimeAsync(60_000); expect(recover).toHaveBeenCalledOnce();
+    } finally { await runtime.close(); vi.useRealTimers(); }
+  });
+  it("close drains an in-flight recovery before releasing spool resources", async () => {
+    const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>(); let signal: AbortSignal | undefined;
+    const { runtime, closeScan } = fixture(async () => { signal = currentMaintenanceAbortSignal(); entered.resolve(); await gate.promise; });
+    const done = expect(runtime.start()).rejects.toBeInstanceOf(StorageMaintenanceCancelledError);
+    await entered.promise; const closing = runtime.close();
+    expect(signal?.aborted).toBe(true); expect(closeScan).not.toHaveBeenCalled();
+    gate.resolve(); await done; await closing;
+    expect(closeScan).toHaveBeenCalledOnce();
+    await expect(runtime.start()).rejects.toThrow("closed");
   });
 });

@@ -69,6 +69,7 @@ import {
   ControlAdmissionJournal,
   createJobControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
+import { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
 import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
 import {
   createOwnerDeliveryParticipant,
@@ -93,6 +94,7 @@ import {
   type AssignmentLedgerOptions,
   type JobRecoveryObligation,
 } from "../assignment-ledger.js";
+import { ExecutorResourceGovernor } from "../resource-governor.js";
 import { projectAssignmentInteractionStream } from "../assignment-interaction-stream.js";
 import {
   AssignmentStreamSpool,
@@ -427,6 +429,7 @@ function systemDefinition(revision = 1, state: TaskDefinition["state"] = "enable
 async function createUserHarness(
   options: {
     assign?: boolean;
+    governed?: boolean;
     definition?: TaskDefinition;
     trigger?: boolean;
     ownerArtifacts?: (artifacts: FileArtifactStore) => ArtifactStore;
@@ -464,6 +467,11 @@ async function createUserHarness(
   );
   const identity = new TestProtocolIdentity();
   const executorIdentity = new TestProtocolIdentity(EXECUTOR_ID);
+  const createGovernor = () => new AnchorResourceGovernor({
+    log, signer: identity, verifier: identity, guard: { assert() {} },
+    anchorEpoch: 3, localExecutorId: EXECUTOR_ID, reporterKeyFor: () => EXECUTOR_ID, clock,
+  });
+  const resources = options.governed ? createGovernor() : undefined;
   const ownerArtifacts = options.ownerArtifacts?.(artifacts) ?? artifacts;
   const compatibilityFacts: Array<{ definition: TaskDefinition; occurrences: unknown[] }> = [];
   const compatibility: JobCompatibilityProjection = {
@@ -501,12 +509,17 @@ async function createUserHarness(
     legacyAbortTickets,
     clock,
     snapshotFor: options.ownerSnapshotFor ?? matchingSnapshotFor,
+    resources,
     schedulerFailureThreshold: options.schedulerFailureThreshold,
     schedulerNotices,
     commitParticipant: options.commitParticipant?.(log, artifacts),
   });
+  const executorLog = options.governed ? trackLog(new FileAuthorityCommitLog(path.join(root,"executor-authority"), artifacts,{clock,lockWaitMs:2000})) : log;
+  const executorResources = options.governed ? new ExecutorResourceGovernor({log:executorLog, signer:executorIdentity, verifier:identity,
+    guard:{assert(){}}, executorId:EXECUTOR_ID, localDomainId:"test-local",localGovernorEpoch:1,clock}) : undefined;
   const ledger = new ConversationAssignmentLedger({
-    log,
+    resources: executorResources,
+    log: executorLog,
     artifacts,
     executorId: EXECUTOR_ID,
     signer: executorIdentity,
@@ -536,7 +549,7 @@ async function createUserHarness(
     surfaceContext("define-user"),
     options.legacyPolicy,
   );
-  const unsigned = createUnsignedJob(identity, {
+  let unsigned = createUnsignedJob(identity, {
     delivery:
       definition.definition.kind === "user"
         ? definition.definition.spec.delivery ?? { kind: "none" }
@@ -550,6 +563,14 @@ async function createUserHarness(
       context: surfaceContext("trigger-user"),
       source: "user",
     });
+    if (resources) {
+      const workload = {kind: "job" as const, id: JOB_RUN_ID, attempt: 1};
+      const origin = {admissionClass: "scheduler" as const, entry: "schedule-trigger" as const};
+      await resources.enqueueRoot("reservation:"+ASSIGNMENT_ID, workload, origin, hostContext("enqueue"));
+      const resourceLease = await resources.prepareAssignmentRoot({assignmentId: ASSIGNMENT_ID, executorId: EXECUTOR_ID,
+        workload, scopeBinding: {kind: "job", taskId: TASK_ID, anchorEpoch: 3}, budget: {maxCalls:20,maxTokens:10000}}, origin, hostContext("lease"));
+      unsigned = {...unsigned, resourceLease};
+    }
     if (options.assign !== false) dispatch = await journal.assign(assignmentPlan(unsigned));
   }
   return {
@@ -558,6 +579,8 @@ async function createUserHarness(
     log,
     identity,
     compatibilityFacts,
+    resources,
+    createGovernor,
     journal,
     schedulerNotices,
     ledger,
@@ -4540,6 +4563,29 @@ describe("job submission guard preflight", {
       "Assignment capability is not activated by durable authority state",
     );
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("running");
+  });
+
+  it("cold job read synchronizes real governed final usage before replay", async () => {
+    const harness = await createUserHarness({governed:true});
+    expect(await harness.ledger.dispatch(harness.dispatch!.envelope,harness.dispatch!.activation,ownerContext(ASSIGNMENT_ID,"executor.dispatch"))).toEqual({v:1,accepted:true});
+    await start(harness);
+    const reportDigest = protocolDigest("AssignmentUsageFinal",1,{assignmentId:ASSIGNMENT_ID,upToUsageSeq:0});
+    await harness.ledger.sealJobBundle(ASSIGNMENT_ID, {
+      fence:harness.unsigned.work.fence, outcome:{status:"completed",summary:"governed done"}, contentAssets:[],
+      streamFinal:{finalSeq:1,streamDigest:SHA256_ZERO},usage:{inputTokens:1,outputTokens:1,toolCalls:0},
+      usageFinal:{reportDigest:reportDigest,upToUsageSeq:0},
+    });
+    expect(await submitExistingSeal(harness)).toMatchObject({committed:true});
+    const coldResources = harness.createGovernor();
+    const cold = new JobJournal({taskId:TASK_ID,anchorEpoch:3,log:harness.log,artifacts:harness.artifacts,
+      signer:harness.identity,verifier:harness.identity,delivery:deliveryParticipant(harness.log),submission,
+      snapshotFor:matchingSnapshotFor,ingress:{authorize(){}},resources:coldResources,clock:()=>NOW});
+    // No snapshot, coordinate, or write prewarms this new governor before the read.
+    expect(await cold.currentState(JOB_RUN_ID)).toBe("committed");
+    const final = {reservationId:harness.unsigned.resourceLease.reservationId,assignmentId:ASSIGNMENT_ID,executorId:EXECUTOR_ID};
+    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:reportDigest,upToUsageSeq:0}})).not.toThrow();
+    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:SHA256_ZERO,upToUsageSeq:0}})).toThrow("digest");
+    expect(()=>coldResources.assertUsageFinal({...final,usageFinal:{reportDigest:reportDigest,upToUsageSeq:1}})).toThrow("watermark");
   });
 
   it("replays an exact committed bundle through a cold journal instance", async () => {

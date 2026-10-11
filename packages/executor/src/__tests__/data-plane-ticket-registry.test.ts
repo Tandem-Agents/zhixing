@@ -624,6 +624,42 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     });
   });
 
+  it.each([false, true])("bounds recovery qualifications and drains in-flight work before returning (failure=%s)", async failing => {
+    const root = await createTempDir("ticket-recovery-batch");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const clock = () => "2026-07-23T00:01:00.000Z";
+    const binding = { ref, executorId: "executor-fixed", ownerKeyId: "owner-fixed" };
+    const assignments = { dataPlaneBinding: vi.fn(async () => binding),
+      dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => binding)) };
+    const spool = { qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
+    const registry = new DataPlaneTicketRegistry({ log: new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock }),
+      executorId: "executor-fixed", verifier: identity, assignments, spool, clock, monotonicClock: () => 1000 });
+    for (let i = 0; i < 35; i++) await registry.accept(createTicketAt("run-observe", "recovery-" + i, "2026-07-23T00:00:00.000Z", "2026-07-23T00:05:00.000Z", identity));
+    assignments.dataPlaneBinding.mockClear();
+    const gates: ReturnType<typeof Promise.withResolvers<void>>[] = [];
+    let active = 0, maximum = 0, released = false, done = false;
+    vi.mocked(spool.qualifyConsumer).mockImplementation(async () => {
+      active++; maximum = Math.max(maximum, active);
+      const gate = Promise.withResolvers<void>(); gates.push(gate);
+      try { if (!released) await gate.promise; } finally { active--; }
+    });
+    const recovering = registry.recover().then(() => ({ ok: true }), error => ({ ok: false, error })).finally(() => { done = true; });
+    try {
+      await vi.waitFor(() => expect(gates).toHaveLength(4));
+      expect(maximum).toBe(4);
+      if (failing) gates[0]!.reject(new Error("qualification failed")); else gates[0]!.resolve();
+      await vi.waitFor(() => expect(failing ? active : gates.length).toBe(failing ? 3 : 5));
+      expect(done).toBe(false);
+      released = true; for (const gate of gates) gate.resolve();
+      const result = await recovering;
+      expect(result.ok).toBe(!failing);
+      if (!result.ok) expect(String(result.error)).toContain("qualification failed");
+      expect(active).toBe(0); expect(maximum).toBeLessThanOrEqual(4);
+      expect(assignments.dataPlaneBinding).not.toHaveBeenCalled();
+      expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual(failing ? [32] : [32, 3]);
+    } finally { released = true; for (const gate of gates) gate.resolve(); await recovering; }
+  });
+
   it("serializes qualification with expiry retirement", async () => {
     const root = await createTempDir("data-plane-ticket-registry-race");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
