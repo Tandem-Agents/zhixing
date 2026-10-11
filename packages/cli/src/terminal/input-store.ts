@@ -41,7 +41,7 @@ export class TerminalInputStore {
   #referenceSerial = Promise.resolve();
   #referencePending = 0;
   #referenceVersion = -1;
-  #deleting = 0;
+  readonly #deletions = new Map<string, Promise<void>>();
   #closing = false;
   readonly #files: TerminalManagedFiles;
   readonly #ownsFiles: boolean;
@@ -174,11 +174,22 @@ export class TerminalInputStore {
   #referenceOperation<T>(ids: Iterable<string>, operation: (canonical: ReadonlySet<string>) => Promise<T>, admitted?: () => void): Promise<T> {
     try {
       this.#checkReferenceOperation();
-      if (this.#referencePending >= 2 || this.#deleting) throw Error('terminal-input-reference-busy');
+      if (this.#referencePending >= 2) throw Error('terminal-input-reference-busy');
       const canonical = new Set<string>();
-      for (const id of ids) { if (canonical.size >= 4096 && !canonical.has(id)) throw Error('terminal-input-reference-capacity'); canonical.add(this.#ready(id).id); }
+      for (const id of ids) {
+        if (canonical.size >= 4096 && !canonical.has(id)) throw Error('terminal-input-reference-capacity');
+        if (this.#deletions.has(id)) throw Error('terminal-input-reference-expired');
+        canonical.add(this.#ready(id).id);
+      }
+      const deleting = [...this.#deletions.values()];
       this.#referencePending++; admitted?.();
-      const work = this.#referenceSerial.then(() => { this.#checkReferenceOperation(); return operation(canonical); })
+      const work = this.#referenceSerial.then(async () => {
+        // A prior submission may still be collecting unrelated originals.
+        // Join that bounded cleanup instead of rejecting the next normal edit.
+        // The admission above inhibits further collection of these references.
+        await Promise.all(deleting);
+        this.#checkReferenceOperation(); return operation(canonical);
+      })
         .finally(() => { this.#referencePending--; });
       this.#referenceSerial = work.then(() => {}, () => {});
       return work;
@@ -504,7 +515,8 @@ export class TerminalInputStore {
       if (!blob) return;
       if ([...this.#owners.values()].some(ids => ids.has(id))) return;
       if (blob.failed) throw Error('terminal-input-settlement-unknown');
-      this.#deleting++;
+      let deleted!: () => void;
+      this.#deletions.set(id, new Promise<void>(resolve => { deleted = resolve; }));
       try {
         await this.#settle(blob);
         if (blob.index) await terminalPhysicalStep(this.capacity, bound, this.signal, async step => {
@@ -518,7 +530,7 @@ export class TerminalInputStore {
         this.#unclaimed.delete(id);
         for (const [token, reference] of this.#handles) if (reference === id) this.#handles.delete(token);
       } catch (error) { blob.failed = true; throw error; }
-      finally { this.#deleting--; }
+      finally { this.#deletions.delete(id); deleted(); }
     });
   }
   async close(): Promise<void> { this.#closing = true; await this.#referenceSerial; await this.#serial; await this.#spliceWork?.catch(() => {}); if (this.#ownsFiles) await this.#files.close(); }

@@ -129,16 +129,19 @@ describe('input reference transactions across a surface timeout', () => {
     await h.store.close();
   });
 
-  it('rejects a reference admission during an already-started unlink without advancing its revision', async () => {
+  it('queues live references behind unrelated cleanup without admitting an original already being removed', async () => {
     const h = await fixture();
     await h.store.reconcileReferences(1, [h.old], [h.old]);
     const unused = await h.add('unused original'), entered = deferred(), resume = deferred();
     h.deleting(async () => { entered.resolve(); await resume.promise; });
     const release = h.store.release(unused); await entered.promise;
-    await expect(h.store.reconcileReferences(2, [h.next], [h.next])).rejects.toThrow('busy');
+    await expect(h.store.reconcileReferences(2, [unused], [unused])).rejects.toThrow('expired');
+    let completed = false;
+    const next = h.store.reconcileReferences(2, [h.next], [h.next]).then(value => { completed = true; return value; });
+    await Promise.resolve(); expect(completed).toBe(false);
     expect(h.store.missing([h.old, h.next, h.material])).toEqual([]);
     resume.resolve(); await release; h.deleting(undefined);
-    await expect(h.store.reconcileReferences(2, [h.next], [h.next])).resolves.toMatchObject({ accepted: true });
+    await expect(next).resolves.toMatchObject({ accepted: true });
     expect(h.store.missing([h.next, h.material])).toEqual([]);
     await h.store.close();
   });

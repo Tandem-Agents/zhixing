@@ -82,6 +82,14 @@ export class TerminalInputSession {
       const frozen = await this.#persist(true);
       const submission = { ...frozen, text: frozenText };
       this.#submission = submission; this.#syncReferences();
+      // Persisting and freezing change reference ownership even when text is
+      // unchanged. Complete their collection before N admits the frozen owner;
+      // otherwise a normal Enter races the maintenance delete it just started.
+      await this.#referenceWork;
+      if (this.#referenceError) {
+        this.#submission = undefined;
+        throw Error('输入引用保留尚未确认，草稿已保留；请重新核对后再提交。');
+      }
       await this.request({ kind: 'input-submit', inputId: submission.inputId, version: submission.version });
     } finally { this.#preparing = false; }
   }
