@@ -1,3 +1,4 @@
+import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime } from "./assignment-lease-clock.js";
 import { Buffer } from "node:buffer";
 import {
   AuthorityStorageError,
@@ -431,6 +432,9 @@ interface RequestedInteraction {
 
 interface LedgerProjection {
   readonly assignmentId: string;
+  leaseTimeFrontier: number;
+  leaseAcceptanceFloor: number;
+  leaseClockActivated: boolean;
   readonly validation: AssignmentLedgerValidationState;
   lastSeq: number;
   chainDigest: string;
@@ -583,7 +587,7 @@ export class ConversationAssignmentLedger implements
   readonly #permissionSnapshotFor: AssignmentLedgerOptions["permissionSnapshotFor"];
   readonly #runtimeBindingGuard: AssignmentLedgerOptions["runtimeBindingGuard"];
   readonly #clock: () => string;
-  readonly #monotonicClock: () => number;
+  readonly #leaseTime: AssignmentLeaseClock;
   readonly #usageFinal: NonNullable<AssignmentLedgerOptions["usageFinal"]>;
   readonly #resources: ExecutorAssignmentResourceCoordinator | undefined;
   readonly #surfaceAbort: AssignmentLedgerOptions["surfaceAbort"];
@@ -596,14 +600,6 @@ export class ConversationAssignmentLedger implements
   readonly #projections = new Map<
     string,
     { readonly state: LedgerProjection; readonly cursor: ProjectionCursor }
-  >();
-  readonly #controlDeadlines = new Map<
-    string,
-    { readonly renewalSeq: number; readonly deadline: number }
-  >();
-  readonly #ownerControlDeadlines = new Map<
-    string,
-    { readonly renewalSeq: number; readonly deadline: number }
   >();
 
   constructor(options: AssignmentLedgerOptions) {
@@ -618,7 +614,7 @@ export class ConversationAssignmentLedger implements
     this.#permissionSnapshotFor = options.permissionSnapshotFor;
     this.#runtimeBindingGuard = options.runtimeBindingGuard;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#monotonicClock = options.monotonicClock ?? (() => performance.now());
+    this.#leaseTime = new AssignmentLeaseClock(this.#clock, options.monotonicClock ?? (() => performance.now()));
     // A missing usage reporter is represented explicitly as zero-usage evidence.
     // When a reporter is configured, its signed UsageReport digest replaces this
     // domain-separated fallback in cancel proofs.
@@ -768,7 +764,7 @@ export class ConversationAssignmentLedger implements
 
     const transaction = await this.#transact<DispatchDecision>(
       assignmentId,
-      (state, transactionContext) => {
+      (state) => {
         if (state.supersedeFence || state.aborts.length > 0 || state.halted) {
           throw new Error("Assignment is durably fenced and rejects late dispatch");
         }
@@ -847,12 +843,13 @@ export class ConversationAssignmentLedger implements
         const permissionSnapshot = this.#permissionSnapshotFor(
           envelope.permissionLease.snapshotDigest,
         );
+        const effectiveAcceptedAt = new Date(this.#effectiveLeaseNow(state)).toISOString();
         let permissionError: AuthorityError | undefined;
         try {
           acceptedRemoteIntervalRemainingMs({
             issuedAt: envelope.permissionLease.issuedAt,
             expiry: envelope.permissionLease.expiry,
-            acceptedAt: transactionContext.at,
+            acceptedAt: effectiveAcceptedAt,
             maxTtlMs: MAX_PERMISSION_LEASE_TTL_MS,
           });
         } catch {
@@ -912,7 +909,8 @@ export class ConversationAssignmentLedger implements
           };
         }
         const entry = nextEntry(state, {
-          v: 1,
+          v: 3,
+          effectiveAcceptedAt,
           t: "received",
           envelope: { ref: artifact.ref },
           activation: activation as unknown as AssignmentActivationProof,
@@ -1802,7 +1800,7 @@ export class ConversationAssignmentLedger implements
   }): Promise<void> {
     assertIdentifier(input.assignmentId, "Owner relay assignment id");
     assertIdentifier(input.ownerDeviceId, "Owner relay device id");
-    await this.#select(input.assignmentId, (state) => {
+    const transaction = await this.#transact(input.assignmentId, (state) => {
       const ref = state.received?.body.activation.ref;
       const control = state.control;
       if (
@@ -1812,12 +1810,16 @@ export class ConversationAssignmentLedger implements
         control.ownerDeviceId !== input.ownerDeviceId ||
         canonicalize(control.authority) !==
           canonicalize(input.consumer.authority) ||
-        control.lease.controlLeaseId !== input.consumer.controlLeaseId ||
-        !this.#ownerControlLeaseIsActive(state)
+        control.lease.controlLeaseId !== input.consumer.controlLeaseId
       ) {
         throw new Error("Owner relay authorization is not active for this assignment");
       }
+      if (!this.#ownerControlLeaseIsActive(state)) {
+        return this.#expiredLeaseDecision(state, leaseTime(control.acceptedAt) + control.validForMs, false);
+      }
+      return { kind: "return", value: true };
     });
+    if (!transaction.value) throw new Error("Owner relay authorization is not active for this assignment");
   }
 
   async pendingInteractionMirrors(
@@ -3172,13 +3174,17 @@ export class ConversationAssignmentLedger implements
             throw new TypeError("Owner control lease sequence was reused");
           }
           if (!this.#ownerControlLeaseIsActive(state)) {
-            throw new TypeError("Owner control lease is no longer active");
+            return this.#expiredLeaseDecision(state, leaseTime(current.acceptedAt) + current.validForMs, false);
           }
           return { kind: "return", value: true };
         }
       }
+      const effectiveAcceptedAt = new Date(this.#effectiveLeaseNow(state)).toISOString();
+      acceptedRemoteIntervalRemainingMs({ issuedAt: authorized.controlLease.issuedAt,
+        expiry: authorized.controlLease.expiry, acceptedAt: effectiveAcceptedAt, maxTtlMs: MAX_CONTROL_LEASE_TTL_MS });
       const entry = nextEntry(state, {
-        v: 1,
+        v: 3,
+        effectiveAcceptedAt,
         t: "control-lease-renewed",
         lease: snapshot(authorized.controlLease, "Authorized control lease"),
       });
@@ -3188,32 +3194,25 @@ export class ConversationAssignmentLedger implements
         value: true,
       };
     });
-    if (!transaction.value || !this.#ownerControlLeaseIsActive(transaction.state)) {
+    if (!transaction.value) {
       throw new TypeError("Owner control lease is no longer active");
     }
   }
 
+  #effectiveLeaseNow(state: LedgerProjection): number {
+    return this.#leaseTime.now(Math.max(state.leaseTimeFrontier, state.leaseAcceptanceFloor));
+  }
+
   #ownerControlLeaseIsActive(state: LedgerProjection): boolean {
     const control = state.control;
-    if (!control) return false;
-    const monotonicNow = this.#monotonicClock();
-    const cached = this.#ownerControlDeadlines.get(state.assignmentId);
-    if (cached?.renewalSeq === control.lease.renewalSeq) {
-      return monotonicNow < cached.deadline;
-    }
-    const now = canonicalTime(this.#clock(), "Owner control local clock");
-    const acceptedAt = canonicalTime(
-      control.acceptedAt,
-      "Control lease local acceptance",
-    );
-    if (now < acceptedAt) return false;
-    const remaining = control.validForMs - (now - acceptedAt);
-    if (remaining <= 0) return false;
-    this.#ownerControlDeadlines.set(state.assignmentId, {
-      renewalSeq: control.lease.renewalSeq,
-      deadline: monotonicNow + remaining,
-    });
-    return true;
+    return control !== undefined && this.#effectiveLeaseNow(state) <
+      leaseTime(control.acceptedAt) + control.validForMs;
+  }
+
+  #expiredLeaseDecision<Value>(state: LedgerProjection, expiry: number, value: Value): ProjectionTransactionDecision<unknown, Value> {
+    if (state.leaseTimeFrontier >= expiry) return { kind: "return", value };
+    return { kind: "append", entries: [leaseClockRecord(this.#executorId,
+      this.#effectiveLeaseNow(state))], value };
   }
 
   #rejectionResult(
@@ -3546,7 +3545,7 @@ export class ConversationAssignmentLedger implements
       | PermissionSnapshotLease<"conversation">
       | PermissionSnapshotLease<"job">,
   ): Promise<readonly PermissionRule[]> {
-    return this.#select(assignmentId, (state) => {
+    const transaction = await this.#transact<readonly PermissionRule[] | undefined>(assignmentId, (state) => {
       const received = state.received?.body.activation;
       const active =
         state.phase === "started" &&
@@ -3561,7 +3560,7 @@ export class ConversationAssignmentLedger implements
         executorId: this.#executorId,
         active,
         now: this.#clock(),
-        timeValid: this.#permissionControlIsActive(state, lease),
+        timeValid: true, // Identity and phase first; effective time is checked below.
       });
       if (
         received === undefined ||
@@ -3580,7 +3579,18 @@ export class ConversationAssignmentLedger implements
       ) {
         throw new TypeError("Permission snapshot does not match the active lease");
       }
-      return validatedSnapshot.rules.map((rule): PermissionRule => ({
+      const control = state.control;
+      const permission = state.received?.permission;
+      if (!control || !permission || control.lease.controlLeaseId !== validatedLease.controlLeaseId ||
+          permission.controlLeaseId !== validatedLease.controlLeaseId) {
+        throw new TypeError("Permission snapshot lease is inactive, expired, or misbound");
+      }
+      const expiry = Math.min(leaseTime(control.acceptedAt) + control.validForMs,
+        leaseTime(permission.acceptedAt) + permission.validForMs);
+      if (this.#effectiveLeaseNow(state) >= expiry) {
+        return this.#expiredLeaseDecision(state, expiry, undefined);
+      }
+      return { kind: "return", value: validatedSnapshot.rules.map((rule): PermissionRule => ({
         ...rule,
         pattern: { ...rule.pattern },
         ...(rule.contextId === undefined
@@ -3591,51 +3601,10 @@ export class ConversationAssignmentLedger implements
           : { contributors: structuredClone(rule.contributors) }),
         lastMatchedAt: 0,
         matchCount: 0,
-      }));
+      })) };
     });
-  }
-
-  #permissionControlIsActive(
-    state: LedgerProjection,
-    lease:
-      | PermissionSnapshotLease<"conversation">
-      | PermissionSnapshotLease<"job">,
-  ): boolean {
-    const control = state.control;
-    const permission = state.received?.permission;
-    if (
-      !control ||
-      !permission ||
-      control.lease.controlLeaseId !== lease.controlLeaseId ||
-      permission.controlLeaseId !== lease.controlLeaseId
-    ) {
-      return false;
-    }
-    const monotonicNow = this.#monotonicClock();
-    const cached = this.#controlDeadlines.get(state.assignmentId);
-    if (cached?.renewalSeq === control.lease.renewalSeq) {
-      return monotonicNow < cached.deadline;
-    }
-    const now = canonicalTime(this.#clock(), "Permission guard local clock");
-    const controlAcceptedAt = canonicalTime(
-      control.acceptedAt,
-      "Control lease local acceptance",
-    );
-    const permissionAcceptedAt = canonicalTime(
-      permission.acceptedAt,
-      "Permission lease local acceptance",
-    );
-    if (now < controlAcceptedAt || now < permissionAcceptedAt) return false;
-    const controlRemaining =
-      control.validForMs - (now - controlAcceptedAt);
-    const permissionRemaining =
-      permission.validForMs - (now - permissionAcceptedAt);
-    if (controlRemaining <= 0 || permissionRemaining <= 0) return false;
-    this.#controlDeadlines.set(state.assignmentId, {
-      renewalSeq: control.lease.renewalSeq,
-      deadline: monotonicNow + Math.min(controlRemaining, permissionRemaining),
-    });
-    return true;
+    if (transaction.value === undefined) throw new TypeError("Permission snapshot lease is inactive, expired, or misbound");
+    return transaction.value;
   }
 
   async #select<Value>(
@@ -3656,7 +3625,7 @@ export class ConversationAssignmentLedger implements
           this.#reduce,
           () => ({ kind: "return", value: undefined }),
           {
-            stream: assignmentStream(assignmentId),
+            streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
             ...(cached ? { cursor: cached.cursor } : {}),
           },
         );
@@ -3667,8 +3636,6 @@ export class ConversationAssignmentLedger implements
         state = transaction.state;
       } catch (error) {
         this.#projections.delete(assignmentId);
-        this.#controlDeadlines.delete(assignmentId);
-        this.#ownerControlDeadlines.delete(assignmentId);
         throw error;
       }
       return select(state);
@@ -3693,7 +3660,7 @@ export class ConversationAssignmentLedger implements
           Value
         >(
           cached?.state ?? emptyProjection(assignmentId),
-          this.#reduce,
+          (state, record, commit) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, commit ),
           (state, context) => {
             const decision = decide(state, context);
             if (decision.kind !== "append") return decision;
@@ -3703,11 +3670,11 @@ export class ConversationAssignmentLedger implements
             );
             return {
               ...decision,
-              entries: [...resourceRecords, ...decision.entries],
+              entries: [...resourceRecords, ...this.#leaseCompanions(decision.entries), ...decision.entries],
             };
           },
           {
-            stream: assignmentStream(assignmentId),
+            streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
           },
@@ -3722,11 +3689,18 @@ export class ConversationAssignmentLedger implements
         return transaction;
       } catch (error) {
         this.#projections.delete(assignmentId);
-        this.#controlDeadlines.delete(assignmentId);
-        this.#ownerControlDeadlines.delete(assignmentId);
         throw error;
       }
     });
+  }
+
+  #leaseCompanions(entries: readonly LogicalRecord<unknown>[]): readonly LogicalRecord<unknown>[] {
+    const times = entries.filter(entry => entry.stream.startsWith("assignment:"))
+      .map(entry => (entry.body as AssignmentEntry).body)
+      .filter(body => body.v === 3).map(body => leaseTime(body.effectiveAcceptedAt));
+    if (times.length === 0) return [];
+    if (times.some(time => time !== times[0])) throw new TypeError("Lease acceptances in one commit must share time");
+    return [leaseClockRecord(this.#executorId, times[0]!)];
   }
 
   #prepareResourceTerminalRecords(
@@ -3779,8 +3753,6 @@ export class ConversationAssignmentLedger implements
       const oldest = this.#projections.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       this.#projections.delete(oldest);
-      this.#controlDeadlines.delete(oldest);
-      this.#ownerControlDeadlines.delete(oldest);
     }
   }
 
@@ -3789,6 +3761,13 @@ export class ConversationAssignmentLedger implements
     record: LogicalRecord<unknown>,
     commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
   ): Promise<LedgerProjection> => {
+    if (record.stream === leaseClockStream(this.#executorId)) {
+      const next = readLeaseClockRecord(record.body, this.#executorId);
+      if (next < state.leaseTimeFrontier) throw corruptLedger("Executor lease time frontier regressed");
+      state.leaseTimeFrontier = next;
+      state.leaseClockActivated = true;
+      return state;
+    }
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
     }
@@ -3863,7 +3842,7 @@ export class ConversationAssignmentLedger implements
       acceptedRemoteIntervalRemainingMs({
         issuedAt: lease.issuedAt,
         expiry: lease.expiry,
-        acceptedAt: commit.at,
+        acceptedAt: entry.body.v === 3 ? entry.body.effectiveAcceptedAt : commit.at,
         maxTtlMs: MAX_CONTROL_LEASE_TTL_MS,
       });
     }
@@ -3924,8 +3903,22 @@ export class ConversationAssignmentLedger implements
     if (entry.body.t === "interaction-requested") {
       await materializeInteractionDisplay(entry.body.display, this.#artifacts);
     }
+    if (entry.body.t === "received" || entry.body.t === "control-lease-renewed") {
+      if (entry.body.v === 3) {
+        const clocks = commit.entries.filter(record => record.stream === leaseClockStream(this.#executorId));
+        if (clocks.length !== 1 || readLeaseClockRecord(clocks[0]!.body, this.#executorId) !== leaseTime(entry.body.effectiveAcceptedAt)) {
+          throw corruptLedger("Lease acceptance is missing its exact durable time companion");
+        }
+      } else if (state.leaseClockActivated) {
+        throw corruptLedger("Legacy lease writer cannot append after effective-time activation");
+      }
+    }
+    const acceptedAt = entry.body.v === 3 ? entry.body.effectiveAcceptedAt : commit.at;
     const digest = applyValidatedAssignmentEntry(state.validation, entry);
-    applyEntry(state, entry, digest, commit.at);
+    applyEntry(state, entry, digest, acceptedAt);
+    if (entry.body.t === "received" || entry.body.t === "control-lease-renewed") {
+      state.leaseAcceptanceFloor = Math.max(state.leaseAcceptanceFloor, leaseTime(acceptedAt));
+    }
     if (entry.body.t === "received" && receivedEnvelope) {
       if (!state.received) {
         throw corruptLedger("received projection was not materialized");
@@ -3935,20 +3928,15 @@ export class ConversationAssignmentLedger implements
         validForMs: acceptedRemoteIntervalRemainingMs({
           issuedAt: receivedEnvelope.permissionLease.issuedAt,
           expiry: receivedEnvelope.permissionLease.expiry,
-          acceptedAt: commit.at,
+          acceptedAt,
           maxTtlMs: MAX_PERMISSION_LEASE_TTL_MS,
         }),
-        acceptedAt: commit.at,
+        acceptedAt,
       };
       state.received.resourceLease = snapshot(
         receivedEnvelope.resourceLease,
         "Received resource lease",
       );
-      this.#controlDeadlines.delete(state.assignmentId);
-    }
-    if (entry.body.t === "control-lease-renewed") {
-      this.#controlDeadlines.delete(state.assignmentId);
-      this.#ownerControlDeadlines.delete(state.assignmentId);
     }
     state.lastSeq = entry.recordSeq;
     state.chainDigest = digest;
@@ -4058,6 +4046,9 @@ function authorityForExecutionRef(
 function emptyProjection(assignmentId: string): LedgerProjection {
   return {
     assignmentId,
+    leaseTimeFrontier: 0,
+    leaseAcceptanceFloor: 0,
+    leaseClockActivated: false,
     validation: createAssignmentLedgerValidationState(assignmentId),
     lastSeq: 0,
     chainDigest: assignmentLedgerSeed(assignmentId),

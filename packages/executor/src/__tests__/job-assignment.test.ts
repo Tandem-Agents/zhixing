@@ -435,6 +435,7 @@ async function createUserHarness(
     runtimeBindingGuard?: AssignmentLedgerOptions["runtimeBindingGuard"];
     assignmentRecordV2Writes?: boolean;
     clock?: () => string;
+    monotonicClock?: () => number;
     legacyPolicy?: {
       readonly kind: "legacy-import";
       readonly nextFire: string;
@@ -515,6 +516,7 @@ async function createUserHarness(
     permissionSnapshotFor: (digest) => matchingPermissionSnapshotFor(identity, digest),
     runtimeBindingGuard: options.runtimeBindingGuard,
     assignmentRecordV2Writes: options.assignmentRecordV2Writes ?? true,
+    monotonicClock: options.monotonicClock,
     clock,
     surfaceAbort: {
       authorize(assignmentId, input) {
@@ -691,6 +693,28 @@ async function resolve(
 describe("user job durable protocol", {
   timeout: DURABLE_IO_TEST_TIMEOUT_MS,
 }, () => {
+  it("persists owner-relay expiry before rejection and rejects it after restart", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createUserHarness({ clock: () => wall, monotonicClock: () => mono });
+    await receive(h);
+    const control = h.dispatch!.envelope.controlLease;
+    const request = { assignmentId: ASSIGNMENT_ID, ownerDeviceId: control.signature.keyId,
+      consumer: { kind: "owner-relay" as const, authority: { execution: "job" as const, taskId: TASK_ID, anchorEpoch: 3 }, controlLeaseId: control.controlLeaseId } };
+    await expect(h.ledger.authorizeOwnerRelay(request)).resolves.toBeUndefined();
+    mono = 60001; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    const before = (await h.log.readAll()).length;
+    await expect(h.ledger.authorizeOwnerRelay({ ...request, ownerDeviceId: "wrong-owner" })).rejects.toThrow("not active");
+    expect(await h.log.readAll()).toHaveLength(before);
+    await expect(h.ledger.authorizeOwnerRelay(request)).rejects.toThrow("not active");
+    expect(await h.log.readAll()).toHaveLength(before + 1);
+    wall = NOW; mono = 0;
+    const reopened = new ConversationAssignmentLedger({ log: h.log, artifacts: h.artifacts, executorId: EXECUTOR_ID,
+      signer: h.identity, verifier: h.identity, ownerControl, snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: digest => matchingPermissionSnapshotFor(h.identity, digest), clock: () => wall, monotonicClock: () => mono });
+    await expect(reopened.authorizeOwnerRelay(request)).rejects.toThrow("not active");
+    expect(await h.log.readAll()).toHaveLength(before + 1);
+  });
+
   it("keeps capability diagnostics internal while publishing actionable notices", async () => {
     const harness = await createUserHarness({
       assign: false,

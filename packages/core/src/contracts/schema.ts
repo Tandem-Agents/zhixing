@@ -163,7 +163,7 @@ export interface WireSchemaMap {
 
 export type WireSchemaId = keyof WireSchemaMap;
 export type WireSchemaVersion = {
-  [K in WireSchemaId]: K extends "AssignmentRecord" ? 1 | 2 : 1;
+  [K in WireSchemaId]: K extends "AssignmentRecord" ? 1 | 2 | 3 : 1;
 };
 
 type Assert<T extends true> = T;

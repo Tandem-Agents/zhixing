@@ -7,7 +7,7 @@ export interface DurableSchemaCompatibility {
 
 /** Finite durable families written by the first stable distributed-runtime baseline. */
 export const DURABLE_SCHEMA_INVENTORY = Object.freeze([
-  row("AssignmentAuthorityRecord"),
+  Object.freeze({ schemaId: "AssignmentAuthorityRecord", readMin: "1", readMax: "3", writeVersion: "3" }),
   row("AuthorityCommitEnvelope"),
   row("CheckpointAuthorityRecord"),
   row("ConversationAuthorityRecord"),

@@ -20,5 +20,7 @@ describe("durable schema inventory", () => {
       writeVersion: "1",
     });
     expect(() => createDurableSchemaActivation("AuthorityCommitEnvelope", "2")).toThrow("writer policy");
+    expect(createDurableSchemaActivation("AssignmentAuthorityRecord", "3").writeVersion).toBe("3");
+    expect(() => createDurableSchemaActivation("AssignmentAuthorityRecord", "1")).toThrow("writer policy");
   });
 });

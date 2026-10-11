@@ -408,8 +408,14 @@ type AssignmentRecordV2 =
       readonly streamProof: InteractionSettlementStreamProof;
     };
 
+type AssignmentRecordV3 =
+  (Extract<AssignmentRecordV1Body, { t: "received" | "control-lease-renewed" }>) & {
+    readonly v: 3;
+    readonly effectiveAcceptedAt: IsoTime;
+  };
+
 export type AssignmentRecord = WireSchemaIdentity<"AssignmentRecord"> &
-  (AssignmentRecordV1 | AssignmentRecordV2);
+  (AssignmentRecordV1 | AssignmentRecordV2 | AssignmentRecordV3);
 
 export interface AssignmentEntry {
   recordSeq: number;

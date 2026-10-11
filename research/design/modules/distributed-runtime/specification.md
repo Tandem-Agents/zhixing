@@ -1458,7 +1458,14 @@ type CancelProofBody = NotStartedCancelProof | HaltedCancelProof;               
 // owner 恢复：6.1 行 28-33 / 6.2 行 30-35），任一不符即拒。
 ```
 
-上述既有 `AssignmentRecord` 分支固定为顶层 `v:1`。本单元新增的 stream 投影与取消提交完成事实只允许使用以下顶层 `v:2` 分支，禁止把新判别项塞入 v1：
+上述既有 `AssignmentRecord` 分支使用顶层 `v:1`，但租约接纳时间采用以下 v3 后缀合同：
+
+- 新写 `received` 与 `control-lease-renewed` 为 `v:3`，新增规范 ISO 字段 `effectiveAcceptedAt`；原有其他事实版本不变。每条 v3 接纳事实必须在同一 authority commit 中伴随唯一的 `executor:<id>:assignment-lease-clock` 流记录 `{v:1,t:"assignment-lease-time-frontier",executorId,frontier}`，水位必须与接纳时间完全相等。
+- Executor 租约有效时间取墙钟、耐久时间水位、前次有效时间加本进程单调时钟增量的最大值。control 与 permission 的过期守卫共用此时间轴；续租 TTL/skew 从有效接纳时间校验，不得因墙钟回拨扩大租约。新 control 续租不改写原 permission 的接纳时间。
+- 已验证身份的过期拒绝，若当前耐久水位尚不能证明过期，须先提交时间水位再返回拒绝；重复拒绝不重复写。存储失败保留原错误，不伪装成已持久确认的拒绝。全局 `commit.at` 和其他流时间语义不改变。
+- 旧 v1 接纳事实仍按原 commit 时间重放；Executor 时间流激活后禁止再接受 v1 的 received/续租。读旧版本不等于允许旧二进制在新格式上写入：当前未发布版本按维护停止、整体升级的发行合同使用，新版本运行后不支持降级或混用旧写者；本合同不宣称提供跨版本写者隔离框架。
+
+stream 投影与取消提交完成事实只允许使用以下顶层 `v:2` 分支，禁止把新判别项塞入 v1：
 
 ```ts
 type AssignmentRecordV2 =

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { ExecutorResourceGovernor } from "../resource-governor.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
@@ -553,7 +554,112 @@ async function createHarness(
   return { ...harness, dispatch };
 }
 
+async function createFormalReceiptHarness(options: { clock?: () => string; monotonicClock?: () => number; shortPermission?: boolean } = {}) {
+  const h = await createHarness(options);
+  const clock = options.clock ?? (() => NOW);
+  const { digest: _digest, signature: _signature, ...root } = h.unsigned.resourceLease;
+  const payload = { ...root, reservationId: `reservation:${ASSIGNMENT_ID}`,
+    domain: { kind: "anchor" as const, anchorEpoch: 3 },
+    delegation: { executorId: EXECUTOR_ID, maxDepth: 1, maxBudget: root.budget } };
+  const digested = { ...payload, digest: protocolDigest("ResourceLease", 1, payload) };
+  const lease = { ...digested, signature: h.identity.sign("ResourceLease", 1, digested) };
+  const { signature: _permissionSignature, ...permissionPayload } = h.unsigned.permissionLease;
+  const permissionBody = { ...permissionPayload, expiry: options.shortPermission ? CONTROL_EXPIRY : permissionPayload.expiry };
+  const permissionLease = { ...permissionBody, signature: h.identity.sign("PermissionSnapshotLease", 1, permissionBody) };
+  const envelope = createSignedConversationEnvelope({ ...h.unsigned, permissionLease, resourceLease: lease }, h.identity, h.identity);
+  const activation = signConversationActivation(buildConversationActivationPayload({ envelope,
+    dispatchRef: dispatchEnvelopeArtifact(envelope).ref, commit: h.dispatch.activation.commit, issuedAt: NOW }), h.identity);
+  const log = new FileAuthorityCommitLog(path.join(h.root, "formal-executor"), h.artifacts, { clock });
+  onTestFinished(() => log.stopStorageMaintenance());
+  const reopen = () => {
+    const governor = new ExecutorResourceGovernor({ log, signer: h.identity, verifier: h.identity, guard: { assert() {} },
+      executorId: EXECUTOR_ID, localDomainId: "local:device-1", localGovernorEpoch: 1, maxActiveRoots: 1, clock, monotonicClock: options.monotonicClock });
+    const ledger = new ConversationAssignmentLedger({ log, artifacts: h.artifacts, executorId: EXECUTOR_ID,
+      signer: h.identity, verifier: h.identity, ownerControl, snapshotFor: matchingSnapshotFor,
+      permissionSnapshotFor: digest => matchingPermissionSnapshotFor(h.identity, digest), resources: governor, clock, monotonicClock: options.monotonicClock });
+    return { governor, ledger };
+  };
+  return { ...h, ...reopen(), log, reopen, envelope, activation, lease };
+}
+
 describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("durably rejects expiry after cache failure and independent reopen without repeated writes", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    mono = 60001; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    const count = (await h.log.readAll()).length;
+    mono = 0; wall = NOW;
+    const reopened = h.reopen().ledger;
+    await expect(reopened.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    await expect(reopened.queryLedger(ASSIGNMENT_ID, ownerContext(ASSIGNMENT_ID, "executor.queryLedger"))).rejects.toThrow("no longer active");
+    await expect(reopened.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    expect(await h.log.readAll()).toHaveLength(count);
+  });
+
+  it("anchors a new renewal on effective time while leaving old permission expired", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono, shortPermission: true });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    mono = 120000; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    const renewed = ownerContext(ASSIGNMENT_ID, "executor.queryLedger", CONVERSATION_ID,
+      { renewalSeq: 2, issuedAt: wall, expiry: new Date(Date.parse(wall) + 60000).toISOString() });
+    await expect(h.ledger.queryLedger(ASSIGNMENT_ID, renewed)).resolves.toMatchObject({ phase: "started" });
+    const commits = await h.log.readAll<unknown>();
+    const accepted = commits.find(c => c.entries.some(e => (e.body as AssignmentEntry).body?.t === "control-lease-renewed" &&
+      ((e.body as AssignmentEntry).body as {lease?:{renewalSeq:number}}).lease?.renewalSeq === 2))!;
+    expect(accepted.at).toBe(wall); // Shared authority clock is untouched.
+    const frontier = accepted.entries.find(e => e.stream.endsWith(":assignment-lease-clock"))!.body as {frontier:string};
+    expect(frontier.frontier).toBe(new Date(Date.parse(NOW) + 120000).toISOString());
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    mono += 30000;
+    await expect(h.ledger.queryLedger(ASSIGNMENT_ID, renewed)).resolves.toMatchObject({ phase: "started" });
+    mono += 30001;
+    await expect(h.ledger.queryLedger(ASSIGNMENT_ID, renewed)).rejects.toThrow("no longer active");
+  });
+
+  it("fails closed and preserves storage failure when the expiry frontier cannot commit", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    mono = 60001; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    const write = vi.spyOn(h.log, "transactProjection").mockRejectedValueOnce(new Error("expiry fsync failed"));
+    try { await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("expiry fsync failed"); }
+    finally { write.mockRestore(); }
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+  });
+
+  it.each(["missing", "mismatched", "duplicate", "malformed"] as const)("rejects an effective acceptance with a %s clock companion", async mode => {
+    const h = await createHarness({ monotonicClock: () => 0 });
+    const ctx = ownerContext(ASSIGNMENT_ID, "executor.queryLedger");
+    if (ctx.principal.kind !== "owner-control") throw new Error("fixture principal");
+    const clock = { stream: `executor:${EXECUTOR_ID}:assignment-lease-clock`, body: { v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID,
+      frontier: mode === "mismatched" ? "2026-07-13T09:00:01.000Z" : NOW, ...(mode === "malformed" ? { extra: true } : {}) } };
+    await h.log.append<unknown>([
+      ...(mode === "missing" ? [] : mode === "duplicate" ? [clock, clock] : [clock]),
+      { stream: `assignment:${ASSIGNMENT_ID}`, body: { recordSeq: 1, body: { v: 3, t: "control-lease-renewed",
+        effectiveAcceptedAt: NOW, lease: ctx.principal.grant.controlLease } } },
+    ]);
+    await expect(h.ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).rejects.toThrow();
+  });
+
+  it("reads historical v1 leases and rejects legacy acceptance after effective-time activation", async () => {
+    const h = await createHarness({ monotonicClock: () => 0 });
+    const ctx = ownerContext(ASSIGNMENT_ID, "executor.queryLedger");
+    if (ctx.principal.kind !== "owner-control") throw new Error("fixture principal");
+    const record = { recordSeq: 1, body: { v: 1, t: "control-lease-renewed", lease: ctx.principal.grant.controlLease } };
+    await h.log.append<unknown>([{ stream: `assignment:${ASSIGNMENT_ID}`, body: record }]);
+    await expect(h.ledger.dataPlaneBinding(ASSIGNMENT_ID, "observe")).resolves.toBeUndefined();
+    await h.log.append<unknown>([{ stream: `executor:${EXECUTOR_ID}:assignment-lease-clock`, body: {
+      v: 1, t: "assignment-lease-time-frontier", executorId: EXECUTOR_ID, frontier: NOW } }]);
+    await h.log.append<unknown>([{ stream: "assignment:legacy-other", body: record }]);
+    await expect(h.ledger.dataPlaneBinding("legacy-other", "observe")).rejects.toThrow("Legacy lease writer");
+  });
+
   it("authorizes a surface abort through the owner-issued durable ticket chain", async () => {
     const harness = await createHarness();
     await harness.ledger.dispatch(

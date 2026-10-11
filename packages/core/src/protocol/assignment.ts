@@ -2192,9 +2192,10 @@ function assertAssignmentRecord(
     value.t === "interaction-stream-projected" ||
     value.t === "cancel-proof-owner-accepted" ||
     value.t === "interaction-settlement-owner-accepted";
+  const effectiveLeaseRecord = value.v === 3 && (value.t === "received" || value.t === "control-lease-renewed");
   if (
     (versionedStreamRecord && value.v !== 2) ||
-    (!versionedStreamRecord && value.v !== 1)
+    (!versionedStreamRecord && !effectiveLeaseRecord && value.v !== 1)
   ) {
     throw new TypeError(
       versionedStreamRecord
@@ -2202,6 +2203,7 @@ function assertAssignmentRecord(
         : "Legacy assignment facts require assignment record v1",
     );
   }
+  if (effectiveLeaseRecord) assertCanonicalTime(value.effectiveAcceptedAt, "Effective lease acceptance");
   switch (value.t) {
     case "interaction-stream-projection-enabled":
       assertExactKeys(
@@ -2285,7 +2287,7 @@ function assertAssignmentRecord(
       }
       return;
     case "received":
-      assertExactKeys(value, ["activation", "envelope", "t", "v"], "received record");
+      assertExactKeys(value, ["activation", "envelope", "t", "v", ...(value.v === 3 ? ["effectiveAcceptedAt"] : [])], "received record");
       assertExactKeys(value.envelope, ["ref"], "received envelope");
       assertArtifactRef(value.envelope.ref, "received envelope reference");
       assertObject(value.activation, "received activation");
@@ -2332,7 +2334,7 @@ function assertAssignmentRecord(
     case "control-lease-renewed":
       assertExactKeys(
         value,
-        ["lease", "t", "v"],
+        ["lease", "t", "v", ...(value.v === 3 ? ["effectiveAcceptedAt"] : [])],
         "control-lease-renewed record",
       );
       validateControlLease(value.lease, verifier);
