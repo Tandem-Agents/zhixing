@@ -30,6 +30,7 @@ export class TerminalChannel {
   #closed = false;
   #retiring = false;
   #failure?: Error;
+  #failureContext?: { error: unknown; requestId?: number; action?: string; pending: number; queued: number };
   #body = 0;
   #control = 0;
   #closing = false;
@@ -44,6 +45,8 @@ export class TerminalChannel {
   ) {}
 
   get bodyAvailable(): boolean { return !this.#closed && !this.#retiring && this.#body < TERMINAL_LIMITS.bodyFrames; }
+  /** First local cause only; the process boundary projects safe log fields. */
+  get failureContext() { return this.#failureContext; }
 
   /** Seal ordinary delivery while retaining close/exit and their receipts.
    * Keep the bounded sent identities until ACK/close: a late genuine ACK must
@@ -93,7 +96,7 @@ export class TerminalChannel {
       return Promise.reject(Error('terminal-frame-too-large'));
     }
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => this.#fail('terminal-delivery-timeout'), TERMINAL_LIMITS.deliveryTimeoutMs);
+      const timer = setTimeout(() => this.#fail('terminal-delivery-timeout', undefined, payload), TERMINAL_LIMITS.deliveryTimeoutMs);
       const delivery: Delivery = { payload: (JSON.parse(encoded) as TerminalEnvelope).payload, traffic, closing, timer, resolve, reject };
       if (!closing && traffic === 'control' && (this.#control >= TERMINAL_LIMITS.controlFrames || this.#controlQueue.length)) this.#controlQueue.push(delivery);
       else this.#send(delivery);
@@ -107,8 +110,8 @@ export class TerminalChannel {
     else this.#control++;
     this.#pending.set(sequence, delivery);
     const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence, traffic: delivery.traffic, payload: delivery.payload };
-    try { this.sender(packet, error => { if (error && !delivery.retired) this.#fail('terminal-send-failed'); }); }
-    catch { this.#fail('terminal-send-failed'); }
+    try { this.sender(packet, error => { if (error && !delivery.retired) this.#fail('terminal-send-failed', error, delivery.payload); }); }
+    catch (error) { this.#fail('terminal-send-failed', error, delivery.payload); }
   }
 
   #flushControl(): void {
@@ -145,16 +148,16 @@ export class TerminalChannel {
       if (!retired()) return this.receiveMessage(message, value.traffic);
     }).catch(error => {
       if (retired() && error instanceof TerminalChannelRetiredError) return;
-      this.#fail('terminal-receive-failed'); throw error;
+      this.#fail('terminal-receive-failed', error, message); throw error;
     }).then(() => {
       if (retired()) return;
       if (this.#closed) throw Error('terminal-channel-closed');
       const packet: TerminalEnvelope = { protocol: TERMINAL_PROTOCOL, instance: this.instance, sequence: ++this.#sequence, traffic: 'control', payload: { type: 'ack', sequence: value.sequence } };
       return new Promise<void>((resolve, reject) => {
         try { this.sender(packet, error => {
-          if (error && !retired()) { this.#fail('terminal-ack-failed'); reject(error); } else resolve();
+          if (error && !retired()) { this.#fail('terminal-ack-failed', error, message); reject(error); } else resolve();
         }); }
-        catch (error) { this.#fail('terminal-ack-failed'); reject(error); }
+        catch (error) { this.#fail('terminal-ack-failed', error, message); reject(error); }
       });
     })
       .finally(() => { this.#receiving--; this.#receivedWork.delete(work); });
@@ -170,8 +173,12 @@ export class TerminalChannel {
     this.#pending.clear(); this.#controlQueue.length = 0; this.#body = 0; this.#control = 0; this.#closing = false;
   }
 
-  #fail(reason: string): void {
+  #fail(reason: string, error: unknown = Error(reason), message?: TerminalMessage): void {
     if (this.#closed) return;
+    this.#failureContext ??= { error,
+      requestId: message?.type === 'request' || message?.type === 'reply' ? message.id : undefined,
+      action: message?.type === 'request' ? message.action?.kind : undefined,
+      pending: this.#pending.size, queued: this.#controlQueue.length };
     this.#failure = Error(reason);
     this.close(reason);
     this.failure(reason);

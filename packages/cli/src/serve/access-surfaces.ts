@@ -494,6 +494,7 @@ export async function createHostLosslessDataPlane(
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
+  readonly onFailure?: import("./conversation-protocol-runtime.js").ConversationProtocolRuntimeOptions["onFailure"];
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
   readonly conversationNamingStorage: NamerConversationRepo;
@@ -661,6 +662,7 @@ export async function createConversationServices(
   });
   inputLifecycleContributions.acquire("sessionProcess.dispose", () => processProjection.dispose());
   const protocol = new ConversationProtocolRuntime({
+    onFailure: input.onFailure,
     authority: inputAuthorityRuntime,
     storedIdentityExists: (conversationId) => inputConversationIdentityLifecycle.identityExists(conversationId),
     manager: managerAssembly.resolve,

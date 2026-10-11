@@ -29,6 +29,7 @@ export class TerminalSkillsOwner {
     client: SkillCatalogClient;
     publish(view: TerminalSkillsView): Promise<void>;
     refreshCommands(): Promise<void> | void;
+    onFailure?(error: unknown, phase: 'operation' | 'commands'): void;
     signal: AbortSignal;
   }) {
     this.#closed = new Promise((resolve, reject) => { this.#resolve = resolve; this.#reject = reject; });
@@ -126,7 +127,8 @@ export class TerminalSkillsOwner {
       if (this.#done) return;
       this.#committed = false;
       try { await operation(); }
-      catch {
+      catch (error) {
+        this.options.onFailure?.(error, 'operation');
         if (!this.#done) {
           this.#fresh = false; this.#state = 'error';
           this.#message = this.#committed ? '变更已保存，但列表刷新失败；按 r 重新读取。' : '技能操作或读取未完成；按 r 重新读取后再操作。';
@@ -136,7 +138,7 @@ export class TerminalSkillsOwner {
       // post-write query must refresh commands from the same authoritative client.
       if ((refreshCommands || this.#committed) && !this.options.signal.aborted) {
         try { await this.options.refreshCommands(); }
-        catch { if (!this.#done) this.#message = `${this.#committed ? '变更已保存。' : ''}技能命令刷新失败；按 r 重试。`; }
+        catch (error) { this.options.onFailure?.(error, 'commands'); if (!this.#done) this.#message = `${this.#committed ? '变更已保存。' : ''}技能命令刷新失败；按 r 重试。`; }
       }
       if (!this.#done) { this.#busy = false; await this.#publish(); }
     })().catch(error => { this.#finish(error); }).finally(() => {

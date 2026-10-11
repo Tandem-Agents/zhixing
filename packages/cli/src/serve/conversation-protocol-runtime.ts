@@ -159,6 +159,7 @@ export interface ConversationProtocolRuntimeOptions {
     >;
     readonly modelCallMetering?: import("@zhixing/owner-kernel/types").SessionRuntimeModelCallMetering;
   }) => Promise<RunResult>;
+  readonly onFailure?: (error: unknown, context: { readonly phase: "run" | "recovery"; readonly conversationId: string; readonly runId?: string }) => void;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
   readonly onFinal?: (frame: FinalFrame) => void | Promise<void>;
   readonly onPublishResult?: (
@@ -326,6 +327,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #statusListeners = new Set<
     NonNullable<ConversationProtocolRuntimeOptions["onStatus"]>
   >();
+  readonly #onFailure: ConversationProtocolRuntimeOptions["onFailure"];
   readonly #onStatus: ((notice: ConversationStatusNotice) => void | Promise<void>) | undefined;
   readonly #onFinal: ((frame: FinalFrame) => void | Promise<void>) | undefined;
   readonly #onFirstPartyStreamEnd: ConversationProtocolRuntimeOptions['onFirstPartyStreamEnd'];
@@ -417,6 +419,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     this.#interactions = options.interactions;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
+    this.#onFailure = options.onFailure;
     this.#onStatus = options.onStatus;
     this.#onFinal = options.onFinal;
     this.#onPublishResult = options.onPublishResult;
@@ -1739,6 +1742,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
       });
     } catch (error) {
+      this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId });
       this.#markRecovery(input.conversationId);
       throw error;
     } finally {
@@ -2184,7 +2188,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             ) {
               this.#recoveryConversations.delete(conversationId);
             }
-          } catch {
+          } catch (error) {
+            this.#observeFailure(error, { phase: "recovery", conversationId });
             // A later pass retries this conversation without blocking service readiness or peers.
           }
         }
@@ -3000,6 +3005,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#retireConversation(conversationId);
     }
     return projected;
+  }
+
+  #observeFailure(error: unknown, context: Parameters<NonNullable<ConversationProtocolRuntimeOptions["onFailure"]>>[1]): void {
+    try { this.#onFailure?.(error, context); } catch { /* Observation must not replace recovery. */ }
   }
 
   #markRecovery(conversationId: string): void {

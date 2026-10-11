@@ -16,6 +16,7 @@
  *   await client.close();
  */
 
+import { restoreFailureDiagnostic } from "@zhixing/core/logging";
 import { WebSocket } from "ws";
 import { RpcMessagePump } from "./rpc-message-pump.js";
 import { RpcRequestSender } from "./rpc-request-sender.js";
@@ -56,7 +57,7 @@ export class RpcClientError extends Error {
     message: string,
     public data?: unknown,
   ) {
-    super(message);
+    super(message, { cause: restoreFailureDiagnostic(data && typeof data === "object" && "diagnostic" in data ? data.diagnostic : undefined) });
     this.name = "RpcClientError";
   }
 }

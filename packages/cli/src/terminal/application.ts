@@ -15,7 +15,7 @@ import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type Ter
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
 import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
-import { beginRuntimeLogging, recordRuntimeFailure, observeStartupPhase } from '../logging/runtime.js';
+import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing/core/logging/storage';
 import { LogFilesProcess } from '../logging/files-process.js';
 import { createLogWriterProbe } from '../logging/writers.js';
@@ -74,6 +74,7 @@ import { TerminalCandidatesOwner } from './candidates.js';
 import { createStopSelectionRequest, shutdownStrategyForChoice } from '../runtime/stop-selection.js';
 import { createTerminalOwnedProcessFactory, TerminalHostLauncher } from './host-launch.js';
 import { boundedControlProjection } from '../runtime/control-projection.js';
+import { recordTerminalFailure } from './failure.js';
 
 type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
@@ -218,7 +219,12 @@ class TerminalApplication {
       } });
     this.#configPath = getGlobalConfigPath(process.env, home);
     this.#channel = new TerminalChannel(instance, (packet, done) => transport.send(packet, done),
-      message => this.#receive(message), reason => void this.#close(70, reason));
+      message => this.#receive(message), reason => {
+        const context = this.#channel.failureContext;
+        recordTerminalFailure(this.#logging.records, context?.error ?? Error(reason), reason,
+          { ...context, active: this.#requests.size });
+        void this.#close(70, reason);
+      });
     this.#recovery = new TerminalRecovery({ signal: this.#abort.signal, publish: view => this.#publish(view),
       send: message => this.#channel.send(message, 'body') });
     this.#hosts = new TerminalHostLauncher(this.#channel);
@@ -359,8 +365,9 @@ class TerminalApplication {
   readonly #interrupted = (): void => { void this.#close(this.args.length ? 130 : 0, 'application-interrupted'); };
   readonly #uncaught = (error: unknown): void => {
     // Seal work synchronously before recorder or resource cleanup.
-    this.#abort.abort(); void this.#close(71, 'application-failed');
-    recordRuntimeFailure(this.#logging.records, error, 'terminal-application-failed');
+    this.#abort.abort();
+    recordTerminalFailure(this.#logging.records, error, 'terminal-application-failed');
+    void this.#close(71, 'application-failed');
   };
 
   #receive(message: TerminalMessage): void {
@@ -381,19 +388,24 @@ class TerminalApplication {
     if (this.#requests.size >= TERMINAL_LIMITS.pendingRequests) throw Error('terminal-application-request-capacity');
     this.#requests.add(message.id);
     // Receipt acknowledges this finite operation, not its future business result.
-    this.#reply(message.id, ['input-history-next', 'input-window'].includes(message.action.kind) ? 'body' : 'control', this.#action(message.action));
+    this.#reply(message.id, ['input-history-next', 'input-window'].includes(message.action.kind) ? 'body' : 'control', this.#action(message.action), message.action.kind);
   }
 
-  #reply(id: number, lane: 'body' | 'control', result: Promise<unknown>): void {
+  #reply(id: number, lane: 'body' | 'control', result: Promise<unknown>, action: string): void {
+    const started = performance.now();
     // A reply blocked on transport retains only its ID/result, not the parsed
     // request and all its already-consumed input-reference arrays.
     void result.then(
       value => this.#channel.send({ type: 'reply', id, value }, lane),
       error => {
-        recordRuntimeFailure(this.#logging.records, error, 'terminal-request-failed');
+        recordTerminalFailure(this.#logging.records, error, 'terminal-request-failed',
+          { requestId: id, action, active: this.#requests.size, durationMs: Math.round(performance.now() - started) });
         return this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' });
       },
-    ).catch(() => this.#close(70, 'application-reply-undelivered')).finally(() => this.#requests.delete(id));
+    ).catch(error => {
+      recordTerminalFailure(this.#logging.records, error, 'application-reply-undelivered', { requestId: id, action });
+      return this.#close(70, 'application-reply-undelivered');
+    }).finally(() => this.#requests.delete(id));
   }
 
   async #action(action: TerminalAction): Promise<unknown> {
@@ -544,7 +556,7 @@ class TerminalApplication {
     if (this.#operation || this.#presentingConfirmation || this.#abort.signal.aborted) throw Error('terminal-operation-in-progress');
     const work = operation().catch(async error => {
       if (this.#abort.signal.aborted) return;
-      recordRuntimeFailure(this.#logging.records, error, 'terminal-operation-failed');
+      recordTerminalFailure(this.#logging.records, error, 'terminal-operation-failed');
       this.#mainView = { ...this.#mainView, busy: false, message: error instanceof ConfigurationEditPendingError
         ? error.message : `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
         ...(error instanceof ConfigurationEditPendingError ? { choices: [{ id: 'config', label: '重新打开配置并核对状态' }, { id: 'exit', label: '退出终端' }] } : {}) };
@@ -812,7 +824,7 @@ class TerminalApplication {
     const history = this.#history;
     const work = this.#historyPage().catch(async error => {
       if (this.#abort.signal.aborted || this.#history !== history) return;
-      recordRuntimeFailure(this.#logging.records, error, 'terminal-history-read-failed');
+      recordTerminalFailure(this.#logging.records, error, 'terminal-history-read-failed');
       this.#mainView = { ...this.#mainView, busy: false, message: '本机历史暂时无法读取。可返回连接页、重试或选择其他历史。' };
       await this.#publishHistoryView();
     }).finally(() => {
@@ -995,7 +1007,7 @@ class TerminalApplication {
     const reason = error instanceof Error && ['terminal-body-source-map', 'terminal-body-active-capacity',
       'terminal-body-projection-capacity', 'terminal-output-queue-capacity', 'terminal-output-retained-capacity', 'terminal-display-encoding-size',
       'terminal-display-page-size', 'terminal-frame-too-large'].includes(error.message) ? error.message : 'terminal-display-paused';
-    recordRuntimeFailure(this.#logging.records, error, reason);
+    recordTerminalFailure(this.#logging.records, error, reason);
     this.#displayHadGap = true;
     this.#outputProjection.pause();
     this.#processSession.pause('过程展示已暂停；业务执行与确认仍可继续。');
@@ -1460,7 +1472,7 @@ class TerminalApplication {
 
   #skillsFailed(error: unknown): void {
     if (this.#abort.signal.aborted) return;
-    recordRuntimeFailure(this.#logging.records, error, 'terminal-skills-refresh-failed');
+    recordTerminalFailure(this.#logging.records, error, 'terminal-skills-refresh-failed');
     this.#mainView = { ...this.#mainView, message: '技能命令刷新失败；原有命令和草稿保留。可打开 /skills 重试。' };
     if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-skills-notice-undelivered'));
   }
@@ -1496,6 +1508,7 @@ class TerminalApplication {
       const [binding, { TerminalSkillsOwner }] = await Promise.all([this.#ensureSkillsBinding(), import('./skills.js')]);
       this.#abort.signal.throwIfAborted();
       const owner = new TerminalSkillsOwner({ client: binding.client, signal: this.#abort.signal,
+        onFailure: (error, phase) => recordTerminalFailure(this.#logging.records, error, `terminal-skills-${phase}-failed`),
         refreshCommands: () => binding.commands.refresh(),
         publish: skills => this.#publish({ kind: 'skills', title: '技能管理', skills }) });
       this.#skills = owner;

@@ -10,6 +10,7 @@
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { recordConversationFailure } from "../logging/runtime.js";
 import { handoffLogging } from "../logging/handoff.js";
 import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
@@ -963,6 +964,7 @@ async function runServerProcess(
   const conversationLosslessDataPlane =
     createConversationLosslessDataPlaneAssemblyHandle();
   const conversationServices = await createConversationServices({
+    onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
     onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,

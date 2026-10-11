@@ -12,6 +12,7 @@
  * - dispatcher 自身无状态，可重用于多个连接
  */
 
+import { failureDiagnostic } from "@zhixing/core/logging";
 import type { RpcConnection } from "./connection.js";
 import type { ServerContext } from "../context.js";
 import { RPC_ERROR_CODES, type JsonRpcError } from "./protocol.js";
@@ -155,16 +156,15 @@ export class HandlerRegistry {
 /**
  * 把任意异常转为 JsonRpcError。
  * - RpcAppError → 直接使用其 code/message
- * - 其他异常 → INTERNAL_ERROR（隐藏内部细节，仅在 data 中保留 message 用于调试）
+ * - 其他异常 → INTERNAL_ERROR，仅附有限、已过滤的诊断证据
  */
 export function toJsonRpcError(err: unknown): JsonRpcError {
   if (err instanceof RpcAppError) {
     return { code: err.code, message: err.message, data: err.data };
   }
-  const message = err instanceof Error ? err.message : String(err);
   return {
     code: RPC_ERROR_CODES.INTERNAL_ERROR,
     message: "Internal error",
-    data: { message },
+    data: { diagnostic: failureDiagnostic(err) },
   };
 }

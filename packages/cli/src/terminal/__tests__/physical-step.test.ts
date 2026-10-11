@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import { DeviceCapacityAdmissionError, type DeviceCapacityArbiterPort } from '@zhixing/core/resources';
+import { logFailureEvidence } from '@zhixing/core/logging';
 import type { CheckpointFilesystemSession } from '@zhixing/mesh/filesystem';
 import { ownedPosixFilesystem } from '../../../../mesh/src/checkpoint-posix-session.js';
 
@@ -14,6 +15,21 @@ import { TerminalManagedFiles } from '../managed-files.js';
 
 afterEach(() => vi.useRealTimers());
 describe('terminal delegated physical completion', () => {
+  it.each([
+    { kind: 'backpressured', blockedBy: 'slots', retryAfterMs: 1 },
+    { kind: 'capacity-gap', blockedBy: 'readBytes' },
+    { kind: 'cancelled' },
+  ] as const)('retains finite admission evidence for $kind without executing the operation', async admission => {
+    const operation = vi.fn();
+    const capacity = { acquire: async () => admission } as unknown as DeviceCapacityArbiterPort;
+    const error = await terminalPhysicalStep(capacity, terminalMetadataStep, new AbortController().signal, operation).catch(error => error);
+    expect(error).toBeInstanceOf(DeviceCapacityAdmissionError);
+    expect(error.admission).toBe(admission);
+    expect(logFailureEvidence(error)).toEqual({ category: 'resource-admission', code: admission.kind,
+      ...('blockedBy' in admission ? { operation: admission.blockedBy } : {}) });
+    expect(operation).not.toHaveBeenCalled();
+  });
+
   it('seals queued file work and notifies the existing close owner once on an unconfirmed effect', async () => {
     vi.useFakeTimers();
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), ref() {}, unref() {}, kill() { return true; } });

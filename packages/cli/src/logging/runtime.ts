@@ -20,6 +20,7 @@ import type { StartupCheckResult } from "../startup.js";
 
 import { createBootstrapLogging, takeEntryLogging } from "./bootstrap.js";
 import { beginWriterDeclaration } from "./writer-admission.js";
+import { failureSourceFrames } from "./failure-location.js";
 export { RUNTIME_LOG_SOURCE } from "./runtime-source.js";
 
 /** Bounded phase timing for the actual entry; no configuration or credential payload. */
@@ -33,9 +34,18 @@ export async function observeStartupPhase<T>(
 
 /** Preserve the observed cause before entry drain, without copying configuration or credentials. */
 export function recordRuntimeFailure(records: LogRecordPort | undefined, error: unknown, reason: string, attempt?: number): void {
+  const sourceFrames = failureSourceFrames(error);
   try { records?.record({ event: "failed", result: "failure", data: {
     reason, attempt, failure: logFailureEvidence(error),
+    ...(sourceFrames.length ? { sourceFrames } : {}),
   } }); } catch { /* Observation cannot replace the runtime's own failure. */ }
+}
+
+export function recordConversationFailure(records: LogRecordPort | undefined, error: unknown, context: { readonly phase: "run" | "recovery"; readonly conversationId: string; readonly runId?: string }): void {
+  try { records?.record({ event: "conversationFailure", result: "failure", refs: [
+    { kind: "conversation", id: context.conversationId },
+    ...(context.runId ? [{ kind: "run", id: context.runId }] : []),
+  ], data: { phase: context.phase, failure: logFailureEvidence(error), sourceFrames: failureSourceFrames(error) } }); } catch { /* Preserve the original failure. */ }
 }
 
 export function recordStartupFailure(records: LogRecordPort, result: Exclude<StartupCheckResult, { kind: "ready" }>): void {

@@ -1,4 +1,5 @@
 import type { LogSource } from "../logging/contracts.js";
+import { LOG_FAILURE_FIELDS } from "../logging/failure.js";
 import { observationRefs } from "../logging/producer.js";
 
 export function productObservationRefs(input: unknown) {
@@ -13,6 +14,6 @@ export const PRODUCT_API_LOG_SOURCE: LogSource = {
   events: {
     requested: { message: "产品应用调用开始", level: "info", tier: "critical", fields: { action: "text", kind: "text" } },
     returned: { message: "产品应用调用已返回", level: "info", tier: "critical", fields: { action: "text", duration: "number", facts: { items: "text", maxItems: 32 } } },
-    failed: { message: "产品应用调用失败", level: "error", tier: "critical", fields: { action: "text", duration: "number", error: "text" } },
+    failed: { message: "产品应用调用失败", level: "error", tier: "critical", fields: { action: "text", duration: "number", error: "text", failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: "text", maxItems: 4 } } },
   },
 };

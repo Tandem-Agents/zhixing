@@ -35,6 +35,13 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     terminalLifecycle: { message: "终端生命周期阶段", level: "info", tier: "critical", fields: {
       instance: "text", phase: "text", role: "text", pid: "number", spawnId: "text", createMs: "number", frameId: "number", reason: "text", exitCode: "number",
     } },
+    conversationFailure: { message: "会话执行或恢复首因", level: "error", tier: "critical", fields: {
+      phase: "text", failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: "text", maxItems: 4 },
+    } },
+    terminalFailure: { message: "终端操作首因", level: "error", tier: "critical", fields: {
+      reason: "text", action: "text", requestId: "number", active: "number", pending: "number", queued: "number", durationMs: "number",
+      failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: 'text', maxItems: 4 },
+    } },
     started: {
       message: "运行入口已开始",
       level: "info",
@@ -63,6 +70,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     startupPhase: { message: "启动阶段已结束", level: "info", tier: "critical", fields: { phase: "text", durationMs: "number" } },
     failed: { message: "运行入口发生错误", level: "error", tier: "critical", fields: {
       reason: "text", error: "text", attempt: "number", phase: "text", durationMs: "number", failure: { fields: LOG_FAILURE_FIELDS },
+      sourceFrames: { items: "text", maxItems: 4 },
       issues: { items: { fields: { field: "text", reason: "text" } }, maxItems: 16 },
       missing: { items: "text", maxItems: 32 },
     } },

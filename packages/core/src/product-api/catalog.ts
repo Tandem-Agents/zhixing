@@ -1,3 +1,4 @@
+import { failureSourceFrames, logFailureEvidence } from "../logging/failure.js";
 import { randomUUID } from "node:crypto";
 import type { LogRecordPort } from "../logging/contracts.js";
 import { productObservationRefs } from "./logging.js";
@@ -317,6 +318,7 @@ export class ProductApiDispatcher {
       records?.record(() => ({ event: "failed", refs: [...refs, ...productObservationRefs(input)], result: "failure", data: {
         action: descriptor.identity, duration: performance.now() - started,
         error: error instanceof Error ? error.message : "应用抛出非标准错误",
+        failure: logFailureEvidence(error), sourceFrames: failureSourceFrames(error),
       } }));
       throw error;
     }
