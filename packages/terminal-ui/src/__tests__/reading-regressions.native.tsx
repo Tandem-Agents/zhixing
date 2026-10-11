@@ -45,6 +45,19 @@ async function scenario(name: string, run: (h: any) => Promise<void>, height = 4
   } finally { clearInterval(tick); await root?.dispose(); test.renderer.destroy(); }
 }
 try {
+  await scenario('virtual-reading-resize-roundtrip', async h => {
+    await h.publish({ first: 0, start: 0, last: 1, follow: true, segments: [{
+      blockId: 'resize-long', role: 'assistant', contentOffset: 0, final: true,
+      text: Array.from({ length: 120 }, (_, i) => `I-ROW-${i} 中文与英文 mixed words，滚动回看时保持这一行。\n`).join('\n'),
+    }] });
+    h.test.mockInput.pressKey('\x1b[5~'); await h.flush();
+    const first = () => /I-ROW-\d+/u.exec(h.test.captureCharFrame())?.[0];
+    const anchor = first(); assert.ok(anchor); h.capture('before');
+    h.test.resize(40, 16); await h.flush();
+    assert.equal(first(), anchor, 'narrowing preserves the first visible source row'); h.capture('narrow');
+    h.test.resize(120, 32); await h.flush();
+    assert.equal(first(), anchor, 'widening restores the same source row'); h.capture('wide');
+  }, 32);
   await scenario('selection-bottom-wheel-and-clear', async h => {
     await h.test.mockMouse.drag(6, 4, 18, 5); await h.flush();
     const selected = h.test.renderer.getSelection()?.getSelectedText(); assert.ok(selected);

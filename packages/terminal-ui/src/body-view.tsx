@@ -11,6 +11,7 @@ import { BodyHighlighter } from './body/highlighting.js';
 import { processBodyBlock, processBodyColor } from './process-model.js';
 
 import { TerminalScrollBox } from './scroll-box.js';
+import { ReadingQueue } from './reading-queue.js';
 export { TerminalScrollBox } from './scroll-box.js';
 
 type NativeSelection = NonNullable<ReturnType<CliRenderer['getSelection']>>;
@@ -171,7 +172,8 @@ export function BodyView(props: BodyViewProps) {
   let selectionClearPending = false;
   let anchorOffset = 0, headerTop: number | undefined;
   let heldContent: BodyPage | undefined;
-  let desiredPage: { start: number | undefined; follow: boolean } | undefined, pageWork: Promise<void> | undefined;
+  const readQueue = new ReadingQueue(intent => disposed ? Promise.resolve() : intent.kind === 'previous'
+    ? props.requestPrevious() : props.requestPage(intent.start, intent.follow));
   let failedIntent: { start: number | undefined; follow: boolean } | undefined;
   const readingOwner = () => {
     // Pointer takeover retires mouse callbacks, not an in-flight reading
@@ -181,17 +183,9 @@ export function BodyView(props: BodyViewProps) {
   };
   const requestPage = (start: number | undefined, follow: boolean): Promise<void> => {
     const current = readingOwner();
-    desiredPage = { start, follow };
-    if (!pageWork) pageWork = (async () => {
-      while (desiredPage && !disposed) {
-        const next = desiredPage; desiredPage = undefined;
-        try { await props.requestPage(next.start, next.follow); }
-        catch (error) { if (!desiredPage) throw error; }
-      }
-    })().finally(() => { pageWork = undefined; });
     // The physical queue still drains in order. Each caller owns only its
     // current interaction: an old rejection must not affect its successor.
-    return pageWork.catch(error => { if (current()) throw error; });
+    return readQueue.request({ kind: 'page', start, follow }).catch(error => { if (current()) throw error; });
   };
   const commitReadingIntent = (follow: boolean) => {
     readingGeneration++; paging = false;
@@ -377,10 +371,11 @@ export function BodyView(props: BodyViewProps) {
     else if (saved) {
       // A bounded thinking tail may have evicted the old anchor. Keep its
       // viewport offset at that same block's first retained source position.
-      if (![...mounted.values()].some(entry => sourceToRendered(entry.block, saved!) !== undefined)) {
-        const retained = [...mounted.values()].find(entry => entry.block.blockId === saved!.blockId && !entry.view.isDestroyed);
-        if (retained && saved.contentOffset < retained.block.node.from) saved = { blockId: saved.blockId, contentOffset: retained.block.node.from };
+      if (!blocks().some(block => sourceToRendered(block, saved!) !== undefined)) {
+        const retained = blocks().find(block => block.blockId === saved!.blockId);
+        if (retained && saved.contentOffset < retained.node.from) saved = { blockId: saved.blockId, contentOffset: retained.node.from };
       }
+      let restored = false;
       for (const entry of mounted.values()) {
         const offset = sourceToRendered(entry.block, saved);
         if (offset === undefined || entry.view.isDestroyed) continue;
@@ -394,7 +389,12 @@ export function BodyView(props: BodyViewProps) {
         for (let i = 0; i < info.lineSources.length; i++) {
           if (info.lineSources[i] === logical && info.lineStartCols[i]! - base <= column) row = i;
         }
-        box.scrollTo(box.scrollTop + entry.view.y - box.viewport.y + row - anchorOffset); break;
+        box.scrollTo(box.scrollTop + entry.view.y - box.viewport.y + row - anchorOffset); restored = true; break;
+      }
+      // A retained source position may still be awaiting its native leaf's
+      // layout. Do not report a completed restoration from the old pixel top.
+      if (!restored && blocks().some(block => sourceToRendered(block, saved!) !== undefined)) {
+        props.renderer.requestRender(); return;
       }
     }
     align = undefined;
@@ -511,7 +511,7 @@ export function BodyView(props: BodyViewProps) {
       // A new conversation starts at latest regardless of whether its view or
       // body arrives first. The previous page never owns the new scope's intent.
       setFollowing(true); box?.cancelPointer(); props.renderer.releasePointerCapture?.(); props.renderer.clearSelection();
-      selectionClearPending = false; desiredPage = undefined; headerTop = undefined; anchorOffset = 0;
+      selectionClearPending = false; readQueue.reset(); headerTop = undefined; anchorOffset = 0;
       pendingScroll = 0; saved = undefined; selection = undefined; selectionOwner = undefined; selectionGesture = undefined; align = undefined; prefetched = undefined;
       restorePending = true; layoutReady = false; props.onAnchor(undefined); props.renderer.requestRender();
       reportReading();
@@ -526,6 +526,7 @@ export function BodyView(props: BodyViewProps) {
       restorePending = false;
       readingGeneration++;
       const current = readingOwner();
+      if (pendingScroll && Math.sign(pendingScroll) !== direction) pendingScroll = 0;
       saved = capture(); props.onAnchor(saved);
       paging = true;
       readError = undefined; reportReading();
@@ -543,12 +544,16 @@ export function BodyView(props: BodyViewProps) {
           box.scrollBy(direction * Math.max(0, rows ?? box.viewport.height - 1));
           saved = capture(); props.onAnchor(saved);
           if (direction > 0 && atBottom() && !handle.hasSelection()) await handle.bottom();
+          else if (direction < 0 && box.scrollTop < box.viewport.height && props.hasEarlier && props.page.start === props.page.first)
+            await readQueue.request({ kind: 'previous' });
           else await requestPage(props.page.start, false);
           return;
         }
         const before = props.page;
-        align = undefined; pendingScroll = direction * Math.max(0, rows ?? box.viewport.height - 2);
-        if (direction < 0 && props.page.start === props.page.first) await props.requestPrevious();
+        align = undefined;
+        pendingScroll = Math.max(-2 * box.viewport.height, Math.min(2 * box.viewport.height,
+          pendingScroll + direction * Math.max(0, rows ?? box.viewport.height - 2)));
+        if (direction < 0 && props.page.start === props.page.first) await readQueue.request({ kind: 'previous' });
         else if (direction < 0) await requestPage(Math.max(props.page.first, props.page.start - 4), false);
         else if (props.page.start + props.page.segments.length < props.page.last) await requestPage(props.page.start + props.page.segments.length, false);
         else if (!handle.hasSelection()) await handle.bottom();
@@ -629,7 +634,10 @@ export function BodyView(props: BodyViewProps) {
     }
     const state = viewport(), selecting = !!props.renderer.getSelection();
     const page = contentPage();
-    if (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting)
+    // Width/page are committed together with the restored scroll coordinate.
+    // Publishing the new width with the old top would cull the source anchor
+    // during the extra native layout frame required by restore().
+    if (!restorePending && (state.page !== page || state.width !== props.width || state.top !== box.scrollTop || state.selecting !== selecting))
       setViewport({ page, width: props.width, top: box.scrollTop, selecting });
     reportReading();
     // A transport batch must not leave a short viewport looking like EOF.
@@ -644,7 +652,7 @@ export function BodyView(props: BodyViewProps) {
   props.onReady?.(handle);
   function release() {
     if (disposed) return;
-    disposed = true; readingGeneration++; props.onReady?.(undefined);
+    disposed = true; readingGeneration++; readQueue.reset(); props.onReady?.(undefined);
     props.renderer.removePostProcessFn(postFrame); mounted.clear(); projected.clear(); wrapMeasure.destroy(); measureView.destroy(); measure.destroy();
   }
   onCleanup(() => {

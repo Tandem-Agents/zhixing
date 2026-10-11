@@ -5,10 +5,10 @@ import { createPlatformSecretStore } from '@zhixing/secrets';
 import { createTerminalCredentialRunner, terminalSecretPlatform } from './credential-command.js';
 import { TerminalClipboard } from './clipboard.js';
 import { HistoryBodyRangeCache } from './body-projection.js';
-import type { ConversationBodyCursor } from '@zhixing/core/contracts';
+import type { ConversationBodyCursor, ConversationBodyPage } from '@zhixing/core/contracts';
 import type { TranscriptByteReader, TranscriptBodyCursor } from '@zhixing/core/transcript';
 import { isAbsolute } from 'node:path';
-import { TerminalChannel } from '@zhixing/terminal-ui/channel';
+import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing/terminal-ui/parent-transport';
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
@@ -81,6 +81,7 @@ type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillComman
 class EmptyTerminalSubmission extends Error {}
 interface TerminalHistoryState {
   conversationId: string;
+  buffered?: ConversationBodyPage;
   bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
 }
 
@@ -385,7 +386,13 @@ class TerminalApplication {
     if (!this.#hello || message.type !== 'request' || !Number.isSafeInteger(message.id) || message.id <= this.#lastRequest ||
       !message.action || typeof message.action.kind !== 'string') throw Error('terminal-application-request');
     this.#lastRequest = message.id;
-    if (this.#requests.size >= TERMINAL_LIMITS.pendingRequests) throw Error('terminal-application-request-capacity');
+    if (this.#requests.size >= TERMINAL_LIMITS.pendingRequests) {
+      recordTerminalFailure(this.#logging.records, Error('terminal-application-request-capacity'), 'terminal-request-busy',
+        { requestId: message.id, action: message.action.kind, active: this.#requests.size });
+      void this.#channel.send({ type: 'reply', id: message.id, error: '操作正在处理中，请稍后重试；未自动重发。' })
+        .catch(() => this.#close(70, 'application-reply-undelivered'));
+      return;
+    }
     this.#requests.add(message.id);
     // Receipt acknowledges this finite operation, not its future business result.
     this.#reply(message.id, ['input-history-next', 'input-window'].includes(message.action.kind) ? 'body' : 'control', this.#action(message.action), message.action.kind);
@@ -393,19 +400,27 @@ class TerminalApplication {
 
   #reply(id: number, lane: 'body' | 'control', result: Promise<unknown>, action: string): void {
     const started = performance.now();
-    // A reply blocked on transport retains only its ID/result, not the parsed
-    // request and all its already-consumed input-reference arrays.
+    // Business admission ends BEFORE the peer can see its reply. The channel
+    // separately bounds replies awaiting transport ACK; those cannot retain
+    // business permits after U has already released the corresponding request.
     void result.then(
-      value => this.#channel.send({ type: 'reply', id, value }, lane),
+      value => {
+        this.#requests.delete(id);
+        if (this.#closing) return;
+        return this.#channel.send({ type: 'reply', id, value }, lane);
+      },
       error => {
+        this.#requests.delete(id);
         recordTerminalFailure(this.#logging.records, error, 'terminal-request-failed',
           { requestId: id, action, active: this.#requests.size, durationMs: Math.round(performance.now() - started) });
+        if (this.#closing) return;
         return this.#channel.send({ type: 'reply', id, error: '操作未完成；请查看当前页面，不会自动重发。' });
       },
     ).catch(error => {
+      if (this.#closing && error instanceof TerminalChannelRetiredError) return;
       recordTerminalFailure(this.#logging.records, error, 'application-reply-undelivered', { requestId: id, action });
       return this.#close(70, 'application-reply-undelivered');
-    }).finally(() => this.#requests.delete(id));
+    });
   }
 
   async #action(action: TerminalAction): Promise<unknown> {
@@ -901,17 +916,18 @@ class TerminalApplication {
     };
     const current = () => this.#history === history && !this.#abort.signal.aborted;
     while (current() && projected < 4 && history.hasMore) {
-      const page = await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
+      const page = history.buffered ?? await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
         'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor));
       if (!current()) return;
-      if (page.reset) { history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
+      if (page.reset) { history.buffered = undefined; history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
       if (page.preparing) {
         history.bodyCursor = page.cursor;
         progress(`正在恢复历史索引（${Math.floor(page.preparing.bytes / 1024)} / ${Math.ceil(page.preparing.total / 1024)} KiB）…`);
         await this.#publishHistoryView(); await new Promise<void>(setImmediate); continue;
       }
+      history.buffered = page;
       const source = page.fragments[0];
-      if (!source) { history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }
+      if (!source) { history.buffered = undefined; history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }
       const blockId = `owner-log:${source.runId}:${source.message}:${source.block}`;
       const role = source.type === 'thinking' ? 'thinking' : source.type === 'tool_use' ? 'tool' : source.type === 'tool_result' ? (source.isError ? 'tool-error' : 'tool') : source.role;
       const groupId = source.toolId ? `${source.runId}:tool:${source.toolId}` : `${source.runId}:${source.message}:${role}`;
@@ -922,6 +938,9 @@ class TerminalApplication {
           ? Math.min(history.bodyCursor.offset, source.length) : source.length;
         const parsed = await this.#bodyWork.run(() => this.#historyParser.read(`${history.conversationId}:${source.cursor.ownerEpoch}:${source.cursor.revision}:${source.cursor.clearId ?? ''}:${blockId}`, source.length, async offset => {
           if (!current()) throw Error('terminal-history-cancelled');
+          const retained = page.fragments.find(part => part.runId === source.runId && part.message === source.message && part.block === source.block &&
+            part.offset <= offset && part.offset + part.text.length > offset);
+          if (retained) return retained.text.slice(offset - retained.offset);
           const part = await this.#conversation.bodyPage(history.conversationId, { ...source.cursor, offset }, { direction: 'forward', runId: source.runId });
           if (part.reset || part.preparing || part.fragments[0]?.offset !== offset) throw Error('terminal-history-source-changed');
           return part.fragments[0]!.text;
@@ -937,16 +956,21 @@ class TerminalApplication {
         }
         if (!parsed.items.length) history.bodyCursor = { ...source.cursor, offset: 0 };
       } else {
-        for (const part of page.fragments) {
-          if (part.runId !== source.runId || part.message !== source.message || part.block !== source.block) break;
-          await this.#display.append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
-            body: { version: 1, revision: 1, kind: 'plain', end: part.final, context: { nodes: [{ kind: 'paragraph', origin: 0,
-              from: part.offset, to: part.offset + part.text.length, anchor: part.offset === 0 && role !== 'user' && role !== 'thinking',
-              runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, true, undefined, true, replay);
-          history.bodyCursor = { ...source.cursor, offset: part.offset }; projected++;
-          if (projected === 4) break;
-        }
+        const part = source;
+        await this.#display.append({ blockId, groupId, role, text: part.text, contentOffset: part.offset, final: part.final,
+          body: { version: 1, revision: 1, kind: 'plain', end: part.final, context: { nodes: [{ kind: 'paragraph', origin: 0,
+            from: part.offset, to: part.offset + part.text.length, anchor: part.offset === 0 && role !== 'user' && role !== 'thinking',
+            runs: [{ from: part.offset, to: part.offset + part.text.length, text: part.text, style: 0 }] }] } } }, true, undefined, true, replay);
+        history.bodyCursor = { ...source.cursor, offset: part.offset }; projected++;
       }
+      // Consume only the source range actually projected. Keep the remainder
+      // of this one bounded RPC page, including OTHER blocks, for the next
+      // iteration. The source cursor remains authoritative across batches.
+      const remaining = page.fragments.filter(part => part.runId !== source.runId || part.message !== source.message ||
+        part.block !== source.block || part.offset < history.bodyCursor!.offset);
+      history.buffered = remaining.length ? { ...page, fragments: remaining } : undefined;
+      if (!remaining.length && !page.hasMore) history.hasMore = false;
+      if (current()) { await this.#displayPage(); await this.#publishHistoryView(); }
       history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
     }
     if (current()) {
@@ -1889,18 +1913,26 @@ class TerminalApplication {
   #publish(view: View, current?: () => boolean): Promise<void> {
     if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
     if (current && !current()) return Promise.resolve();
-    if (this.#presentingConfirmation && view.kind !== 'confirmation') return Promise.resolve();
-    if (this.#skills && view.kind !== 'skills') return Promise.resolve();
+    if (!this.#ownsPage(view)) return Promise.resolve();
     this.#nextView = { view: { ...view, conversationId: view.conversationId ?? this.#controller?.current.conversationId,
       environment: view.kind === 'conversation' && this.#resolvedLocalView ? terminalEnvironment(this.#resolvedLocalView) : undefined }, current };
     if (!this.#publishing) this.#publishing = (async () => {
       while (this.#nextView && !this.#abort.signal.aborted) {
         const next = this.#nextView; this.#nextView = undefined;
-        if (next.current && !next.current()) continue;
+        if ((next.current && !next.current()) || !this.#ownsPage(next.view)) continue;
         await this.#channel.send({ type: 'view', view: { ...next.view, displayGap: this.#displayHadGap, displayPaused: this.#displayUnavailable, generation: ++this.#generation } });
       }
     })().finally(() => { this.#publishing = undefined; if (view.kind === 'conversation') this.#drainConfirmations(); });
     return this.#publishing;
+  }
+
+  #ownsPage(view: View): boolean {
+    // History/process work may finish after a foreground page has opened.
+    // Keep its main-view state, but never replace that page or its input target.
+    if (this.#selection && view.requestId !== this.#selection.id) return false;
+    if (this.#presentingConfirmation && view.kind !== 'confirmation') return false;
+    if (this.#editor && view.kind !== 'configuration') return false;
+    return !this.#skills || view.kind === 'skills';
   }
 
   #close(code: number, reason: string, notify = true): Promise<void> {
