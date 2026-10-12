@@ -20,7 +20,6 @@ import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 import { assertSupportedRuntime } from "./runtime-support.js";
 import type { RuntimeLogging } from "./logging/runtime.js";
-import { observeLogPhase } from '@zhixing/core/logging';
 import { peekEntryLogging } from './logging/bootstrap.js';
 import { cliLoggingMode, normalizeCliArgs } from "./logging/entry-mode.js";
 
@@ -882,6 +881,7 @@ const serveCmd = program
     managedSecretBackend?: string;
   }) => {
     try {
+      const { observeLogPhase } = await import("@zhixing/core/logging");
       const { applyManagedServiceLaunchContext } = await observeLogPhase(peekEntryLogging()?.records, 'load-managed-service', () => import("./serve/managed-service.js"));
       applyManagedServiceLaunchContext({
         ...(options.managed ? { managed: true } : {}),

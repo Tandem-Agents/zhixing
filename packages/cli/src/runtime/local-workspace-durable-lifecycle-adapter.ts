@@ -4,12 +4,10 @@ import {
   DeviceCapacityAdmissionError,
   StorageMaintenanceAdmissionError,
   StorageMaintenanceCancelledError,
-} from "@zhixing/core/resources";
-import {
   ExecutorResourceAdmissionExpiredError,
   ExecutorResourceAdmissionPendingError,
   ExecutorResourceBackpressureError,
-} from "@zhixing/executor";
+} from "@zhixing/core/resources";
 
 /**
  * Projects concrete Correctness failures into the domain-owned lifecycle

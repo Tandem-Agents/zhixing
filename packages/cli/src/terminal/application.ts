@@ -42,7 +42,6 @@ import { PendingInputReceiptError, RpcConversationFacade } from '../runtime/rpc-
 import { RpcWorksceneFacade } from '../runtime/rpc-workscene-facade.js';
 import { RpcManagementFacade } from '../runtime/rpc-management-facade.js';
 import { ReplLocalView } from '../runtime/repl-local-view.js';
-import { createLocalWorkspaceClient } from '../runtime/local-workspace-management-host.js';
 import { createRuntimeConfigurationProvider } from '../runtime/runtime-configuration-provider.js';
 import type { AgentYield } from '@zhixing/core/loop';
 import type { ConversationOutputSource } from '../runtime/conversation-output.js';
@@ -61,7 +60,6 @@ import type { SessionSendSnapshotIdentity } from '../runtime/rpc-conversation-fa
 import { InputMaterialRegistry, createMaterialTokenPattern } from '../input-material-registry.js';
 import { ingestPastedMaterials, ingestSelectedMaterial } from '../input-material-ingest.js';
 import { createUserSubmission } from '../runtime/user-submission.js';
-import { createReadOnlyConversationStorage } from '../serve/conversation-storage-infrastructure.js';
 import { createAdvancementContractSelectionRequest, primaryNearbyCandidate } from '../runtime/advancement-contract-selection.js';
 import { chooseTerminalSelection, terminalSelectionActions, isSelectionCancelCause, type TerminalSelectionResponse } from './selection.js';
 import { TerminalOutputProjection } from './output.js';
@@ -359,6 +357,8 @@ class TerminalApplication {
       resolveSceneWorkspace: async sceneId => {
         const scene = (await this.#workscene.list()).find(item => item.sceneId === sceneId);
         if (!scene?.workspace) return { root: null, label: '未设置工作目录' };
+        const { createLocalWorkspaceClient } = await import('../runtime/local-workspace-management-host.js');
+        this.#abort.signal.throwIfAborted();
         const binding = await createLocalWorkspaceClient(this.home).viewByReference({
           deviceId: scene.workspace.deviceId, bindingRef: scene.workspace.bindingRef,
         });
@@ -809,11 +809,17 @@ class TerminalApplication {
     finally { this.#selectionDepth--; this.#drainConfirmations(); }
   }
 
+  async #readOnlyStorage() {
+    const { createReadOnlyConversationStorage } = await import('../serve/conversation-storage-infrastructure.js');
+    this.#abort.signal.throwIfAborted();
+    return createReadOnlyConversationStorage(this.home);
+  }
+
   async #readOnly(): Promise<void> {
     this.#historySelection = true;
     try {
       if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
-      const storage = createReadOnlyConversationStorage(this.home);
+      const storage = await this.#readOnlyStorage();
       const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
       for (;;) {
         const result = await storage.listPage!({ limit: 24, after: pages.at(-1) });
@@ -889,8 +895,12 @@ class TerminalApplication {
 
   async #offlineHistoryPage(history: TerminalHistoryState): Promise<void> {
     if (this.#offlineReader?.history !== history) {
+      const storage = await this.#readOnlyStorage();
+      if (this.#history !== history) return;
       await this.#offlineReader?.reader.close();
-      this.#offlineReader = { history, reader: createReadOnlyConversationStorage(this.home).openBodyReader(history.conversationId) };
+      this.#abort.signal.throwIfAborted();
+      if (this.#history !== history) return;
+      this.#offlineReader = { history, reader: storage.openBodyReader(history.conversationId) };
     }
     const state = this.#offlineReader, current = () => this.#history === history && !this.#abort.signal.aborted;
     let projected = 0;
@@ -1036,8 +1046,10 @@ class TerminalApplication {
         }
       } else {
         if (this.#displayReplayReader?.conversationId !== source.conversationId) {
+          const storage = await this.#readOnlyStorage();
           await this.#displayReplayReader?.reader.close();
-          this.#displayReplayReader = { conversationId: source.conversationId, reader: createReadOnlyConversationStorage(this.home).openBodyReader(source.conversationId) };
+          this.#abort.signal.throwIfAborted();
+          this.#displayReplayReader = { conversationId: source.conversationId, reader: storage.openBodyReader(source.conversationId) };
         }
         const page = await this.#displayReplayReader.reader.page({ cursor: { ...source.cursor, offset }, forward: true, signal: this.#abort.signal });
         if (!page.preparing) {

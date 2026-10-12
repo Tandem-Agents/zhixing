@@ -1,3 +1,5 @@
+import { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing/core/resources";
+export { ExecutorResourceBackpressureError, ExecutorResourceAdmissionPendingError, ExecutorResourceAdmissionExpiredError } from "@zhixing/core/resources";
 import type {
   AdmissionClass,
   AssignmentReservationRequest,
@@ -1704,26 +1706,6 @@ export class ExecutorResourceGovernor
   }
 }
 
-export class ExecutorResourceBackpressureError extends Error {
-  constructor(readonly maximumActiveRoots: number) {
-    super(`Executor resource capacity is limited to ${maximumActiveRoots} active roots`);
-    this.name = "ExecutorResourceBackpressureError";
-  }
-}
-
-export class ExecutorResourceAdmissionPendingError extends Error {
-  constructor(readonly reservationId: string) {
-    super(`Local resource reservation ${reservationId} is waiting for fair admission`);
-    this.name = "ExecutorResourceAdmissionPendingError";
-  }
-}
-
-export class ExecutorResourceAdmissionExpiredError extends Error {
-  constructor(readonly reservationId: string) {
-    super(`Local resource reservation ${reservationId} expired while waiting for admission`);
-    this.name = "ExecutorResourceAdmissionExpiredError";
-  }
-}
 
 function findAssignmentRoot(state: GovernorProjection, assignmentId: string) {
   return [...state.reservations.values()].find((reservation) => {
