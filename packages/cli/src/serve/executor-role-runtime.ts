@@ -1,3 +1,4 @@
+import { resolvePlatformProcessStartTime } from '../platform/secret-platform.js';
 import { createWorksceneRunToolApplication } from "./workscene-application-adapter.js";
 
 import { AUTHORITY_LOG_SOURCE, DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
@@ -139,7 +140,7 @@ import {
   type HostStopAcceptedWorkPorts,
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
-import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
 import {
@@ -194,7 +195,7 @@ async function runExecutorProcess(
   const providerCredentials = bootstrap.providerCredentials;
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
-  const processStartTime = await resolveProcessStartTime(process.pid);
+  const processStartTime = await resolvePlatformProcessStartTime(process.pid, resolveProcessStartTime);
   const lifecycleLog = bootstrap.mesh.bootstrapStore.authorityLog();
   const lifecycleHomeId = (await lifecycleLog.originCheckpoint()).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleLog);
@@ -861,7 +862,8 @@ async function runExecutorProcess(
         endpoint.startTime === endpointLock.startTime &&
         endpoint.startedAt === endpointLock.startedAt
       ) return false;
-      if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
+      // PID 存活不等于旧宿主仍在：按 PID + 启动时间或端点端口独占识别复用。
+      if (!currentReplacesEndpoint && await endpointProcessMayBeOldHost(localServerBinding!, endpoint)) return false;
       if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
       try {
         const current = await loadManagedState("inspect");

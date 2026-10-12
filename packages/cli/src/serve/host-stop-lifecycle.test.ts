@@ -44,6 +44,25 @@ describe("HostStopCoordinator", () => {
     120_000,
   );
 
+  it("joins a stop already in progress for the same host instead of admitting a conflicting one", async () => {
+    const fixture = await createFixture();
+    // 空闲回收的内部停止先进入，外部 zz stop 在其推进过程中到达。
+    const internal = fixture.coordinator.prepare({ requestId: "anchor-internal-stop:test", reason: "idle", strategy: "drain", timeoutMs: 2_000 });
+    const external = fixture.coordinator.prepare({ requestId: "user-stop", reason: "rpc", strategy: "cancel", timeoutMs: 2_000 });
+    await expect(internal).resolves.toMatchObject({ phase: "ready-to-stop", strategy: "drain" });
+    // 接续已有停止并如实报告它的策略，不声称按新请求的策略处理。
+    await expect(external).resolves.toMatchObject({ requestId: "user-stop", phase: "ready-to-stop", strategy: "drain" });
+    const active = await fixture.journal.active();
+    expect(active).toHaveLength(1);
+    expect(active[0]?.identity.kind === "stop" && active[0].identity.requestId).toBe("anchor-internal-stop:test");
+    expect(fixture.order.filter((item) => item === "close")).toHaveLength(1);
+    expect(fixture.order.filter((item) => item === "flush")).toHaveLength(1);
+    // 已到安全点后再到达的停止同样接续，不再推进或报错。
+    await expect(fixture.coordinator.prepare({ requestId: "user-stop-late", reason: "rpc", strategy: "cancel", timeoutMs: 2_000 }))
+      .resolves.toMatchObject({ phase: "ready-to-stop", strategy: "drain" });
+    expect(fixture.order.filter((item) => item === "flush")).toHaveLength(1);
+  }, 120_000);
+
   it("exactly replays response loss without repeating completed effects", async () => {
     const fixture = await createFixture();
     const request = {

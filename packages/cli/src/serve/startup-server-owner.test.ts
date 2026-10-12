@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 
 describe("production startup server ownership", () => {
   it("installs consumers before startup recovery and opens Channel transport only after recovery", async () => {
@@ -150,7 +150,7 @@ describe("production startup server ownership", () => {
       rubricCancellation,
     );
     const rubricCancellationPersist = source.indexOf(
-      "advancementReviews.cancelSession(input)",
+      "advancementDetailController.persistRubricCancellation(input)",
       rubricCancellation,
     );
     const awaitingRubricAdmission = location(
@@ -208,13 +208,13 @@ describe("production startup server ownership", () => {
     );
     const schedulerGenerationInstall = location(
       source,
-      "await schedulerGenerationOwner.installInitial({",
+      "schedulerGenerationOwner.installInitial({",
     );
     const postAdoptionReviewContribution = location(
       source,
       "definePostAdoptionReviewLifecycleContribution({",
     );
-    const authority = location(source, "const authorityServices = await prepareAuthorityServices({");
+    const authority = location(source, "prepareAuthorityServices({");
     const conversation = location(source, "const conversationServices = await createConversationServices({");
     const runtimeHost = location(source, "const runtimeHost = new RuntimeHost({");
     expect(authority).toBeLessThan(conversation);
@@ -325,7 +325,7 @@ describe("production startup server ownership", () => {
     expect(activation).toContain("lifecycleOwner: hostShellLifecycle");
     const shell = source.slice(
       location(source, "const hostShellLifecycle = new AnchorHostShellLifecycle({"),
-      location(source, "const serverLogLifecycle = isBackground"),
+      location(source, "const port = opts.port ?? homeToPort(zhixingHome)"),
     );
     expect(shell).toContain("startTime: processStartTime");
     expect(shell).toContain("startedAt: processStartedAt");
@@ -494,7 +494,7 @@ describe("production startup server ownership", () => {
     );
     expect(schedulerContribution).toBeGreaterThan(schedulerHandle);
     expect(schedulerContribution).toBeLessThan(
-      location(source, "await schedulerGenerationOwner.installInitial({"),
+      location(source, "schedulerGenerationOwner.installInitial({"),
     );
     expect(ready).toBeGreaterThan(publish);
     expect(location(source, "await runner.waitForShutdown()"))
@@ -676,3 +676,36 @@ function endpoint(pid: number, port: number) {
     startedAt: "2026-08-13T00:00:00.000Z",
   };
 }
+
+describe("host-stop old endpoint identity", () => {
+  const owner = (port?: number) => ({ ownsEndpoint: (candidate: number) => candidate === port });
+  const old = (startTime: number | null) => ({ ...endpoint(4242, 19128), startTime });
+
+  it("treats a dead PID as no longer the old host", async () => {
+    await expect(endpointProcessMayBeOldHost(owner(), old(null), { alive: () => false })).resolves.toBe(false);
+  });
+
+  it("detects PID reuse by start time where the platform records it", async () => {
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, startTime: async () => 99 })).resolves.toBe(false);
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, startTime: async () => 10 })).resolves.toBe(true);
+  });
+
+  it("does not mistake a released endpoint for process exit when birth is unknown", async () => {
+    // The old process may release its listener before draining owned work.
+    await expect(endpointProcessMayBeOldHost(owner(19128), old(null), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+    // 未取得该端口时不能据 PID 推断旧宿主已停止。
+    await expect(endpointProcessMayBeOldHost(owner(), old(null), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner(20000), old(null), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+  });
+
+  it("proves reuse of a legacy Windows PID only when OS birth postdates the old generation", async () => {
+    const recorded = Date.parse(old(null).startedAt);
+    await expect(endpointProcessMayBeOldHost(owner(19128), old(null), { alive: () => true, platform: 'win32', startTime: async () => recorded + 1 })).resolves.toBe(false);
+    await expect(endpointProcessMayBeOldHost(owner(19128), old(null), { alive: () => true, platform: 'win32', startTime: async () => recorded - 1 })).resolves.toBe(true);
+  });
+
+  it("keeps an unreadable live process as potentially old despite port ownership", async () => {
+    await expect(endpointProcessMayBeOldHost(owner(19128), old(10), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+    await expect(endpointProcessMayBeOldHost(owner(), old(10), { alive: () => true, startTime: async () => null })).resolves.toBe(true);
+  });
+});

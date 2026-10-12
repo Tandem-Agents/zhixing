@@ -1,3 +1,4 @@
+import { resolvePlatformProcessStartTime } from '../platform/secret-platform.js';
 /**
  * `zhixing serve` 命令 — 启动常驻服务（核心宿主）
  *
@@ -296,7 +297,7 @@ import {
 } from "@zhixing/mesh/recovery-package";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
-import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { AnchorInternalStopLifecycle } from "./anchor-internal-stop.js";
 import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
 import {
@@ -406,7 +407,7 @@ async function runServerProcess(
   const processMode = resolveHostProcessMode(opts.managed);
   const processStartedAt = new Date().toISOString();
   const startupRecords = bootstrap.bindLogs?.(RUNTIME_LOG_SOURCE, { scope: "storage" });
-  const processStartTime = await observeLogPhase(startupRecords, "process-identity", () => resolveProcessStartTime(process.pid));
+  const processStartTime = await observeLogPhase(startupRecords, "process-identity", () => resolvePlatformProcessStartTime(process.pid, resolveProcessStartTime));
   // Reuse the Host-owned platform resource, never a cached admission snapshot.
   const loadManagedState = (intent: Parameters<typeof loadCurrentManagedServiceState>[0]) =>
     loadCurrentManagedServiceState(intent, zhixingHome, bootstrap.secretStore);
@@ -2157,7 +2158,8 @@ async function runServerProcess(
       endpoint.startTime === stopEndpointLock.startTime &&
       endpoint.startedAt === stopEndpointLock.startedAt
     ) return false;
-    if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
+    // PID 存活不等于旧宿主仍在；必须核对出生时间，端口释放不是退出证明。
+    if (!currentReplacesEndpoint && await endpointProcessMayBeOldHost(serverBinding, endpoint)) return false;
     if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
     try {
       const state = await loadManagedState("inspect");

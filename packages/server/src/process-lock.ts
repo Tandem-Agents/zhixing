@@ -19,7 +19,7 @@
  *
  * Windows 兼容性：
  * - process.kill(pid, 0) 在 Windows 可用（isProcessAlive 供 discoverServer 判进程存活）。
- * - resolveProcessStartTime 在 Windows / 非 Linux-macOS 返回 null（平台不支持，startTime 记 null）。
+ * - resolveProcessStartTime 在 Windows 读取 OS 出生时间；无法读取时返回 null，不能把端口释放当作进程退出。
  */
 
 import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
@@ -170,7 +170,7 @@ export function isProcessAlive(pid: number): boolean {
  * 返回值只要求**同一 pid 的两次调用返回相同 number**，数值语义不要求跨平台一致：
  * - Linux：`/proc/<pid>/stat` 字段 22（starttime, jiffies since boot）
  * - macOS：`ps -o lstart= -p <pid>` 再转 Unix 时间戳
- * - Windows / 其他：返回 null（降级到纯 isProcessAlive）
+ * - Windows：Get-Process 的 StartTime（Unix 毫秒）；其他平台返回 null。
  *
  * 读取失败一律返回 null，调用方自行决定降级策略。
  */
@@ -181,7 +181,8 @@ export async function resolveProcessStartTime(pid: number): Promise<number | nul
   if (process.platform === "darwin") {
     return readMacStartTime(pid);
   }
-  return null; // Windows 或其他平台
+  if (process.platform === "win32") return readWindowsStartTime(pid);
+  return null;
 }
 
 // ─── 内部 ───
@@ -236,6 +237,17 @@ async function readLinuxStartTime(pid: number): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+async function readWindowsStartTime(pid: number): Promise<number | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `[DateTimeOffset]::new((Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()`],
+      { timeout: 2000, maxBuffer: 4096, windowsHide: true });
+    const birth = Number(stdout.trim());
+    return Number.isSafeInteger(birth) && birth > 0 ? birth : null;
+  } catch { return null; }
 }
 
 async function readMacStartTime(pid: number): Promise<number | null> {

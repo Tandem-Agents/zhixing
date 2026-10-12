@@ -79,6 +79,10 @@ export interface HostStopCoordinatorOptions {
 }
 
 export class HostStopCoordinator {
+  /** 同一停止操作只推进一次；后到的请求等待同一结果。 */
+  readonly #preparing = new Map<string, Promise<DeviceLifecycleOperation>>();
+  #admission: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly options: HostStopCoordinatorOptions) {}
 
   async prepare(input: {
@@ -95,21 +99,46 @@ export class HostStopCoordinator {
       requestId: input.requestId,
       homeId: this.options.homeId,
     });
-    let state = await this.options.journal.accept({
-      v: 1,
-      kind: "stop",
-      requestId: input.requestId,
-      operationId,
-      homeId: this.options.homeId,
-      localDeviceId: this.options.localDeviceId,
-      strategy: input.strategy,
-      host: this.options.host,
+    // “查找已有停止或提交新停止”串行执行，两个并发请求不会各自提交互相冲突的操作。
+    const admission = this.#admission.then(async () => {
+      const running = (await this.options.journal.active()).find((operation) =>
+        operation.identity.kind === "stop" &&
+        operation.identity.operationId !== operationId &&
+        operation.identity.homeId === this.options.homeId &&
+        operation.identity.localDeviceId === this.options.localDeviceId &&
+        canonicalHost(operation.identity.host) === canonicalHost(this.options.host));
+      // 本宿主已在停止（如空闲回收发起的内部停止）：接续它，而不是提交一个必然冲突的新停止。
+      if (running) return { operation: running, strategy: running.identity.kind === "stop" ? running.identity.strategy : input.strategy };
+      const accepted = await this.options.journal.accept({
+        v: 1,
+        kind: "stop",
+        requestId: input.requestId,
+        operationId,
+        homeId: this.options.homeId,
+        localDeviceId: this.options.localDeviceId,
+        strategy: input.strategy,
+        host: this.options.host,
+      });
+      return { operation: accepted, strategy: input.strategy };
     });
-    state = await this.#resume(state, input.timeoutMs);
+    this.#admission = admission.catch(() => undefined);
+    const { operation, strategy } = await admission;
+    const state = await this.#resumeOnce(operation, input.timeoutMs);
     if (state.phase !== "ready-to-stop") {
       throw new Error("Stop operation did not reach a durable safe point");
     }
-    return { requestId: input.requestId, phase: "ready-to-stop", strategy: input.strategy };
+    return { requestId: input.requestId, phase: "ready-to-stop", strategy };
+  }
+
+  #resumeOnce(operation: DeviceLifecycleOperation, timeoutMs: number): Promise<DeviceLifecycleOperation> {
+    const operationId = operation.identity.operationId;
+    const existing = this.#preparing.get(operationId);
+    if (existing) return existing;
+    const resumed = this.#resume(operation, timeoutMs).finally(() => {
+      if (this.#preparing.get(operationId) === resumed) this.#preparing.delete(operationId);
+    });
+    this.#preparing.set(operationId, resumed);
+    return resumed;
   }
 
   async resumeActive(): Promise<readonly DeviceLifecycleOperation[]> {

@@ -46,3 +46,18 @@ export function nativeSecretPlatform(records?: () => LogRecordPort | undefined):
     windowsProtection: (mode, input) => observeLogPhase(records?.(), 'platform.protect-key', async () => (await load()).protectKey(mode, Buffer.from(input.buffer, input.byteOffset, input.byteLength))),
   };
 }
+
+/** Uses the same OS birth proof as file ownership, without launching a second
+ * PowerShell process in a Host that already ships the verified native adapter. */
+export async function resolvePlatformProcessStartTime(
+  pid: number,
+  fallback: (pid: number) => Promise<number | null>,
+  resolver = nativeSecretPlatform().processIdentityResolver,
+): Promise<number | null> {
+  if (!resolver) return fallback(pid);
+  const identity = await resolver.read(pid);
+  if (identity.kind !== 'present' || !/^win32:[0-9]+$/u.test(identity.birth)) return null;
+  const milliseconds = (BigInt(identity.birth.slice(6)) - 621355968000000000n) / 10000n;
+  if (milliseconds <= 0 || milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(milliseconds);
+}

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import type { LogDraft } from '@zhixing/core/logging';
-import { nativeSecretPlatform } from './secret-platform.js';
+import { nativeSecretPlatform, resolvePlatformProcessStartTime } from './secret-platform.js';
 
 vi.mock('../cli-entry.js', () => ({ resolveCliEntry: () => fileURLToPath(new URL('../../dist/index.js', import.meta.url)) }));
 
@@ -24,4 +24,14 @@ it.skipIf(process.platform !== 'win32')('uses the verified shipped adapter for P
     restored.fill(0);
     expect(events.filter(event => event.data?.phase === 'platform.protect-key' && event.event === 'phaseFinished').map(event => event.result)).toEqual(['success', 'success']);
   } finally { synthetic.fill(0); protectedValue.fill(0); }
+});
+
+it('converts OS Windows birth ticks without weakening unknown identity', async () => {
+  const fallback = vi.fn(async () => 42);
+  const expected = 1791756545000;
+  expect(await resolvePlatformProcessStartTime(12, fallback, { read: async () => ({ kind: 'present', birth: 'win32:' + (621355968000000000n + BigInt(expected)*10000n + 9999n) }) })).toBe(expected);
+  for (const identity of [{ kind: 'unknown' }, { kind: 'absent' }, { kind: 'present', birth: 'invalid' }] as const) {
+    expect(await resolvePlatformProcessStartTime(12, fallback, { read: async () => identity })).toBeNull();
+  }
+  expect(fallback).not.toHaveBeenCalled();
 });

@@ -158,9 +158,9 @@ describe("ProcessLock", () => {
   });
 
   it("resolveProcessStartTime returns a value or null — never throws", async () => {
-    // 当前进程应该能读到（Linux/macOS），Windows 返回 null
+    // Supported platforms read OS birth; an inaccessible process remains unknown.
     const res = await resolveProcessStartTime(process.pid);
-    if (process.platform === "linux" || process.platform === "darwin") {
+    if (process.platform === "linux" || process.platform === "darwin" || process.platform === "win32") {
       // 理论上应能读到；若读取失败也不抛
       expect(res === null || typeof res === "number").toBe(true);
     } else {
