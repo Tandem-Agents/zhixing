@@ -15,6 +15,9 @@ const inputIdValid = (id: unknown): id is string => typeof id === 'string' && /^
 export class TerminalInputSession {
   readonly draft: TerminalDraft = { text: '', cursor: 0, version: 0 };
   readonly #pastes = new Map<string, string>();
+  readonly #pasteWork = new Set<Promise<void>>();
+  #editRevision = 0;
+  #submitIntent = 0;
   readonly #handles = new Map<string, { id: string; paste: boolean }>();
   readonly #completed = new Set<string>();
   #referenceWork?: Promise<void>;
@@ -41,6 +44,22 @@ export class TerminalInputSession {
   #atomicCache?: { draftVersion: number; tokenVersion: number; ranges: readonly TerminalAtomicRange[] };
   constructor(readonly request: (action: TerminalAction) => Promise<unknown>, readonly changed: () => void) {}
   get pending(): boolean { return this.#preparing || !!this.#submission || this.#pastes.size > 0 || !!this.#persistWork || this.#paging || this.#historyLoading; }
+  get pasting(): boolean { return this.#pastes.size > 0; }
+  /** An Enter applies only to the admitted pastes and the draft it observed.
+   * Later edits, a new paste, page changes, or a newer Enter retire that intent. */
+  async waitForPastes(): Promise<boolean> {
+    const intent = ++this.#submitIntent, revision = this.#editRevision, epoch = this.#historyEpoch;
+    const results = await Promise.allSettled([...this.#pasteWork]);
+    if (!this.#active || intent !== this.#submitIntent || revision !== this.#editRevision || epoch !== this.#historyEpoch) return false;
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    return true;
+  }
+  #trackPaste(work: Promise<void>): Promise<void> {
+    this.#pasteWork.add(work);
+    void work.then(() => this.#pasteWork.delete(work), () => this.#pasteWork.delete(work));
+    return work;
+  }
   get windowStart(): number { return this.#cold?.start ?? 0; }
   get beforeWindow(): boolean { return this.windowStart > 0; }
   get afterWindow(): boolean { return !!this.#cold && this.#cold.end < this.#cold.bytes; }
@@ -55,6 +74,10 @@ export class TerminalInputSession {
     if (this.#active !== active) { this.#active = active; this.#historyEpoch++; }
   }
   edit(text: string, cursor: number): void {
+    if (text !== this.draft.text) this.#editRevision++;
+    this.#edit(text, cursor);
+  }
+  #edit(text: string, cursor: number): void {
     if (Buffer.byteLength(text) > EDIT_WINDOW_BYTES) throw Error('输入窗口正在保存，请稍后继续；已接纳的草稿保留。');
     if (text !== this.draft.text) { this.draft.text = text; this.draft.version++; this.#dirty = true; }
     this.draft.cursor = Math.max(0, Math.min(cursor, text.length));
@@ -106,7 +129,8 @@ export class TerminalInputSession {
     const paste = this.beginPaste(bytes.byteLength);
     paste.write(bytes); paste.end(); return paste.done;
   }
-  async pasteClipboard(): Promise<void> {
+  pasteClipboard(): Promise<void> { return this.#trackPaste(this.#pasteClipboard()); }
+  async #pasteClipboard(): Promise<void> {
     if (this.#pastes.size >= 2) throw Error('前次粘贴仍在保存，原有草稿保留。');
     const inputId = crypto.randomUUID(), marker = `[粘贴处理中 · ${++this.#marker}]`;
     this.#pastes.set(inputId, marker); this.#atomicTokenVersion++;
@@ -132,7 +156,7 @@ export class TerminalInputSession {
     const cursor = this.draft.cursor;
     try { this.edit(this.draft.text.slice(0, cursor) + marker + this.draft.text.slice(cursor), cursor + marker.length); this.changed(); }
     catch (error) { this.#pastes.delete(inputId); this.#atomicTokenVersion++; stream.abort(); throw error; }
-    const done = this.#consumePaste(inputId, marker, stream, expectedBytes);
+    const done = this.#trackPaste(this.#consumePaste(inputId, marker, stream, expectedBytes));
     return { write: bytes => stream.write(bytes), end: () => stream.end(), abort: () => stream.abort(), done };
   }
   async #consumePaste(inputId: string, marker: string, stream: TerminalPasteStream, expectedBytes?: number): Promise<void> {
@@ -408,7 +432,7 @@ export class TerminalInputSession {
     if (start < 0) return false;
     const end = start + marker.length;
     cursor = cursor <= start ? cursor : cursor < end ? start + text.length : cursor + text.length - marker.length;
-    this.edit(draft.slice(0, start) + text + draft.slice(end), cursor); this.changed();
+    this.#edit(draft.slice(0, start) + text + draft.slice(end), cursor); this.changed();
     return true;
   }
   async #upload(inputId: string, purpose: 'draft' | 'paste', parts: Iterable<string> | AsyncIterable<string>, bytes?: number): Promise<void> {

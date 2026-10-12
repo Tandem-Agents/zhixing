@@ -245,7 +245,18 @@ export async function createTerminalRoot(options: TerminalRootOptions, createRen
     } });
   };
   const submit = async () => {
-    const current = view();
+    let current = view();
+    if (current.kind === 'conversation' && input.pasting) {
+      preserveDraft();
+      const source = statusSource, report = reportStatus();
+      setStatus('正在处理粘贴，完成后发送…');
+      try {
+        const ready = await input.waitForPastes();
+        if (disposed || statusSource !== source || view().kind !== 'conversation') return;
+        if (!ready) { setStatus('草稿已更改，请按 Enter 发送。'); return; }
+      } catch (error) { if (!disposed) report(error); return; }
+      current = view();
+    }
     const report = reportStatus();
     if (current.field && fieldPastes.has(statusSource)) { setStatus('粘贴仍在处理，请完成后再确认。'); return; }
     if (current.field && current.requestId) {

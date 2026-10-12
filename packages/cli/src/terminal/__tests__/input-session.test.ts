@@ -42,6 +42,57 @@ describe('terminal draft receipts and asynchronous paste', () => {
     expect(session.draft.text).toBe('A中文🙂BC');
     expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
   });
+  it.each(['clipboard', 'native'] as const)('waits for the admitted %s paste and submits once after repeated Enter', async kind => {
+    let ready!: () => void;
+    const barrier = new Promise<void>(resolve => { ready = resolve; });
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'paste-finish') { await barrier; return { text: '中文🙂\nline two' }; }
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn());
+    const paste = kind === 'clipboard' ? session.pasteClipboard() : session.paste(Buffer.from('中文🙂\nline two'));
+    const enter = async () => { if (await session.waitForPastes()) await session.submit(); };
+    const first = enter(), second = enter();
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
+    ready(); await Promise.all([paste, first, second]);
+    expect(session.draft.text).toBe('中文🙂\nline two');
+    expect(request.mock.calls.filter(([action]) => action.kind === 'input-submit')).toHaveLength(1);
+    expect(request.mock.calls.filter(([action]) => action.kind === 'input-part' && !action.final).at(-1)?.[0]).toEqual(expect.objectContaining({ text: '中文🙂\nline two' }));
+  });
+  it.each(['edit', 'clear', 'page', 'new-paste'] as const)('retires a waiting Enter after %s without submitting a later draft', async change => {
+    let ready!: () => void;
+    const barrier = new Promise<void>(resolve => { ready = resolve; });
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'paste-finish') { await barrier; return { text: 'original' }; }
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn());
+    const pastes = [session.pasteClipboard()];
+    const enter = (async () => { if (await session.waitForPastes()) await session.submit(); })();
+    if (change === 'edit') session.edit(session.draft.text + 'later', session.draft.text.length + 5);
+    if (change === 'clear') { session.clear(session.draft.version); session.edit('replacement', 11); }
+    if (change === 'page') { session.activate(false); session.activate(true); }
+    if (change === 'new-paste') pastes.push(session.pasteClipboard());
+    ready(); await Promise.all([...pastes, enter]);
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
+  });
+  it('drains both admitted pastes and rejects the waiting Enter when either paste fails', async () => {
+    let finish!: () => void;
+    const barrier = new Promise<void>(resolve => { finish = resolve; }); let calls = 0;
+    const request = vi.fn(async (action: TerminalAction) => {
+      if (action.kind === 'clipboard-read') { if (++calls === 1) throw Error('paste unavailable'); await barrier; }
+      if (action.kind === 'paste-finish') return { text: 'second' };
+      return {};
+    });
+    const session = new TerminalInputSession(request, vi.fn()); session.edit('prefix ', 7);
+    const first = session.pasteClipboard(), second = session.pasteClipboard();
+    const waiting = session.waitForPastes();
+    const failedPaste = expect(first).rejects.toThrow('paste unavailable');
+    const failedEnter = expect(waiting).rejects.toThrow('paste unavailable');
+    finish(); await Promise.all([failedPaste, second, failedEnter]);
+    expect(session.draft.text).toBe('prefix second');
+    expect(request.mock.calls.some(([action]) => action.kind === 'input-submit')).toBe(false);
+  });
   it('drops clipboard results after the pending marker was cancelled', async () => {
     let ready!: () => void;
     const request = vi.fn(async (action: TerminalAction) => {
