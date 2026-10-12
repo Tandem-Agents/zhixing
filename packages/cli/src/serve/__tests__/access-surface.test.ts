@@ -8,7 +8,7 @@ describe("Host static construction graph", () => {
   it("connects all fourteen factories directly, before their consumers become reachable", async () => {
     const command = await read("command.ts");
     const calls = [
-      "await prepareAuthorityServices({",
+      "prepareAuthorityServices({",
       "await createConversationServices({",
       "new RuntimeHost({",
       "await createLocalConversationOwner({",

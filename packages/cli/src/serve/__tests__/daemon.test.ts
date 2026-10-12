@@ -489,7 +489,7 @@ describe("spawnDaemon", () => {
       });
 
       expect(r.ok).toBe(false);
-      expect(r.reason).toMatch(/not a JavaScript file/);
+      expect(r.reason).toContain("Cannot resolve the physical CLI entry for self-exec");
       expect(deps.spawnFn).not.toHaveBeenCalled();
     } finally {
       process.argv = origArgv;

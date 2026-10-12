@@ -31,6 +31,7 @@ describe("typed pre-server lifecycle contributions", () => {
       { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "ephemeralRuntime.dispose", stage: "runtime" },
+      { owner: "anchor-host", role: "surface", id: "sessionProcess.dispose", stage: "runtime" },
     ]);
     expect(ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS).toContainEqual({
       owner: "anchor-host",

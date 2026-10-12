@@ -48,7 +48,8 @@ describe("runStatusCommand", () => {
     });
     await runStatusCommand({ deps });
     const output = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(output).toContain("不需要后台运行");
+    expect(output).toContain("本机服务未运行");
+    expect(output).toContain("zz logs 查看原因");
     expect(output).not.toMatch(/pid|port|path|daemon|systemd|launchd/iu);
   });
 
@@ -68,7 +69,8 @@ describe("runStatusCommand", () => {
     });
     await runStatusCommand({ deps });
     const output = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(output).toContain("不需要后台运行");
+    expect(output).toContain("本机服务未运行");
+    expect(output).toContain("zz logs 查看原因");
     expect(output).not.toMatch(/pid|port|path|daemon|systemd|launchd/iu);
   });
 

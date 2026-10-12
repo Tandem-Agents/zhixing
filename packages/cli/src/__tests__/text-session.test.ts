@@ -66,6 +66,7 @@ vi.mock('../runtime/conversation-controller.js', () => ({
     applySessionChanged() { return { kind: 'ignored' }; }
     async history() { return { runs: [], hasMore: false, inputsOutsideHistory: [] }; }
     async listConversations() { return [{ conversationId: 'main-1', name: '恢复对话', lastActiveAt: '2026-10-08' }]; }
+    async listConversationPage() { return { conversations: await this.listConversations(), hasMore: false }; }
     async abortBackgroundTask() { return false; }
   },
 }));
@@ -239,7 +240,7 @@ describe('text session application binding', () => {
   it('uses the existing session commands and dynamic skills without sending local commands as user turns', async () => {
     const t = fixture(); const run = t.run();
     t.input.end('/new\n/name changed\n/resume main-1\n/clear\n/custom-skill ask\n/quit\nnever-send\n');
-    expect(await run).toBe(0);
+    const code = await run; expect(code, t.error()).toBe(0);
     expect(f.create).toHaveBeenCalledOnce(); expect(f.rename).toHaveBeenCalledWith('changed');
     expect(f.resume).toHaveBeenCalledWith('main-1'); expect(f.clear).toHaveBeenCalledOnce();
     expect(f.begin.mock.calls.map(([input]) => input.parts[0].text)).toEqual(['/custom-skill ask']);

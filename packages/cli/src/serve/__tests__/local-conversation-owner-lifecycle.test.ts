@@ -404,7 +404,9 @@ describe("local conversation owner lifecycle", () => {
         },
       });
       await fixture.assembly.start();
-      await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(false);
+      // start() also schedules the periodic recovery pass; wait for its real
+      // closure before asserting idle, rather than racing that owned work.
+      await vi.waitFor(async () => expect(await fixture.assembly.hasIdleBlockingWork()).toBe(false));
       const conversationId = await fixture.port.createConversation();
       const turn = fixture.runTurn({
         conversationId,

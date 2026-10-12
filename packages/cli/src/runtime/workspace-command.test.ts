@@ -14,10 +14,10 @@ import {
   useLocalWorkspaceClient,
 } from "./workspace-command.js";
 
-it("REPL workspace creation binds authorization and recovered receipts to its entry home", async () => {
-  // Execute the actual REPL composition callback without booting the terminal or a Host.
-  const source = ts.createSourceFile("repl.ts",
-    await readFile(new URL("../repl.ts", import.meta.url), "utf8"),
+it("Terminal workspace creation binds authorization and recovered receipts to its entry home", async () => {
+  // Execute the actual terminal composition callback without booting the terminal or a Host.
+  const source = ts.createSourceFile("application.ts",
+    await readFile(new URL("../terminal/application.ts", import.meta.url), "utf8"),
     ts.ScriptTarget.Latest, true);
   let callback: ts.Expression | undefined;
   const visit = (node: ts.Node): void => {
@@ -28,7 +28,7 @@ it("REPL workspace creation binds authorization and recovered receipts to its en
   };
   visit(source);
   expect(callback).toBeDefined();
-  const home = "bound-repl-home-a";
+  const home = "bound-terminal-home-a";
   const authorization = { deviceId: "device-a", bindingRef: "binding-a" };
   const create = vi.fn(async () => ({ sceneId: "created-scene" }));
   const facade = {};
@@ -42,18 +42,22 @@ it("REPL workspace creation binds authorization and recovered receipts to its en
       authorizeForControl: async () => authorization,
     }), credential);
   });
+  const callbackSource = callback!.getText(source);
+  const moduleImport = /await import\('\.\.\/runtime\/workspace-command\.js'\)/gu;
+  expect([...callbackSource.matchAll(moduleImport)]).toHaveLength(1);
   const emitted = ts.transpileModule(
-    "const callback = " + callback!.getText(source) + "; callback;",
+    "class Entry { #workscene = worksceneFacade; #logging = undefined; home = entryHome; callback = " +
+      callbackSource.replace(moduleImport, "workspaceModule") + "; } new Entry().callback;",
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   const invoke = runInNewContext(emitted, {
-    zhixingHome: home,
-    withLocalWorkspaceClient: withWorkspace,
-    createWorksceneFromLocalWorkspaceAuthorization: create,
+    entryHome: home,
+    current: () => undefined,
+    workspaceModule: {
+      withLocalWorkspaceClient: withWorkspace,
+      createWorksceneFromLocalWorkspaceAuthorization: create,
+    },
     worksceneFacade: facade,
-    cliWriter: { line: () => undefined },
-    chalk: { yellow: (text: string) => text, dim: (text: string) => text },
-    layout: { contentPrefix: "" },
   });
   vi.stubEnv("ZHIXING_HOME", "unrelated-home-b");
   try {

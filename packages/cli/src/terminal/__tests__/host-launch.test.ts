@@ -81,12 +81,12 @@ describe.skipIf(process.platform !== 'win32')('terminal helper private transport
       sockets.add(socket); socket.on('error', reject);
     });
     try {
-      const owner = createTerminalOwnedProcessFactory(writer ? 'filesystem' : 'credential-command')('/fixture/private-command', ['private-argument'], {
+      const owner = createTerminalOwnedProcessFactory(writer ? 'filesystem' : 'credential-command')(process.execPath, ['private-argument'], {
         env: { FIXTURE_PRIVATE_VALUE: 'not-for-supervisor' }, cwd: process.cwd(), deadline: Date.now() + 5000,
       });
       let output = ''; owner.child.stdout.on('data', data => { output += data.toString(); }); owner.child.stderr.resume();
-      await requested;
-      expect(JSON.stringify(request)).not.toContain('private-command'); expect(JSON.stringify(request)).not.toContain('not-for-supervisor');
+      await Promise.race([requested, owner.ready.then(() => requested)]);
+      expect(JSON.stringify(request)).not.toContain(process.execPath); expect(JSON.stringify(request)).not.toContain('private-argument'); expect(JSON.stringify(request)).not.toContain('not-for-supervisor');
       let ready = false, spawned = false;
       void owner.ready.then(() => { ready = true; }, () => {});
       owner.child.once('spawn', () => { spawned = true; });

@@ -57,7 +57,7 @@ describe("local automatic communication notification chain", () => {
       expect(shown.join('')).toContain('来信处理未完成');
       await controller.reattachActiveObserver();
       expect(fixture.runtime.executions()).toBe(3);
-    } finally { controller?.dispose(); await fixture.assembly.close(); }
+    } finally { controller?.dispose(); await fixture.assembly.close(); await fixture.authority.stopStorageMaintenance(); }
   }, 60000);
   it.each(["completed", "failed"] as const)("replays offline %s through the real facade and owner routes exactly once", async ending => {
     const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only", run: async function* (messages) {
@@ -124,7 +124,7 @@ describe("local automatic communication notification chain", () => {
         expect(connection.notify.mock.calls.some(([method, notice]) => method === "session.status" && (notice as { state: string }).state === "failed")).toBe(true);
         expect(fixture.runtime.executions()).toBe(2);
       }
-    } finally { controller?.dispose(); await fixture.assembly.close(); }
+    } finally { controller?.dispose(); await fixture.assembly.close(); await fixture.authority.stopStorageMaintenance(); }
   }, 60000);
 
   it("a durably queued recovery uses the already bound communication port exactly once", async () => {
@@ -157,7 +157,7 @@ describe("local automatic communication notification chain", () => {
       await vi.waitFor(async () => expect(await fixture.port.communicationMessages.inspect(conversationId, "pending")).toMatchObject({ state: "committed" }), { timeout: 20000 });
       expect(invoke).toHaveBeenCalledExactlyOnceWith(conversationId, { action: "discover" });
       expect(fixture.runtime.executions()).toBe(1);
-    } finally { recovery.mockRestore(); await fixture.assembly.close(); }
+    } finally { recovery.mockRestore(); await fixture.assembly.close(); await fixture.authority.stopStorageMaintenance(); }
   }, 60000);
   it.each(["completed", "error", "cancelled"] as const)("publishes durable inputs, output and terminal state without a local sender: %s", async (ending) => {
     let proceed!: () => void;
@@ -184,24 +184,24 @@ describe("local automatic communication notification chain", () => {
       await router.dispatch({ method: "session.subscribe", params: { conversationId }, connection });
       const binding = createLocalConversationCommunicationBinding(fixture.port);
       const first = await binding.invoke("source-c", { action: "send", conversationId, operationId: "initial", input: "原始要求" }) as ConversationMessageReceipt;
-      await vi.waitFor(() => expect(connection.notify.mock.calls.some(([method, value]) => method === "session.assignmentStream" && value.payload.kind === "agent-yield")).toBe(true), { timeout: 15000 });
-      expect(connection.notify.mock.calls.some(([method, value]) => method === "session.assignmentStream" && value.meta.turnOrigin?.messageIdentity?.source.conversationId === "source-c")).toBe(true);
+      await vi.waitFor(() => expect(connection.notify.mock.calls.some(([method, value]) => method === "session.process" && value.payload.kind === "yield")).toBe(true), { timeout: 15000 });
+      expect(connection.notify.mock.calls.some(([method, value]) => method === "session.process" && value.source.turnOrigin?.messageIdentity?.source.conversationId === "source-c")).toBe(true);
       const second = await binding.invoke("source-a", { action: "send", conversationId, operationId: "append", input: "补充要求" }) as ConversationMessageReceipt;
       expect(second.runId).toBe(first.runId);
       if (ending === "cancelled") await router.dispatch({ method: "session.abort", params: { conversationId, runId: first.runId, requestId: "cancel-test", acceptLimitedCapabilities: true }, connection });
       proceed();
       if (ending === "completed") {
         await vi.waitFor(() => expect(connection.notify.mock.calls.some(([method]) => method === "session.final")).toBe(true), { timeout: 20000 });
-        const appended = connection.notify.mock.calls.find(([method, value]) => method === "session.assignmentStream" && value.payload.kind === "agent-event" && value.payload.event.event === "agent:input_received")?.[1];
+        const appended = connection.notify.mock.calls.find(([method, value]) => method === "session.process" && value.payload.kind === "event" && value.payload.event.event === "agent:input_received")?.[1];
         expect(appended.payload.event.payload.inputs[0].identity).toEqual({ id: second.messageId, source: { kind: "conversation", conversationId: "source-a" } });
         const read = await binding.invoke("source-a", { action: "read", conversationId }) as { runs: { record: { messages: unknown[] } }[] };
         expect(JSON.stringify(read.runs)).toContain(second.messageId);
       } else {
         await vi.waitFor(() => expect(connection.notify.mock.calls.some(([method, value]) => method === "session.status" && value.state === (ending === "error" ? "failed" : "cancelled"))).toBe(true), { timeout: 20000 });
-        expect(connection.notify.mock.calls.some(([method, value]) => method === "session.assignmentStream" && value.payload.yield?.text === "不应显示")).toBe(false);
+        expect(connection.notify.mock.calls.some(([method, value]) => method === "session.process" && value.payload.delta?.text === "不应显示")).toBe(false);
       }
       expect(connection.notify.mock.calls.some(([method]) => method === "session.delta" || method === "session.complete")).toBe(false);
       expect(fixture.runtime.executions()).toBe(1);
-    } finally { proceed(); await fixture.assembly.close(); }
+    } finally { proceed(); await fixture.assembly.close(); await fixture.authority.stopStorageMaintenance(); }
   }, 60000);
 });

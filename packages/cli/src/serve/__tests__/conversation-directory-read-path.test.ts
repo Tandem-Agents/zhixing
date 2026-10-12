@@ -9,7 +9,7 @@ describe('directory production query path', () => {
       clearedThrough: 0, name: key.split(':')[0], activity: '2026-10-09T00:00:00.000Z' }));
     const owner = { ownerEpoch: 1, deviceId: 'device', executorId: 'executor', signer: {}, verifier: {}, artifacts: {},
       acceptsConversationId: () => true,
-      controlAdmission: { listCreatedConversationIds: async () => ['one', 'two', 'three', 'deleted'] },
+      controlAdmission: { hasCreatedConversation: async (id: string) => ['one', 'two', 'three', 'deleted'].includes(id), listCreatedConversationIds: async () => ['one', 'two', 'three', 'deleted'] },
       authorityLog: { durableProjection: () => ({ get: metadata }), readProjection: replay } };
     for (let cold = 0; cold < 2; cold++) {
       const protocol = new ConversationProtocolRuntime({ owner, manager: () => undefined, executorDispatch: {}, assignmentArtifactAuthority: {},

@@ -146,10 +146,13 @@ export async function executeSessionActivityCase(
     }]);
     await expectFailure(() => fixture.createJournal().authorityState(), "run stream", { kind: "corruption", caseKey: "wrong-stream" });
   } else if (caseKey === "invalid-time") {
-    await fixture.log.append<unknown>([
+    const entries = [
       { stream: `run:${fixture.conversationId}`, body: { ...meta, lastActiveAt: "not-a-time" } },
       sessionActivityEntry(fixture.conversationId, "scene-a", "not-a-time", "upsert", 1),
-    ]);
+    ];
+    await expectFailure(() => fixture.log.append<unknown>(entries), "time");
+    assert((await fixture.log.readAll()).length === 0, "invalid time must not be committed by the journal writer");
+    await fixture.corruptLog.append<unknown>(entries);
     await expectFailure(() => fixture.createJournal().authorityState(), "time", { kind: "corruption", caseKey: "invalid-time" });
   } else if (caseKey === "identity-rebinding") {
     await fixture.log.append<unknown>([
@@ -187,7 +190,10 @@ async function createSessionActivityFixture() {
     clock: () => NOW,
   });
   const journal = createJournal();
-  return { conversationId, log, journal, createJournal };
+  // Simulate an out-of-band writer: these bytes bypass the journal's write-time
+  // projection validators, so reopening must independently detect corruption.
+  const corruptLog = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock: () => NOW });
+  return { conversationId, log, journal, createJournal, corruptLog };
 }
 
 async function sessionActivityRecords(log: AuthorityCommitLog) {
@@ -432,7 +438,7 @@ export async function executeAdvancementEventCase(
   const digestOf = (events: readonly AdvancementControlEvent[]) =>
     byteDigest(Buffer.from(canonicalize(events), "utf8"));
   if (caseKey === "invalid-event") {
-    await fixture.log.append<unknown>([
+    const entries = [
       {
         stream: `run:${conversationId}`,
         body: {
@@ -443,7 +449,10 @@ export async function executeAdvancementEventCase(
           event: { type: "bogus", timestamp: ADVANCEMENT_NOW, sessionId: "session-1" },
         },
       },
-    ]);
+    ];
+    await expectFailure(() => fixture.log.append<unknown>(entries), "contract failed");
+    assert((await fixture.log.readAll()).length === 0, "invalid event must not be committed by the journal writer");
+    await fixture.corruptLog.append<unknown>(entries);
     await expectFailure(
       () => fixture.createJournal().advancementSessions(),
       "contract failed",
