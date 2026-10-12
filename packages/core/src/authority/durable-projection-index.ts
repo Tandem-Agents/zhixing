@@ -15,6 +15,7 @@ import {
   ensureDurableDirectory,
   SerialTaskQueue,
   syncDirectory,
+  replaceFile,
 } from "../persistence/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
@@ -1976,8 +1977,11 @@ export class FileDurableProjectionIndex {
     } finally {
       await handle.close();
     }
-    claimStorageIo("ioOperations", 2);
-    await rename(temporary, path.join(this.rootDir, "manifest.json"));
+    await replaceFile(temporary, path.join(this.rootDir, "manifest.json"), {
+      signal: currentMaintenanceAbortSignal(),
+      beforeAttempt: () => claimStorageIo("ioOperations", 1),
+    });
+    claimStorageIo("ioOperations", 1);
     await syncDirectory(this.rootDir);
   }
 
@@ -2275,8 +2279,11 @@ export class FileDurableProjectionIndex {
     } finally {
       await handle.close();
     }
-    claimStorageIo("ioOperations", 2);
-    await rename(temporary, path.join(this.rootDir, "write-intent.json"));
+    await replaceFile(temporary, path.join(this.rootDir, "write-intent.json"), {
+      signal: currentMaintenanceAbortSignal(),
+      beforeAttempt: () => claimStorageIo("ioOperations", 1),
+    });
+    claimStorageIo("ioOperations", 1);
     await syncDirectory(this.rootDir);
   }
 
