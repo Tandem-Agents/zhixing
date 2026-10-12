@@ -1,5 +1,6 @@
 import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
 import { retryControlAdmission } from "./conversation-admission-retry.js";
+import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from "@zhixing/executor";
 import { randomUUID } from "node:crypto";
 import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
 import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
@@ -46,6 +47,7 @@ import {
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
+  ConversationAssignmentCancelledError,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
   type AssignmentSubmissionIdentity,
@@ -346,6 +348,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
+  /** 本进程仍在执行的 assignment → run；覆盖完整运行生命期，也用于取消后的本机止损。 */
+  readonly #activeAssignmentClaims = new Map<string, string>();
   readonly #pendingConversationRetirements = new Set<string>();
   #deliveryDrain: (() => Promise<void>) | undefined;
   #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -887,33 +891,64 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async cancel(
     input: DurableConversationCancelInput,
   ): Promise<DurableConversationCancellationResult> {
-    return this.#terminalOperations.run(() => this.#cancelInternal(input));
-  }
-
-  async #cancelInternal(
-    input: DurableConversationCancelInput,
-  ): Promise<DurableConversationCancellationResult> {
-    const journal = this.#journal(input.conversationId);
-    if (!input.runId) return this.#cancelBatch(input, journal);
-    const candidate = await journal.runControlDescriptor(input.runId);
-    if (!candidate) return { dispositions: [] };
-    const runId = candidate.runId;
+    // Freeze the complete control identity across transient capacity retries.
+    // Re-enter only after the serial owner and recovery claim have unwound;
+    // replay reads the original durable batch, never a new candidate set.
+    input = structuredClone(input);
     const source = { principal: { ...input.principal } };
-    const outcome = await this.#applyAuthorityControl(input.conversationId, journal, {
+    const localResults = new Map<string, ReturnType<ConversationManager["applyDurableCancellation"]>>();
+    const applyLocal = (runId: string) => {
+      let result = localResults.get(runId);
+      if (!result) {
+        result = this.#requiredManager().applyDurableCancellation(input.conversationId, runId, input.reason);
+        // 会话运行时之外，实际执行在按 assignment 装配的本机运行时里；取消已耐久，
+        // 立即止损，不等执行器取消链完成。停止证明与结算仍走原执行器取消。
+        // 远端 assignment 在此为空操作，仍只经执行器取消链。
+        for (const [assignmentId, activeRunId] of this.#activeAssignmentClaims) {
+          if (activeRunId === runId) this.#executorDispatch.stopLocalExecution(assignmentId);
+        }
+        localResults.set(runId, result);
+      }
+      return result;
+    };
+    const control = {
       admission: this.#authority.controlAdmission,
+      source,
       envelope: createConversationControlEnvelope({
         requestId: input.requestId,
         source,
         at: this.#clock(),
-        body: {
-          t: "cancel",
-          conversationId: input.conversationId,
-          runId,
+        body: input.runId ? {
+          t: "cancel", conversationId: input.conversationId, runId: input.runId,
           ownerEpoch: this.#ownerEpochFor(input.conversationId),
+        } : {
+          t: "cancel-batch", conversationId: input.conversationId,
+          ownerEpoch: this.#ownerEpochFor(input.conversationId),
+          ...(input.response ? { response: { replyTarget: { ...input.response.replyTarget } } } : {}),
         },
       }),
-      source,
-    });
+    };
+    return retryControlAdmission(
+      () => this.#terminalOperations.run(() => {
+        // The request can expire while queued behind a different owner operation.
+        if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+        return this.#withRecoveryClaim(input.conversationId, () => this.#cancelInternal(input, control, applyLocal));
+      }),
+      async () => {},
+    );
+  }
+
+  async #cancelInternal(
+    input: DurableConversationCancelInput,
+    control: Parameters<ConversationRunJournal["applyControl"]>[0],
+    applyLocal: (runId: string) => ReturnType<ConversationManager["applyDurableCancellation"]>,
+  ): Promise<DurableConversationCancellationResult> {
+    const journal = this.#journal(input.conversationId);
+    if (!input.runId) return this.#cancelBatch(input, journal, control, applyLocal);
+    const candidate = await journal.runControlDescriptor(input.runId);
+    if (!candidate) return { dispositions: [] };
+    const runId = candidate.runId;
+    const outcome = await this.#applyAuthorityControl(input.conversationId, journal, control, true);
     if (outcome.kind === "rejected") {
       throw new Error(
         `Conversation cancellation was rejected: ${outcome.result.error.message}`,
@@ -927,17 +962,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (outcome.result.body.t !== "cancel") {
       throw new Error("Conversation cancellation returned another control result");
     }
-    if (outcome.result.body.runState === "cancel-requested") {
-      await this.#drivePendingCancellations(journal);
-    }
-    const local = this.#requiredManager().applyDurableCancellation(
-      input.conversationId,
-      runId,
-      input.reason,
-    );
+    const local = applyLocal(runId);
     this.#clearRunClaims(runId);
     this.#markRecovery(input.conversationId);
     this.#kickDelivery();
+    if (outcome.result.body.runState === "cancel-requested") {
+      await this.#drivePendingCancellations(journal);
+    }
     return {
       dispositions: [
         {
@@ -960,25 +991,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async #cancelBatch(
     input: DurableConversationCancelInput,
     journal: ConversationRunJournal,
+    control: Parameters<ConversationRunJournal["applyControl"]>[0],
+    applyLocal: (runId: string) => ReturnType<ConversationManager["applyDurableCancellation"]>,
   ): Promise<DurableConversationCancellationResult> {
-    const source = { principal: { ...input.principal } };
-    const outcome = await this.#applyAuthorityControl(input.conversationId, journal, {
-      admission: this.#authority.controlAdmission,
-      envelope: createConversationControlEnvelope({
-        requestId: input.requestId,
-        source,
-        at: this.#clock(),
-        body: {
-          t: "cancel-batch",
-          conversationId: input.conversationId,
-          ownerEpoch: this.#ownerEpochFor(input.conversationId),
-          ...(input.response
-            ? { response: { replyTarget: input.response.replyTarget } }
-            : {}),
-        },
-      }),
-      source,
-    });
+    const outcome = await this.#applyAuthorityControl(input.conversationId, journal, control, true);
     if (outcome.kind === "rejected") {
       throw new Error(
         `Conversation batch cancellation was rejected: ${outcome.result.error.message}`,
@@ -994,16 +1010,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         "Conversation batch cancellation returned another control result",
       );
     }
-    if (outcome.result.body.runs.some((run) => run.runState === "cancel-requested")) {
-      await this.#drivePendingCancellations(journal);
-    }
     const dispositions: DurableConversationCancellationDisposition[] = [];
     for (const run of outcome.result.body.runs) {
-      const local = this.#requiredManager().applyDurableCancellation(
-        input.conversationId,
-        run.runId,
-        input.reason,
-      );
+      const local = applyLocal(run.runId);
       this.#clearRunClaims(run.runId);
       dispositions.push({
         runId: run.runId,
@@ -1015,6 +1024,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     this.#markRecovery(input.conversationId);
     this.#kickDelivery();
+    if (outcome.result.body.runs.some((run) => run.runState === "cancel-requested")) {
+      await this.#drivePendingCancellations(journal);
+    }
     return { dispositions };
   }
 
@@ -1210,12 +1222,40 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         : message);
     const attempt = await journal.nextAssignmentAttempt(runId);
     const assignmentId = conversationAssignmentId(runId, attempt);
+    this.#activeAssignmentClaims.set(assignmentId, runId);
     let channelSession: LosslessDataPlaneSession | undefined;
     let firstPartySurfaceSession: FirstPartySurfaceSession | undefined;
     let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
+    let firstPartyStreamFinalSeq: number | undefined;
+    const drainFirstPartyProjection = (finalSeq: number, finalIdentity?: string) => {
+      const surface = firstPartySurfaceSession, finality = firstPartyFinalitySession;
+      if (!surface) return;
+      firstPartySurfaceSession = undefined; firstPartyFinalitySession = undefined;
+      // Keep the authenticated consumer alive for its verified terminal frame.
+      // Do not hold the execution/terminal owner while waiting: cancellation
+      // proof and stream reclamation must still be able to finish independently.
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(new Error("Conversation stream tail drain timed out")), 5_000);
+      timer.unref?.();
+      const close = async () => {
+        clearTimeout(timer);
+        if (finalIdentity) {
+          this.#pendingFirstPartyFinals.delete(finalIdentity);
+          this.#ownerPublishedFirstPartyFinals.delete(finalIdentity);
+        }
+        finality?.close();
+        await surface.close();
+      };
+      void surface.waitForSeq(finalSeq, deadline.signal).then(close, async error => {
+        this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId });
+        await close();
+      }).catch(error => this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId }));
+    };
     let executorPlan: Awaited<
       ReturnType<ConversationExecutorDispatchApplication["plan"]>
     > | undefined;
+    let runFailed = false;
+    let runError: unknown;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -1250,6 +1290,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         assignmentId,
         this.#clock(),
       );
+      await this.#executorDispatch.reconcileLocalReceipts();
       await this.#authority.resources.enqueueRoot(
         assignmentReservationId(assignmentId),
         { kind: "run", id: runId, attempt },
@@ -1309,7 +1350,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await executorPlan.dispatch({
         journal,
         envelope: dispatch.envelope,
-        contexts: this.#contexts,
+        activation: dispatch.activation,
+        contexts: this.#capturedAssignmentRouting().contexts,
         submissionContext,
       });
       const streamRef = {
@@ -1395,6 +1437,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             : {}),
         });
         await firstPartyFinalitySession?.start();
+        const projectionFinality = firstPartyFinalitySession;
         firstPartySurfaceSession =
           await losslessDataPlane.openFirstPartySurfaceSession({
             executorId: targetExecutorId,
@@ -1404,7 +1447,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             surfacePrincipal: executionIngress.surfacePrincipal,
             adoptFrame: async (frame, _checkpoint, _signal, readDisplay) => {
               if (frame.payload.kind === "provisional-final") {
-                await firstPartyFinalitySession?.acceptProvisionalFinal(frame);
+                await projectionFinality?.acceptProvisionalFinal(frame);
               }
               await this.#onFirstPartyFrame?.(frame, readDisplay);
             },
@@ -1429,10 +1472,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
+      let observedFinal: Awaited<ReturnType<typeof stream.final>> | undefined;
+      let streamEndPublished = false;
       const finishObservedStream = async () => {
-        const final = await stream.final(streamMeta);
-        if (executionIngress.kind === 'first-party' && this.#losslessDataPlane.kind === 'absent') {
+        const final = observedFinal ??= await stream.final(streamMeta);
+        firstPartyStreamFinalSeq = final.finalSeq;
+        if (!streamEndPublished && executionIngress.kind === 'first-party' && this.#losslessDataPlane.kind === 'absent') {
           this.#onFirstPartyStreamEnd?.({ conversationId: input.conversationId, runId, assignmentId, finalSeq: final.finalSeq });
+          streamEndPublished = true;
         }
         return final;
       };
@@ -1442,10 +1489,28 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         if (state === "cancel-requested") {
           await this.#drivePendingCancellations(journal);
         }
+        // Cancellation has already recorded interaction endings. Drain that
+        // existing projection without repeating started-only run-end cleanup.
+        if (!observedFinal) await interactionScope.drain();
+        // markTerminal may create a final frame internally, but the no-data-plane
+        // producer also needs the same explicit end boundary for its observer.
+        await finishObservedStream();
         await stream.markTerminal?.();
         this.#markRecovery(input.conversationId);
         this.#kickDelivery(input.hooks?.onFinalPublishFailure);
         return true;
+      };
+      // Retry only cancellation settlement after releasing the terminal queue.
+      // Other terminal failures retain their original disposition and error.
+      const settleTerminal = async <T>(operation: (cancelled: boolean) => Promise<T>): Promise<T> => {
+        const outcome = await retryControlAdmission(() => this.#terminalOperations.run(async () => {
+          if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+          const cancelled = await yieldToDurableCancellation();
+          try { return { ok: true as const, value: await operation(cancelled) }; }
+          catch (error) { return { ok: false as const, error }; }
+        }), async () => {});
+        if (!outcome.ok) throw outcome.error;
+        return outcome.value;
       };
       let toolCalls = 0;
       const interactionScope = effect.createInteractionScope({
@@ -1461,8 +1526,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       const settleFailure = async (error: unknown): Promise<never> => {
         await controlHeartbeat.stop();
         try {
-          await this.#terminalOperations.run(async () => {
-            if (await yieldToDurableCancellation()) return;
+          await settleTerminal(async cancelled => {
+            if (cancelled) return;
             const usageFinal = await flushResourceUsage();
             if (await effect.hasOpenSideEffects()) {
               await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
@@ -1602,8 +1667,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
 
       if (runResult.agentResult.reason !== "completed") {
-        const cancelled = await this.#terminalOperations.run(async () => {
-          if (await yieldToDurableCancellation()) return true;
+        const cancelled = await settleTerminal(async cancelled => {
+          if (cancelled) return true;
           const usageFinal = await flushResourceUsage();
           if (await effect.hasOpenSideEffects()) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
@@ -1641,8 +1706,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         return runResult;
       }
 
-      const terminal = await this.#terminalOperations.run(async () => {
-        if (await yieldToDurableCancellation()) {
+      const terminal = await settleTerminal(async cancelled => {
+        if (cancelled) {
           return { kind: "cancelled" as const };
         }
         await this.#prepareRunEndUntilAvailable(
@@ -1714,20 +1779,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         } catch (error) {
           input.hooks?.onFinalPublishFailure?.(error, runResult);
         }
-        const surfaceSession = firstPartySurfaceSession;
-        const finalitySession = firstPartyFinalitySession;
-        const closeFirstPartyProjection = async () => {
-          this.#pendingFirstPartyFinals.delete(finalIdentity);
-          this.#ownerPublishedFirstPartyFinals.delete(finalIdentity);
-          finalitySession.close();
-          await surfaceSession.close();
-        };
-        void surfaceSession.waitForSeq(bundle.streamFinal.finalSeq).then(
-          closeFirstPartyProjection,
-          closeFirstPartyProjection,
-        ).catch(() => undefined);
-        firstPartySurfaceSession = undefined;
-        firstPartyFinalitySession = undefined;
+        drainFirstPartyProjection(bundle.streamFinal.finalSeq, finalIdentity);
       }
       this.#markRecovery(input.conversationId);
       this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
@@ -1743,16 +1795,63 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
       });
     } catch (error) {
+      runFailed = true;
+      runError = error;
+      const cancelledPreparation = (error instanceof ConversationAssignmentCancelledError &&
+        error.runId === runId && error.assignmentId === assignmentId) ||
+        ((error instanceof AssignmentStartCancelledError || (error instanceof DataPlaneAssignmentInactiveError &&
+          error.ref.execution === "conversation" && error.ref.runId === runId && error.ref.conversationId === input.conversationId)) && error.assignmentId === assignmentId &&
+          ["cancel-requested", "cancelled"].includes(await journal.runState(runId) ?? ""));
+      if (cancelledPreparation) {
+        this.#markRecovery(input.conversationId);
+        await this.#drivePendingCancellations(journal);
+        this.#kickDelivery();
+        runFailed = false;
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "aborted", usage },
+          runRecord: { timestamp: this.#clock(), messages: [], usage },
+          newMessages: [], durationMs: 0 };
+      }
       this.#observeFailure(error, { phase: "run", conversationId: input.conversationId, runId });
       this.#markRecovery(input.conversationId);
       throw error;
     } finally {
-      await channelSession?.close();
-      firstPartyFinalitySession?.close();
-      await firstPartySurfaceSession?.close();
-      await executorPlan?.dispose();
+      // 每项释放独立执行：前一项关闭失败不能让流尾、投影会话或执行计划泄漏。
+      const cleanupErrors: unknown[] = [];
+      const release = async (step: () => unknown) => {
+        try { await step(); } catch (error) { cleanupErrors.push(error); }
+      };
+      await release(() => channelSession?.close());
+      if (firstPartyStreamFinalSeq !== undefined) drainFirstPartyProjection(firstPartyStreamFinalSeq);
+      await release(() => firstPartyFinalitySession?.close());
+      await release(() => firstPartySurfaceSession?.close());
+      await release(() => executorPlan?.dispose());
+      // Local execution has left this frame; the claim must not outlive it even
+      // when session cleanup fails, or recovery would skip this attempt forever.
       this.#clearRunClaims(runId);
-      this.#forgetAssignment(assignmentId);
+      this.#activeAssignmentClaims.delete(assignmentId);
+      try {
+        await this.#retireSettledAssignments(input.conversationId, journal);
+      } catch (cleanupError) {
+        // Route retirement is derived cleanup: the run outcome above is already
+        // durable. Keep the route and leave retirement to recovery under transient
+        // pressure; never let a cleanup read replace the run's real result.
+        this.#markRecovery(input.conversationId);
+        this.#observeFailure(cleanupError, { phase: "recovery", conversationId: input.conversationId });
+        if (maintenanceRetryDelayMs(cleanupError) === undefined) cleanupErrors.push(cleanupError);
+      }
+      if (cleanupErrors.length > 0) {
+        this.#markRecovery(input.conversationId);
+        if (runFailed) {
+          throw new AggregateError(
+            [runError, ...cleanupErrors],
+            `Conversation run failed (${executionFailureReason(runError)}) and cleanup failed (${cleanupErrors.map(executionFailureReason).join(", ")})`,
+          );
+        }
+        throw cleanupErrors.length === 1
+          ? cleanupErrors[0]
+          : new AggregateError(cleanupErrors, `Conversation run cleanup failed (${cleanupErrors.map(executionFailureReason).join(", ")})`);
+      }
     }
   }
 
@@ -2116,11 +2215,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     conversationId: string,
     journal: ConversationRunJournal,
     input: Parameters<ConversationRunJournal["applyControl"]>[0],
+    deferCapacityRetry = false,
   ): Promise<Awaited<ReturnType<ConversationRunJournal["applyControl"]>>> {
     try {
       return await journal.applyControl(input);
     } catch (firstError) {
       this.#markRecovery(conversationId);
+      if (deferCapacityRetry && maintenanceRetryDelayMs(firstError) !== undefined) throw firstError;
       try {
         return await journal.applyControl(input);
       } catch (replayError) {
@@ -2137,7 +2238,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     await this.recoverReadinessProjections();
     if (this.#recoveryStopped) return 0;
     const queue = [...this.#recoveryConversations.entries()];
-    let recovered = await this.#authority.resourceRecovery.reclaimExpired();
+    let recovered = await this.#executorDispatch.reconcileLocalReceipts();
+    recovered += await this.#authority.resourceRecovery.reclaimExpired();
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
@@ -2154,15 +2256,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return 0;
         }
         await this.#primeAssignmentRouting(journal);
-        const recovery = this.#executorDispatch.recoveryDispatcher({
-          journal,
-          contexts: this.#contexts,
-          executorIdForAssignment: (assignmentId) =>
-            this.#executorIdForAssignment(assignmentId),
-          submissionContext: (assignmentId) =>
-            this.#submissionContext(assignmentId),
-        });
-        const { dispatcher, executor: routedExecutor } = recovery;
+        const recovery = this.#createRecoveryDispatcher(journal);
+        const { dispatcher, executor: routedExecutor, cancellationContinuationPending } = recovery;
         if (this.#recoveryStopped) return count;
         count += await journal.resumeCommittedProjections();
         if (this.#recoveryStopped) return count;
@@ -2182,6 +2277,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           journal,
           dispatcher,
           routedExecutor,
+          cancellationContinuationPending,
         );
         if (this.#recoveryStopped) return count;
         if (!this.#shutdownDraining) {
@@ -2665,51 +2761,65 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     journal: ConversationRunJournal,
     request: Parameters<InProcessConversationDispatcher["cancelRun"]>[0],
   ): Promise<void> {
-    await this.#primeAssignmentRouting(journal);
-    await this.#createRecoveryDispatcher(journal).dispatcher.cancelRun(request);
+    await this.#withRecoveryClaim(journal.conversationId, async () => {
+      await this.#primeAssignmentRouting(journal);
+      await this.#createRecoveryDispatcher(journal).dispatcher.cancelRun(request);
+    });
   }
 
   async #drivePendingCancellations(
     journal: ConversationRunJournal,
   ): Promise<number> {
-    await this.#primeAssignmentRouting(journal);
-    return this.#createRecoveryDispatcher(journal).dispatcher.recoverCancellations();
+    return this.#withRecoveryClaim(journal.conversationId, async () => {
+      await this.#primeAssignmentRouting(journal);
+      return this.#createRecoveryDispatcher(journal).dispatcher.recoverCancellations();
+    });
   }
 
-  #executorIdForAssignment(assignmentId: string): string {
-    return this.#assignmentArtifactAuthority.read(assignmentId).capability.executorId;
+  #capturedAssignmentRouting() {
+    // A dispatcher owns its bindings across awaits. Recovery claims prevent a newly
+    // issued binding from being retired before its first lookup in this operation.
+    const bindings = new Map<string, { conversationId: string; authority: ReturnType<ConversationAssignmentArtifactAuthorityIndex["read"]> }>();
+    const capture = (assignmentId: string) => {
+      let binding = bindings.get(assignmentId);
+      if (!binding) {
+        binding = { conversationId: this.#conversationForAssignment(assignmentId),
+          authority: this.#assignmentArtifactAuthority.read(assignmentId) };
+        bindings.set(assignmentId, binding);
+      }
+      return binding;
+    };
+    for (const assignmentId of this.#assignmentConversations.keys()) capture(assignmentId);
+    return {
+      contexts: createDispatchContexts({ signer: this.#authority.signer, deviceId: this.#authority.deviceId,
+        clock: this.#clock, conversationIdFor: id => capture(id).conversationId,
+        ownerEpochFor: id => capture(id).authority.activation.ref.ownerEpoch }),
+      executorIdForAssignment: (id: string) => capture(id).authority.capability.executorId,
+      submissionContext: (id: string): AuthorityCallContext => {
+        const capability = capture(id).authority.capability;
+        return { principal: { kind: "assignment", capability }, requestId: `submission:${id}`, deadlineAt: capability.expiry };
+      },
+    };
   }
 
   #createRecoveryDispatcher(journal: ConversationRunJournal) {
     return this.#executorDispatch.recoveryDispatcher({
       journal,
-      contexts: this.#contexts,
-      executorIdForAssignment: (assignmentId) =>
-        this.#executorIdForAssignment(assignmentId),
-      submissionContext: (assignmentId) => this.#submissionContext(assignmentId),
+      ...this.#capturedAssignmentRouting(),
     });
-  }
-
-  #submissionContext(assignmentId: string): AuthorityCallContext {
-    const capability = this.#assignmentArtifactAuthority.find(assignmentId)?.capability;
-    if (!capability) {
-      throw new Error("Recovered assignment has no durable submission capability");
-    }
-    return {
-      principal: { kind: "assignment", capability },
-      requestId: `submission:${assignmentId}`,
-      deadlineAt: capability.expiry,
-    };
   }
 
   async #reconcileAbandonedAssignments(
     journal: ConversationRunJournal,
     dispatcher: InProcessConversationDispatcher,
     executor: RunExecutorPort,
+    cancellationContinuationPending: (assignmentId: string) => boolean,
   ): Promise<number> {
     let reconciled = 0;
     for (const candidate of await journal.assignmentsAwaitingRecovery()) {
-      if (this.#scheduledRuns.has(candidate.dispatch.envelope.work.runId)) {
+      if (this.#scheduledRuns.has(candidate.dispatch.envelope.work.runId) ||
+          this.#activeAssignmentClaims.has(candidate.assignmentId) ||
+          cancellationContinuationPending(candidate.assignmentId)) {
         continue;
       }
       this.#rememberAssignment(
@@ -2725,6 +2835,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           }),
         ),
       );
+      // Cancellation clears scheduler claims before its executor continuation
+      // is installed. A live run still owns this assignment through its finally.
+      if (this.#scheduledRuns.has(candidate.dispatch.envelope.work.runId) ||
+          this.#activeAssignmentClaims.has(candidate.assignmentId) ||
+          cancellationContinuationPending(candidate.assignmentId)) continue;
       if (snapshot.phase === "received" && candidate.state === "dispatched") {
         await dispatcher.supersede(
           candidate.assignmentId,
@@ -3072,8 +3187,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       conversationId,
       (this.#activeRecoveryClaims.get(conversationId) ?? 0) + 1,
     );
+    let primaryFailed = false;
+    let primaryError: unknown;
     try {
       return await run();
+    } catch (error) {
+      primaryFailed = true; primaryError = error;
+      throw error;
     } finally {
       const remaining = (this.#activeRecoveryClaims.get(conversationId) ?? 1) - 1;
       if (remaining > 0) {
@@ -3082,6 +3202,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         this.#activeRecoveryClaims.delete(conversationId);
         if (this.#pendingConversationRetirements.has(conversationId)) {
           this.#finalizeConversationRetirement(conversationId);
+        } else {
+          try {
+            await this.#retireSettledAssignments(conversationId, this.#journal(conversationId));
+          } catch (cleanupError) {
+            // A pressured read has not proved a route safe to retire. Keep the
+            // route and its recovery obligation, without undoing the main result
+            // or replacing a permanent main failure with retryable pressure.
+            this.#markRecovery(conversationId);
+            this.#observeFailure(cleanupError, { phase: "recovery", conversationId });
+            if (maintenanceRetryDelayMs(cleanupError) === undefined) {
+              if (primaryFailed) throw new AggregateError([primaryError, cleanupError], "Conversation operation and route cleanup failed");
+              throw cleanupError;
+            }
+          }
         }
       }
     }
@@ -3162,6 +3296,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   #forgetAssignment(assignmentId: string): void {
+    const conversationId = this.#assignmentConversations.get(assignmentId);
+    if (this.#activeAssignmentClaims.has(assignmentId) ||
+        (conversationId && (this.#activeRecoveryClaims.get(conversationId) ?? 0) > 0)) return;
     this.#assignmentConversations.delete(assignmentId);
     this.#assignmentArtifactAuthority.remove(assignmentId);
     this.#assignmentIngress.delete(assignmentId);

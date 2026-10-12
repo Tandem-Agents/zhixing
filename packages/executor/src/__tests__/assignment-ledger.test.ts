@@ -1,5 +1,6 @@
 import path from "node:path";
 import { ExecutorResourceGovernor } from "../resource-governor.js";
+import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
@@ -583,6 +584,57 @@ async function createFormalReceiptHarness(options: { clock?: () => string; monot
 }
 
 describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("atomically retires a superseded formal receipt and replays the permanent start fence", async () => {
+    const h = await createFormalReceiptHarness();
+    expect(await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"))).toMatchObject({ accepted: true });
+    expect(await h.governor.activeAssignmentReceipts()).toHaveLength(1);
+    const fence = { fenceSeq: 1, requestId: "formal-supersede" };
+    await h.ledger.supersede(ASSIGNMENT_ID, fence, ownerContext(ASSIGNMENT_ID, "executor.supersede"));
+    const commits = await h.log.readAll();
+    const terminal = commits.find(c => c.entries.some(e => (e.body as AssignmentEntry).body?.t === "supersede-fenced"))!;
+    expect(terminal.entries.some(e => (e.body as {t?:string}).t === "release")).toBe(true);
+    const reopened = h.reopen();
+    expect(await reopened.governor.activeAssignmentReceipts()).toHaveLength(0);
+    expect(await reopened.ledger.reconcileSupersededReceipts()).toBe(0);
+    await expect(reopened.ledger.start(ASSIGNMENT_ID)).rejects.toThrow();
+    expect(await h.log.readAll()).toHaveLength(commits.length);
+  });
+
+  it("recovers an old fenced receipt without rewriting its fence or repeating release", async () => {
+    const h = await createFormalReceiptHarness();
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    // Emit the historical v1 format through a coordinator that predates fence retirement.
+    const prepare = vi.spyOn(h.governor, "prepareTerminal").mockReturnValueOnce([]);
+    try { await h.ledger.supersede(ASSIGNMENT_ID, { fenceSeq: 1, requestId: "legacy-fence" }, ownerContext(ASSIGNMENT_ID, "executor.supersede")); }
+    finally { prepare.mockRestore(); }
+    const before = (await h.log.readAll()).length, restarted = h.reopen();
+    expect(await restarted.governor.activeAssignmentReceipts()).toHaveLength(1);
+    const get = h.artifacts.get.bind(h.artifacts);
+    const reads = vi.spyOn(h.artifacts, "get").mockImplementation(async ref => {
+      if (ref.digest !== dispatchEnvelopeArtifact(h.envelope).ref.digest) throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      return get(ref);
+    });
+    onTestFinished(() => reads.mockRestore());
+    // Production recovery discovery must retire it even though fenced jobs are not recoverable work.
+    expect(await restarted.ledger.reconcileSupersededReceipts()).toBe(1);
+    reads.mockRestore();
+    expect(await restarted.ledger.recoverableConversationAssignments()).toEqual([]);
+    expect(await restarted.governor.activeAssignmentReceipts()).toHaveLength(0);
+    expect(await restarted.ledger.reconcileSupersededReceipts()).toBe(0);
+    expect(await h.log.readAll()).toHaveLength(before + 1);
+    await expect(restarted.ledger.start(ASSIGNMENT_ID)).rejects.toThrow();
+  });
+
+  it("does not retire an already-started formal receipt on supersede", async () => {
+    const h = await createFormalReceiptHarness();
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    expect(await h.ledger.supersede(ASSIGNMENT_ID, { fenceSeq: 1, requestId: "started-fence" }, ownerContext(ASSIGNMENT_ID, "executor.supersede")))
+      .toMatchObject({ decision: "already-started" });
+    expect(await h.ledger.reconcileSupersededReceipts()).toBe(0);
+    expect(await h.governor.activeAssignmentReceipts()).toHaveLength(1);
+  });
+
   it("preserves live monotonic permission anchors across successful and failed binding batches", async () => {
     let wall = NOW, mono = 0;
     const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
@@ -697,6 +749,34 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       expect(await h.ledger.dataPlaneBindings(Array.from({ length: 64 }, () => ({ assignmentId: ASSIGNMENT_ID, use: "observe" as const })))).toHaveLength(64);
       await expect(h.ledger.dataPlaneBindings(Array.from({ length: 65 }, () => ({ assignmentId: ASSIGNMENT_ID })))).rejects.toThrow("64");
     } finally { read.mockRestore(); }
+  });
+
+  it("keeps expired monotonic permissions expired across successful and failed receipt scans", async () => {
+    let wall = NOW, mono = 0;
+    const h = await createFormalReceiptHarness({ clock: () => wall, monotonicClock: () => mono });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    await h.ledger.start(ASSIGNMENT_ID);
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).resolves.toEqual([]);
+    mono = 60001; wall = new Date(Date.parse(NOW) + 30000).toISOString();
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    expect(await h.ledger.reconcileSupersededReceipts()).toBe(0);
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+    const get = vi.spyOn(h.artifacts, "get").mockRejectedValueOnce(new Error("receipt read failed"));
+    try { await expect(h.ledger.reconcileSupersededReceipts()).rejects.toThrow("receipt read failed"); }
+    finally { get.mockRestore(); }
+    await expect(h.ledger.authorizeToolExecution(ASSIGNMENT_ID, h.envelope.permissionLease)).rejects.toThrow("inactive");
+  });
+
+  it.each([false, true])("does not persist operational artifact pressure as invalid dispatch, previously received=%s", async (received) => {
+    const h = await createHarness();
+    const dispatch = () => h.ledger.dispatch(h.dispatch.envelope, h.dispatch.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    if (received) expect(await dispatch()).toMatchObject({ accepted: true });
+    const pressure = new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "probe-unavailable", retryAfterMs: 1 });
+    const put = vi.spyOn(h.artifacts, "put").mockRejectedValueOnce(pressure);
+    try { await expect(dispatch()).rejects.toBe(pressure); } finally { put.mockRestore(); }
+    expect(await dispatch()).toMatchObject({ accepted: true });
+    const records = (await h.log.readAll()).flatMap(e => e.entries);
+    expect(records.some(r => (r.body as { body?: { t?: string } }).body?.t === "dispatch-rejected")).toBe(false);
   });
 
   it("authorizes a surface abort through the owner-issued durable ticket chain", async () => {
@@ -913,7 +993,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         kind: "run-observe",
         ttlMs: 60_000,
       }),
-    ).rejects.toThrow("current acknowledged assignment");
+    ).rejects.toThrow("Conversation assignment was durably cancelled before execution");
     const abortRequest = {
       v: 1,
       assignmentId: ASSIGNMENT_ID,

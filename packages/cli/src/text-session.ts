@@ -319,6 +319,7 @@ export async function startTextSession(home: string, configPath: string, options
             }
             if (started.kind === 'contract-failed') { fail(Error(`推进准则生成失败：${started.error.message}`)); continue; }
             if (started.kind === 'cancelled') { output.line('已取消这次任务。'); continue; }
+            if (started.kind === 'submission-settled') { output.line(started.message); continue; }
             if (started.turn.rubricPublicationMessage) output.line(started.turn.rubricPublicationMessage);
             if (started.turn.advancementContinuation) output.line(started.turn.advancementContinuation.interruptedProxy
               ? '已中止当前推进以处理你的输入；已作为当前任务的补充继续推进。' : '已作为当前任务的补充继续推进。');

@@ -232,6 +232,7 @@ export interface ConversationExecutorDispatchPlan {
   dispatch(input: {
     readonly journal: ConversationRunJournal;
     readonly envelope: Extract<DispatchEnvelope, { execution: "conversation" }>;
+    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
     readonly contexts: InProcessDispatchContextFactory;
     readonly submissionContext: AuthorityCallContext;
   }): Promise<void>;
@@ -248,6 +249,9 @@ export interface ConversationExecutorDispatchPlan {
 }
 
 export interface ConversationExecutorDispatchApplication {
+  reconcileLocalReceipts(): Promise<number>;
+  /** 取消已耐久后立即中止本机执行；远端执行仍只经执行器取消链。 */
+  stopLocalExecution(assignmentId: string): void;
   plan(input: ConversationExecutorApplicationPlanInput): Promise<ConversationExecutorDispatchPlan>;
   recoveryDispatcher(input: {
     readonly journal: ConversationRunJournal;
@@ -257,6 +261,7 @@ export interface ConversationExecutorDispatchApplication {
   }): {
     readonly dispatcher: InProcessConversationDispatcher;
     readonly executor: RunExecutorPort;
+    readonly cancellationContinuationPending: (assignmentId: string) => boolean;
   };
 }
 
@@ -291,7 +296,10 @@ export interface ConversationExecutorHostBoundaryOptions {
 }
 
 interface LocalConversationExecutorMechanism {
+  reconcileReceipts(): Promise<number>;
   readonly executor: RunExecutorPort;
+  cancellationContinuationPending(assignmentId: string): boolean;
+  stopExecution(assignmentId: string): void;
   prepare(input: {
     readonly conversationId: string;
     readonly assignmentId: string;
@@ -386,6 +394,14 @@ export class ConversationExecutorTopologyAdapter {
       : [];
   }
 
+  reconcileLocalReceipts(): Promise<number> {
+    return this.#local?.reconcileReceipts() ?? Promise.resolve(0);
+  }
+
+  stopLocalExecution(assignmentId: string): void {
+    this.#local?.stopExecution(assignmentId);
+  }
+
   hasLocal(): boolean {
     return this.#local !== undefined;
   }
@@ -453,6 +469,14 @@ class DefaultConversationExecutorDispatchApplication
     this.#topology = options.topology;
   }
 
+  reconcileLocalReceipts(): Promise<number> {
+    return this.#topology.reconcileLocalReceipts();
+  }
+
+  stopLocalExecution(assignmentId: string): void {
+    this.#topology.stopLocalExecution(assignmentId);
+  }
+
   async plan(
     input: ConversationExecutorApplicationPlanInput,
   ): Promise<ConversationExecutorDispatchPlan> {
@@ -499,6 +523,7 @@ class DefaultConversationExecutorDispatchApplication
   }): {
     readonly dispatcher: InProcessConversationDispatcher;
     readonly executor: RunExecutorPort;
+    readonly cancellationContinuationPending: (assignmentId: string) => boolean;
   } {
     const resolve = (executorId: string) =>
       this.#topology.resolve(executorId, this.#authority.executorId);
@@ -513,11 +538,16 @@ class DefaultConversationExecutorDispatchApplication
     const submission = local?.kind === "local"
       ? local.mechanism.createSubmission(input.journal)
       : undefined;
+    const cancellationContinuationPending = (assignmentId: string) =>
+      local?.kind === "local" &&
+      input.executorIdForAssignment(assignmentId) === this.#authority.executorId &&
+      local.mechanism.cancellationContinuationPending(assignmentId);
     const dispatcher = new InProcessConversationDispatcher({
       enabled: true,
       journal: input.journal,
       executor,
       contexts: input.contexts,
+      cancellationContinuationPending,
       cancellationSubmission: {
         submitCancellation: async (assignmentId) => {
           if (input.executorIdForAssignment(assignmentId) === this.#authority.executorId) {
@@ -556,7 +586,7 @@ class DefaultConversationExecutorDispatchApplication
         },
       },
     });
-    return { dispatcher, executor };
+    return { dispatcher, executor, cancellationContinuationPending };
   }
 
 }
@@ -618,6 +648,7 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
   async dispatch(input: {
     readonly journal: ConversationRunJournal;
     readonly envelope: Extract<DispatchEnvelope, { execution: "conversation" }>;
+    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
     readonly contexts: InProcessDispatchContextFactory;
     readonly submissionContext: AuthorityCallContext;
   }): Promise<void> {
@@ -667,18 +698,18 @@ class PlannedConversationExecutorDispatch implements ConversationExecutorDispatc
     });
     let results: readonly DispatchResult[] | undefined;
     try {
-      results = await this.#dispatcher.dispatchPending();
+      results = [await this.#dispatcher.dispatchAssignment({ assignmentId: input.envelope.assignmentId, envelope: input.envelope, activation: input.activation })];
     } catch (error) {
       if (this.#target.kind !== "remote" || !isRetryableMeshFailure(error)) throw error;
     }
     if (results && (results.length !== 1 || !results[0]!.accepted)) {
       const rejection = results[0];
       const topology = this.#target.kind === "remote" ? "Remote" : "Local";
-      throw new Error(
+      throw Object.assign(new Error(
         rejection && !rejection.accepted
           ? `${topology} executor rejected a freshly issued assignment: ${rejection.error.message}`
           : `${topology} executor did not return exactly one dispatch result`,
-      );
+      ), { name: "ExecutorDispatchRejectedError", code: rejection && !rejection.accepted ? rejection.error.code : "invalid" });
     }
   }
 
@@ -749,6 +780,7 @@ function createLocalConversationExecutorMechanism(
 } {
   const bindings = new Map<string, ConversationRuntimeBinding>();
   const executions = new Map<string, ConversationKernelExecution>();
+  const pendingCancellations = new Set<string>();
   const executorAuthority = options.authority.executorLog && options.authority.assignmentResources
     ? options.authority as ConversationOwnerRuntimeStack & {
         readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
@@ -795,6 +827,10 @@ function createLocalConversationExecutorMechanism(
   return {
     ledger,
     mechanism: {
+      reconcileReceipts: () => ledger.reconcileSupersededReceipts(),
+      cancellationContinuationPending: (assignmentId) => pendingCancellations.has(assignmentId),
+      // Owner 已耐久决定取消后的本机止损：只中止本进程执行，停止证明仍由 cancel 取得。
+      stopExecution: (assignmentId) => { executions.get(assignmentId)?.stop(); },
       executor: {
         dispatch: (...args) => (ledger as RunExecutorPort).dispatch(...args),
         queryLedger: (...args) => ledger.queryLedger(...args),
@@ -803,8 +839,18 @@ function createLocalConversationExecutorMechanism(
           await ledger.beginOwnerCancellation(assignmentId, fence, context);
           // Never hold the owner terminal operation while waiting for that same
           // operation from the executing turn. Recovery retries after quiescence.
-          if (executions.get(assignmentId)?.stop() === false) return;
-          await ledger.finishOwnerCancellation(assignmentId, fence, context);
+          if (executions.get(assignmentId)?.stop() === false) {
+            pendingCancellations.add(assignmentId);
+            return;
+          }
+          // Keep the continuation across the recovery pass even if the kernel
+          // finishes between cancel and the subsequent ledger scan. A later
+          // cancellation attempt must produce (or fail to produce) real proof.
+          try {
+            await ledger.finishOwnerCancellation(assignmentId, fence, context);
+          } finally {
+            pendingCancellations.delete(assignmentId);
+          }
         },
       },
       createSubmission(journal) {
@@ -836,8 +882,11 @@ function createLocalConversationExecutorMechanism(
             await implementation.prepareForRunEnd(assignmentId, context);
           },
           cancellation: {
-            submitCancellation: (assignmentId, context) =>
-              implementation.submitCancellation(assignmentId, context),
+            submitCancellation: async (assignmentId, context) => {
+              const submitted = await implementation.submitCancellation(assignmentId, context);
+              if (submitted) pendingCancellations.delete(assignmentId);
+              return submitted;
+            },
           },
           bundle: {
             submitSealedBundle: (assignmentId, context) =>

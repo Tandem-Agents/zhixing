@@ -99,6 +99,8 @@ interface LocalCandidateOccupancy {
 export interface ExecutorAssignmentResourceCoordinator {
   coordinate<T>(operation: () => Promise<T>): Promise<T>;
   prepareReceipt(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
+  activeAssignmentReceipts(): Promise<readonly AssignmentResourceLease[]>;
+  prepareSupersededReceiptRelease(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
   prepareActivation(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[];
   prepareQueuedTerminal(input: {
     readonly workload: RootResourceWorkload;
@@ -212,6 +214,25 @@ export class ExecutorResourceGovernor
         this.#pruneCandidates();
       }
     });
+  }
+
+  /** Finite candidates only; the ledger must establish the business terminal fact. */
+  async activeAssignmentReceipts(): Promise<readonly AssignmentResourceLease[]> {
+    return this.coordinate(async () => [...this.#projection!.state.reservations.values()]
+      .filter(reservation => reservation.depth === 0 && reservation.state === "active" &&
+        "activation" in reservation.lease && reservation.lease.activation?.kind === "assignment")
+      .map(reservation => reservation.lease as AssignmentResourceLease));
+  }
+
+  /** Called in coordinate after the ledger proves a durable never-started fence. */
+  prepareSupersededReceiptRelease(lease: AssignmentResourceLease): readonly LogicalRecord<GovernorRecord>[] {
+    const validated = this.#validateAcceptedRoot(lease);
+    const current = this.#projection?.state.reservations.get(validated.reservationId);
+    if (!current) return [];
+    if (canonicalize(current.lease) !== canonicalize(validated))
+      throw new TypeError("Superseded receipt does not match its durable lease");
+    if (current.state !== "active") return [];
+    return this.prepareTerminal({ lease: validated, mode: "release" });
   }
 
   async enqueueRoot(

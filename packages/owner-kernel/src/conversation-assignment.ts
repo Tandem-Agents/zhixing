@@ -913,6 +913,8 @@ interface InProcessConversationDispatcherBaseOptions {
   readonly journal: ConversationRunJournal;
   readonly executor: ConversationDispatchPort;
   readonly contexts: InProcessDispatchContextFactory;
+  /** Same-process cancellation still owns a live execution's quiescence step. Not a stop proof. */
+  readonly cancellationContinuationPending?: (assignmentId: string) => boolean;
 }
 
 export interface InProcessCancellationSubmission {
@@ -2711,9 +2713,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           !assigned ||
           !assigned.acked ||
           state.assignmentByRun.get(assigned.record.runId) !== input.assignmentId ||
-          state.closedAssignments.has(input.assignmentId) ||
-          (runState !== "dispatched" && runState !== "running") ||
-          state.cancelFences.has(input.assignmentId)
+          (state.closedAssignments.has(input.assignmentId) && runState !== "cancelled")
         ) {
           throw new Error("Ticket requires a current acknowledged assignment");
         }
@@ -2741,6 +2741,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             replaced.kind !== input.kind)
         ) {
           throw new Error("Ticket renewal does not continue an active renewable grant");
+        }
+        if (
+          (runState === "cancel-requested" || runState === "cancelled") &&
+          state.cancelFences.has(input.assignmentId)
+        ) {
+          throw new ConversationAssignmentCancelledError(assigned.record.runId, input.assignmentId);
+        }
+        if ((runState !== "dispatched" && runState !== "running") || state.cancelFences.has(input.assignmentId)) {
+          throw new Error("Ticket requires a current acknowledged assignment");
         }
         const issuedAt = authorityPrefix.at;
         const ticket = createSignedDataPlaneTicket(
@@ -3991,6 +4000,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         current?.state !== "dispatched" ||
         state.assignmentByRun.get(assigned.record.runId) !== assignmentId
       ) {
+        if (state.assignmentByRun.get(assigned.record.runId) === assignmentId &&
+            (current?.state === "cancel-requested" || current?.state === "cancelled") &&
+            state.cancelFences.has(assignmentId)) {
+          throw new ConversationAssignmentCancelledError(assigned.record.runId, assignmentId);
+        }
         throw new Error("Started report is invalid for the current run state");
       }
       this.#authorizeSubmission(state, ctx, {
@@ -9115,6 +9129,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 }
 
+/** An exact assignment lost the atomic preparation decision to a durable cancellation. */
+export class ConversationAssignmentCancelledError extends Error {
+  constructor(readonly runId: string, readonly assignmentId: string) {
+    super("Conversation assignment was durably cancelled before execution");
+    this.name = "ConversationAssignmentCancelledError";
+  }
+}
+
 /** Explicitly gated single-process transport; disabled means zero dispatch side effects. */
 export class InProcessConversationDispatcher {
   readonly #enabled: boolean;
@@ -9123,6 +9145,7 @@ export class InProcessConversationDispatcher {
   readonly #contexts: InProcessDispatchContextFactory;
   readonly #cancellationSubmission: InProcessCancellationSubmission | undefined;
   readonly #bundleSubmission: InProcessBundleSubmission | undefined;
+  readonly #cancellationContinuationPending: (assignmentId: string) => boolean;
 
   constructor(options: InProcessConversationDispatcherOptions) {
     this.#enabled = options.enabled;
@@ -9131,30 +9154,28 @@ export class InProcessConversationDispatcher {
     this.#contexts = options.contexts;
     this.#cancellationSubmission = options.cancellationSubmission;
     this.#bundleSubmission = options.bundleSubmission;
+    this.#cancellationContinuationPending = options.cancellationContinuationPending ?? (() => false);
   }
 
   async dispatchPending(): Promise<readonly DispatchResult[]> {
     if (!this.#enabled) return [];
-    const pending = await this.#journal.pendingDispatches();
     const outcomes: DispatchResult[] = [];
-    for (const item of pending) {
-      const outcome = this.#journal.validateExecutorDispatchResult(
-        await this.#executor.dispatch(
-          item.envelope,
-          item.activation,
-          this.#dispatchContext(item),
-        ),
-      );
-      outcomes.push(outcome);
-      if (outcome.accepted) {
-        await this.#journal.acknowledgeDispatch(item.assignmentId);
-      } else if (outcome.outcome === "rejected-before-received") {
-        await this.#journal.acceptDispatchRejection(outcome);
-      } else {
-        await this.#journal.recordDispatchConflict(item, outcome);
-      }
+    for (const item of await this.#journal.pendingDispatches()) {
+      outcomes.push(await this.dispatchAssignment(item));
     }
     return outcomes;
+  }
+
+  /** Deliver this exact issued assignment even if another reader already ACKed it. */
+  async dispatchAssignment(item: PendingConversationDispatch): Promise<DispatchResult> {
+    if (!this.#enabled) throw new Error("Conversation dispatch is disabled");
+    const outcome = this.#journal.validateExecutorDispatchResult(
+      await this.#executor.dispatch(item.envelope, item.activation, this.#dispatchContext(item)),
+    );
+    if (outcome.accepted) await this.#journal.acknowledgeDispatch(item.assignmentId);
+    else if (outcome.outcome === "rejected-before-received") await this.#journal.acceptDispatchRejection(outcome);
+    else await this.#journal.recordDispatchConflict(item, outcome);
+    return outcome;
   }
 
   async recoverStarted(): Promise<number> {
@@ -9310,7 +9331,8 @@ export class InProcessConversationDispatcher {
       if (
         candidate.state === "uncertain" ||
         candidate.state === "committed" ||
-        ledger.lastSeq <= 0
+        ledger.lastSeq <= 0 ||
+        this.#cancellationContinuationPending(candidate.assignmentId)
       ) {
         continue;
       }

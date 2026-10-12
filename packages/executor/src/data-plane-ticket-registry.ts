@@ -72,6 +72,14 @@ interface TicketRegistryProjection {
   retiredThrough: string | undefined;
 }
 
+/** Signed ticket matches durable activation, but the assignment no longer permits active use. */
+export class DataPlaneAssignmentInactiveError extends Error {
+  constructor(readonly assignmentId: string, readonly ref: ExecutionRef) {
+    super("Data-plane assignment no longer accepts active tickets");
+    this.name = "DataPlaneAssignmentInactiveError";
+  }
+}
+
 export interface DataPlaneAssignmentBinding {
   readonly ref: ExecutionRef;
   readonly executorId: string;
@@ -185,6 +193,11 @@ export class DataPlaneTicketRegistry {
         ticket.assignmentId,
       );
       if (!binding) {
+        const inactive = await this.#assignments.dataPlaneBinding(ticket.assignmentId, "observe");
+        if (inactive) {
+          assertTicketActivation(ticket, inactive);
+          throw new DataPlaneAssignmentInactiveError(ticket.assignmentId, ticket.ref);
+        }
         throw new Error("Data-plane ticket has no durable assignment activation");
       }
       assertTicketActivation(ticket, binding);

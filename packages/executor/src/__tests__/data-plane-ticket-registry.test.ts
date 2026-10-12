@@ -43,6 +43,26 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
 };
 
 describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
+
+  it.each(["inactive", "missing", "different-run"] as const)("preserves validated identity when acceptance sees %s assignment", async state => {
+    const root = await createTempDir("ticket-inactive");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const clock = () => "2026-07-23T00:01:00.000Z";
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock });
+    const spool = new AssignmentStreamSpool(path.join(root, "spool"), artifacts, { clock });
+    const registry = new DataPlaneTicketRegistry({ log, spool, clock, executorId: "executor-fixed", verifier: identity,
+      assignments: { async dataPlaneBinding(_id, use) {
+        if (use !== "observe" || state === "missing") return undefined;
+        return { ref: state === "different-run" ? { ...ref, runId: "other-run" } : ref,
+          executorId: "executor-fixed", ownerKeyId: "owner-fixed" };
+      } },
+    });
+    const error = await registry.accept(createTicket("run-interact")).catch(error => error);
+    if (state === "inactive") expect(error).toMatchObject({ name: "DataPlaneAssignmentInactiveError", assignmentId: "assignment-fixed", ref });
+    else { expect(error).toBeInstanceOf(Error); expect(error.name).not.toBe("DataPlaneAssignmentInactiveError"); }
+    expect(await log.readAll()).toEqual([]);
+  });
+
   it("persists acceptance before qualification and revocation before denial", async () => {
     const root = await createTempDir("data-plane-ticket-registry");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));

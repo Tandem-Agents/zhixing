@@ -1,4 +1,5 @@
 import { StorageMaintenanceAdmissionError } from '@zhixing/core/resources';
+import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import type {
   ConversationStatusNotice,
   SecretRef,
@@ -36,6 +37,7 @@ import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mu
 import { SchedulerConversationMutationPublisher } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
 import {
   ConversationRunJournal,
+  InProcessConversationDispatcher,
   type ConversationMutationPublisher,
 } from "@zhixing/owner-kernel/conversation-assignment";
 import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
@@ -43,6 +45,9 @@ import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel
 import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   ConversationAssignmentLedger,
+  DataPlaneTicketRegistry,
+  AssignmentStreamSpool,
+  AssignmentStreamWriter,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import { projectSessionTurn } from "@zhixing/rpc";
@@ -86,6 +91,7 @@ import {
   type ConversationExecutorDispatchApplication,
   type ConversationExecutorTopologyDirectory,
 } from "../conversation-executor-dispatch.js";
+import { ConversationKernelExecution } from "../conversation-kernel-execution.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -167,6 +173,7 @@ function createProtocol(
     | "losslessDataPlane"
     | "recoverAuxiliary"
   > & {
+    readonly losslessDataPlane?: ConversationLosslessDataPlaneTopology;
     readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;
     readonly executorDispatch?: ConversationExecutorDispatchApplication;
     readonly maxPendingInteractions?: number;
@@ -175,6 +182,7 @@ function createProtocol(
       readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
       readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
       readonly runtimeFactory: RuntimeFactory;
+      readonly createStream?: (input: { readonly assignmentId: string; readonly ref: import("@zhixing/core/contracts").ExecutionRef }) => Promise<AssignmentStreamWriter>;
     };
   },
 ): ConversationProtocolRuntime {
@@ -210,7 +218,7 @@ function createProtocol(
   return new ConversationProtocolRuntime({
     ...protocolOptions,
     recoverAuxiliary: options.recoverAuxiliary ?? (async () => {}),
-    losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
+    losslessDataPlane: options.losslessDataPlane ?? TEST_ANCHOR_LOSSLESS_DATA_PLANE,
     assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
     executorDispatch: options.executorDispatch ?? executorBoundary!.application,
     ...(executorBoundary?.staging
@@ -346,13 +354,25 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
-  it.each(["single", "batch"] as const)("%s cancellation stops the assignment kernel before final usage", async mode => {
+  it.each([
+    { mode: "single", settleBetween: false }, { mode: "batch", settleBetween: false },
+    { mode: "single", settleBetween: true }, { mode: "batch", settleBetween: true },
+  ])("$mode cancellation preserves pending quiescence (between recovery steps: $settleBetween)", async ({ mode, settleBetween }) => {
     const home = await createTempDir("conversation-cancel-meter");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     await authority.installPermissionSnapshot(createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: new Date().toISOString() }, authority.signer));
     const reserved = Promise.withResolvers<void>();
     const cleanup = Promise.withResolvers<void>();
     const teardown = Promise.withResolvers<void>();
+    const kernelFinished = Promise.withResolvers<void>();
+    const finishProof = Promise.withResolvers<void>();
+    const originalKernel = ConversationKernelExecution.prototype.run;
+    const kernelRun = vi.spyOn(ConversationKernelExecution.prototype, "run").mockImplementation(async function* (...args) {
+      try { return yield* originalKernel.apply(this, args); }
+      finally { kernelFinished.resolve(); }
+    });
+    let recoverAssignments: ReturnType<typeof vi.spyOn> | undefined;
+    let finishCancellation: ReturnType<typeof vi.spyOn> | undefined;
     const consumed = vi.fn();
     const projection: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "cancel-meter",
       async *run() { throw new Error("projection runtime must not execute"); }, abort: vi.fn(() => false), async dispose() {} };
@@ -391,14 +411,35 @@ describe("ConversationProtocolRuntime", () => {
       expect(consumed).not.toHaveBeenCalled();
       const status = () => protocol.statusHistory([{ conversationId: "cancel-meter", runId, afterStatusRevision: 0 }]);
       expect((await status()).notices.at(-1)?.state).toBe("cancel-requested");
+      if (settleBetween) {
+        const originalFinish = ConversationAssignmentLedger.prototype.finishOwnerCancellation;
+        finishCancellation = vi.spyOn(ConversationAssignmentLedger.prototype, "finishOwnerCancellation").mockImplementation(async function (...args) {
+          await finishProof.promise;
+          return originalFinish.apply(this, args);
+        });
+        const originalRecover = InProcessConversationDispatcher.prototype.recoverAssignments;
+        recoverAssignments = vi.spyOn(InProcessConversationDispatcher.prototype, "recoverAssignments").mockImplementationOnce(async function (...args) {
+          cleanup.resolve();
+          await kernelFinished.promise;
+          return originalRecover.apply(this, args);
+        });
+      }
+      await protocol.recoverConversation("cancel-meter");
+      expect((await status()).notices.at(-1)?.state).toBe("cancel-requested");
+      expect((await status()).notices.some(notice => notice.state === "uncertain")).toBe(false);
+      finishProof.resolve();
       cleanup.resolve();
       expectSettled(await running);
       expect(consumed).toHaveBeenCalledOnce();
       expect((await status()).notices.at(-1)?.state).toBe("cancelled");
     } finally {
       teardown.resolve();
+      finishProof.resolve();
       cleanup.resolve();
       await running;
+      kernelRun.mockRestore();
+      recoverAssignments?.mockRestore();
+      finishCancellation?.mockRestore();
       await protocol.stopRecoveryLoop();
       await manager.disposeAll();
     }
@@ -585,6 +626,152 @@ describe("ConversationProtocolRuntime", () => {
       await protocol.stopRecoveryLoop(); await manager.disposeAll();
     }
   }, 30000);
+
+
+  it.each([
+    { mode: "single", boundary: "ack" }, { mode: "batch", boundary: "ack" },
+    { mode: "single", boundary: "ticket" }, { mode: "batch", boundary: "ticket" },
+    { mode: "single", boundary: "accept" }, { mode: "batch", boundary: "accept" },
+    { mode: "single", boundary: "start" }, { mode: "batch", boundary: "start" },
+    { mode: "single", boundary: "report" }, { mode: "batch", boundary: "report" },
+  ] as const)("settles cancellation before $boundary for $mode without losing in-flight routing", async ({ mode, boundary }) => {
+    const home = await createTempDir("conversation-prestart-cancel");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const conversationId = "prestart-cancel";
+    const reached = Promise.withResolvers<void>();
+    const proceed = Promise.withResolvers<void>();
+    const cancellationBegan = Promise.withResolvers<void>();
+    const firstProof = Promise.withResolvers<void>();
+    let runId = "";
+    let executions = 0;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run() { executions++; throw new Error("Cancelled assignment must not execute"); },
+      abort: vi.fn(() => false), async dispose() {} };
+    let dispatchedLedger: ConversationAssignmentLedger | undefined;
+    const dispatch = ConversationAssignmentLedger.prototype.dispatch;
+    const dispatchSpy = vi.spyOn(ConversationAssignmentLedger.prototype, "dispatch").mockImplementation(async function (...args) {
+      dispatchedLedger = this; return dispatch.apply(this, args);
+    });
+    const losslessDataPlane: ConversationLosslessDataPlaneTopology = { kind: "available", port: {
+      ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+      async openFirstPartySurfaceSession(input) {
+        if (boundary === "accept") {
+          reached.resolve(); await proceed.promise;
+          const artifacts = new FileArtifactStore(resolve(home, "ticket-test-artifacts"));
+          const registry = new DataPlaneTicketRegistry({
+            log: new FileAuthorityCommitLog(resolve(home, "ticket-test-authority"), artifacts),
+            spool: new AssignmentStreamSpool(resolve(home, "ticket-test-spool"), artifacts),
+            executorId: input.executorId, verifier: authority.verifier, assignments: dispatchedLedger!,
+          });
+          await registry.accept(input.ticket);
+        }
+        return TEST_ANCHOR_LOSSLESS_DATA_PLANE.port.openFirstPartySurfaceSession();
+      },
+    } };
+    const failures: unknown[] = [];
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      losslessDataPlane, onFailure: error => { failures.push(error); } });
+    manager = new ConversationManager({ create: async () => runtime }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const ack = ConversationRunJournal.prototype.acknowledgeDispatch;
+    const issue = ConversationRunJournal.prototype.issueDataPlaneTicket;
+    const ackSpy = vi.spyOn(ConversationRunJournal.prototype, "acknowledgeDispatch").mockImplementationOnce(async function (...args) {
+      if (boundary === "ack") { reached.resolve(); await proceed.promise; }
+      return ack.apply(this, args);
+    });
+    const ticketSpy = vi.spyOn(ConversationRunJournal.prototype, "issueDataPlaneTicket").mockImplementationOnce(async function (...args) {
+      if (boundary === "ticket") { reached.resolve(); await proceed.promise; }
+      return issue.apply(this, args);
+    });
+    const start = ConversationAssignmentLedger.prototype.start;
+    const startSpy = vi.spyOn(ConversationAssignmentLedger.prototype, "start").mockImplementationOnce(async function (...args) {
+      if (boundary === "start") { reached.resolve(); await proceed.promise; }
+      return start.apply(this, args);
+    });
+    const report = ConversationRunJournal.prototype.reportStarted;
+    const reportSpy = vi.spyOn(ConversationRunJournal.prototype, "reportStarted").mockImplementationOnce(async function (...args) {
+      if (boundary === "report") { reached.resolve(); await proceed.promise; }
+      return report.apply(this, args);
+    });
+    const begin = ConversationAssignmentLedger.prototype.beginOwnerCancellation;
+    const beginSpy = vi.spyOn(ConversationAssignmentLedger.prototype, "beginOwnerCancellation").mockImplementation(async function (...args) {
+      const result = await begin.apply(this, args); cancellationBegan.resolve(); return result;
+    });
+    const finish = ConversationAssignmentLedger.prototype.finishOwnerCancellation;
+    const finishSpy = vi.spyOn(ConversationAssignmentLedger.prototype, "finishOwnerCancellation").mockImplementationOnce(async function (...args) {
+      await firstProof.promise; return finish.apply(this, args);
+    });
+    let running: ReturnType<typeof projectSessionTurn> | undefined;
+    let cancelling: ReturnType<typeof protocol.cancel> | undefined;
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, conversationId);
+      running = projectSessionTurn({ manager, managed, text: "cancel before model", turnId: "prestart",
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "prestart" } }, notify: () => {} });
+      await Promise.race([reached.promise, running.then(result => { throw new Error("Run ended before gate: " + result.kind); })]);
+      runId = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; runId?: string }).find(body => body.t === "admitted")!.runId!;
+      const request = { conversationId, ...(mode === "single" ? { runId } : {}), requestId: "cancel-prestart",
+        principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "test" } };
+      cancelling = protocol.cancel(request);
+      await cancellationBegan.promise;
+      proceed.resolve();
+      expectSettled(await running);
+      firstProof.resolve();
+      expect((await cancelling).dispositions).toHaveLength(1);
+      await protocol.cancel(request);
+      await protocol.recoverConversation(conversationId);
+      expect(executions).toBe(0);
+      expect(failures).toEqual([]);
+      const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries).map(entry => entry.body as { t?: string });
+      expect(records.filter(record => record.t === "ticket-issued")).toHaveLength(boundary === "accept" || boundary === "start" || boundary === "report" ? 1 : 0);
+      expect((await protocol.statusHistory([{ conversationId, runId, afterStatusRevision: 0 }])).notices.at(-1)?.state).toBe("cancelled");
+    } finally {
+      proceed.resolve(); firstProof.resolve();
+      await Promise.allSettled([running, cancelling]);
+      ackSpy.mockRestore(); ticketSpy.mockRestore(); startSpy.mockRestore(); reportSpy.mockRestore(); beginSpy.mockRestore(); finishSpy.mockRestore(); dispatchSpy.mockRestore();
+      await protocol.stopRecoveryLoop(); await manager.disposeAll();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("executes the issued assignment once when recovery has already acknowledged its dispatch", async () => {
+    const home = await createTempDir("conversation-dispatch-recovery-race");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const conversationId = "dispatch-race";
+    let executions = 0;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: conversationId,
+      async *run(messages) {
+        executions++;
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "complete" }] };
+        const usage = { inputTokens: 0, outputTokens: 0 };
+        return { agentResult: { reason: "completed" as const, message: assistant, usage },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage },
+          newMessages: [assistant], durationMs: 1 };
+      }, abort: () => false, async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const failures: unknown[] = [];
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      onFailure: (error, context) => { failures.push({ error, context }); },
+    });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const assign = ConversationRunJournal.prototype.assign;
+    let acknowledged = false;
+    const raced = vi.spyOn(ConversationRunJournal.prototype, "assign").mockImplementationOnce(async function (...args) {
+      const issued = await assign.apply(this, args);
+      await protocol.recoverConversation(conversationId);
+      acknowledged = (await this.pendingDispatches()).length === 0;
+      return issued;
+    });
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, conversationId);
+      expectSettled(await projectSessionTurn({ manager, managed, text: "hello", turnId: "race-turn",
+        runOptions: { source: "interactive", turnContext: { turnId: "race-turn" } }, notify: () => {} }));
+      expect(acknowledged).toBe(true);
+      expect(executions).toBe(1);
+      expect(failures).toEqual([]);
+    } finally { raced.mockRestore(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("keeps committed transcript identity monotonic after clearing the visible conversation", async () => {
     const home = await createTempDir("conversation-clear-sequence");
@@ -2818,6 +3005,339 @@ describe("ConversationProtocolRuntime", () => {
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("stops the local kernel once cancellation is durable without waiting for the executor cancellation chain", async () => {
+    const home = await createTempDir("conversation-local-stop");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const started = Promise.withResolvers<void>(), aborted = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+    const projection: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "local-stop",
+      async *run() { throw new Error("projection runtime must not execute"); }, abort: vi.fn(() => false), async dispose() {} };
+    const execution: SessionRuntime = { ...projection, abort: vi.fn(() => true),
+      async *run(messages, options) {
+        const signal = options!.abortSignal!;
+        started.resolve();
+        if (!signal.aborted) await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+        aborted.resolve();
+        return { agentResult: { reason: "aborted", usage: { inputTokens: 0, outputTokens: 0 } },
+          runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!], usage: { inputTokens: 0, outputTokens: 0 } }, newMessages: [], durationMs: 1 };
+      } };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => execution } } });
+    manager = new ConversationManager({ create: async () => projection }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    // 执行器侧的取消开始被阻塞：本机止损不能依赖它。
+    const originalBegin = ConversationAssignmentLedger.prototype.beginOwnerCancellation;
+    const begin = vi.spyOn(ConversationAssignmentLedger.prototype, "beginOwnerCancellation").mockImplementation(async function (...args) {
+      await gate.promise;
+      return originalBegin.apply(this, args);
+    });
+    try {
+      const managed = await getOrCreateActiveConversation(authority, manager, "local-stop");
+      const running = projectSessionTurn({ manager, managed, text: "stop me", turnId: "local-stop", notify: () => {},
+        runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "local-stop" } } });
+      await started.promise;
+      const runId = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; runId?: string }).find(body => body.t === "admitted")!.runId!;
+      const cancelling = protocol.cancel({ conversationId: "local-stop", runId, requestId: "cancel:local-stop",
+        principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "test" } });
+      const stoppedBeforeExecutorCancellation = await Promise.race([
+        aborted.promise.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3_000)),
+      ]);
+      expect(stoppedBeforeExecutorCancellation).toBe(true);
+      expect(execution.abort).toHaveBeenCalledOnce();
+      gate.resolve();
+      await cancelling;
+      await running;
+      const status = () => protocol.statusHistory([{ conversationId: "local-stop", runId, afterStatusRevision: 0 }]);
+      await vi.waitFor(async () => expect((await status()).notices.at(-1)?.state).toBe("cancelled"), { timeout: 10_000 });
+      expect((await status()).notices.some(notice => notice.state === "uncertain")).toBe(false);
+    } finally {
+      gate.resolve();
+      begin.mockRestore();
+    }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["absent", "available"] as const)("drains the $0 first-party stream boundary after durable cancellation", async topology => {
+    const home = await createTempDir("conversation-cancel-stream-tail");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const reached = Promise.withResolvers<void>(), stopped = Promise.withResolvers<void>();
+    const tail = Promise.withResolvers<void>();
+    const close = vi.fn(async () => {});
+    const waitForSeq = vi.fn(async (_seq: number, signal?: AbortSignal) => {
+      expect(signal).toBeDefined();
+      await tail.promise;
+    });
+    const streamEnd = vi.fn();
+    const spool = new AssignmentStreamSpool(resolve(home, "tail-spool"), new FileArtifactStore(resolve(home, "tail-artifacts")));
+    onTestFinished(() => spool.stopStorageMaintenance());
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: "cancel-stream",
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        yield { type: "text_delta", text: "verified prefix" };
+        reached.resolve(); await stopped.promise;
+        throw Object.assign(new Error("cancelled test execution"), { name: "AbortError" });
+      },
+      abort: () => { stopped.resolve(); return true; }, async dispose() {} };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      onFirstPartyFrame: async () => {}, onFirstPartyStreamEnd: streamEnd,
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => runtime },
+        createStream: input => AssignmentStreamWriter.open(spool, input.assignmentId, input.ref) },
+      losslessDataPlane: topology === "absent" ? { kind: "absent", reason: "executor-only" } : { kind: "available", port: {
+        ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+        openFirstPartySurfaceSession: async () => ({
+          ...await TEST_ANCHOR_LOSSLESS_DATA_PLANE.port.openFirstPartySurfaceSession(), waitForSeq, close,
+        }),
+      } },
+    });
+    manager = new ConversationManager({ create: async () => runtime }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const conversationId = "cancel-stream";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const input = { conversationId, input: "stream then cancel",
+      invocation: { kind: "agent", source: "interactive" } as const,
+      options: { source: "interactive" as const, turnContext: { turnId: "stream-cancel" } }, surfacePrincipal: "rpc:owner" };
+    const admitted = await protocol.admit(input);
+    const applyLocal = vi.spyOn(manager, "applyDurableCancellation");
+    if (topology === "available") applyLocal.mockReturnValueOnce({ abortedInFlight: true, cancelledPending: 2 });
+    const pending = ConversationRunJournal.prototype.pendingCancellations;
+    let continuationPressured = false;
+    const pendingSpy = vi.spyOn(ConversationRunJournal.prototype, "pendingCancellations").mockImplementation(async function (...args) {
+      if (topology === "available" && applyLocal.mock.calls.length > 0 && !continuationPressured) {
+        continuationPressured = true;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      }
+      return pending.apply(this, args);
+    });
+    onTestFinished(() => { applyLocal.mockRestore(); pendingSpy.mockRestore(); });
+    const generator = protocol.run({ ...input, messages: [], baseRevision: 0, runtime });
+    const running = (async () => { try { for await (const _ of generator) {} } catch (error) { return error; } })();
+    try {
+      await Promise.race([reached.promise, running.then(error => { throw error ?? Error("execution ended before the first frame"); })]);
+      const cancellation = await protocol.cancel({ conversationId, runId: admitted.runId, requestId: "cancel:stream-tail",
+        principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } });
+      stopped.resolve(); await running;
+      if (topology === "absent") {
+        expect(streamEnd).toHaveBeenCalledWith(expect.objectContaining({ conversationId, runId: admitted.runId, finalSeq: expect.any(Number) }));
+      } else {
+        expect(continuationPressured).toBe(true);
+        expect(applyLocal).toHaveBeenCalledOnce();
+        expect(cancellation.dispositions).toMatchObject([{ abortedInFlight: true, cancelledPending: 2 }]);
+        expect(waitForSeq).toHaveBeenCalledOnce();
+        expect(close).not.toHaveBeenCalled();
+        tail.resolve(); await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      }
+    } finally { stopped.resolve(); tail.resolve(); await running; await generator.return(undefined as never); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  function cancellableStreamFixture(name: string) {
+    const reached = Promise.withResolvers<void>(), stopped = Promise.withResolvers<void>();
+    const tail = Promise.withResolvers<void>();
+    const close = vi.fn(async () => {});
+    const waitForSeq = vi.fn(async () => { await tail.promise; });
+    const streamEnd = vi.fn();
+    let kernelRuns = 0;
+    const runtime: SessionRuntime = { ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: name,
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        kernelRuns += 1;
+        yield { type: "text_delta", text: "verified prefix" };
+        reached.resolve(); await stopped.promise;
+        throw Object.assign(new Error("cancelled test execution"), { name: "AbortError" });
+      },
+      // The kernel keeps running after the cancel request; the test decides when it stops.
+      abort: () => true, async dispose() {} };
+    return { reached, stopped, tail, close, waitForSeq, streamEnd, runtime, kernelRuns: () => kernelRuns };
+  }
+
+  async function startCancellableRun(topology: "absent" | "available", name: string) {
+    const home = await createTempDir(name);
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const f = cancellableStreamFixture(name);
+    const spool = new AssignmentStreamSpool(resolve(home, "tail-spool"), new FileArtifactStore(resolve(home, "tail-artifacts")));
+    onTestFinished(() => spool.stopStorageMaintenance());
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(),
+      onFirstPartyFrame: async () => {}, onFirstPartyStreamEnd: f.streamEnd,
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => f.runtime },
+        createStream: input => AssignmentStreamWriter.open(spool, input.assignmentId, input.ref) },
+      losslessDataPlane: topology === "absent" ? { kind: "absent", reason: "executor-only" } : { kind: "available", port: {
+        ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+        openFirstPartySurfaceSession: async () => ({
+          ...await TEST_ANCHOR_LOSSLESS_DATA_PLANE.port.openFirstPartySurfaceSession(), waitForSeq: f.waitForSeq, close: f.close,
+        }),
+      } },
+    });
+    manager = new ConversationManager({ create: async () => f.runtime }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const conversationId = name;
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const input = { conversationId, input: "stream then cancel",
+      invocation: { kind: "agent", source: "interactive" } as const,
+      options: { source: "interactive" as const, turnContext: { turnId: `${name}-turn` } }, surfacePrincipal: "rpc:owner" };
+    const admitted = await protocol.admit(input);
+    // Local abort is acknowledged without stopping the kernel, so the run is still
+    // inside its frame when cancellation returns: the window E33 is about.
+    const applyLocal = vi.spyOn(manager, "applyDurableCancellation").mockReturnValue({ abortedInFlight: true, cancelledPending: 0 });
+    onTestFinished(() => applyLocal.mockRestore());
+    const generator = protocol.run({ ...input, messages: [], baseRevision: 0, runtime: f.runtime });
+    const running = (async () => { try { for await (const _ of generator) {} return undefined; } catch (error) { return error; } })();
+    await Promise.race([f.reached.promise, running.then(error => { throw error ?? Error("execution ended before the first frame"); })]);
+    const cancel = () => protocol.cancel({ conversationId, runId: admitted.runId, requestId: `cancel:${name}`,
+      principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } });
+    const records = async () => (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+      .map(entry => entry.body as { t?: string; state?: string });
+    const finish = async () => { f.stopped.resolve(); f.tail.resolve(); await running; await generator.return(undefined as never); };
+    return { ...f, protocol, authority, admitted, running, cancel, records, finish };
+  }
+
+  it.each(["absent", "available"] as const)("retries one settlement backpressure after cancellation and still drains the $0 stream tail", async topology => {
+    const run = await startCancellableRun(topology, `cancel-settle-pressure-${topology}`);
+    const runState = ConversationRunJournal.prototype.runState;
+    let armed = false, pressured = 0;
+    const stateSpy = vi.spyOn(ConversationRunJournal.prototype, "runState").mockImplementation(async function (...args) {
+      if (armed && pressured === 0) {
+        pressured += 1;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      }
+      return runState.apply(this, args);
+    });
+    onTestFinished(() => stateSpy.mockRestore());
+    try {
+      await run.cancel();
+      // The kernel stops only now, so the injected pressure hits the run's own settlement.
+      armed = true; run.stopped.resolve();
+      const outcome = await run.running;
+      expect(pressured).toBe(1);
+      expect(String(outcome ?? "")).not.toMatch(/backpressure|settlement failed|maintenance/i);
+      expect(run.kernelRuns()).toBe(1);
+      if (topology === "absent") {
+        expect(run.streamEnd).toHaveBeenCalledWith(expect.objectContaining({ runId: run.admitted.runId, finalSeq: expect.any(Number) }));
+      } else {
+        await vi.waitFor(() => expect(run.waitForSeq).toHaveBeenCalledOnce());
+        expect(run.close).not.toHaveBeenCalled();
+        run.tail.resolve(); await vi.waitFor(() => expect(run.close).toHaveBeenCalledOnce());
+      }
+      expect((await run.records()).some(record => record.t === "state" && record.state === "cancelled")).toBe(true);
+    } finally { await run.finish(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["absent", "available"] as const)("keeps recovery off a cancelled $0 run until its local execution leaves the frame", async topology => {
+    const run = await startCancellableRun(topology, `cancel-recovery-interleave-${topology}`);
+    const uncertain = vi.spyOn(ConversationRunJournal.prototype, "markAssignmentUncertain");
+    onTestFinished(() => uncertain.mockRestore());
+    try {
+      await run.cancel();
+      // Deterministic interleave: the recovery scan runs after cancellation cleared
+      // the scheduler claims but while the kernel is still inside the run.
+      await run.protocol.recover();
+      expect(uncertain).not.toHaveBeenCalled();
+      expect(run.kernelRuns()).toBe(1);
+      run.stopped.resolve();
+      await run.running;
+      await run.protocol.recover();
+      expect(uncertain).not.toHaveBeenCalled();
+      expect(run.kernelRuns()).toBe(1);
+      expect((await run.records()).some(record => record.t === "state" && record.state === "cancelled")).toBe(true);
+    } finally { await run.finish(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("keeps a committed result when post-run route retirement meets transient pressure", async () => {
+    const home = await createTempDir("conversation-retire-pressure");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let executions = 0;
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-retire-pressure",
+      async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+        executions += 1;
+        const assistant: Message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+        return {
+          agentResult: { reason: "completed", message: assistant, usage: { inputTokens: 1, outputTokens: 1 } },
+          runRecord: { timestamp: "2026-09-24T00:00:00.000Z", messages: [messages.at(-1)!, assistant], usage: { inputTokens: 1, outputTokens: 1 } },
+          newMessages: [assistant], durationMs: 1,
+        };
+      },
+      abort: () => false,
+      async dispose() {},
+    };
+    let manager!: ConversationManager;
+    const failures: unknown[] = [];
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      onFailure: error => { failures.push(error); } });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+      appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: "durable", appended: true }),
+    });
+    const conversationId = "conversation-retire-pressure";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const awaiting = ConversationRunJournal.prototype.assignmentsAwaitingRecovery;
+    let pressured = 0;
+    const spy = vi.spyOn(ConversationRunJournal.prototype, "assignmentsAwaitingRecovery").mockImplementation(async function (...args) {
+      const committed = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .some(entry => (entry.body as { t?: string }).t === "committed");
+      if (executions > 0 && committed && pressured === 0) {
+        pressured += 1;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      }
+      return awaiting.apply(this, args);
+    });
+    try {
+      const execution = protocol.run({ conversationId, input: "check", messages: [{ role: "user", content: [{ type: "text", text: "check" }] }], baseRevision: 0,
+        runtime, invocation: { kind: "agent", source: "interactive" }, options: { turnContext: { turnId: "rpc:retire-pressure" }, source: "interactive" } });
+      let step = await execution.next();
+      while (!step.done) step = await execution.next();
+      expect(step.value.agentResult.reason).toBe("completed");
+    } finally { spy.mockRestore(); }
+    expect(pressured).toBe(1);
+    expect(failures.some(error => error instanceof StorageMaintenanceAdmissionError)).toBe(true);
+    // The retained route is retired by the next recovery pass instead of being lost.
+    await protocol.recover();
+    expect(executions).toBe(1);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+  it("releases the execution plan when an earlier session close fails and keeps the run's first error", async () => {
+    const home = await createTempDir("conversation-cleanup-close-failure");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let disposed = 0;
+    const runtime: SessionRuntime = {
+      ...TEST_RUNTIME_AUTHORITY_FACTS,
+      sessionId: "runtime-cleanup-close-failure",
+      async *run(): AsyncGenerator<AgentYield, RunResult> {
+        throw new Error("model failed");
+      },
+      abort: () => false,
+      async dispose() { disposed += 1; },
+    };
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      losslessDataPlane: { kind: "available", port: {
+        ...TEST_ANCHOR_LOSSLESS_DATA_PLANE.port,
+        openFirstPartySurfaceSession: async () => ({
+          ...await TEST_ANCHOR_LOSSLESS_DATA_PLANE.port.openFirstPartySurfaceSession(),
+          close: async () => { throw new Error("surface close failed"); },
+        }),
+      } } });
+    manager = new ConversationManager({ create: async () => runtime }, undefined, {
+      durableTurnExecutor: protocol, onTurnCommitted: () => {},
+    });
+    const conversationId = "conversation-cleanup-close-failure";
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    // An open side effect leaves the run uncertain without a stream final, so the
+    // surface remains for the generic release path instead of the tail drain.
+    const openEffects = vi.spyOn(ConversationAssignmentLedger.prototype, "hasOpenSideEffects").mockResolvedValue(true);
+    const execution = protocol.run({ conversationId, input: "check", messages: [{ role: "user", content: [{ type: "text", text: "check" }] }], baseRevision: 0,
+      runtime, invocation: { kind: "agent", source: "interactive" }, options: { turnContext: { turnId: "rpc:cleanup-close-failure" }, source: "interactive" } });
+    const failure = await (async () => {
+      try { let step = await execution.next(); while (!step.done) step = await execution.next(); }
+      catch (error) { return error; }
+      finally { openEffects.mockRestore(); }
+    })();
+    expect(failure).toBeInstanceOf(AggregateError);
+    const errors = (failure as AggregateError).errors.map(error => (error as Error).message);
+    expect(errors[0]).toContain("model failed");
+    expect(errors).toContain("surface close failed");
+    expect(disposed).toBe(1);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("closes the executor iterator and control heartbeat before releasing a returned run", async () => {
     const home = await createTempDir("conversation-protocol-return-cleanup");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
@@ -3279,6 +3799,121 @@ describe("ConversationProtocolRuntime", () => {
     }]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("does not start a cancelled control after waiting for the terminal owner", async () => {
+    const { runWithMaintenanceUrgency } = await import("@zhixing/core/resources");
+    const home = await createTempDir("conversation-cancel-queue-signal");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const protocol = createProtocol({ authority, manager: () => { throw Error("unused"); },
+      interactions: new DurableConversationInteractionObserver() });
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const descriptor = vi.spyOn(ConversationRunJournal.prototype, "runControlDescriptor").mockImplementationOnce(async () => {
+      entered.resolve(); await release.promise; return undefined;
+    });
+    const input = { conversationId: "queued-control", runId: "run:missing", requestId: "cancel:first",
+      principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } };
+    const first = protocol.cancel(input);
+    try {
+      await entered.promise;
+      const abort = new AbortController();
+      const second = runWithMaintenanceUrgency(() => "foreground", abort.signal,
+        () => protocol.cancel({ ...input, requestId: "cancel:queued" }));
+      const rejected = expect(second).rejects.toThrow("cancelled");
+      abort.abort(); release.resolve(); await first; await rejected;
+      expect(descriptor).toHaveBeenCalledOnce();
+    } finally { release.resolve(); await first; descriptor.mockRestore(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each(["success", "permanent-main", "permanent-cleanup"] as const)("preserves the $0 result across recovery-claim cleanup pressure", async fault => {
+    const home = await createTempDir("conversation-cancel-cleanup-pressure");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let manager!: ConversationManager;
+    const observed = vi.fn();
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(), onFailure: observed });
+    manager = new ConversationManager({ create: vi.fn(async () => { throw Error("unused"); }) }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const input = { conversationId: "cancel-cleanup", runId: "run:missing", requestId: "cancel:cleanup",
+      principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } };
+    await registerActiveConversation(authority, input.conversationId, new Date().toISOString());
+    const permanent = new Error("verified control integrity failed");
+    const pressure = new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+    const cleanupFailure = fault === "permanent-cleanup" ? permanent : pressure;
+    const cleanup = vi.spyOn(ConversationRunJournal.prototype, "assignmentsAwaitingRecovery").mockRejectedValueOnce(cleanupFailure);
+    const descriptor = vi.spyOn(ConversationRunJournal.prototype, "runControlDescriptor");
+    if (fault === "permanent-main") descriptor.mockRejectedValueOnce(permanent);
+    if (fault === "permanent-cleanup") descriptor.mockRejectedValueOnce(pressure);
+    try {
+      if (fault === "success") await expect(protocol.cancel(input)).resolves.toEqual({ dispositions: [] });
+      else if (fault === "permanent-main") await expect(protocol.cancel(input)).rejects.toBe(permanent);
+      else await expect(protocol.cancel(input)).rejects.toMatchObject({ errors: [pressure, permanent] });
+      expect(descriptor).toHaveBeenCalledOnce();
+      expect(observed).toHaveBeenCalledWith(cleanupFailure, { phase: "recovery", conversationId: input.conversationId });
+      cleanup.mockRestore(); descriptor.mockRestore();
+      await expect(protocol.cancel({ ...input, requestId: "cancel:after-cleanup" })).resolves.toEqual({ dispositions: [] });
+    } finally { cleanup.mockRestore(); descriptor.mockRestore(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each([
+    { kind: "single", committed: false }, { kind: "single", committed: true },
+    { kind: "batch", committed: false }, { kind: "batch", committed: true },
+  ] as const)("retries $kind cancellation outside its queue after pressure (committed=$committed)", async ({ kind, committed }) => {
+    const home = await createTempDir("conversation-cancel-capacity");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager(
+      { create: vi.fn(async () => { throw Error("queued input must not execute"); }) }, undefined,
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
+    );
+    const conversationId = "cancel-capacity";
+    await registerActiveConversation(authority, conversationId, new Date().toISOString());
+    const admit = (id: string) => protocol.admit({ conversationId, input: id,
+      invocation: { kind: "agent", source: "interactive" },
+      options: { source: "interactive", turnContext: { turnId: id } }, surfacePrincipal: "rpc:owner" });
+    const admitted = await admit("before-cancel");
+    const principal = { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" };
+    const pressureReached = Promise.withResolvers<void>();
+    let capacityAvailable = false, tried = false;
+    const envelopes: unknown[] = [];
+    const apply = ConversationRunJournal.prototype.applyControl;
+    const spy = vi.spyOn(ConversationRunJournal.prototype, "applyControl").mockImplementation(async function (...args) {
+      if (args[0].envelope.requestId !== "cancel:capacity") return apply.apply(this, args);
+      envelopes.push(structuredClone(args[0].envelope));
+      if (!tried) {
+        tried = true;
+        if (committed) await apply.apply(this, args);
+        pressureReached.resolve();
+      }
+      if (!capacityAvailable) throw new StorageMaintenanceAdmissionError({
+        kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 10,
+      });
+      return apply.apply(this, args);
+    });
+    try {
+      const cancelling = protocol.cancel({ conversationId, requestId: "cancel:capacity", principal,
+        ...(kind === "single" ? { runId: admitted.runId } : {}) });
+      // Attach the failure handler while another command proves the serial owner is released.
+      const settled = cancelling.then(value => ({ value }), error => ({ error }));
+      await pressureReached.promise;
+      await expect(protocol.cancel({ conversationId, requestId: "cancel:queue-probe", principal,
+        runId: "run:not-present" })).resolves.toEqual({ dispositions: [] });
+      // A new input after a durable batch decision must survive its exact replay.
+      const later = committed && kind === "batch" ? await admit("after-cancel") : undefined;
+      capacityAvailable = true;
+      const result = await settled;
+      if ("error" in result) throw result.error;
+      expect(result.value.dispositions).toMatchObject([{ runId: admitted.runId, runState: "cancelled" }]);
+      expect(envelopes.length).toBeGreaterThan(1);
+      expect(envelopes.every(envelope => JSON.stringify(envelope) === JSON.stringify(envelopes[0]))).toBe(true);
+      const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; runId?: string; state?: string; requestId?: string });
+      expect(records.filter(record => record.t === "state" && record.runId === admitted.runId && record.state === "cancelled")).toHaveLength(1);
+      expect(records.filter(record => record.t === "received" && record.requestId === "cancel:capacity")).toHaveLength(1);
+      if (later) expect(records.some(record => record.t === "state" && record.runId === later.runId && record.state === "cancelled")).toBe(false);
+    } finally { capacityAvailable = true; spy.mockRestore(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it("freezes batch cancellation on the surface request id and replays the original batch", async () => {
     const home = await createTempDir("conversation-protocol-cancel-batch");
     const authority = await setupAuthorityRuntime({
@@ -3479,6 +4114,10 @@ describe("ConversationProtocolRuntime", () => {
     const snapshotRead = vi.spyOn(restartedAuthority.authorityLog, "readSnapshot");
     const fullRead = vi.spyOn(restartedAuthority.authorityLog, "readAll");
     await restartedProtocol.recover();
+    expect(snapshotRead).toHaveBeenCalledTimes(1);
+    expect(fullRead).not.toHaveBeenCalled();
+    // 续跑的输入重放复用恢复时已校验的快照，不再追加一次全量读取。
+    await vi.waitFor(() => expect(executions).toBe(1), { timeout: 10_000 });
     expect(snapshotRead).toHaveBeenCalledTimes(1);
     expect(fullRead).not.toHaveBeenCalled();
 

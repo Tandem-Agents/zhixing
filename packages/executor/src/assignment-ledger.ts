@@ -1,5 +1,6 @@
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime } from "./assignment-lease-clock.js";
 import { Buffer } from "node:buffer";
+import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
 import {
   AuthorityStorageError,
   DurableProjectionStorageError,
@@ -740,6 +741,8 @@ export class ConversationAssignmentLedger implements
       }
       envelopeReferences = await this.#assertEnvelopeArtifactsPresent(envelope);
     } catch (error) {
+      // Operational pressure/cancellation is not durable evidence of invalid input.
+      if (error instanceof StorageMaintenanceAdmissionError || error instanceof StorageMaintenanceCancelledError || error instanceof DeviceCapacityAdmissionError) throw error;
       const authorityError = invalidDispatchError(error);
       return this.#rejectBeforeReceived(
         assignmentId,
@@ -747,6 +750,10 @@ export class ConversationAssignmentLedger implements
         authorityError,
       );
     }
+
+    // Old durable fences may predate atomic receipt retirement. Reconcile before
+    // fresh capacity admission on both local and remote dispatch paths.
+    await this.reconcileSupersededReceipts();
 
     const shouldCheckRuntimeBinding =
       envelope.execution === "conversation" &&
@@ -1295,7 +1302,10 @@ export class ConversationAssignmentLedger implements
     const transaction = await this.#transact<{ started: boolean }>(
       assignmentId,
       (state) => {
-        if (state.aborts.length > 0 || state.supersedeFence) {
+        if (state.aborts.length > 0) {
+          throw new AssignmentStartCancelledError(assignmentId);
+        }
+        if (state.supersedeFence) {
           throw new Error("Assignment is fenced and cannot start");
         }
         if (state.phase === "received") {
@@ -2569,9 +2579,30 @@ export class ConversationAssignmentLedger implements
     return this.#conversationAssignmentsInPhases(new Set(["sealed"]));
   }
 
+  /** Recover only receipts backed by an exact, durable never-started fence. */
+  async reconcileSupersededReceipts(): Promise<number> {
+    if (!this.#resources) return 0;
+    // End the governor read before entering ledger -> governor -> authority locks.
+    const candidates = await this.#resources.activeAssignmentReceipts();
+    let released = 0;
+    for (const lease of candidates) {
+      const result = await this.#transact(lease.activation.assignmentId, state => {
+        if (!state.supersedeFence || state.started || !state.received ||
+          canonicalize(state.received.resourceLease) !== canonicalize(lease))
+          return { kind: "return" as const, value: 0 };
+        const entries = this.#resources!.prepareSupersededReceiptRelease(lease);
+        return entries.length ? { kind: "append" as const, entries, value: 1 }
+          : { kind: "return" as const, value: 0 };
+      }, [], true);
+      released += result.value;
+    }
+    return released;
+  }
+
   async recoverableConversationAssignments(): Promise<
     readonly ConversationEnvelope[]
   > {
+    await this.reconcileSupersededReceipts();
     const phases = new Set<LedgerSnapshot["phase"]>(["received", "sealed"]);
     return this.#conversationAssignmentsMatching(
       (state) => phases.has(state.phase) && state.aborts.length === 0,
@@ -3653,10 +3684,11 @@ export class ConversationAssignmentLedger implements
       context: ProjectionTransactionContext,
     ) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
+    receiptRetirement = false,
   ) {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#operations.run(async () => {
-      const cached = this.#takeCachedProjection(assignmentId);
+      const cached = receiptRetirement ? undefined : this.#takeCachedProjection(assignmentId);
       try {
         const transact = () => this.#log.transactProjection<
           LedgerProjection,
@@ -3664,7 +3696,7 @@ export class ConversationAssignmentLedger implements
           Value
         >(
           cached?.state ?? emptyProjection(assignmentId),
-          (state, record, commit) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, commit ),
+          (state, record, commit) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, commit, receiptRetirement),
           (state, context) => {
             const decision = decide(state, context);
             if (decision.kind !== "append") return decision;
@@ -3686,13 +3718,16 @@ export class ConversationAssignmentLedger implements
         const transaction = await (
           this.#resources ? this.#resources.coordinate(transact) : transact()
         );
-        this.#cacheProjection(assignmentId, {
+        // A retirement view never certifies the execution artifact closure.
+        if (!receiptRetirement) this.#cacheProjection(assignmentId, {
           state: transaction.state,
           cursor: transaction.cursor,
         });
         return transaction;
       } catch (error) {
-        this.#projections.delete(assignmentId);
+        if (!receiptRetirement) {
+          this.#projections.delete(assignmentId);
+        }
         throw error;
       }
     });
@@ -3723,7 +3758,7 @@ export class ConversationAssignmentLedger implements
           "t" in body &&
           (body.t === "bundle_sealed" ||
             body.t === "halted" ||
-            body.t === "execution-failed")
+            body.t === "execution-failed" || body.t === "supersede-fenced")
         );
     });
     if (!terminal) return [];
@@ -3733,7 +3768,8 @@ export class ConversationAssignmentLedger implements
     if (!this.#resources) {
       throw corruptLedger("Governed assignment has no executor resource coordinator");
     }
-    const mode = terminal.body.t === "halted" && terminal.body.proof.decision === "not-started"
+    const mode = terminal.body.t === "supersede-fenced" ||
+      (terminal.body.t === "halted" && terminal.body.proof.decision === "not-started")
       ? "release"
       : "settle-release";
     return this.#resources.prepareTerminal({ lease, mode });
@@ -3764,6 +3800,7 @@ export class ConversationAssignmentLedger implements
     state: LedgerProjection,
     record: LogicalRecord<unknown>,
     commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+    receiptRetirement = false,
   ): Promise<LedgerProjection> => {
     if (record.stream === leaseClockStream(this.#executorId)) {
       const next = readLeaseClockRecord(record.body, this.#executorId);
@@ -3815,7 +3852,7 @@ export class ConversationAssignmentLedger implements
       ) {
         throw corruptLedger("received dispatch targets a different assignment or executor");
       }
-      await this.#assertEnvelopeArtifactsPresent(envelope);
+      if (!receiptRetirement) await this.#assertEnvelopeArtifactsPresent(envelope);
       const control = state.control;
       if (
         !control ||
@@ -3872,7 +3909,10 @@ export class ConversationAssignmentLedger implements
     if (
       entry.body.t === "halted" ||
       entry.body.t === "bundle_sealed" ||
-      entry.body.t === "execution-failed"
+      entry.body.t === "execution-failed" ||
+      // v1 fences without a companion are valid legacy records; the business
+      // recovery operation retires their exact receipt. Present companions must match.
+      (entry.body.t === "supersede-fenced" && commit.entries.some(record => record.stream === "governor"))
     ) {
       const lease = state.received?.resourceLease;
       if (lease && requiresExecutorResourceReceipt(lease)) {
@@ -3880,7 +3920,8 @@ export class ConversationAssignmentLedger implements
           throw corruptLedger("Governed assignment has no executor resource coordinator");
         }
         const mode =
-          entry.body.t === "halted" && entry.body.proof.decision === "not-started"
+          entry.body.t === "supersede-fenced" ||
+          (entry.body.t === "halted" && entry.body.proof.decision === "not-started")
             ? "release"
             : "settle-release";
         try {
@@ -3904,7 +3945,7 @@ export class ConversationAssignmentLedger implements
     ) {
       validateJobStagedMutationRecord(entry.body);
     }
-    if (entry.body.t === "interaction-requested") {
+    if (!receiptRetirement && entry.body.t === "interaction-requested") {
       await materializeInteractionDisplay(entry.body.display, this.#artifacts);
     }
     if (entry.body.t === "received" || entry.body.t === "control-lease-renewed") {
@@ -4607,6 +4648,14 @@ function applyEntry(
       return;
     default:
       throw corruptLedger("Unsupported assignment record in this protocol stage");
+  }
+}
+
+/** A durable abort fence won before the executor's atomic start. */
+export class AssignmentStartCancelledError extends Error {
+  constructor(readonly assignmentId: string) {
+    super("Assignment is cancelled and cannot start");
+    this.name = "AssignmentStartCancelledError";
   }
 }
 
