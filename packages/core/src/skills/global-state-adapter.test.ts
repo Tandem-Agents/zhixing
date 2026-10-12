@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog, TransactionArtifactReferenceError } from "../authority/index.js";
 import type {
   ArtifactRef,
@@ -10,13 +10,56 @@ import type {
   GlobalStagedMutation,
 } from "../contracts/index.js";
 import { skillNameToId } from "./id.js";
-import { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
+import { AnchorSkillGlobalStateAdapter, SkillMutationConflictError } from "./global-state-adapter.js";
 import { validateGlobalQueryResult } from "../protocol/global-query-validation.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
 describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("manages a staged-created skill after the adapter opened an empty catalog", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.read({ kind: "skill-catalog" }, readContext("open-empty"));
+    const content = await fixture.artifacts.put(Buffer.from("staged skill document"));
+    const id = skillNameToId("Staged Skill");
+    await commitStaged(fixture, [{ seq: 1, requestId: "staged-create", mutation: {
+      kind: "skill-create", mode: "work", record: { name: "Staged Skill", description: "Useful", content },
+    } }]);
+    for (const [index, patch] of [{ pinned: true }, { disabled: true }, { disabled: false, mode: "main" as const }].entries()) {
+      const mutation = { kind: "skill-set-state" as const, skillId: id, expectedRevision: index + 1, patch };
+      const context = controlContext("manage-" + index);
+      await fixture.adapter.mutate(mutation, context);
+      const commits = (await fixture.log.readSnapshot()).commits.length;
+      await fixture.adapter.mutate(mutation, context);
+      expect((await fixture.log.readSnapshot()).commits).toHaveLength(commits);
+    }
+    const reopened = new AnchorSkillGlobalStateAdapter({ log: fixture.log, anchorEpoch: 1, clock: () => NOW });
+    const result = await reopened.read({ kind: "skill-get", skillId: id }, readContext("reopen"));
+    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: content, revision: 4, pinned: true, disabled: false, mode: "main" });
+    await fixture.adapter.mutate({ kind: "skill-archive", skillId: id, expectedRevision: 4 }, controlContext("archive"));
+    const archived = await reopened.read({ kind: "skill-catalog", includeDisabled: true }, readContext("archived"));
+    expect(archived.kind === "skill-catalog" && archived.entries).toEqual([]);
+    await fixture.log.stopStorageMaintenance();
+  });
+
+  it("keeps the revision check when content changes after management dependency collection", async () => {
+    const fixture = await createFixture();
+    const contentA = await fixture.artifacts.put(Buffer.from("original"));
+    const contentB = await fixture.artifacts.put(Buffer.from("replacement"));
+    const id = skillNameToId("Skill");
+    await commitStaged(fixture, [{ seq: 1, requestId: "create", mutation: { kind: "skill-create", mode: "main", record: { name: "Skill", description: "Useful", content: contentA } } }]);
+    const transact = fixture.log.transactProjection.bind(fixture.log);
+    vi.spyOn(fixture.log, "transactProjection").mockImplementationOnce(async (...args) => {
+      await commitStaged(fixture, [{ seq: 1, requestId: "replace", mutation: { kind: "skill-update", mode: "main", skillId: id, expectedRevision: 1, record: { name: "Skill", description: "Updated", content: contentB } } }]);
+      return transact(...args);
+    });
+    await expect(fixture.adapter.mutate({ kind: "skill-set-state", skillId: id, expectedRevision: 1, patch: { pinned: true } }, controlContext("stale-pin"))).rejects.toBeInstanceOf(SkillMutationConflictError);
+    const result = await fixture.adapter.read({ kind: "skill-get", skillId: id }, readContext("after-race"));
+    expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 2, pinned: false });
+    expect((await fixture.log.readSnapshot()).commits).toHaveLength(2);
+    await fixture.log.stopStorageMaintenance();
+  });
+
   it("protects same-batch content and commits usage once across durable replay", async () => {
     const fixture = await createFixture();
     const content = await fixture.artifacts.put(Buffer.from("original skill body"));

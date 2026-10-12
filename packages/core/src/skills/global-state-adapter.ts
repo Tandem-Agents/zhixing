@@ -105,6 +105,12 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
       requestId: record.requestId,
       mutation: requireStagedSkillMutation(record.mutation),
     }));
+    return this.#collectCandidateReferences(mutations);
+  }
+
+  async #collectCandidateReferences(
+    mutations: readonly { readonly requestId: string; readonly mutation: SkillMutation }[],
+  ): Promise<readonly ArtifactRef[]> {
     const transaction = await this.#log.transactDurableProjection(
       SKILL_AUTHORITY_PROJECTION_ID,
       async (projection) => {
@@ -261,6 +267,12 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     }
     this.#admit(context, "global.mutate");
     await this.#ensureOpen();
+    // Staged writes can advance the catalog without updating this adapter's
+    // replay cursor. Protect dependencies from the current durable view before
+    // acquiring the artifact/log transaction; the locked plan still checks CAS.
+    const candidateReferences = await this.#collectCandidateReferences([
+      { requestId: context.requestId, mutation },
+    ]);
     const transaction = await this.#log.transactProjection<
       SkillProjection,
       SkillAuthorityRecord,
@@ -282,7 +294,15 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         if (planned.outcome.t === "conflicted") {
           throw new SkillMutationConflictError(planned.outcome.error);
         }
-        if (!planned.record) throw new Error("Skill mutation plan has no record");
+        if (!planned.record) {
+          return {
+            kind: "return",
+            value: {
+              revision: planned.outcome.targetRevision,
+              catalogRevision: state.catalogRevision,
+            },
+          };
+        }
         return {
           kind: "append",
           entries: [{ stream: SKILL_STREAM, body: planned.record }],
@@ -296,10 +316,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         cursor: this.#cursor,
         stream: SKILL_STREAM,
         readProjectionIds: [SKILL_AUTHORITY_PROJECTION_ID],
-        candidateReferences: skillCandidateReferences(
-          this.#projection,
-          mutation,
-        ),
+        candidateReferences,
       },
     );
     this.#projection = transaction.state;
