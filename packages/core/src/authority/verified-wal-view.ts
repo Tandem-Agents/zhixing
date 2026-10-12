@@ -17,8 +17,9 @@ export interface VerifiedWalFrame {
   readonly lsn: number;
   readonly frameEndOffset: number;
   readonly prefixDigest: string;
-  /** Serialized, validated bytes; never a caller's mutable envelope or reducer state. */
-  readonly payload: string;
+  /** Slice of the view's already retained, validated physical bytes. */
+  readonly payloadOffset: number;
+  readonly payloadBytes: number;
   readonly singleStream?: string;
 }
 
@@ -67,6 +68,7 @@ export function matchesWalVersion(tail: VerifiedWalTail, metadata: WalFileVersio
 // a proven view. Both total retention and one scan's capture are bounded.
 export const MAX_VERIFIED_WAL_VIEW_BYTES = 8 * 1024 * 1024;
 export const MAX_VERIFIED_WAL_VIEW_FRAMES = 16_384;
+export const VERIFIED_WAL_FRAME_RETAINED_BYTES = 208;
 
 export class VerifiedWalViews {
   readonly #views = new Map<string, { view: VerifiedWalView; bytes: number }>();
@@ -87,7 +89,7 @@ export class VerifiedWalViews {
 
   put(file: string, view: VerifiedWalView): void {
     this.delete(file);
-    const bytes = view.frames.reduce((total, frame) => total + frame.payload.length * 2 + 192, 256 + view.physicalBytes.byteLength);
+    const bytes = 256 + view.physicalBytes.byteLength + view.frames.length * VERIFIED_WAL_FRAME_RETAINED_BYTES;
     if (bytes > Math.min(this.budget, MAX_VERIFIED_WAL_VIEW_BYTES) ||
         view.frames.length > MAX_VERIFIED_WAL_VIEW_FRAMES) return;
     while (this.#views.size && (this.#bytes + bytes > this.budget || this.#views.size >= 32)) {

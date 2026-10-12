@@ -82,6 +82,7 @@ import type {
 } from "./interfaces.js";
 import {
   AUTHORITY_WAL_FILE_HEADER_BYTES,
+  AUTHORITY_WAL_HEADER_BYTES,
   AUTHORITY_WAL_SCAN_SLICE_MS,
   decodeAuthorityWalFileHeader,
   encodeAuthorityWalFileHeader,
@@ -93,6 +94,7 @@ import { fileReader } from "./wal-file-reader.js";
 import {
   MAX_VERIFIED_WAL_VIEW_BYTES,
   MAX_VERIFIED_WAL_VIEW_FRAMES,
+  VERIFIED_WAL_FRAME_RETAINED_BYTES,
   matchesWalVersion,
   readWalVersion,
   type WalFileVersion,
@@ -1449,7 +1451,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           tail: nextTail,
           physicalBytes: Buffer.concat([previousView.physicalBytes, frame]),
           frames: [...previousView.frames, {
-            lsn, frameEndOffset, prefixDigest, payload: bytes.toString("utf8"),
+            lsn, frameEndOffset, prefixDigest,
+            payloadOffset: previousView.tail.bytes + AUTHORITY_WAL_HEADER_BYTES, payloadBytes: bytes.byteLength,
             ...(entries.every(entry => entry.stream === entries[0]!.stream) ? { singleStream: entries[0]!.stream } : {}),
           }],
         });
@@ -1503,7 +1506,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     // Missing post-commit metadata grants no reuse: recover the whole changed
     // version instead of trusting only a frame footer over an unverified prefix.
-    return this.#readAndRecover();
+    // This decision needs only the validated tail. Verify every physical frame
+    // but do not materialize already validated historical records for a no-op.
+    return this.#readAndRecover(undefined, 0, () => false);
   }
 
   async #readAndRecover(
@@ -1681,7 +1686,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       if (verified) return await this.#visitVerifiedView(verified, startOffset, previousLsn,
         previousPrefixDigest, visit, fromLsn, select);
       let capture: VerifiedWalFrame[] | undefined = previousLsn === 0 &&
-        startOffset === this.#logDataStartOffset() && metadata.size * 3 <= MAX_VERIFIED_WAL_VIEW_BYTES ? [] : undefined;
+        startOffset === this.#logDataStartOffset() && metadata.size <= MAX_VERIFIED_WAL_VIEW_BYTES ? [] : undefined;
       let captureBytes = 256 + metadata.size;
       const physicalFrames: Buffer[] = [];
       if (capture && startOffset > 0) {
@@ -1739,13 +1744,13 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             ...(singleStream === undefined ? {} : { singleStream }),
           });
           if (capture) {
-            captureBytes += payload.byteLength * 2 + 192;
+            captureBytes += VERIFIED_WAL_FRAME_RETAINED_BYTES;
             if (captureBytes > MAX_VERIFIED_WAL_VIEW_BYTES || capture.length >= MAX_VERIFIED_WAL_VIEW_FRAMES) {
               capture = undefined;
               physicalFrames.length = 0;
             }
             else capture.push({ lsn: identity.lsn, frameEndOffset: startOffset + nextOffset,
-              prefixDigest, payload: payload.toString("utf8"), ...(singleStream === undefined ? {} : { singleStream }) });
+              prefixDigest, payloadOffset: startOffset + offset + AUTHORITY_WAL_HEADER_BYTES, payloadBytes: payload.byteLength, ...(singleStream === undefined ? {} : { singleStream }) });
           }
           // Selection skips only object materialization/visitation. Every byte,
           // LSN and physical frame proof above is still verified in order.
@@ -1832,7 +1837,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       if (select?.(frame) !== false) {
         // Each consumer owns its objects; reducer/caller mutations cannot poison
         // another reader or the next durable append.
-        const shouldContinue = await visit(JSON.parse(frame.payload) as CommitEnvelope<JsonValue>, {
+        const shouldContinue = await visit(JSON.parse(view.physicalBytes.toString("utf8", frame.payloadOffset, frame.payloadOffset + frame.payloadBytes)) as CommitEnvelope<JsonValue>, {
           logId: view.tail.logId, lsn: frame.lsn, frameEndOffset: frame.frameEndOffset, prefixDigest: frame.prefixDigest,
         });
         // Match the physical scanner: a limit reached at EOF is completion,
@@ -2657,9 +2662,10 @@ function normalizeEntries<Body>(
 }
 
 export function decodeCommitEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValue> {
+  const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8");
   let value: unknown;
   try {
-    value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+    value = JSON.parse(text);
   } catch (error) {
     throw new AuthorityStorageError(
       "invalid-authority-record",
@@ -2684,6 +2690,7 @@ export function decodeCommitEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValu
     throw invalidEnvelope("Commit envelope fields are invalid");
   }
   assertCanonicalTime(value.at);
+  const entries: string[] = [];
   for (const entry of value.entries) {
     if (!isPlainRecord(entry))
       throw invalidEnvelope("Logical record must be an object");
@@ -2692,18 +2699,19 @@ export function decodeCommitEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValu
       throw invalidEnvelope("Logical record stream must be a string");
     }
     assertStream(entry.stream);
-    assertInlineBody(entry.body);
+    const body = assertInlineBody(entry.body);
+    entries.push(`{"body":${body},"stream":${canonicalize(entry.stream)}}`);
   }
-  const unsigned = {
-    v: value.v,
-    lsn: value.lsn,
-    at: value.at,
-    entries: value.entries,
-  };
-  if (protocolDigest("CommitEnvelope", 1, unsigned) !== value.envelopeDigest) {
+  // Serialize each validated body once. These fixed field orders are the
+  // canonical CommitEnvelope v1 schema, also checked against protocolDigest.
+  const prefix = `{"at":${JSON.stringify(value.at)},"entries":[${entries.join(",")}]`;
+  const suffix = `,"lsn":${value.lsn},"v":1}`;
+  const expectedDigest = `sha256:${createHash("sha256")
+    .update("zhixing:CommitEnvelope:v1\0").update(prefix).update(suffix).digest("hex")}`;
+  if (expectedDigest !== value.envelopeDigest) {
     throw invalidEnvelope("Commit envelope digest is invalid");
   }
-  if (canonicalize(value) !== Buffer.from(bytes).toString("utf8")) {
+  if (`${prefix},"envelopeDigest":${JSON.stringify(value.envelopeDigest)}${suffix}` !== text) {
     throw invalidEnvelope("Commit envelope bytes are not canonical");
   }
   return value as unknown as CommitEnvelope<JsonValue>;
@@ -2727,13 +2735,15 @@ function assertCanonicalTime(value: string): void {
   }
 }
 
-function assertInlineBody(body: unknown): void {
-  const inlineBytes = Buffer.byteLength(canonicalize(body), "utf8");
+function assertInlineBody(body: unknown): string {
+  const serialized = canonicalize(body);
+  const inlineBytes = Buffer.byteLength(serialized, "utf8");
   if (inlineBytes > MAX_INLINE_LOGICAL_RECORD_BYTES) {
     throw new TypeError(
       `Logical record body exceeds the ${MAX_INLINE_LOGICAL_RECORD_BYTES}-byte inline limit`,
     );
   }
+  return serialized;
 }
 
 function assertExactKeys(

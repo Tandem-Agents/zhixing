@@ -111,7 +111,9 @@ function serialize(value: unknown): string {
     const record = value as Record<string, unknown>;
     assertNoEnumerableSymbols(record);
     const keys = Object.keys(record).sort();
-    for (const key of keys) {
+    const entries = new Array<string>(keys.length);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index]!;
       assertValidUnicode(key);
       const descriptor = Object.getOwnPropertyDescriptor(record, key);
       if (!descriptor || !("value" in descriptor)) {
@@ -120,29 +122,18 @@ function serialize(value: unknown): string {
       if (descriptor.value === undefined) {
         throw new TypeError(`Canonical JSON rejects undefined field: ${key}`);
       }
+      entries[index] = `${JSON.stringify(key)}:${serialize(descriptor.value)}`;
     }
-    return `{${keys
-      .map((key) => {
-        const descriptor = Object.getOwnPropertyDescriptor(record, key)!;
-        return `${JSON.stringify(key)}:${serialize(descriptor.value)}`;
-      })
-      .join(",")}}`;
+    return `{${entries.join(",")}}`;
   }
   throw new TypeError(`Canonical JSON rejects ${typeof value}`);
 }
 
 function assertValidUnicode(value: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const trailing = value.charCodeAt(index + 1);
-      if (!(trailing >= 0xdc00 && trailing <= 0xdfff)) {
-        throw new TypeError("Canonical JSON rejects invalid Unicode");
-      }
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      throw new TypeError("Canonical JSON rejects invalid Unicode");
-    }
+  // Unicode mode treats a valid surrogate pair as one non-surrogate code point.
+  // Reject lone UTF-16 units without scanning every character in JavaScript.
+  if (/[\uD800-\uDFFF]/u.test(value)) {
+    throw new TypeError("Canonical JSON rejects invalid Unicode");
   }
 }
 

@@ -16,7 +16,7 @@ function view(id = "log"): VerifiedWalView {
   return { physicalBytes: Buffer.from("test"), tail: { logId: id, device: 1n, inode: 2n, bytes: 100,
     modifiedAt: 1_700_000_000_000_000_001n, changedAt: 1_700_000_000_000_000_001n,
     lastLsn: 1, prefixDigest: "proof" }, frames: [
-    { lsn: 1, frameEndOffset: 100, prefixDigest: "proof", payload: "{}" },
+    { lsn: 1, frameEndOffset: 100, prefixDigest: "proof", payloadOffset: 0, payloadBytes: 2 },
   ] };
 }
 function metadata(value: VerifiedWalView) {
@@ -41,7 +41,7 @@ it("bounds retained bytes and paths with least-recently-used eviction", () => {
   cache.put("c", value);
   expect(cache.get("b", "log", meta)).toBeUndefined();
   expect(cache.get("a", "log", meta)).toBe(value);
-  cache.put("huge", { ...value, frames: [{ ...value.frames[0]!, payload: "x".repeat(1000) }] });
+  cache.put("huge", { ...value, physicalBytes: Buffer.alloc(1000) });
   expect(cache.get("huge", "log", meta)).toBeUndefined();
   const paths = new VerifiedWalViews();
   for (let i = 0; i < 33; i++) paths.put(String(i), value);
@@ -325,3 +325,33 @@ it("bounds ordered multi-key reads to one strict proof without trusting metadata
     await expect(index.getMany(["a"])).rejects.toThrow();
   } finally { unchanged.mockRestore(); }
 }, 20000);
+
+
+it("retains one physical copy of a multi-megabyte WAL and isolates read results", async () => {
+  const root = await createTempDir("verified-wal-physical-copy");
+  const authority = path.join(root, "authority");
+  const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const writer = new FileAuthorityCommitLog(authority, artifacts);
+  const reader = new FileAuthorityCommitLog(authority, artifacts);
+  onTestFinished(async () => { await writer.stopStorageMaintenance(); await reader.stopStorageMaintenance(); });
+  const text = "中".repeat(10_000);
+  await writer.append(Array.from({ length: 100 }, (_, n) => ({ stream: "control", body: { n, text } })));
+  verified.verifiedWalViews.delete(writer.logPath);
+  const first = await reader.readSnapshot<{ n: number; text: string }>();
+  const version = await verified.readWalVersion(reader.logPath);
+  expect(version.size).toBeGreaterThan(verified.MAX_VERIFIED_WAL_VIEW_BYTES / 3);
+  const physical = verified.verifiedWalViews.get(reader.logPath, first.cursor.logId, version);
+  expect(physical).toBeDefined();
+  expect(physical!.frames[0]).not.toHaveProperty("payload");
+  expect(physical!.physicalBytes.byteLength).toBe(version.size);
+  first.commits[0]!.entries[0]!.body.text = "caller mutation";
+  await writer.append([{ stream: "control", body: { n: 100, text: "last" } }]);
+  const next = await reader.readStream<{ n: number; text: string }>("control");
+  expect(next).toHaveLength(101);
+  expect(next[0]!.body.text).toBe(text);
+  expect(next[100]!.body.text).toBe("last");
+  const changed = await readFile(reader.logPath);
+  changed[changed.indexOf(Buffer.from(text))] ^= 1;
+  await writeFile(reader.logPath, changed);
+  await expect(reader.readSnapshot()).rejects.toThrow();
+}, 30_000);
