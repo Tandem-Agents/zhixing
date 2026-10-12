@@ -13,7 +13,7 @@ const readExitCodes: Readonly<Record<number, string>> = {
 const nodeReader = `const {createRequire}=require('node:module');
 try{const native=createRequire(process.argv[1])(process.argv[1]);
 const data=native.readClipboard(Number(process.argv[2]),Math.max(0,Number(process.argv[3])-Date.now()));
-process.stdout.write(data,()=>data.fill(0));
+process.stdout.write(data,()=>data.fill(0)); // allow-direct-stdout: owned clipboard helper private pipe, never terminal output.
 }catch(error){const codes={'terminal-clipboard-size':65,'terminal-clipboard-encoding':66,
  'terminal-clipboard-unavailable':67,'terminal-clipboard-timeout':68};process.exitCode=codes[error?.message]||69;}`;
 const commandList = (platform: NodeJS.Platform, entry: string, limit: number, deadline: number): readonly [string, string[]][] => platform === 'win32'

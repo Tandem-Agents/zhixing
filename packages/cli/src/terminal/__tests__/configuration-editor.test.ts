@@ -5,7 +5,9 @@ import { TerminalConfigurationEditor } from '../configuration-editor.js';
 import type { TerminalView } from '@zhixing/terminal-ui/protocol';
 import type { ConfigEditorRuntime } from '../../config-editor/types.js';
 import type { ConfigurationEditResult } from '../../runtime/configuration-edit.js';
-import { ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { CONFIGURATION_LOG_SOURCE, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { recordingFixture } from '../../../../core/src/logging/__tests__/recording.js';
+import { RUNTIME_LOG_SOURCE } from '../../logging/runtime.js';
 import type { McpSetupCandidate } from '@zhixing/core/mcp-management';
 
 function setup(runtime?: ConfigEditorRuntime, apiKey = 'synthetic-original-secret-123456') {
@@ -49,6 +51,30 @@ describe('single-root Node configuration transaction', () => {
     expect(loading.configurationHome).toBe(true); expect(loading.chromeDetails).toHaveLength(3);
     for (const key of ['title', 'configurationHome', 'chromeDescription', 'chromeDetails'] as const) expect(loading[key]).toEqual(views.at(-1)![key]);
     editor.cancel(); await result;
+  });
+
+  it('records terminal configuration saves with the configuration source without capture loss', async () => {
+    const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+    const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
+    const methods = ['#configuration', '#configurationHeaderDetails'].map(name => owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name)!.getText(source).replace(/#/gu, '')).join('\n')
+      .replace("await import('../runtime/configuration-application.js')", 'configurationApplication');
+    const logs = recordingFixture();
+    const configurationApplication = {
+      editRuntimeConfiguration: async (input: { configurationRecords: import('@zhixing/core/logging').LogRecordPort }) => {
+        input.configurationRecords.record({ event: 'saved', data: { scope: 'global', selectionVersion: 'v1', selectionDigest: 'synthetic-digest' } });
+        return { kind: 'local-applied' };
+      },
+    };
+    const Fixture = new Function('configurationApplication', 'CONFIGURATION_LOG_SOURCE', ts.transpile('class Fixture { ' + methods + ' } return Fixture;', { target: ts.ScriptTarget.ES2022 }))(configurationApplication, CONFIGURATION_LOG_SOURCE);
+    const target = new Fixture();
+    Object.assign(target, { abort: new AbortController(), configPath: 'fixture-config.json', home: 'fixture-home',
+      logging: { bind: logs.bind, records: logs.bind(RUNTIME_LOG_SOURCE, { scope: 'storage' }) }, secretPlatform: {},
+      connection: { getStatus: () => ({ kind: 'unavailable' }) }, publish: async () => {}, mainView: {},
+    });
+    await target.configuration('config');
+    await logs.finish();
+    expect(logs.recorder.health().captureFailures).toBe(0);
+    expect(logs.records()).toContainEqual(expect.objectContaining({ source: CONFIGURATION_LOG_SOURCE.id, event: 'saved' }));
   });
 
   it('preserves the selected thinking option when completing the provider page', async () => {

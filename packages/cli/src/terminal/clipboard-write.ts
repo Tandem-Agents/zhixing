@@ -12,8 +12,8 @@ const nodeWriter = `const {createRequire}=require('node:module');
 const native=createRequire(process.argv[1])(process.argv[1]);let bytes=0,parts=[];
 process.stdin.on('data',part=>{bytes+=part.length;if(bytes>229376)process.exit(65);parts.push(part)});
 process.stdin.on('end',()=>{const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(Buffer.concat(parts));parts=[];
-if(process.platform==='win32'){process.stdout.write(native.writeClipboard(text)+'\\n');}
-else {const window=native.writeXClipboard(Buffer.from(text));process.stdout.write(JSON.stringify({requestId:process.argv[2],window})+'\\n');
+if(process.platform==='win32'){process.stdout.write(native.writeClipboard(text)+'\\n');} // allow-direct-stdout: owned clipboard helper private pipe, never terminal output.
+else {const window=native.writeXClipboard(Buffer.from(text));process.stdout.write(JSON.stringify({requestId:process.argv[2],window})+'\\n'); // allow-direct-stdout: owned clipboard helper private pipe, never terminal output.
 if(window>0)setInterval(()=>{if(!native.pollXClipboard())process.exit(0)},10)}});`;
 
 /** S owns every provider and reader. A setup deadline never becomes the

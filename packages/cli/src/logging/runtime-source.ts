@@ -34,6 +34,7 @@ export const RUNTIME_LOG_SOURCE: LogSource = {
     } },
     terminalLifecycle: { message: "终端生命周期阶段", level: "info", tier: "critical", fields: {
       instance: "text", phase: "text", role: "text", pid: "number", spawnId: "text", createMs: "number", frameId: "number", reason: "text", exitCode: "number",
+      signal: "text", requested: "boolean", closing: "boolean",
     } },
     conversationFailure: { message: "会话执行或恢复首因", level: "error", tier: "critical", fields: {
       phase: "text", failure: { fields: LOG_FAILURE_FIELDS }, sourceFrames: { items: "text", maxItems: 4 },

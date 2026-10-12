@@ -13,7 +13,7 @@ import { consumeTerminalParentEndpoint, TerminalParentTransport } from '@zhixing
 import { CheckpointDirectoryHandle } from '@zhixing/mesh/filesystem';
 import { TERMINAL_LIMITS, type TerminalAction, type TerminalPasteDraft, type TerminalMessage, type TerminalView, type TerminalCandidateAcceptance, type TerminalTaskStatus, type TerminalProcessStatus } from '@zhixing/terminal-ui/protocol';
 import type { SessionEventEnvelope } from '@zhixing/rpc/session-events';
-import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError } from '@zhixing/providers/configuration';
+import { getGlobalConfigPath, loadConfig, ConfigurationEditPendingError, CONFIGURATION_LOG_SOURCE } from '@zhixing/providers/configuration';
 import { beginEntryLogging } from '../logging/bootstrap.js';
 import { beginRuntimeLogging, observeStartupPhase } from '../logging/runtime.js';
 import { LocalLogStore } from '@zhixing/core/logging/storage';
@@ -623,7 +623,7 @@ class TerminalApplication {
           this.#abort.signal.throwIfAborted();
           const { checkStartupConfiguration } = await import('../runtime/startup-application.js');
           const result = await checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
-            secretStore: this.#secretStore, records: this.#logging.records,
+            secretStore: this.#secretStore, records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
             processIdentityResolver: this.#secretPlatform.processIdentityResolver,
             edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
               writers: { save: async edit => { await session.save(edit); } } }, '设备初始配置', ['model', 'messaging']),
@@ -662,7 +662,7 @@ class TerminalApplication {
         return checkStartupConfiguration({ homeDir: this.home, configPath: this.#configPath, mode: 'repl', isTTY: true,
         secretStore: this.#secretStore,
         processIdentityResolver: this.#secretPlatform.processIdentityResolver,
-        records: this.#logging.records,
+        records: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }),
         edit: session => this.#edit({ initialConfig: session.config, initialCredentials: session.credentials,
           writers: { save: async edit => { await session.save(edit); } } }, '初始配置', ['model', 'messaging']),
         });
@@ -1580,7 +1580,7 @@ class TerminalApplication {
     const result = await editRuntimeConfiguration({ zhixingHome: this.home, configPath: this.#configPath,
       secretStore: this.#secretStore,
       processIdentityResolver: this.#secretPlatform.processIdentityResolver,
-      configurationRecords: this.#logging.records, state: this.#state,
+      configurationRecords: this.#logging.bind(CONFIGURATION_LOG_SOURCE, { scope: 'storage' }), state: this.#state,
       ...(connected ? { readExtensions: () => this.#management.extensions(), readExtensionLocalSetup: () => this.#management.extensionLocalSetup(),
         applyExtensionConfiguration: (ids: readonly string[]) => { this.#abort.signal.throwIfAborted(); return this.#management.applyExtensionConfiguration(ids); } } : {}),
       requestHostReload: options => this.#reload(options),

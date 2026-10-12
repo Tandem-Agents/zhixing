@@ -26,6 +26,7 @@ interface OwnedProcess {
   readonly listening: Promise<void>; announceListening(): void; announced: boolean;
   created: boolean; resumed: boolean; exited: boolean; code: number | null; birth?: string;
   exitRequested?: boolean;
+  disconnected?: boolean;
   cancelledBeforeListening?: boolean;
   channel?: TerminalChannel;
 }
@@ -718,14 +719,26 @@ class TerminalSupervisor {
       if (this.#sealed && !item.resumed && child.cancelled) return;
       void this.#close(71, `${role}-error`);
     });
-    child.once('exit', code => {
+    child.once('exit', (code, signal) => {
       item.exited = true; item.code = code; resolveExit();
+      // 角色进程的实际退出是断开/关闭的上游事实：在关闭排空日志前记录，并标明是否由本 S 请求。
+      // 观察失败不得重入或拖延关闭。
+      try {
+        this.options.records?.record({ event: 'terminalLifecycle', data: { phase: 'exited', instance: this.instance, role, pid: child.pid ?? 0,
+          spawnId: item.spawnId, exitCode: typeof code === 'number' ? code : -1, signal: signal ?? 'none', requested: !!item.exitRequested, closing: !!this.#closing } });
+      } catch { /* Close remains authoritative. */ }
       // A successful foreground close is requested over the control channel.
       // An unrequested exit is not success merely because a frame was shown.
-      if (!this.#closing) void this.#close(code || 71, `${role}-exit`);
+      if (!this.#closing) void this.#close(item.disconnected ? 70 : code || 71, `${role}-exit`);
     });
     child.once('close', resolveDrain);
-    child.on('disconnect', () => { if (!this.#closing) void this.#close(70, `${role}-disconnected`); });
+    child.on('disconnect', () => {
+      if (this.#closing || item.disconnected) return;
+      item.disconnected = true;
+      // 进程死亡时通道断开先于 exit 到达。短暂等待实际退出，让首因落在真实进程退出而不是其后的断开；
+      // 进程仍存活时按原断开收束。
+      void this.#bounded(item.exit, 250).then(() => { if (!this.#closing) void this.#close(70, `${role}-disconnected`); });
+    });
     if (role === 'recovery') this.#attachNative(item); else this.#attachRole(item);
     return item;
   }
