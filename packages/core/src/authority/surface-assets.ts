@@ -294,14 +294,18 @@ export class SurfaceAssetCoordinator {
   async recover(): Promise<void> {
     // 恢复要在串行段内完成,段内准入是零等待的,容量紧张时会立刻拿到背压。
     // 背压不是恢复失败:重试必须发生在段外,否则等待又回到段内。
-    const deadline = Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
+    // Successful recovery work does not consume the admission retry window.
+    // Start its bounded clock when capacity first prevents forward progress.
+    let deadline: number | undefined;
     for (;;) {
       try {
         await this.#queue.run(() => this.#recoverLocked());
         return;
       } catch (error) {
         const retryAfterMs = maintenanceRetryDelayMs(error);
-        if (retryAfterMs === undefined || Date.now() >= deadline) throw error;
+        if (retryAfterMs === undefined || isHoldingMaintenanceExclusion()) throw error;
+        deadline ??= Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
+        if (Date.now() >= deadline) throw error;
         await waitForMaintenanceRetry(
           Math.min(retryAfterMs, Math.max(0, deadline - Date.now())),
         );

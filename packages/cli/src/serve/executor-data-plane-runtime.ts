@@ -1,5 +1,5 @@
 import path from "node:path";
-import { artifactReadCapacity } from './artifact-read-capacity.js';
+import { artifactReadCapacity, projectionReadCapacity } from './artifact-read-capacity.js';
 import type { DeviceCapacityArbiterPort } from '@zhixing/core/resources';
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError, StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
@@ -161,6 +161,7 @@ export class ExecutorDataPlaneRuntime {
         clock,
         storageMaintenance: options.storageMaintenance,
         runReadStep: artifactReadCapacity(options.deviceCapacity),
+        runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
       },
     );
     this.#tickets = new options.module.DataPlaneTicketRegistry({

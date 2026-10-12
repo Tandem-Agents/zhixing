@@ -1574,13 +1574,13 @@ export class ArtifactLifecycleIndex {
       scopeIdentity,
     );
     const temporaryStateIdentityKey = temporaryStateKey(ref.digest);
-    const [scopeReservation, deviceReservation, temporaryScope, temporary] =
-      await Promise.all([
-        reader.get(scopeReservationKey),
-        reader.get(deviceReservationKey),
-        reader.get(temporaryScopeIdentityKey),
-        reader.get(temporaryStateIdentityKey),
-      ]);
+    // These reads share a zero-wait physical admission policy under the
+    // lifecycle queue. Fan-out would repeatedly compete with itself on a
+    // single-slot device; finish each bounded read before admitting the next.
+    const scopeReservation = await reader.get(scopeReservationKey);
+    const deviceReservation = await reader.get(deviceReservationKey);
+    const temporaryScope = await reader.get(temporaryScopeIdentityKey);
+    const temporary = await reader.get(temporaryStateIdentityKey);
     if (scopeReservation !== undefined) {
       countedReference(scopeReservation, scopeReservationKey);
     }

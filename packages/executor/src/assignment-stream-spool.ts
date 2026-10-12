@@ -7,6 +7,7 @@ import {
   collectArtifactRefs,
   type ArtifactStore,
   type FileArtifactStoreOptions,
+  type FileAuthorityCommitLogOptions,
   type PhysicalStorageStepRunner,
   type ProjectionCursor,
   type ProjectionTransactionDecision,
@@ -61,6 +62,7 @@ const IDENTITY_VERSION = 1;
 
 export interface AssignmentStreamSpoolOptions {
   readonly runReadStep?: FileArtifactStoreOptions['runReadStep'];
+  readonly runProjectionReadStep?: FileAuthorityCommitLogOptions['runProjectionReadStep'];
   readonly capacityBytes?: number;
   readonly clock?: () => IsoTime;
   readonly reclaimDelayMs?: number;
@@ -468,6 +470,7 @@ export class AssignmentStreamSpool {
   readonly #reclaimDelayMs: number;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #runReadStep: FileArtifactStoreOptions['runReadStep'];
+  readonly #runProjectionReadStep: AssignmentStreamSpoolOptions['runProjectionReadStep'];
   readonly #removeRetiredArtifact: NonNullable<
     AssignmentStreamSpoolOptions["removeRetiredArtifact"]
   >;
@@ -488,6 +491,7 @@ export class AssignmentStreamSpool {
       options.reclaimDelayMs ?? DEFAULT_ASSIGNMENT_STREAM_RECLAIM_DELAY_MS;
     this.#storageMaintenance = options.storageMaintenance;
     this.#runReadStep = options.runReadStep;
+    this.#runProjectionReadStep = options.runProjectionReadStep;
     this.#removeRetiredArtifact =
       options.removeRetiredArtifact ??
       ((store, ref) => rm(store.pathFor(ref), { force: true }));
@@ -1470,6 +1474,7 @@ export class AssignmentStreamSpool {
       log: new FileAuthorityCommitLog(path.join(directory, "index"), frames, {
         clock: this.#clock,
         storageMaintenance: this.#storageMaintenance,
+        runProjectionReadStep: this.#runProjectionReadStep,
       }),
       queue: new SerialTaskQueue(),
       waiters: new Set(),
@@ -1698,6 +1703,7 @@ export class AssignmentStreamSpool {
         {
           clock: this.#clock,
           storageMaintenance: this.#storageMaintenance,
+          runProjectionReadStep: this.#runProjectionReadStep,
         },
       );
       try {

@@ -2333,6 +2333,32 @@ describe("surface asset collection capacity", { timeout: DURABLE_IO_TEST_TIMEOUT
     expect(synchronizes).toBe(2);
   });
 
+  it.each([false, true])('starts the bounded recovery admission window after productive work (persistent=%s)', async persistent => {
+    let attempts = 0, offset = 0;
+    const originalNow = Date.now;
+    const state = await fixture({ ledgerDecorator: ledger => new Proxy(ledger, {
+      get(target, property) {
+        if (property === 'synchronize') return async () => {
+          attempts++;
+          if (attempts === 1 || persistent) {
+            offset += 6_000;
+            throw new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 1 });
+          }
+          return target.synchronize();
+        };
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) });
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => originalNow() + offset);
+    try {
+      const recovery = state.coordinator.recover();
+      if (persistent) await expect(recovery).rejects.toThrow('backpressured:ioOperations');
+      else await expect(recovery).resolves.toBeUndefined();
+      expect(attempts).toBe(2);
+    } finally { now.mockRestore(); }
+  });
+
   it("retries request-blocking recovery outside the coordinator serial section", async () => {
     let synchronizes = 0;
     const state = await fixture({

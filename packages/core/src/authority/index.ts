@@ -59,6 +59,7 @@ export {
   bindDurableProjectionMutations,
   createBoundDurableProjectionReadContext,
   durableProjectionDirectoryName,
+  durableProjectionReadBudget,
   type DurableProjectionDefinition,
   type DurableProjectionCheckpoints,
   type DurableProjectionEntry,
@@ -70,6 +71,7 @@ export {
   type DurableProjectionScanPage,
   type DurableProjectionScanRange,
   type FileDurableProjectionIndexOptions,
+  type DurableProjectionReadStep,
   type PreparedProjectionDelta,
   type RebuildableDurableProjectionIndex,
 } from "./durable-projection-index.js";

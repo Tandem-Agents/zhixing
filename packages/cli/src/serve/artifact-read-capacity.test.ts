@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileArtifactStore } from "@zhixing/core/authority";
 import { AssignmentStreamSpool } from '@zhixing/executor';
 import {
+  claimDeviceCapacity,
   createDefaultDeviceCapacityPolicy,
   currentDeviceCapacityStep,
   DefaultDeviceCapacityArbiter,
@@ -16,7 +17,7 @@ import {
   withDeviceCapacityStep,
   type DeviceCapacityBudget,
 } from "@zhixing/core/resources";
-import { artifactReadCapacity } from "./artifact-read-capacity.js";
+import { artifactReadCapacity, projectionReadCapacity } from "./artifact-read-capacity.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 
 const MIB = 1024 * 1024;
@@ -182,4 +183,57 @@ describe("artifact read capacity", () => {
     await expect(store.get(ref)).rejects.toMatchObject({ code: corruption === "missing" ? "artifact-missing" : "artifact-corrupt" });
     expect(arbiter.snapshot().occupancyInUse).toMatchObject({ memoryReservationBytes: 0, slots: 0 });
   });
+});
+
+
+describe("projection read capacity", () => {
+  it("borrows the actual workload slot, meters physical reads and returns its reservation", async () => {
+    const defaults = createDefaultDeviceCapacityPolicy();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: MIB, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+    const acquire = vi.spyOn(arbiter, "acquire");
+    await runWithDeviceCapacity(arbiter, { serviceClass: "workload-interactive", atomic: workload, preferred: workload, maxWaitMs: 0 }, abort, async () => {
+      const before = currentDeviceCapacityStep();
+      const read = projectionReadCapacity(arbiter)!;
+      expect(await read("segment-entry", async () => {
+        expect(currentDeviceCapacityStep()?.kind).toBe("physical");
+        claimDeviceCapacity("readBytes", 73); claimDeviceCapacity("ioOperations", 2);
+        return "saved";
+      })).toBe("saved");
+      expect(currentDeviceCapacityStep()).toBe(before);
+      expect(arbiter.snapshot().occupancyInUse).toEqual(workload.occupancy);
+    });
+    expect(acquire.mock.calls[1]![0]).toMatchObject({ serviceClass: "workload-interactive", maxWaitMs: 0, atomic: { occupancy: { slots: 0 } } });
+    expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    expect(arbiter.snapshot().lastViolation).toBeUndefined();
+  });
+
+  it("returns lock-retryable pressure without reading when a physical projection leaf cannot enter", async () => {
+    const { arbiter } = await fixture();
+    const read = projectionReadCapacity(arbiter)!;
+    const operation = vi.fn();
+    await expect(runHoldingMaintenanceExclusion(() => read("segment-entry", operation))).rejects.toMatchObject({ name: "StorageMaintenanceAdmissionError", admission: { kind: "capacity-gap" } });
+    expect(operation).not.toHaveBeenCalled();
+  });
+});
+
+
+it("retries projection reads after real slot pressure is released and never reads after cancellation", async () => {
+  const defaults = createDefaultDeviceCapacityPolicy();
+  const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
+    probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: MIB, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+  const held = await arbiter.acquire({ admissionId: "other-reader", serviceClass: "storage-foreground", atomic: workload, preferred: workload, maxWaitMs: 0 }, abort);
+  if (held.kind !== "granted") throw Error("fixture admission failed");
+  const read = projectionReadCapacity(arbiter)!, operation = vi.fn(async () => { claimDeviceCapacity("ioOperations", 1); return "read"; });
+  try {
+    await expect(runHoldingMaintenanceExclusion(() => read("segment-entry", operation))).rejects.toMatchObject({ name: "StorageMaintenanceAdmissionError", admission: { kind: "backpressured", blockedBy: "slots" } });
+    expect(operation).not.toHaveBeenCalled();
+  } finally { held.permit.release(); }
+  expect(await read("segment-entry", operation)).toBe("read");
+  expect(operation).toHaveBeenCalledTimes(1);
+  operation.mockClear();
+  const cancelled = new AbortController(); cancelled.abort();
+  await expect(runWithMaintenanceUrgency(() => "foreground", cancelled.signal, () => read("segment-entry", operation))).rejects.toMatchObject({ admission: { kind: "cancelled" } });
+  expect(operation).not.toHaveBeenCalled();
+  expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
 });

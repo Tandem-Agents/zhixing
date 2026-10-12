@@ -21,6 +21,7 @@ import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
   currentMaintenanceAbortSignal,
+  currentDeviceCapacityStep,
   isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   runDetachedMaintenanceContext,
@@ -42,6 +43,8 @@ const DIRECTORY_PAGE_FORMAT_VERSION = 1;
 const RETIREMENT_PAGE_FORMAT_VERSION = 1;
 const WRITE_INTENT_FORMAT_VERSION = 1;
 const SEGMENT_HEADER_BYTES = 52;
+const SEGMENT_IO_BATCH_BYTES = 64 * 1024;
+const SEGMENT_IO_BATCH_ENTRIES = 128;
 const SEGMENT_TOMBSTONE = 1;
 const MAX_KEY_BYTES = 2_048;
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
@@ -135,6 +138,19 @@ export interface DurableProjectionDefinition<Body = JsonValue> {
   readonly reduce: DurableProjectionReducer<Body>;
 }
 
+export type DurableProjectionReadStep = "segment-open" | "segment-entry" | "directory-page";
+
+/** Physical read bounds stay beside the format constants that determine them. */
+export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
+  memoryReservationBytes: number; readBytes: number; ioOperations: number;
+} {
+  switch (step) {
+    case "segment-open": return { memoryReservationBytes: 0, readBytes: 0, ioOperations: 2 };
+    case "directory-page": return { memoryReservationBytes: 4 * MAX_DIRECTORY_PAGE_BYTES, readBytes: MAX_DIRECTORY_PAGE_BYTES, ioOperations: 3 };
+    case "segment-entry": return { memoryReservationBytes: 2 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES + MAX_KEY_BYTES + SEGMENT_HEADER_BYTES + 8, ioOperations: 3 };
+  }
+}
+
 export interface FileDurableProjectionIndexOptions {
   readonly rootDir: string;
   readonly projectionId: string;
@@ -148,7 +164,7 @@ export interface FileDurableProjectionIndexOptions {
    * outside this step so the two maintenance owners never nest capacity permits.
    */
   readonly runReadStep?: <T>(
-    inputIdentity: unknown,
+    step: DurableProjectionReadStep,
     operation: () => Promise<T>,
   ) => Promise<T>;
 }
@@ -286,14 +302,23 @@ export function bindDurableProjectionMutations(
 }
 
 export function createBoundDurableProjectionReadContext(
-  current: DurableProjectionReadContext,
-): DurableProjectionReadContext {
+  current: DurableProjectionReadContext & Partial<Pick<RebuildableDurableProjectionIndex, "getMany">>,
+): DurableProjectionReadContext & Pick<RebuildableDurableProjectionIndex, "getMany"> {
   return {
     async get(key) {
       const value = await current.get(key);
       return value === undefined
         ? undefined
         : readBoundDurableProjectionValue(key, value);
+    },
+    async getMany(keys) {
+      const selected = validateReadKeys(keys);
+      const values = current.getMany ? await current.getMany(selected) : await (async () => {
+        const result: (JsonValue | undefined)[] = [];
+        for (const key of selected) result.push(await current.get(key));
+        return result;
+      })();
+      return values.map((value, index) => value === undefined ? undefined : readBoundDurableProjectionValue(selected[index]!, value));
     },
     async scan(range, limit, continuation) {
       const page = await current.scan(range, limit, continuation);
@@ -381,12 +406,7 @@ export class FileDurableProjectionIndex {
   readonly #manifestQueue = new SerialTaskQueue();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
-  readonly #runReadStep:
-    | (<T>(
-      inputIdentity: unknown,
-      operation: () => Promise<T>,
-    ) => Promise<T>)
-    | undefined;
+  readonly #runReadStep: FileDurableProjectionIndexOptions["runReadStep"];
   #retirementRetryTimer: ReturnType<typeof setTimeout> | undefined;
   #retirementRetryAt: number | undefined;
   #retirementCleanupFailure: { readonly error: unknown } | undefined;
@@ -651,31 +671,72 @@ export class FileDurableProjectionIndex {
     const view = this.#captureReadView();
     this.#retainReadView(view);
     try {
-      return await this.#readStep({ step: "projection-get", key }, async () => {
+      const active = view.active.get(key);
+      if (active) return active.tombstone ? undefined : active.value;
+      for (const segment of view.deltaSegments) {
+        if (key < segment.minKey || key > segment.maxKey) continue;
+        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
+        try {
+          const entry = await reader.get(key);
+          if (entry) return entry.tombstone ? undefined : entry.value;
+        } finally {
+          await reader.close();
+        }
+      }
+      const base = await this.#baseSegmentForKey(view.baseRoot, key);
+      if (base && key >= base.minKey && key <= base.maxKey) {
+        const reader = await SegmentReader.open(this.rootDir, base, this.#runReadStep);
+        try {
+          const entry = await reader.get(key);
+          if (entry) return entry.tombstone ? undefined : entry.value;
+        } finally {
+          await reader.close();
+        }
+      }
+      return undefined;
+    } finally {
+      this.#releaseReadView(view);
+      await this.#runRetirementCleanup();
+    }
+  }
+
+  /** One retained view and one reader at a time; nothing survives this batch. */
+  async getMany(keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]> {
+    const selected = validateReadKeys(keys);
+    if (!selected.length) return [];
+    this.#expireReadViews();
+    await this.#runRetirementCleanup();
+    const view = this.#captureReadView();
+    this.#retainReadView(view);
+    try {
+      const pending = new Set(selected);
+      const values = new Map<string, JsonValue | undefined>();
+      for (const key of pending) {
         const active = view.active.get(key);
-        if (active) return active.tombstone ? undefined : active.value;
-        for (const segment of view.deltaSegments) {
-          if (key < segment.minKey || key > segment.maxKey) continue;
-          const reader = await SegmentReader.open(this.rootDir, segment);
-          try {
-            const entry = await reader.get(key);
-            if (entry) return entry.tombstone ? undefined : entry.value;
-          } finally {
-            await reader.close();
+        if (active) { values.set(key, active.tombstone ? undefined : active.value); pending.delete(key); }
+      }
+      const read = async (segment: SegmentDescriptor, candidates: readonly string[]) => {
+        if (!candidates.length) return;
+        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
+        try {
+          for (const [key, entry] of await reader.getMany(candidates)) {
+            values.set(key, entry.tombstone ? undefined : entry.value); pending.delete(key);
           }
-        }
-        const base = await this.#baseSegmentForKey(view.baseRoot, key);
-        if (base && key >= base.minKey && key <= base.maxKey) {
-          const reader = await SegmentReader.open(this.rootDir, base);
-          try {
-            const entry = await reader.get(key);
-            if (entry) return entry.tombstone ? undefined : entry.value;
-          } finally {
-            await reader.close();
-          }
-        }
-        return undefined;
-      });
+        } finally { await reader.close(); }
+      };
+      for (const segment of view.deltaSegments) {
+        await read(segment, [...pending].filter(key => key >= segment.minKey && key <= segment.maxKey));
+        if (!pending.size) break;
+      }
+      const bases = new Map<string, { segment: SegmentDescriptor; keys: string[] }>();
+      for (const key of pending) {
+        const segment = await this.#baseSegmentForKey(view.baseRoot, key);
+        if (!segment || key < segment.minKey || key > segment.maxKey) continue;
+        const group = bases.get(segment.id) ?? { segment, keys: [] };
+        group.keys.push(key); bases.set(segment.id, group);
+      }
+      for (const { segment, keys } of bases.values()) await read(segment, keys);
+      return selected.map(key => values.get(key));
     } finally {
       this.#releaseReadView(view);
       await this.#runRetirementCleanup();
@@ -699,41 +760,31 @@ export class FileDurableProjectionIndex {
     const after = resumed?.lastKey;
     this.#retainReadView(view);
     try {
-      return await this.#readStep(
-        {
-          step: "projection-scan",
-          range,
-          limit,
-          ...(continuation === undefined ? {} : { continuation }),
-        },
-        async () => {
-          const entries = await this.#scanView(
-            view,
-            normalizedRange,
-            limit,
-            after,
-          );
-          const lastKey = entries.at(-1)?.key;
-          if (entries.length < limit || lastKey === undefined) {
-            this.#readViews.delete(view.id);
-            return { entries };
-          }
-          return {
-            entries,
-            continuation: encodeContinuation(view.id, lastKey),
-          };
-        },
+      const entries = await this.#scanView(
+        view,
+        normalizedRange,
+        limit,
+        after,
       );
+      const lastKey = entries.at(-1)?.key;
+      if (entries.length < limit || lastKey === undefined) {
+        this.#readViews.delete(view.id);
+        return { entries };
+      }
+      return {
+        entries,
+        continuation: encodeContinuation(view.id, lastKey),
+      };
     } finally {
       this.#releaseReadView(view);
       await this.#runRetirementCleanup();
     }
   }
 
-  async flush(): Promise<void> {
+  async flush(options: { readonly compact?: boolean } = {}): Promise<void> {
     // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
     // 启动恢复触发的按恢复,周期回收触发的才是后台。
-    await this.#runFlush("committed");
+    await this.#runFlush("committed", options.compact !== false);
   }
 
   /** 进程停机时取消尚未跨过安全检查点的投影维护义务。 */
@@ -743,11 +794,17 @@ export class FileDurableProjectionIndex {
     await this.#maintenanceRunner.stop();
   }
 
-  async #runFlush(obligation: StorageMaintenanceObligation): Promise<void> {
+  async #runFlush(obligation: StorageMaintenanceObligation, compact = true): Promise<void> {
     await this.#runRetirementCleanup();
     for (;;) {
       const manifest = this.#requireManifest();
-      if (manifest.compaction) {
+      // A recovery checkpoint need not finish a compaction whose durable
+      // manifest already makes all values readable. A new delta still waits
+      // for it, preserving the existing five-segment read bound.
+      if (!compact && this.#active.size === 0 && sameCheckpoints(this.checkpoints(), manifest.checkpoints)) {
+        this.#resetActiveProgress(); return;
+      }
+      if (manifest.compaction && (compact || this.#active.size > 0)) {
         const frozenInput = {
           checkpoints: manifest.checkpoints,
           deltaSegments: manifest.deltaSegments.map(({ id }) => id),
@@ -865,10 +922,10 @@ export class FileDurableProjectionIndex {
   }
 
   #readStep<T>(
-    inputIdentity: unknown,
+    inputIdentity: DurableProjectionReadStep,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return this.#runReadStep?.(inputIdentity, operation) ?? operation();
+    return runProjectionReadStep(this.#runReadStep, inputIdentity, operation);
   }
 
   async #runRetirementCleanup(
@@ -1036,10 +1093,8 @@ export class FileDurableProjectionIndex {
         );
         deltaSegments = [newest, ...deltaSegments];
       }
-      const compaction =
-        deltaSegments.length > MAX_DELTA_SEGMENTS
-          ? {}
-          : manifest.compaction;
+      const compaction = manifest.compaction ??
+        (deltaSegments.length > MAX_DELTA_SEGMENTS ? {} : undefined);
       const created = new Set(this.#requireWriteIntent().createdFiles);
       const transientFiles = [...obsoleteFiles].filter((file) =>
         created.has(file)
@@ -1138,20 +1193,26 @@ export class FileDurableProjectionIndex {
     const openCursor = async (
       descriptor: SegmentDescriptor,
     ): Promise<SegmentCursor> => {
-      const reader = await SegmentReader.open(this.rootDir, descriptor);
-      let index = await reader.lowerBound(lowerBound);
-      const cursor: SegmentCursor = { descriptor, reader, index };
-      cursor.current = await reader.entry(index);
-      while (
-        cursor.current !== undefined &&
-        !inRange(cursor.current.key) &&
-        cursor.current.key < range.lt
-      ) {
-        index += 1;
-        cursor.index = index;
+      const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep);
+      try {
+        let index = await reader.lowerBound(lowerBound);
+        const cursor: SegmentCursor = { descriptor, reader, index };
         cursor.current = await reader.entry(index);
+        while (
+          cursor.current !== undefined &&
+          !inRange(cursor.current.key) &&
+          cursor.current.key < range.lt
+        ) {
+          index += 1;
+          cursor.index = index;
+          cursor.current = await reader.entry(index);
+        }
+        return cursor;
+      } catch (error) {
+        // Until the cursor is returned, this reader has no outer owner.
+        await reader.close().catch(() => undefined);
+        throw error;
       }
-      return cursor;
     };
     const advanceBase = async (): Promise<void> => {
       while (baseCursor?.current === undefined) {
@@ -1335,6 +1396,18 @@ export class FileDurableProjectionIndex {
     let minKey: string | undefined;
     let maxKey: string | undefined;
     let previousKey: string | undefined;
+    const dataBatch: Buffer[] = [];
+    const offsetBatch: Buffer[] = [];
+    let batchBytes = 0;
+    const writeBatch = async () => {
+      if (dataBatch.length === 0) return;
+      claimStorageIo("ioOperations", 2);
+      await offsets.writeFile(Buffer.concat(offsetBatch));
+      await data.writeFile(dataBatch.length === 1 ? dataBatch[0]! : Buffer.concat(dataBatch, batchBytes));
+      dataBatch.length = 0;
+      offsetBatch.length = 0;
+      batchBytes = 0;
+    };
     try {
       for await (const entry of entries) {
         if (
@@ -1348,9 +1421,13 @@ export class FileDurableProjectionIndex {
         offset.writeBigUInt64BE(BigInt(position));
         claimStorageIo("writeBytes", offset.byteLength + encoded.byteLength);
         claimStorageIo("temporaryBytes", offset.byteLength + encoded.byteLength);
-        claimStorageIo("ioOperations", 2);
-        await offsets.writeFile(offset);
-        await data.writeFile(encoded);
+        // Bound small-record batching; one oversized record follows the same
+        // direct write path and does not require a second payload allocation.
+        if (dataBatch.length && batchBytes + encoded.byteLength > SEGMENT_IO_BATCH_BYTES) await writeBatch();
+        dataBatch.push(encoded);
+        offsetBatch.push(offset);
+        batchBytes += encoded.byteLength;
+        if (batchBytes >= SEGMENT_IO_BATCH_BYTES || dataBatch.length >= SEGMENT_IO_BATCH_ENTRIES) await writeBatch();
         position += encoded.byteLength;
         count += 1;
         minKey ??= entry.key;
@@ -1360,6 +1437,7 @@ export class FileDurableProjectionIndex {
       if (count === 0 || minKey === undefined || maxKey === undefined) {
         throw new TypeError("Cannot write an empty projection segment");
       }
+      await writeBatch();
       claimStorageIo("ioOperations", 2);
       await data.sync();
       await offsets.sync();
@@ -1500,9 +1578,16 @@ export class FileDurableProjectionIndex {
     const afterKey = manifest.compaction?.afterKey;
     let firstKey: string | undefined;
     for (const delta of manifest.deltaSegments) {
-      const reader = await SegmentReader.open(this.rootDir, delta);
+      // Descriptor ranges are already bound by the manifest. Completed ranges
+      // need no reader, and an untouched segment already names its first key.
+      if (afterKey !== undefined && delta.maxKey <= afterKey) continue;
+      if (afterKey === undefined || afterKey < delta.minKey) {
+        if (firstKey === undefined || delta.minKey < firstKey) firstKey = delta.minKey;
+        continue;
+      }
+      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep);
       try {
-        let index = afterKey === undefined
+        let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
           : await reader.lowerBound(afterKey);
         let entry = await reader.entry(index);
@@ -1525,9 +1610,11 @@ export class FileDurableProjectionIndex {
       : undefined;
     const latest = new Map<string, StoredMutation>();
     for (const delta of [...manifest.deltaSegments].reverse()) {
-      const reader = await SegmentReader.open(this.rootDir, delta);
+      if ((afterKey !== undefined && delta.maxKey <= afterKey) ||
+          (upperBound !== undefined && delta.minKey >= upperBound)) continue;
+      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep);
       try {
-        let index = afterKey === undefined
+        let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
           : await reader.lowerBound(afterKey);
         let entry = await reader.entry(index);
@@ -1575,7 +1662,7 @@ export class FileDurableProjectionIndex {
   async #readSegment(
     descriptor: SegmentDescriptor,
   ): Promise<StoredMutation[]> {
-    const reader = await SegmentReader.open(this.rootDir, descriptor);
+    const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep);
     try {
       const entries: StoredMutation[] = [];
       for (let index = 0; index < descriptor.count; index += 1) {
@@ -1696,6 +1783,10 @@ export class FileDurableProjectionIndex {
       this.#cacheDirectoryPage(pointer.id, cached);
       return cached;
     }
+    return this.#readStep("directory-page", () => this.#readDirectoryPage(pointer));
+  }
+
+  async #readDirectoryPage(pointer: DirectoryPagePointer): Promise<DirectoryPage> {
     const file = directoryPageFile(pointer.id);
     let handle: FileHandle;
     try {
@@ -1998,7 +2089,7 @@ export class FileDurableProjectionIndex {
       if (segment.level !== 0) {
         throw new Error("Projection delta segment level is invalid");
       }
-      const reader = await SegmentReader.open(this.rootDir, segment);
+      const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
       try {
         const first = await reader.entry(0);
         const last = await reader.entry(segment.count - 1);
@@ -2444,16 +2535,42 @@ export class FileDurableProjectionIndex {
   }
 }
 
+function runProjectionReadStep<T>(
+  runner: FileDurableProjectionIndexOptions["runReadStep"],
+  step: DurableProjectionReadStep,
+  operation: () => Promise<T>,
+): Promise<T> {
+  // Maintenance already owns a physical plan. Charge its claims without
+  // acquiring a second permit (which would deadlock a single-slot device).
+  if (currentDeviceCapacityStep()?.kind === "physical") return operation();
+  return runner ? runner(step, operation) : operation();
+}
+
 class SegmentReader {
+  // A single bounded read-ahead buffer belongs to this open immutable segment,
+  // never to the index or a later read view. Every returned entry still checks
+  // its ordinal, digest and canonical payload before use.
+  #dataWindow: { readonly start: number; readonly bytes: Buffer } | undefined;
   private constructor(
     readonly descriptor: SegmentDescriptor,
     readonly data: FileHandle,
     readonly offsets: FileHandle,
+    readonly runReadStep: FileDurableProjectionIndexOptions["runReadStep"],
   ) {}
 
   static async open(
     rootDir: string,
     descriptor: SegmentDescriptor,
+    runReadStep?: FileDurableProjectionIndexOptions["runReadStep"],
+  ): Promise<SegmentReader> {
+    const operation = () => SegmentReader.openFiles(rootDir, descriptor, runReadStep);
+    return runProjectionReadStep(runReadStep, "segment-open", operation);
+  }
+
+  private static async openFiles(
+    rootDir: string,
+    descriptor: SegmentDescriptor,
+    runReadStep: FileDurableProjectionIndexOptions["runReadStep"],
   ): Promise<SegmentReader> {
     let data: FileHandle;
     try {
@@ -2468,7 +2585,7 @@ class SegmentReader {
     try {
       claimStorageIo("ioOperations", 1);
       const offsets = await open(path.join(rootDir, descriptor.offsetsFile), "r");
-      return new SegmentReader(descriptor, data, offsets);
+      return new SegmentReader(descriptor, data, offsets, runReadStep);
     } catch (error) {
       await data.close();
       if (isNodeError(error, "ENOENT")) {
@@ -2485,6 +2602,29 @@ class SegmentReader {
     const index = await this.lowerBound(key);
     const entry = await this.entry(index);
     return entry?.key === key ? entry : undefined;
+  }
+
+  async getMany(keys: readonly string[]): Promise<ReadonlyMap<string, SegmentEntry>> {
+    const sorted = [...new Set(keys)].sort();
+    const values = new Map<string, SegmentEntry>();
+    const pending = [{ low: 0, high: this.descriptor.count, from: 0, to: sorted.length }];
+    while (pending.length) {
+      const { low, high, from, to } = pending.pop()!;
+      if (low >= high || from >= to) continue;
+      const middle = low + Math.floor((high - low) / 2);
+      const entry = await this.entry(middle);
+      if (!entry) throw projectionCorrupt('Projection segment offset is invalid');
+      let left = from, right = to;
+      while (left < right) {
+        const pivot = left + Math.floor((right - left) / 2);
+        if (sorted[pivot]! < entry.key) left = pivot + 1; else right = pivot;
+      }
+      const matched = left < to && sorted[left] === entry.key;
+      if (matched) values.set(entry.key, entry);
+      pending.push({ low: middle + 1, high, from: left + Number(matched), to });
+      pending.push({ low, high: middle, from, to: left });
+    }
+    return values;
   }
 
   async lowerBound(key: string): Promise<number> {
@@ -2504,6 +2644,11 @@ class SegmentReader {
 
   async entry(index: number): Promise<SegmentEntry | undefined> {
     if (index < 0 || index >= this.descriptor.count) return undefined;
+    const operation = () => this.readEntry(index);
+    return runProjectionReadStep(this.runReadStep, "segment-entry", operation);
+  }
+
+  private async readEntry(index: number): Promise<SegmentEntry | undefined> {
     const offsetBytes = Buffer.allocUnsafe(8);
     claimStorageIo("readBytes", offsetBytes.byteLength);
     claimStorageIo("ioOperations", 1);
@@ -2516,14 +2661,7 @@ class SegmentReader {
       throw projectionCorrupt("Projection segment offset exceeds the safe range");
     }
     const header = Buffer.allocUnsafe(SEGMENT_HEADER_BYTES);
-    claimStorageIo("readBytes", header.byteLength);
-    claimStorageIo("ioOperations", 1);
-    const headerRead = await this.data.read(
-      header,
-      0,
-      header.byteLength,
-      Number(offset),
-    );
+    const headerRead = await this.#readData(header, Number(offset), false);
     if (headerRead.bytesRead !== header.byteLength) {
       throw projectionCorrupt("Projection segment entry header is truncated");
     }
@@ -2545,14 +2683,7 @@ class SegmentReader {
       throw projectionCorrupt("Projection segment entry header is invalid");
     }
     const payload = Buffer.allocUnsafe(keyBytes + valueBytes);
-    claimStorageIo("readBytes", payload.byteLength);
-    claimStorageIo("ioOperations", 1);
-    const payloadRead = await this.data.read(
-      payload,
-      0,
-      payload.byteLength,
-      Number(offset) + SEGMENT_HEADER_BYTES,
-    );
+    const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, true);
     if (
       payloadRead.bytesRead !== payload.byteLength ||
       !checksum(Buffer.concat([header.subarray(0, 20), payload])).equals(
@@ -2579,7 +2710,30 @@ class SegmentReader {
     return { key, value, tombstone: false };
   }
 
+  async #readData(target: Buffer, position: number, readAhead: boolean): Promise<{ bytesRead: number }> {
+    const window = this.#dataWindow;
+    if (window && position >= window.start && position + target.length <= window.start + window.bytes.length) {
+      window.bytes.copy(target, 0, position - window.start, position - window.start + target.length);
+      return { bytesRead: target.length };
+    }
+    // Read the exact header first. Only a validated small payload may prefetch,
+    // so the largest legal entry still fits the unchanged per-entry IO budget.
+    if (!readAhead || target.length > SEGMENT_IO_BATCH_BYTES) {
+      claimStorageIo("readBytes", target.length);
+      claimStorageIo("ioOperations", 1);
+      return this.data.read(target, 0, target.length, position);
+    }
+    const bytes = Buffer.allocUnsafe(SEGMENT_IO_BATCH_BYTES);
+    claimStorageIo("readBytes", bytes.length);
+    claimStorageIo("ioOperations", 1);
+    const read = await this.data.read(bytes, 0, bytes.length, position);
+    this.#dataWindow = { start: position, bytes: bytes.subarray(0, read.bytesRead) };
+    bytes.copy(target, 0, 0, Math.min(target.length, read.bytesRead));
+    return { bytesRead: Math.min(target.length, read.bytesRead) };
+  }
+
   async close(): Promise<void> {
+    this.#dataWindow = undefined;
     await Promise.all([this.data.close(), this.offsets.close()]);
   }
 }
@@ -3231,4 +3385,11 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 export function durableProjectionDirectoryName(projectionId: string): string {
   return protocolDigest("DurableProjectionDirectory", 1, { projectionId })
     .slice("sha256:".length);
+}
+
+function validateReadKeys(keys: readonly string[]): string[] {
+  if (!Array.isArray(keys) || keys.length > 256) throw new TypeError('Projection multi-key read requires at most 256 string keys');
+  const selected = [...keys];
+  for (const key of selected) assertKey(key);
+  return selected;
 }

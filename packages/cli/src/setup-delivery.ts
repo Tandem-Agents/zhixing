@@ -11,7 +11,7 @@
  */
 
 import { type RuntimeExecutionProfile, createEventBus } from "@zhixing/core";
-import { artifactReadCapacity } from "./serve/artifact-read-capacity.js";
+import { artifactReadCapacity, projectionReadCapacity } from "./serve/artifact-read-capacity.js";
 import { type PermissionRule } from "@zhixing/core/security";
 import {
   AuthorityDeliveryPipeline,
@@ -573,6 +573,7 @@ export async function setupAuthorityRuntime(
           artifacts,
           {
             storageMaintenance: options.storageMaintenance,
+            runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
             records: options.records,
             // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
             // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
@@ -599,6 +600,7 @@ export async function setupAuthorityRuntime(
           artifacts,
           {
             storageMaintenance: options.storageMaintenance,
+            runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
             records: options.records,
             ...(options.clock ? { clock: options.clock } : {}),
           },
@@ -994,6 +996,7 @@ export async function setupAuthorityRuntime(
               bindingArtifacts,
               {
                 storageMaintenance: options.storageMaintenance,
+                runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
                 records: options.records,
                 clock,
               },

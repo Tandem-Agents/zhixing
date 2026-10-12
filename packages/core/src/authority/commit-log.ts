@@ -58,6 +58,7 @@ import {
   FileDurableProjectionIndex,
   type DurableProjectionCheckpoints,
   type DurableProjectionDefinition,
+  type FileDurableProjectionIndexOptions,
   type DurableProjectionMutation,
   type DurableProjectionReadContext,
   type RebuildableDurableProjectionIndex,
@@ -120,6 +121,8 @@ export interface FileAuthorityCommitLogOptions {
   readonly lockStaleMs?: number;
   readonly lockWaitMs?: number;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  /** Caller data reads have a leaf budget separate from workload occupancy. */
+  readonly runProjectionReadStep?: FileDurableProjectionIndexOptions["runReadStep"];
 }
 
 export interface PlannedAnchorPrefixInstallation<Body> {
@@ -185,7 +188,7 @@ class FileProjectionCursor implements ProjectionCursor {
 
 interface RegisteredDurableProjection {
   readonly state: FileDurableProjectionIndex;
-  readonly read: DurableProjectionReadContext;
+  readonly read: DurableProjectionReadContext & Pick<RebuildableDurableProjectionIndex, "getMany">;
   readonly reduce: DurableProjectionDefinition<JsonValue>["reduce"];
 }
 
@@ -209,6 +212,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #operations = new SerialTaskQueue();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
+  readonly #runProjectionReadStep: FileAuthorityCommitLogOptions["runProjectionReadStep"];
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
   // Only byte-validation proofs, never shared mutable envelopes or business state.
@@ -237,6 +241,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       options.storageMaintenance,
     );
     this.#storageMaintenance = options.storageMaintenance;
+    this.#runProjectionReadStep = options.runProjectionReadStep;
     this.durableProjection({
       projectionId: RETAINED_REFERENCE_PROJECTION_ID,
       reducerVersion: 4,
@@ -321,6 +326,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       projectionId: definition.projectionId,
       reducerVersion: definition.reducerVersion,
       storageMaintenance: this.#storageMaintenance,
+      runReadStep: this.#runProjectionReadStep,
     });
     const registered: RegisteredDurableProjection = {
       state,
@@ -1176,11 +1182,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         return this.#withLogLock("projection.getMany", () =>
           this.#withDurableProjectionRecovery(projection, async () => {
             await this.#synchronizeDurableProjection(projection);
-            const values: (JsonValue | undefined)[] = [];
-            // Physical reads stay sequential: one atomic step must not compete
-            // with its siblings for the same device admission slot.
-            for (const key of selected) values.push(await projection.read.get(key));
-            return values;
+            return await projection.read.getMany(selected);
           }),
         );
       },

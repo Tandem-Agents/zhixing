@@ -1,4 +1,4 @@
-import { readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -233,6 +233,70 @@ async function createLaggingCorruptedProjection(
 }
 
 describe("FileDurableProjectionIndex", () => {
+  it("batches physical segment IO while preserving large entries and cold corruption checks", async () => {
+    const rootDir = await createTempDir("projection-physical-batches");
+    const options = { rootDir, projectionId: "physical-batches", reducerVersion: 1 };
+    const index = new FileDurableProjectionIndex(options);
+    await index.initialize({ authority: checkpoint(0) });
+    const handle = await open(path.join(rootDir, "io-probe"), "w");
+    const prototype = Object.getPrototypeOf(handle);
+    await handle.close();
+    const writes = vi.spyOn(prototype, "writeFile");
+    const reads = vi.spyOn(prototype, "read");
+    const entries = Array.from({ length: 512 }, (_, id) => ({ kind: "put" as const, key: "key-" + id.toString().padStart(4, "0"), value: { id, text: "中文🙂".repeat(id === 511 ? 20_000 : 12) } }));
+    try {
+      index.publish(await index.prepare(entries), { authority: checkpoint(1) });
+      writes.mockClear();
+      await index.flush();
+      expect(writes.mock.calls.length).toBeLessThan(100);
+      const cold = new FileDurableProjectionIndex(options);
+      await cold.initialize({ authority: checkpoint(0) });
+      reads.mockClear();
+      const page = await cold.scan({}, 256);
+      expect(page.entries).toEqual(entries.slice(0, 256).map(({ key, value }) => ({ key, value })));
+      expect(reads.mock.calls.length).toBeLessThan(400);
+      expect(await cold.get("key-0511")).toEqual(entries[511]!.value);
+      await corruptFirstSegment(rootDir);
+      await expect(cold.get("key-0511")).rejects.toThrow(DurableProjectionStorageError);
+      await cold.stopStorageMaintenance();
+    } finally {
+      writes.mockRestore(); reads.mockRestore();
+      await index.stopStorageMaintenance();
+    }
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+  it('shares bounded multi-key segment reads across base, deltas, tombstones and a cold reopen', async () => {
+    const rootDir = await createTempDir('projection-batch-read');
+    const options = { rootDir, projectionId: 'batch-read', reducerVersion: 1 };
+    const index = new FileDurableProjectionIndex(options);
+    await index.initialize({ authority: checkpoint(0) });
+    let revision = 0;
+    const publish = async (mutations: DurableProjectionMutation[]) => {
+      index.publish(await index.prepare(mutations), { authority: checkpoint(++revision) });
+      await index.flush();
+    };
+    for (let page = 0; page < 5; page++) await publish(Array.from({ length: 64 }, (_, offset) => {
+      const id = page * 64 + offset;
+      return { kind: 'put' as const, key: 'key-' + id.toString().padStart(3, '0'), value: id };
+    }));
+    await publish([{ kind: 'tombstone', key: 'key-007' }, { kind: 'put', key: 'key-008', value: 'replaced' }]);
+    const steps: string[] = [];
+    const cold = new FileDurableProjectionIndex({ ...options, runReadStep: async (step, operation) => { steps.push(step); return operation(); } });
+    await cold.initialize({ authority: checkpoint(0) });
+    cold.publish(await cold.prepare([{ kind: 'put', key: 'key-009', value: 'active' }]), { authority: checkpoint(++revision) });
+    steps.length = 0;
+    const keys = ['key-008', 'missing', 'key-007', 'key-009', 'key-008', ...Array.from({ length: 240 }, (_, id) => 'key-' + (319 - id).toString().padStart(3, '0'))];
+    expect(await cold.getMany(keys)).toEqual(['replaced', undefined, undefined, 'active', 'replaced', ...Array.from({ length: 240 }, (_, id) => 319 - id)]);
+    expect(steps.filter(step => step === 'segment-open').length).toBeLessThanOrEqual(7);
+    expect(steps.filter(step => step === 'segment-entry').length).toBeLessThan(350);
+    expect(await cold.getMany([])).toEqual([]);
+    await expect(cold.getMany(Array(257).fill('key-001'))).rejects.toThrow();
+    await expect(cold.getMany(Array(1))).rejects.toThrow();
+    await corruptFirstSegment(rootDir);
+    await expect(cold.getMany(['key-008'])).rejects.toThrow(DurableProjectionStorageError);
+    await Promise.all([index.stopStorageMaintenance(), cold.stopStorageMaintenance()]);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it("retries transient initialize backpressure outside the manifest queue", async () => {
     const root = await createTempDir("durable-projection-initialize-backpressure");
     const governor = new DefaultStorageMaintenanceGovernor({
@@ -1252,4 +1316,31 @@ describe("FileDurableProjectionIndex", () => {
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
+});
+
+ it('publishes a cold recovery checkpoint without draining readable compaction and resumes it before the next delta', async () => {
+  const root = await createTempDir('recovery-checkpoint-compaction');
+  const options = { rootDir: root, projectionId: 'checkpoint-compaction', reducerVersion: 1, overlayEntries: 32 };
+  const index = new FileDurableProjectionIndex(options);
+  try {
+    await index.initialize({ source: checkpoint(0) });
+    for (let value = 0; value < 5; value++) {
+      index.publish(await index.prepare([{ kind: 'put', key: 'key-' + value, value }]), { source: checkpoint(value + 1) });
+      await index.flush({ compact: false });
+    }
+    const published = await readProjectionManifest(root);
+    expect(published.deltaSegments).toHaveLength(5); expect(published.compaction).toEqual({});
+    const restored = new FileDurableProjectionIndex(options);
+    try {
+      await restored.initialize({ source: checkpoint(0) });
+      await restored.flush({ compact: false });
+      expect(await readProjectionManifest(root)).toEqual(published);
+      for (let value = 0; value < 5; value++) await expect(restored.get('key-' + value)).resolves.toBe(value);
+      restored.publish(await restored.prepare([{ kind: 'put', key: 'key-5', value: 5 }]), { source: checkpoint(6) });
+      await restored.flush({ compact: false });
+      expect((await readProjectionManifest(root)).deltaSegments.length).toBeLessThanOrEqual(5);
+      await expect(restored.get('key-0')).resolves.toBe(0); await expect(restored.get('key-5')).resolves.toBe(5);
+      await restored.flush(); expect((await readProjectionManifest(root)).compaction).toBeUndefined();
+    } finally { await restored.stopStorageMaintenance(); }
+  } finally { await index.stopStorageMaintenance(); }
 });
