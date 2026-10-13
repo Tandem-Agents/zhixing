@@ -16,7 +16,6 @@ import {
   userMessage,
 } from "@zhixing/core";
 import type { FetchError, NetworkPolicy } from "@zhixing/network";
-import { safeFetch, sanitizeUntrustedText } from "@zhixing/network";
 import {
   DISTILL_SYSTEM_PROMPT,
   buildDistillPrompt,
@@ -185,6 +184,8 @@ async function fetchAndProcess(
     return { text: cached };
   }
 
+  // 网络出口栈（含 undici）只在真正抓取时加载，不进入宿主启动的模块图。
+  const { safeFetch, sanitizeUntrustedText } = await import("@zhixing/network");
   const result = await safeFetch(
     parsed.url,
     { ...defaultWebFetchPolicy, proxy },

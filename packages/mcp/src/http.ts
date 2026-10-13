@@ -5,7 +5,7 @@
  * 同源 config.network.proxy），`HttpGetText` 可注入以便单测不真联网。
  */
 
-import { createSafeFetch, type NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy, SafeFetch } from "@zhixing/network";
 
 /** 文本 GET：返回 HTTP 状态码与响应体。注入点——测试用 mock 替换，避免真联网。 */
 export type HttpGetText = (
@@ -15,9 +15,12 @@ export type HttpGetText = (
 
 /** 缺省 HTTP 文本 GET —— 走 SSRF-safe fetch；proxy 与 hub / probe 同源。 */
 export function defaultHttpGetText(proxy?: NetworkPolicy["proxy"]): HttpGetText {
-  const fetch = createSafeFetch(proxy ? { proxy } : undefined);
+  // 网络出口栈（含 undici）在首次请求时才加载，不进入宿主启动的模块图；加载失败下次重试。
+  let fetch: Promise<SafeFetch> | undefined;
   return async (url, signal) => {
-    const res = await fetch(url, signal ? { signal } : undefined);
+    fetch ??= import("@zhixing/network").then(({ createSafeFetch }) => createSafeFetch(proxy ? { proxy } : undefined));
+    fetch.catch(() => { fetch = undefined; });
+    const res = await (await fetch)(url, signal ? { signal } : undefined);
     return { status: res.status, body: await res.text() };
   };
 }

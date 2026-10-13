@@ -5,7 +5,7 @@
  * SSRF-safe fetch / env 白名单），避免出现第二条连接旁路而安全策略漂移。
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { NetworkPolicy } from "@zhixing/network";
 import type {
   CreatedTransport,
@@ -15,6 +15,17 @@ import type { McpServerSpec, McpToolDescriptor } from "./types.js";
 
 /** 知行作为 MCP client 向 server 申报的身份。 */
 export const CLIENT_INFO = { name: "zhixing", version: "0.1.0" };
+
+// SDK 与默认传输实现（含网络出口栈）只在首次真正建链时加载，不进入宿主启动的模块图；
+// 加载完成后同步复用，建链时序与静态导入一致。
+let sdkClient: typeof Client | undefined;
+let defaultTransport: CreateTransportFn | undefined;
+async function loadSdkClient(): Promise<typeof Client> {
+  return sdkClient ??= (await import("@modelcontextprotocol/sdk/client/index.js")).Client;
+}
+async function loadDefaultTransport(): Promise<CreateTransportFn> {
+  return defaultTransport ??= (await import("./transport.js")).createTransport;
+}
 
 /** transport 构造函数签名 —— 默认按 spec 造真实 transport，测试可注入内存传输。 */
 export type CreateTransportFn = (
@@ -37,7 +48,8 @@ export interface ConnectedClient {
 export async function connectAndListTools(
   spec: McpServerSpec,
   opts: {
-    createTransport: CreateTransportFn;
+    /** 省略时按 spec 造真实 transport。 */
+    createTransport?: CreateTransportFn;
     proxy?: NetworkPolicy["proxy"];
     timeoutMs: number;
     /** 中断信号 —— abort 时连接 / 列工具立即失败，建链资源随 catch 释放（一次性探测的取消用）。 */
@@ -47,8 +59,10 @@ export async function connectAndListTools(
 ): Promise<ConnectedClient> {
   let created: CreatedTransport | undefined;
   try {
-    created = opts.createTransport(spec, { proxy: opts.proxy, ...(opts.createStdioProcess ? { createStdioProcess: opts.createStdioProcess, signal: opts.signal } : {}) });
-    const client = new Client(CLIENT_INFO, { capabilities: {} });
+    const createTransport = opts.createTransport ?? defaultTransport ?? await loadDefaultTransport();
+    created = createTransport(spec, { proxy: opts.proxy, ...(opts.createStdioProcess ? { createStdioProcess: opts.createStdioProcess, signal: opts.signal } : {}) });
+    const SdkClient = sdkClient ?? await loadSdkClient();
+    const client = new SdkClient(CLIENT_INFO, { capabilities: {} });
     const reqOptions = { timeout: opts.timeoutMs, signal: opts.signal };
     await client.connect(created.transport, reqOptions);
     const listed = await client.listTools({}, reqOptions);

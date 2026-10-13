@@ -10,7 +10,7 @@
  * - 不做重试 / Failover —— 那是 Resilience 层的职责
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import type {
   ChatRequest,
   LLMProvider,
@@ -44,10 +44,16 @@ type BlockState =
 // ─── 工厂函数 ───
 
 export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider {
-  const client = new Anthropic({
-    apiKey: resolved.apiKey,
-    baseURL: resolved.baseUrl || undefined,
-  });
+  // SDK 在首次真正调用模型时才加载并构造，不进入宿主启动的模块图；加载失败下次重试。
+  let client: Promise<Anthropic> | undefined;
+  const connect = (): Promise<Anthropic> => {
+    client ??= import("@anthropic-ai/sdk").then(({ default: Anthropic }) => new Anthropic({
+      apiKey: resolved.apiKey,
+      baseURL: resolved.baseUrl || undefined,
+    }));
+    client.catch(() => { client = undefined; });
+    return client;
+  };
 
   // `LLMProvider.models[]` 直接复用 `resolved.declaredModels`——catalog 数据本身就是
   // `ModelInfo` 形态，无需转换。catalog 之外的 model（如新发布尚未补 preset 的版本）走
@@ -106,7 +112,7 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
       const blocks = new Map<number, BlockState>();
 
       try {
-        const stream = await client.messages.create(
+        const stream = await (await connect()).messages.create(
           params as unknown as Anthropic.MessageCreateParamsStreaming,
           request.abortSignal ? { signal: request.abortSignal } : undefined,
         );

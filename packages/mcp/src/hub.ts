@@ -23,7 +23,6 @@ import {
   type CreateTransportFn,
 } from "./connect.js";
 import { toToolResult } from "./result.js";
-import { createTransport as defaultCreateTransport } from "./transport.js";
 import type {
   McpCallFn,
   McpServerContext,
@@ -105,7 +104,7 @@ export function createMcpHub(
 ): McpHub {
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-  const createTransport = options.createTransport ?? defaultCreateTransport;
+  const createTransport = options.createTransport;
   const networkProxy = options.networkProxy;
   const connections = new Map<string, Connection>();
   const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();

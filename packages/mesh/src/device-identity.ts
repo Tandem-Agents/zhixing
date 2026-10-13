@@ -1,5 +1,3 @@
-import "reflect-metadata";
-
 import {
   createHash,
   createPrivateKey,
@@ -11,16 +9,7 @@ import {
   type KeyObject,
 } from "node:crypto";
 import type { DeviceIdentity, Signature } from "@zhixing/core/contracts";
-import { Crypto, type CryptoKey as CertificateCryptoKey } from "@peculiar/webcrypto";
-import {
-  BasicConstraintsExtension,
-  ExtendedKeyUsage,
-  ExtendedKeyUsageExtension,
-  KeyUsageFlags,
-  KeyUsagesExtension,
-  SubjectKeyIdentifierExtension,
-  X509CertificateGenerator,
-} from "@peculiar/x509";
+import type { Crypto, CryptoKey as CertificateCryptoKey } from "@peculiar/webcrypto";
 import { protocolBytes } from "./canonical.js";
 import { MeshProtocolError } from "./errors.js";
 
@@ -31,7 +20,18 @@ const decodedIdentityKeys = new WeakMap<DeviceIdentity, { publicKey: string; fin
 const DEFAULT_TLS_VALIDITY_MS = 24 * 60 * 60_000;
 const CERTIFICATE_BACKDATE_MS = 2 * 60_000;
 const DEVICE_IDENTITY_NOT_AFTER_MS = Date.parse("9999-12-31T23:59:59.000Z");
-const certificateCrypto = new Crypto();
+// 证书签发栈（ASN.1、X.509 与 WebCrypto 垫片）只在签发证书时加载，不进入宿主启动的模块图；
+// 加载失败下次重试。X.509 依赖的元数据垫片须先于它求值。
+let certificateToolkit: Promise<{ readonly x509: typeof import("@peculiar/x509"); readonly crypto: Crypto }> | undefined;
+function loadCertificateToolkit(): Promise<{ readonly x509: typeof import("@peculiar/x509"); readonly crypto: Crypto }> {
+  certificateToolkit ??= (async () => {
+    await import("reflect-metadata");
+    const [x509, webcrypto] = await Promise.all([import("@peculiar/x509"), import("@peculiar/webcrypto")]);
+    return { x509, crypto: new webcrypto.Crypto() };
+  })();
+  certificateToolkit.catch(() => { certificateToolkit = undefined; });
+  return certificateToolkit;
+}
 
 interface WebCryptoKeyPair {
   readonly privateKey: CertificateCryptoKey;
@@ -104,6 +104,7 @@ export class DeviceKey {
     if (rootExpiresAt <= issuedAt) {
       throw new TypeError("Device identity certificate expiry must follow its issue time");
     }
+    const { x509, crypto: certificateCrypto } = await loadCertificateToolkit();
     const keys = (await certificateCrypto.subtle.generateKey(
       { name: "Ed25519" },
       true,
@@ -117,7 +118,7 @@ export class DeviceKey {
       }),
     );
     const deviceId = deviceIdFromPublicKey(publicKey);
-    const certificate = await X509CertificateGenerator.createSelfSigned(
+    const certificate = await x509.X509CertificateGenerator.createSelfSigned(
       {
         serialNumber: randomBytes(16).toString("hex"),
         name: rootSubject(deviceId),
@@ -128,12 +129,12 @@ export class DeviceKey {
         signingAlgorithm: { name: "Ed25519" },
         keys,
         extensions: [
-          new BasicConstraintsExtension(true, 0, true),
-          new KeyUsagesExtension(
-            KeyUsageFlags.digitalSignature | KeyUsageFlags.keyCertSign,
+          new x509.BasicConstraintsExtension(true, 0, true),
+          new x509.KeyUsagesExtension(
+            x509.KeyUsageFlags.digitalSignature | x509.KeyUsageFlags.keyCertSign,
             true,
           ),
-          await SubjectKeyIdentifierExtension.create(keys.publicKey, false, certificateCrypto),
+          await x509.SubjectKeyIdentifierExtension.create(keys.publicKey, false, certificateCrypto),
         ],
       },
       certificateCrypto,
@@ -203,6 +204,7 @@ export class DeviceKey {
     if (expiresAtMs > this.rootValidTo) {
       throw new TypeError("TLS leaf certificate cannot outlive its device trust root");
     }
+    const { x509, crypto: certificateCrypto } = await loadCertificateToolkit();
     const rootPrivateKey = await certificateCrypto.subtle.importKey(
       "pkcs8",
       this.privateKey.export({ format: "der", type: "pkcs8" }),
@@ -216,7 +218,7 @@ export class DeviceKey {
       ["sign", "verify"],
     )) as WebCryptoKeyPair;
     const expiresAt = new Date(expiresAtMs);
-    const certificate = await X509CertificateGenerator.create(
+    const certificate = await x509.X509CertificateGenerator.create(
       {
         serialNumber: randomBytes(16).toString("hex"),
         subject: leafSubject(this.deviceId),
@@ -227,13 +229,13 @@ export class DeviceKey {
         signingKey: rootPrivateKey,
         signingAlgorithm: { name: "Ed25519" },
         extensions: [
-          new BasicConstraintsExtension(false, undefined, true),
-          new KeyUsagesExtension(KeyUsageFlags.digitalSignature, true),
-          new ExtendedKeyUsageExtension(
-            [ExtendedKeyUsage.clientAuth, ExtendedKeyUsage.serverAuth],
+          new x509.BasicConstraintsExtension(false, undefined, true),
+          new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
+          new x509.ExtendedKeyUsageExtension(
+            [x509.ExtendedKeyUsage.clientAuth, x509.ExtendedKeyUsage.serverAuth],
             true,
           ),
-          await SubjectKeyIdentifierExtension.create(leafKeys.publicKey, false, certificateCrypto),
+          await x509.SubjectKeyIdentifierExtension.create(leafKeys.publicKey, false, certificateCrypto),
         ],
       },
       certificateCrypto,

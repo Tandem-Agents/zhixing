@@ -18,7 +18,7 @@
  *   新 vendor 方言扩展见 openai-usage.ts 顶部"扩展点"注释。
  */
 
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import type {
   ChatRequest,
   LLMProvider,
@@ -74,10 +74,16 @@ type DeepSeekAssistantMessage = OpenAI.ChatCompletionAssistantMessageParam & {
  * 的 model 由 core/resolveModelInfo 走协议族默认（PROTOCOL_BUDGET_DEFAULTS["openai-compatible"]）兜底。
  */
 export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMProvider {
-  const client = new OpenAI({
-    baseURL: provider.baseUrl,
-    apiKey: provider.apiKey,
-  });
+  // SDK 在首次真正调用模型时才加载并构造，不进入宿主启动的模块图；加载失败下次重试。
+  let client: Promise<OpenAI> | undefined;
+  const connect = (): Promise<OpenAI> => {
+    client ??= import("openai").then(({ default: OpenAI }) => new OpenAI({
+      baseURL: provider.baseUrl,
+      apiKey: provider.apiKey,
+    }));
+    client.catch(() => { client = undefined; });
+    return client;
+  };
 
   return {
     id: provider.id,
@@ -146,7 +152,7 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
       let inThinking = false;
 
       try {
-        const stream = await client.chat.completions.create(params, {
+        const stream = await (await connect()).chat.completions.create(params, {
           signal: request.abortSignal ?? undefined,
         });
 

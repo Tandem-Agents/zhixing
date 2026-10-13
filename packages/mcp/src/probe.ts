@@ -12,7 +12,6 @@ import {
   type ConnectedClient,
   type CreateTransportFn,
 } from "./connect.js";
-import { createTransport as defaultCreateTransport } from "./transport.js";
 import type { McpServerSpec, McpToolDescriptor } from "./types.js";
 import type { McpStdioProcessFactory } from './owned-stdio.js';
 
@@ -40,7 +39,7 @@ export async function probeServer(
   spec: McpServerSpec,
   options: ProbeOptions = {},
 ): Promise<ProbeResult> {
-  const createTransport = options.createTransport ?? defaultCreateTransport;
+  const createTransport = options.createTransport;
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 
   let connected: ConnectedClient | undefined;
