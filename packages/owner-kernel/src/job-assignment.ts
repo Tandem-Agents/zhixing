@@ -4796,25 +4796,26 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     });
   }
 
+  /** One owner snapshot supplies both scheduler decisions and occurrence state. */
+  async schedulerReadView(): Promise<{ readonly definition?: TaskDefinition; readonly occurrences: readonly ScheduleOccurrence[] }> {
+    return this.#select(state => ({
+      ...(state.definition ? { definition: snapshot(state.definition) } : {}),
+      occurrences: this.#projectOccurrences(state),
+    }));
+  }
+
   /** Rebuildable task-local occurrence projection for scheduler/query recovery. */
   async occurrences(): Promise<readonly ScheduleOccurrence[]> {
-    return this.#select((state) =>
-      [...state.occurrences.values()]
-        .map((occurrence) => {
-          const current = state.states.get(occurrence.jobRunId);
-          const projected = validateJobOccurrence({
-            ...snapshot(occurrence),
-            state: current?.state ?? occurrence.state,
-          });
-          const outcome = state.outcomeByRun.get(occurrence.jobRunId);
-          return { ...projected, ...(outcome ? { outcome: snapshot(outcome) } : {}) };
-        })
-        .sort(
-          (left, right) =>
-            left.scheduledFor.localeCompare(right.scheduledFor) ||
-            left.jobRunId.localeCompare(right.jobRunId),
-        ),
-    );
+    return this.#select(state => this.#projectOccurrences(state));
+  }
+
+  #projectOccurrences(state: JobProjection): readonly ScheduleOccurrence[] {
+    return [...state.occurrences.values()].map(occurrence => {
+      const current = state.states.get(occurrence.jobRunId);
+      const projected = validateJobOccurrence({ ...snapshot(occurrence), state: current?.state ?? occurrence.state });
+      const outcome = state.outcomeByRun.get(occurrence.jobRunId);
+      return { ...projected, ...(outcome ? { outcome: snapshot(outcome) } : {}) };
+    }).sort((left, right) => left.scheduledFor.localeCompare(right.scheduledFor) || left.jobRunId.localeCompare(right.jobRunId));
   }
 
   async currentState(jobRunId: string): Promise<JobRunState | undefined> {

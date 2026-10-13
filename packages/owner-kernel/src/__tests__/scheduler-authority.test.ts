@@ -2,7 +2,7 @@ import type { SchedulerEventMap } from "@zhixing/core/scheduler";
 import type { ScheduleOccurrence } from "@zhixing/core/scheduler/application";
 import { createEventBus } from "@zhixing/core";
 import { currentDeviceCapacityStep, currentMaintenanceAbortSignal, currentMaintenanceUrgency, emptyDeviceCapacityBudget,
-  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, withDeviceCapacityStep } from "@zhixing/core/resources";
+  isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceAdmissionError, withDeviceCapacityStep } from "@zhixing/core/resources";
 import type {
   JobOccurrence,
   JobRunState,
@@ -57,6 +57,10 @@ class MemoryJobJournal {
 
   async occurrences() {
     return structuredClone(this.runs);
+  }
+
+  async schedulerReadView() {
+    return { definition: await this.taskDefinition(), occurrences: await this.occurrences() };
   }
 
   async define(definition: TaskDefinition) {
@@ -444,6 +448,36 @@ describe("AnchorScheduler authority", () => {
     scheduler.activate();
     await vi.waitFor(() => expect(journal.resumeSystemJobs).toHaveBeenCalledOnce());
     releaseRecovery();
+    await scheduler.stop();
+  });
+
+  it.each([false, true])("re-drives transient pressure while preparing system tasks outside owner queues (outer exclusion: %s)", async (outerExclusion) => {
+    const journal = new MemoryJobJournal();
+    const original = journal.define.bind(journal);
+    let attempts = 0;
+    journal.define = vi.fn(async (definition: TaskDefinition) => {
+      attempts += 1;
+      if (attempts === 1) throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 }, "projection-scrub");
+      return original(definition);
+    });
+    const systemTasks = new Map([["__transcript-gc", {
+      id: "__transcript-gc", name: "transcript-gc", handler: "__transcript-gc",
+      schedule: { kind: "interval" as const, everyMs: 60_000 },
+    }]]);
+    const { scheduler } = fixture({ journals: new Map([["__transcript-gc", journal]]), systemTasks });
+    const prepare = outerExclusion
+      ? runHoldingMaintenanceExclusion(() => scheduler.prepare())
+      : scheduler.prepare();
+    if (outerExclusion) {
+      // 外层所有者仍持有排他时不在内部等待，背压原样交还给它。
+      await expect(prepare).rejects.toBeInstanceOf(StorageMaintenanceAdmissionError);
+      expect(attempts).toBe(1);
+      expect(journal.definition).toBeUndefined();
+    } else {
+      await prepare;
+      expect(attempts).toBe(2);
+      expect(journal.definition?.definition).toEqual({ kind: "system", handler: "__transcript-gc" });
+    }
     await scheduler.stop();
   });
 

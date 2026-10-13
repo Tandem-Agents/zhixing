@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { runDetachedDeviceCapacity, runDetachedMaintenanceContext } from "@zhixing/core/resources";
+import {
+  currentMaintenanceAbortSignal,
+  isHoldingMaintenanceExclusion,
+  maintenanceRetryDelayMs,
+  runDetachedDeviceCapacity,
+  runDetachedMaintenanceContext,
+  waitForMaintenanceRetry,
+} from "@zhixing/core/resources";
 import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing/core/scheduler";
 import type { IEventBus } from "@zhixing/core";
 import {
@@ -147,15 +154,36 @@ export class AnchorScheduler {
   async prepare(): Promise<void> {
     if (this.#prepared) return;
     this.#onlineSince = this.#now().getTime();
-    for (const taskId of await this.#options.listTaskIds()) {
+    for (const taskId of await this.#retryTransientPressure(() => this.#options.listTaskIds())) {
       const registeredSystem = this.#options.systemTasks?.get(taskId);
-      await this.#refreshTask(
+      await this.#retryTransientPressure(() => this.#refreshTask(
         taskId,
         registeredSystem ? { systemView: systemView(registeredSystem) } : {},
-      );
+      ));
     }
     await this.#ensureConfiguredSystemTasks();
     this.#prepared = true;
+  }
+
+  /**
+   * 准备阶段由 Host 启动直接调用，不持有任何串行排他；各层日志/投影队列在
+   * 持有排他时零等待并把暂时容量背压交还给这里。只在退出全部队列后有限重驱
+   * 幂等的读取与系统任务定义，避免一次暂时读背压让整个 Host 启动失败。
+   */
+  async #retryTransientPressure<T>(operation: () => Promise<T>): Promise<T> {
+    let deadline: number | undefined;
+    for (;;) {
+      try {
+        return await operation();
+      } catch (error) {
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || currentMaintenanceAbortSignal().aborted) throw error;
+        deadline ??= performance.now() + 5_000;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, remaining));
+      }
+    }
   }
 
   activate(): void {
@@ -654,11 +682,12 @@ export class AnchorScheduler {
           ...(spec.params ? { params: structuredClone(spec.params) } : {}),
         },
       };
-      await this.#journal(spec.id).define(
+      // 相同定义再次提交按已存在修订返回，提交后发布阶段失败时重驱也不会重复写入。
+      await this.#retryTransientPressure(() => this.#journal(spec.id).define(
         definition,
         this.#hostContext(`ensure-system-${spec.id}`),
-      );
-      await this.#refreshTask(spec.id, { systemView: systemView(spec) });
+      ));
+      await this.#retryTransientPressure(() => this.#refreshTask(spec.id, { systemView: systemView(spec) }));
     }
   }
 
@@ -1129,9 +1158,8 @@ export class AnchorScheduler {
     } = {},
   ): Promise<void> {
     const journal = this.#journal(taskId);
-    const definition = await journal.taskDefinition();
+    const { definition, occurrences } = await journal.schedulerReadView();
     if (!definition) return;
-    const occurrences = await journal.occurrences();
     this.#activeRunCountByTask.set(
       taskId,
       occurrences.filter((item) => !TERMINAL_STATES.has(item.state as never)).length,
