@@ -1686,3 +1686,56 @@ async function storedArtifactFiles(root: string): Promise<string[]> {
   await walk(root);
   return files.sort();
 }
+
+it('recovers a same-assignment consumer batch with one verified read and durable per-consumer expiry', async () => {
+  const fixture = await createFixture();
+  const consumers = Array.from({ length: 32 }, (_, i) => ({ consumer: { kind: 'surface-ticket' as const, ticketId: 'batch-' + i }, expiresAt: SURFACE_EXPIRY }));
+  await fixture.spool.qualifyConsumers({ assignmentId: 'assignment-fixed', ref, consumers });
+  const spool = restartedSpool(fixture), read = vi.spyOn(FileAuthorityCommitLog.prototype, 'readProjection');
+  try {
+    const result = await spool.qualifyConsumers({ assignmentId: 'assignment-fixed', ref, consumers });
+    expect(read).toHaveBeenCalledOnce(); expect(result.consumers).toHaveLength(32);
+    expect(result.consumers.every(consumer => consumer.qualified && consumer.expiresAt === SURFACE_EXPIRY)).toBe(true);
+    await expect(spool.qualifyConsumers({ assignmentId: 'assignment-fixed', ref: { ...ref, runId: 'different' }, consumers })).rejects.toThrow();
+    await expect(spool.qualifyConsumers({ assignmentId: 'assignment-fixed', ref, consumers: [...consumers, consumers[0]!] })).rejects.toThrow(/bound/);
+  } finally { read.mockRestore(); }
+});
+
+
+it('registers cold ticket obligations without opening history, then restores before the first read', async () => {
+  const fixture = await createFixture();
+  const cold = restartedSpool(fixture);
+  const read = vi.spyOn(FileAuthorityCommitLog.prototype, 'readProjection');
+  try {
+    await cold.deferRecoveredConsumers({ assignmentId: 'assignment-fixed', ref, consumers: [{ consumer: surface, expiresAt: SURFACE_EXPIRY }] });
+    expect(read).not.toHaveBeenCalled();
+    // Simulates a crash after the registry accepted the ticket, before the
+    // spool consumer was qualified. The first operation creates its proof.
+    expect((await cold.snapshot('assignment-fixed')).consumers).toEqual([expect.objectContaining({ qualified: true, expiresAt: SURFACE_EXPIRY })]);
+    expect(read).toHaveBeenCalled();
+  } finally { read.mockRestore(); }
+});
+
+it('revokes deferred obligations before materialization and retains a failed binding for retry', async () => {
+  const fixture = await createFixture(); await fixture.spool.open('assignment-fixed', ref);
+  const cold = restartedSpool(fixture);
+  await cold.deferRecoveredConsumers({ assignmentId: 'assignment-fixed', ref, consumers: [{ consumer: surface, expiresAt: SURFACE_EXPIRY }] });
+  await cold.revokeConsumer({ assignmentId: 'assignment-fixed', consumer: surface });
+  expect((await cold.snapshot('assignment-fixed')).consumers).toHaveLength(0);
+  await cold.deferRecoveredConsumers({ assignmentId: 'assignment-fixed', ref: { ...ref, runId: 'wrong-run' }, consumers: [{ consumer: surface, expiresAt: SURFACE_EXPIRY }] });
+  await expect(cold.snapshot('assignment-fixed')).rejects.toThrow();
+  await expect(cold.snapshot('assignment-fixed')).rejects.toThrow();
+});
+
+it('restores a deferred consumer before retention decisions can reclaim its unread final', async () => {
+  const fixture = await createFixture();
+  const final = await fixture.spool.finalize({ assignmentId: 'assignment-fixed', ref });
+  await fixture.spool.markTerminal('assignment-fixed', final.seq);
+  const cold = restartedSpool(fixture);
+  await cold.deferRecoveredConsumers({ assignmentId: 'assignment-fixed', ref, consumers: [{ consumer: surface, expiresAt: '2026-07-30T00:00:00.000Z' }] });
+  fixture.now = '2026-07-25T00:00:00.000Z';
+  expect(await cold.reclaimDue('assignment-fixed')).toBe(false);
+  const state = await cold.snapshot('assignment-fixed');
+  expect(state.consumers[0]).toMatchObject({ qualified: true, ackSeq: 0 });
+  expect(state.reclaimAfter).toBeUndefined();
+});

@@ -644,21 +644,21 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
     });
   });
 
-  it.each([false, true])("bounds recovery qualifications and drains in-flight work before returning (failure=%s)", async failing => {
+  it.each([false, true])("bounds recovery obligation registration and drains in-flight work before returning (failure=%s)", async failing => {
     const root = await createTempDir("ticket-recovery-batch");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     const clock = () => "2026-07-23T00:01:00.000Z";
     const binding = { ref, executorId: "executor-fixed", ownerKeyId: "owner-fixed" };
     const assignments = { dataPlaneBinding: vi.fn(async () => binding),
       dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => binding)) };
-    const spool = { qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
+    const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
     const registry = new DataPlaneTicketRegistry({ log: new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock }),
       executorId: "executor-fixed", verifier: identity, assignments, spool, clock, monotonicClock: () => 1000 });
-    for (let i = 0; i < 35; i++) await registry.accept(createTicketAt("run-observe", "recovery-" + i, "2026-07-23T00:00:00.000Z", "2026-07-23T00:05:00.000Z", identity));
+    for (let i = 0; i < 35; i++) await registry.accept(createTicketAt("run-observe", "recovery-" + i, "2026-07-23T00:00:00.000Z", "2026-07-23T00:05:00.000Z", identity, "recovery-assignment-" + i % 8));
     assignments.dataPlaneBinding.mockClear();
     const gates: ReturnType<typeof Promise.withResolvers<void>>[] = [];
     let active = 0, maximum = 0, released = false, done = false;
-    vi.mocked(spool.qualifyConsumer).mockImplementation(async () => {
+    vi.mocked(spool.deferRecoveredConsumers).mockImplementation(async () => {
       active++; maximum = Math.max(maximum, active);
       const gate = Promise.withResolvers<void>(); gates.push(gate);
       try { if (!released) await gate.promise; } finally { active--; }
@@ -754,13 +754,14 @@ function createTicketAt(
   issuedAt: string,
   expiry: string,
   signer: ProtocolSigner,
+  assignmentId = "assignment-fixed",
 ): DataPlaneTicket {
   return createSignedDataPlaneTicket(
     {
       v: 1,
       ticketId,
       ref,
-      assignmentId: "assignment-fixed",
+      assignmentId,
       surfacePrincipal: "surface:origin",
       executorId: "executor-fixed",
       issuedAt,
@@ -771,3 +772,109 @@ function createTicketAt(
     signer,
   );
 }
+
+it('retires a recovered invalid binding batch durably before revoking its consumers', async () => {
+  const root = await createTempDir('ticket-recovery-retirement-batch');
+  const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+  const clock = () => '2026-07-23T00:01:00.000Z';
+  const log = new FileAuthorityCommitLog(path.join(root, 'authority'), artifacts, { clock });
+  const binding = { ref, executorId: 'executor-fixed', ownerKeyId: 'owner-fixed' };
+  const assignments = { dataPlaneBinding: vi.fn(async () => binding),
+    dataPlaneBindings: vi.fn(async (requests: readonly unknown[]) => requests.map(() => undefined)) };
+  const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
+  const options = { log, executorId: 'executor-fixed', verifier: identity, assignments, spool, clock, monotonicClock: () => 1000 };
+  const registry = new DataPlaneTicketRegistry(options);
+  for (let i = 0; i < 35; i++) await registry.accept(createTicketAt('run-observe', 'invalid-recovery-' + i, '2026-07-23T00:00:00.000Z', '2026-07-23T00:05:00.000Z', identity));
+  vi.mocked(spool.qualifyConsumer).mockClear(); assignments.dataPlaneBinding.mockClear();
+  vi.mocked(spool.revokeConsumer).mockImplementation(async input => {
+    if (input.consumer.kind !== 'surface-ticket') throw Error('Unexpected recovered consumer');
+    const ticketId = input.consumer.ticketId;
+    const records = (await log.readAll()).flatMap(envelope => envelope.entries.map(entry => entry.body as { t?: string; ticketId?: string }));
+    expect(records.some(record => record.t === 'data-plane-ticket-retired' && record.ticketId === ticketId)).toBe(true);
+    return undefined;
+  });
+  const recovered = new DataPlaneTicketRegistry(options);
+  await recovered.recover();
+  const retirementEnvelopes = (await log.readAll()).filter(envelope => envelope.entries.some(entry => (entry.body as {t?:string}).t === 'data-plane-ticket-retired'));
+  expect(retirementEnvelopes.map(envelope => envelope.entries.length)).toEqual([32, 3]);
+  // 物理撤销不在启动路径上：恢复只耐久退休，周期维护每轮有界地补齐。
+  expect(spool.revokeConsumer).not.toHaveBeenCalled();
+  for (let round = 1; round <= 5; round++) {
+    await recovered.maintain();
+    expect(vi.mocked(spool.revokeConsumer).mock.calls.length).toBe(Math.min(35, round * 8));
+  }
+  await recovered.maintain();
+  expect(spool.revokeConsumer).toHaveBeenCalledTimes(35); expect(spool.qualifyConsumer).not.toHaveBeenCalled();
+  expect(assignments.dataPlaneBinding).not.toHaveBeenCalled();
+  expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual([32, 3]);
+}, 30_000);
+
+
+it('retries failed retirement effects and retains completed revocations across restart', async () => {
+  const root = await createTempDir('ticket-retirement-effects');
+  const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+  const clock = () => '2026-07-23T00:01:00.000Z';
+  const log = new FileAuthorityCommitLog(path.join(root, 'authority'), artifacts, { clock });
+  const spool = { deferRecoveredConsumers: vi.fn(async () => {}), qualifyConsumer: vi.fn(async () => {}), revokeConsumer: vi.fn(async () => {}) } as unknown as AssignmentStreamSpool;
+  const options = { log, spool, clock, executorId: 'executor-fixed', verifier: identity,
+    assignments: { async dataPlaneBinding() { return { ref, executorId: 'executor-fixed', ownerKeyId: 'owner-fixed' }; } } };
+  const registry = new DataPlaneTicketRegistry(options);
+  const ticket = createTicket('run-observe'); await registry.accept(ticket);
+  vi.mocked(spool.revokeConsumer).mockRejectedValueOnce(Error('physical retirement failed'));
+  await expect(registry.revoke({ assignmentId: ticket.assignmentId, ticketId: ticket.ticketId })).rejects.toThrow('physical retirement failed');
+  await registry.maintain(); expect(spool.revokeConsumer).toHaveBeenCalledTimes(2);
+  await registry.maintain(); await registry.recover(); expect(spool.revokeConsumer).toHaveBeenCalledTimes(2);
+  await expect(registry.accept(ticket)).resolves.toEqual(ticket); expect(spool.qualifyConsumer).toHaveBeenCalledOnce();
+  const restarted = new DataPlaneTicketRegistry(options); await restarted.recover();
+  expect(spool.revokeConsumer).toHaveBeenCalledTimes(2);
+  await expect(restarted.authorize(ticket.ticketId, 'observe', { assignmentId: ticket.assignmentId, ref, executorId: 'executor-fixed', surfacePrincipal: ticket.surfacePrincipal })).rejects.toThrow('retired');
+  expect(spool.qualifyConsumer).toHaveBeenCalledOnce();
+});
+
+
+it('redrives the effect-to-receipt crash window, binds its consumer epoch and preserves a new ticket', async () => {
+  const root = await createTempDir('ticket-revocation-receipt');
+  const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+  const clock = () => '2026-07-23T00:01:00.000Z';
+  const log = new FileAuthorityCommitLog(path.join(root, 'authority'), artifacts, { clock });
+  const spool = new AssignmentStreamSpool(path.join(root, 'spool'), artifacts, { clock });
+  const options = { log, spool, clock, executorId: 'executor-fixed', verifier: identity,
+    assignments: { async dataPlaneBinding() { return { ref, executorId: 'executor-fixed', ownerKeyId: 'owner-fixed' }; } } };
+  const registry = new DataPlaneTicketRegistry(options), ticket = createTicket('run-observe');
+  await registry.accept(ticket);
+  const epoch = await spool.beginConnection(ticket.assignmentId, ref, { kind: 'surface-ticket', ticketId: ticket.ticketId });
+  const original = spool.revokeConsumer.bind(spool);
+  const revoke = vi.spyOn(spool, 'revokeConsumer').mockImplementationOnce(async input => {
+    await original(input); throw Error('crash after durable spool revoke');
+  });
+  await expect(registry.revoke({ assignmentId: ticket.assignmentId, ticketId: ticket.ticketId })).rejects.toThrow('crash after durable spool revoke');
+  // 恢复只重建授权视图，不在就绪路径上补做物理撤销；周期维护补齐撤销与回执。
+  const recovered = new DataPlaneTicketRegistry(options);
+  await recovered.recover();
+  expect(revoke).toHaveBeenCalledTimes(1);
+  await expect(recovered.authorize(ticket.ticketId, 'observe', { assignmentId: ticket.assignmentId, ref, executorId: 'executor-fixed', surfacePrincipal: ticket.surfacePrincipal })).rejects.toThrow('retired');
+  await recovered.maintain();
+  expect(revoke).toHaveBeenCalledTimes(2);
+  const receipts = (await log.readAll()).flatMap(envelope => envelope.entries.map(entry => entry.body as any))
+    .filter(body => body.t === 'data-plane-ticket-revocation-completed');
+  expect(receipts).toEqual([{ t: 'data-plane-ticket-revocation-completed', assignmentId: ticket.assignmentId, ticketId: ticket.ticketId, streamEpoch: epoch }]);
+  const renewed = createTicketAt('run-observe', 'new-ticket-after-revocation', ticket.issuedAt, ticket.expiry, identity);
+  const restarted = new DataPlaneTicketRegistry(options); await restarted.accept(renewed); await restarted.recover(); await restarted.maintain();
+  expect(revoke).toHaveBeenCalledTimes(2);
+  expect((await spool.snapshot(ticket.assignmentId)).consumers).toContainEqual(expect.objectContaining({ key: 'surface:' + renewed.ticketId, qualified: true }));
+  await expect(restarted.authorize(ticket.ticketId, 'observe', { assignmentId: ticket.assignmentId, ref, executorId: 'executor-fixed', surfacePrincipal: ticket.surfacePrincipal })).rejects.toThrow('retired');
+});
+
+it('rejects a revocation completion whose durable retirement binds another assignment', async () => {
+  const root = await createTempDir('ticket-corrupt-revocation-receipt');
+  const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+  const clock = () => '2026-07-23T00:01:00.000Z';
+  const log = new FileAuthorityCommitLog(path.join(root, 'authority'), artifacts, { clock });
+  const spool = new AssignmentStreamSpool(path.join(root, 'spool'), artifacts, { clock });
+  const options = { log, spool, clock, executorId: 'executor-fixed', verifier: identity,
+    assignments: { async dataPlaneBinding() { return { ref, executorId: 'executor-fixed', ownerKeyId: 'owner-fixed' }; } } };
+  const registry = new DataPlaneTicketRegistry(options), ticket = createTicket('run-observe');
+  await registry.accept(ticket); await registry.revoke({ assignmentId: ticket.assignmentId, ticketId: ticket.ticketId });
+  await log.append([{ stream: 'assignment:another-assignment:data-plane-tickets', body: { t: 'data-plane-ticket-revocation-completed', assignmentId: 'another-assignment', ticketId: ticket.ticketId, streamEpoch: null } }]);
+  await expect(new DataPlaneTicketRegistry(options).recover()).rejects.toThrow('no matching retirement');
+});

@@ -392,6 +392,25 @@ interface CachedProjection {
   readonly cursor: ProjectionCursor;
 }
 
+type ConsumerQualification = { readonly consumer: StreamConsumerAuth; readonly expiresAt?: IsoTime };
+interface ConsumerQualificationBatch {
+  readonly assignmentId: string;
+  readonly ref: ExecutionRef;
+  readonly consumers: readonly ConsumerQualification[];
+}
+function validateConsumerQualifications(input: ConsumerQualificationBatch): void {
+    if (!input.consumers.length || input.consumers.length > 32) throw new RangeError('Stream qualification batch exceeds its bound');
+    const keys = new Set<string>();
+    for (const entry of input.consumers) {
+      if (entry.expiresAt !== undefined) assertCanonicalTime(entry.expiresAt);
+      if (entry.consumer.kind === 'owner-relay' && entry.expiresAt !== undefined) throw new TypeError('Owner relay stream consumers do not expire');
+      if (entry.consumer.kind === 'surface-ticket' && entry.expiresAt === undefined) throw new TypeError('Surface stream authorization requires a stable expiry');
+      const key = streamConsumerKey(entry.consumer);
+      if (keys.has(key)) throw new TypeError('Duplicate stream consumer qualification');
+      keys.add(key);
+    }
+}
+
 interface AssignmentHandle {
   readonly assignmentId: string;
   readonly directory: string;
@@ -399,6 +418,8 @@ interface AssignmentHandle {
   readonly log: FileAuthorityCommitLog;
   readonly queue: SerialTaskQueue;
   readonly waiters: Set<() => void>;
+  deferredConsumers?: { ref: ExecutionRef; consumers: Map<string, ConsumerQualification> };
+  restoringConsumers?: boolean;
   cache?: CachedProjection;
   cleanupComplete: boolean;
   producers: number;
@@ -587,61 +608,76 @@ export class AssignmentStreamSpool {
     readonly consumer: StreamConsumerAuth;
     readonly expiresAt?: IsoTime;
   }): Promise<StreamSpoolSnapshot> {
-    if (input.expiresAt !== undefined) assertCanonicalTime(input.expiresAt);
-    if (
-      input.consumer.kind === "owner-relay" &&
-      input.expiresAt !== undefined
-    ) {
-      throw new TypeError("Owner relay stream consumers do not expire");
-    }
-    if (
-      input.consumer.kind === "surface-ticket" &&
-      input.expiresAt === undefined
-    ) {
-      throw new TypeError("Surface stream authorization requires a stable expiry");
-    }
+    return this.qualifyConsumers({ ...input, consumers: [input] });
+  }
+
+  /** One recovery decision opens this assignment once. The same queue and
+   * authority transaction still own every consumer qualification. */
+  async qualifyConsumers(input: ConsumerQualificationBatch): Promise<StreamSpoolSnapshot> {
+    validateConsumerQualifications(input);
     const handle = this.#handle(input.assignmentId);
-    return handle.queue.run(async () => {
-      const opened = await this.#openUnlocked(handle, input.ref);
-      const key = streamConsumerKey(input.consumer);
-      const qualified = opened.consumers.get(key);
-      if (qualified?.qualified && qualified.kind === input.consumer.kind && qualified.expiresAt === input.expiresAt) {
-        return snapshotOf(opened);
+    return handle.queue.run(() => this.#qualifyConsumersUnlocked(handle, input));
+  }
+
+  /** The registry has verified the durable tickets. Hold their retention
+   * obligations in this assignment's existing owner until its first physical
+   * operation. No history read or detached recovery task runs at registration. */
+  async deferRecoveredConsumers(input: ConsumerQualificationBatch): Promise<void> {
+    validateConsumerQualifications(input);
+    const handle = this.#handle(input.assignmentId);
+    await handle.queue.run(async () => {
+      const pending = handle.deferredConsumers;
+      if (pending && canonicalize(pending.ref) !== canonicalize(input.ref)) throw new TypeError('Recovered stream consumers bind different executions');
+      const deferred = pending ?? { ref: clone(input.ref), consumers: new Map<string, ConsumerQualification>() };
+      for (const entry of input.consumers) {
+        const key = streamConsumerKey(entry.consumer), old = deferred.consumers.get(key);
+        if (old && canonicalize(old) !== canonicalize(entry)) throw new TypeError('Recovered stream consumer identity changed');
+        deferred.consumers.set(key, clone(entry));
       }
-      const result = await this.#transact(handle, (state) => {
-        assertOpen(state);
-        assertSameExecution(state, input.ref);
-        const current = state.consumers.get(key);
-        if (
-          current?.qualified &&
-          current.kind === input.consumer.kind &&
-          current.expiresAt === input.expiresAt
-        ) {
-          return { kind: "return", value: undefined };
+      handle.deferredConsumers = deferred;
+    });
+  }
+
+  async #restoreDeferredConsumers(handle: AssignmentHandle): Promise<void> {
+    if (handle.restoringConsumers || !handle.deferredConsumers) return;
+    handle.restoringConsumers = true;
+    try {
+      const pending = handle.deferredConsumers;
+      while (pending.consumers.size) {
+        const batch: [string, ConsumerQualification][] = [];
+        for (const entry of pending.consumers) { batch.push(entry); if (batch.length === 32) break; }
+        await this.#qualifyConsumersUnlocked(handle, { assignmentId: handle.assignmentId, ref: pending.ref, consumers: batch.map(([, value]) => value) });
+        for (const [key] of batch) pending.consumers.delete(key);
+      }
+      handle.deferredConsumers = undefined;
+    } finally { handle.restoringConsumers = false; }
+  }
+
+  /** Called only under the existing assignment queue. */
+  async #qualifyConsumersUnlocked(handle: AssignmentHandle, input: ConsumerQualificationBatch): Promise<StreamSpoolSnapshot> {
+      const opened = await this.#openUnlocked(handle, input.ref);
+      const matches = (state: SpoolProjection, entry: typeof input.consumers[number]) => {
+        const current = state.consumers.get(streamConsumerKey(entry.consumer));
+        return current?.qualified && current.kind === entry.consumer.kind && current.expiresAt === entry.expiresAt;
+      };
+      if (input.consumers.every(entry => matches(opened, entry))) return snapshotOf(opened);
+      const result = await this.#transact(handle, state => {
+        assertOpen(state); assertSameExecution(state, input.ref);
+        const entries: ReturnType<typeof record>[] = [];
+        let disarm: string | undefined;
+        for (const entry of input.consumers) {
+          if (matches(state, entry)) continue;
+          const key = streamConsumerKey(entry.consumer), current = state.consumers.get(key);
+          entries.push(record({ t: 'consumer-qualified', key, kind: entry.consumer.kind,
+            ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }) }));
+          if (state.reclaimAfter !== undefined && !(current?.degraded ?? false) &&
+              !(state.verifier?.finalSeq !== undefined && (current?.ackSeq ?? 0) >= state.verifier.finalSeq)) disarm ??= key;
         }
-        return {
-          kind: "append",
-          entries: [
-            record({
-              t: "consumer-qualified",
-              key,
-              kind: input.consumer.kind,
-              ...(input.expiresAt === undefined
-                ? {}
-                : { expiresAt: input.expiresAt }),
-            }),
-            ...(state.reclaimAfter === undefined ||
-            (current?.degraded ?? false) ||
-            (state.verifier?.finalSeq !== undefined &&
-              (current?.ackSeq ?? 0) >= state.verifier.finalSeq)
-              ? []
-              : [record({ t: "reclaim-disarmed" as const, key })]),
-          ],
-          value: undefined,
-        };
+        if (!entries.length) return { kind: 'return', value: undefined };
+        if (disarm !== undefined) entries.push(record({ t: 'reclaim-disarmed', key: disarm }));
+        return { kind: 'append', entries, value: undefined };
       });
       return snapshotOf(result.state);
-    });
   }
 
   async revokeConsumer(input: {
@@ -650,6 +686,7 @@ export class AssignmentStreamSpool {
   }): Promise<StreamSpoolSnapshot | undefined> {
     const handle = this.#handle(input.assignmentId);
     return handle.queue.run(async () => {
+      handle.deferredConsumers?.consumers.delete(streamConsumerKey(input.consumer));
       // Permanent reclamation already removed every consumer. Retirement replay
       // must remain idempotent, without recreating the spool or its index.
       if (await this.#isTombstoned(handle)) return undefined;
@@ -1419,6 +1456,7 @@ export class AssignmentStreamSpool {
   }
 
   async #select(handle: AssignmentHandle): Promise<SpoolProjection> {
+    await this.#restoreDeferredConsumers(handle);
     const cached = handle.cache;
     const result = await handle.log.readProjection<SpoolProjection, SpoolRecord>(
       cached?.state ?? emptyProjection(handle.assignmentId),
@@ -1437,6 +1475,7 @@ export class AssignmentStreamSpool {
     ) => ProjectionTransactionDecision<SpoolRecord, Value>,
     candidateReferences: readonly ArtifactRef[] = [],
   ) {
+    await this.#restoreDeferredConsumers(handle);
     const cached = handle.cache;
     const result = await handle.log.transactProjection<
       SpoolProjection,

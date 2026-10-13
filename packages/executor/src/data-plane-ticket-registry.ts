@@ -30,7 +30,16 @@ import {
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import type { AssignmentStreamSpool } from "./assignment-stream-spool.js";
 
+const MAINTENANCE_REVOCATION_BATCH = 8;
+
 type TicketRegistryRecord =
+  | {
+      readonly t: "data-plane-ticket-revocation-completed";
+      readonly assignmentId: string;
+      readonly ticketId: string;
+      /** null means the permanently reclaimed spool has no live generation. */
+      readonly streamEpoch: number | null;
+    }
   | {
       readonly t: "data-plane-ticket-accepted";
       readonly ticket: DataPlaneTicket;
@@ -64,6 +73,7 @@ interface RetiredTicket {
   readonly ticketDigest?: string;
   readonly reason: "expired" | "invalidated" | "revoked";
   readonly retainUntil: string;
+  readonly revocation?: { readonly streamEpoch: number | null };
 }
 
 interface TicketRegistryProjection {
@@ -129,6 +139,10 @@ export class DataPlaneTicketRegistry {
   readonly #monotonicClock: () => number;
   readonly #operations = new SerialTaskQueue();
   readonly #deadlines = new Map<string, number>();
+  readonly #pendingRevocations = new Map<string, { assignmentId: string; streamEpoch: number | null }>();
+  // Completed physical effects only. Authorization always reads the durable
+  // retirement; a new registry replays every outstanding consumer revocation.
+  readonly #revokedConsumers = new Map<string, string>();
   #projection:
     | { readonly state: TicketRegistryProjection; readonly cursor: ProjectionCursor }
     | undefined;
@@ -145,7 +159,7 @@ export class DataPlaneTicketRegistry {
   }
 
   async accept(input: unknown): Promise<DataPlaneTicket> {
-    await this.maintain();
+    await this.maintain(undefined, 0);
     const ticket = validateDataPlaneTicket(input, this.#verifier);
     if (ticket.executorId !== this.#executorId) {
       throw new TypeError("Data-plane ticket targets a different executor");
@@ -278,6 +292,10 @@ export class DataPlaneTicketRegistry {
         return;
       }
       const accepted = transaction.state.accepted.get(ticket.ticketId)!;
+      if (!transaction.value.existing) {
+        this.#revokedConsumers.delete(ticket.ticketId);
+        this.#pendingRevocations.delete(ticket.ticketId);
+      }
       this.#deadlineFor(ticket.ticketId, accepted);
       await this.#restoreAcceptedConsumer(
         accepted,
@@ -291,7 +309,7 @@ export class DataPlaneTicketRegistry {
     readonly assignmentId: string;
     readonly ticketId: string;
   }): Promise<boolean> {
-    await this.maintain();
+    await this.maintain(undefined, 0);
     assertProtocolIdentifier(input.assignmentId, "Ticket revocation assignment id");
     assertProtocolIdentifier(input.ticketId, "Ticket revocation ticket id");
     return this.#operations.run(async () => {
@@ -406,7 +424,7 @@ export class DataPlaneTicketRegistry {
   }
 
   async recover(): Promise<void> {
-    await this.maintain();
+    await this.maintain(undefined, 0);
     await this.#operations.run(async () => {
       const projection = await this.#load();
       const entries = [...projection.state.accepted.values()];
@@ -421,6 +439,31 @@ export class DataPlaneTicketRegistry {
             ? await this.#assignments.dataPlaneBindings(batch.map(entry => ({ assignmentId: entry.ticket.assignmentId,
               use: entry.ticket.kind === "abort" ? "abort" as const : "observe" as const }))) : undefined;
           if (bindings && bindings.length !== batch.length) throw new Error("Assignment binding batch length mismatch");
+          if (bindings) {
+            const retirements = batch.flatMap((entry, index) => {
+              const reason = this.#retirementReason(entry, bindings[index]);
+              return reason ? [{ assignmentId: entry.ticket.assignmentId, ticketId: entry.ticket.ticketId, reason }] : [];
+            });
+            if (retirements.length) {
+              await Promise.all(pending);
+              if (failed) break;
+              // The registry queue owns this immutable binding batch. Publish
+              // its retirements in one authority transaction before effects.
+              await this.#appendRetirements(retirements);
+            }
+          }
+          const groups = new Map<string, { ticket: DataPlaneTicket; expiresAt: string }[]>();
+          const qualifyGroups = async () => {
+            for (const group of groups.values()) {
+              if (failed) break;
+              const first = group[0]!;
+              const work = this.#spool.deferRecoveredConsumers({ assignmentId: first.ticket.assignmentId, ref: first.ticket.ref,
+                consumers: group.map(({ ticket, expiresAt }) => ({ consumer: surfaceConsumer(ticket.ticketId), expiresAt })) }).then(() => {}, fail);
+              pending.add(work); void work.then(() => pending.delete(work));
+              if (pending.size >= 4) await Promise.race(pending);
+            }
+            groups.clear();
+          };
           for (const [index, entry] of batch.entries()) {
             if (failed) break;
             const authorization = await this.#authorizeUnlocked(entry.ticket.ticketId,
@@ -429,19 +472,15 @@ export class DataPlaneTicketRegistry {
                 surfacePrincipal: entry.ticket.surfacePrincipal }, this.#projection!.state,
               bindings ? { value: bindings[index] } : undefined);
             if (entry.ticket.kind === "abort") continue;
-            if (authorization.kind !== "authorized") {
-              // Earlier qualifications must finish before any later revocation.
-              await Promise.all(pending);
-              if (failed) break;
-              await this.#revokeConsumer(entry.ticket);
-              continue;
-            }
+            // 授权已失效的票据不在启动路径上做物理撤销：访问一律以耐久退休为准拒绝，
+            // spool 上的资格撤销只影响保留回收，由有界的周期维护补齐，不随过期票据数拖慢就绪。
+            if (authorization.kind !== "authorized") continue;
             if (failed) break;
-            const work = this.#qualify(entry.ticket, authorization.value.expiresAt).catch(fail);
-            pending.add(work);
-            void work.then(() => pending.delete(work));
-            if (pending.size >= 4) await Promise.race(pending);
+            const key = canonicalize({ assignmentId: entry.ticket.assignmentId, ref: entry.ticket.ref });
+            const group = groups.get(key) ?? [];
+            group.push({ ticket: entry.ticket, expiresAt: authorization.value.expiresAt }); groups.set(key, group);
           }
+          await qualifyGroups();
         }
       } catch (error) { fail(error); }
       // No background writes may outlive recovery or a failed startup.
@@ -450,11 +489,19 @@ export class DataPlaneTicketRegistry {
     });
   }
 
-  async maintain(runPhysicalStep?: PhysicalStorageStepRunner): Promise<number> {
+  /**
+   * 退休已过期票据并推进退休前沿；`physicalRevocations` 限定本轮补做的 spool 资格撤销数。
+   * 签发、撤销与恢复路径内联调用时传 0：访问一律以耐久退休为准拒绝，资格撤销只影响
+   * 保留回收，交给有界的周期维护，不随过期票据数拖慢就绪或首次签发。
+   */
+  async maintain(
+    runPhysicalStep?: PhysicalStorageStepRunner,
+    physicalRevocations = MAINTENANCE_REVOCATION_BATCH,
+  ): Promise<number> {
     // 容量准入由调用方经 runPhysicalStep 提供,在 registry 串行段内、退休
     // 事务批(耐久追加 + 前沿推进)前取得;permit 绝不横跨串行队列等待。
     const step = runPhysicalStep ?? ((operation) => operation());
-    return this.#operations.run(() => step(async () => {
+    const expired = await this.#operations.run(() => step(async () => {
       const monotonicNow = this.#monotonicClock();
       const transaction = await this.#transact<readonly DataPlaneTicket[]>(
         (state, context) => {
@@ -489,9 +536,22 @@ export class DataPlaneTicketRegistry {
       for (const ticket of transaction.value) {
         this.#deadlines.delete(ticket.ticketId);
       }
-      for (const [ticketId, retired] of transaction.state.retired) {
-        await this.#revokeConsumerIdentity(retired.assignmentId, ticketId);
-      }
+      return transaction.value.length;
+    }));
+    // 物理撤销逐个排入登记表队列：前台签发与授权最多等一次撤销，不等整批；余量留给下一轮。
+    for (let revocations = 0; revocations < physicalRevocations; revocations += 1) {
+      const revoked = await this.#operations.run(() => step(async () => {
+        for (const [ticketId, retired] of this.#projection?.state.retired ?? []) {
+          if (retired.revocation || this.#revokedConsumers.get(ticketId) === retired.assignmentId) continue;
+          await this.#revokeConsumerIdentity(retired.assignmentId, ticketId, true);
+          return true;
+        }
+        return false;
+      }));
+      if (!revoked) break;
+    }
+    await this.#operations.run(() => step(async () => {
+      await this.#flushRevocations();
       await this.#transact<void>((state, context) => {
         const retiredThrough = nextRetirementFrontier(state, context.at);
         if (retiredThrough === undefined) {
@@ -505,8 +565,11 @@ export class DataPlaneTicketRegistry {
           value: undefined,
         };
       });
-      return transaction.value.length;
+      for (const ticketId of this.#revokedConsumers.keys()) {
+        if (!this.#projection!.state.retired.has(ticketId)) this.#revokedConsumers.delete(ticketId);
+      }
     }));
+    return expired;
   }
 
   async #restoreAcceptedConsumer(
@@ -553,25 +616,9 @@ export class DataPlaneTicketRegistry {
       accepted.ticket.assignmentId,
       use,
     );
-    if (
-      !currentActivation ||
-      !ticketActivationMatches(accepted.ticket, accepted.activation) ||
-      canonicalize(currentActivation) !== canonicalize(accepted.activation)
-    ) {
-      await this.#appendRetirement(
-        accepted.ticket.assignmentId,
-        ticketId,
-        "invalidated",
-      );
-      return { kind: "retired", ticket: accepted.ticket };
-    }
-    const deadline = this.#deadlineFor(ticketId, accepted);
-    if (this.#monotonicClock() >= deadline) {
-      await this.#appendRetirement(
-        accepted.ticket.assignmentId,
-        ticketId,
-        "expired",
-      );
+    const reason = this.#retirementReason(accepted, currentActivation);
+    if (reason) {
+      await this.#appendRetirement(accepted.ticket.assignmentId, ticketId, reason);
       return { kind: "retired", ticket: accepted.ticket };
     }
     return {
@@ -582,6 +629,13 @@ export class DataPlaneTicketRegistry {
         expiresAt: acceptedTicketExpiresAt(accepted),
       },
     };
+  }
+
+  #retirementReason(accepted: AcceptedTicket, current: DataPlaneAssignmentBinding | undefined): TicketRetirementReason | undefined {
+    if (!current || !ticketActivationMatches(accepted.ticket, accepted.activation) || canonicalize(current) !== canonicalize(accepted.activation)) return "invalidated";
+    const deadline = this.#deadlineFor(accepted.ticket.ticketId, accepted);
+    if (this.#monotonicClock() >= deadline) return "expired";
+    return undefined;
   }
 
   async #qualify(ticket: DataPlaneTicket, expiresAt: string): Promise<void> {
@@ -613,39 +667,29 @@ export class DataPlaneTicketRegistry {
     reason: TicketRetirementReason,
     ticketDigest?: string,
   ): Promise<void> {
+    return this.#appendRetirements([{ assignmentId, ticketId, reason, ticketDigest }]);
+  }
+
+  async #appendRetirements(retirements: readonly { assignmentId: string; ticketId: string; reason: TicketRetirementReason; ticketDigest?: string }[]): Promise<void> {
+    if (retirements.length > 32) throw new TypeError("Ticket retirement batch exceeds 32");
     await this.#transact<void>((state, context) => {
-      const accepted = state.accepted.get(ticketId);
-      if (accepted && accepted.ticket.assignmentId !== assignmentId) {
-        throw new Error("Ticket retirement binds a different assignment");
-      }
-      const retired = state.retired.get(ticketId);
-      if (retired) {
-        if (retired.assignmentId !== assignmentId) {
+      const entries: { stream: string; body: TicketRegistryRecord }[] = [];
+      for (const { assignmentId, ticketId, reason, ticketDigest } of retirements) {
+        const accepted = state.accepted.get(ticketId), retired = state.retired.get(ticketId);
+        if (accepted && accepted.ticket.assignmentId !== assignmentId || retired && retired.assignmentId !== assignmentId) {
           throw new Error("Ticket retirement binds a different assignment");
         }
-        return { kind: "return", value: undefined };
+        if (retired) continue;
+        const digest = ticketDigest ?? (accepted === undefined ? undefined : dataPlaneTicketDigest(accepted.ticket));
+        entries.push(ticketRecord(assignmentId, {
+          t: "data-plane-ticket-retired", assignmentId, ticketId,
+          ...(digest === undefined ? {} : { ticketDigest: digest }), reason,
+          retainUntil: retentionDeadline(projectionTime(state, context.at)),
+        }));
       }
-      const digest =
-        ticketDigest ??
-        (accepted === undefined
-          ? undefined
-          : dataPlaneTicketDigest(accepted.ticket));
-      return {
-        kind: "append",
-        entries: [
-          ticketRecord(assignmentId, {
-            t: "data-plane-ticket-retired",
-            assignmentId,
-            ticketId,
-            ...(digest === undefined ? {} : { ticketDigest: digest }),
-            reason,
-            retainUntil: retentionDeadline(projectionTime(state, context.at)),
-          }),
-        ],
-        value: undefined,
-      };
+      return entries.length ? { kind: "append", entries, value: undefined } : { kind: "return", value: undefined };
     });
-    this.#deadlines.delete(ticketId);
+    for (const { ticketId } of retirements) this.#deadlines.delete(ticketId);
   }
 
   async #revokeConsumer(ticket: DataPlaneTicket): Promise<void> {
@@ -655,11 +699,42 @@ export class DataPlaneTicketRegistry {
   async #revokeConsumerIdentity(
     assignmentId: string,
     ticketId: string,
+    deferCompletion = false,
   ): Promise<void> {
-    await this.#spool.revokeConsumer({
+    const retired = this.#projection?.state.retired.get(ticketId);
+    if (retired?.assignmentId === assignmentId && retired.revocation) return;
+    if (this.#revokedConsumers.get(ticketId) === assignmentId) return;
+    const result = await this.#spool.revokeConsumer({
       assignmentId,
       consumer: surfaceConsumer(ticketId),
     });
+    const consumer = result?.consumers.find(value => value.key === `surface:${ticketId}`);
+    if (result && result.assignmentId !== assignmentId || consumer?.qualified) {
+      throw new Error('Consumer revocation did not settle the matching stream consumer');
+    }
+    // Failed effects retain their obligation; success cannot requalify this
+    // ticket because its immutable retirement is already authoritative.
+    if (this.#projection?.state.retired.get(ticketId)?.assignmentId === assignmentId) {
+      this.#revokedConsumers.set(ticketId, assignmentId);
+      this.#pendingRevocations.set(ticketId, { assignmentId, streamEpoch: consumer?.streamEpoch ?? null });
+      if (!deferCompletion) await this.#flushRevocations();
+    }
+  }
+
+  async #flushRevocations(): Promise<void> {
+    while (this.#pendingRevocations.size) {
+      const batch = [...this.#pendingRevocations].slice(0, 32);
+      await this.#transact<void>(state => {
+        const entries = batch.flatMap(([ticketId, receipt]) => {
+          const retired = state.retired.get(ticketId);
+          if (!retired || retired.revocation) return [];
+          if (retired.assignmentId !== receipt.assignmentId) throw Error('Revocation completion changed assignment');
+          return [ticketRecord(receipt.assignmentId, { t: 'data-plane-ticket-revocation-completed', ticketId, ...receipt })];
+        });
+        return entries.length ? { kind: 'append', entries, value: undefined } : { kind: 'return', value: undefined };
+      });
+      for (const [ticketId, receipt] of batch) if (this.#pendingRevocations.get(ticketId) === receipt) this.#pendingRevocations.delete(ticketId);
+    }
   }
 
   async #load(): Promise<{
@@ -765,6 +840,17 @@ function reduceTicketRegistry(
   ) {
     throw new TypeError("Ticket registry record is stored in the wrong logical stream");
   }
+  if (record.t === 'data-plane-ticket-revocation-completed') {
+    const retired = state.retired.get(record.ticketId);
+    if (!retired || retired.assignmentId !== record.assignmentId || state.accepted.has(record.ticketId)) {
+      throw new TypeError('Consumer revocation completion has no matching retirement');
+    }
+    if (retired.revocation && retired.revocation.streamEpoch !== record.streamEpoch) {
+      throw new TypeError('Consumer revocation completion changed its stream generation');
+    }
+    state.retired.set(record.ticketId, { ...retired, revocation: { streamEpoch: record.streamEpoch } });
+    return state;
+  }
   if (record.t === "data-plane-ticket-accepted") {
     if (
       !Number.isSafeInteger(record.validForMs) ||
@@ -822,6 +908,7 @@ function reduceTicketRegistry(
         Date.parse(record.retainUntil) > Date.parse(existing.retainUntil)
           ? record.retainUntil
           : existing.retainUntil,
+      ...(existing.revocation ? { revocation: existing.revocation } : {}),
     });
     return state;
   }
@@ -907,6 +994,16 @@ function validateTicketRegistryRecord(
       acceptedAt: record.acceptedAt,
       validForMs: expected,
     };
+  }
+  if (record.t === 'data-plane-ticket-revocation-completed') {
+    assertKeys(record, ['assignmentId', 'streamEpoch', 't', 'ticketId']);
+    assertProtocolIdentifier(record.assignmentId, 'Revoked consumer assignment id');
+    assertProtocolIdentifier(record.ticketId, 'Revoked consumer ticket id');
+    if (record.streamEpoch !== null && (!Number.isSafeInteger(record.streamEpoch) || (record.streamEpoch as number) < 0)) {
+      throw new TypeError('Revoked consumer stream generation is invalid');
+    }
+    return { t: 'data-plane-ticket-revocation-completed', assignmentId: record.assignmentId,
+      ticketId: record.ticketId, streamEpoch: record.streamEpoch as number | null };
   }
   if (record.t === "data-plane-ticket-retired") {
     assertKeys(record, [
