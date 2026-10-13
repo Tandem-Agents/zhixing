@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -82,9 +83,22 @@ describe('artifact JSON byte index', () => {
   it('rebuilds a corrupt derived database without modifying source artifacts', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'zx-json-index-corrupt-'));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
-    await writeFile(path.join(directory, 'positions-v1.sqlite'), 'not a sqlite database');
+    await writeFile(path.join(directory, 'positions-v2.sqlite'), 'not a sqlite database');
     const f = fixture({ text: 'original 中文' }, directory); await ready(f);
     expect(await f.index.value(f.ref, ['text'])).toBe('original 中文');
+  });
+  it('keeps the disposable index in its own WAL-mode file and retires the previous format', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'zx-json-index-format-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(path.join(directory, 'positions-v1.sqlite'), 'previous format');
+    await writeFile(path.join(directory, 'positions-v1.sqlite-journal'), 'previous journal');
+    const f = fixture({ text: 'current' }, directory); await ready(f);
+    expect(await f.index.value(f.ref, ['text'])).toBe('current');
+    expect(existsSync(path.join(directory, 'positions-v1.sqlite'))).toBe(false);
+    expect(existsSync(path.join(directory, 'positions-v1.sqlite-journal'))).toBe(false);
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+    const inspector = new DatabaseSync(path.join(directory, 'positions-v2.sqlite'));
+    try { expect(inspector.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal'); } finally { inspector.close(); }
   });
   it('lets interleaved readers finish distinct large artifacts without resetting progress', async () => {
     const values = [fixture({ text: 'a'.repeat(300000) }), fixture({ text: 'b'.repeat(300000) })];

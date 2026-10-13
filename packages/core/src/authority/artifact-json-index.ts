@@ -21,6 +21,12 @@ interface Scan { ref: ArtifactRef; at: number; next: number; stack: Frame[]; tok
 const BLOCK = 64 * 1024, PIECE = 24 * 1024, MAX_BYTES = 128 * 1024 * 1024;
 const dec = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const cache = new WeakMap<ArtifactStore, ArtifactJsonIndex>();
+// 读索引是可丢弃的派生缓存，格式变化即换文件：v2 用 WAL 日志。回滚日志模式下每条自动提交
+// 语句都要独立加锁并检查日志文件，一页历史上百次查找的固定开销随累积数据量放大；WAL 下
+// 只做一次共享内存快照检查。旧版本仍用 v1 文件互不干扰，v1 由新版本尽力清理。
+const INDEX_FILE = 'positions-v2.sqlite', INDEX_LOCK = 'positions-v2.lock';
+const RETIRED_INDEX_FILES = ['positions-v1.sqlite', 'positions-v1.sqlite-journal'];
+const retiredIndexChecked = new Set<string>();
 
 export function artifactJsonIndex(store: ArtifactStore): ArtifactJsonIndex {
   let value = cache.get(store);
@@ -48,10 +54,10 @@ export class ArtifactJsonIndex {
     // node:sqlite is prefix-only. getBuiltinModule also keeps bundlers from
     // rewriting it into the unrelated npm package named "sqlite".
     const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
-    const filename = this.directory ? path.join(this.directory, 'positions-v1.sqlite') : ':memory:';
+    const filename = this.directory ? path.join(this.directory, INDEX_FILE) : ':memory:';
     let db = new DatabaseSync(filename);
     const initialize = () => db.exec(`PRAGMA busy_timeout=3000; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA cache_size=-1024;
-      PRAGMA temp_store=MEMORY; PRAGMA journal_mode=DELETE; PRAGMA max_page_count=32768;
+      PRAGMA temp_store=MEMORY; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA journal_size_limit=4194304; PRAGMA max_page_count=32768;
       CREATE TABLE IF NOT EXISTS artifacts(ref TEXT PRIMARY KEY, bytes INTEGER NOT NULL, ready INTEGER NOT NULL, touched INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS nodes(ref TEXT NOT NULL, id INTEGER NOT NULL, parent INTEGER NOT NULL, field TEXT NOT NULL,
         ordinal INTEGER NOT NULL, kind TEXT NOT NULL, lo INTEGER NOT NULL, hi INTEGER NOT NULL, units INTEGER NOT NULL,
@@ -69,15 +75,21 @@ export class ArtifactJsonIndex {
       // Only SQLite's corruption codes authorize rebuilding this disposable
       // index. Permissions, busy/disk-full and original artifacts are untouched.
       if (!this.directory || ![11, 26].includes(Number((error as { errcode?: unknown }).errcode))) throw error;
-      const release = await this.#acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
+      const release = await this.#acquireFileLock(path.join(this.directory, INDEX_LOCK), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
       try {
-        await durablyRemoveFiles([filename, filename + '-journal']);
+        await durablyRemoveFiles([filename, filename + '-wal', filename + '-shm', filename + '-journal']);
         db = new DatabaseSync(filename); initialize();
       } finally { await release(); }
     }
     if (!db.prepare('PRAGMA table_info(artifacts)').all().some(row => row.name === 'canonical')) db.exec('ALTER TABLE artifacts ADD COLUMN canonical INTEGER');
     if (!db.prepare('PRAGMA table_info(artifacts)').all().some(row => row.name === 'identity')) db.exec('ALTER TABLE artifacts ADD COLUMN identity TEXT');
-    this.#db = db; return db;
+    this.#db = db;
+    if (this.directory && !retiredIndexChecked.has(this.directory)) {
+      retiredIndexChecked.add(this.directory);
+      // 旧格式只是缓存；仍被旧版本进程占用而删除失败时，留待下一次打开再试。
+      await durablyRemoveFiles(RETIRED_INDEX_FILES.map(name => path.join(this.directory!, name))).catch(() => { retiredIndexChecked.delete(this.directory!); });
+    }
+    return db;
   }
   #release(): void {
     if (!this.directory) return;
@@ -141,7 +153,7 @@ export class ArtifactJsonIndex {
         return { ready: true, bytes: ref.bytes, total: ref.bytes };
       }
       if (this.directory && !this.#unlock) {
-        this.#unlock = await this.#acquireFileLock(path.join(this.directory, 'positions-v1.lock'), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
+        this.#unlock = await this.#acquireFileLock(path.join(this.directory, INDEX_LOCK), { staleMs: 30_000, waitMs: 3000, resourceName: 'Artifact read index' });
         // A different process may have finished while this caller waited.
         const ready = db.prepare('SELECT ready,canonical,identity FROM artifacts WHERE ref=?').get(ref.digest);
         if (ready?.ready === 1 && ready.canonical !== null && (identity === undefined || ready.identity === identity)) {
