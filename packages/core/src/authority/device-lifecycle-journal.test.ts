@@ -1,6 +1,7 @@
+import { readFile, writeFile, stat, utimes } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { protocolDigest, type StopLifecycleIdentity } from "../protocol/index.js";
 import type { ProtocolSignatureVerifier, ProtocolSigner } from "../protocol/signature.js";
 import { FileArtifactStore } from "./artifact-store.js";
@@ -68,6 +69,32 @@ describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     const fixture = await createFixture();
     await fixture.log.append([{ stream: "device-lifecycle", body: { v: 1, t: "accepted" } }]);
     await expect(fixture.journal.active()).rejects.toThrow("incomplete or unknown");
+  });
+
+  it("reuses verified prefixes while observing another journal and isolating returned objects", async () => {
+    const fixture = await createFixture();
+    const accepted = await fixture.journal.accept(stopIdentity());
+    (accepted.identity as { requestId: string }).requestId = "caller-mutation";
+    const read = vi.spyOn(fixture.log, "readProjection");
+    await expect(fixture.journal.state("stop-1")).resolves.toMatchObject({ identity: { requestId: "request-stop" } });
+    expect(read.mock.calls[0]![2]?.cursor).toBeDefined();
+    const other = new DeviceLifecycleJournal(fixture.log, identity());
+    await other.advance("stop-1", "gate-closed");
+    await expect(fixture.journal.state("stop-1")).resolves.toMatchObject({ phase: "gate-closed" });
+    await expect(fixture.journal.advance("stop-1", "ready-to-stop")).rejects.toThrow();
+    await fixture.journal.advance("stop-1", "work-settled");
+    await expect(other.state("stop-1")).resolves.toMatchObject({ phase: "work-settled" });
+  });
+
+  it("does not trust cached lifecycle state after same-size authority corruption", async () => {
+    const fixture = await createFixture();
+    await fixture.journal.accept(stopIdentity());
+    await fixture.journal.active();
+    const before = await stat(fixture.log.logPath), bytes = await readFile(fixture.log.logPath);
+    const at = bytes.indexOf(Buffer.from('"request-stop"'));
+    expect(at).toBeGreaterThan(0); bytes[at + 1] = "X".charCodeAt(0);
+    await writeFile(fixture.log.logPath, bytes); await utimes(fixture.log.logPath, before.atime, before.mtime);
+    await expect(fixture.journal.active()).rejects.toThrow();
   });
 
   it("declares retained artifact evidence again when writing the terminal record", async () => {
