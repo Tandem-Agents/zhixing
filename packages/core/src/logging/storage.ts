@@ -17,7 +17,7 @@ import type {
   LogTier,
 } from "./contracts.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
-import { fitLogCapture } from "./limits.js";
+import { fitLogCapture, LOG_APPEND_BATCH_BYTES, LOG_APPEND_BATCH_DETAILS, LOG_APPEND_BATCH_RECORDS } from "./limits.js";
 import { logFailureEvidence, logStorageFailure } from "./failure.js";
 import { projectLogAccess, validLogAccess, type LogRecordAccess } from "./access-projection.js";
 import { isLegacyFile, validateWriterObservation, type LegacyLogEntry, type LogMigration, type LogWriterIdentity, type LogWriterObservation } from "./legacy.js";
@@ -194,7 +194,9 @@ export class LocalLogStore implements LogSink {
   }
 
   async append(input: readonly LogCapture[]): Promise<LogAppendReceipt> {
-    if (input.length > 8) throw storageFault("batch-limit", "日志批次超限");
+    if (input.length > LOG_APPEND_BATCH_RECORDS || input.filter((entry) => entry.detail).length > LOG_APPEND_BATCH_DETAILS ||
+        input.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry.record)) + Buffer.byteLength(entry.detail ?? "") + 512, 0) > LOG_APPEND_BATCH_BYTES)
+      throw storageFault("batch-limit", "日志批次超限");
     let wrote = false,
       committed: LogAppendReceipt | undefined;
     try {

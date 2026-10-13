@@ -691,6 +691,32 @@ describe("runtime log capture and lifecycle", () => {
     ).toBe(1);
   });
 
+  it("carries queued plain records in one generation instead of eight per append", async () => {
+    const target = sink();
+    const append = target.append;
+    const gate = pause();
+    const batches: number[] = [];
+    let first = true;
+    target.append = async records => {
+      if (first) { first = false; await gate.promise; }
+      batches.push(records.filter(item => item.record.source === "test").length);
+      return append(records);
+    };
+    const recorder = new LogRecorder(target), records = recorder.bind(source, { scope: "storage" });
+    try {
+      records.record({ event: "error", data: { n: 0 } });
+      await vi.waitFor(() => expect(first).toBe(false));
+      for (let n = 1; n <= 40; n++) records.record({ event: "error", data: { n } });
+      gate.resolve();
+      await recorder.flush(4000);
+      expect(target.stored.filter(item => item.record.source === "test")).toHaveLength(41);
+      // 原先每次至多 8 条需 6 次以上追加；排队的无详情记录现在同代写出。
+      expect(Math.max(...batches)).toBeGreaterThan(8);
+      expect(batches.filter(count => count > 0).length).toBeLessThanOrEqual(3);
+      expect(recorder.health()).toMatchObject({ state: "ready", lost: 0 });
+    } finally { await recorder.close(); }
+  });
+
   it("advances a minimum-policy batch using physical rather than double-escaped queue bytes", async () => {
     const policy = validateLogPolicy({
       ...DEFAULT_LOG_POLICY,

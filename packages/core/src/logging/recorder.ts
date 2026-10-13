@@ -11,7 +11,7 @@ import type {
   LogSink,
   LogSource,
 } from "./contracts.js";
-import { fitLogCapture } from "./limits.js";
+import { fitLogCapture, LOG_APPEND_BATCH_BYTES, LOG_APPEND_BATCH_DETAILS, LOG_APPEND_BATCH_RECORDS } from "./limits.js";
 import { DEFAULT_LOG_POLICY, validateLogPolicy } from "./policy.js";
 import { LOG_FAILURE_FIELDS, logFailureEvidence, logStorageFailure } from "./failure.js";
 import type { LogFailureEvidence } from "./contracts.js";
@@ -532,12 +532,20 @@ export class LogRecorder {
       );
       const batch: Entry[] = [];
       let peakBytes = 0;
+      // 每次追加都会发布一代完整的存储状态。原有条数内规则不变；超出后只再带
+      // 无详情记录，且整批不超过一个分段——不新增详情文件或分段文件，只减少
+      // 高峰期整份状态的重写次数。总量另受进程间单帧上限约束。
+      const fileBoundedRecords = Math.min(LOG_APPEND_BATCH_DETAILS, Math.floor((this.#policy.maxFiles - 7) / 2));
       for (const entry of ordered) {
         const bytes =
           Buffer.byteLength(JSON.stringify(entry.capture.record)) +
           Buffer.byteLength(entry.capture.detail ?? "") +
           512;
-        if (batch.length >= Math.min(8, Math.floor((this.#policy.maxFiles - 7) / 2))) break;
+        if (batch.length >= fileBoundedRecords && (
+          entry.capture.detail ||
+          batch.length >= LOG_APPEND_BATCH_RECORDS ||
+          peakBytes + bytes > Math.min(LOG_APPEND_BATCH_BYTES, this.#policy.segmentBytes)
+        )) break;
         if (peakBytes + bytes > this.#policy.maxBytes - this.#policy.governanceBytes * 2) {
           if (batch.length) break;
           this.#remove(entry);

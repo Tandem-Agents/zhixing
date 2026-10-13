@@ -392,6 +392,20 @@ describe("runtime log Store using real isolated processes and filesystem", () =>
     expect(page.coverage.complete).toBe(true);
   }, 15000);
 
+  it("publishes one generation for a burst of plain records while detail files keep their bound", async () => {
+    const h = await setup({ segmentBytes: 65536 });
+    await h.store.initialize();
+    const before = (await h.snapshot()).generation;
+    await h.store.append(Array.from({ length: 40 }, () => h.capture()));
+    const after = await h.snapshot();
+    expect(after.generation).toBe(before + 1);
+    expect(after.segments.flatMap(segment => segment.recordIds)).toHaveLength(40);
+    expect(await h.store.append([])).toBeTruthy();
+    const detailed = Array.from({ length: 9 }, () => ({ ...h.capture(), detail: "{}" }));
+    await expect(h.store.append(detailed)).rejects.toMatchObject({ evidence: { code: "batch-limit" } });
+    await expect(h.store.append(Array.from({ length: 65 }, () => h.capture()))).rejects.toMatchObject({ evidence: { code: "batch-limit" } });
+  }, 20000);
+
   it("keeps a sequence lower bound inside one segment across query pages", async () => {
     const h = await setup({ segmentBytes: 16384 });
     await h.store.initialize();
