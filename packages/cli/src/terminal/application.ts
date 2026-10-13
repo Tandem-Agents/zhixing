@@ -581,7 +581,23 @@ class TerminalApplication {
           this.#mainView = { ...this.#mainView, message: '已请求中止；正在核对原输入，确认接纳后停止。Ctrl+R 再次核对 · 连按 Ctrl+C 退出' };
           await this.#publish(this.#mainView); this.#receiptRetry?.(); return { accepted: true };
         }
-        if (this.#state.activeTurnPromise) { await this.#controller?.abort(); return { accepted: true }; }
+        const activeTurn = this.#state.activeTurnPromise;
+        if (activeTurn) {
+          // 停止要等 Owner 耐久裁决与执行收束；按键时先如实反馈“已请求”，
+          // 运行终态到达后由实际结果覆盖，不在此声称已经停止。
+          this.#mainView = { ...this.#mainView, message: '已请求中止，正在停止当前运行…' };
+          await this.#publish(this.#mainView);
+          try { await this.#controller?.abort(); }
+          catch (error) {
+            // 仅当同一运行仍未收束时改写提示；已到达的终态结果不被覆盖。
+            if (this.#state.activeTurnPromise === activeTurn) {
+              this.#mainView = { ...this.#mainView, message: '中止请求未完成；当前运行可能仍在继续，可再次按 Ctrl+C。' };
+              await this.#publish(this.#mainView);
+            }
+            throw error;
+          }
+          return { accepted: true };
+        }
         if (this.#controller && await this.#controller.abortBackgroundTask()) {
           this.#mainView = { ...this.#mainView, message: '已请求停止当前后台工作；已发生的动作不会回滚。' }; await this.#publish(this.#mainView);
         } else void this.#close(this.args.length ? 130 : 0, 'user-interrupt');
