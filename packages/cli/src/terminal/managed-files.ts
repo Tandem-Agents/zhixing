@@ -63,6 +63,9 @@ export class TerminalManagedFiles {
     }
     return { parent: await parent, name };
   }
+  async prepareDisplay(step: DeviceCapacityStepPermit): Promise<void> {
+    await this.#io(() => this.#parent('display/data', step));
+  }
   async write(relative: string, bytes: Buffer, position: number, maximum: number, step: DeviceCapacityStepPermit, identity?: string): Promise<CheckpointEntry> {
     return this.#io(async () => {
       const { parent, name } = await this.#parent(relative, step);

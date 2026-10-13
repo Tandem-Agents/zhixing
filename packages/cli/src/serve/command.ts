@@ -1040,7 +1040,7 @@ async function runServerProcess(
       }),
   });
 
-  const localExecutor = executor ? await (async () => {
+  const localExecutor = executor ? await observeLogPhase(startupRecords, "create-local-executor", async () => {
     const dataPlane = conversationServices.executorDataPlane;
     const ledger = conversationServices.conversationExecutorLedger;
     const evidence = authorityServices.evidenceHandler;
@@ -1070,7 +1070,7 @@ async function runServerProcess(
       executorDataPlane: dataPlane,
     });
     return Object.freeze({ owner, jobs, dataPlane, ledger, evidence });
-  })() : undefined;
+  }) : undefined;
   await startAssetMaintenance({ authorityRuntime, lifecycleContributions });
   const meshBootstrap = bootstrap.mesh;
   const preparedMeshRuntime =
@@ -1271,7 +1271,7 @@ async function runServerProcess(
   if (!worksceneDirectory || !worksceneApplication) {
     throw new Error("Workscene product composition is incomplete");
   }
-  await worksceneDirectory.recover();
+  await observeLogPhase(startupRecords, "recover-workscene", () => worksceneDirectory.recover());
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。

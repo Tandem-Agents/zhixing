@@ -51,6 +51,22 @@ async function setup(replay?: (record: DisplayReplayRecord) => Promise<import('@
 }
 
 describe('display recovery retains the original cache', () => {
+  it('prepares pinned history storage without allocating a body and drains preparation on close', async () => {
+    const h = await setup();
+    const prepared = h.store.prepare();
+    await prepared;
+    expect(h.account.reserve).not.toHaveBeenCalled();
+    expect(h.counts()).toEqual({ active: 0, outstanding: 0, stored: 0 });
+    await expect(stat(path.join(h.root, 'display/data'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await h.store.append({ blockId: 'first', role: 'user', text: 'first input', contentOffset: 0, final: true });
+    expect((await h.store.page()).segments[0]?.text).toBe('first input');
+    const closing = await setup();
+    const preparation = closing.store.prepare();
+    await closing.store.close();
+    await preparation;
+    expect(closing.counts().active).toBe(0);
+  });
+
   it('retains only locators for cold durable history and rereads evicted pages without dropping live-only output', async () => {
     const sourceText = '中文😀\n'.repeat(1600), read = vi.fn(async (_source: DisplayReplaySource, offset: number) => sourceText.slice(offset));
     const replay = new TerminalDisplayReplay(read), h = await setup(record => replay.read(record));

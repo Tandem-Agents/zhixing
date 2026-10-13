@@ -642,6 +642,11 @@ class TerminalApplication {
   }
 
   async #startup(): Promise<void> {
+    // Directory preparation overlaps connection/history RPC work. It belongs
+    // to the existing display queue and is joined before input admission; close
+    // already drains that same queue on cancellation or an unavailable service.
+    const displayPrepared = this.#display.prepare();
+    void displayPrepared.catch(() => {});
     // A connection notice ends with that attempt. Clear its stored projection,
     // not just the transient starting frame; later business notices survive.
     if (this.#mainView.connectionState) this.#mainView = { ...this.#mainView, message: undefined };
@@ -761,6 +766,7 @@ class TerminalApplication {
       this.#ensureSessionBinding();
       if (initial.adoptionReview) this.#mainView = { ...this.#mainView, message: initial.adoptionReview.message };
     }
+    await displayPrepared;
     this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined, readyForInput: true };
     this.#startupWatch = undefined;
     this.#historyReturn = undefined;
@@ -1007,7 +1013,7 @@ class TerminalApplication {
         part.block !== source.block || part.offset < history.bodyCursor!.offset);
       history.buffered = remaining.length ? { ...page, fragments: remaining } : undefined;
       if (!remaining.length && !page.hasMore) history.hasMore = false;
-      if (current()) { await this.#displayPage(); await this.#publishHistoryView(); }
+      if (current() && this.#mainView.readyForInput) { await this.#displayPage(); await this.#publishHistoryView(); }
       history.recoveryRunIds = [...new Set([...(history.recoveryRunIds ?? []), source.runId])].slice(0, 4);
     }
     if (current()) {

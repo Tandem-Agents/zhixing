@@ -67,6 +67,7 @@ export class TerminalDisplayStore {
   // later mutation. Keep its full confirmed entry before touching that index.
   #unpublished?: { readonly ordinal: number; readonly entry: Buffer };
   #admission?: string;
+  #preparing?: Promise<void>;
   #dataIdentity?: string; #indexIdentity?: string;
   readonly #files: TerminalManagedFiles;
   readonly #ownsFiles: boolean;
@@ -79,6 +80,13 @@ export class TerminalDisplayStore {
   get first(): number { return this.#first; }
   get last(): number { return this.#last; }
   get paused(): boolean { return this.#failed; }
+
+  /** Open only the pinned display directory while service connection runs.
+   * The normal display/file queues retain cancellation and close ownership. */
+  prepare(): Promise<void> {
+    return this.#preparing ??= this.#enqueue(() => terminalPhysicalStep(this.capacity, bound, this.signal,
+      step => this.#files.prepareDisplay(step)));
+  }
 
   async admit(): Promise<void> {
     await this.#tail; this.signal.throwIfAborted();

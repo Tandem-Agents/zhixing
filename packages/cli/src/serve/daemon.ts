@@ -293,8 +293,12 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
     if (childExit && childExitSeenAt === null) {
       childExitSeenAt = clock();
     }
+    // 同一 home 并发拉起只活一个：本次子进程让位时，PID 文件已指向另一个存活的 owner。
+    // 它仍在启动，就继续等它就绪直到本次截止，而不是在宽限后当作启动失败。
+    const competingOwner = lock !== null && lock.pid !== opts.spawnedPid && isAlive(lock.pid);
     if (
       childExit &&
+      !competingOwner &&
       childExitSeenAt !== null &&
       clock() - childExitSeenAt >= CHILD_EXIT_DISCOVERY_GRACE_MS
     ) {

@@ -243,6 +243,40 @@ describe("spawnDaemon", () => {
     expect(clock()).toBe(6400);
   });
 
+  it("keeps waiting for a live concurrent owner that becomes ready well after the spawned process yields", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const result = await spawnDaemon({
+      forwardedArgs: ["serve"], deadlineAt: 30000, reportFailure: false,
+      deps: makeDeps({
+        clock, spawnFn: () => child as any,
+        sleep: async (ms) => { clock.advance(ms); if (clock() === 6000) child.emit("exit", 1, null); },
+        readLockFn: async () => clock() < 6400 ? null : { pid: 12345, port: 18900, startedAt: "t" },
+        checkReadyMarkerFn: async () => clock() >= 9000,
+        isProcessAliveFn: () => true, httpGetFn: async () => 200,
+      }),
+    });
+    expect(result).toMatchObject({ ok: true, pid: 12345 });
+    expect(clock()).toBe(9000);
+  });
+
+  it("does not wait on a concurrent owner whose process is gone", async () => {
+    const clock = mkFakeClock();
+    const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn() });
+    const result = await spawnDaemon({
+      forwardedArgs: ["serve"], deadlineAt: 30000, reportFailure: false,
+      deps: makeDeps({
+        clock, spawnFn: () => child as any,
+        sleep: async (ms) => { clock.advance(ms); if (clock() === 6000) child.emit("exit", 1, null); },
+        readLockFn: async () => ({ pid: 12345, port: 18900, startedAt: "t" }),
+        checkReadyMarkerFn: async () => false,
+        isProcessAliveFn: (pid) => pid !== 12345, httpGetFn: async () => 200,
+      }),
+    });
+    expect(result).toMatchObject({ ok: false, status: "failed" });
+    expect(clock()).toBeLessThan(8000);
+  });
+
   it("cancels observation without killing the shared host or leaving child listeners", async () => {
     const abort = new AbortController();
     const child = Object.assign(new EventEmitter(), { pid: 99999, unref: vi.fn(), kill: vi.fn() });

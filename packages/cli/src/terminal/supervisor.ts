@@ -9,7 +9,7 @@ import { beginLogPhase, type LogRecordPort } from '@zhixing/core/logging';
 import { TerminalChannel, TerminalChannelRetiredError } from '@zhixing/terminal-ui/channel';
 import { TERMINAL_LIMITS, TERMINAL_PROTOCOL, type TerminalMessage, type TerminalTraffic } from '@zhixing/terminal-ui/protocol';
 import { isTerminalPrivateEndpoint, TerminalPrivateEndpoint } from '@zhixing/terminal-ui/parent-transport';
-import { createServer, type Server, type Socket } from 'node:net';
+import { connect, createServer, type Server, type Socket } from 'node:net';
 import { TerminalWindowsWriterAdmission, type TerminalHelperRole } from './host-launch.js';
 import { createDeviceCapacityRuntime } from '../serve/device-capacity-runtime.js';
 import { TerminalInstanceAssets, type TerminalIdentityResolver, type TerminalProcessIdentity } from './instance-assets.js';
@@ -35,6 +35,11 @@ interface NativeEvent {
   registered?: boolean; enabled?: boolean;
   baseline?: { platform?: string; terminal?: boolean; foreground?: boolean; modeErrors?: number[]; cursorError?: number; inputCP?: number; outputCP?: number };
   targetPID?: number; targetBorn?: string; absent?: boolean; error?: number; exited?: boolean; errors?: number;
+}
+interface PrelaunchedHost {
+  readonly child: TerminalForegroundChild; readonly endpoint: TerminalPrivateEndpoint; readonly server: Server;
+  resumed: boolean; exitCode?: number; source?: Socket; plan?: Buffer; relay?: Socket;
+  adopted?: { readonly id: string; readonly application: OwnedProcess };
 }
 interface NativeWaiter { readonly matches: (event: NativeEvent) => boolean; resolve(event: NativeEvent): void; reject(error: Error): void; readonly timer: ReturnType<typeof setTimeout> }
 
@@ -101,6 +106,10 @@ class TerminalSupervisor {
   #assetFileWorker?: { child: TerminalForegroundChild; spawnId: string };
   readonly #writerSettlements = new Set<Promise<void>>();
   readonly #hosts = new Map<string, TerminalForegroundChild>();
+  /** Windows 交互终端预先拉起的按需 Host；N 首次请求拉起时接管它，不再另起。 */
+  #prelaunch?: PrelaunchedHost;
+  /** N 已发出过拉起请求：此后不再预拉起，避免与 N 的请求各起一个。 */
+  #hostRequested = false;
   readonly #creationEndpoint = new TerminalPrivateEndpoint();
   #creationServer?: Server;
   readonly #creationConnections = new Set<Socket>();
@@ -169,6 +178,7 @@ class TerminalSupervisor {
       await this.#phase('recovery-ready', () => ready); this.#live();
       await this.#phase('recovery-admit', () => this.#nativeCommand('admit', event => event.event === 'admitted', 800));
       this.#live();
+      this.#prelaunchHost();
       this.#capacity = createDeviceCapacityRuntime(path.join(this.options.home, 'temporary', 'terminal'), { createDirectory: false, activityDriven: true });
       const identity: TerminalIdentityResolver = { read: pid => this.#identity(pid) };
       await filesystemVerified; this.#live();
@@ -609,12 +619,14 @@ class TerminalSupervisor {
 
   #startHost(message: Extract<TerminalMessage, { type: 'host-start' }>, application: OwnedProcess): void {
     this.#live();
+    this.#hostRequested = true;
     if (!/^[a-f0-9-]{36}$/u.test(message.id) || !/^[a-f0-9-]{36}$/u.test(message.handoff) ||
         (process.platform === 'win32' ? typeof message.endpoint !== 'string' || !isTerminalPrivateEndpoint(message.endpoint) || message.channel !== undefined : message.channel !== 'posix' || message.endpoint !== undefined) ||
         !Number.isSafeInteger(message.deadline) || message.deadline <= 0 ||
         this.#hosts.size >= 4 || this.#hosts.has(message.id)) throw Error('terminal-host-create-request');
     const creationDeadline = Math.min(message.deadline, Date.now() + 5000);
     if (creationDeadline <= Date.now()) { void application.channel!.send({ type: 'host-state', id: message.id, state: 'failed' }).catch(() => {}); return; }
+    if (this.#adoptPrelaunchedHost(message, application)) return;
     const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.entry],
       env: { ...process.env, ZHIXING_HOME: this.options.home, ZHIXING_LOG_HANDOFF: message.handoff,
         ...(process.platform === 'win32' ? { ZHIXING_HOST_STARTUP_PIPE: message.endpoint } : { ZHIXING_HOST_STARTUP_FD: '6' }) } });
@@ -665,6 +677,90 @@ class TerminalSupervisor {
       if (!handed || acknowledged) { clearTimeout(timeout); this.#channelHandoffs.delete(message.id); if (!permitted) finishChannels(); }
     });
     child.once('released', () => clearTimeout(timeout));
+  }
+
+  /** 交互终端（Windows）在 R 就绪后立即拉起按需 Host，与 U/N 的创建和加载并行。它与 N 请求时
+   * 创建的 Host 完全相同（同一入口、同一环境裁剪、同一 host 生命周期），只是交接标识由 S 生成；
+   * 启动计划行由 S 原样转交给随后接管它的 N。本机已有存活 Host 时不预拉起；任何一步失败都只是
+   * 少了提速，N 照常请求拉起。 */
+  #prelaunchHost(): void {
+    if (process.platform !== 'win32' || this.options.args.length) return;
+    void (async () => {
+      if (await recordedHostAlive(this.options.home) || this.#hostRequested) return;
+      this.#live();
+      const endpoint = new TerminalPrivateEndpoint(), handoff = randomUUID();
+      const server = createServer(socket => this.#acceptPrelaunchPlan(socket));
+      server.on('error', () => {});
+      let child: TerminalForegroundChild;
+      try {
+        await endpoint.listen(server);
+        this.#live();
+        if (this.#hostRequested) throw Error('terminal-host-already-requested');
+        const resolved = resolveSelfExec(['serve', '--auto-start'], { argv: [process.execPath, this.options.entry],
+          env: { ...process.env, ZHIXING_HOME: this.options.home, ZHIXING_LOG_HANDOFF: handoff, ZHIXING_HOST_STARTUP_PIPE: endpoint.address } });
+        for (const key of Object.keys(resolved.env)) if (key.startsWith('ZHIXING_TERMINAL_') || key === 'ZHIXING_LOG_STORE_PIPE') delete resolved.env[key];
+        child = this.#processes!.create(resolved.command, resolved.args, resolved.env, false, false, { scope: 'host', pipeEnvironment: false });
+      } catch (error) { void endpoint.close().catch(() => {}); throw error; }
+      const prelaunch: PrelaunchedHost = this.#prelaunch = { child, endpoint, server, resumed: false };
+      child.once('spawn', () => {
+        try {
+          this.#live(); child.resume(); prelaunch.resumed = true;
+          this.#observe('host-prelaunched', { role: 'host', pid: child.pid!, spawnId: handoff });
+        } catch { child.kill(); }
+      });
+      child.once('exit', code => {
+        prelaunch.exitCode = typeof code === 'number' ? code : 71;
+        const adopted = prelaunch.adopted;
+        if (adopted) void adopted.application.channel!.send({ type: 'host-state', id: adopted.id, state: 'exited', pid: child.pid, code: prelaunch.exitCode }).catch(() => {});
+      });
+      child.on('error', () => {});
+      child.once('close', () => {
+        if (prelaunch.adopted) this.#hosts.delete(prelaunch.adopted.id);
+        this.#closePrelaunch(prelaunch);
+      });
+    })().catch(() => { /* 预拉起只为提速；N 的正常拉起路径不受影响。 */ });
+  }
+
+  /** 只接受预拉起 Host 的一条启动计划，校验形状后留待转交。 */
+  #acceptPrelaunchPlan(socket: Socket): void {
+    const prelaunch = this.#prelaunch;
+    if (!prelaunch || prelaunch.source) { socket.destroy(); return; }
+    prelaunch.source = socket; prelaunch.server.close();
+    socket.on('error', () => {});
+    let buffer = Buffer.alloc(0);
+    socket.on('data', data => {
+      if (prelaunch.plan || buffer.length + data.length > 1024) { socket.destroy(); return; }
+      buffer = Buffer.concat([buffer, data]);
+      const end = buffer.indexOf(10); if (end < 0) return;
+      try {
+        const value = JSON.parse(buffer.subarray(0, end).toString('utf8')) as Record<string, unknown>;
+        if (Object.keys(value).length !== 2 || value.type !== 'host-launch-plan' || !['managed', 'on-demand', 'none'].includes(value.mode as string)) throw Error('terminal-host-launch-plan');
+        prelaunch.plan = Buffer.from(JSON.stringify({ type: value.type, mode: value.mode }) + '\n');
+        prelaunch.relay?.write(prelaunch.plan);
+      } catch { socket.destroy(); }
+    });
+  }
+
+  /** N 的首次拉起请求接管仍在运行的预拉起 Host：登记为该请求的 Host、转交启动计划、立即确认创建。 */
+  #adoptPrelaunchedHost(message: Extract<TerminalMessage, { type: 'host-start' }>, application: OwnedProcess): boolean {
+    const prelaunch = this.#prelaunch, child = prelaunch?.child;
+    if (process.platform !== 'win32' || !prelaunch || !child || prelaunch.adopted || !prelaunch.resumed ||
+        prelaunch.exitCode !== undefined || child.cancelled || child.exited || !child.pid || typeof message.endpoint !== 'string') return false;
+    const relay = prelaunch.relay = connect(message.endpoint);
+    relay.on('error', () => {});
+    prelaunch.adopted = { id: message.id, application };
+    this.#hosts.set(message.id, child);
+    if (prelaunch.plan) relay.write(prelaunch.plan);
+    this.#observe('host-adopted', { role: 'host', pid: child.pid, spawnId: message.handoff });
+    void application.channel!.send({ type: 'host-state', id: message.id, state: 'created', pid: child.pid }).catch(() => this.#releaseHost(message.id));
+    return true;
+  }
+
+  /** 关闭 S 侧为预拉起持有的端点与转交连接；Host 本身按 host 生命周期独立存续。 */
+  #closePrelaunch(prelaunch = this.#prelaunch): void {
+    if (!prelaunch) return;
+    prelaunch.source?.destroy(); prelaunch.relay?.end();
+    void prelaunch.endpoint.close().catch(() => {});
   }
 
   #releaseHost(id: string): void {
@@ -1034,6 +1130,7 @@ class TerminalSupervisor {
     this.#closing = new Promise(resolve => { resolveClosing = resolve; });
     this.#sealed = true;
     for (const item of this.#owned) item.channel?.beginClose();
+    this.#closePrelaunch();
     this.#abort.abort(); clearTimeout(this.#startupTimer); clearTimeout(this.#applicationStartupTimer);
     this.#firstFramePhase?.finish(code === 0 || code === 130 ? new DOMException(reason, 'AbortError') : Error(reason));
     // Preserve the first finite lifecycle cause before logging is drained.
@@ -1132,4 +1229,14 @@ class TerminalSupervisor {
     });
     return this.#closing;
   }
+}
+
+/** server.pid 记录的进程仍存活即视为本机已有 Host（含仍在启动者）；文件缺失、损坏或进程已不在则否。 */
+async function recordedHostAlive(home: string): Promise<boolean> {
+  try {
+    const { pid } = JSON.parse(await readFile(path.join(home, 'server.pid'), 'utf8')) as { pid?: unknown };
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) { return (error as NodeJS.ErrnoException | undefined)?.code === 'EPERM'; }
 }
