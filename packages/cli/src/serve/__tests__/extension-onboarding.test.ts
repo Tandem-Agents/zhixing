@@ -276,8 +276,16 @@ describe("published extension onboarding production path", { timeout: 40_000 }, 
     await f.api.command(extensionManage, { action: "update", id: "maintenance", instanceId: "my-app", source: f.request.source });
     await f.api.command(extensionManage, { action: "connect", id: "maintenance", expectedRevision: 1, candidate: version(f.candidate, action) });
     await expect.poll(async () => (await f.api.query(extensionList, undefined)).instances[0]?.phase).toBe("running");
-    const operation = (await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "maintenance")!;
-    await f.api.command(extensionManage, action === "cancel" ? { action, id: operation.id, expectedRevision: operation.revision } : { action, instanceId: "my-app" });
+    // 验证仍在后台推进操作修订号：读到的修订号可能在发出取消前被抢先，冲突时重读再发。
+    for (let attempt = 0; ; attempt += 1) {
+      const operation = (await f.api.query(extensionList, undefined)).operations!.find(op => op.id === "maintenance")!;
+      try {
+        await f.api.command(extensionManage, action === "cancel" ? { action, id: operation.id, expectedRevision: operation.revision } : { action, instanceId: "my-app" });
+        break;
+      } catch (error) {
+        if (action !== "cancel" || attempt >= 4 || !/revision conflict/.test(String(error))) throw error;
+      }
+    }
     await f.system.dispose(); systems.splice(systems.indexOf(f.system), 1);
     const reopened = await f.open();
     const state = await reopened.api.query(extensionList, undefined);

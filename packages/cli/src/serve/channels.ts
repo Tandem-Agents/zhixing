@@ -155,6 +155,8 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   let onboarding: ExtensionOnboarding | undefined;
   const snapshot = async () => { instances = (await application.list()).instances; };
   const changedOperation = () => {
+    // 关闭后不再登记新的观察：关闭过程中的回调不得在释放后继续读写权威日志。
+    if (closed) return;
     const observation = snapshot().then(() => onboarding?.reconcile()).then(async () => {
       for (const instance of (await application.list()).instances) await verification.resume(instance);
     }).catch(() => undefined);
@@ -466,7 +468,9 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     resumeConfigured: async (next) => { if (closed) throw new Error("Channel lifecycle closed"); connectionRevision++; consumers = next; ownerRequested = true; await startIfReady(); },
     dispose: async () => {
       connectionRevision++; closed = true; ownerRequested = false; consumers = undefined;
-      await runtime.close(); await Promise.all(observations);
+      await runtime.close();
+      // 等到观察集合真正清空：等待期间完成的观察可能已登记后继观察。
+      while (observations.size) await Promise.all(observations);
     },
   };
 }
