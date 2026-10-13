@@ -13,7 +13,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     return handle;
   } };
 });
-import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex, bindDurableProjectionMutations, durableProjectionDirectoryName } from "../index.js";
+import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex, bindDurableProjectionMutations, durableProjectionDirectoryName, durableProjectionReadBudget } from "../index.js";
 import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runWithDeviceCapacity, withDeviceCapacityStep, currentDeviceCapacityStep, StorageMaintenanceAdmissionError } from "../../resources/index.js";
 
 describe("authority projection physical reads", () => {
@@ -61,10 +61,12 @@ describe("authority projection physical reads", () => {
       expect((await stored.scan({ gte: "skill", lt: "skillz" }, 1)).entries).toMatchObject([{ key: "skill", value: { v: 1, value: "saved" } }]);
       expect(readSteps).toEqual([]);
       await stored.flush();
-      const log = new FileAuthorityCommitLog(logRoot, artifacts, { storageMaintenance: storage, runProjectionReadStep: async (_input, operation) => {
+      // 叶级预算与生产相同（durableProjectionReadBudget），覆盖条目读取的有界预读。
+      const log = new FileAuthorityCommitLog(logRoot, artifacts, { storageMaintenance: storage, runProjectionReadStep: async (step, operation) => {
         const owner = currentDeviceCapacityStep();
         if (owner?.kind === "physical") return operation();
-        const leaf = { occupancy: { memoryReservationBytes: 4096, temporaryBytes: 0, slots: owner?.kind === "workload" ? 0 : 1 }, quantum: { readBytes: 4096, writeBytes: 0, ioOperations: 32 } };
+        const budget = durableProjectionReadBudget(step);
+        const leaf = { occupancy: { memoryReservationBytes: budget.memoryReservationBytes, temporaryBytes: 0, slots: owner?.kind === "workload" ? 0 : 1 }, quantum: { readBytes: budget.readBytes, writeBytes: 0, ioOperations: budget.ioOperations } };
         const admission = await arbiter.acquire({ admissionId: "projection-leaf", serviceClass: owner?.kind === "workload" ? owner.serviceClass : "storage-foreground", atomic: leaf, preferred: leaf, maxWaitMs: 0 }, new AbortController().signal);
         if (admission.kind !== "granted") throw new Error(admission.kind);
         try { return await withDeviceCapacityStep(admission.permit, leaf, operation); } finally { admission.permit.release(); }

@@ -1,4 +1,4 @@
-import { StorageMaintenanceAdmissionError } from '@zhixing/core/resources';
+import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion } from '@zhixing/core/resources';
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import type {
   ConversationStatusNotice,
@@ -3360,7 +3360,14 @@ describe("ConversationProtocolRuntime", () => {
       durableTurnExecutor: protocol, onTurnCommitted: () => {},
     });
     await getOrCreateActiveConversation(authority, manager, "conversation-return-cleanup");
-    const intervals = vi.spyOn(globalThis, "setInterval");
+    // 持有文件锁期间创建的是写者锁心跳，归提交日志而非本次运行：日志空闲片刻后才放锁。
+    const lockHeartbeats = new Set<unknown>();
+    const createInterval = globalThis.setInterval;
+    const intervals = vi.spyOn(globalThis, "setInterval").mockImplementation(((...args: Parameters<typeof setInterval>) => {
+      const timer = createInterval(...args);
+      if (isHoldingMaintenanceExclusion()) lockHeartbeats.add(timer);
+      return timer;
+    }) as typeof setInterval);
     const cleared = vi.spyOn(globalThis, "clearInterval");
     const generator = protocol.run({ conversationId: "conversation-return-cleanup", input: "check", messages: [], baseRevision: 0,
       runtime, invocation: { kind: "agent", source: "interactive" },
@@ -3368,10 +3375,13 @@ describe("ConversationProtocolRuntime", () => {
     try {
       expect((await generator.next()).done).toBe(false);
       const timers = intervals.mock.results.filter(result => result.type === "return").map(result => result.value);
-      expect(timers.length).toBeGreaterThan(0);
+      const owned = timers.filter(timer => !lockHeartbeats.has(timer));
+      expect(owned.length).toBeGreaterThan(0);
       await generator.return(undefined as never);
       expect(closed).toBe(true);
-      for (const timer of timers) expect(cleared).toHaveBeenCalledWith(timer);
+      for (const timer of owned) expect(cleared).toHaveBeenCalledWith(timer);
+      // 写者锁的心跳随锁释放而清理，不会残留。
+      await vi.waitFor(() => { for (const timer of timers) expect(cleared).toHaveBeenCalledWith(timer); }, { timeout: 5_000 });
     } finally {
       await generator.return(undefined as never).catch(() => undefined);
       for (const result of intervals.mock.results) if (result.type === "return") clearInterval(result.value);

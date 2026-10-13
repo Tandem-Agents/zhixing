@@ -116,12 +116,32 @@ const RETAINED_LEAF_PREFIX = "retention/leaf/";
 const RETAINED_DEAD_PREFIX = "retention/dead/";
 const RETAINED_ROOT_PREFIX = "retention/root/";
 const RETAINED_SCAN_PAGE_SIZE = 256;
+/** 相邻操作之间保留写者锁的空闲时长：覆盖同一调用链上前后相接的 await，不让其他进程久等。 */
+const LOCK_SESSION_LINGER_MS = 20;
+/** 单次连续持锁的上限；到期在操作边界释放，让其他写者有机会进入。 */
+const LOCK_SESSION_MAX_HOLD_MS = 500;
+/** 同一进程内处于空闲保留期的写者锁会话；其他实例需要同一把锁时立即收回，不必等保留期结束。 */
+const idleLockSessions = new Map<string, () => Promise<void>>();
+
+/** 跨连续操作持有的写者锁：省去逐次取锁、放锁的文件往返，不改变每次操作的字节核验。 */
+interface CommitLogLockSession {
+  readonly release: () => Promise<void>;
+  readonly acquiredAt: number;
+  readonly close: () => Promise<void>;
+  idle: ReturnType<typeof setTimeout> | undefined;
+  /** 本会话内逐次字节核验共用的读取缓冲。 */
+  comparison?: Buffer;
+}
 
 export interface FileAuthorityCommitLogOptions {
   readonly records?: LogRecordPort;
   readonly clock?: () => IsoTime;
   readonly lockStaleMs?: number;
   readonly lockWaitMs?: number;
+  /** 连续操作之间保留写者锁的空闲时长；0 表示每次操作结束即释放。 */
+  readonly lockSessionLingerMs?: number;
+  /** 单次连续持锁的上限；到期在操作边界释放。 */
+  readonly lockSessionMaxHoldMs?: number;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   /** Caller data reads have a leaf budget separate from workload occupancy. */
   readonly runProjectionReadStep?: FileDurableProjectionIndexOptions["runReadStep"];
@@ -200,8 +220,12 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #workObserver: AuthorityWorkObserver;
   readonly #checkpointViews = new WeakMap<DurableLogCheckpoint, FileProjectionCursor>();
   #work: AuthorityWork | undefined;
-  /** One verified snapshot per exclusive operation; never survives lock release. */
+  /** One verified snapshot per exclusive operation; never survives the operation. */
   #operationView: VerifiedWalView | undefined;
+  #lockSession: CommitLogLockSession | undefined;
+  #lockSessionClosing: Promise<void> | undefined;
+  /** 已进入本日志串行队列（排队或执行中）的加锁操作数。 */
+  #lockedOperations = 0;
   readonly rootDir: string;
   readonly logPath: string;
   readonly identityPath: string;
@@ -211,6 +235,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #clock: () => IsoTime;
   readonly #lockStaleMs: number;
   readonly #lockWaitMs: number;
+  readonly #lockSessionLingerMs: number;
+  readonly #lockSessionMaxHoldMs: number;
   readonly #operations = new SerialTaskQueue();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
@@ -239,6 +265,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#lockStaleMs = options.lockStaleMs ?? 30_000;
     this.#lockWaitMs = options.lockWaitMs ?? 10_000;
+    this.#lockSessionLingerMs = options.lockSessionLingerMs ?? LOCK_SESSION_LINGER_MS;
+    if (!Number.isFinite(this.#lockSessionLingerMs) || this.#lockSessionLingerMs < 0) {
+      throw new TypeError("Authority lock session linger must be a non-negative finite duration");
+    }
+    this.#lockSessionMaxHoldMs = options.lockSessionMaxHoldMs ?? LOCK_SESSION_MAX_HOLD_MS;
+    if (!Number.isFinite(this.#lockSessionMaxHoldMs) || this.#lockSessionMaxHoldMs < 0) {
+      throw new TypeError("Authority lock session hold limit must be a non-negative finite duration");
+    }
     this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
       options.storageMaintenance,
     );
@@ -331,6 +365,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       runReadStep: this.#runProjectionReadStep,
     });
     const registered: RegisteredDurableProjection = {
+      // Replayed derived rows stay in the existing bounded overlay. prepare()
+      // spills before its original bounds; reading a short suffix alone does
+      // not manufacture a new delta and force a full historical compaction.
       state,
       read: createBoundDurableProjectionReadContext(state),
       reduce: definition.reduce as RegisteredDurableProjection["reduce"],
@@ -1800,7 +1837,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const handle = supplied ?? await open(this.logPath, "r");
     try {
       if (this.#work) this.#work.scans++;
-      const current = Buffer.allocUnsafe(view.physicalBytes.byteLength);
+      const current = this.#comparisonBuffer(view.physicalBytes.byteLength);
       let offset = 0;
       while (offset < current.length) {
         const { bytesRead } = await handle.read(current, offset, current.length - offset, offset);
@@ -1817,6 +1854,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       this.#verifiedTail = undefined;
       return undefined;
     } finally { if (!supplied) await handle.close(); }
+  }
+
+  /** 逐次比对整份日志字节时复用同一块缓冲：只在连续持锁的会话内保留，会话结束即释放，
+   * 不再为每次操作分配一份与日志等长的临时内存。 */
+  #comparisonBuffer(bytes: number): Buffer {
+    const session = this.#lockSession;
+    if (!session) return Buffer.allocUnsafe(bytes);
+    if (!session.comparison || session.comparison.byteLength < bytes) {
+      session.comparison = Buffer.allocUnsafe(bytes);
+    }
+    return session.comparison.subarray(0, bytes);
   }
 
   async #visitVerifiedView(
@@ -2262,43 +2310,42 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       try {
         const queued = performance.now();
         observation.stage("local-queue");
-        return await this.#operations.run(async () => {
-          observation.data.queueMs += performance.now() - queued;
-          observation.stage("directory-preparation");
-          const preparing = performance.now();
-          try { await ensureDurableDirectory(this.rootDir); }
-          finally { observation.data.preparationMs += performance.now() - preparing; }
-          const waiting = performance.now();
-          observation.stage("authority-file-lock");
-          let release: () => Promise<void>;
-          try { release = await this.#acquireFileLock(this.#lockPath, {
-              staleMs: this.#lockStaleMs,
-              waitMs: this.#lockWaitMs,
-              resourceName: "AuthorityCommitLog",
-            });
-          } finally { observation.data.lockWaitMs += performance.now() - waiting; }
-          const executing = performance.now();
-          observation.stage("authority-execution");
-          this.#work = observation.data;
-          try {
-            // 持有日志锁期间恒有权威操作在等待,故为前台。互斥区不在这里声明:
-            // 外层 `#operations` 串行队列已单点标记,内层维护准入随之零等待——
-            // 排队会把锁的持有时间拉到准入超时,阻塞全部其他持锁者。背压由本方法
-            // 的锁外重试兜住。
-            return await runInMaintenanceContext("foreground", async () => {
-              await this.#ensureInitialized();
-              return await operation();
-            });
-          } finally {
-            this.#operationView = undefined;
-            this.#work = undefined;
-            observation.data.executionMs += performance.now() - executing;
-            const releasing = performance.now();
-            const previousStage = observation.stage("authority-lock-release");
-            try { await release(); } finally { observation.data.releaseMs += performance.now() - releasing; }
-            observation.stage(previousStage);
-          }
-        });
+        this.#lockedOperations++;
+        try {
+          return await this.#operations.run(async () => {
+            observation.data.queueMs += performance.now() - queued;
+            const session = await this.#enterLockSession(observation);
+            const executing = performance.now();
+            observation.stage("authority-execution");
+            this.#work = observation.data;
+            let failed = false;
+            try {
+              // 持有日志锁期间恒有权威操作在等待,故为前台。互斥区不在这里声明:
+              // 外层 `#operations` 串行队列已单点标记,内层维护准入随之零等待——
+              // 排队会把锁的持有时间拉到准入超时,阻塞全部其他持锁者。背压由本方法
+              // 的锁外重试兜住。
+              return await runInMaintenanceContext("foreground", async () => {
+                await this.#ensureInitialized();
+                return await operation();
+              });
+            } catch (error) {
+              failed = true;
+              throw error;
+            } finally {
+              // 每次操作都重新按字节核验：同一持锁会话也不跨操作沿用视图，
+              // 非协作写者在两次操作之间的改动仍由下一次操作发现。
+              this.#operationView = undefined;
+              this.#work = undefined;
+              observation.data.executionMs += performance.now() - executing;
+              const releasing = performance.now();
+              const previousStage = observation.stage("authority-lock-release");
+              try { await this.#leaveLockSession(session, failed); } finally { observation.data.releaseMs += performance.now() - releasing; }
+              observation.stage(previousStage);
+            }
+          });
+        } finally {
+          this.#lockedOperations--;
+        }
       } catch (error) {
         // 可重试判据由 resources 层单点给出,这里不再内联。
         const retryAfterMs = maintenanceRetryDelayMs(error);
@@ -2321,6 +2368,69 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         observation.data.retries++;
       }
     }
+  }
+
+  /** 沿用本实例仍持有的写者锁，否则取得新锁并开始新会话。 */
+  async #enterLockSession(observation: ReturnType<AuthorityWorkObserver["begin"]>): Promise<CommitLogLockSession> {
+    const held = this.#lockSession;
+    if (held) {
+      clearTimeout(held.idle);
+      held.idle = undefined;
+      if (idleLockSessions.get(this.#lockPath) === held.close) idleLockSessions.delete(this.#lockPath);
+      return held;
+    }
+    await this.#lockSessionClosing?.catch(() => undefined);
+    // 同进程另一实例在空闲保留期持有同一把锁：立即收回，按原有语义由文件锁仲裁。
+    await idleLockSessions.get(this.#lockPath)?.().catch(() => undefined);
+    observation.stage("directory-preparation");
+    const preparing = performance.now();
+    try { await ensureDurableDirectory(this.rootDir); }
+    finally { observation.data.preparationMs += performance.now() - preparing; }
+    const waiting = performance.now();
+    observation.stage("authority-file-lock");
+    let release: () => Promise<void>;
+    try { release = await this.#acquireFileLock(this.#lockPath, {
+        staleMs: this.#lockStaleMs,
+        waitMs: this.#lockWaitMs,
+        resourceName: "AuthorityCommitLog",
+      });
+    } finally { observation.data.lockWaitMs += performance.now() - waiting; }
+    const session: CommitLogLockSession = {
+      release,
+      acquiredAt: performance.now(),
+      close: () => this.#closeLockSession(session),
+      idle: undefined,
+    };
+    this.#lockSession = session;
+    return session;
+  }
+
+  /** 失败或持有到上限即在本操作边界释放；后续已排队的操作直接沿用；否则短暂保留以接住紧随其后的操作。 */
+  async #leaveLockSession(session: CommitLogLockSession, failed: boolean): Promise<void> {
+    if (failed || this.#lockSessionLingerMs === 0 || performance.now() - session.acquiredAt >= this.#lockSessionMaxHoldMs) {
+      await session.close();
+      return;
+    }
+    if (this.#lockedOperations > 1) return;
+    session.idle = setTimeout(() => {
+      // 计时到期时若已有操作排进队列，由它沿用并在结束时重新计时。
+      if (this.#lockedOperations === 0) void session.close().catch(() => undefined);
+    }, this.#lockSessionLingerMs);
+    session.idle.unref?.();
+    idleLockSessions.set(this.#lockPath, session.close);
+  }
+
+  #closeLockSession(session: CommitLogLockSession): Promise<void> {
+    if (this.#lockSession !== session) return this.#lockSessionClosing ?? Promise.resolve();
+    clearTimeout(session.idle);
+    session.idle = undefined;
+    if (idleLockSessions.get(this.#lockPath) === session.close) idleLockSessions.delete(this.#lockPath);
+    this.#lockSession = undefined;
+    const closing: Promise<void> = session.release().finally(() => {
+      if (this.#lockSessionClosing === closing) this.#lockSessionClosing = undefined;
+    });
+    this.#lockSessionClosing = closing;
+    return closing;
   }
 }
 

@@ -297,6 +297,47 @@ describe("FileDurableProjectionIndex", () => {
     await Promise.all([index.stopStorageMaintenance(), cold.stopStorageMaintenance()]);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
+  it("coalesces a short verified cold catch-up, replays after restart and still rejects later authority corruption", async () => {
+    const root = await createTempDir("projection-cold-checkpoint");
+    const artifactStore = new FileArtifactStore(path.join(root, "artifacts"));
+    const logRoot = path.join(root, "authority");
+    const writer = new FileAuthorityCommitLog(logRoot, artifactStore);
+    const definition = { projectionId: "cold-checkpoint", reducerVersion: 1, reduce: mutationsFor };
+    const live = writer.durableProjection(definition);
+    await expect(live.get("item")).resolves.toBeUndefined();
+    for (let value = 0; value < 5; value++) {
+      await writer.append([{ stream: "publish", body: { t: "put", key: "item", value } }]);
+    }
+    await writer.stopStorageMaintenance();
+    const first = new FileAuthorityCommitLog(logRoot, artifactStore);
+    const firstReduce = vi.fn(mutationsFor);
+    const firstIndex = first.durableProjection({ ...definition, reduce: firstReduce });
+    const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "flush");
+    try {
+      await expect(firstIndex.get("item")).resolves.toBe(4);
+      await expect(firstIndex.get("item")).resolves.toBe(4);
+      expect(flush).not.toHaveBeenCalled();
+    } finally { flush.mockRestore(); }
+    expect(firstReduce).toHaveBeenCalledTimes(5);
+    const persisted = await readProjectionManifest(path.join(logRoot, "projections", durableProjectionDirectoryName(definition.projectionId)));
+    expect(persisted.checkpoints.authority?.lsn).toBe(0);
+    await first.stopStorageMaintenance();
+    const second = new FileAuthorityCommitLog(logRoot, artifactStore);
+    const secondReduce = vi.fn(mutationsFor);
+    const recovered = second.durableProjection({ ...definition, reduce: secondReduce });
+    try {
+      await expect(recovered.get("item")).resolves.toBe(4);
+      expect(secondReduce).toHaveBeenCalledTimes(5);
+      const walPath = path.join(logRoot, "authority.log");
+      const wal = await readFile(walPath);
+      const position = wal.indexOf(Buffer.from('"value":0'));
+      expect(position).toBeGreaterThan(0);
+      wal[position + Buffer.byteLength('"value":')] = '9'.charCodeAt(0);
+      await writeFile(walPath, wal);
+      await expect(recovered.get("item")).rejects.toMatchObject({ code: "invalid-authority-record" });
+    } finally { await second.stopStorageMaintenance(); }
+  });
+
   it("retries transient initialize backpressure outside the manifest queue", async () => {
     const root = await createTempDir("durable-projection-initialize-backpressure");
     const governor = new DefaultStorageMaintenanceGovernor({
