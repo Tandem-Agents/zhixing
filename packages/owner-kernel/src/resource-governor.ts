@@ -103,7 +103,8 @@ interface CandidateOccupancy {
 }
 
 export interface AssignmentResourceCoordinator {
-  coordinate<T>(operation: () => Promise<T>): Promise<T>;
+  /** Read-only callbacks may inspect/validate facts, but must not append authority records. */
+  coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T>;
   prepareQueuedTerminal(input: {
     readonly workload: RootResourceWorkload;
     readonly reason: Extract<GovernorRecord, { t: "dequeue" }>["reason"];
@@ -197,13 +198,13 @@ export class AnchorResourceGovernor
     this.#operations = shared;
   }
 
-  async coordinate<T>(operation: () => Promise<T>): Promise<T> {
+  async coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T> {
     return this.#operations.run(async () => {
       await this.#synchronizeUnlocked();
       try {
         return await operation();
       } finally {
-        await this.#synchronizeUnlocked();
+        if (!options?.readOnly) await this.#synchronizeUnlocked();
         this.#pruneCandidates();
       }
     });
@@ -1544,19 +1545,21 @@ export class AnchorResourceGovernor
   async #synchronizeUnlocked(): Promise<void> {
     const cached = this.#projection;
     const retentionCutoff = this.#retentionCutoff();
-    const initial = cached
-      ? cloneGovernorProjection(cached.state)
-      : emptyGovernorProjection();
+    const initial = cached?.state ?? emptyGovernorProjection();
+    let retentionApplied = false;
     const transaction = await this.#log.readProjection<GovernorProjection, unknown>(
       initial,
       (state, record, envelope) => {
         if (record.stream !== GOVERNOR_STREAM) return state;
-        return this.#applyRetainedRecord(
-          state,
+        const next = this.#applyRetainedRecord(
+          state === cached?.state ? cloneGovernorProjection(state) : state,
           record.body,
           envelope.at,
           retentionCutoff,
+          retentionApplied,
         );
+        retentionApplied = true;
+        return next;
       },
       {
         stream: GOVERNOR_STREAM,
@@ -1599,16 +1602,20 @@ export class AnchorResourceGovernor
       const initial = cached
         ? cloneGovernorProjection(cached.state)
         : emptyGovernorProjection();
+      let retentionApplied = false;
       const transaction = await this.#log.transactProjection<GovernorProjection, unknown, Value>(
         initial,
         (state, record, envelope) => {
           if (record.stream !== GOVERNOR_STREAM) return state;
-          return this.#applyRetainedRecord(
+          const next = this.#applyRetainedRecord(
             state,
             record.body,
             envelope.at,
             retentionCutoff,
+            retentionApplied,
           );
+          retentionApplied = true;
+          return next;
         },
         (state) => {
           const decision = decide(state);
@@ -1644,17 +1651,18 @@ export class AnchorResourceGovernor
     record: unknown,
     envelopeAt: string,
     retentionCutoff: string,
+    retentionApplied: boolean,
   ): GovernorProjection {
-    return compactGovernorProjection(
-      applyGovernorRecordAt(
-        state,
-        record,
-        envelopeAt,
-        MAX_LEASE_TTL_MS,
-        this.#verifier,
-      ),
-      retentionCutoff,
+    const next = applyGovernorRecordAt(
+      state, record, envelopeAt, MAX_LEASE_TTL_MS, this.#verifier,
     );
+    // The cutoff is frozen for this replay. Once pruned, only these records
+    // can introduce another terminal timestamp. Every record is still fully
+    // validated and reduced; the first record and final projection always prune.
+    const kind = (record as GovernorRecord).t;
+    return !retentionApplied || kind === "release" || kind === "reclaim" || kind === "dequeue"
+      ? compactGovernorProjection(next, retentionCutoff)
+      : next;
   }
 
   #retentionCutoff(): string {

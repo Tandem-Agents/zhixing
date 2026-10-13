@@ -427,21 +427,25 @@ export function compactGovernorProjection(
         Date.parse(reservation.terminalAt) < cutoff)
       .map((reservation) => reservation.rootReservationId),
   );
-  for (const [reservationId, reservation] of state.reservations) {
-    if (!expiredRoots.has(reservation.rootReservationId)) continue;
-    state.reservations.delete(reservationId);
-    state.leaseAcceptances.delete(reservationId);
-  }
-  for (const [usageId, usage] of state.usages) {
-    if (expiredRoots.has(usage.rootReservationId)) state.usages.delete(usageId);
-  }
-  for (const [usageId, reservation] of state.usageReservations) {
-    if (expiredRoots.has(reservation.rootReservationId)) {
-      state.usageReservations.delete(usageId);
+  // No expired root can own removable usage or lease entries. Avoid walking
+  // the complete retained usage history after every replayed nonterminal fact.
+  if (expiredRoots.size > 0) {
+    for (const [reservationId, reservation] of state.reservations) {
+      if (!expiredRoots.has(reservation.rootReservationId)) continue;
+      state.reservations.delete(reservationId);
+      state.leaseAcceptances.delete(reservationId);
     }
-  }
-  for (const rootReservationId of expiredRoots) {
-    state.nextUsageSeqByRoot.delete(rootReservationId);
+    for (const [usageId, usage] of state.usages) {
+      if (expiredRoots.has(usage.rootReservationId)) state.usages.delete(usageId);
+    }
+    for (const [usageId, reservation] of state.usageReservations) {
+      if (expiredRoots.has(reservation.rootReservationId)) {
+        state.usageReservations.delete(usageId);
+      }
+    }
+    for (const rootReservationId of expiredRoots) {
+      state.nextUsageSeqByRoot.delete(rootReservationId);
+    }
   }
   for (const [workloadKey, dequeuedAt] of state.dequeuedAt) {
     if (Date.parse(dequeuedAt) >= cutoff) continue;

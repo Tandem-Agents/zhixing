@@ -1516,15 +1516,13 @@ export class ExecutorResourceGovernor
   async #synchronizeUnlocked(): Promise<void> {
     const cached = this.#projection;
     const retentionCutoff = this.#retentionCutoff();
-    const initial = cached
-      ? cloneGovernorProjection(cached.state)
-      : emptyGovernorProjection();
+    const initial = cached?.state ?? emptyGovernorProjection();
     const result = await this.#log.transactProjection<GovernorProjection, unknown, void>(
       initial,
       (state, record, envelope) => {
         if (record.stream !== this.#stream) return state;
         return this.#applyRetainedRecord(
-          state,
+          state === cached?.state ? cloneGovernorProjection(state) : state,
           record.body,
           envelope.at,
           retentionCutoff,

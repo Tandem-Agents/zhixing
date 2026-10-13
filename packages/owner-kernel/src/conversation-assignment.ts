@@ -5995,7 +5995,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             }
           };
           const transaction = await (
-            this.#resources ? this.#resources.coordinate(replay) : replay()
+            this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
           );
           if (abort.aborted) throw new StorageMaintenanceCancelledError();
           this.#runProjection = {
@@ -8532,7 +8532,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
       };
       const transaction = await (
-        this.#resources ? this.#resources.coordinate(replay) : replay()
+        this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
       );
       this.#submissionGuardProjection = {
         state: transaction.state,

@@ -590,7 +590,8 @@ export interface JobCommitParticipant {
 }
 
 export interface SystemJobResourceCoordinator {
-  coordinate<T>(operation: () => Promise<T>): Promise<T>;
+  /** Read-only callbacks must not append authority records. */
+  coordinate<T>(operation: () => Promise<T>, options?: { readonly readOnly: true }): Promise<T>;
   prepareQueuedTerminal(input: {
     readonly workload: Extract<RootResourceWorkload, { readonly kind: "job" }>;
     readonly reason: "cancelled" | "failed" | "expired";
@@ -5251,7 +5252,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           },
         );
         const transaction = await (
-          this.#resources ? this.#resources.coordinate(replay) : replay()
+          this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
         );
         this.#projection = { state: transaction.state, cursor: transaction.cursor };
         return select(transaction.state);
@@ -7086,7 +7087,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         }
       };
       const transaction = await (
-        this.#resources ? this.#resources.coordinate(replay) : replay()
+        this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
       );
       this.#submissionGuard = {
         state: transaction.state,

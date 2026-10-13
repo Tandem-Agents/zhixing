@@ -22,7 +22,7 @@ import {
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AnchorResourceGovernor,
   assignmentReservationId,
@@ -869,6 +869,20 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     const compacted = await fixture.restart().snapshot();
     expect(compacted.reservations.size).toBe(0);
     expect(compacted.leaseAcceptances.size).toBe(0);
+    const retained = await fixture.restart().acquireRoot(
+      { kind: "control", id: "after-retention", attempt: 1 },
+      { maxCalls: 1 },
+      { admissionClass: "advancement", entry: "advancement-control" },
+      { ...hostContext, requestId: "after-retention", deadlineAt: "2026-08-17T00:05:00.000Z" },
+    );
+    // A warm cursor sees the new nonterminal fact after its old state ages out;
+    // a cold replay crosses the old terminal fact before the new active root.
+    for (const governor of [fixture.governor, fixture.restart()]) {
+      const mixed = await governor.snapshot();
+      expect([...mixed.reservations.keys()]).toEqual([retained.reservationId]);
+      expect([...mixed.leaseAcceptances.keys()]).toEqual([retained.reservationId]);
+      expect(mixed.reservations.get(retained.reservationId)?.state).toBe("active");
+    }
   });
 });
 
@@ -1157,3 +1171,17 @@ function usageReport(input: {
     signature: signer.sign("UsageReport", 1, withDigest),
   };
 }
+
+it('verifies a read-only coordination once and refreshes after a mutating decision', async () => {
+  const fixture = await createHarness(), read = vi.spyOn(fixture.log, 'readProjection');
+  try {
+    await fixture.governor.coordinate(async () => {}, { readOnly: true });
+    expect(read).toHaveBeenCalledOnce(); read.mockClear();
+    await fixture.governor.coordinate(async () => {
+      await fixture.log.append(fixture.governor.prepareQueuedTerminal({ workload: { kind: 'run', id: 'read-boundary', attempt: 1 }, reason: 'cancelled' }));
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    await expect(fixture.governor.enqueueRoot(assignmentReservationId('after-read'), { kind: 'run', id: 'read-boundary', attempt: 1 },
+      { admissionClass: 'interactive', entry: 'conversation-input' }, hostContext)).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
+  } finally { read.mockRestore(); }
+});

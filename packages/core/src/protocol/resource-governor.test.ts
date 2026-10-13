@@ -199,6 +199,11 @@ describe("resource governor protocol", () => {
       "2026-07-20T00:00:01.000Z",
     );
 
+    compactGovernorProjection(state, "2026-07-20T00:00:00.000Z");
+    expect(state.reservations.size).toBe(1);
+    expect(state.usages.size).toBe(1);
+    expect(state.usageReservations.size).toBe(1);
+
     compactGovernorProjection(state, "2026-07-20T00:00:02.000Z");
 
     expect(state.reservations.size).toBe(0);
