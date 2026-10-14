@@ -57,3 +57,24 @@ describe("session.statusHistory", () => {
     await expect(registry.dispatch("session.statusHistory", params, { connection: { authenticated: true }, server: {} } as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
   });
 });
+
+
+it('accepts bounded owner timeline cursors and rejects malformed history coverage', async () => {
+  const read = vi.fn(async () => ({ fragments: [], hasMore: false, reset: false }));
+  const registry = buildBuiltinRegistry(), context = { connection: { authenticated: true }, server: { serverInfoRuntime: { conversationRecovery: read } } };
+  const history = { key: '0:9007199254740000:9007199254740991', throughLsn: 991 };
+  const cursor = { conversationId: 'conversation-b', ownerEpoch: 2, revision: 1, message: 0, block: 0, offset: 0, history };
+  const request = { mode: 'body-page', conversationId: 'conversation-b', includeInputs: true, cursor };
+  await registry.dispatch('session.statusHistory', request, context as never);
+  expect(read).toHaveBeenLastCalledWith(request);
+  const coverage = { mode: 'control-page', conversationId: 'conversation-b', historyThroughInputLsn: 991 };
+  await registry.dispatch('session.statusHistory', coverage, context as never);
+  expect(read).toHaveBeenLastCalledWith(coverage);
+  for (const invalid of [{ ...request, includeInputs: false }, ...[
+    { ...history, key: '../../source' }, { ...history, throughLsn: -1 }, { ...history, throughLsn: 1.5 }, { ...history, after: false }, { ...history, artifact: 'caller-source' },
+  ].map(history => ({ ...request, cursor: { ...cursor, history } })),
+    { ...request, direction: 'forward', cursor: { ...cursor, history: { ...history, after: true } } }, { ...coverage, historyThroughInputLsn: -1 }]) {
+    await expect(registry.dispatch('session.statusHistory', invalid, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+  }
+  expect(read).toHaveBeenCalledTimes(2);
+});

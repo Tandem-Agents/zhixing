@@ -102,18 +102,24 @@ export class ConversationBodyReader {
     const after = await this.directory.state(this.conversationId);
     return after.deleted || after.clearId !== before.clearId ? { fragments: [], hasMore: !after.deleted, reset: true } : result;
   }
-  async #page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }, state: ReadMeta): Promise<ConversationBodyPage> {
+  /** The timeline owns visibility checks before and after its whole page. Reuse
+   * its verified locator without repeating nested state/commit lookups. */
+  pageFromCommit(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId: string }, commit: CommitPointer, state: ReadMeta, limit: number): Promise<ConversationBodyPage> {
+    if (input.runId !== commit.runId || !Number.isInteger(limit) || limit < 1 || limit > 4) throw Error('conversation-body-page-binding');
+    return this.#page(input, state, commit, limit);
+  }
+  async #page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }, state: ReadMeta, selected?: CommitPointer, limit = 4): Promise<ConversationBodyPage> {
     const cursor = input.cursor;
     if (state.deleted || cursor && (cursor.conversationId !== this.conversationId || cursor.ownerEpoch !== this.ownerEpoch || cursor.clearId !== state.clearId || cursor.revision <= state.clearedThrough))
       return { fragments: [], hasMore: !state.deleted, reset: true };
     const reverse = input.direction !== 'forward';
     if (!reverse && !cursor) throw Error('conversation-body-forward-cursor');
-    let commit = input.runId ? await this.directory.commit(this.conversationId, input.runId) : await this.directory.latest(this.conversationId, cursor ? cursor.revision + 1 : MAX);
+    let commit = selected ?? (input.runId ? await this.directory.commit(this.conversationId, input.runId) : await this.directory.latest(this.conversationId, cursor ? cursor.revision + 1 : MAX));
     let message = cursor?.message ?? MAX, block = cursor?.block ?? MAX, offset = cursor?.offset ?? MAX;
     const fragments: ConversationBodyFragment[] = [];
     let scanned = 0;
     const position = (): ConversationBodyCursor => ({ conversationId: this.conversationId, ownerEpoch: this.ownerEpoch, clearId: state.clearId, revision: commit!.commitRevision, message, block, offset });
-    while (commit && ++scanned <= 64 && fragments.length < 4) {
+    while (commit && ++scanned <= 64 && fragments.length < limit) {
       if (cursor && input.runId && commit.commitRevision !== cursor.revision) throw Error('conversation-body-cursor-run');
       const source = await this.source(commit);
       if ('ready' in source) return { fragments, hasMore: true, reset: false, cursor: position(),
@@ -147,7 +153,7 @@ export class ConversationBodyReader {
         if (offset !== 0) fragments.push({ cursor: { ...position(), offset: 0 }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type, text: '[图像材料]', offset: 0, length: 6, final: true });
         offset = 0;
       } else {
-        const parts = reverse ? await this.json.text(source.ref, node, offset, 4 - fragments.length) : [await this.json.textRange(source.ref, node, offset)];
+        const parts = reverse ? await this.json.text(source.ref, node, offset, limit - fragments.length) : [await this.json.textRange(source.ref, node, offset)];
         const toolId = type === 'tool_use' ? await read('id') : type === 'tool_result' ? await read('toolUseId') : undefined;
         const isError = type === 'tool_result' && await read('isError') === true;
         for (const part of parts) fragments.push({ cursor: { ...position(), offset: part.offset }, runId: commit.runId, runIndex: runIndex as number, message, block, role, type,

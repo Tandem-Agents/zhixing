@@ -29,6 +29,9 @@ export interface ConversationMessageProjectionPort {
   inputsOutsideHistory(conversationId: string): Promise<{
     readonly inputs: readonly ConversationMessageStatus[];
     readonly truncated: boolean;
+    /** Complete control discovery, independent of the 200 displayed inputs.
+     * At most two preferred targets are needed to distinguish unique/ambiguous. */
+    readonly interruptibleRuns?: readonly { readonly runId: string; readonly state: ConversationRunState }[];
   }>;
 }
 
@@ -134,6 +137,7 @@ export class ConversationCommunicationApplicationService {
     const oldest = page.runs.at(-1);
     const outsideHistory = input.before ? { inputs: [], truncated: false } : await this.ports.messages.inputsOutsideHistory(input.conversationId);
     return { ...page, inputsOutsideHistory: outsideHistory.inputs, inputsOutsideHistoryTruncated: outsideHistory.truncated,
+      ...('interruptibleRuns' in outsideHistory ? { interruptibleRuns: outsideHistory.interruptibleRuns } : {}),
       ...(page.hasMore && oldest ? { next: { shardId: oldest.shardId, runIndex: oldest.record.runIndex } } : {}) };
   }
 

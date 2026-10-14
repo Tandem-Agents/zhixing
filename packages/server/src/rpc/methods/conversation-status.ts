@@ -27,31 +27,37 @@ export function parseConversationRecoveryRequest(raw: unknown): ConversationReco
     return value as unknown as ConversationRecoveryRequest;
   }
   if (value.mode === 'body-page') {
-    if (!keys(value, ['mode', 'conversationId', 'cursor', 'direction', 'runId']) || !isProtocolIdentifier(value.conversationId) ||
-      value.runId !== undefined && !isProtocolIdentifier(value.runId) || value.direction !== undefined && !['forward', 'reverse'].includes(value.direction as string)) fail();
+    if (!keys(value, ['mode', 'conversationId', 'cursor', 'direction', 'runId', 'includeInputs']) || !isProtocolIdentifier(value.conversationId) ||
+      value.includeInputs !== undefined && value.includeInputs !== true || value.runId !== undefined && !isProtocolIdentifier(value.runId) || value.direction !== undefined && !['forward', 'reverse'].includes(value.direction as string)) fail();
     if (value.cursor !== undefined) {
       const cursor = object(value.cursor);
-      if (!keys(cursor, ['conversationId', 'ownerEpoch', 'clearId', 'revision', 'message', 'block', 'offset']) || cursor.conversationId !== value.conversationId ||
+      if (!keys(cursor, ['conversationId', 'ownerEpoch', 'clearId', 'revision', 'message', 'block', 'offset', 'history']) || cursor.conversationId !== value.conversationId ||
           !integer(cursor.ownerEpoch) || cursor.ownerEpoch === 0 || !integer(cursor.revision) || !integer(cursor.offset) ||
           ['message', 'block'].some(key => !integer(cursor[key]) && cursor[key] !== -1) || cursor.clearId !== undefined && !isProtocolIdentifier(cursor.clearId)) fail();
     }
-    if (value.direction === 'forward' && !value.cursor) fail();
+    if (value.cursor && object(value.cursor).history !== undefined) {
+      const history = object(object(value.cursor).history);
+      if (!keys(history, ['key', 'throughLsn', 'after']) || typeof history.key !== 'string' || !/^[01]:[0-9]{16}:[0-9]{16}$/.test(history.key) ||
+          !integer(history.throughLsn) || history.after !== undefined && history.after !== true) fail();
+    }
+    if (value.direction === 'forward' && (!value.cursor || object(object(value.cursor).history ?? {}).after)) fail();
     return value as unknown as ConversationRecoveryRequest;
   }
   if (!['control-page', 'input-page'].includes(value.mode as string) || !isProtocolIdentifier(value.conversationId) ||
-      !keys(value, value.mode === 'input-page' ? ['mode', 'conversationId', 'runId', 'cursor'] : ['mode', 'conversationId', 'cursor', 'historyRunIds'])) fail();
+      !keys(value, value.mode === 'input-page' ? ['mode', 'conversationId', 'runId', 'cursor'] : ['mode', 'conversationId', 'cursor', 'historyRunIds', 'historyThroughInputLsn'])) fail();
+  if (value.historyThroughInputLsn !== undefined && (!integer(value.historyThroughInputLsn) || value.cursor !== undefined)) fail();
   if (value.historyRunIds !== undefined && (!Array.isArray(value.historyRunIds) || value.historyRunIds.length > 4 ||
       value.historyRunIds.some(id => !isProtocolIdentifier(id)) || value.cursor !== undefined)) fail();
   if (value.mode === 'input-page' && !isProtocolIdentifier(value.runId)) fail();
   if (value.cursor !== undefined) {
     const cursor = object(value.cursor);
-    const fields = value.mode === 'control-page' ? ['after', 'item', 'baseItem', 'historyThroughCommitRevision'] : ['runId', 'position', 'part', 'offset', 'contentOffset', 'inputKey', 'imported'];
+    const fields = value.mode === 'control-page' ? ['after', 'item', 'baseItem', 'historyThroughCommitRevision', 'historyThroughInputLsn'] : ['runId', 'position', 'part', 'offset', 'contentOffset', 'inputKey', 'imported'];
     if (!keys(cursor, ['conversationId', 'ownerEpoch', 'clearedThroughLsn', 'clearId', 'baseId', 'upper', ...fields]) || cursor.conversationId !== value.conversationId ||
         !integer(cursor.ownerEpoch) || cursor.ownerEpoch === 0 || !integer(cursor.clearedThroughLsn)) fail();
     for (const key of ['clearId', 'baseId', 'inputKey']) if (cursor[key] !== undefined && !isProtocolIdentifier(cursor[key])) fail();
     if (cursor.imported !== undefined && cursor.imported !== true) fail();
     checkpoint(cursor.upper);
-    if (value.mode === 'control-page') { checkpoint(cursor.after); if (!integer(cursor.item) || !integer(cursor.baseItem) || (cursor.historyThroughCommitRevision !== undefined && !integer(cursor.historyThroughCommitRevision))) fail(); }
+    if (value.mode === 'control-page') { checkpoint(cursor.after); if (!integer(cursor.item) || !integer(cursor.baseItem) || (cursor.historyThroughCommitRevision !== undefined && !integer(cursor.historyThroughCommitRevision)) || (cursor.historyThroughInputLsn !== undefined && !integer(cursor.historyThroughInputLsn))) fail(); }
     else if (cursor.runId !== value.runId || ['position', 'part', 'offset', 'contentOffset'].some(key => !integer(cursor[key]))) fail();
   }
   return value as unknown as ConversationRecoveryRequest;

@@ -651,8 +651,8 @@ export class RpcConversationFacade {
     return result;
   }
 
-  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[]): Promise<ConversationControlPage> {
-    const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}) };
+  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThroughInputLsn?: number): Promise<ConversationControlPage> {
+    const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}), ...(historyThroughInputLsn !== undefined ? { historyThroughInputLsn } : {}) };
     const consume = (page: ConversationControlPage): ConversationControlPage => boundedControlProjection({ ...page,
       facts: page.facts.map(fact => fact.kind === 'status' && 'reason' in fact.notice
         ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact),
@@ -665,7 +665,7 @@ export class RpcConversationFacade {
     return boundedControlProjection(await client.request('session.statusHistory', { mode: 'completion', conversationId, runId, ownerEpoch }), 32 * 1024);
   }
   async bodyPage(conversationId: string, cursor?: import('@zhixing/core/contracts').ConversationBodyCursor,
-    options: { direction?: 'forward' | 'reverse'; runId?: string } = {}): Promise<import('@zhixing/core/contracts').ConversationBodyPage> {
+    options: { direction?: 'forward' | 'reverse'; runId?: string; includeInputs?: true } = {}): Promise<import('@zhixing/core/contracts').ConversationBodyPage> {
     const client = await this.link.getClient();
     const page = await client.request<import('@zhixing/core/contracts').ConversationBodyPage>('session.statusHistory', { mode: 'body-page', conversationId, ...(cursor ? { cursor } : {}), ...options });
     return boundedControlProjection(page, 224 * 1024);

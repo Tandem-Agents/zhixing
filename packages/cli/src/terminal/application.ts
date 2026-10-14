@@ -79,6 +79,7 @@ type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
 class EmptyTerminalSubmission extends Error {}
 interface TerminalHistoryState {
+  historyThroughInputLsn?: number;
   conversationId: string;
   buffered?: ConversationBodyPage;
   bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
@@ -732,6 +733,7 @@ class TerminalApplication {
         presentationProfile: 'bounded-v1',
         onProcess: value => this.#processSession.accept(value),
         pagedRecovery: true,
+        historyThroughInputLsn: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.historyThroughInputLsn : undefined,
         historyRunIds: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.recoveryRunIds ?? [] : [],
         onRecoveryDrain: source => {
           this.#outputProjection.end(source.conversationId, source.turnId, source.runId);
@@ -976,7 +978,7 @@ class TerminalApplication {
     const current = () => this.#history === history && !this.#abort.signal.aborted;
     while (current() && projected < 4 && history.hasMore) {
       const page = history.buffered ?? await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
-        'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor));
+        'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor, { includeInputs: true }));
       if (!current()) return;
       if (page.reset) { history.buffered = undefined; history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
       if (page.preparing) {
@@ -984,10 +986,11 @@ class TerminalApplication {
         progress(`正在恢复历史索引（${Math.floor(page.preparing.bytes / 1024)} / ${Math.ceil(page.preparing.total / 1024)} KiB）…`);
         await this.#publishHistoryView(); await new Promise<void>(setImmediate); continue;
       }
+      history.historyThroughInputLsn = page.historyThroughInputLsn;
       history.buffered = page;
       const source = page.fragments[0];
       if (!source) { history.buffered = undefined; history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }
-      const blockId = `owner-log:${source.runId}:${source.message}:${source.block}`;
+      const blockId = `owner-log:${source.runId}:${source.cursor.history?.key ?? source.cursor.revision}:${source.message}:${source.block}`;
       const role = source.type === 'thinking' ? 'thinking' : source.type === 'tool_use' ? 'tool' : source.type === 'tool_result' ? (source.isError ? 'tool-error' : 'tool') : source.role;
       const groupId = source.toolId ? `${source.runId}:tool:${source.toolId}` : `${source.runId}:${source.message}:${role}`;
       const replay: DisplayReplaySource = { kind: 'owner', conversationId: history.conversationId, runId: source.runId, cursor: source.cursor,

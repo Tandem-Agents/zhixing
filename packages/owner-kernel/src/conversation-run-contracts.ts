@@ -4,6 +4,7 @@ import { isAdvancementControlEvent } from "@zhixing/core/advancement";
 import type { AdvancementControlEvent } from "@zhixing/core/advancement";
 import type {
   ArtifactRef,
+  FinalOutboxRecord,
   AssignmentTerminationProof,
   CancelProofBody,
   ConversationInvocation,
@@ -53,6 +54,19 @@ import {
   validateConversationChannelChallengeRecord,
   type ConversationChannelChallengeRecord,
 } from "./channel-interaction-records.js";
+
+/** Structural contract shared by final replay and authoritative read locators. */
+export function validateFinalOutboxRecord(value: unknown): FinalOutboxRecord {
+  assertPlainRecord(value, 'Final outbox record');
+  assertRecordKeys(value, ['commitRevision', 'conversationId', 'digest', 'runId', 'state', 't'], [], 'Final outbox record');
+  if (value.t !== 'final') throw corruptRunJournal('Final outbox record kind is invalid');
+  assertIdentifier(value.conversationId, 'Final conversation id');
+  assertIdentifier(value.runId, 'Final run id');
+  assertPositiveSafeInteger(value.commitRevision, 'Final commit revision');
+  assertDigest(value.digest, 'Final bundle digest');
+  if (value.state !== 'pending' && value.state !== 'published' && value.state !== 'expired') throw corruptRunJournal('Final outbox state is invalid');
+  return value as unknown as FinalOutboxRecord;
+}
 
 export type Stored<T> = T | { readonly ref: ArtifactRef };
 

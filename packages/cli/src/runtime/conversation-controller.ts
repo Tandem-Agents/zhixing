@@ -229,6 +229,7 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   onRecoveryDrain?: (turn: ObservedTurnNotification) => Promise<void>;
   onRecoveryReset?: (conversationId: string, current: () => boolean) => Promise<void>;
   historyRunIds?: () => readonly string[];
+  historyThroughInputLsn?: () => number | undefined;
 }
 
 export interface InitialConversationSelection {
@@ -1027,7 +1028,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     this.opts.onRunTerminal?.({ conversationId, turnId, runId });
     if (runId && (result.reason === "aborted" || result.reason === "error")) {
       // 本地 waiter 已负责终态展示，重复状态不能再进入旁观展示。
-      rememberBounded(this.observedContinuations, runId, { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: true });
+      rememberBounded(this.observedContinuations, runId, { conversationId, localTurnId: turnId, sequences: new Map(), text: new ObservedTextPrefix(), settled: true });
     }
     this.releaseDurableRun(turnId);
     waiter({ result, postTurnControl: intent });
@@ -1048,7 +1049,13 @@ export class ConversationController<Outcome = TurnOutcome> {
         .abort(conversationId, pendingAbort.requestId, runId)
         .then(pendingAbort.resolve, pendingAbort.reject);
     }
-    if (!runId || !this.waiters.has(turnId)) return;
+    if (!runId) return;
+    if (!this.waiters.has(turnId)) {
+      // A terminal notification can settle the waiter before the send receipt.
+      const observed = this.observedContinuations.get(runId) ?? { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: true };
+      rememberBounded(this.observedContinuations, runId, { ...observed, localTurnId: turnId });
+      return;
+    }
     this.durableRuns.set(runId, {
       conversationId,
       turnId,
@@ -1269,7 +1276,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (!current()) return;
           this.finishRecoveryReset(conversationId);
         }
-        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.());
+        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.(), this.recoveryCursor ? undefined : this.opts.historyThroughInputLsn?.());
         if (!current()) return;
         if (page.reset) {
           this.recoveryResetRequested = true;
@@ -1351,7 +1358,7 @@ export class ConversationController<Outcome = TurnOutcome> {
       do {
         this.completionScanRequested = false;
         const page = await this.opts.conversation.controlPage(conversationId, this.completionCursor,
-          this.completionCursor ? undefined : this.opts.historyRunIds?.());
+          this.completionCursor ? undefined : this.opts.historyRunIds?.(), this.completionCursor ? undefined : this.opts.historyThroughInputLsn?.());
         if (!current()) return;
         if (page.reset) {
           this.completionCursor = undefined;
@@ -1413,15 +1420,21 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (!result) return;
     if (!current()) return;
     let observed = this.observedContinuations.get(runId);
+    const historyCovered = fact.commitRevision !== undefined && fact.commitRevision <= historyThroughCommitRevision ||
+      fact.historyCovered === true && !observed && !watch && notice.state !== 'uncertain';
+    // Recovery reads all old terminal runs. Only an actual communication or
+    // continuation, or an observed live run, owns a new terminal notification.
+    // Input facts are consumed independently, including uncommitted sources.
+    const historicalInteractive = !observed && !watch && !fact.communication && !fact.continuation && notice.state !== 'uncertain';
     if (!observed) {
-      observed = { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: !!progress.localSettled };
+      observed = { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: !!progress.localSettled || historyCovered || historicalInteractive };
       rememberBounded(this.observedContinuations, runId, observed);
     }
     observed.terminalInputsReconciled = true;
     observed.communication ||= fact.communication;
     if (!observed.settled) {
       const identity = { conversationId, runId };
-      const label = observed.communication ? '来信处理' : '任务续接';
+      const label = observed.communication ? '来信处理' : fact.continuation ? '任务续接' : '运行';
       await this.emitRecoveredYield({ type: 'text_delta', text: result.reason === 'error' ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: 'status', notice });
       await this.opts.onRecoveryDrain?.(identity);
       if (!current()) return;
@@ -1435,9 +1448,15 @@ export class ConversationController<Outcome = TurnOutcome> {
       await this.opts.conversation.consumeInputPage(conversationId, runId, progress.inputCursor, async page => {
         if (!current()) return;
         if (page.reset) throw new RecoveryGenerationChanged();
-        if (page.input?.identity.source.kind === 'conversation') {
-          await this.opts.onObservedInputFragment?.({ ...page.input, conversationId, runId });
-          progress.communication = true;
+        if (page.input) {
+          const localTurnId = this.durableRuns.get(runId)?.turnId ?? this.observedContinuations.get(runId)?.localTurnId;
+          const communication = page.input.identity.source.kind === 'conversation';
+          // The same live input is already displayed by its sender. Cold inputs
+          // have no local receipt; preserve their source and original text.
+          if (communication || page.input.identity.id !== localTurnId) {
+            await this.opts.onObservedInputFragment?.({ ...page.input, conversationId, runId });
+          }
+          progress.communication ||= communication;
         }
         // Commit within the consumer, before the surrounding RPC retires. A
         // transport error after this point cannot cause duplicate append.
@@ -1993,10 +2012,10 @@ export class ConversationController<Outcome = TurnOutcome> {
     const conversationId = this.active.conversationId;
     const runId = await this.consumeHistory(conversationId, { limit: 1 }, page => {
       if (this.active.conversationId !== conversationId) return undefined;
-      const runs = new Map((page.inputsOutsideHistory ?? [])
+      const runs = new Map((page.interruptibleRuns ?? (page.inputsOutsideHistory ?? [])
         .filter(input => input.message.inputIdentity?.source.kind === "conversation" &&
           ["queued", "dispatched", "running", "cancel-requested"].includes(input.state))
-        .map(input => [input.runId, input.state]));
+        ).map(input => [input.runId, input.state]));
       const current = [...runs].filter(([, state]) => state !== "queued");
       const candidates = current.length ? current : [...runs];
       if (candidates.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");

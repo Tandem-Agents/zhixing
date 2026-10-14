@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
 import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage, Signature } from '@zhixing/core/contracts';
-import { protocolDigest } from '@zhixing/core/protocol';
+import { protocolDigest, canonicalize, createConversationSealedBundle } from '@zhixing/core/protocol';
 import { createTempDir } from '@zhixing/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import { StorageMaintenanceAdmissionError, isHoldingMaintenanceExclusion, runHoldingMaintenanceExclusion, runWithMaintenanceUrgency } from '@zhixing/core/resources';
@@ -30,6 +30,26 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
     ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'seed-ingress', receivedAt: NOW,
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
+
+it('cold message queries use the actual owner directory and imported base without full execution replay', async () => {
+  const h = await harness(); await admit(h.journal);
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-message-query' });
+  const expected = { runId: 'seed-run', state: 'cancelled', consumed: false, disposition: 'stopped' };
+  const records = (await h.log.readSnapshot()).commits.flatMap(envelope =>
+    envelope.entries.map(record => ({ ...record, lsn: envelope.lsn, at: envelope.at })));
+  const snapshot = vi.spyOn(h.log, 'readSnapshot').mockRejectedValue(Error('full execution replay forbidden'));
+  const get = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('execution artifact read forbidden'));
+  try {
+    const cold = h.journalAt();
+    expect(await cold.messageStatus('seed-message')).toMatchObject(expected);
+    expect(await cold.messageInputsOutsideHistory()).toMatchObject({ inputs: [expected], truncated: false });
+    expect(cold.hasRecoveredInputProjection).toBe(false);
+    const target = await harness(); await target.journal.primeImportedReadBase(records as any);
+    expect(await target.journal.messageStatus('seed-message')).toMatchObject(expected);
+    expect(await target.journal.messageInputsOutsideHistory()).toMatchObject({ inputs: [expected] });
+    expect(get).not.toHaveBeenCalled(); expect(snapshot).not.toHaveBeenCalled();
+  } finally { get.mockRestore(); snapshot.mockRestore(); }
+});
 
 describe('finite owner recovery pages', () => {
   it('installs empty and sparse recovery views without syncing unrelated resource slices', async () => {
@@ -122,14 +142,17 @@ describe('finite owner recovery pages', () => {
     } finally { release.resolve(); spy.mockRestore(); }
   });
 
-  it('recovers more than 200 old cancelled inputs and advances inside one authority envelope', async () => {
+  it.each(['conversation', 'legacy-local'] as const)('recovers more than 200 old cancelled %s inputs and advances inside one authority envelope', async origin => {
     const source = await harness(); await admit(source.journal);
     await source.journal.cancelRun({ runId: 'seed-run', requestId: 'seed-cancel' });
     const template = (await source.log.readAll()).flatMap(envelope => envelope.entries);
     const target = await harness();
     const entries = Array.from({ length: 205 }, (_, index) => template.map(entry => {
       const record = JSON.parse(JSON.stringify(entry).replaceAll('seed-', `case-${index}-`));
-      if (record.body.t === 'admitted') record.body.queuedPosition = index;
+      if (record.body.t === 'admitted') {
+        record.body.queuedPosition = index;
+        if (origin === 'legacy-local') delete record.body.ingress.turnOrigin.messageIdentity;
+      }
       return record;
     })).flat();
     await target.log.append(entries);
@@ -144,6 +167,7 @@ describe('finite owner recovery pages', () => {
         if (fact.kind !== 'input') continue;
         const input = await target.journal.recoveryPage({ mode: 'input-page', conversationId: 'recovery-conversation', runId: fact.cursor.runId, cursor: fact.cursor }) as ConversationInputPage;
         expect(input.input?.text).toBe('original input'); expect(input.input?.final).toBe(true);
+        expect(input.input?.identity.source.kind).toBe(origin === 'legacy-local' ? 'user' : 'conversation');
         expect(seen.has(input.input!.identity.id)).toBe(false); seen.add(input.input!.identity.id);
       }
       cursor = page.cursor; if (!page.hasMore) break;
@@ -302,7 +326,169 @@ it('reads control chunks once without rescanning the directory for every status 
     expect(page.facts.some(fact => fact.kind === 'status' && fact.notice.state === 'cancelled')).toBe(true);
     expect(page.facts.length).toBeLessThanOrEqual(32);
     expect(status).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled();
-    expect(control.mock.calls.every(([, runs]) => runs.length <= 64)).toBe(true);
+    expect(control.mock.calls.every(([, runs]) => runs.length <= 63)).toBe(true);
     expect(control.mock.calls.filter(([, runs]) => runs.length > 0)).toHaveLength(1);
   } finally { control.mockRestore(); status.mockRestore(); commit.mockRestore(); }
 });
+
+ it.each([false, true])('keeps the authoritative continuation origin of a cancelled run: %s', async continuation => {
+  const h = await harness();
+  await h.journal.admit({ ingressKey: 'origin-ingress', runId: 'origin-run', queuedPosition: 0,
+    userInput: { parts: [{ type: 'text', text: 'cancelled input' }] }, invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'origin-ingress', receivedAt: NOW,
+      turnOrigin: { channel: 'rpc', messageIdentity: { id: 'origin-message', source: { kind: 'user' } },
+        ...(continuation ? { worksceneContinuation: { kind: 'result', conversationId: 'ws:test:primary', runId: 'child' } } : {}) } } });
+  await h.journal.cancelRun({ runId: 'origin-run', requestId: 'cancel-origin' });
+  const page = await h.journalAt().recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation' }) as ConversationControlPage;
+  expect(page.facts.filter(fact => fact.kind === 'status')).toEqual([expect.objectContaining({
+    continuation, communication: false, notice: expect.objectContaining({ state: 'cancelled', ref: expect.objectContaining({ runId: 'origin-run' }) }),
+  })]);
+});
+
+it('skips unrelated authority envelopes while keeping a complete bounded control cursor', async () => {
+  const h = await harness(); await admit(h.journal);
+  for (let i = 0; i < 70; i++) await h.log.append([{ stream: 'run:unrelated', body: { n: i } }]);
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'sparse-cancel' });
+  for (let i = 0; i < 70; i++) await h.log.append([{ stream: 'run:unrelated', body: { n: i + 70 } }]);
+  const wholeTail = vi.spyOn(h.log, 'readTail'), selected = vi.spyOn(h.log, 'readEnvelopesAt');
+  try {
+    const page = await h.journalAt().recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation' }) as ConversationControlPage;
+    expect(page.hasMore).toBe(false); expect(page.cursor.after).toEqual(page.cursor.upper);
+    expect(page.facts.some(fact => fact.kind === 'input')).toBe(true);
+    expect(page.facts.some(fact => fact.kind === 'status' && fact.notice.state === 'cancelled')).toBe(true);
+    expect(wholeTail).not.toHaveBeenCalled();
+    expect(selected).toHaveBeenCalledOnce(); expect(selected.mock.calls[0]![0].length).toBeLessThanOrEqual(4);
+  } finally { wholeTail.mockRestore(); selected.mockRestore(); }
+}, 20000);
+
+it('verifies the incoming recovery checkpoint even when using indexed envelopes', async () => {
+  const h = await harness(); await admit(h.journal);
+  const first = await h.journal.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation' }) as ConversationControlPage;
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'checkpoint-cancel' });
+  for (const changed of [{ frameEndOffset: first.cursor.after.frameEndOffset + 1 }, { prefixDigest: 'sha256:' + '0'.repeat(64) }]) {
+    const cursor = { ...first.cursor, after: { ...first.cursor.after, ...changed } };
+    await expect(h.journal.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', cursor })).rejects.toThrow();
+  }
+});
+
+
+it('indexes final-outbox locators using their own contract after reopening completed history', async () => {
+  const root = await createTempDir('final-control-locator');
+  const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, 'log'), artifacts, { clock: () => NOW }));
+  const final = { t: 'final', conversationId: 'recovery-conversation', runId: 'finished-run', commitRevision: 1,
+    digest: 'sha256:' + '1'.repeat(64), state: 'pending' };
+  await log.append([{ stream: 'final-outbox', body: final }]);
+  const boundary = await log.checkpoint();
+  const directory = new ConversationReadIndex(log, artifacts, verifier);
+  expect(await directory.controlPage('recovery-conversation', 0)).toEqual([boundary]);
+  expect(await directory.controlPage('unrelated-conversation', 0)).toEqual([]);
+  // Locators never bypass the final record shape contract.
+  await expect(log.append([{ stream: 'final-outbox', body: { ...final, state: 'unknown' } }])).rejects.toThrow('Final outbox state is invalid');
+});
+
+
+it('fits the maximum control chunk into one 256-key authority read', async () => {
+  const h = await harness();
+  const directory = new ConversationReadIndex(h.log, h.artifacts, verifier);
+  const read = vi.spyOn(directory.index, 'getMany');
+  const runs = Array.from({ length: 63 }, (_, index) => 'run-' + index);
+  expect((await directory.control('recovery-conversation', runs)).size).toBe(63);
+  expect(read).toHaveBeenCalledOnce(); expect(read.mock.calls[0]![0]).toHaveLength(253);
+  await expect(directory.control('recovery-conversation', [...runs, 'overflow'])).rejects.toThrow('exceeds 63 runs');
+});
+
+
+async function timelineFixture() {
+  const h = await harness(); await admit(h.journal, 'cancel-early');
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'early-cancel' });
+  const seed = (await h.log.readAll()).flatMap(envelope => envelope.entries).find(entry => (entry.body as any).t === 'admitted')!;
+  const add = async (id: string, text: string, position: number) => {
+    const body = structuredClone(seed.body) as any;
+    body.runId = id; body.ingressKey = id; body.ingress.ingressId = id;
+    body.ingress.turnOrigin.messageIdentity.id = id; body.queuedPosition = position;
+    body.input = { parts: [{ type: 'text', text }] };
+    await h.log.append([{ stream: seed.stream, body }]);
+  };
+  const commit = async (id: string, text: string, revision: number) => {
+    const bundle = await h.artifacts.put(Buffer.from(canonicalize(createConversationSealedBundle({ assignmentId: 'assignment-' + id, executorId: 'executor-test',
+      streamFinal: { finalSeq: 1, streamDigest: 'sha256:' + '0'.repeat(64) }, usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+      usageFinal: { reportDigest: 'sha256:' + '0'.repeat(64), upToUsageSeq: 0 }, dependencyArtifacts: [], body: {
+      t: 'conversation', ownerEpoch: 1, runId: id, conversationId: 'recovery-conversation', baseRevision: revision - 1,
+      runRecord: { type: 'run', timestamp: NOW, runId: id, runIndex: revision - 1, messages: [
+        { role: 'user', content: [{ type: 'text', text }] }, { role: 'assistant', content: [{ type: 'text', text: 'reply-' + id }] },
+      ] }, contentAssets: [],
+    } }))));
+    await h.log.append([{ stream: seed.stream, body: { t: 'committed', runId: id, assignmentId: 'assignment-' + id, bundle: { ref: bundle }, commitRevision: revision } }]);
+  };
+  await add('success-2', 'success-2', 1); await commit('success-2', 'success-2', 1);
+  await add('cancel-3', 'cancel-3', 2);
+  await add('success-4', 'success-4', 3); await commit('success-4', 'success-4', 2);
+  return { ...h, add, commit };
+}
+type BodyPage = import('@zhixing/core/contracts').ConversationBodyPage;
+type BodyCursor = import('@zhixing/core/contracts').ConversationBodyCursor;
+async function timelinePages(journal: ConversationRunJournal, terminalCursor = false) {
+  let cursor: BodyCursor | undefined;
+  const fragments: import('@zhixing/core/contracts').ConversationBodyFragment[] = [];
+  for (let i = 0; i < 150; i++) {
+    const page = await journal.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', includeInputs: true, cursor }) as BodyPage;
+    expect(page.reset).toBe(false); expect(page.fragments.length).toBeLessThanOrEqual(4);
+    fragments.push(...page.fragments);
+    if (!page.hasMore) return fragments;
+    cursor = terminalCursor && page.fragments.length ? page.fragments.at(-1)!.cursor : page.cursor;
+  }
+  throw Error('history did not terminate');
+}
+it.each([false, true])('orders cancelled inputs and successful bodies once after restart, including terminal source cursors (%s)', async terminalCursor => {
+  const h = await timelineFixture(), cold = h.journalAt();
+  const first = await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', includeInputs: true }) as BodyPage;
+  expect(first.fragments.map(f => f.text)).toEqual(['reply-success-4', 'success-4', 'cancel-3', 'reply-success-2']);
+  const fragments = await timelinePages(cold, terminalCursor);
+  expect(fragments.map(f => f.text).reverse()).toEqual(['cancel-early', 'success-2', 'reply-success-2', 'cancel-3', 'success-4', 'reply-success-4']);
+  const page = await cold.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', historyThroughInputLsn: first.historyThroughInputLsn }) as ConversationControlPage;
+  expect(page.facts.filter(f => f.kind === 'input')).toEqual([]);
+  expect(page.cursor.historyThroughCommitRevision).toBe(2);
+  expect(page.facts.filter(f => f.kind === 'status')).toEqual([expect.objectContaining({ historyCovered: true })]);
+  await h.add('live-remote', 'arrived after history opened', 4);
+  const live = await cold.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', cursor: page.cursor }) as ConversationControlPage;
+  expect(live.facts.filter(f => f.kind === 'input').map(f => f.cursor.runId)).toEqual(['live-remote']);
+  expect(fragments.every(f => f.cursor.history?.throughLsn === first.historyThroughInputLsn)).toBe(true);
+}, 20000);
+
+it('range-reads an uncovered large input, replays its source, and resets it after clear/delete', async () => {
+  const h = await harness(), text = '汉😀\n'.repeat(12000); await admit(h.journal, text);
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-large' });
+  const cold = h.journalAt(), get = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('whole body read forbidden'));
+  const all = vi.spyOn(h.log, 'readSnapshot').mockRejectedValue(Error('whole replay forbidden'));
+  try {
+    const fragments = await timelinePages(cold, true);
+    expect(fragments.map(f => f.text).reverse().join('')).toBe(text);
+    const source = fragments.at(-1)!;
+    const replay = await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: source.cursor, runId: source.runId, direction: 'forward' }) as BodyPage;
+    expect(replay.fragments[0]?.offset).toBe(0); expect(text.startsWith(replay.fragments[0]!.text)).toBe(true);
+    expect(get).not.toHaveBeenCalled(); expect(all).not.toHaveBeenCalled();
+    await h.log.append([{ stream: 'run:recovery-conversation', body: { t: 'session-lifecycle', mutation: 'clear', domainRevision: 1, requestId: 'clear-history' } }]);
+    expect(await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: source.cursor, includeInputs: true })).toMatchObject({ reset: true, fragments: [] });
+    expect(await timelinePages(cold)).toEqual([]);
+    await h.log.append([{ stream: 'run:recovery-conversation', body: { t: 'session-lifecycle', mutation: 'delete', domainRevision: 2, requestId: 'delete-history' } }]);
+    expect(await cold.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', includeInputs: true })).toMatchObject({ reset: true, hasMore: false, fragments: [] });
+  } finally { get.mockRestore(); all.mockRestore(); }
+}, 20000);
+
+it('merges imported history before local records and keeps source replay stable across a late commit', async () => {
+  const source = await timelineFixture(), target = await harness();
+  const snapshot = await source.log.readSnapshot();
+  for (const ref of await source.log.retainedArtifactReferences()) {
+    await target.artifacts.put(await source.artifacts.get(ref));
+  }
+  const base = snapshot.commits.flatMap(envelope => envelope.entries.map(record => ({ ...record, lsn: envelope.lsn, at: envelope.at })));
+  await target.journal.primeImportedReadBase(base as any);
+  expect((await timelinePages(target.journal)).map(f => f.text).reverse()).toEqual(['cancel-early', 'success-2', 'reply-success-2', 'cancel-3', 'success-4', 'reply-success-4']);
+  const first = await target.journal.recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', includeInputs: true }) as BodyPage;
+  expect(first.historyThroughInputLsn).toBe(0);
+  const original = (await timelinePages(source.journalAt())).find(f => f.runId === 'cancel-3')!;
+  await source.commit('cancel-3', 'cancel-3', 3);
+  const replay = await source.journalAt().recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: original.cursor, runId: original.runId, direction: 'forward' }) as BodyPage;
+  expect(replay.fragments[0]?.text).toBe('cancel-3');
+}, 20000);

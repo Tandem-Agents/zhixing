@@ -10,9 +10,12 @@ import type { ConversationRecoveryRequest, ConversationRecoveryPage, Conversatio
 import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { ConversationReadIndex, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
+import { ConversationMessageInputReader } from './conversation-message-input-reader.js';
+import { hasDurableStartedObservation } from './conversation-message-delivery.js';
 import { conversationCommitSummary } from './conversation-commit-summary.js';
 import { readInputTextPage } from './conversation-input-reader.js';
 import { ConversationBodyReader } from './conversation-body-reader.js';
+import { ConversationTimelineReader } from './conversation-timeline-reader.js';
 import { readConversationReplayRecord } from './conversation-replay-record.js';
 import {
   applyAdvancementEvent,
@@ -206,6 +209,7 @@ import {
   isOpenResolutionFact,
   assignmentTerminationProofKind,
   corruptRunJournal,
+  validateFinalOutboxRecord,
   historicalBundleFenceMatches,
   nextActiveRunIdForReplay,
   resolutionFactDigest,
@@ -991,6 +995,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #log: AuthorityCommitLog;
   readonly #readIndex: ConversationReadIndex;
   readonly #sessionRead: ConversationSessionReadModel<RunProjection>;
+  readonly #messageRead: ConversationMessageInputReader;
   readonly #artifacts: ArtifactStore;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
@@ -1034,6 +1039,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#readIndex = new ConversationReadIndex(options.log, options.artifacts, options.verifier);
     this.#sessionRead = new ConversationSessionReadModel(options.log, this.#readIndex, options.conversationId,
       () => emptyProjection(this.#conversationId), this.#reduceSessionRead);
+    this.#messageRead = new ConversationMessageInputReader(options.log, this.#readIndex, options.artifacts, options.conversationId);
     this.#artifacts = options.artifacts;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
@@ -1396,6 +1402,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       this.#readBaseGeneration++;
       await this.#readIndex.installBase(records);
       this.#sessionRead.installBase(records);
+      this.#messageRead.installBase(records);
     });
   }
 
@@ -2160,22 +2167,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async messageStatus(messageId: string): Promise<ConversationMessageStatus | undefined> {
-    return this.#select((state) => projectMessageInputs(state).find((entry) => entry.status.message.inputIdentity?.id === messageId)?.status);
+    return this.#messageRead.messageStatus(messageId);
   }
 
-  async messageInputsOutsideHistory(): Promise<{ readonly inputs: readonly ConversationMessageStatus[]; readonly truncated: boolean }> {
-    return this.#select((state) => {
-      const inputs = state.deleted ? [] : projectMessageInputs(state).filter(({ lsn, status }) =>
-        lsn > state.clearedThroughLsn && (status.state !== "committed" || !status.consumed));
-      // Keep unresolved work discoverable even when old terminal inputs fill the page.
-      const unresolved = inputs.filter(entry => entry.status.state === "uncertain");
-      const remaining = Math.max(0, 200 - unresolved.length);
-      const recent = remaining > 0
-        ? inputs.filter(entry => entry.status.state !== "uncertain").slice(-remaining)
-        : [];
-      const selected = [...unresolved, ...recent].slice(0, 200).sort((a, b) => a.position - b.position);
-      return { inputs: selected.map((entry) => entry.status), truncated: inputs.length > 200 };
-    });
+  async messageInputsOutsideHistory() {
+    return this.#messageRead.messageInputsOutsideHistory();
   }
 
   /** Finite recovery reads use the original verified authority log and input
@@ -2191,7 +2187,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly clearedThroughLsn: number;
   }): Promise<ConversationRecoveryPage> {
     if (request.conversationId !== this.#conversationId) throw new TypeError('Recovery cursor belongs to another conversation');
-    if (request.mode === 'body-page') return new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).page(request);
+    if (request.mode === 'body-page') {
+      const generation = this.#readBaseGeneration;
+      const page = await (request.includeInputs || request.cursor?.history
+        ? new ConversationTimelineReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).page(request)
+        : new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).page(request));
+      return generation === this.#readBaseGeneration ? page : { fragments: [], hasMore: true, reset: true };
+    }
     if (request.mode === 'context') return new ConversationBodyReader(this.#readIndex, this.#artifacts, this.#conversationId, this.#ownerEpoch).context();
     if (request.mode === 'completion') {
       assertIdentifier(request.runId, 'Completion run id');
@@ -2239,20 +2241,27 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       return page;
     }
     if (request.historyRunIds && (request.historyRunIds.length > 4 || request.cursor)) throw new TypeError('Invalid consumed history boundary');
-    let historyThroughCommitRevision = 0;
+    if (request.historyThroughInputLsn !== undefined && (request.cursor || !Number.isSafeInteger(request.historyThroughInputLsn) || request.historyThroughInputLsn < 0 || request.historyThroughInputLsn > head.lsn)) throw new TypeError('Invalid ordered history boundary');
+    let historyThroughCommitRevision = request.historyThroughInputLsn === undefined ? 0 :
+      (await this.#readIndex.historyCommit(this.#conversationId, request.historyThroughInputLsn))?.commitRevision ?? 0;
     for (const runId of request.historyRunIds ?? []) assertIdentifier(runId, 'Consumed history run id');
     const consumed = await this.#readIndex.control(this.#conversationId, request.historyRunIds ?? []);
     for (const { commit } of consumed.values()) {
-      if (commit) historyThroughCommitRevision = Math.max(historyThroughCommitRevision, commit.commitRevision);
+      if (request.historyThroughInputLsn === undefined && commit) historyThroughCommitRevision = Math.max(historyThroughCommitRevision, commit.commitRevision);
     }
+    const origin = !request.cursor || reset || request.cursor.after.lsn === 0 ? await this.#log.originCheckpoint() : undefined;
     let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
       conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
       clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.records.length ?? 0,
       historyThroughCommitRevision,
-      upper: head, after: await this.#log.originCheckpoint(), item: 0,
+      ...(request.historyThroughInputLsn !== undefined ? { historyThroughInputLsn: request.historyThroughInputLsn } : {}),
+      upper: head, after: origin!, item: 0,
     };
     if (cursor.after.lsn === cursor.upper.lsn && cursor.item === 0) cursor = { ...cursor, upper: head };
     if (cursor.after.logId !== head.logId || cursor.after.lsn > cursor.upper.lsn) throw new TypeError('Recovery cursor boundary is invalid');
+    if (cursor.after.lsn === 0 && (cursor.after.frameEndOffset !== origin!.frameEndOffset || cursor.after.prefixDigest !== origin!.prefixDigest)) {
+      throw new TypeError('Recovery origin checkpoint is invalid');
+    }
     const facts: ConversationControlFact[] = [];
     const controlFor = async (records: readonly LogicalRecord<unknown>[]) => {
       const ids = new Set<string>();
@@ -2273,11 +2282,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       // carrier deliberately exposes JSON rather than this journal's union.
       const body = record.body as ConversationCommitLogRecord;
       if (record.stream === runStream(this.#conversationId) && 't' in body && (body.t === 'admitted' || body.t === 'run-input-appended')) {
+        if (cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn)) return;
         if (cursor.historyThroughCommitRevision) {
           const commit = controls.get(body.runId)?.commit;
           if (commit && commit.commitRevision <= cursor.historyThroughCommitRevision) return;
         }
-        if (body.ingress.turnOrigin?.messageIdentity?.source.kind === 'conversation') facts.push({ kind: 'input', cursor: {
+        facts.push({ kind: 'input', cursor: {
           conversationId: this.#conversationId, runId: body.runId, ownerEpoch: this.#ownerEpoch,
           clearedThroughLsn: cursor.clearedThroughLsn, clearId: cursor.clearId, baseId: base?.id,
           ...(imported ? { imported: true as const } : {}), inputKey: body.ingressKey, upper,
@@ -2286,7 +2296,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       } else if (record.stream === runStream(this.#conversationId) && 't' in body && body.t === 'state') {
         const status = controls.get(body.runId)!;
         const notice = status.entry?.statusRevision === body.statusRevision ? conversationStatusNotice(this.#conversationId, this.#ownerEpoch, body.runId, status.entry) : undefined;
-        const fact = notice ? { kind: 'status' as const, notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication: status.communication } : undefined;
+        const fact = notice ? { kind: 'status' as const, ...(cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn) ? { historyCovered: true } : {}), notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication: status.communication, continuation: status.continuation, ...(status.commit ? { commitRevision: status.commit.commitRevision } : {}) } : undefined;
         if (fact) facts.push(fact);
       } else if (record.stream === 'final-outbox' && 't' in body && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
         const commit = controls.get(body.runId)?.commit;
@@ -2296,7 +2306,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     };
     // Each finite chunk reads its control keys against one verified authority
     // view. It is discarded before the next chunk; lifecycle is rechecked below.
-    const imported = base?.records.slice(cursor.baseItem, cursor.baseItem + 64) ?? [];
+    const imported = base?.records.slice(cursor.baseItem, cursor.baseItem + 63) ?? [];
     const importedControls = await controlFor(baseVisible ? imported.filter(record => record.lsn > base!.clearedThroughLsn) : []);
     for (const record of imported) {
       if (facts.length >= 32) break;
@@ -2305,7 +2315,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
     // A bounded scan also yields on logs containing unrelated conversation facts.
     if (facts.length < 32 && cursor.baseItem >= (base?.records.length ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
-      const tail = await this.#log.readTail<ConversationCommitLogRecord>(cursor.after, 64);
+      // Select this conversation's authoritative envelope locators in one
+      // verified directory read. The batch still verifies the complete WAL;
+      // unrelated conversations do not force empty RPC pages or repeated scans.
+      const positions = await this.#readIndex.controlPage(this.#conversationId, cursor.after.lsn);
+      const selected = positions.filter(position => position.lsn <= cursor.upper.lsn).slice(0, cursor.after.lsn ? 63 : 64);
+      const incoming = cursor.after.lsn ? [cursor.after] : [];
+      const envelopes = await this.#log.readEnvelopesAt<ConversationCommitLogRecord>([...incoming, ...selected]);
+      const tail = { commits: incoming.length ? envelopes.slice(1) : envelopes, checkpoints: selected };
+      if (!selected.length) {
+        if (cursor.item) throw new TypeError('Recovery cursor envelope is unavailable');
+        cursor = { ...cursor, after: cursor.upper, item: 0 };
+      }
       const firstItem = cursor.item;
       function* pending() {
         for (let frame = 0; frame < tail.commits.length; frame++) {
@@ -2324,7 +2345,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const iterator = pending();
       while (facts.length < 32) {
         const chunk: Exclude<ReturnType<typeof iterator.next>['value'], void>[] = [];
-        while (chunk.length < 64) {
+        while (chunk.length < 63) {
           const next = iterator.next();
           if (next.done) break;
           chunk.push(next.value);
@@ -2337,7 +2358,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (facts.length >= 32) break;
         }
       }
-      if (!tail.commits.length) throw new TypeError('Recovery cursor envelope is unavailable');
+      if (cursor.item === 0 && (positions.length < 64 || positions.some(position => position.lsn > cursor.upper.lsn)) &&
+          (!selected.length || cursor.after.lsn === selected.at(-1)!.lsn)) cursor = { ...cursor, after: cursor.upper };
     }
     const current = await lifecycleOf();
     if (readGeneration !== this.#readBaseGeneration || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
@@ -5530,6 +5552,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
   async advancementSession(sessionId: string): Promise<AdvancementSession | null> {
     assertIdentifier(sessionId, "Advancement session id");
+    if (!await this.#readIndex.hasAdvancement(this.#conversationId)) return null;
     return this.#sessionRead.read(state => {
       const value = state.advancementSessions.get(sessionId);
       return value ? freezeAdvancementSessions(new Map([[sessionId, value]]))[0]! : null;
@@ -5537,6 +5560,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async pendingAdvancementOriginalTasks(after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }> {
+    if (!await this.#readIndex.hasAdvancement(this.#conversationId)) return { sessionIds: [] };
     return this.#sessionRead.read(state => {
       const ids = [...state.advancementSessions.values()]
         .filter(session => session.originalTaskAdmission?.status === "pending" &&
@@ -5548,6 +5572,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async advancementSessions(): Promise<AdvancementSession[]> {
+    if (!await this.#readIndex.hasAdvancement(this.#conversationId)) return [];
     return this.#sessionRead.read(state => freezeAdvancementSessions(state.advancementSessions));
   }
 
@@ -9463,37 +9488,6 @@ export class InProcessConversationDispatcher {
   }
 }
 
-function projectMessageInputs(state: RunProjection): Array<{ readonly position: number; readonly lsn: number; readonly status: ConversationMessageStatus }> {
-  const result: Array<{ position: number; lsn: number; status: ConversationMessageStatus }> = [];
-  const delivery = (runId: string, consumed: boolean) => {
-    const runState = state.stateByRun.get(runId)!.state;
-    const assignmentId = state.assignmentByRun.get(runId);
-    const closed = assignmentId !== undefined && state.closedInputAssignments.has(assignmentId);
-    // 完全从接收方耐久的关闭／终态派生；崩溃恢复也不能把停止投递误报为待消费。
-    const disposition = consumed ? "consumed" : closed || runState === "committed" || runState === "failed" || runState === "cancelled" ? "stopped" : "pending";
-    return { runId, state: runState, consumed, disposition } as const;
-  };
-  for (const [runId, entry] of state.admittedByRun) {
-    const identity = entry.record.ingress.turnOrigin?.messageIdentity;
-    const consumed = [...state.assignedById.entries()].some(([assignmentId, assigned]) =>
-      assigned.record.runId === runId && (hasDurableStartedObservation(state, assignmentId) ||
-      state.committedByAssignment.has(assignmentId) || state.openInputAssignments.get(runId) === assignmentId ||
-      state.closedInputAssignments.has(assignmentId)));
-    result.push({ position: entry.record.queuedPosition, lsn: entry.lsn, status: {
-      ...delivery(runId, consumed),
-      message: { ...userMessageFromTurnInput(entry.input), ...(identity ? { inputIdentity: structuredClone(identity) } : {}) },
-    } });
-  }
-  const consumed = new Set([...state.inputConsumptions.values()].flatMap((entry) => [...entry.ingressKeys]));
-  for (const [key, entry] of state.appendedInputs) {
-    result.push({ position: entry.record.position, lsn: entry.lsn, status: {
-      ...delivery(entry.record.runId, consumed.has(key)),
-      message: { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(entry.record.ingress.turnOrigin!.messageIdentity!) },
-    } });
-  }
-  return result.sort((left, right) => left.position - right.position);
-}
-
 function assertRunInputCommit(state: RunProjection, runId: string, assignmentId: string, messages: readonly Message[]): void {
   if (state.openInputAssignments.get(runId) === assignmentId) throw new Error("Run input must close before commit");
   const expected = expectedRunInputMessages(state, runId, assignmentId);
@@ -10070,23 +10064,6 @@ function hasRejectedNotStarted(
   kind: AssignmentTerminationProofKind,
 ): boolean {
   return state.rejectedNotStarted.has(rejectedNotStartedKey(assignmentId, kind));
-}
-
-function hasDurableStartedObservation(
-  state: RunProjection,
-  assignmentId: string,
-): boolean {
-  const assigned = state.assignedById.get(assignmentId);
-  const currentState =
-    assigned && state.assignmentByRun.get(assigned.record.runId) === assignmentId
-      ? state.stateByRun.get(assigned.record.runId)?.state
-      : undefined;
-  return (
-    currentState === "running" ||
-    state.cancelOrigins.get(assignmentId) === "running" ||
-    state.uncertainOrigins.get(assignmentId) === "running" ||
-    state.supersedeStartedObservations.has(assignmentId)
-  );
 }
 
 function sameTerminationProof(
@@ -11693,20 +11670,7 @@ async function applyFinalRecord(
   envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
   artifacts: ArtifactStore,
 ): Promise<void> {
-  const body = snapshot(raw, "Final outbox record");
-  assertExactRecordKeys(
-    body,
-    ["commitRevision", "conversationId", "digest", "runId", "state", "t"],
-    "Final outbox record",
-  );
-  if (body.t !== "final") throw corruptRunJournal("Final outbox record kind is invalid");
-  assertIdentifier(body.conversationId, "Final conversation id");
-  assertIdentifier(body.runId, "Final run id");
-  assertPositiveSafeInteger(body.commitRevision, "Final commit revision");
-  assertDigest(body.digest, "Final bundle digest");
-  if (body.state !== "pending" && body.state !== "published" && body.state !== "expired") {
-    throw corruptRunJournal("Final outbox state is invalid");
-  }
+  const body = validateFinalOutboxRecord(snapshot(raw, "Final outbox record"));
   canonicalTime(at, "Final outbox record time");
   const key = finalKey(body);
   const revisionKey = finalRevisionKey(body);

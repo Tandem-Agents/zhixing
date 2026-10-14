@@ -33,6 +33,8 @@ export interface ConversationBodyCursor {
   readonly conversationId: string;
   readonly ownerEpoch: number;
   readonly clearId?: string;
+  /** Present for the owner's ordered history, including uncovered durable inputs. */
+  readonly history?: { readonly key: string; readonly throughLsn: number; readonly after?: true };
   readonly revision: number;
   readonly message: number;
   readonly block: number;
@@ -54,6 +56,7 @@ export interface ConversationBodyFragment {
   readonly final: boolean;
 }
 export interface ConversationBodyPage {
+  readonly historyThroughInputLsn?: number;
   readonly fragments: readonly ConversationBodyFragment[];
   readonly cursor?: ConversationBodyCursor;
   readonly hasMore: boolean;
@@ -73,13 +76,16 @@ export interface ConversationControlCursor {
   /** Completed runs through this revision are owned by the ordinary history
    * view. Failed/uncommitted source inputs are still recovered from the log. */
   readonly historyThroughCommitRevision?: number;
+  /** All inputs through this local authority boundary (and the imported base)
+   * belong to the ordered history, including its not-yet-loaded older pages. */
+  readonly historyThroughInputLsn?: number;
   readonly upper: DurableLogCheckpoint;
   /** Boundary before the envelope currently being consumed. */
   readonly after: DurableLogCheckpoint;
   readonly item: number;
 }
 export type ConversationControlFact =
-  | { readonly kind: 'status'; readonly notice: ConversationStatusNotice; readonly communication: boolean }
+  | { readonly kind: 'status'; readonly historyCovered?: boolean; readonly notice: ConversationStatusNotice; readonly communication: boolean; readonly continuation?: boolean; readonly commitRevision?: number }
   | { readonly kind: 'input'; readonly cursor: ConversationInputCursor }
   | { readonly kind: 'final'; readonly frame: FinalFrame };
 export interface ConversationControlPage {
@@ -119,8 +125,8 @@ export interface ConversationInputPage {
 }
 export type ConversationRecoveryRequest =
   | { readonly mode: 'context'; readonly conversationId: string }
-  | { readonly mode: 'body-page'; readonly conversationId: string; readonly cursor?: ConversationBodyCursor; readonly direction?: 'forward' | 'reverse'; readonly runId?: string }
+  | { readonly mode: 'body-page'; readonly conversationId: string; readonly includeInputs?: true; readonly cursor?: ConversationBodyCursor; readonly direction?: 'forward' | 'reverse'; readonly runId?: string }
   | { readonly mode: 'completion'; readonly conversationId: string; readonly runId: string; readonly ownerEpoch?: number }
-  | { readonly mode: 'control-page'; readonly conversationId: string; readonly cursor?: ConversationControlCursor; readonly historyRunIds?: readonly string[] }
+  | { readonly mode: 'control-page'; readonly conversationId: string; readonly cursor?: ConversationControlCursor; readonly historyRunIds?: readonly string[]; readonly historyThroughInputLsn?: number }
   | { readonly mode: 'input-page'; readonly conversationId: string; readonly runId: string; readonly cursor?: ConversationInputCursor };
 export type ConversationRecoveryPage = ConversationControlPage | ConversationInputPage | ConversationCompletionPage | ConversationBodyPage | ConversationContextPage;
