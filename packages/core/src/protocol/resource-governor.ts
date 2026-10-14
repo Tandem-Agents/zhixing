@@ -128,6 +128,10 @@ export function emptyGovernorProjection(): GovernorProjection {
   };
 }
 
+/**
+ * 复制投影中会被归约改动的部分。租约是验签后的不可变事实，归约从不原地修改它，复制时共享
+ * 引用；只复制计数、状态与队列等外层结构，复制成本不再随租约内容的体量增长。
+ */
 export function cloneGovernorProjection(
   state: GovernorProjection,
 ): GovernorProjection {
@@ -136,7 +140,7 @@ export function cloneGovernorProjection(
       [...state.reservations].map(([id, value]) => [
         id,
         {
-          lease: structuredClone(value.lease),
+          lease: value.lease,
           rootReservationId: value.rootReservationId,
           depth: value.depth,
           used: { ...value.used },

@@ -1567,15 +1567,15 @@ export class ExecutorResourceGovernor
   ): Promise<Value> {
       const cached = this.#projection;
       const retentionCutoff = this.#retentionCutoff();
-      const initial = cached
-        ? cloneGovernorProjection(cached.state)
-        : emptyGovernorProjection();
+      // 只在第一次写入前复制缓存基线：没有新记录、也不追加的事务不复制整份投影；日志内部
+      // 重试时从未改动的基线重新归约。
+      const initial = cached?.state ?? emptyGovernorProjection();
       const result = await this.#log.transactProjection<GovernorProjection, unknown, Value>(
         initial,
         (state, record, envelope) => {
           if (record.stream !== this.#stream) return state;
           return this.#applyRetainedRecord(
-            state,
+            state === cached?.state ? cloneGovernorProjection(state) : state,
             record.body,
             envelope.at,
             retentionCutoff,
