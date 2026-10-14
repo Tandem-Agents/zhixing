@@ -276,8 +276,9 @@ describe("ArtifactLifecycleIndex", () => {
         originCheckpoint: async () => checkpoint(0),
         checkpoint: async () => checkpoint(commits.length),
         readTail,
+        stopStorageMaintenance: async () => {},
       } as unknown as FileAuthorityCommitLog;
-      const lifecycle = new ArtifactLifecycleIndex({
+      const createLifecycle = () => new ArtifactLifecycleIndex({
         rootDir: path.join(root, "derived"),
         logs: [log],
         artifacts,
@@ -286,6 +287,7 @@ describe("ArtifactLifecycleIndex", () => {
         receiver,
       });
 
+      const lifecycle = createLifecycle();
       await expect(lifecycle.synchronize()).resolves.toBeUndefined();
       expect(readTail.mock.calls.map(([cursor]) => cursor.lsn)).toEqual([
         0, 64, 128, 192, 256,
@@ -293,6 +295,17 @@ describe("ArtifactLifecycleIndex", () => {
       expect(readTail.mock.calls.map(([, limit]) => limit)).toEqual([
         64, 64, 64, 64, 1,
       ]);
+      commits.push({ ...commits.at(-1)!, lsn: 258, envelopeDigest: `sha256:${(258).toString(16).padStart(64, "0")}` });
+      await lifecycle.synchronize();
+      await lifecycle.stopStorageMaintenance();
+      readTail.mockClear();
+      const reopened = createLifecycle();
+      try {
+        await reopened.synchronize();
+        // A crash may lose only the one coalesced tail record. Full source
+        // pages remain durably checkpointed, with no repeated old work.
+        expect(readTail.mock.calls.map(([cursor]) => cursor.lsn)).toEqual([257]);
+      } finally { await reopened.stopStorageMaintenance(); }
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
@@ -819,6 +832,48 @@ describe("ArtifactLifecycleIndex", () => {
     } finally { await reopened?.stopStorageMaintenance(); await lifecycle.stopStorageMaintenance(); }
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
+  it("idle maintenance catches up and completes pending compaction without nested single-slot admission", async () => {
+    const root = await createTempDir("lifecycle-idle-maintenance");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const temporaryArtifacts = new FileArtifactStore(path.join(root, "temporary"));
+    const receiver = new FileResumableArtifactReceiver(temporaryArtifacts, path.join(root, "partials"), { maxArtifactBytes: 1024 });
+    const policy = createDefaultDeviceCapacityPolicy();
+    const capacity = new DefaultDeviceCapacityArbiter({ policy: { ...policy, occupancy: { ...policy.occupancy, slots: 1 } },
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+    const delegate = new DefaultStorageMaintenanceGovernor({ capacity });
+    const admissions: StorageMaintenanceKind[] = [];
+    let nested = 0;
+    const storageMaintenance: StorageMaintenanceGovernorPort = {
+      acquire: async (...args) => { if (currentDeviceCapacityStep()?.kind === "physical") nested += 1; admissions.push(args[0].kind); return delegate.acquire(...args); },
+      snapshot: () => delegate.snapshot(),
+    };
+    const createLog = () => new FileAuthorityCommitLog(path.join(root, "log"), artifacts, { clock: () => "2026-07-25T00:00:00.000Z" });
+    const createLifecycle = (log: FileAuthorityCommitLog) => new ArtifactLifecycleIndex({ rootDir: path.join(root, "derived"), logs: [log], artifacts, temporaryArtifacts,
+      temporaryPresence: temporaryPresence(root, { storageMaintenance }), receiver, storageMaintenance });
+    const log = createLog();
+    const lifecycle = createLifecycle(log);
+    let reopened: ArtifactLifecycleIndex | undefined;
+    try {
+      const ref = await temporaryArtifacts.put(Buffer.from("idle maintenance"));
+      for (let i = 0; i < 6; i += 1) {
+        const grant: SurfaceAssetGrant = { v: 1, grantId: "grt-" + String(i).padStart(26, "0"),
+          scope: { domain: "conversation", conversationId: "idle", ownerEpoch: 1 }, surfacePrincipal: "idle",
+          requestId: "request-" + i, kind: "asset-upload", payloadDigest: byteDigest(Buffer.from("payload-" + i)), assets: [ref],
+          issuedAt: "2026-07-25T00:00:00.000Z", expiry: "2026-07-25T01:00:00.000Z", signature: { alg: "test", keyId: "owner", sig: "test" } };
+        await log.append([{ stream: "control", body: { t: "asset-grant-issued", grant } }]);
+        await runInMaintenanceContext("background", () => lifecycle.maintainIdle());
+      }
+      // 每轮空闲维护都把追平结果落盘；增量段超过上界时在这里完成合并，而不是留给下一次启动或请求。
+      expect(admissions).toContain("projection-flush");
+      expect(admissions).toContain("projection-compaction");
+      await lifecycle.stopStorageMaintenance();
+      reopened = createLifecycle(createLog());
+      expect(await runInMaintenanceContext("foreground", () => reopened!.activeConversationGrants("idle", 16))).toHaveLength(6);
+      expect(nested).toBe(0);
+      expect(capacity.snapshot().occupancyInUse.slots).toBe(0);
+    } finally { await reopened?.stopStorageMaintenance(); await lifecycle.stopStorageMaintenance(); }
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it(
     "redrives lifecycle backpressure outside its queue without waiting under a caller exclusion",
     async () => {
@@ -1136,6 +1191,7 @@ describe("ArtifactLifecycleIndex", () => {
       );
       const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts);
       const ref = await artifacts.put(Buffer.from("fenced leaf", "utf8"));
+      const checkpoint = vi.spyOn(log, "checkpoint");
       const lifecycle = new ArtifactLifecycleIndex({
         rootDir: path.join(root, "derived"),
         logs: [log],
@@ -1145,6 +1201,10 @@ describe("ArtifactLifecycleIndex", () => {
         receiver,
       });
       await lifecycle.synchronize();
+      const firstHead = await checkpoint.mock.results.at(-1)!.value;
+      await lifecycle.synchronize();
+      expect(checkpoint.mock.calls.at(-1)?.[0]).toBe(firstHead);
+      expect(await checkpoint.mock.results.at(-1)!.value).toBe(firstHead);
       await log.append([
         {
           stream: "publish",

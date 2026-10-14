@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SurfaceAssetCoordinator } from "@zhixing/core/authority";
-import { currentMaintenanceUrgency } from "@zhixing/core/resources";
+import {
+  currentMaintenanceAbortSignal,
+  currentMaintenanceUrgency,
+  StorageMaintenanceTaskRunner,
+  storageMaintenanceObligation,
+} from "@zhixing/core/resources";
 import {
   SurfaceAssetMaintenance,
   shouldContinueSurfaceAssetCollection,
@@ -204,5 +209,75 @@ describe("surface asset maintenance", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("surface asset index idle maintenance", () => {
+  it("waits out the startup window, repeats in the background and stops with the owner", async () => {
+    vi.useFakeTimers();
+    try {
+      const seen: string[] = [];
+      const port = {
+        collectExpiredTemporaryAssets: async () => ({ processed: 0, removed: 0, hasMore: false }),
+        maintainLedgerIndex: async () => { seen.push(currentMaintenanceUrgency()); },
+      } as unknown as SurfaceAssetCoordinator;
+      const maintenance = new SurfaceAssetMaintenance({
+        surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 60_000, indexIntervalMs: 30_000, onError: () => undefined,
+      });
+      await maintenance.start();
+      // 启动窗口内不追平索引，避免与启动步骤争用容量。
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(seen).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(seen).toEqual(["background"]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(seen).toHaveLength(2);
+      // 正式停止前最后追平一次，此后不再运行。
+      await maintenance.stop();
+      expect(seen).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(seen).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the bounded final catch-up at its budget and returns only after the work stopped", async () => {
+    // 停止前的追平义务是 committed 的：仅撤掉等待者不会让它停下。到时必须连同义务一起中止，
+    // stop 返回之时不得仍有维护在写派生索引。
+    const runner = new StorageMaintenanceTaskRunner();
+    let running = false;
+    let stepsAfterStop = 0;
+    let stopped = false;
+    const port = {
+      collectExpiredTemporaryAssets: async () => ({ processed: 0, removed: 0, hasMore: false }),
+      maintainLedgerIndex: () => runner.run(
+        storageMaintenanceObligation("lifecycle-reconcile", "surface-test", { head: 1 }, { owner: "artifact-lifecycle-index", obligation: "committed" }),
+        currentMaintenanceAbortSignal(),
+        async (signal) => {
+          running = true;
+          try {
+            // 步骤边界检查取消；每步都是一次真实等待，模拟大索引上的长追平。
+            while (!signal.aborted) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+              if (stopped) stepsAfterStop += 1;
+            }
+          } finally {
+            running = false;
+          }
+        },
+      ),
+    } as unknown as SurfaceAssetCoordinator;
+    const maintenance = new SurfaceAssetMaintenance({
+      surfaceAssets: port, intervalMs: 3_600_000, indexFirstDelayMs: 3_600_000, indexFinalBudgetMs: 30, onError: () => undefined,
+    });
+    await maintenance.start();
+    const startedAt = Date.now();
+    await maintenance.stop();
+    stopped = true;
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(running).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(stepsAfterStop).toBe(0);
   });
 });

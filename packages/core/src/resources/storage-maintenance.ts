@@ -10,6 +10,7 @@ import {
 } from "./device-capacity.js";
 import {
   currentMaintenanceAbortSignal,
+  currentMaintenanceCancelWhenAbandoned,
   currentMaintenanceUrgency,
   isHoldingMaintenanceExclusion,
   runWithMaintenanceUrgency,
@@ -226,6 +227,11 @@ interface SharedTask<T> {
   /** 当前仍在等待的调用者中最强的紧急度。 */
   urgency: StorageMaintenanceUrgency;
   readonly abort: AbortController;
+  /**
+   * 本义务是被停止或被放弃取消的（而非提交前无人等待的自然作废）：它发起的内层义务
+   * 随之中止，并由它等到内层真正结算。
+   */
+  stopping: boolean;
   promise: Promise<T>;
   readonly waiters: Map<symbol, StorageMaintenanceUrgency>;
   settled: boolean;
@@ -250,6 +256,20 @@ export class StorageMaintenanceTaskRunner {
     request: StorageMaintenanceObligationRequest,
     waiterAbort: AbortSignal,
     operation: (abort: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    return this.#run(
+      request,
+      waiterAbort,
+      operation,
+      currentMaintenanceCancelWhenAbandoned(),
+    );
+  }
+
+  #run<T>(
+    request: StorageMaintenanceObligationRequest,
+    waiterAbort: AbortSignal,
+    operation: (abort: AbortSignal) => Promise<T>,
+    cancelWhenAbandoned: () => boolean,
   ): Promise<T> {
     validateStorageObligationRequest(request);
     if (this.#stopped) {
@@ -278,6 +298,7 @@ export class StorageMaintenanceTaskRunner {
           request,
           waiterAbort,
           operation,
+          cancelWhenAbandoned,
         );
       }
       if (request.obligation === "committed") {
@@ -287,6 +308,7 @@ export class StorageMaintenanceTaskRunner {
         existing as SharedTask<T>,
         waiterAbort,
         request.urgency,
+        cancelWhenAbandoned,
       );
     }
 
@@ -297,6 +319,7 @@ export class StorageMaintenanceTaskRunner {
       obligation: request.obligation,
       urgency: request.urgency,
       abort: new AbortController(),
+      stopping: false,
       promise: undefined as unknown as Promise<T>,
       waiters: new Map(),
       settled: false,
@@ -308,12 +331,14 @@ export class StorageMaintenanceTaskRunner {
       }
     });
     this.#tasks.set(task.workKey, task as SharedTask<unknown>);
-    return this.#join(task, waiterAbort, request.urgency);
+    return this.#join(task, waiterAbort, request.urgency, cancelWhenAbandoned);
   }
 
   async stop(): Promise<void> {
     this.#stopped = true;
     const tasks = [...this.#tasks.values()];
+    // 先标记再中止：中止回调同步触发，内层义务据此判定要随之停下并被等待。
+    for (const task of tasks) task.stopping = true;
     for (const task of tasks) task.abort.abort();
     await Promise.allSettled(tasks.map((task) => task.promise));
   }
@@ -327,6 +352,7 @@ export class StorageMaintenanceTaskRunner {
         () => task.urgency,
         task.abort.signal,
         () => operation(task.abort.signal),
+        () => task.stopping,
       );
     } catch (error) {
       recordMaintenanceError(this.governor, task.kind, error);
@@ -338,6 +364,7 @@ export class StorageMaintenanceTaskRunner {
     task: SharedTask<T>,
     waiterAbort: AbortSignal,
     urgency: StorageMaintenanceUrgency,
+    cancelWhenAbandoned: () => boolean,
   ): Promise<T> {
     const waiter = Symbol("storage-maintenance-waiter");
     task.waiters.set(waiter, urgency);
@@ -355,8 +382,25 @@ export class StorageMaintenanceTaskRunner {
         this.#releaseWaiter(task, waiter);
         callback();
       };
-      const onAbort = () =>
-        finish(() => reject(new StorageMaintenanceCancelledError()));
+      const onAbort = () => {
+        // 可放弃的调用且已无其他等待者：连同义务一起停下，并等它在步骤边界结算后才返回取消。
+        // 先置停止标记再中止，它发起的内层义务据此同样停下并被它等待。
+        const abandon =
+          cancelWhenAbandoned() &&
+          !task.settled &&
+          task.waiters.size === 1 &&
+          task.waiters.has(waiter);
+        if (!abandon) {
+          finish(() => reject(new StorageMaintenanceCancelledError()));
+          return;
+        }
+        task.stopping = true;
+        finish(() => {
+          task.abort.abort();
+          const cancelled = () => reject(new StorageMaintenanceCancelledError());
+          task.promise.then(cancelled, cancelled);
+        });
+      };
       waiterAbort.addEventListener("abort", onAbort, { once: true });
       task.promise.then(
         (value) => finish(() => resolve(value)),
@@ -390,7 +434,9 @@ export class StorageMaintenanceTaskRunner {
     request: StorageMaintenanceObligationRequest,
     waiterAbort: AbortSignal,
     operation: (abort: AbortSignal) => Promise<T>,
+    cancelWhenAbandoned: () => boolean,
   ): Promise<T> {
+    const rerun = () => this.#run(request, waiterAbort, operation, cancelWhenAbandoned);
     return new Promise<T>((resolve, reject) => {
       let finished = false;
       const finish = (callback: () => void) => {
@@ -411,13 +457,13 @@ export class StorageMaintenanceTaskRunner {
           if (finished) return;
           waiterAbort.removeEventListener("abort", onAbort);
           finished = true;
-          this.run(request, waiterAbort, operation).then(resolve, reject);
+          rerun().then(resolve, reject);
         },
         () => {
           if (finished) return;
           waiterAbort.removeEventListener("abort", onAbort);
           finished = true;
-          this.run(request, waiterAbort, operation).then(resolve, reject);
+          rerun().then(resolve, reject);
         },
       );
     });

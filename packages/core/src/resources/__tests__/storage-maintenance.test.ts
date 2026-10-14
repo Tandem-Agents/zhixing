@@ -6,7 +6,11 @@ import {
   type DeviceCapacityBudget,
   type DeviceCapacityPolicy,
 } from "../device-capacity.js";
-import { currentMaintenanceUrgency } from "../maintenance-context.js";
+import {
+  currentMaintenanceAbortSignal,
+  currentMaintenanceUrgency,
+  runWithMaintenanceUrgency,
+} from "../maintenance-context.js";
 import {
   DefaultStorageMaintenanceGovernor,
   runStorageMaintenanceStep,
@@ -477,6 +481,117 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
     await expect(pending).rejects.toThrow("cancelled");
     await vi.waitFor(() => expect(sharedSignal?.aborted).toBe(true));
     gate.resolve();
+  });
+
+  it("stops an abandoned committed obligation and returns only after it settles", async () => {
+    // 可放弃的调用（空闲维护、停止前的限时追平）被取消后，返回之时底层义务必须已经停下，
+    // 不得在调用方以为维护已结束后继续写入。
+    const runner = new StorageMaintenanceTaskRunner(governor());
+    const step = deferred<void>();
+    const waiter = new AbortController();
+    const events: string[] = [];
+    const operation = vi.fn(async (signal: AbortSignal) => {
+      await step.promise;
+      events.push(signal.aborted ? "stopped-at-boundary" : "continued");
+      return "done";
+    });
+    const pending = runWithMaintenanceUrgency(
+      () => "background",
+      waiter.signal,
+      () => runner.run(obligation("abandon-1", { obligation: "committed" }), currentMaintenanceAbortSignal(), operation),
+      () => true,
+    ).catch((error: Error) => { events.push("returned"); throw error; });
+    await vi.waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
+    waiter.abort();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(events).toEqual([]);
+    step.resolve();
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(events).toEqual(["stopped-at-boundary", "returned"]);
+  });
+
+  it("keeps an obligation running for remaining waiters when an abandonable waiter leaves", async () => {
+    const runner = new StorageMaintenanceTaskRunner(governor());
+    const gate = deferred<void>();
+    const idle = new AbortController();
+    let sharedSignal: AbortSignal | undefined;
+    const operation = vi.fn(async (signal: AbortSignal) => {
+      sharedSignal = signal;
+      await gate.promise;
+      return "done";
+    });
+    const abandonable = runWithMaintenanceUrgency(
+      () => "background",
+      idle.signal,
+      () => runner.run(obligation("abandon-2", { obligation: "committed" }), currentMaintenanceAbortSignal(), operation),
+      () => true,
+    );
+    const foreground = runner.run(
+      obligation("abandon-2", { obligation: "committed", urgency: "foreground" }),
+      new AbortController().signal,
+      operation,
+    );
+    await vi.waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
+    idle.abort();
+    await expect(abandonable).rejects.toThrow("cancelled");
+    expect(sharedSignal?.aborted).toBe(false);
+    gate.resolve();
+    await expect(foreground).resolves.toBe("done");
+  });
+
+  it("stops nested obligations together with the abandoned obligation that started them", async () => {
+    const outerRunner = new StorageMaintenanceTaskRunner(governor());
+    const innerRunner = new StorageMaintenanceTaskRunner(governor());
+    const innerStep = deferred<void>();
+    const waiter = new AbortController();
+    const events: string[] = [];
+    let innerSignal: AbortSignal | undefined;
+    const inner = vi.fn(async (signal: AbortSignal) => {
+      innerSignal = signal;
+      await innerStep.promise;
+      events.push("inner-settled");
+    });
+    const pending = runWithMaintenanceUrgency(
+      () => "background",
+      waiter.signal,
+      () => outerRunner.run(
+        obligation("abandon-outer", { obligation: "committed" }),
+        currentMaintenanceAbortSignal(),
+        () => innerRunner.run(obligation("abandon-inner", { obligation: "committed" }), currentMaintenanceAbortSignal(), inner),
+      ),
+      () => true,
+    ).catch((error: Error) => { events.push("returned"); throw error; });
+    await vi.waitFor(() => expect(inner).toHaveBeenCalledTimes(1));
+    waiter.abort();
+    expect(innerSignal?.aborted).toBe(true);
+    innerStep.resolve();
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(events).toEqual(["inner-settled", "returned"]);
+  });
+
+  it("waits for nested obligations when the process stops their owner", async () => {
+    const outerRunner = new StorageMaintenanceTaskRunner(governor());
+    const innerRunner = new StorageMaintenanceTaskRunner(governor());
+    const innerStep = deferred<void>();
+    const events: string[] = [];
+    let innerSignal: AbortSignal | undefined;
+    const inner = vi.fn(async (signal: AbortSignal) => {
+      innerSignal = signal;
+      await innerStep.promise;
+      events.push("inner-settled");
+    });
+    const pending = outerRunner.run(
+      obligation("stop-outer", { obligation: "committed" }),
+      new AbortController().signal,
+      () => innerRunner.run(obligation("stop-inner", { obligation: "committed" }), currentMaintenanceAbortSignal(), inner),
+    );
+    pending.catch(() => undefined);
+    await vi.waitFor(() => expect(inner).toHaveBeenCalledTimes(1));
+    const stopped = outerRunner.stop().then(() => events.push("stopped"));
+    expect(innerSignal?.aborted).toBe(true);
+    innerStep.resolve();
+    await stopped;
+    expect(events).toEqual(["inner-settled", "stopped"]);
   });
 
   it("propagates the shared pre-commit cancellation into capacity waiting", async () => {

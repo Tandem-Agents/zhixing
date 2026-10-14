@@ -175,6 +175,10 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     return this.lifecycle.synchronize();
   }
 
+  maintainIndex(): Promise<void> {
+    return this.lifecycle.maintainIdle();
+  }
+
   async stopStorageMaintenance(): Promise<void> {
     await this.lifecycle.stopStorageMaintenance();
   }

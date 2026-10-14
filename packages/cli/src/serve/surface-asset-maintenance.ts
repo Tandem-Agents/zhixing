@@ -2,9 +2,15 @@ import type {
   SurfaceAssetCollectionResult,
   SurfaceAssetCoordinator,
 } from "@zhixing/core/authority";
-import { runInMaintenanceContext } from "@zhixing/core/resources";
+import { runInMaintenanceContext, runWithMaintenanceUrgency } from "@zhixing/core/resources";
 
 const SURFACE_ASSET_GC_INTERVAL_MS = 60 * 60 * 1_000;
+// 派生索引的空闲维护：启动后先留出启动窗口，此后按较短周期追平，使重启只回放很短的尾部。
+const SURFACE_ASSET_INDEX_FIRST_DELAY_MS = 60 * 1_000;
+const SURFACE_ASSET_INDEX_INTERVAL_MS = 30 * 1_000;
+// 正式停止前最后一次追平的时间上限：到时即请求中止，等它真正停下后再继续停止，余量由下次
+// 启动或空闲维护补齐。
+const SURFACE_ASSET_INDEX_FINAL_BUDGET_MS = 5_000;
 
 /** 只有取得进展才立即续跑,零进展必须等下一个周期,避免忙等。 */
 export function shouldContinueSurfaceAssetCollection(
@@ -17,6 +23,9 @@ export interface SurfaceAssetMaintenanceOptions {
   readonly surfaceAssets: SurfaceAssetCoordinator | (() => SurfaceAssetCoordinator);
   readonly onError?: (error: Error) => void;
   readonly intervalMs?: number;
+  readonly indexFirstDelayMs?: number;
+  readonly indexIntervalMs?: number;
+  readonly indexFinalBudgetMs?: number;
 }
 
 /**
@@ -29,11 +38,16 @@ export interface SurfaceAssetMaintenanceOptions {
  */
 export class SurfaceAssetMaintenance {
   #timer: NodeJS.Timeout | undefined;
+  #indexTimer: NodeJS.Timeout | undefined;
+  #indexTask: Promise<void> | undefined;
   #task: Promise<void> | undefined;
   #continuation: NodeJS.Immediate | undefined;
   #stopped = false;
   #started = false;
+  #finalized = false;
   readonly #abort = new AbortController();
+  // 空闲维护与停止前最后一次追平各自可中止：停止或超时后不得仍在后台写派生索引。
+  readonly #indexAbort = new AbortController();
 
   constructor(private readonly options: SurfaceAssetMaintenanceOptions) {}
 
@@ -53,6 +67,7 @@ export class SurfaceAssetMaintenance {
       void this.#collect();
     }, this.options.intervalMs ?? SURFACE_ASSET_GC_INTERVAL_MS);
     this.#timer.unref();
+    this.#scheduleIndexMaintenance(this.options.indexFirstDelayMs ?? SURFACE_ASSET_INDEX_FIRST_DELAY_MS);
   }
 
   async stop(): Promise<void> {
@@ -63,11 +78,57 @@ export class SurfaceAssetMaintenance {
       clearInterval(this.#timer);
       this.#timer = undefined;
     }
+    if (this.#indexTimer) {
+      clearTimeout(this.#indexTimer);
+      this.#indexTimer = undefined;
+    }
     if (this.#continuation) {
       clearImmediate(this.#continuation);
       this.#continuation = undefined;
     }
+    this.#indexAbort.abort();
     await this.#task;
+    await this.#indexTask;
+    // 正式停止前再追平一次派生索引并完成挂起的合并（有时间上限）：重启（含升级）后的首次
+    // 启动不必回放上一段会话的尾部，更不在启动路径上做与索引规模成正比的整轮合并。到时即
+    // 中止，并等它在步骤边界真正停下；返回之后不再有任何维护写入。
+    if (this.#started && !this.#finalized) {
+      this.#finalized = true;
+      const finalAbort = new AbortController();
+      const timer = setTimeout(() => finalAbort.abort(), this.options.indexFinalBudgetMs ?? SURFACE_ASSET_INDEX_FINAL_BUDGET_MS);
+      timer.unref();
+      try {
+        await this.#maintainIndex(finalAbort.signal).catch(() => undefined);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  // 空闲维护随时可放弃：取消即连同它发起的维护义务一起中止，并等它们在步骤边界停下才返回。
+  #maintainIndex(signal: AbortSignal): Promise<void> {
+    return runWithMaintenanceUrgency(() => "background", signal, async () => {
+      if (signal.aborted) return;
+      await this.#surfaceAssets().maintainLedgerIndex?.();
+    }, () => true);
+  }
+
+  #scheduleIndexMaintenance(delayMs: number): void {
+    if (this.#stopped) return;
+    this.#indexTimer = setTimeout(() => {
+      this.#indexTimer = undefined;
+      // 与回收批次错开：回收本身会追平索引，这一轮跳过即可。
+      const run: Promise<void> = this.#task ? Promise.resolve() : this.#maintainIndex(this.#indexAbort.signal).catch((error: unknown) => {
+        if (this.#stopped) return;
+        this.options.onError?.(error instanceof Error ? error : new Error(String(error)));
+      });
+      const tracked: Promise<void> = run.finally(() => {
+        if (this.#indexTask === tracked) this.#indexTask = undefined;
+        this.#scheduleIndexMaintenance(this.options.indexIntervalMs ?? SURFACE_ASSET_INDEX_INTERVAL_MS);
+      });
+      this.#indexTask = tracked;
+    }, delayMs);
+    this.#indexTimer.unref();
   }
 
   #collect(): Promise<void> {

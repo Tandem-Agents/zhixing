@@ -79,6 +79,8 @@ export interface SurfaceAssetGrantLedgerIssuedResult
 export interface SurfaceAssetGrantLedger {
   load(): Promise<SurfaceAssetGrantLedgerSnapshot>;
   synchronize(): Promise<void>;
+  /** 空闲维护：追平派生索引并完成挂起的合并；未实现时视为无事可做。 */
+  maintainIndex?(): Promise<void>;
   append(
     record: RevokedRecord | FrontierRecord,
   ): Promise<SurfaceAssetGrantLedgerAppendResult>;
@@ -311,6 +313,14 @@ export class SurfaceAssetCoordinator {
         );
       }
     }
+  }
+
+  /**
+   * 空闲维护账本的派生索引，使重启恢复只需回放很短的尾部、不遗留整轮合并。不占用
+   * 协调器串行段：索引有自己的串行与容量准入，前台请求不排在它后面。
+   */
+  async maintainLedgerIndex(): Promise<void> {
+    await this.options.ledger.maintainIndex?.();
   }
 
   /** Returns whether the authority currently owns the requested asset scope. */

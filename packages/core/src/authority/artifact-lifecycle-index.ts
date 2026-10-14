@@ -273,6 +273,7 @@ export class ArtifactLifecycleIndex {
   readonly #receiver: SurfaceAssetTemporaryRecoveryPort;
   readonly #logs: readonly FileAuthorityCommitLog[];
   #sources: readonly LifecycleSource[] | undefined;
+  readonly #sourceHeads = new Map<string, DurableLogCheckpoint>();
   #retentionRebuildRequired = false;
   #temporaryReconciliation: TemporaryReconciliationSession | undefined;
 
@@ -350,6 +351,15 @@ export class ArtifactLifecycleIndex {
         }
       },
     );
+  }
+
+  /**
+   * 空闲维护：追平源日志并完成挂起的整轮合并。宿主在空闲时调用，使重启时的恢复只需
+   * 回放很短的尾部，且不在启动或请求路径上承担与索引规模成正比的合并。
+   */
+  async maintainIdle(): Promise<void> {
+    await this.synchronize();
+    await this.#queue.run(() => this.#index.flush({ compact: true }));
   }
 
   /** 进程停机时取消生命周期、内部投影及源日志拥有的维护义务。 */
@@ -915,6 +925,7 @@ export class ArtifactLifecycleIndex {
 
   async #reset(sources: readonly LifecycleSource[]): Promise<void> {
     await this.#closeTemporaryReconciliation();
+    this.#unflushedSourceRecords = 0;
     await this.#index.reset(
       Object.fromEntries(sources.map((source) => [source.id, source.origin])),
     );
@@ -1223,10 +1234,16 @@ export class ArtifactLifecycleIndex {
     )).entries.length > 0;
   }
 
+  #unflushedSourceRecords = 0;
+
   async #synchronizeSources(
     sources: readonly LifecycleSource[],
     sourceHeads: LifecycleSourceHeads,
   ): Promise<boolean> {
+    if (this.#unflushedSourceRecords >= SOURCE_PAGE_SIZE) {
+      await this.#index.flush({ compact: false });
+      this.#unflushedSourceRecords = 0;
+    }
     let hasMore = false;
     for (const source of sources) {
       const sourceHead = sourceHeads[source.id];
@@ -1274,10 +1291,13 @@ export class ArtifactLifecycleIndex {
         for (const envelope of page.commits) {
           await this.#applyEnvelope(source.id, envelope, buffer);
         }
+        // Pure authority replay is reconstructible. Coalesce a short suffix
+        // in the bounded overlay, but checkpoint at least each source page so
+        // a crash never turns this optimization into an unbounded replay.
         await this.#commit(buffer, {
           ...checkpoints,
           [source.id]: page.checkpoint,
-        });
+        }, false, page.commits.length);
         if (page.checkpoint.lsn >= sourceHead.lsn) break;
         if (pageIndex === MAX_SYNCHRONIZATION_TURNS - 1) {
           hasMore = true;
@@ -1292,10 +1312,14 @@ export class ArtifactLifecycleIndex {
   ): Promise<LifecycleSourceHeads> {
     const entries: Array<readonly [string, DurableLogCheckpoint]> = [];
     for (const source of sources) {
-      const checkpoint = await source.log.checkpoint();
+      // Reuse the log's own verified read view when it has not changed. A new
+      // prefix still takes the normal physical verification and tail path;
+      // deletion fences deliberately obtain a fresh checkpoint separately.
+      const checkpoint = await source.log.checkpoint(this.#sourceHeads.get(source.id));
       if (checkpoint.logId !== source.id) {
         throw new Error("Artifact lifecycle source identity changed");
       }
+      this.#sourceHeads.set(source.id, checkpoint);
       entries.push([source.id, checkpoint]);
     }
     return Object.fromEntries(entries);
@@ -1964,7 +1988,8 @@ export class ArtifactLifecycleIndex {
       if (owners.entries.length < RETIREMENT_PAGE_SIZE) {
         buffer.tombstone(entry.key);
       }
-      await this.#commit(buffer, this.#index.checkpoints());
+      // 退休任务同样由源回放派生、只改写索引内记账：合入有界覆盖层按页落盘。
+      await this.#commit(buffer, this.#index.checkpoints(), false, 1);
     }
     return (await this.#records.scan(
       { gte: PENDING_PREFIX, lt: `${PENDING_PREFIX}\uffff` },
@@ -2078,7 +2103,9 @@ export class ArtifactLifecycleIndex {
           }
         }
       }
-      await this.#commit(buffer, this.#index.checkpoints());
+      // 领用任务由源回放派生、只改写索引内记账，崩溃后可从耐久检查点重放重建：
+      // 与源回放一样合入有界覆盖层按页落盘，不逐任务刷盘，更不逐五个任务做一次整轮合并。
+      await this.#commit(buffer, this.#index.checkpoints(), false, 1);
     }
     return (await this.#records.scan(
       {
@@ -2233,13 +2260,18 @@ export class ArtifactLifecycleIndex {
   async #commit(
     buffer: MutationBuffer,
     checkpoints: DurableProjectionCheckpoints,
+    compact = true,
+    replayedSourceRecords = 0,
   ): Promise<void> {
     if (buffer.size === 0) return;
     const prepared = await this.#index.prepare(
       bindDurableProjectionMutations(buffer.mutations()),
     );
     this.#index.publish(prepared, checkpoints);
-    await this.#index.flush();
+    this.#unflushedSourceRecords += replayedSourceRecords;
+    if (replayedSourceRecords > 0 && this.#unflushedSourceRecords < SOURCE_PAGE_SIZE) return;
+    await this.#index.flush({ compact });
+    this.#unflushedSourceRecords = 0;
   }
 }
 

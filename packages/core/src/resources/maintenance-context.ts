@@ -29,10 +29,17 @@ export interface MaintenanceExecutionContext {
    * 排队等待会把锁的持有时间拉长到准入超时,阻塞所有其他持锁者。
    */
   readonly holdingExclusion: boolean;
+  /**
+   * 取消信号到来时，若本调用是同键义务的最后一个等待者，是否连同底层义务一起中止，
+   * 并等它在步骤边界结算后才返回。以函数承载：嵌套义务在外层义务被停止或被放弃时
+   * 才变为真，外层借此等到它发起的内层义务真正停下。
+   */
+  readonly cancelWhenAbandoned: () => boolean;
 }
 
 const maintenanceContext = new AsyncLocalStorage<MaintenanceExecutionContext>();
 const neverAbortMaintenance = new AbortController().signal;
+const neverCancelWhenAbandoned = () => false;
 
 /**
  * 声明这段调用的真实阻塞关系,互斥标记继承。
@@ -52,6 +59,7 @@ export function runInMaintenanceContext<T>(
       urgency: () => urgency,
       abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
       holdingExclusion: maintenanceContext.getStore()?.holdingExclusion ?? false,
+      cancelWhenAbandoned: maintenanceContext.getStore()?.cancelWhenAbandoned ?? neverCancelWhenAbandoned,
     },
     operation,
   );
@@ -73,6 +81,7 @@ export function runDetachedMaintenanceContext<T>(
       urgency: () => urgency,
       abort: neverAbortMaintenance,
       holdingExclusion: false,
+      cancelWhenAbandoned: neverCancelWhenAbandoned,
     },
     operation,
   );
@@ -81,17 +90,25 @@ export function runDetachedMaintenanceContext<T>(
 /**
  * 声明一段调用内的紧急度可随同键提级变化。仅供义务级协调层使用:义务的
  * 有效紧急度 = 当前最强等待者,叶级准入读取时必须看到最新值。
+ *
+ * `cancelWhenAbandoned` 缺省继承外层；空闲维护这类可随时放弃的调用声明为真，取消即
+ * 连同无人再等的义务一起停下，返回之后不再有它发起的维护写入。
  */
 export function runWithMaintenanceUrgency<T>(
   urgency: () => StorageMaintenanceUrgency,
   abort: AbortSignal,
   operation: () => Promise<T>,
+  cancelWhenAbandoned?: () => boolean,
 ): Promise<T> {
   return maintenanceContext.run(
     {
       urgency,
       abort,
       holdingExclusion: maintenanceContext.getStore()?.holdingExclusion ?? false,
+      cancelWhenAbandoned:
+        cancelWhenAbandoned ??
+        maintenanceContext.getStore()?.cancelWhenAbandoned ??
+        neverCancelWhenAbandoned,
     },
     operation,
   );
@@ -108,6 +125,7 @@ export function runHoldingMaintenanceExclusion<T>(
       urgency: maintenanceContext.getStore()?.urgency ?? (() => "background"),
       abort: maintenanceContext.getStore()?.abort ?? neverAbortMaintenance,
       holdingExclusion: true,
+      cancelWhenAbandoned: maintenanceContext.getStore()?.cancelWhenAbandoned ?? neverCancelWhenAbandoned,
     },
     operation,
   );
@@ -127,6 +145,11 @@ export function currentMaintenanceUrgency(): StorageMaintenanceUrgency {
 /** 叶级容量排队与安全检查点读取当前完整维护义务的共享取消信号。 */
 export function currentMaintenanceAbortSignal(): AbortSignal {
   return maintenanceContext.getStore()?.abort ?? neverAbortMaintenance;
+}
+
+/** 义务级协调层读取当前调用的放弃策略（见 `cancelWhenAbandoned`）。 */
+export function currentMaintenanceCancelWhenAbandoned(): () => boolean {
+  return maintenanceContext.getStore()?.cancelWhenAbandoned ?? neverCancelWhenAbandoned;
 }
 
 /** 叶级准入点判断是否必须零等待。 */
