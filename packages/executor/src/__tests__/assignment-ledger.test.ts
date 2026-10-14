@@ -5651,19 +5651,26 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         at: NOW,
       }),
     };
-    await appendCompleteConversationCommit(conflicted, bundle, 4, false, {
+    // 以迟到包提交收束调度冲突：会话读索引在写入时即拒绝。
+    await expect(appendCompleteConversationCommit(conflicted, bundle, 4, false, {
+      ...fact,
+      resolution,
+    })).rejects.toThrow("Dispatch conflict cannot close through a late bundle commit");
+    // 不经读索引写入的同类历史（例如旧版本留下的记录），回放时同样被拒绝。
+    const raw = new FileAuthorityCommitLog(conflicted.log.rootDir, conflicted.artifacts);
+    await appendCompleteConversationCommit({ ...conflicted, log: raw }, bundle, 4, false, {
       ...fact,
       resolution,
     });
+    await raw.stopStorageMaintenance();
+    const corrupted = /Committed run replay contract|Dispatch conflict cannot close through a late bundle commit/u;
     await expect(
       reopenJournal(conflicted).submitBundle(
         bundle,
         submissionContext(conflicted.unsigned),
       ),
-    ).rejects.toThrow("Committed run replay contract");
-    await expect(conflicted.journal.currentState(RUN_ID)).rejects.toThrow(
-      "Committed run replay contract",
-    );
+    ).rejects.toThrow(corrupted);
+    await expect(conflicted.journal.currentState(RUN_ID)).rejects.toThrow(corrupted);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("recovers a cancelled run from a dispatch rejection whose response was lost", async () => {

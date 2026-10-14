@@ -228,7 +228,7 @@ function sessionActivityEntry(
 
 const ADVANCEMENT_NOW = "2026-08-02T00:00:00.000Z";
 
-function advancementCreatedEvent(text: string): AdvancementControlEvent {
+function advancementCreatedEvent(text: string): Extract<AdvancementControlEvent, { readonly type: "session_created" }> {
   return {
     type: "session_created",
     timestamp: ADVANCEMENT_NOW,

@@ -201,7 +201,7 @@ describe("gracefulKill: Windows 路径", () => {
 
   it("Windows tree-kill 失败 → 降级 child.kill()", async () => {
     const { child, killCalls, simulateExit } = createMockChild();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const recorded: unknown[] = [];
     const killWindowsProcessTree = vi.fn(async () => {
       throw new Error("taskkill failed");
     });
@@ -209,6 +209,7 @@ describe("gracefulKill: Windows 路径", () => {
     const promise = gracefulKill(child, {
       getPlatform: () => "win32",
       killWindowsProcessTree,
+      records: { record: (draft) => { recorded.push(typeof draft === "function" ? draft() : draft); } },
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -217,9 +218,11 @@ describe("gracefulKill: Windows 路径", () => {
 
     expect(killWindowsProcessTree).toHaveBeenCalledTimes(1);
     expect(killCalls).toEqual([undefined]);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Windows process tree kill failed"),
-    );
+    // 降级经官方日志记录，不再写控制台。
+    expect(recorded).toContainEqual(expect.objectContaining({
+      event: "fallback",
+      data: expect.objectContaining({ error: expect.stringContaining("taskkill failed") }),
+    }));
   });
 
   it("Windows + 子进程已退出 → 立即 resolve, 不调 kill", async () => {

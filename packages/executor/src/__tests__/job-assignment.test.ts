@@ -1940,7 +1940,8 @@ describe("user job durable protocol", {
     if (!("fromSeq" in page)) {
       throw new Error("expected assignment evidence page");
     }
-    expect(page.entries.every((entry) => entry.body.v === 1)).toBe(true);
+    // 受激活门控的是 v2 的流投影事实；租约接纳事实按合同一律写 v3。
+    expect(page.entries.some((entry) => entry.body.v === 2)).toBe(false);
     await expect(
       harness.ledger.interactionStreamProjectionEnabled(ASSIGNMENT_ID),
     ).resolves.toBe(false);
