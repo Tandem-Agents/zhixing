@@ -8,6 +8,7 @@ export {
 } from "./durable-removal.js";
 export { acquireFileLock, createFileLockAcquirer, withFileLockProcessIdentity } from "./file-lock.js";
 export type { FileLockOptions } from "./file-lock.js";
+export type { ProcessIdentityReading, ProcessIdentityResolver } from "./process-identity.js";
 export { SerialTaskQueue } from "./serial-task-queue.js";
 
 export { replaceFile } from "./atomic-file.js";

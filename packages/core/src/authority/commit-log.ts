@@ -27,7 +27,7 @@ import {
   syncDirectory,
 } from "../persistence/index.js";
 import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
-import { canonicalize, protocolDigest } from "../protocol/index.js";
+import { canonicalize, protocolDigest, protocolDigestOfCanonicalParts } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
   currentMaintenanceAbortSignal,
@@ -2816,8 +2816,7 @@ export function decodeCommitEnvelope(bytes: Uint8Array): CommitEnvelope<JsonValu
   // canonical CommitEnvelope v1 schema, also checked against protocolDigest.
   const prefix = `{"at":${JSON.stringify(value.at)},"entries":[${entries.join(",")}]`;
   const suffix = `,"lsn":${value.lsn},"v":1}`;
-  const expectedDigest = `sha256:${createHash("sha256")
-    .update("zhixing:CommitEnvelope:v1\0").update(prefix).update(suffix).digest("hex")}`;
+  const expectedDigest = protocolDigestOfCanonicalParts("CommitEnvelope", 1, [prefix, suffix]);
   if (expectedDigest !== value.envelopeDigest) {
     throw invalidEnvelope("Commit envelope digest is invalid");
   }

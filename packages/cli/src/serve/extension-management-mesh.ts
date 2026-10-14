@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { assertArtifactRef, validateArtifactReceiveProgress, type ArtifactStore, type ArtifactReceiveProgress } from "@zhixing/core/authority";
 import type { ArtifactRef } from "@zhixing/core/contracts";
+import { byteDigest } from "@zhixing/core/protocol";
 import type { MeshServiceClient } from "@zhixing/mesh";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type { ExtensionManagementRequest } from "@zhixing/core/extensions/contracts";
@@ -92,7 +93,7 @@ export function createMeshExtensionManagement(client: () => MeshServiceClient): 
     if (request.action !== "connect") return call({ v: 1, request });
     const bytes = encode(request.candidate);
     if (bytes.length > MAX_CANDIDATE_BYTES) throw new Error("候选体积超限");
-    const ref: ArtifactRef = { digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`, bytes: bytes.length };
+    const ref: ArtifactRef = { digest: byteDigest(bytes), bytes: bytes.length };
     const envelope = { v: 1, t: "candidate", id: request.id, revision: request.expectedRevision, ref };
     let progress = validateArtifactReceiveProgress(await call({ ...envelope, step: "probe" }), ref);
     while (!progress.complete) {

@@ -1,4 +1,4 @@
-import { validateConversationCommitSummary } from "../contracts/conversation-recovery.js";
+import { validateConversationCommitSummary } from "../protocol/conversation-commit-summary.js";
 import type {
   ArtifactRef,
   DeliveryEndpointDto,

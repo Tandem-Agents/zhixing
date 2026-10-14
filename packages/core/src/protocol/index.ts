@@ -5,6 +5,7 @@ export {
   createByteDigestAccumulator,
   protocolBytes,
   protocolDigest,
+  protocolDigestOfCanonicalParts,
 } from "./canonical.js";
 export type { ByteDigestAccumulator } from "./canonical.js";
 export { assignmentMutationRequestId } from "./assignment-mutation.js";

@@ -38,6 +38,21 @@ export function protocolDigest(
     .digest("hex")}`;
 }
 
+/**
+ * 与 protocolDigest 相同的协议摘要，输入为已按规范顺序串好的片段：调用方已逐段校验并规范化，
+ * 不必为求摘要再整体规范化一次。片段拼接必须恰好等于 canonicalize(payload)。
+ */
+export function protocolDigestOfCanonicalParts(
+  schemaId: string,
+  version: number,
+  parts: readonly string[],
+): Digest {
+  assertSchema(schemaId, version);
+  const hash = createHash("sha256").update(`zhixing:${schemaId}:v${version}`, "utf8").update(Buffer.from([0]));
+  for (const part of parts) hash.update(part, "utf8");
+  return `sha256:${hash.digest("hex")}`;
+}
+
 export function byteDigest(bytes: Uint8Array): Digest {
   const accumulator = createByteDigestAccumulator();
   accumulator.update(bytes);
