@@ -1,5 +1,8 @@
 import { maintenanceRetryDelayMs, currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from "@zhixing/core/resources";
 import { retryControlAdmission } from "./conversation-admission-retry.js";
+import { retryDurableObligation } from "./durable-obligation-retry.js";
+import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
+import { AuthorityStorageError } from "@zhixing/core/authority";
 import { AssignmentStartCancelledError, DataPlaneAssignmentInactiveError } from "@zhixing/executor";
 import { randomUUID } from "node:crypto";
 import { WorksceneContinuationApplication, isWorksceneContinuationCurrent, worksceneTaskContext, readWorksceneTaskContext } from "@zhixing/core/workscene/application";
@@ -109,7 +112,6 @@ import type { SessionStatePort } from "@zhixing/core/contracts";
 import {
   DurableConversationInteractionObserver,
 } from "./durable-conversation-interactions.js";
-import { retryDurableObligation } from "./durable-obligation-retry.js";
 import {
   assignmentGlobalCapability,
   createAssignmentGlobalQueryPort,
@@ -293,6 +295,10 @@ export function createConversationCommittedTurnListenerAssemblyHandle(): Readonl
       completed = true;
     },
   });
+}
+
+class RetryableRunEndPreparation extends Error {
+  constructor(error: unknown) { super("Run end preparation remains pending", { cause: error }); }
 }
 
 /** Single-process production composition for the durable conversation protocol. */
@@ -1501,17 +1507,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         this.#kickDelivery(input.hooks?.onFinalPublishFailure);
         return true;
       };
-      // Retry only cancellation settlement after releasing the terminal queue.
-      // Other terminal failures retain their original disposition and error.
+      // 本机终结步骤沿同一assignment幂等推进；临时资源压力在释放终态队列后有界重试。
+      // 协议错误或永久失败保持原始判断，不能把它们当作可重试背压。
       const settleTerminal = async <T>(operation: (cancelled: boolean) => Promise<T>): Promise<T> => {
-        const outcome = await retryControlAdmission(() => this.#terminalOperations.run(async () => {
-          if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
-          const cancelled = await yieldToDurableCancellation();
-          try { return { ok: true as const, value: await operation(cancelled) }; }
-          catch (error) { return { ok: false as const, error }; }
-        }), async () => {});
-        if (!outcome.ok) throw outcome.error;
-        return outcome.value;
+        return retryDurableObligation(async () => {
+          const outcome = await retryControlAdmission(() => this.#terminalOperations.run(async () => {
+            if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+            const cancelled = await yieldToDurableCancellation();
+            try { return { ok: true as const, value: await operation(cancelled) }; }
+            catch (error) {
+              if (maintenanceRetryDelayMs(error) !== undefined) throw error;
+              return { ok: false as const, error };
+            }
+          }), async () => {});
+          if (!outcome.ok) throw outcome.error;
+          return outcome.value;
+        }, currentMaintenanceAbortSignal(), error => error instanceof RetryableRunEndPreparation);
       };
       let toolCalls = 0;
       const interactionScope = effect.createInteractionScope({
@@ -1674,11 +1685,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           if (await effect.hasOpenSideEffects()) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
           } else {
-            await this.#prepareRunEndUntilAvailable(
-              effect,
-              submissionContext,
-              interactionScope,
-            );
+            if (!runEndPrepared) {
+              await this.#prepareRunEndUntilAvailable(effect, submissionContext, interactionScope);
+              runEndPrepared = true;
+            }
             await finishObservedStream();
             const failure = await effect.failExecution({
               reason: runFailureReason(runResult.agentResult),
@@ -1711,12 +1721,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         if (cancelled) {
           return { kind: "cancelled" as const };
         }
-        await this.#prepareRunEndUntilAvailable(
-          effect,
-          submissionContext,
-          interactionScope,
-        );
-        runEndPrepared = true;
+        if (!runEndPrepared) {
+          await this.#prepareRunEndUntilAvailable(effect, submissionContext, interactionScope);
+          runEndPrepared = true;
+        }
         const sourceValue = runResult.runRecord.source ?? input.options?.source;
         const advancement =
           runResult.runRecord.advancement ?? input.options?.advancement;
@@ -1865,10 +1873,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     context: AuthorityCallContext,
     interactionScope: import("./conversation-executor-dispatch.js").ConversationExecutorInteractionScope,
   ): Promise<void> {
-    await retryDurableObligation(async () => {
+    // 这里位于本机终态队列内，不在持有队列时睡眠重试；调用方在队列外结算延期。
+    try {
       await effect.prepareForRunEnd(context);
       await interactionScope.drain();
-    });
+    } catch (error) {
+      if (maintenanceRetryDelayMs(error) !== undefined || error instanceof AuthorityStorageError || !shouldRetryRemoteObligation(error)) throw error;
+      throw new RetryableRunEndPreparation(error);
+    }
   }
 
   async #applyInputAdmission(

@@ -3242,7 +3242,7 @@ describe("ConversationProtocolRuntime", () => {
     } finally { await run.finish(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
-  it("keeps a committed result when post-run route retirement meets transient pressure", async () => {
+  it.each(["retirement", "usage", "sealed"] as const)("keeps a completed run through transient %s pressure without repeating the model", async phase => {
     const home = await createTempDir("conversation-retire-pressure");
     const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
     let executions = 0;
@@ -3272,8 +3272,10 @@ describe("ConversationProtocolRuntime", () => {
     const conversationId = "conversation-retire-pressure";
     await getOrCreateActiveConversation(authority, manager, conversationId);
     const awaiting = ConversationRunJournal.prototype.assignmentsAwaitingRecovery;
+    const finalize = authority.executorResourceGovernor.flushAssignment.bind(authority.executorResourceGovernor);
+    const seal = ConversationAssignmentLedger.prototype.sealConversationBundle;
     let pressured = 0;
-    const spy = vi.spyOn(ConversationRunJournal.prototype, "assignmentsAwaitingRecovery").mockImplementation(async function (...args) {
+    const spy = phase === "retirement" ? vi.spyOn(ConversationRunJournal.prototype, "assignmentsAwaitingRecovery").mockImplementation(async function (...args) {
       const committed = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries)
         .some(entry => (entry.body as { t?: string }).t === "committed");
       if (executions > 0 && committed && pressured === 0) {
@@ -3281,6 +3283,19 @@ describe("ConversationProtocolRuntime", () => {
         throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
       }
       return awaiting.apply(this, args);
+    }) : phase === "usage" ? vi.spyOn(authority.executorResourceGovernor, "flushAssignment").mockImplementation(async (...args) => {
+      if (executions > 0 && pressured === 0) {
+        pressured += 1;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      }
+      return finalize(...args);
+    }) : vi.spyOn(ConversationAssignmentLedger.prototype, "sealConversationBundle").mockImplementation(async function (...args) {
+      const bundle = await seal.apply(this, args);
+      if (pressured === 0) {
+        pressured += 1;
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "readBytes", retryAfterMs: 1 });
+      }
+      return bundle;
     });
     try {
       const execution = protocol.run({ conversationId, input: "check", messages: [{ role: "user", content: [{ type: "text", text: "check" }] }], baseRevision: 0,
@@ -3290,10 +3305,12 @@ describe("ConversationProtocolRuntime", () => {
       expect(step.value.agentResult.reason).toBe("completed");
     } finally { spy.mockRestore(); }
     expect(pressured).toBe(1);
-    expect(failures.some(error => error instanceof StorageMaintenanceAdmissionError)).toBe(true);
+    expect(failures.some(error => error instanceof StorageMaintenanceAdmissionError)).toBe(phase === "retirement");
     // The retained route is retired by the next recovery pass instead of being lost.
     await protocol.recover();
     expect(executions).toBe(1);
+    const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries);
+    expect(records.some(entry => (entry.body as { state?: string }).state === "uncertain")).toBe(false);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("releases the execution plan when an earlier session close fails and keeps the run's first error", async () => {
     const home = await createTempDir("conversation-cleanup-close-failure");

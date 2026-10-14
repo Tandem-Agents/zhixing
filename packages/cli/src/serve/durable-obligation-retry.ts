@@ -5,6 +5,7 @@ import { shouldRetryRemoteObligation } from "./remote-obligation-failure.js";
 export async function retryDurableObligation<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
+  shouldRetry: (error: unknown) => boolean = shouldRetryRemoteObligation,
 ): Promise<T> {
   let delayMs = 100;
   while (!signal?.aborted) {
@@ -16,7 +17,7 @@ export async function retryDurableObligation<T>(
       }
       if (
         error instanceof AuthorityStorageError ||
-        !shouldRetryRemoteObligation(error)
+        !shouldRetry(error)
       ) {
         throw error;
       }
