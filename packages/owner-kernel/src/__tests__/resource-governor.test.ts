@@ -73,6 +73,27 @@ describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     )).rejects.toBeInstanceOf(ImmediateRootReplayTerminalError);
   });
 
+  it("does not let a dormant durable assignment block an unrelated live request across restart", async () => {
+    const fixture = await createHarness();
+    const dormant = assignmentReservationId("dormant-assignment");
+    await fixture.governor.enqueueRoot(dormant,
+      { kind: "run", id: "blocked-run", attempt: 1 },
+      { admissionClass: "interactive", entry: "conversation-input" }, hostContext);
+    const workload = { kind: "control", id: "ready-control", attempt: 1 } as const;
+    const origin = { admissionClass: "interactive", entry: "environment-control" } as const;
+    const lease = await fixture.governor.acquireRoot(workload, { maxCalls: 1 }, origin, hostContext);
+    expect((await fixture.governor.snapshot()).queued.has(dormant)).toBe(true);
+    const restarted = fixture.restart();
+    await expect(restarted.acquireRoot(workload, { maxCalls: 1 }, origin, hostContext)).resolves.toEqual(lease);
+    const resumed = await restarted.prepareAssignmentRoot({
+      assignmentId: "dormant-assignment", executorId: "executor-1",
+      workload: { kind: "run", id: "blocked-run", attempt: 1 },
+      scopeBinding: { kind: "conversation", conversationId: "blocked-conversation", ownerEpoch: 1 },
+      budget: { maxCalls: 1 },
+    }, { admissionClass: "interactive", entry: "conversation-input" }, hostContext);
+    expect(resumed.reservationId).toBe(dormant);
+  });
+
   it("keeps candidate signing side-effect free and atomically rechecks activation", async () => {
     const fixture = await createHarness();
     const reservationId = assignmentReservationId("assignment-1");

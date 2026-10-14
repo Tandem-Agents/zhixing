@@ -2551,7 +2551,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   /** Inputs that are durably admitted but have no active assignment, in FIFO order. */
   async pendingInputs(): Promise<PendingConversationInput[]> {
     return this.#select((state) =>
-      state.queuedPositionHeap.map((queuedPosition) => {
+      [...state.queuedPositionHeap].sort((left, right) => left - right).map((queuedPosition) => {
         const runId = state.queuedRunByPosition.get(queuedPosition);
         const admitted = runId ? state.admittedByRun.get(runId) : undefined;
         const current = runId ? state.stateByRun.get(runId) : undefined;
@@ -2672,6 +2672,22 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async nextAssignmentAttempt(runId: string): Promise<number> {
     assertIdentifier(runId, "Run id");
     return this.#select((state) => nextConversationAssignmentAttempt(state, runId));
+  }
+
+  /** 待确认或前序任务未结清时，仅保留耐久输入，不进入全局资源候选队列。 */
+  async isReadyForAssignment(runId: string): Promise<boolean> {
+    return (await this.assignmentSchedulingState(runId)).ready;
+  }
+
+  async assignmentSchedulingState(runId: string): Promise<{ readonly ready: boolean; readonly blockingRunId?: string }> {
+    return this.#select((state) => {
+      const admitted = state.admittedByRun.get(runId);
+      if (!admitted || state.deleted || state.stateByRun.get(runId)?.state !== "queued" || state.assignmentByRun.has(runId)) return { ready: false };
+      const first = state.queuedPositionHeap[0];
+      const blockingRunId = state.activeRunId !== undefined && state.activeRunId !== runId
+        ? state.activeRunId : first !== admitted.record.queuedPosition && first !== undefined ? state.queuedRunByPosition.get(first) : undefined;
+      return blockingRunId ? { ready: false, blockingRunId } : { ready: first === admitted.record.queuedPosition };
+    });
   }
 
   async dispatchesAwaitingStarted(): Promise<PendingConversationDispatch[]> {

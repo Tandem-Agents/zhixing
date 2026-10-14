@@ -1250,6 +1250,7 @@ export function assertSystemJobReservationRequest(value: unknown): void {
 export function selectFairReservation(
   state: GovernorProjection,
   occupiedClasses: ReadonlySet<AdmissionClass> = new Set(),
+  eligibleReservations?: ReadonlySet<string>,
 ): { readonly reservationId: string; readonly admissionClass: AdmissionClass } | undefined {
   if (state.queued.size === 0) return undefined;
   for (let offset = 0; offset < ADMISSION_CLASSES.length; offset += 1) {
@@ -1257,7 +1258,12 @@ export function selectFairReservation(
     const admissionClass = ADMISSION_CLASSES[index]!;
     const queue = state.admissionQueues[admissionClass];
     if (queue.length === 0 || occupiedClasses.has(admissionClass)) continue;
-    return { reservationId: queue[0]!, admissionClass };
+    // 耐久排队表示业务仍待推进；只有正在申请候选的任务才参与本轮调度。
+    // 同类按原入队顺序选择，失联或被领域阻塞的任务保留原队位，不占住其它任务。
+    const reservationId = eligibleReservations
+      ? queue.find((id) => eligibleReservations.has(id))
+      : queue[0];
+    if (reservationId !== undefined) return { reservationId, admissionClass };
   }
   return undefined;
 }
@@ -1269,13 +1275,15 @@ export function advanceFairReservation(
   admissionClass: AdmissionClass,
 ): void {
   const queue = state.admissionQueues[admissionClass];
-  if (state.queued.get(reservationId) !== admissionClass || queue[0] !== reservationId) {
-    throw new TypeError("Resource reservation is not the head of its admission class");
+  const position = queue.indexOf(reservationId);
+  if (state.queued.get(reservationId) !== admissionClass || position < 0) {
+    throw new TypeError("Resource reservation is not queued in its admission class");
   }
   if (state.admissionDeficits[admissionClass] === 0) {
     state.admissionDeficits[admissionClass] = DEFAULT_ADMISSION_WEIGHTS[admissionClass];
   }
-  queue.shift();
+  // 候选选择由当前申请集合裁定；耐久 reserve 记录确定实际获准者，重放只消费该身份。
+  queue.splice(position, 1);
   state.admissionDeficits[admissionClass] -= 1;
   const classIndex = ADMISSION_CLASSES.indexOf(admissionClass);
   if (queue.length > 0 && state.admissionDeficits[admissionClass] > 0) {

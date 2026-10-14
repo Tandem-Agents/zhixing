@@ -31,6 +31,24 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
 
+it('only admits the earliest unfinished input to assignment scheduling', async () => {
+  const h = await harness(); await admit(h.journal);
+  await h.journal.admit({ ingressKey: 'second-ingress', runId: 'second-run', queuedPosition: 1,
+    userInput: { parts: [{ type: 'text', text: 'second' }] }, invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'second-ingress', receivedAt: NOW } });
+  for (const [id, position] of [['third', 2], ['fourth', 3]] as const) {
+    await h.journal.admit({ ingressKey: id, runId: id, queuedPosition: position,
+      userInput: { parts: [{ type: 'text', text: id }] }, invocation: { kind: 'agent', source: 'interactive' },
+      ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: id, receivedAt: NOW } });
+  }
+  expect(await h.journal.isReadyForAssignment('seed-run')).toBe(true);
+  expect(await h.journal.isReadyForAssignment('second-run')).toBe(false);
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'release-first-input' });
+  expect((await h.journal.pendingInputs()).map(input => input.runId)).toEqual(['second-run', 'third', 'fourth']);
+  expect(await h.journal.isReadyForAssignment('second-run')).toBe(true);
+  expect(await h.journal.isReadyForAssignment('missing')).toBe(false);
+});
+
 it('cold message queries use the actual owner directory and imported base without full execution replay', async () => {
   const h = await harness(); await admit(h.journal);
   await h.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-message-query' });

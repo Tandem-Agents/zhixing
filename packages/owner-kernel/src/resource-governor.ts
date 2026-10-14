@@ -158,6 +158,8 @@ export class AnchorResourceGovernor
   readonly #monotonicClock: () => number;
   readonly #operations: SerialTaskQueue;
   readonly #candidates = new Map<AdmissionClass, CandidateOccupancy>();
+  /** 同一任务的并发重试共享申请资格，最后一个等待者离开才撤销。 */
+  readonly #candidateWaiters = new Map<string, number>();
   readonly #leaseDeadlines = new Map<string, {
     readonly digest: string;
     readonly deadline: number;
@@ -1093,8 +1095,9 @@ export class AnchorResourceGovernor
         throw new TypeError("Immediate resource root is not durably queued");
       }
       const selected = selectFairReservation(
-        cloneGovernorProjection(state),
+        state,
         new Set(this.#candidates.keys()),
+        new Set(this.#candidateWaiters.keys()),
       );
       if (
         selected?.reservationId !== reservationId ||
@@ -1165,8 +1168,9 @@ export class AnchorResourceGovernor
         return occupied.lease as Lease;
       }
       const selected = selectFairReservation(
-        cloneGovernorProjection(state),
+        state,
         new Set(this.#candidates.keys()),
+        new Set(this.#candidateWaiters.keys()),
       );
       if (
         selected?.reservationId !== reservationId ||
@@ -1188,19 +1192,26 @@ export class AnchorResourceGovernor
     ctx: AuthorityCallContext,
     attempt: () => Promise<Lease>,
   ): Promise<Lease> {
-    return waitForResourceAdmissionCandidate({
-      attempt,
-      isPending: (error) => error instanceof ResourceAdmissionPendingError,
-      deadline: deadlineFromContext(
-        ctx,
-        this.#clock(),
-        this.#monotonicClock(),
-      ),
-      monotonicClock: this.#monotonicClock,
-      onDeadline: () => {
-        throw new ResourceAdmissionDeferredError(reservationId);
-      },
-    });
+    this.#candidateWaiters.set(reservationId, (this.#candidateWaiters.get(reservationId) ?? 0) + 1);
+    try {
+      return await waitForResourceAdmissionCandidate({
+        attempt,
+        isPending: (error) => error instanceof ResourceAdmissionPendingError,
+        deadline: deadlineFromContext(
+          ctx,
+          this.#clock(),
+          this.#monotonicClock(),
+        ),
+        monotonicClock: this.#monotonicClock,
+        onDeadline: () => {
+          throw new ResourceAdmissionDeferredError(reservationId);
+        },
+      });
+    } finally {
+      const remaining = (this.#candidateWaiters.get(reservationId) ?? 1) - 1;
+      if (remaining > 0) this.#candidateWaiters.set(reservationId, remaining);
+      else this.#candidateWaiters.delete(reservationId);
+    }
   }
 
   #assertCurrentCandidate(

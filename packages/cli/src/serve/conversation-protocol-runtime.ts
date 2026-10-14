@@ -787,7 +787,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const shouldSchedule =
       state === "queued" &&
       !this.#schedulingRuns.has(admission.runId) &&
-      !this.#scheduledRuns.has(admission.runId);
+      !this.#scheduledRuns.has(admission.runId) &&
+      await this.#mayScheduleInput(input.conversationId, admission.runId);
     if (shouldSchedule) {
       this.#schedulingRuns.add(admission.runId);
       this.#preparedAdmissions.set(key, {
@@ -2859,6 +2860,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return reconciled;
   }
 
+  async #mayScheduleInput(conversationId: string, runId: string): Promise<boolean> {
+    const state = await this.#journal(conversationId).assignmentSchedulingState(runId);
+    if (state.ready) return true;
+    // 正常执行中的后续输入仍交给原内存队列；无人执行的待确认项只留耐久队列。
+    return state.blockingRunId !== undefined && this.#scheduledRuns.has(state.blockingRunId) &&
+      this.#manager()?.getSession(conversationId)?.busy === true;
+  }
+
   async #resumeQueuedInputs(
     conversationId: string,
     journal: ConversationRunJournal,
@@ -2877,6 +2886,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   ): Promise<void> {
     if (this.#shutdownDraining) return;
     if (this.#scheduledRuns.has(pending.runId)) return;
+    if (!await this.#mayScheduleInput(conversationId, pending.runId)) return;
     if (this.#schedulingRuns.has(pending.runId)) {
       throw new Error(`Conversation run ${pending.runId} is still entering the scheduler`);
     }

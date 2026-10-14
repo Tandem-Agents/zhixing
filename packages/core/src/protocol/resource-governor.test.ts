@@ -444,6 +444,23 @@ describe("resource governor protocol", () => {
     expect(state.queued.has("interactive-head")).toBe(true);
   });
 
+  it("preserves dormant queue entries while replaying service for the earliest eligible peer", () => {
+    const state = emptyGovernorProjection();
+    for (const id of ["dormant", "ready-first", "ready-second"]) {
+      applyGovernorRecord(state, {
+        t: "queued", reservationId: id, admissionClass: "interactive",
+        workload: { kind: "control", id, attempt: 1 },
+      }, verifier);
+    }
+    const ready = new Set(["ready-second", "ready-first"]);
+    expect(selectFairReservation(state, new Set(), ready)?.reservationId).toBe("ready-first");
+    applyGovernorRecord(state, { t: "reserve", lease: rootLease("ready-first", "interactive") }, verifier);
+    expect(state.admissionQueues.interactive).toEqual(["dormant", "ready-second"]);
+    expect(state.queued.has("dormant")).toBe(true);
+    expect(selectFairReservation(state, new Set(), new Set(["dormant", "ready-second"]))?.reservationId).toBe("dormant");
+    expect(selectFairReservation(state, new Set(), new Set())).toBeUndefined();
+  });
+
   it("requires a bounded durable usage reservation before every consume", () => {
     const state = activeRoot("root-prehold", { maxCalls: 2, maxTokens: 20 });
     expect(() => applyGovernorRecord(state, {
