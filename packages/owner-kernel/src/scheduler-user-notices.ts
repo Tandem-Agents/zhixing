@@ -109,15 +109,21 @@ export class SchedulerUserNoticeJournal {
     if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
       throw new TypeError("Scheduler notice cursor must be a non-negative safe integer");
     }
-    const notices: SchedulerUserNotice[] = [];
-    for (const envelope of await this.#log.readAll<unknown>()) {
-      if (envelope.lsn <= afterRevision) continue;
-      for (const entry of envelope.entries) {
-        if (entry.stream !== SCHEDULER_NOTICE_STREAM) continue;
+    // 游标已在日志末尾或之后（例如客户端带来的旧游标）：没有更新的通知。
+    if (afterRevision >= (await this.#log.checkpoint()).lsn) return [];
+    // 只读通知流中游标之后的记录：日志按流与 LSN 筛选，不为它解析整份历史。
+    const initial: SchedulerUserNotice[] = [];
+    const read = await this.#log.readProjection<SchedulerUserNotice[], unknown>(
+      initial,
+      (current, entry, envelope) => {
+        // 日志内部重试时从未改动的空起点重新收集。
+        const notices = current === initial ? [] : current;
         notices.push(projectNotice(validateNoticeFact(entry.body), envelope));
-      }
-    }
-    return notices.sort((a, b) => a.revision - b.revision);
+        return notices;
+      },
+      { stream: SCHEDULER_NOTICE_STREAM, afterLsn: afterRevision },
+    );
+    return [...read.state].sort((a, b) => a.revision - b.revision);
   }
 
   onNotice(listener: (notice: SchedulerUserNotice) => void | Promise<void>): () => void {
@@ -126,8 +132,8 @@ export class SchedulerUserNoticeJournal {
   }
 
   async initializeLiveCursor(): Promise<void> {
-    const commits = await this.#log.readAll();
-    this.#publishedRevision = commits.at(-1)?.lsn ?? 0;
+    // 只需要日志当前末尾的 LSN，不读取历史。
+    this.#publishedRevision = (await this.#log.checkpoint()).lsn;
   }
 
   async publishNew(): Promise<void> {

@@ -100,6 +100,9 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
     expect(listener).toHaveBeenCalledOnce();
     expect(listener).toHaveBeenCalledWith(notice);
     expect(notice?.revision).toBeGreaterThan(0);
+    // 游标在末尾或超前（客户端带来的旧游标）：没有更新的通知，不报错。
+    await expect(harness.notices.history(notice!.revision)).resolves.toEqual([]);
+    await expect(harness.notices.history(notice!.revision + 1_000)).resolves.toEqual([]);
   });
 
   it("projects a stable per-item publish result through the existing notice history", async () => {
