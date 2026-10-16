@@ -681,8 +681,33 @@ describe("host-stop old endpoint identity", () => {
   const owner = (port?: number) => ({ ownsEndpoint: (candidate: number) => candidate === port });
   const old = (startTime: number | null) => ({ ...endpoint(4242, 19128), startTime });
 
+    it("accepts native exit evidence when the process exits after the first liveness check", async () => {
+      await expect(endpointProcessMayBeOldHost(owner(), old(10), {
+        alive: () => true, birth: async () => ({ kind: 'absent' }),
+      })).resolves.toBe(false);
+      await expect(endpointProcessMayBeOldHost(owner(), old(10), {
+        alive: () => true, birth: async () => ({ kind: 'unknown' }),
+      })).resolves.toBe(true);
+    });
+
+    it("rechecks liveness when the portable birth probe loses a concurrently exiting process", async () => {
+      let alive = true;
+      await expect(endpointProcessMayBeOldHost(owner(), old(10), {
+        alive: () => alive, startTime: async () => { alive = false; return null; },
+      })).resolves.toBe(false);
+    });
+
+    it("does not let a coarse ESRCH result override a still-live or unreadable native incarnation", async () => {
+      await expect(endpointProcessMayBeOldHost(owner(), old(10), {
+        alive: () => false, birth: async () => ({ kind: 'present', startTime: 10 }),
+      })).resolves.toBe(true);
+      await expect(endpointProcessMayBeOldHost(owner(), old(10), {
+        alive: () => false, birth: async () => ({ kind: 'unknown' }),
+      })).resolves.toBe(true);
+    });
+
   it("treats a dead PID as no longer the old host", async () => {
-    await expect(endpointProcessMayBeOldHost(owner(), old(null), { alive: () => false })).resolves.toBe(false);
+      await expect(endpointProcessMayBeOldHost(owner(), old(null), { alive: () => false, startTime: async () => null })).resolves.toBe(false);
   });
 
   it("detects PID reuse by start time where the platform records it", async () => {

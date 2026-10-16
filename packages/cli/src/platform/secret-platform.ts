@@ -49,15 +49,35 @@ export function nativeSecretPlatform(records?: () => LogRecordPort | undefined):
 
 /** Uses the same OS birth proof as file ownership, without launching a second
  * PowerShell process in a Host that already ships the verified native adapter. */
+export type PlatformProcessBirth =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'present'; readonly startTime: number };
+
+export async function readPlatformProcessBirth(
+  pid: number,
+  fallback: (pid: number) => Promise<number | null>,
+  resolver: PlatformSecretStoreOptions['processIdentityResolver'] | null = nativeSecretPlatform().processIdentityResolver,
+  alive?: (pid: number) => boolean,
+): Promise<PlatformProcessBirth> {
+  if (!resolver) {
+    const startTime = await fallback(pid);
+    if (startTime !== null) return { kind: 'present', startTime };
+    return alive && !alive(pid) ? { kind: 'absent' } : { kind: 'unknown' };
+  }
+  const identity = await resolver.read(pid);
+  if (identity.kind === 'absent') return { kind: 'absent' };
+  if (identity.kind !== 'present' || !/^win32:[0-9]+$/u.test(identity.birth)) return { kind: 'unknown' };
+  const milliseconds = (BigInt(identity.birth.slice(6)) - 621355968000000000n) / 10000n;
+  if (milliseconds <= 0 || milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) return { kind: 'unknown' };
+  return { kind: 'present', startTime: Number(milliseconds) };
+}
+
 export async function resolvePlatformProcessStartTime(
   pid: number,
   fallback: (pid: number) => Promise<number | null>,
   resolver = nativeSecretPlatform().processIdentityResolver,
 ): Promise<number | null> {
-  if (!resolver) return fallback(pid);
-  const identity = await resolver.read(pid);
-  if (identity.kind !== 'present' || !/^win32:[0-9]+$/u.test(identity.birth)) return null;
-  const milliseconds = (BigInt(identity.birth.slice(6)) - 621355968000000000n) / 10000n;
-  if (milliseconds <= 0 || milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(milliseconds);
+  const identity = await readPlatformProcessBirth(pid, fallback, resolver);
+  return identity.kind === 'present' ? identity.startTime : null;
 }

@@ -17,6 +17,8 @@ import {
   type PidFileContents,
 } from "@zhixing/server/client";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import { recordedHostMayBeAlive } from "./startup-server-owner.js";
+import type { PlatformProcessBirth } from "../platform/secret-platform.js";
 import {
   createManagedServiceAdapter,
   managedServiceDefinitionDigest,
@@ -36,6 +38,7 @@ export interface StopOptions {
 export interface StopDeps {
   readLockFn?: typeof readLock;
   isProcessAliveFn?: typeof isProcessAlive;
+  readProcessBirthFn?: (pid: number) => Promise<PlatformProcessBirth>;
   releaseLockFn?: typeof releaseLock;
   /** Retained only so older injected fixtures remain source-compatible; never invoked. */
   killFn?: (pid: number, signal: NodeJS.Signals | 0) => void;
@@ -99,7 +102,12 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     if (verbose) con.log(chalk.dim("知行运行实例已变化，跳过停止"));
     return { status: "nothing-to-stop" };
   }
-  if (!isAlive(lock.pid)) {
+  const mayBeOldHost = () => recordedHostMayBeAlive(lock, {
+    alive: isAlive,
+    ...(deps.readProcessBirthFn ? { birth: deps.readProcessBirthFn } : {}),
+    ...(deps.platform ? { platform: deps.platform } : {}),
+  });
+  if (!(await mayBeOldHost())) {
     if (verbose) con.log(chalk.dim("知行已经停止，正在清理旧运行标记"));
     await cleanupExitedInstance({
       releaseLockFn,
@@ -156,14 +164,11 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
   }
 
   const exited = await waitForExit({
-    pid: lock.pid,
     deadline: clock() + (opts.timeoutMs ?? 30_000),
     pollMs: opts.pollMs ?? 300,
     clock,
     sleep,
-    isAlive,
-    readLockFn,
-    expectedLock: lock,
+    mayBeOldHost,
   });
   if (!exited) {
     const reason = "知行仍在安全收束中；请处理阻塞项后用同一命令继续，系统不会强制结束进程";
@@ -219,14 +224,11 @@ async function defaultRpcShutdown(
 }
 
 interface WaitForExitArgs {
-  pid: number;
   deadline: number;
   pollMs: number;
   clock: () => number;
   sleep: (ms: number) => Promise<void>;
-  isAlive: (pid: number) => boolean;
-  readLockFn: typeof readLock;
-  expectedLock: PidFileContents;
+  mayBeOldHost: () => Promise<boolean>;
 }
 
 async function waitForExit(input: WaitForExitArgs): Promise<boolean> {
@@ -238,9 +240,7 @@ async function waitForExit(input: WaitForExitArgs): Promise<boolean> {
 }
 
 async function exactHostExited(input: WaitForExitArgs): Promise<boolean> {
-  const current = await input.readLockFn().catch(() => null);
-  if (!current || !isSameLock(current, input.expectedLock)) return true;
-  return !input.isAlive(input.pid);
+  return !(await input.mayBeOldHost());
 }
 
 async function prepareManagedExactStop(

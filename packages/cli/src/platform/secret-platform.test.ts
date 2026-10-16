@@ -1,9 +1,18 @@
 import { expect, it, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import type { LogDraft } from '@zhixing/core/logging';
-import { nativeSecretPlatform, resolvePlatformProcessStartTime } from './secret-platform.js';
+import { nativeSecretPlatform, readPlatformProcessBirth, resolvePlatformProcessStartTime } from './secret-platform.js';
 
 vi.mock('../cli-entry.js', () => ({ resolveCliEntry: () => fileURLToPath(new URL('../../dist/index.js', import.meta.url)) }));
+
+it('preserves explicit native absence independently of unreadable process identity', async () => {
+  const fallback = vi.fn(async () => 123);
+  await expect(readPlatformProcessBirth(12, fallback, { read: async () => ({ kind: 'absent' }) }))
+    .resolves.toEqual({ kind: 'absent' });
+  await expect(readPlatformProcessBirth(12, fallback, { read: async () => ({ kind: 'unknown' }) }))
+    .resolves.toEqual({ kind: 'unknown' });
+  expect(fallback).not.toHaveBeenCalled();
+});
 
 it.skipIf(process.platform !== 'win32')('uses the verified shipped adapter for PID identity and CurrentUser protection', async () => {
   const events: LogDraft[] = [];
