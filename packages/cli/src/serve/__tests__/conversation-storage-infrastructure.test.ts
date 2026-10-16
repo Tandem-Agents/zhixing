@@ -8,6 +8,7 @@ import { worksceneConversationId } from "@zhixing/core/conversation";
 import { createTempDir } from "@zhixing/test-utils";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
+import { TranscriptByteReader } from "@zhixing/core/transcript";
 
 let previousHome: string | undefined;
 
@@ -23,6 +24,42 @@ afterEach(() => {
 });
 
 describe("conversation storage infrastructure", () => {
+  it("uses the owner count without traversing old context and preserves bootstrap/snapshot/clear semantics", async () => {
+    const root = await createTempDir("bootstrap-owner-count");
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 4_000,
+      worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+    });
+    const { conversationId } = await storage.directory.create();
+    for (let i = 0; i < 30; i++) {
+      await storage.runtime.appendCommittedRun(conversationId, run(`row-${i}:` + "x".repeat(3000), i));
+    }
+    await storage.runtime.writeSnapshot(conversationId, {
+      coveredThroughRunIndex: 10,
+      structuredSummary: { facts: "PRESERVED-EARLIER-FACT", state: "", active: "" },
+      tokensBefore: 100, tokensAfter: 10,
+    });
+    const expected = await storage.runtime.loadHistory(conversationId);
+    const records = TranscriptByteReader.prototype.records;
+    let visited = 0;
+    const spy = vi.spyOn(TranscriptByteReader.prototype, "records").mockImplementation(async function* (this: TranscriptByteReader, ...args) {
+      for await (const record of records.apply(this, args)) { visited++; yield record; }
+    });
+    const actual = await storage.runtime.loadHistory(conversationId, 30);
+    expect(actual).toEqual(expected);
+    expect(visited).toBeLessThanOrEqual(2);
+    expect(JSON.stringify(actual?.bootstrap)).toContain("PRESERVED-EARLIER-FACT");
+    expect(JSON.stringify(actual?.bootstrap)).toContain("row-29");
+    spy.mockRestore();
+    await storage.directory.clearStoredView(conversationId);
+    expect(await storage.runtime.loadHistory(conversationId, 0)).toBeUndefined();
+    await storage.runtime.appendCommittedRun(conversationId, run("AFTER-CLEAR", 30));
+    const after = await storage.runtime.loadHistory(conversationId, 1);
+    expect(after?.turnCount).toBe(1);
+    expect(JSON.stringify(after?.bootstrap)).toContain("AFTER-CLEAR");
+    expect(JSON.stringify(after?.bootstrap)).not.toContain("PRESERVED-EARLIER-FACT");
+  }, 30_000);
+
   it.each(['ENOENT', 'EACCES'])('classifies a read-only history directory failure without pretending unreadable data is absent (%s)', async code => {
     const root = await createTempDir('readonly-history-error');
     const failure = Object.assign(new Error('synthetic directory failure'), { code });

@@ -32,23 +32,10 @@ import {
   type RetentionSweepReport,
   type RunRecordWithRef,
 } from "@zhixing/core/transcript";
-import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel/conversation-manager";
+import type { ConversationRuntimeStoragePort } from "./access-surface.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
 import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
-
-type ConversationRuntimeStoragePort = Readonly<
-  Required<
-    Pick<
-      ConversationManagerCallbacks,
-      | "loadHistory"
-      | "initTranscript"
-      | "appendRun"
-      | "appendCommittedRun"
-      | "writeSnapshot"
-    >
-  >
->;
 
 type ConversationDirectoryPort = ReturnType<typeof createConversationDirectory>;
 
@@ -107,18 +94,30 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   });
 
   const runtime: ConversationRuntimeStoragePort = Object.freeze({
-    async loadHistory(conversationId) {
+    async loadHistory(conversationId, committedTurnCount) {
+      if (committedTurnCount !== undefined &&
+          (!Number.isSafeInteger(committedTurnCount) || committedTurnCount < 0)) {
+        throw new TypeError("Committed conversation turn count is invalid");
+      }
+      if (committedTurnCount === 0) return undefined;
       const storage = routeConversation(conversationId);
       const { scope } = parseConversationId(conversationId);
       const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
         path.join(zhixingHome, 'cache', 'transcript-read-index'));
       try {
-        // Count from finite record metadata. Warm reads reuse verified byte
-        // positions instead of decoding every historical message again.
-        let turnCount = 0;
-        for await (const _ of reader.records()) turnCount++;
+        // Production already has the count in the owner's current read model.
+        // Enumerating every JSONL record just to count it makes the first send
+        // grow with history, and an append changes every slice cache identity.
+        let turnCount = committedTurnCount ?? 0;
+        if (committedTurnCount === undefined) {
+          for await (const _ of reader.records()) turnCount++;
+        }
         if (!turnCount) return undefined;
-        const clearBoundary = { lastClearAt: reader.lastClearAt };
+        // Legacy-only callers discover clear during the count pass. With owner
+        // metadata, the existing snapshot reader uses its persisted clear index;
+        // a durable clear has count zero until its first post-clear commit.
+        const clearBoundary = committedTurnCount === undefined
+          ? { lastClearAt: reader.lastClearAt } : undefined;
         const bootstrap = await buildStartupBootstrap({
           conversationId: storage.localId,
           store: storage.transcript,
@@ -126,7 +125,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
           capability: { optimalMaxTokens: input.optimalMaxTokens },
           estimator: createTokenEstimator(),
           runs: readBootstrapRunViews(reader),
-          clearBoundary,
+          ...(clearBoundary ? { clearBoundary } : {}),
         });
         return { bootstrap, turnCount };
       } finally { await reader.close(); }

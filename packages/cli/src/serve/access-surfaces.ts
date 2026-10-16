@@ -803,6 +803,18 @@ export async function createConversationServices(
   manager = new ConversationManager(input.runtimeFactory, undefined, {
     onRelease: (conversationId) => protocol.releaseConversation(conversationId),
     ...input.conversationRuntimeStorage,
+    loadHistory: async (conversationId) => {
+      const meta = await protocol.sessionState.readSessionMeta(conversationId, {
+        principal: { kind: "host", component: "conversation-bootstrap" },
+        requestId: "conversation-bootstrap-read",
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      // A legacy-only transcript has no committed owner prefix yet. Preserve
+      // its compatibility reader; ordinary owner conversations use metadata.
+      return input.conversationRuntimeStorage.loadHistory(
+        conversationId, meta.baseRevision > 0 ? meta.turnCount : undefined,
+      );
+    },
     ensureConversation: async (conversationId) => {
       await protocol.ensureSession(conversationId);
       await inputConversationIdentityLifecycle.initializeRuntimeStorage(

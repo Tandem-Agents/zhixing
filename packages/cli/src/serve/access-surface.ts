@@ -20,7 +20,7 @@ import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel/conversation-manager";
 import type { AdvancementController } from "@zhixing/owner-services/advancement";
 
-export type ConversationRuntimeStoragePort = Readonly<
+type ConversationRuntimeStorageCallbacks =
   Required<
     Pick<
       ConversationManagerCallbacks,
@@ -30,7 +30,16 @@ export type ConversationRuntimeStoragePort = Readonly<
       | "appendCommittedRun"
       | "writeSnapshot"
     >
-  >
+  >;
+
+export type ConversationRuntimeStoragePort = Readonly<
+  Omit<ConversationRuntimeStorageCallbacks, "loadHistory"> & {
+    /** The owner supplies its committed count; storage reads only budgeted context. */
+    loadHistory(
+      conversationId: string,
+      committedTurnCount?: number,
+    ): ReturnType<ConversationRuntimeStorageCallbacks["loadHistory"]>;
+  }
 >;
 
 export interface AdvancementConversationComposition {
