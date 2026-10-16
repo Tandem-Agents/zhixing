@@ -33,8 +33,9 @@ async function fixture() {
 }
 
 describe("durable extension onboarding", () => {
-  it.each(["update", "repair"] as const)("isolates later configuration verification from a completed %s", async purpose => {
-    for (const enabled of [undefined, true, false]) for (const outcome of ["ready", "blocked", "cancelled"] as const) {
+  it.each((["update", "repair"] as const).flatMap(purpose => [undefined, true, false].flatMap(enabled =>
+    (["ready", "blocked", "cancelled"] as const).map(outcome => ({ purpose, enabled, outcome })))))(
+    "isolates later configuration verification from completed $purpose (enabled=$enabled, outcome=$outcome)", async ({ purpose, enabled, outcome }) => {
       const f = await fixture();
       await f.application.adopt("app", f.binding);
       await f.application.prepare("change", "app", { conversationId: "scene", request: "换版" }, purpose);
@@ -71,7 +72,6 @@ describe("durable extension onboarding", () => {
       expect(settled.admission?.ready).toBe(outcome === "ready");
       expect(settled.enabled).toBe(outcome !== "cancelled");
       expect(await replay.operation("change")).toEqual(completed);
-    }
   });
 
   it("requires fresh admission for changed legacy accounts but preserves same-account secret rotation", async () => {
