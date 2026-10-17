@@ -58,9 +58,12 @@ export {
   FileDurableProjectionIndex,
   bindDurableProjectionMutations,
   createBoundDurableProjectionReadContext,
+  createDurableProjectionOverlay,
   durableProjectionDirectoryName,
+  durableProjectionVersionDirectoryName,
   durableProjectionReadBudget,
   type DurableProjectionDefinition,
+  type DurableProjectionInputs,
   type DurableProjectionCheckpoints,
   type DurableProjectionEntry,
   type DurableProjectionIndex,
@@ -105,6 +108,7 @@ export {
   type FileAuthorityCommitLogOptions,
   type PlannedAnchorPrefixInstallation,
 } from "./commit-log.js";
+export { AuthorityCacheIntegrity, DEFAULT_HOST_AUTHORITY_LOG_PROFILE, projectionCheckpointKey, type HostAuthorityLogProfile } from "./startup-proofs.js";
 export {
   AuthorityStorageError,
   type AuthorityStorageErrorCode,
@@ -131,3 +135,5 @@ export type {
   ProjectionTransactionReducer,
 } from "./interfaces.js";
 export { DeviceLifecycleJournal } from "./device-lifecycle-journal.js";
+export { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, AuthorityProjectionUnavailable, maximumAuthorityRecoveryTailBytes } from "./recovery-work.js";
+export type { AuthorityPreparedWatermark } from "./recovery-work.js";

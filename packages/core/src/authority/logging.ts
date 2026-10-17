@@ -13,8 +13,16 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
     } },
     uncertain: { message: "业务权威追加结果未确认", level: "error", tier: "critical", fields: { lsn: "number", error: "text" } },
     recovered: { message: "业务权威已恢复有效尾部", level: "info", tier: "critical", fields: { lsn: "number", incompleteTail: "boolean" } },
+    corrupted: { message: "业务权威历史字节与认证索引不符", level: "error", tier: "critical", fields: { error: "text" } },
     work: { message: "业务权威存储工作汇总", level: "info", tier: "critical", fields: {
       operation: "text", preparationMs: "number", releaseMs: "number", retryWaitMs: "number", recoveries: "number", operations: "number", scans: "number", readBytes: "number", queueMs: "number", lockWaitMs: "number", executionMs: "number", retries: "number",
+      preparedFrames: "number",
+    } },
+    prepared: { message: "就绪边界依赖的派生状态已在该位置就绪", level: "info", tier: "critical", fields: {
+      boundary: "text", lsn: "number", frameEndOffset: "number", projections: "number", durationMs: "number",
+    } },
+    retired: { message: "被替代派生版本副本的回收状态", level: "info", tier: "critical", fields: {
+      projection: "text", version: "number", outcome: "text", reason: "text",
     } },
     waiting: { message: "业务权威操作仍在等待或执行", level: "info", tier: "critical", fields: { operation: "text", waitFor: "text", durationMs: "number" } },
     failed: { message: "业务权威操作未完成", level: "error", tier: "critical", fields: { operation: "text", waitFor: "text", validation: "text", sourceFrames: { items: "text", maxItems: 4 }, failure: { fields: LOG_FAILURE_FIELDS } } },
@@ -23,13 +31,16 @@ export const AUTHORITY_LOG_SOURCE: LogSource = {
 
 export type AuthorityOperation = "append" | "readSnapshot" | "readStream" | "readProjection" | "checkpoint" | "installPlannedAnchorPrefix"
   | "installAppendAdmissionGuard" | "originCheckpoint" | "readTail" | "readEnvelopeAt" | "rebuildProjection"
-  | "transactProjection" | "transactDurableProjection" | "projection.get" | "projection.getMany" | "projection.scan" | "projection.checkpoints" | "projection.rebuild" | "projection.retainedReferences";
+  | "transactProjection" | "transactDurableProjection" | "maintainFrameIndex" | "projection.get" | "projection.getMany" | "projection.scan" | "projection.checkpoint" | "projection.checkpoints" | "projection.rebuild" | "projection.retainedReferences"
+  | "projection.prepare" | "projection.retire";
 export interface AuthorityWork {
   scans: number; readBytes: number; recoveries: number; queueMs: number; preparationMs: number;
   lockWaitMs: number; executionMs: number; releaseMs: number; retryWaitMs: number; retries: number;
+  /** 派生状态追平/候选构建实际处理的源帧数（锁内同步与锁外分页准备都计入）。 */
+  preparedFrames: number;
 }
 const emptyWork = (): AuthorityWork => ({ scans: 0, readBytes: 0, recoveries: 0, queueMs: 0, preparationMs: 0,
-  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0 });
+  lockWaitMs: 0, executionMs: 0, releaseMs: 0, retryWaitMs: 0, retries: 0, preparedFrames: 0 });
 /** Bounded by phase and finite operation kind, never by business body or operation count. */
 export class AuthorityWorkObserver {
   #pending = new Map<string, { refs: readonly LogRef[]; data: AuthorityWork & { operation: AuthorityOperation; operations: number } }>();

@@ -108,7 +108,7 @@ export type ProjectionReducer<State, Body> = (
   state: State,
   record: LogicalRecord<Body>,
   envelope: CommitEnvelope<Body>,
-) => State;
+) => State | Promise<State>;
 
 export type ProjectionTransactionReducer<State, Body> = (
   state: State,
@@ -151,12 +151,16 @@ export interface ProjectionTransactionOptions extends ProjectionReplayOptions {
 }
 
 export interface ProjectionTransactionContext {
+  readonly checkpoint?: DurableLogCheckpoint;
+  readonly originCheckpoint?: DurableLogCheckpoint;
   readonly lastLsn: number;
   readonly nextLsn: number;
   /** Timestamp that will be written to the envelope if this decision appends. */
   readonly at: IsoTime;
   /** Reads a projection selected by readProjectionIds at this exact locked prefix. */
   readProjection(projectionId: string): DurableProjectionReadContext;
+  /** Exact source locator at this transaction's already verified prefix. */
+  readEnvelopeAt?(checkpoint: DurableLogCheckpoint): Promise<CommitEnvelope<JsonValue>>;
 }
 
 export type ProjectionTransactionDecision<Body, Value> =
@@ -181,6 +185,16 @@ export interface AuthorityLogSnapshot<Body = JsonValue> {
 }
 
 export interface AuthorityCommitLog {
+  /** Explicit readiness fence; implementation releases source locks between recovery pages. */
+  prepareProjections?(ids?: readonly string[], boundary?: string): Promise<import("./recovery-work.js").AuthorityPreparedWatermark>;
+  /** 启动证明开启时可用：读取与当前已核验前缀一致的投影检查点。 */
+  loadProjectionCheckpoint?<State>(key: string): Promise<{ readonly state: State; readonly cursor: ProjectionCursor } | undefined>;
+  /** 启动证明开启时可用：保存投影检查点；失败不影响调用方。 */
+  saveProjectionCheckpoint?(key: string, cursor: ProjectionCursor, state: unknown): Promise<void>;
+  /** 丢弃不再需要的投影检查点；检查点只是缓存，失败不影响调用方。 */
+  deleteProjectionCheckpoint?(key: string): Promise<void>;
+  /** 登记正式停止前补存检查点的回调；返回注销函数。 */
+  registerCheckpointFlush?(flush: () => Promise<unknown> | unknown): () => void;
   append<Body>(
     entries: readonly LogicalRecord<Body>[],
   ): Promise<CommitEnvelope<Body>>;
@@ -222,15 +236,18 @@ export interface AuthorityCommitLog {
     ) =>
       | ProjectionTransactionDecision<Body, Value>
       | Promise<ProjectionTransactionDecision<Body, Value>>,
-    options?: Pick<ProjectionTransactionOptions, "candidateReferences">,
+    options?: Pick<ProjectionTransactionOptions, "candidateReferences" | "readProjectionIds" | "runPhysicalStep">,
   ): Promise<{
     readonly value: Value;
     readonly commit?: CommitEnvelope<Body>;
   }>;
+  /** Reducers preserve the caller's verified basis (immutable reduction or
+   * copy-on-first-write). createState creates a private draft for each retry;
+   * the storage layer never clones an entire history by default. */
   rebuildProjection<State, Body = JsonValue>(
     initial: State,
     reducer: ProjectionReducer<State, Body>,
-    options?: ProjectionReplayOptions,
+    options?: ProjectionReplayOptions & { readonly createState?: () => State },
   ): Promise<State>;
   transactProjection<State, Body = JsonValue, Value = void>(
     initial: State,
@@ -241,13 +258,13 @@ export interface AuthorityCommitLog {
     ) =>
       | ProjectionTransactionDecision<Body, Value>
       | Promise<ProjectionTransactionDecision<Body, Value>>,
-    options?: ProjectionTransactionOptions,
+    options?: ProjectionTransactionOptions & { readonly createState?: () => State },
   ): Promise<ProjectionTransactionResult<State, Body, Value>>;
   /** Read a verified projection snapshot; never makes an append decision. */
   readProjection<State, Body = JsonValue>(
     initial: State,
     reducer: ProjectionTransactionReducer<State, Body>,
-    options?: ProjectionReplayOptions & { readonly cursor?: ProjectionCursor },
+    options?: ProjectionReplayOptions & { readonly cursor?: ProjectionCursor; readonly createState?: () => State },
   ): Promise<Pick<ProjectionTransactionResult<State, Body, never>, "state" | "lastLsn" | "cursor">>;
   collectGarbage(
     options: AuthorityGarbageCollectionOptions,

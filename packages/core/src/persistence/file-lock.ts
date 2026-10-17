@@ -52,6 +52,14 @@ export interface FileLockOptions {
   readonly processIdentityResolver?: ProcessIdentityResolver;
 }
 
+export class FileLockBusyError extends Error {
+  readonly code = "FILE_LOCK_BUSY";
+  constructor(resourceName: string) {
+    super(`${resourceName} lock is busy`);
+    this.name = "FileLockBusyError";
+  }
+}
+
 export async function acquireFileLock(
   lockPath: string,
   options: FileLockOptions,
@@ -106,7 +114,7 @@ export async function acquireFileLock(
       continue;
     }
     if (performance.now() - startedAt >= options.waitMs) {
-      throw new Error(`${resourceName} lock is busy`);
+      throw new FileLockBusyError(resourceName);
     }
     await new Promise<void>((resolve) => setTimeout(resolve, retryMs));
   }

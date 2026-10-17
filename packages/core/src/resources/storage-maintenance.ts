@@ -18,6 +18,7 @@ import {
 
 export const STORAGE_MAINTENANCE_KINDS = [
   "log-migration",
+  "authority-projection-recovery",
   "workspace-migration",
   "workspace-catalog-reset",
   "local-workspace-operation-outbox",
@@ -41,6 +42,7 @@ export type StorageMaintenanceKind =
   (typeof STORAGE_MAINTENANCE_KINDS)[number];
 export const STORAGE_MAINTENANCE_TASK_OWNERS = {
   "log-migration": "authority-commit-log",
+  "authority-projection-recovery": "authority-commit-log",
   "workspace-migration": "workspace-binding-migrator",
   "workspace-catalog-reset": "workspace-binding-recovery-owner",
   "local-workspace-operation-outbox": "local-workspace-management-host",
@@ -290,6 +292,14 @@ export class StorageMaintenanceTaskRunner {
           ),
         );
       }
+      // A shared task may be waiting for the caller's source/owner mutex.
+      // Joining it while holding that exclusion would invert the lock order.
+      // The outer owner retries only after leaving its exclusive operation.
+      if (isHoldingMaintenanceExclusion()) {
+        return Promise.reject(new StorageMaintenanceAdmissionError({
+          kind: "backpressured", blockedBy: "slots", retryAfterMs: 1,
+        }, request.kind));
+      }
       // 已被最后一个 pre-commit 等待者取消的旧执行仍可能在清理。新调用不得
       // 加入注定失败的 promise，也不得与它并行执行同键工作；等它结算后重驱。
       if (existing.abort.signal.aborted) {
@@ -476,6 +486,7 @@ const STORAGE_STEP_BUDGETS: Readonly<
   Record<StorageMaintenanceKind, DeviceCapacityBudget>
 > = {
   "log-migration": budget(32 * MIB, 256 * MIB, 256 * MIB, 256 * MIB, 4_096),
+  "authority-projection-recovery": budget(32 * MIB, 64 * MIB, 256 * MIB, 256 * MIB, 16_384),
   "workspace-migration": budget(
     16 * MIB,
     16 * MIB,

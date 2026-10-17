@@ -1,0 +1,185 @@
+import { afterEach, expect, it, vi } from "vitest";
+import path from "node:path";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createTempDir } from "@zhixing/test-utils";
+import { FileArtifactStore } from "../artifact-store.js";
+import { FileAuthorityCommitLog } from "../commit-log.js";
+import { AuthorityCacheIntegrity } from "../startup-proofs.js";
+import { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, maximumAuthorityRecoveryTailBytes } from "../recovery-work.js";
+import { authorityWalMaximumFrameBytes } from "../wal-frame.js";
+import { durableProjectionDirectoryName, durableProjectionVersionDirectoryName, FileDurableProjectionIndex } from "../durable-projection-index.js";
+import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
+
+const logs: FileAuthorityCommitLog[] = [];
+const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 91));
+afterEach(async () => { await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance())); vi.restoreAllMocks(); });
+function open(root: string) {
+  const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")),
+    { integrity, lockSessionLingerMs: 0 });
+  logs.push(log);
+  return log;
+}
+const definition = (projectionId = "bounds-test", reducerVersion = 1) => ({
+  projectionId, reducerVersion, authenticated: true, inputs: { streams: ["control"] },
+  reduce: vi.fn((envelope: { lsn: number; entries: readonly { stream: string }[] }) =>
+    envelope.entries.some(entry => entry.stream === "control") ? [{ kind: "put" as const, key: "last", value: envelope.lsn }] : []),
+});
+async function publishedLsn(root: string, projectionId: string, version = 1): Promise<number> {
+  const manifest = JSON.parse(await readFile(path.join(root, "authority", "projections",
+    durableProjectionVersionDirectoryName(projectionId, version), "manifest.json"), "utf8"));
+  return manifest.checkpoints.authority.lsn;
+}
+/** 由多条不超过内联上限的记录组成的一个合法大帧。 */
+function largeEnvelope(totalBytes: number) {
+  const chunk = "x".repeat(30 * 1024);
+  return Array.from({ length: Math.ceil(totalBytes / chunk.length) }, (_, n) => ({ stream: "control", body: { n, chunk } }));
+}
+
+it("derives the abnormal-exit tail bound from the legal frame format and admits an oversized frame only with zero prior debt", async () => {
+  expect(maximumAuthorityRecoveryTailBytes()).toBe(Math.max(AUTHORITY_RECOVERY_BUDGET.hardBytes, authorityWalMaximumFrameBytes()));
+  expect(authorityWalMaximumFrameBytes()).toBe(16 + 16 * 1024 * 1024 + 84);
+  expect(authorityWalMaximumFrameBytes("legacy")).toBe(16 + 16 * 1024 * 1024 + 12);
+  const root = await createTempDir("b2-oversized");
+  const log = open(root), def = definition();
+  log.durableProjection(def);
+  for (let n = 0; n < 3; n++) await log.append([{ stream: "control", body: { n } }]);
+  // 先前三帧尚未发布；超过 Kb 的合法大帧只能在欠账为零后接纳。
+  const big = await log.append(largeEnvelope(AUTHORITY_RECOVERY_BUDGET.hardBytes + 64 * 1024));
+  expect(await publishedLsn(root, def.projectionId)).toBe(3);
+  // 大帧本身已占满硬界：下一次追加之前必须先发布它。
+  await log.append([{ stream: "control", body: { after: true } }]);
+  expect(await publishedLsn(root, def.projectionId)).toBe(big.lsn);
+}, 60_000);
+
+it("keeps published debt within the hard bounds across a crash and publishes idle coverage on a normal stop", async () => {
+  const root = await createTempDir("b2-stop-coverage");
+  const first = open(root), def = definition();
+  first.durableProjection(def);
+  await first.append([{ stream: "control", body: { n: 0 } }]);
+  await first.stopStorageMaintenance();
+  const second = open(root);
+  second.durableProjection(definition());
+  for (let n = 0; n < 10; n++) await second.append([{ stream: "job:unrelated", body: { n } }]);
+  await second.stopStorageMaintenance();
+  // 正常停止发布闲置投影越过无关输入的覆盖位置：下一个实例无需再扫这些帧。
+  expect(await publishedLsn(root, def.projectionId)).toBe(11);
+  const third = open(root), thirdDef = definition();
+  expect(await third.durableProjection(thirdDef).get("last")).toBe(1);
+  expect(thirdDef.reduce).not.toHaveBeenCalled();
+}, 60_000);
+
+it("resets every current version before installing a WAL and changes the identity-cache source even when logId is retained", async () => {
+  const source = open(await createTempDir("b2-install-source"));
+  await source.append([{ stream: "control", body: { source: true } }]);
+  const sourceHead = await source.checkpoint();
+  const records = await source.readAll();
+  const root = await createTempDir("b2-install-target"), target = open(root);
+  const first = target.durableProjection(definition("install-a", 2));
+  const second = target.durableProjection(definition("install-b", 7));
+  await target.append([{ stream: "control", body: { old: 1 } }]);
+  await target.append([{ stream: "control", body: { old: 2 } }]);
+  const oldHead = await target.checkpoint(), oldIdentity = target.sourceIdentity();
+  const oldWal = await readFile(target.logPath);
+  const input = () => ({ source: (async function* () { yield* records; })(), sourceHead,
+    installationEntries: [{ stream: "job:installation", body: { installed: true } }], candidateReferences: [] });
+  const reset = vi.spyOn(FileDurableProjectionIndex.prototype, "reset");
+  reset.mockRejectedValueOnce(new Error("injected prepublication cache failure"));
+  await expect(target.installPlannedAnchorPrefix(input())).rejects.toThrow("prepublication cache failure");
+  expect(await readFile(target.logPath)).toEqual(oldWal);
+  reset.mockRestore();
+  const original = FileDurableProjectionIndex.prototype.reset;
+  const versions: number[] = [];
+  const beforePublication = vi.spyOn(FileDurableProjectionIndex.prototype, "reset").mockImplementation(async function(this: FileDurableProjectionIndex, ...args) {
+    if (this.projectionId.startsWith("install-")) {
+      expect(await readFile(target.logPath)).toEqual(oldWal);
+      versions.push(this.reducerVersion);
+    }
+    return original.apply(this, args);
+  });
+  await target.installPlannedAnchorPrefix(input());
+  beforePublication.mockRestore();
+  expect(versions.sort()).toEqual([2, 7]);
+  expect((await target.checkpoint()).logId).toBe(oldHead.logId);
+  expect(target.sourceIdentity()).not.toBe(oldIdentity);
+  expect(await first.get("last")).toBe(1);
+  expect(await second.get("last")).toBe(1);
+  const installed = await target.installPlannedAnchorPrefix(input());
+  expect(installed.lsn).toBe(2);
+}, 60_000);
+
+it("releases the physical WAL lock between candidate pages even when ordinary operations retain their lock session", async () => {
+  const root = await createTempDir("b2-candidate-lock-release");
+  const writer = open(root);
+  for (let n = 0; n < 130; n++) await writer.append([{ stream: "control", body: { n } }]);
+  await writer.stopStorageMaintenance();
+  const recovering = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")),
+    { integrity, lockSessionLingerMs: 60_000, lockSessionMaxHoldMs: 60_000 });
+  logs.push(recovering);
+  const def = definition("page-lock-release");
+  recovering.durableProjection(def);
+  const tokens: string[] = [];
+  const original = FileDurableProjectionIndex.prototype.flush;
+  const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "flush").mockImplementation(async function(this: FileDurableProjectionIndex, options) {
+    if (this.projectionId === def.projectionId && this.checkpoints().authority!.lsn > 0) {
+      tokens.push(JSON.parse(await readFile(path.join(root, "authority", ".commit-log.lock"), "utf8")).token);
+    }
+    return original.call(this, options);
+  });
+  try {
+    await recovering.prepareProjections([def.projectionId]);
+    expect(tokens.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(tokens).size).toBe(tokens.length);
+  } finally { flush.mockRestore(); }
+}, 60_000);
+
+it("keeps bounded healthy catch-up in the transaction but waits for new candidates outside domain serial sections", async () => {
+  const root = await createTempDir("b2-nested-preparation");
+  const writer = open(root);
+  for (let n = 0; n < 70; n++) await writer.append([{ stream: "control", body: { n } }]);
+  await writer.stopStorageMaintenance();
+  const log = open(root), def = definition("nested-new");
+  const index = log.durableProjection(def);
+  const domain = new SerialTaskQueue();
+  // The source starts recovery, but the domain turn does not wait for it.
+  await expect(domain.run(() => index.get("last"))).rejects.toBeInstanceOf(AuthorityPreparationRequired);
+  await log.prepareProjections([def.projectionId]);
+  expect(await domain.run(() => index.get("last"))).toBe(70);
+  await domain.run(() => log.append([{ stream: "control", body: { n: 70 } }]));
+  expect(await index.get("last")).toBe(71);
+  expect(def.reduce).toHaveBeenCalledTimes(71);
+}, 60_000);
+
+it("reclaims a retired projection version by pages, refuses directories in use or of another version, and resumes after stop", async () => {
+  const root = await createTempDir("b2-retired-version");
+  const log = open(root);
+  await log.append([{ stream: "control", body: {} }]);
+  const legacy = path.join(root, "authority", "projections", durableProjectionDirectoryName("retired-copy"));
+  await mkdir(path.join(legacy, "nested"), { recursive: true });
+  await writeFile(path.join(legacy, "manifest.json"), JSON.stringify({ projectionId: "retired-copy", reducerVersion: 1 }));
+  for (let n = 0; n < 150; n++) await writeFile(path.join(legacy, n % 3 ? `segment-${n}.data` : path.join("nested", `node-${n}`)), "copy");
+  // 当前版本正在使用的目录与另一个版本的目录都不能回收。
+  log.durableProjection(definition("in-use", 1));
+  await expect(log.reclaimRetiredProjectionVersion("in-use", 1)).rejects.toThrow("in use");
+  await expect(log.reclaimRetiredProjectionVersion("retired-copy", 2)).rejects.toThrow("retired version");
+  expect((await readdir(legacy)).length).toBeGreaterThan(1);
+
+  log.durableProjection(definition("retired-copy", 2));
+  const work = vi.spyOn(log, "reclaimRetiredProjectionVersion");
+  await expect(log.reclaimRetiredProjectionVersion("retired-copy", 1)).resolves.toBe("removed");
+  await expect(stat(legacy)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(log.reclaimRetiredProjectionVersion("retired-copy", 1)).resolves.toBe("absent");
+  expect(work).toHaveBeenCalledTimes(2);
+
+  // 停止维护后在页边界停下，下一实例接续并以目录消失完成。
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, "manifest.json"), JSON.stringify({ projectionId: "retired-copy", reducerVersion: 1 }));
+  const stopping = open(root);
+  stopping.durableProjection(definition("retired-copy", 2));
+  await stopping.stopStorageMaintenance();
+  await expect(stopping.reclaimRetiredProjectionVersion("retired-copy", 1)).resolves.toBe("stopped");
+  await expect(stat(path.join(legacy, "manifest.json"))).resolves.toBeDefined();
+  const resumed = open(root);
+  resumed.durableProjection(definition("retired-copy", 2));
+  await expect(resumed.reclaimRetiredProjectionVersion("retired-copy", 1)).resolves.toBe("removed");
+  await expect(stat(legacy)).rejects.toMatchObject({ code: "ENOENT" });
+}, 60_000);

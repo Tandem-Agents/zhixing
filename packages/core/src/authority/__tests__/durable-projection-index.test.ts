@@ -265,6 +265,39 @@ describe("FileDurableProjectionIndex", () => {
     }
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
+  it('reuses verified segment entries for repeated lookups and still detects an out-of-band rewrite', async () => {
+    const rootDir = await createTempDir('projection-entry-reuse');
+    const options = { rootDir, projectionId: 'entry-reuse', reducerVersion: 1 };
+    const writer = new FileDurableProjectionIndex(options);
+    await writer.initialize({ authority: checkpoint(0) });
+    writer.publish(await writer.prepare(Array.from({ length: 200 }, (_, id) => ({
+      kind: 'put' as const, key: 'key-' + id.toString().padStart(3, '0'), value: { id, text: 'value-' + id },
+    }))), { authority: checkpoint(1) });
+    await writer.flush();
+    const steps: string[] = [];
+    const reader = new FileDurableProjectionIndex({ ...options, runReadStep: async (step, operation) => { steps.push(step); return operation(); } });
+    await reader.initialize({ authority: checkpoint(0) });
+    expect(await reader.get('key-123')).toEqual({ id: 123, text: 'value-123' });
+    const coldEntries = steps.filter(step => step === 'segment-entry').length;
+    expect(coldEntries).toBeGreaterThan(0);
+    steps.length = 0;
+    // 同一查询再次执行：只核对一次段文件身份，不再打开文件、不再读条目。
+    const repeated = await reader.get('key-123') as { id: number };
+    expect(repeated).toEqual({ id: 123, text: 'value-123' });
+    expect(steps).toEqual(['segment-open']);
+    // 返回值每次重新解析：调用方改动不影响后续读取。
+    repeated.id = -1;
+    expect(await reader.getMany(['key-123', 'key-124'])).toEqual([{ id: 123, text: 'value-123' }, { id: 124, text: 'value-124' }]);
+    // 带外改写段文件（末尾条目）：身份变化使缓存失效，回到真实读取，读到被改写的条目即发现损坏。
+    expect(await reader.get('key-199')).toEqual({ id: 199, text: 'value-199' });
+    await corruptFirstSegment(rootDir);
+    steps.length = 0;
+    expect(await reader.get('key-123')).toEqual({ id: 123, text: 'value-123' });
+    expect(steps.filter(step => step === 'segment-entry').length).toBeGreaterThan(0);
+    await expect(reader.get('key-199')).rejects.toThrow(DurableProjectionStorageError);
+    await Promise.all([writer.stopStorageMaintenance(), reader.stopStorageMaintenance()]);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
+
   it('shares bounded multi-key segment reads across base, deltas, tombstones and a cold reopen', async () => {
     const rootDir = await createTempDir('projection-batch-read');
     const options = { rootDir, projectionId: 'batch-read', reducerVersion: 1 };
@@ -297,7 +330,7 @@ describe("FileDurableProjectionIndex", () => {
     await Promise.all([index.stopStorageMaintenance(), cold.stopStorageMaintenance()]);
   }, DURABLE_IO_TEST_TIMEOUT_MS);
 
-  it("coalesces a short verified cold catch-up, replays after restart and still rejects later authority corruption", async () => {
+  it("coalesces a short verified cold catch-up, saves it on formal stop and still rejects later authority corruption", async () => {
     const root = await createTempDir("projection-cold-checkpoint");
     const artifactStore = new FileArtifactStore(path.join(root, "artifacts"));
     const logRoot = path.join(root, "authority");
@@ -308,7 +341,8 @@ describe("FileDurableProjectionIndex", () => {
     for (let value = 0; value < 5; value++) {
       await writer.append([{ stream: "publish", body: { t: "put", key: "item", value } }]);
     }
-    await writer.stopStorageMaintenance();
+    // A recovery page publishes its cursor and rows together, so another
+    // process never has to pay for the same already completed catch-up again.
     const first = new FileAuthorityCommitLog(logRoot, artifactStore);
     const firstReduce = vi.fn(mutationsFor);
     const firstIndex = first.durableProjection({ ...definition, reduce: firstReduce });
@@ -316,18 +350,20 @@ describe("FileDurableProjectionIndex", () => {
     try {
       await expect(firstIndex.get("item")).resolves.toBe(4);
       await expect(firstIndex.get("item")).resolves.toBe(4);
-      expect(flush).not.toHaveBeenCalled();
+      expect(flush).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledWith({ compact: false });
     } finally { flush.mockRestore(); }
     expect(firstReduce).toHaveBeenCalledTimes(5);
-    const persisted = await readProjectionManifest(path.join(logRoot, "projections", durableProjectionDirectoryName(definition.projectionId)));
-    expect(persisted.checkpoints.authority?.lsn).toBe(0);
+    const persisted = await readProjectionManifest(path.join(logRoot, "projections", durableProjectionDirectoryName(definition.projectionId) + ".v1"));
+    expect(persisted.checkpoints.authority?.lsn).toBe(5);
     await first.stopStorageMaintenance();
+    await writer.stopStorageMaintenance();
     const second = new FileAuthorityCommitLog(logRoot, artifactStore);
     const secondReduce = vi.fn(mutationsFor);
     const recovered = second.durableProjection({ ...definition, reduce: secondReduce });
     try {
       await expect(recovered.get("item")).resolves.toBe(4);
-      expect(secondReduce).toHaveBeenCalledTimes(5);
+      expect(secondReduce).not.toHaveBeenCalled();
       const walPath = path.join(logRoot, "authority.log");
       const wal = await readFile(walPath);
       const position = wal.indexOf(Buffer.from('"value":0'));
@@ -780,7 +816,7 @@ describe("FileDurableProjectionIndex", () => {
   );
 
   it(
-    "clears derived storage in bounded governed steps",
+    "publishes a new reset root without enumerating or deleting unproven old files",
     async () => {
       const root = await createTempDir("durable-projection-bounded-reset");
       const basePolicy = createDefaultDeviceCapacityPolicy();
@@ -833,8 +869,9 @@ describe("FileDurableProjectionIndex", () => {
 
       await index.reset({ source: checkpoint(0) });
 
-      expect(rebuildAdmissions).toBeGreaterThanOrEqual(3);
-      expect((await readdir(root)).sort()).toEqual(["manifest.json"]);
+      expect(rebuildAdmissions).toBe(1);
+      expect(await readdir(root)).toHaveLength(131);
+      expect(await readFile(path.join(root, "orphan-000"), "utf8")).toBe("orphan");
       await expect(index.scan({}, 1)).resolves.toEqual({ entries: [] });
     },
     DURABLE_IO_TEST_TIMEOUT_MS,

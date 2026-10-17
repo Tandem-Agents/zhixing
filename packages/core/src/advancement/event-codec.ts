@@ -1,3 +1,4 @@
+import { rethrowUnloadedProtocolIdentity } from "../protocol/verification-identities.js";
 import { isAdvancementSubmissionReceipt } from "./submission.js";
 import type {
   AdvancementControlEvent,
@@ -188,7 +189,8 @@ export function isAdvancementControlEvent(
       }
       try {
         validateEvidenceRequest(candidate.request, verifier);
-      } catch {
+      } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
         return false;
       }
       return (
@@ -302,7 +304,8 @@ function isReviewAttemptShape(
       ) {
         return false;
       }
-    } catch {
+    } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       return false;
     }
   }
@@ -394,7 +397,8 @@ function isEvidenceOutcome(
     if (!hasExactKeys(outcome, ["bundle", "kind"])) return false;
     try {
       validateEvidenceBundle(outcome.bundle, verifier);
-    } catch {
+    } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       return false;
     }
     return true;

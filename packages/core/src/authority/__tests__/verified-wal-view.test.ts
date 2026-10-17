@@ -12,12 +12,12 @@ import type { LogDraft } from "../../logging/contracts.js";
 import type { DurableLogCheckpoint } from "../interfaces.js";
 import { AUTHORITY_WAL_FILE_HEADER_BYTES } from "../wal-frame.js";
 
-function view(id = "log"): VerifiedWalView {
-  return { physicalBytes: Buffer.from("test"), tail: { logId: id, device: 1n, inode: 2n, bytes: 100,
+function view(id = "log", bytes = 4): VerifiedWalView {
+  return { chunks: [Buffer.alloc(bytes)], chunkCount: 1, tail: { logId: id, device: 1n, inode: 2n, bytes,
     modifiedAt: 1_700_000_000_000_000_001n, changedAt: 1_700_000_000_000_000_001n,
     lastLsn: 1, prefixDigest: "proof" }, frames: [
-    { lsn: 1, frameEndOffset: 100, prefixDigest: "proof", payloadOffset: 0, payloadBytes: 2 },
-  ] };
+    { lsn: 1, frameEndOffset: bytes, prefixDigest: "proof", chunk: 0, payloadStart: 0, payloadBytes: 2 },
+  ], frameCount: 1 };
 }
 function metadata(value: VerifiedWalView) {
   return { dev: value.tail.device, ino: value.tail.inode, size: value.tail.bytes,
@@ -41,8 +41,9 @@ it("bounds retained bytes and paths with least-recently-used eviction", () => {
   cache.put("c", value);
   expect(cache.get("b", "log", meta)).toBeUndefined();
   expect(cache.get("a", "log", meta)).toBe(value);
-  cache.put("huge", { ...value, physicalBytes: Buffer.alloc(1000) });
-  expect(cache.get("huge", "log", meta)).toBeUndefined();
+  const huge = view("log", 1000);
+  cache.put("huge", huge);
+  expect(cache.get("huge", "log", metadata(huge))).toBeUndefined();
   const paths = new VerifiedWalViews();
   for (let i = 0; i < 33; i++) paths.put(String(i), value);
   expect(paths.get("0", "log", meta)).toBeUndefined();
@@ -342,8 +343,9 @@ it("retains one physical copy of a multi-megabyte WAL and isolates read results"
   expect(version.size).toBeGreaterThan(verified.MAX_VERIFIED_WAL_VIEW_BYTES / 3);
   const physical = verified.verifiedWalViews.get(reader.logPath, first.cursor.logId, version);
   expect(physical).toBeDefined();
+  // 帧只引用块内偏移，不另存载荷副本；全部块合起来恰好是一份文件字节。
   expect(physical!.frames[0]).not.toHaveProperty("payload");
-  expect(physical!.physicalBytes.byteLength).toBe(version.size);
+  expect(physical!.chunks.slice(0, physical!.chunkCount).reduce((total, chunk) => total + chunk.byteLength, 0)).toBe(version.size);
   first.commits[0]!.entries[0]!.body.text = "caller mutation";
   await writer.append([{ stream: "control", body: { n: 100, text: "last" } }]);
   const next = await reader.readStream<{ n: number; text: string }>("control");

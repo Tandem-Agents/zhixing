@@ -55,11 +55,12 @@ describe("authority projection physical reads", () => {
       const readSteps: string[] = [];
       const stored = new FileDurableProjectionIndex({ rootDir: path.join(logRoot, "projections", durableProjectionDirectoryName(id)), projectionId: id, reducerVersion: 1, runReadStep: async (step, operation) => { readSteps.push(step); return operation(); } });
       await stored.initialize({ authority: await writer.originCheckpoint() });
+      const initializationReads = readSteps.length;
       const delta = await stored.prepare(bindDurableProjectionMutations([{ kind: "put", key: "skill", value: "saved" }]));
       stored.publish(delta, { authority: await writer.checkpoint() });
       expect(await stored.get("skill")).toMatchObject({ v: 1, value: "saved" });
       expect((await stored.scan({ gte: "skill", lt: "skillz" }, 1)).entries).toMatchObject([{ key: "skill", value: { v: 1, value: "saved" } }]);
-      expect(readSteps).toEqual([]);
+      expect(readSteps.slice(initializationReads)).toEqual([]);
       await stored.flush();
       // 叶级预算与生产相同（durableProjectionReadBudget），覆盖条目读取的有界预读。
       const log = new FileAuthorityCommitLog(logRoot, artifacts, { storageMaintenance: storage, runProjectionReadStep: async (step, operation) => {

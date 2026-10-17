@@ -484,3 +484,11 @@ export {
   type ResourceReservationProjection,
   type ResourceReservationState,
 } from "./resource-governor.js";
+export {
+  ProtocolIdentityNotLoaded,
+  ProtocolVerificationIdentityCache,
+  rethrowUnloadedProtocolIdentity,
+  untrustedProtocolSignature,
+  type ProtocolIdentityResolver,
+} from "./verification-identities.js";
+export { verifyProtocolStep } from "./verification-identities.js";

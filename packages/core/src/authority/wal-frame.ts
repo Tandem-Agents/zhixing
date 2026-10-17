@@ -16,6 +16,12 @@ export const AUTHORITY_WAL_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const LEGACY_TRAILER_BYTES = 12;
 const PREFIX_BYTES = 32;
 
+/** Existing legal frame bound, shared by recovery admission and its tests. */
+export function authorityWalMaximumFrameBytes(format: "legacy" | "versioned" = "versioned"): number {
+  return AUTHORITY_WAL_HEADER_BYTES + AUTHORITY_WAL_MAX_PAYLOAD_BYTES +
+    (format === "legacy" ? LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES);
+}
+
 export interface AuthorityWalFileHeader {
   readonly formatVersion: 2;
   readonly logId: string;
@@ -206,6 +212,7 @@ export async function scanAuthorityWalFrames(
     nextOffset: number,
   ) => boolean | void | Promise<boolean | void>,
   observeVerifiedFrame?: (bytes: Buffer) => void,
+  budget?: { readonly frames: number; readonly bytes: number },
 ): Promise<AuthorityWalScanResult> {
   if (!Number.isSafeInteger(reader.size) || reader.size < 0) {
     throw new TypeError("Authority WAL reader size is invalid");
@@ -215,6 +222,7 @@ export async function scanAuthorityWalFrames(
   let frameCount = 0;
   let yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
   while (offset < reader.size) {
+    if (budget && frameCount >= budget.frames) return { frameCount, validBytes: offset, stopped: true };
     const remaining = reader.size - offset;
     const headerLength = Math.min(AUTHORITY_WAL_HEADER_BYTES, remaining);
     const header = await readExact(reader, offset, headerLength);
@@ -229,6 +237,11 @@ export async function scanAuthorityWalFrames(
         : AUTHORITY_WAL_TRAILER_BYTES;
     const frameBytes =
       AUTHORITY_WAL_HEADER_BYTES + payloadBytes + trailerBytes;
+    // One legal oversized frame may occupy a page by itself. Only its small
+    // header is read when the preceding page has no room for the next frame.
+    if (budget && frameCount > 0 && offset + frameBytes > budget.bytes) {
+      return { frameCount, validBytes: offset, stopped: true };
+    }
     const remainderLength = Math.min(
       frameBytes - AUTHORITY_WAL_HEADER_BYTES,
       remaining - AUTHORITY_WAL_HEADER_BYTES,

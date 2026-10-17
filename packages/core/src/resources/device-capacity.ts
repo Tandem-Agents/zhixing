@@ -24,7 +24,8 @@ export type DeviceCapacityDimension =
   | "writeBytes"
   | "ioOperations";
 
-export type DeviceCapacityBlocker = DeviceCapacityDimension | "probe-unavailable";
+/** derived-preparation：派生状态正在锁外分页准备，持锁路径只返回这一背压，等待在互斥区外。 */
+export type DeviceCapacityBlocker = DeviceCapacityDimension | "probe-unavailable" | "derived-preparation";
 
 export interface DeviceCapacityBudget {
   readonly occupancy: {

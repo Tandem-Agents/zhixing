@@ -1,12 +1,12 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   open,
-  opendir,
   rename,
+  stat,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
-import type { Dir } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import path from "node:path";
 import type { CommitEnvelope, JsonValue } from "../contracts/index.js";
 import {
@@ -36,6 +36,7 @@ import {
   type StorageMaintenanceObligation,
 } from "../resources/index.js";
 import type { DurableLogCheckpoint } from "./interfaces.js";
+import { projectionIndexMac, type AuthorityCacheIntegrity } from "./startup-proofs.js";
 
 const INDEX_FORMAT_VERSION = 3;
 const SEGMENT_FORMAT_VERSION = 1;
@@ -64,7 +65,6 @@ const MAX_RETIREMENT_PAGE_FILES = 64;
 const MAX_RETIREMENT_PAGE_BYTES = 64 * 1024;
 const MAX_RETIREMENT_TRANSITIONS_PER_TRIGGER = 2;
 const RETIREMENT_CONTINUATION_DELAY_MS = 1;
-const MAX_CLEAR_ENTRIES_PER_STEP = 64;
 
 export type DurableProjectionMutation =
   | {
@@ -105,6 +105,8 @@ export interface DurableProjectionIndex {
 
 export interface RebuildableDurableProjectionIndex
   extends DurableProjectionIndex {
+  /** 保存有界覆盖层；若必须先合并历史段则保留尾部待重放，不在此完成整轮合并。 */
+  flushCheckpoint?(): Promise<void>;
   /** One verified authority view, in input order; missing/tombstoned keys are undefined.
    * At most 256 keys, including duplicates. An empty list performs no I/O. */
   getMany(keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]>;
@@ -120,6 +122,58 @@ export interface DurableProjectionReadContext {
   ): Promise<DurableProjectionScanPage>;
 }
 
+/** A finite candidate envelope can touch the same namespace several times.
+ * Reducers own the source fence; scans merge those uncommitted mutations with
+ * the fixed source view instead of silently ignoring earlier entries. */
+export function createDurableProjectionOverlay(
+  current: DurableProjectionReadContext,
+  changes: ReadonlyMap<string, JsonValue | undefined>,
+): DurableProjectionReadContext {
+  return {
+    get: async key => changes.has(key) ? changes.get(key) : current.get(key),
+    async scan(range, limit, continuation) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_SCAN_LIMIT) throw new RangeError("Projection overlay scan limit is invalid");
+      const identity = canonicalize(range);
+      let after: string | undefined;
+      if (continuation !== undefined) {
+        const cursor = JSON.parse(Buffer.from(continuation, "base64url").toString("utf8")) as { range?: unknown; after?: unknown };
+        if (cursor.range !== identity || typeof cursor.after !== "string" ||
+            (range.gte !== undefined && cursor.after < range.gte) ||
+            (range.gt !== undefined && cursor.after <= range.gt) ||
+            (range.lt !== undefined && cursor.after >= range.lt)) throw new TypeError("Projection overlay continuation is invalid");
+        after = cursor.after;
+      }
+      const included = (key: string) => (range.gte === undefined || key >= range.gte) &&
+        (range.gt === undefined || key > range.gt) && (range.lt === undefined || key < range.lt) &&
+        (after === undefined || key > after);
+      const pending = [...changes].filter(([key]) => included(key));
+      const selected = new Map<string, JsonValue>();
+      let readAfter = after;
+      for (;;) {
+        const page = await current.scan({ ...range, ...(readAfter === undefined ? {} : { gt: readAfter }) }, limit);
+        const boundary = page.entries.at(-1)?.key;
+        if (page.continuation && boundary === undefined) throw new DurableProjectionStorageError("Projection overlay base scan made no progress");
+        for (const entry of page.entries) {
+          const value = changes.has(entry.key) ? changes.get(entry.key) : entry.value;
+          if (value !== undefined) selected.set(entry.key, value);
+        }
+        for (const [key, value] of pending) {
+          if ((readAfter === undefined || key > readAfter) && (!page.continuation || (boundary !== undefined && key <= boundary)) && value !== undefined) {
+            selected.set(key, value);
+          }
+        }
+        const entries = [...selected].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => ({ key, value }));
+        if (entries.length >= limit || !page.continuation) {
+          const result = entries.slice(0, limit), last = result.at(-1)?.key;
+          const more = last !== undefined && (entries.length > limit || page.continuation !== undefined || pending.some(([key, value]) => value !== undefined && key > last));
+          return { entries: result, ...(more ? { continuation: Buffer.from(JSON.stringify({ range: identity, after: last })).toString("base64url") } : {}) };
+        }
+        readAfter = boundary;
+      }
+    },
+  };
+}
+
 export interface DurableProjectionSource {
   readonly checkpoint: DurableLogCheckpoint;
 }
@@ -132,19 +186,31 @@ export type DurableProjectionReducer<Body = JsonValue> = (
   | readonly DurableProjectionMutation[]
   | Promise<readonly DurableProjectionMutation[]>;
 
+/** Complete source declaration, independent of a transaction's read set.
+ * Omitting it conservatively consumes every stream. Families are the existing
+ * parameterized WAL stream prefixes (for example run:), never arbitrary globs. */
+export interface DurableProjectionInputs {
+  readonly streams?: readonly string[];
+  readonly families?: readonly string[];
+}
+
 export interface DurableProjectionDefinition<Body = JsonValue> {
   readonly projectionId: string;
   readonly reducerVersion: number;
   readonly reduce: DurableProjectionReducer<Body>;
+  readonly inputs?: DurableProjectionInputs;
+  /** 可信业务快路径须认证磁盘缓存；无密钥时只接受本实例从权威源重建的状态。 */
+  readonly authenticated?: boolean;
 }
 
-export type DurableProjectionReadStep = "segment-open" | "segment-entry" | "directory-page";
+export type DurableProjectionReadStep = "manifest" | "segment-open" | "segment-entry" | "directory-page";
 
 /** Physical read bounds stay beside the format constants that determine them. */
 export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
   memoryReservationBytes: number; readBytes: number; ioOperations: number;
 } {
   switch (step) {
+    case "manifest": return { memoryReservationBytes: 4 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES, ioOperations: 3 };
     case "segment-open": return { memoryReservationBytes: 0, readBytes: 0, ioOperations: 2 };
     case "directory-page": return { memoryReservationBytes: 4 * MAX_DIRECTORY_PAGE_BYTES, readBytes: MAX_DIRECTORY_PAGE_BYTES, ioOperations: 3 };
     case "segment-entry": return { memoryReservationBytes: 2 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES + MAX_KEY_BYTES + SEGMENT_HEADER_BYTES + 8, ioOperations: 3 };
@@ -152,6 +218,14 @@ export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
 }
 
 export interface FileDurableProjectionIndexOptions {
+  readonly integrity?: AuthorityCacheIntegrity;
+  readonly readOnly?: boolean;
+  readonly managedRecovery?: boolean;
+  readonly legacyRootDir?: string;
+  readonly allowSegmentReclamation?: boolean;
+  readonly withSourceLock?: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly runDetached?: <T>(operation: () => T) => T;
+  readonly authenticated?: boolean;
   readonly rootDir: string;
   readonly projectionId: string;
   readonly reducerVersion: number;
@@ -181,6 +255,7 @@ interface StoredMutation {
 }
 
 interface SegmentDescriptor {
+  readonly authenticated?: true;
   readonly id: string;
   readonly dataFile: string;
   readonly offsetsFile: string;
@@ -215,6 +290,8 @@ interface RetirementPage {
   readonly retiredAtGeneration: number;
   readonly files: readonly string[];
   readonly next?: RetirementPagePointer;
+  /** An abandoned base tree is expanded one page at a time after readers leave. */
+  readonly tree?: DirectoryPagePointer;
 }
 
 interface ProjectionCompaction {
@@ -232,6 +309,9 @@ interface ProjectionManifest {
   readonly baseRoot?: DirectoryPagePointer;
   readonly retirementRoot?: RetirementPagePointer;
   readonly retirementCleanup?: string;
+  readonly rebuilding?: true;
+  readonly recoveryTarget?: DurableProjectionCheckpoints;
+  readonly unrelatedThrough?: DurableProjectionCheckpoints;
 }
 
 interface ProjectionRetirementIdentity {
@@ -368,6 +448,94 @@ interface SegmentEntry {
   readonly tombstone: boolean;
 }
 
+/** 已核验段条目：值以核验过的规范编码保存，过大的值只记键，命中时重新读取。 */
+interface VerifiedSegmentEntry {
+  readonly key: string;
+  readonly tombstone: boolean;
+  readonly encoded?: string;
+}
+
+const SEGMENT_ENTRY_CACHE_BYTES = 4 * 1024 * 1024;
+const SEGMENT_ENTRY_CACHE_ENTRIES = 16_384;
+const SEGMENT_ENTRY_CACHE_VALUE_BYTES = 64 * 1024;
+
+/** 段数据文件的身份：任何改写、替换或删除都会使其变化。 */
+function segmentFileIdentity(value: BigIntStats): string {
+  return `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`;
+}
+
+/**
+ * 段文件不可变且文件名唯一：条目首读时完成序号、校验和与规范编码核验，之后的点查与
+ * 二分探测直接复用核验结果，不再为同一条目重复打开文件、准入与读盘。复用前按段核对
+ * 数据文件身份，带外改写或删除即丢弃该段缓存、回到真实读取并由它发现损坏。按段整体
+ * 淘汰；段文件删除或派生存储重建时失效。返回给调用方的值每次重新解析，缓存不会被改动。
+ */
+class SegmentEntryCache {
+  readonly #segments = new Map<string, Map<number, VerifiedSegmentEntry>>();
+  readonly #segmentBytes = new Map<string, number>();
+  readonly #identities = new Map<string, string>();
+  #bytes = 0;
+  #entries = 0;
+
+  identity(file: string): string | undefined {
+    return this.#identities.get(file);
+  }
+
+  /** 登记本段条目所属的文件身份；身份变化时丢弃此前的条目。 */
+  bind(file: string, identity: string): void {
+    if (this.#identities.get(file) === identity) return;
+    this.forget([file]);
+    this.#identities.set(file, identity);
+  }
+
+  get(file: string, index: number): VerifiedSegmentEntry | undefined {
+    return this.#segments.get(file)?.get(index);
+  }
+
+  put(file: string, index: number, entry: VerifiedSegmentEntry): void {
+    const bytes = 64 + entry.key.length * 2 + (entry.encoded?.length ?? 0) * 2;
+    if (!this.#identities.has(file) || this.#segments.get(file)?.has(index)) return;
+    while (
+      this.#segments.size > 0 &&
+      (this.#bytes + bytes > SEGMENT_ENTRY_CACHE_BYTES || this.#entries + 1 > SEGMENT_ENTRY_CACHE_ENTRIES)
+    ) {
+      const oldest = this.#segments.keys().next().value!;
+      if (oldest === file) break;
+      this.forget([oldest]);
+    }
+    if (this.#bytes + bytes > SEGMENT_ENTRY_CACHE_BYTES || this.#entries + 1 > SEGMENT_ENTRY_CACHE_ENTRIES) return;
+    let segment = this.#segments.get(file);
+    if (!segment) {
+      segment = new Map();
+      this.#segments.set(file, segment);
+    }
+    segment.set(index, entry);
+    this.#segmentBytes.set(file, (this.#segmentBytes.get(file) ?? 0) + bytes);
+    this.#bytes += bytes;
+    this.#entries += 1;
+  }
+
+  forget(files: Iterable<string>): void {
+    for (const file of files) {
+      this.#identities.delete(file);
+      const segment = this.#segments.get(file);
+      if (!segment) continue;
+      this.#entries -= segment.size;
+      this.#bytes -= this.#segmentBytes.get(file) ?? 0;
+      this.#segments.delete(file);
+      this.#segmentBytes.delete(file);
+    }
+  }
+
+  clear(): void {
+    this.#segments.clear();
+    this.#segmentBytes.clear();
+    this.#identities.clear();
+    this.#bytes = 0;
+    this.#entries = 0;
+  }
+}
+
 interface SegmentCursor {
   readonly descriptor: SegmentDescriptor;
   readonly reader: SegmentReader;
@@ -382,7 +550,23 @@ interface NormalizedScanRange {
 }
 
 export class FileDurableProjectionIndex {
-  readonly rootDir: string;
+  readonly #requiresAuthentication: boolean;
+  readonly #integrity: AuthorityCacheIntegrity | undefined;
+  readonly #readOnly: boolean;
+  readonly #managedRecovery: boolean;
+  readonly #legacyRootDir: string | undefined;
+  readonly #sourceLock: FileDurableProjectionIndexOptions["withSourceLock"];
+  readonly #runDetached: NonNullable<FileDurableProjectionIndexOptions["runDetached"]>;
+  #allowReclamation: boolean;
+  #directorySelected = false;
+  #persistent: boolean;
+  #rebuilding = false;
+  #recoveryTarget: DurableProjectionCheckpoints | undefined;
+  #unrelatedThrough: DurableProjectionCheckpoints | undefined;
+  #hasPublishedManifest = false;
+  #rootDir: string;
+  get rootDir(): string { return this.#rootDir; }
+  #authenticated: boolean | undefined;
   readonly projectionId: string;
   readonly reducerVersion: number;
   readonly #overlayEntries: number;
@@ -403,6 +587,7 @@ export class FileDurableProjectionIndex {
     { readonly view: ReadView; users: number }
   >();
   readonly #directoryCache = new Map<string, DirectoryPage>();
+  readonly #segmentEntries = new SegmentEntryCache();
   readonly #manifestQueue = new SerialTaskQueue();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
@@ -414,12 +599,59 @@ export class FileDurableProjectionIndex {
   /** 清理失败、尚待下一个写意图接管的派生文件名(相对 rootDir)。 */
   readonly #uncleared = new Set<string>();
   #writeIntent: ProjectionWriteIntent | undefined;
-  #clearDirectory: Dir | undefined;
-  #clearInProgress = false;
+  #initializing: Promise<void> | undefined;
+
+  /** Under the source writer fence, observe a publication made by another log
+   * instance. Any local unflushed facts are replayed from the newly published
+   * checkpoint by that source owner; they are never another authority. */
+  async refreshPublishedState(): Promise<void> {
+    await this.#serializeManifest(async () => undefined);
+  }
+
+  async #refreshFromDisk(): Promise<void> {
+    if (!this.#initialized || !this.#manifest) return;
+    if (this.#requiresAuthentication && !this.#integrity) return;
+    // A read-only fallback has deliberately rejected the disk root. Re-reading
+    // that same unusable root must not erase its strictly recovered memory page.
+    if (this.#readOnly && !this.#hasPublishedManifest) return;
+      if (this.#writeIntent) await this.#recoverWriteIntent();
+      const current = this.#requireManifest();
+      const published = await this.#readManifest();
+      if (!published && !this.#hasPublishedManifest) return;
+      if (!published || published.projectionId !== this.projectionId || published.reducerVersion !== this.reducerVersion ||
+          !sameCheckpointSources(published.checkpoints, current.checkpoints) || (this.#hasPublishedManifest && published.generation < current.generation)) {
+        throw projectionCorrupt("Projection publication changed identity or moved backwards");
+      }
+      if (this.#hasPublishedManifest && published.generation === current.generation) {
+        if (canonicalize(published) !== canonicalize(current)) throw projectionCorrupt("Projection publication conflicts at the same generation");
+        return;
+      }
+      await this.#validatePublishedStorage(published);
+      this.#manifest = published;
+      this.#hasPublishedManifest = true;
+      this.#currentCheckpoints = cloneCheckpoints(published.checkpoints);
+      this.#rebuilding = published.rebuilding === true;
+      this.#recoveryTarget = published.recoveryTarget;
+      this.#unrelatedThrough = published.unrelatedThrough;
+      this.#active = new Map();
+      this.#activeBytes = 0;
+      this.#resetActiveProgress();
+      this.#directoryCache.clear();
+      this.#publicationSequence++;
+  }
 
   constructor(options: FileDurableProjectionIndexOptions) {
+    this.#requiresAuthentication = options.authenticated === true;
+    this.#integrity = options.integrity;
+    this.#readOnly = options.readOnly === true;
+    this.#managedRecovery = options.managedRecovery === true;
+    this.#legacyRootDir = options.legacyRootDir && path.resolve(options.legacyRootDir);
+    this.#sourceLock = options.withSourceLock;
+    this.#runDetached = options.runDetached ?? (operation => operation());
+    this.#allowReclamation = options.allowSegmentReclamation !== false;
+    this.#persistent = !this.#readOnly && (!this.#requiresAuthentication || this.#integrity !== undefined);
     assertProjectionIdentity(options.projectionId, options.reducerVersion);
-    this.rootDir = path.resolve(options.rootDir);
+    this.#rootDir = path.resolve(options.rootDir);
     this.projectionId = options.projectionId;
     this.reducerVersion = options.reducerVersion;
     this.#overlayEntries = options.overlayEntries ?? DEFAULT_OVERLAY_ENTRIES;
@@ -434,10 +666,91 @@ export class FileDurableProjectionIndex {
     assertPositiveInteger(this.#overlayBytes, "Projection overlay byte budget");
   }
 
+  async #selectDirectory(): Promise<void> {
+    if (this.#directorySelected) return;
+    if (this.#legacyRootDir && this.#legacyRootDir !== this.rootDir) {
+      const present = await stat(this.rootDir).catch((error: unknown) => { if (isNodeError(error, "ENOENT")) return undefined; throw error; });
+      if (!present) {
+        const legacy = await this.#readManifest(this.#legacyRootDir).catch((error: unknown) => {
+          if (error instanceof DurableProjectionStorageError) return undefined;
+          throw error;
+        });
+        if (legacy?.projectionId === this.projectionId && legacy.reducerVersion === this.reducerVersion) {
+          this.#rootDir = this.#legacyRootDir;
+          // C8 readers did not register version-directory lifetimes.
+          this.#allowReclamation = false;
+        }
+      }
+    }
+    this.#directorySelected = true;
+  }
+
+  readiness(): "building" | "ready" { return this.#rebuilding ? "building" : "ready"; }
+  recoveryTarget(): DurableProjectionCheckpoints | undefined { return this.#recoveryTarget && cloneCheckpoints(this.#recoveryTarget); }
+  unrelatedThrough(): DurableProjectionCheckpoints { return cloneCheckpoints(this.#unrelatedThrough ?? this.#currentCheckpoints!); }
+  coverRecoveryGap(checkpoints: DurableProjectionCheckpoints): void { this.#unrelatedThrough = checkpoints; this.#activePublicationCount++; }
+  extendRecoveryTarget(checkpoints: DurableProjectionCheckpoints): void { this.#recoveryTarget = checkpoints; this.#unrelatedThrough = checkpoints; this.#activePublicationCount++; }
+  publishedCheckpoints(): DurableProjectionCheckpoints { return cloneCheckpoints(this.#requireManifest().checkpoints); }
+  publishedRecoveryCoverage(): DurableProjectionCheckpoints {
+    const manifest = this.#requireManifest();
+    return cloneCheckpoints(manifest.unrelatedThrough ?? manifest.checkpoints);
+  }
+  isPersistent(): boolean { return this.#persistent; }
+  #recoveryMatches(manifest: ProjectionManifest): boolean {
+    return this.#rebuilding === (manifest.rebuilding === true) &&
+      sameOptionalCheckpoints(this.#recoveryTarget, manifest.recoveryTarget) &&
+      sameOptionalCheckpoints(this.#unrelatedThrough, manifest.unrelatedThrough);
+  }
+  async finishRebuild(checkpoints?: DurableProjectionCheckpoints): Promise<void> {
+    if (this.#writeIntent) await this.refreshPublishedState();
+    this.#rebuilding = false;
+    if (checkpoints) this.#currentCheckpoints = checkpoints;
+    this.#recoveryTarget = undefined;
+    this.#unrelatedThrough = undefined;
+    await this.flush({ compact: false });
+  }
+
   async initialize(
     emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints = emptyCheckpoints,
   ): Promise<void> {
     if (this.#initialized) return;
+    // 同一实例的并发打开共享一次初始化，不重复申请维护准入。
+    this.#initializing ??= this.#initializeOnce(emptyCheckpoints, recoveryTarget)
+      .finally(() => { this.#initializing = undefined; });
+    return this.#initializing;
+  }
+
+  async #initializeOnce(
+    emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints,
+  ): Promise<void> {
+    if (this.#initialized) return;
+    this.#authenticated ??= this.#requiresAuthentication && this.#integrity !== undefined;
+    if (this.#requiresAuthentication && !this.#integrity) {
+      await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
+      this.#initialized = true;
+      return;
+    }
+    await this.#runInitialStep("select-directory", () => this.#selectDirectory());
+    if (this.#readOnly) {
+      await this.#runInitialStep("readonly-open", async () => {
+      const manifest = await this.#readManifest().catch((error: unknown) => {
+        if (error instanceof DurableProjectionStorageError) return undefined;
+        throw error;
+      });
+      if (manifest && manifest.projectionId === this.projectionId && manifest.reducerVersion === this.reducerVersion && sameCheckpointSources(manifest.checkpoints, emptyCheckpoints)) {
+        try {
+          await this.#validatePublishedStorage(manifest);
+          this.#manifest = manifest; this.#hasPublishedManifest = true; this.#currentCheckpoints = cloneCheckpoints(manifest.checkpoints); this.#rebuilding = manifest.rebuilding === true;
+          this.#recoveryTarget = manifest.recoveryTarget; this.#unrelatedThrough = manifest.unrelatedThrough;
+        } catch (error) { if (!(error instanceof DurableProjectionStorageError)) throw error; }
+      }
+      if (!this.#manifest) await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
+      });
+      this.#initialized = true;
+      return;
+    }
     const frozenInput = { emptyCheckpoints };
     await this.#runMaintenanceObligation(
       "projection-scrub",
@@ -448,13 +761,11 @@ export class FileDurableProjectionIndex {
         let initialized = false;
         while (!initialized) {
           try {
-            initialized = await this.#manifestQueue.run(() =>
-              this.#runMaintenanceStep(
+            initialized = await this.#runMaintenanceStep(
                 "projection-scrub",
                 { frozenInput, step: "initialize" },
                 "committed",
-                () => this.#initializeStep(emptyCheckpoints),
-              ),
+                () => this.#initializeStep(emptyCheckpoints, recoveryTarget),
             );
           } catch (error) {
             const retryAfterMs = maintenanceRetryDelayMs(error);
@@ -477,46 +788,45 @@ export class FileDurableProjectionIndex {
         }
       },
     );
-    try {
-      await this.#runRetirementCleanup({ drain: true });
-    } catch (error) {
-      if (!(error instanceof DurableProjectionStorageError)) throw error;
-      // Retirement pages are derived state too. A later page may be corrupt
-      // even when the manifest and its root page validated successfully, so
-      // cleanup remains part of initialization's rebuild boundary.
-      this.#manifest = undefined;
-      this.#currentCheckpoints = undefined;
-      this.#active = new Map();
-      this.#activeBytes = 0;
-      this.#resetActiveProgress();
-      this.#readViews.clear();
-      this.#inUseReadViews.clear();
-      this.#directoryCache.clear();
-      await this.reset(emptyCheckpoints);
-    }
+    await this.#runRetirementCleanup();
     this.#initialized = true;
+  }
+
+  async #runInitialStep<T>(step: string, operation: () => Promise<T>): Promise<T> {
+    const deadline = Date.now() + PROJECTION_ADMISSION_DEADLINE_MS;
+    for (;;) {
+      try { return await this.#runMaintenanceStep("projection-scrub", { step }, "committed", operation); }
+      catch (error) {
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || Date.now() >= deadline) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, Math.max(0, deadline - Date.now())));
+      }
+    }
   }
 
   async #initializeStep(
     emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints,
   ): Promise<boolean> {
     if (this.#manifest !== undefined) return true;
     await ensureDurableDirectory(this.rootDir);
-    if (this.#clearInProgress) {
-      await this.#clearDerivedStorageStep();
-      return false;
-    }
     try {
       await this.#recoverWriteIntent();
-    } catch {
+    } catch (error) {
+      if (!(error instanceof DurableProjectionStorageError)) throw error;
       // A damaged recovery intent invalidates only derived state. Clearing the
       // index forces the owning authority log to rebuild it from its WAL.
-      await this.#clearDerivedStorageStep();
-      return false;
+      this.#writeIntent = undefined;
+      await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
+      return true;
     }
-    const manifest = await this.#readManifest().catch(() => undefined);
+    const manifest = await this.#readManifest().catch((error: unknown) => {
+      if (error instanceof DurableProjectionStorageError) return undefined;
+      throw error;
+    });
     if (
       manifest &&
+      (!this.#requiresAuthentication || this.#authenticated) &&
       manifest.projectionId === this.projectionId &&
       manifest.reducerVersion === this.reducerVersion &&
       sameCheckpointSources(manifest.checkpoints, emptyCheckpoints)
@@ -524,20 +834,25 @@ export class FileDurableProjectionIndex {
       try {
         await this.#validatePublishedStorage(manifest);
         this.#manifest = manifest;
+        this.#hasPublishedManifest = true;
         this.#currentCheckpoints = manifest.checkpoints;
+        this.#rebuilding = manifest.rebuilding === true;
+        this.#recoveryTarget = manifest.recoveryTarget; this.#unrelatedThrough = manifest.unrelatedThrough;
         return true;
-      } catch {
+      } catch (error) {
+        if (!(error instanceof DurableProjectionStorageError)) throw error;
+        this.#manifest = manifest;
         // The index is derived state. Invalid storage is replaced and rebuilt
         // from the authority log by the owning commit log.
       }
     }
-    if (!(await this.#clearDerivedStorageStep())) return false;
-    await this.#installEmptyManifest(emptyCheckpoints);
+    await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
     return true;
   }
 
   async reset(
     emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints = emptyCheckpoints,
   ): Promise<void> {
     const frozenInput = {
       emptyCheckpoints,
@@ -555,14 +870,12 @@ export class FileDurableProjectionIndex {
       async () => {
         let reset = false;
         while (!reset) {
-          reset = await this.#manifestQueue.run(() =>
-            this.#runMaintenanceStep(
+          reset = await this.#runMaintenanceStep(
               "projection-rebuild",
               { frozenInput, step: "reset" },
               "committed",
-              () => this.#resetStep(emptyCheckpoints),
-            ),
-          );
+              () => this.#resetStep(emptyCheckpoints, recoveryTarget),
+            );
         }
       },
     );
@@ -570,36 +883,61 @@ export class FileDurableProjectionIndex {
 
   async #resetStep(
     emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints,
   ): Promise<boolean> {
-    await ensureDurableDirectory(this.rootDir);
-    if (!(await this.#clearDerivedStorageStep())) return false;
-    await this.#installEmptyManifest(emptyCheckpoints);
+    if (this.#persistent) await ensureDurableDirectory(this.rootDir);
+    await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
     return true;
   }
 
   async #installEmptyManifest(
     emptyCheckpoints: DurableProjectionCheckpoints,
+    recoveryTarget: DurableProjectionCheckpoints,
   ): Promise<void> {
     const checkpoints = validateCheckpoints(emptyCheckpoints);
+    const old = this.#manifest;
+    const generation = (old?.generation ?? 0) + 1;
+    let retirementRoot = old?.retirementRoot;
+    if (this.#persistent && old && (old.baseRoot || old.deltaSegments.length)) {
+      if (this.#writeIntent) await this.#recoverWriteIntent();
+      await this.#beginWriteIntent(generation);
+      retirementRoot = await this.#prependRetirementPages(old.deltaSegments.flatMap(segment => [segment.dataFile, segment.offsetsFile]), generation, retirementRoot);
+      if (old.baseRoot) retirementRoot = await this.#writeRetirementPage({
+        formatVersion: 1, retiredAtGeneration: generation, files: [], tree: old.baseRoot,
+        ...(retirementRoot ? { next: retirementRoot } : {}),
+      });
+    }
     const initial: ProjectionManifest = {
       formatVersion: INDEX_FORMAT_VERSION,
       projectionId: this.projectionId,
       reducerVersion: this.reducerVersion,
-      generation: (this.#manifest?.generation ?? 0) + 1,
+      generation,
       checkpoints,
       deltaSegments: [],
+      ...(retirementRoot ? { retirementRoot } : {}),
+      ...(old?.retirementCleanup ? { retirementCleanup: old.retirementCleanup } : {}),
+      ...(this.#managedRecovery ? { rebuilding: true as const, recoveryTarget: cloneCheckpoints(recoveryTarget), unrelatedThrough: cloneCheckpoints(recoveryTarget) } : {}),
     };
-    await this.#writeManifest(initial);
+    if (this.#persistent) {
+      if (this.#writeIntent) await this.#finalizeWriteIntent(initial, []);
+      await this.#writeManifest(initial);
+    }
+    this.#rebuilding = initial.rebuilding === true;
+    this.#recoveryTarget = initial.recoveryTarget; this.#unrelatedThrough = initial.unrelatedThrough;
     this.#manifest = initial;
+    this.#hasPublishedManifest = this.#persistent;
     this.#active = new Map();
     this.#activeBytes = 0;
     this.#resetActiveProgress();
     this.#currentCheckpoints = checkpoints;
+    // A reset discards corrupt snapshots, but active physical reads retain their
+    // separate in-use protection until the owning operation leaves its fence.
     this.#readViews.clear();
     this.#directoryCache.clear();
     this.#retirementCleanupFailure = undefined;
     this.#clearRetirementRetry();
     this.#publicationSequence += 1;
+    if (this.#persistent && this.#writeIntent) await this.#completeWriteIntent(true).catch(() => undefined);
   }
 
   checkpoints(): DurableProjectionCheckpoints {
@@ -610,9 +948,15 @@ export class FileDurableProjectionIndex {
     return cloneCheckpoints(checkpoints);
   }
 
+  releaseContinuation(encoded: string): void {
+    const { viewId } = decodeContinuation(encoded);
+    if (!this.#inUseReadViews.has(viewId)) this.#readViews.delete(viewId);
+  }
+
   async prepare(
     mutations: readonly DurableProjectionMutation[],
   ): Promise<PreparedProjectionDelta> {
+    if (this.#writeIntent) await this.refreshPublishedState();
     if (!this.#manifest || !this.#currentCheckpoints) {
       throw new Error("Durable projection index is not initialized");
     }
@@ -620,7 +964,7 @@ export class FileDurableProjectionIndex {
     let incomingBytes = 0;
     for (const mutation of normalized.values()) incomingBytes += mutation.bytes;
     if (
-      this.#hasUnpersistedProgress() &&
+      this.#persistent && this.#hasUnpersistedProgress() &&
       (
         this.#activeMutationCount + mutations.length > this.#overlayEntries ||
         this.#activeMutationBytes + incomingBytes > this.#overlayBytes ||
@@ -629,15 +973,16 @@ export class FileDurableProjectionIndex {
     ) {
       // 覆盖层已装不下本次 delta,当前权威写必须等这次 flush 完成才能继续:
       // 阻塞关系内在固定为前台,与谁触发这次写无关。
-      await runInMaintenanceContext("foreground", () =>
-        this.#runFlush("pre-commit"),
-      );
+      await runInMaintenanceContext("foreground", () => this.#runFlush("pre-commit"));
     }
-    const nextActive = new Map(this.#active);
+    // Most envelopes do not touch this projection. Published overlays are
+    // immutable; only a real mutation needs a new key table.
+    const changedActive = normalized.size > 0 ? new Map(this.#active) : undefined;
+    const nextActive = changedActive ?? this.#active;
     let nextBytes = this.#activeBytes;
     for (const [key, mutation] of normalized) {
       nextBytes -= nextActive.get(key)?.bytes ?? 0;
-      nextActive.set(key, mutation);
+      changedActive!.set(key, mutation);
       nextBytes += mutation.bytes;
     }
     return {
@@ -664,6 +1009,15 @@ export class FileDurableProjectionIndex {
     this.#publicationSequence += 1;
   }
 
+  /** Caller has proved, under the source writer fence, that the intervening
+   * source range contains no input for this projection. This creates no replay
+   * empty mutation batch. After a crash the owner replays from the published
+   * checkpoint through the existing verified WAL path. */
+  coverUnchangedSource(checkpoints: DurableProjectionCheckpoints): void {
+    this.#currentCheckpoints = checkpoints;
+    this.#publicationSequence += 1;
+  }
+
   async get(key: string): Promise<JsonValue | undefined> {
     assertKey(key);
     this.#expireReadViews();
@@ -675,7 +1029,7 @@ export class FileDurableProjectionIndex {
       if (active) return active.tombstone ? undefined : active.value;
       for (const segment of view.deltaSegments) {
         if (key < segment.minKey || key > segment.maxKey) continue;
-        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
+        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep, this.#segmentEntries, this.#integrity);
         try {
           const entry = await reader.get(key);
           if (entry) return entry.tombstone ? undefined : entry.value;
@@ -685,7 +1039,7 @@ export class FileDurableProjectionIndex {
       }
       const base = await this.#baseSegmentForKey(view.baseRoot, key);
       if (base && key >= base.minKey && key <= base.maxKey) {
-        const reader = await SegmentReader.open(this.rootDir, base, this.#runReadStep);
+        const reader = await SegmentReader.open(this.rootDir, base, this.#runReadStep, this.#segmentEntries, this.#integrity);
         try {
           const entry = await reader.get(key);
           if (entry) return entry.tombstone ? undefined : entry.value;
@@ -717,7 +1071,7 @@ export class FileDurableProjectionIndex {
       }
       const read = async (segment: SegmentDescriptor, candidates: readonly string[]) => {
         if (!candidates.length) return;
-        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
+        const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep, this.#segmentEntries, this.#integrity);
         try {
           for (const [key, entry] of await reader.getMany(candidates)) {
             values.set(key, entry.tombstone ? undefined : entry.value); pending.delete(key);
@@ -782,9 +1136,17 @@ export class FileDurableProjectionIndex {
   }
 
   async flush(options: { readonly compact?: boolean } = {}): Promise<void> {
+    if (!this.#persistent) return;
+    if (this.#writeIntent) await this.refreshPublishedState();
     // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
     // 启动恢复触发的按恢复,周期回收触发的才是后台。
     await this.#runFlush("committed", options.compact !== false);
+  }
+
+  async flushCheckpoint(): Promise<void> {
+    if (!this.#persistent) return;
+    if (this.#writeIntent) await this.refreshPublishedState();
+    await this.#runFlush("committed", false, true);
   }
 
   /** 进程停机时取消尚未跨过安全检查点的投影维护义务。 */
@@ -794,14 +1156,16 @@ export class FileDurableProjectionIndex {
     await this.#maintenanceRunner.stop();
   }
 
-  async #runFlush(obligation: StorageMaintenanceObligation, compact = true): Promise<void> {
+  async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false): Promise<void> {
     await this.#runRetirementCleanup();
     for (;;) {
       const manifest = this.#requireManifest();
+      // 退出/启动检查点不承担与历史规模成正比的合并；未落盘覆盖层由权威尾部恢复。
+      if (checkpointOnly && manifest.compaction && this.#active.size > 0) return;
       // A recovery checkpoint need not finish a compaction whose durable
       // manifest already makes all values readable. A new delta still waits
       // for it, preserving the existing five-segment read bound.
-      if (!compact && this.#active.size === 0 && sameCheckpoints(this.checkpoints(), manifest.checkpoints)) {
+      if (!compact && this.#active.size === 0 && sameCheckpoints(this.checkpoints(), manifest.checkpoints) && this.#recoveryMatches(manifest)) {
         this.#resetActiveProgress(); return;
       }
       if (manifest.compaction && (compact || this.#active.size > 0)) {
@@ -817,8 +1181,7 @@ export class FileDurableProjectionIndex {
             while (this.#requireManifest().compaction) {
               const stepManifest = this.#requireManifest();
               const previousGeneration = stepManifest.generation;
-              await this.#manifestQueue.run(() =>
-                this.#runMaintenanceStep(
+              await this.#runMaintenanceStep(
                   "projection-compaction",
                   {
                     frozenInput,
@@ -829,8 +1192,7 @@ export class FileDurableProjectionIndex {
                   },
                   obligation,
                   () => this.#compactNextRange(),
-                ),
-              );
+            );
               if (this.#requireManifest().generation <= previousGeneration) {
                 throw new Error("Projection compaction made no durable progress");
               }
@@ -846,7 +1208,7 @@ export class FileDurableProjectionIndex {
       }
       if (
         this.#active.size === 0 &&
-        sameCheckpoints(this.checkpoints(), manifest.checkpoints)
+        sameCheckpoints(this.checkpoints(), manifest.checkpoints) && this.#recoveryMatches(manifest)
       ) {
         this.#resetActiveProgress();
         return;
@@ -863,8 +1225,7 @@ export class FileDurableProjectionIndex {
         frozenInput,
         obligation,
         () =>
-          this.#manifestQueue.run(() =>
-            this.#runMaintenanceStep(
+          this.#runMaintenanceStep(
               "projection-flush",
               {
                 frozenInput,
@@ -874,7 +1235,6 @@ export class FileDurableProjectionIndex {
               obligation,
               () => this.#flushActive(),
             ),
-          ),
       );
       await this.#runRetirementCleanup();
     }
@@ -917,8 +1277,16 @@ export class FileDurableProjectionIndex {
         // 建立互斥的原语已标记,准入自动转为零等待;段外调用则按常规等待。
         { obligation, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) },
       ),
-      operation,
+      () => this.#serializeManifest(operation, kind !== "projection-rebuild"),
     );
+  }
+
+  #serializeManifest<T>(operation: () => Promise<T>, refresh = true): Promise<T> {
+    const run = () => this.#manifestQueue.run(async () => {
+      if (refresh) await this.#refreshFromDisk();
+      return operation();
+    });
+    return this.#sourceLock ? this.#sourceLock(run) : run();
   }
 
   #readStep<T>(
@@ -934,6 +1302,8 @@ export class FileDurableProjectionIndex {
       readonly surfaceFailure?: boolean;
     } = {},
   ): Promise<void> {
+    if (!this.#persistent || !this.#allowReclamation) return;
+    if (this.#retirementCleanupFailure?.error instanceof DurableProjectionStorageError) return;
     if (
       options.surfaceFailure !== false &&
       this.#retirementCleanupFailure !== undefined
@@ -942,25 +1312,27 @@ export class FileDurableProjectionIndex {
       this.#retirementCleanupFailure = undefined;
       throw failure.error;
     }
-    await this.#runMaintenanceObligation(
+    try { await this.#runMaintenanceObligation(
       "projection-compaction",
       { phase: "retirement-cleanup" },
       "committed",
       () =>
         this.#drainRetirementDebt(
           (inputIdentity, operation) =>
-            this.#manifestQueue.run(() =>
-              this.#runMaintenanceStep(
+            this.#runMaintenanceStep(
                 "projection-compaction",
                 inputIdentity,
                 "committed",
                 operation,
                 0,
-              ),
             ),
           options.drain ? undefined : MAX_RETIREMENT_TRANSITIONS_PER_TRIGGER,
         ),
-    );
+    ); } catch (error) {
+      if (!(error instanceof DurableProjectionStorageError)) throw error;
+      this.#retirementCleanupFailure = { error };
+      this.#clearRetirementRetry();
+    }
   }
 
   async #drainRetirementDebt(
@@ -1044,9 +1416,9 @@ export class FileDurableProjectionIndex {
       if (this.#retirementRetryTimer !== timer) return;
       this.#retirementRetryTimer = undefined;
       this.#retirementRetryAt = undefined;
-      void runDetachedMaintenanceContext("background", () =>
+      void this.#runDetached(() => runDetachedMaintenanceContext("background", () =>
         this.#runRetirementCleanup({ surfaceFailure: false })
-      ).catch((error: unknown) => {
+      )).catch((error: unknown) => {
         if (!this.#maintenanceStopped) {
           this.#retirementCleanupFailure = { error };
         }
@@ -1075,9 +1447,25 @@ export class FileDurableProjectionIndex {
     const checkpoints = this.checkpoints();
     if (
       this.#active.size === 0 &&
-      sameCheckpoints(checkpoints, manifest.checkpoints)
+      sameCheckpoints(checkpoints, manifest.checkpoints) && this.#recoveryMatches(manifest)
     ) {
       this.#resetActiveProgress();
+      return;
+    }
+    if (this.#active.size === 0) {
+      // Only the verified cursor/readiness changes. All referenced files are
+      // unchanged, so the atomic manifest is the complete publication: there
+      // are no new files for a separate write intent to protect or reclaim.
+      const { rebuilding: _rebuilding, recoveryTarget: _target, unrelatedThrough: _coverage, ...existing } = manifest;
+      const next: ProjectionManifest = {
+        ...existing, generation: manifest.generation + 1, checkpoints,
+        ...(this.#rebuilding ? { rebuilding: true as const, recoveryTarget: this.#recoveryTarget!, unrelatedThrough: this.#unrelatedThrough! } : {}),
+      };
+      await this.#writeManifest(next);
+      this.#manifest = next;
+      this.#hasPublishedManifest = true;
+      this.#resetActiveProgress();
+      this.#publicationSequence++;
       return;
     }
     await this.#beginWriteIntent(manifest.generation + 1);
@@ -1114,6 +1502,7 @@ export class FileDurableProjectionIndex {
         generation: manifest.generation + 1,
         checkpoints,
         deltaSegments,
+        ...(this.#rebuilding ? { rebuilding: true as const, recoveryTarget: this.#recoveryTarget!, unrelatedThrough: this.#unrelatedThrough! } : {}),
         ...(compaction === undefined ? {} : { compaction }),
         ...(baseRoot === undefined ? {} : { baseRoot }),
         ...(retirementRoot === undefined ? {} : { retirementRoot }),
@@ -1131,8 +1520,19 @@ export class FileDurableProjectionIndex {
       this.#publicationSequence += 1;
     } catch (error) {
       if (!committed) {
-        await this.#completeWriteIntent(false);
-        throw error;
+        const outcome = await this.#publicationOutcome();
+        if (outcome?.committed) {
+          try { await syncDirectory(this.rootDir); } catch { throw error; }
+          this.#manifest = outcome.manifest;
+          this.#currentCheckpoints = cloneCheckpoints(outcome.manifest.checkpoints);
+          this.#active = new Map(); this.#activeBytes = 0; this.#resetActiveProgress();
+          this.#publicationSequence++;
+          committed = true;
+        } else {
+          if (outcome) await this.#completeWriteIntent(false);
+          // An unreadable outcome keeps its intent and files for recovery.
+          throw error;
+        }
       }
     }
     if (committed) {
@@ -1148,6 +1548,7 @@ export class FileDurableProjectionIndex {
   #hasUnpersistedProgress(): boolean {
     return (
       this.#activePublicationCount > 0 ||
+      !this.#recoveryMatches(this.#requireManifest()) ||
       !sameCheckpoints(
         this.checkpoints(),
         this.#requireManifest().checkpoints,
@@ -1193,7 +1594,7 @@ export class FileDurableProjectionIndex {
     const openCursor = async (
       descriptor: SegmentDescriptor,
     ): Promise<SegmentCursor> => {
-      const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep);
+      const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep, this.#segmentEntries, this.#integrity);
       try {
         let index = await reader.lowerBound(lowerBound);
         const cursor: SegmentCursor = { descriptor, reader, index };
@@ -1416,7 +1817,7 @@ export class FileDurableProjectionIndex {
         ) {
           throw new TypeError("Projection segment entries are not strictly ordered");
         }
-        const encoded = encodeSegmentEntry(entry, count);
+        const encoded = encodeSegmentEntry(entry, count, dataFile, this.#authenticated === true, this.#integrity);
         const offset = Buffer.allocUnsafe(8);
         offset.writeBigUInt64BE(BigInt(position));
         claimStorageIo("writeBytes", offset.byteLength + encoded.byteLength);
@@ -1455,7 +1856,8 @@ export class FileDurableProjectionIndex {
     await rename(offsetsTemporary, path.join(this.rootDir, offsetsFile));
     claimStorageIo("ioOperations", 1);
     await syncDirectory(this.rootDir);
-    return { id, dataFile, offsetsFile, count, minKey, maxKey, level };
+    return { id, dataFile, offsetsFile, count, minKey, maxKey, level,
+      ...(this.#authenticated ? { authenticated: true as const } : {}) };
   }
 
   async #compactNextRange(): Promise<void> {
@@ -1541,6 +1943,7 @@ export class FileDurableProjectionIndex {
         generation: manifest.generation + 1,
         checkpoints: manifest.checkpoints,
         deltaSegments,
+        ...(manifest.rebuilding ? { rebuilding: true as const, recoveryTarget: manifest.recoveryTarget!, unrelatedThrough: manifest.unrelatedThrough! } : {}),
         ...(compaction === undefined ? {} : { compaction }),
         ...(baseRoot === undefined ? {} : { baseRoot }),
         ...(retirementRoot === undefined ? {} : { retirementRoot }),
@@ -1555,8 +1958,16 @@ export class FileDurableProjectionIndex {
       this.#publicationSequence += 1;
     } catch (error) {
       if (!committed) {
-        await this.#completeWriteIntent(false);
-        throw error;
+        const outcome = await this.#publicationOutcome();
+        if (outcome?.committed) {
+          try { await syncDirectory(this.rootDir); } catch { throw error; }
+          this.#manifest = outcome.manifest;
+          this.#publicationSequence++;
+          committed = true;
+        } else {
+          if (outcome) await this.#completeWriteIntent(false);
+          throw error;
+        }
       }
     }
     if (!committed) {
@@ -1585,7 +1996,7 @@ export class FileDurableProjectionIndex {
         if (firstKey === undefined || delta.minKey < firstKey) firstKey = delta.minKey;
         continue;
       }
-      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep);
+      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep, this.#segmentEntries, this.#integrity);
       try {
         let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
@@ -1612,7 +2023,7 @@ export class FileDurableProjectionIndex {
     for (const delta of [...manifest.deltaSegments].reverse()) {
       if ((afterKey !== undefined && delta.maxKey <= afterKey) ||
           (upperBound !== undefined && delta.minKey >= upperBound)) continue;
-      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep);
+      const reader = await SegmentReader.open(this.rootDir, delta, this.#runReadStep, this.#segmentEntries, this.#integrity);
       try {
         let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
@@ -1662,7 +2073,7 @@ export class FileDurableProjectionIndex {
   async #readSegment(
     descriptor: SegmentDescriptor,
   ): Promise<StoredMutation[]> {
-    const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep);
+    const reader = await SegmentReader.open(this.rootDir, descriptor, this.#runReadStep, this.#segmentEntries, this.#integrity);
     try {
       const entries: StoredMutation[] = [];
       for (let index = 0; index < descriptor.count; index += 1) {
@@ -2017,8 +2428,12 @@ export class FileDurableProjectionIndex {
     return this.#writeDirectoryPage(descriptor, left, right);
   }
 
-  async #readManifest(): Promise<ProjectionManifest | undefined> {
-    const file = path.join(this.rootDir, "manifest.json");
+  async #readManifest(directory = this.rootDir): Promise<ProjectionManifest | undefined> {
+    return this.#readStep("manifest", () => this.#readManifestBytes(directory));
+  }
+
+  async #readManifestBytes(directory: string): Promise<ProjectionManifest | undefined> {
+    const file = path.join(directory, "manifest.json");
     let handle: FileHandle;
     try {
       claimStorageIo("ioOperations", 1);
@@ -2031,27 +2446,45 @@ export class FileDurableProjectionIndex {
       claimStorageIo("ioOperations", 1);
       const metadata = await handle.stat();
       if (metadata.size <= 0 || metadata.size > MAX_VALUE_BYTES) {
-        throw new Error("Projection manifest size is invalid");
+        throw projectionCorrupt("Projection manifest size is invalid");
       }
       const bytes = Buffer.allocUnsafe(metadata.size);
       claimStorageIo("readBytes", bytes.byteLength);
       claimStorageIo("ioOperations", 1);
       const { bytesRead } = await handle.read(bytes, 0, bytes.byteLength, 0);
       if (bytesRead !== bytes.byteLength) {
-        throw new Error("Projection manifest changed while reading");
+        throw projectionCorrupt("Projection manifest changed while reading");
       }
+      try {
       const value = JSON.parse(bytes.toString("utf8")) as unknown;
       if (canonicalize(value) !== bytes.toString("utf8")) {
-        throw new Error("Projection manifest is not canonical");
+        throw projectionCorrupt("Projection manifest is not canonical");
       }
-      return validateManifest(value);
+      const stored = plainRecord(value);
+      if (!stored) throw projectionCorrupt("Projection manifest is invalid");
+      const { integrity, ...contents } = stored;
+      if (this.#authenticated) {
+        const expected = projectionIndexMac("manifest", [Buffer.from(canonicalize(contents), "utf8")], this.#integrity);
+        if (!expected || typeof integrity !== "string" || !/^[a-f0-9]{64}$/u.test(integrity) ||
+            !timingSafeEqual(expected, Buffer.from(integrity, "hex"))) {
+          throw projectionCorrupt("Projection manifest authentication is invalid");
+        }
+      }
+      return validateManifest(contents);
+      } catch (error) {
+        if (error instanceof DurableProjectionStorageError) throw error;
+        throw projectionCorrupt("Projection manifest contents are invalid", error);
+      }
     } finally {
       await handle.close();
     }
   }
 
   async #writeManifest(manifest: ProjectionManifest): Promise<void> {
-    const encoded = Buffer.from(canonicalize(manifest), "utf8");
+    const contents = Buffer.from(canonicalize(manifest), "utf8");
+    const signature = this.#authenticated ? projectionIndexMac("manifest", [contents], this.#integrity) : undefined;
+    if (this.#authenticated && !signature) throw projectionCorrupt("Projection integrity key is unavailable");
+    const encoded = signature ? Buffer.from(canonicalize({ ...manifest, integrity: signature.toString("hex") }), "utf8") : contents;
     if (encoded.byteLength > MAX_VALUE_BYTES) {
       throw new RangeError("Projection manifest exceeds its byte budget");
     }
@@ -2083,13 +2516,13 @@ export class FileDurableProjectionIndex {
       manifest.deltaSegments.length >
         MAX_DELTA_SEGMENTS + (manifest.compaction ? 1 : 0)
     ) {
-      throw new Error("Projection manifest has too many delta segments");
+      throw projectionCorrupt("Projection manifest has too many delta segments");
     }
     for (const segment of manifest.deltaSegments) {
       if (segment.level !== 0) {
-        throw new Error("Projection delta segment level is invalid");
+        throw projectionCorrupt("Projection delta segment level is invalid");
       }
-      const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep);
+      const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep, this.#segmentEntries, this.#integrity);
       try {
         const first = await reader.entry(0);
         const last = await reader.entry(segment.count - 1);
@@ -2108,9 +2541,8 @@ export class FileDurableProjectionIndex {
     if (manifest.baseRoot) {
       await this.#loadDirectoryPage(manifest.baseRoot);
     }
-    if (manifest.retirementRoot) {
-      await this.#loadRetirementPage(manifest.retirementRoot);
-    }
+    // Retirement storage is independent of the current data root. A damaged
+    // cleanup page preserves old files; it must not erase healthy business rows.
   }
 
   async #prependRetirementPages(
@@ -2289,9 +2721,29 @@ export class FileDurableProjectionIndex {
         ...(retryAt === undefined ? {} : { retryAt }),
       };
     }
+    if (page.tree) {
+      const tree = await this.#loadDirectoryPage(page.tree);
+      await this.#beginWriteIntent(manifest.generation + 1);
+      let next = page.next;
+      for (const child of [tree.left, tree.right]) if (child) {
+        next = await this.#writeRetirementPage({ formatVersion: 1, retiredAtGeneration: page.retiredAtGeneration,
+          files: [], tree: child, ...(next ? { next } : {}) });
+      }
+      next = await this.#prependRetirementPages([
+        ...page.files, directoryPageFile(page.tree.id), tree.descriptor.dataFile, tree.descriptor.offsetsFile,
+      ], page.retiredAtGeneration, next);
+      const updated = normalizeManifestOptionals({ ...manifest, generation: manifest.generation + 1,
+        retirementRoot: next, retirementCleanup: retirementPageFile(manifest.retirementRoot.id) });
+      await this.#finalizeWriteIntent(updated, []);
+      await this.#writeManifest(updated);
+      this.#manifest = updated;
+      await this.#completeWriteIntent(true).catch(() => undefined);
+      return { kind: "progressed" };
+    }
     await durablyRemoveFiles(
       page.files.map((file) => path.join(this.rootDir, file)),
     );
+    this.#segmentEntries.forget(page.files);
     for (const file of page.files) {
       this.#directoryCache.delete(directoryPageIdFromFile(file) ?? "");
     }
@@ -2381,16 +2833,30 @@ export class FileDurableProjectionIndex {
   async #recoverWriteIntent(): Promise<void> {
     const intent = await this.#readWriteIntent();
     if (!intent) {
+      this.#writeIntent = undefined;
       await unlink(path.join(this.rootDir, ".write-intent.tmp")).catch(
         () => undefined,
       );
       return;
     }
-    const manifest = await this.#readManifest().catch(() => undefined);
+    const manifest = await this.#readManifest().catch((error: unknown) => {
+      if (error instanceof DurableProjectionStorageError) return undefined;
+      throw error;
+    });
     this.#writeIntent = intent;
-    await this.#completeWriteIntent(
-      manifest !== undefined && isCommittedIntent(intent, manifest),
-    );
+    const committed = manifest !== undefined && isCommittedIntent(intent, manifest);
+    if (committed) await syncDirectory(this.rootDir);
+    await this.#completeWriteIntent(committed);
+  }
+
+  async #publicationOutcome(): Promise<{ readonly manifest: ProjectionManifest; readonly committed: boolean } | undefined> {
+    if (!this.#writeIntent) return;
+    try {
+      const manifest = await this.#readManifest();
+      if (!manifest || manifest.projectionId !== this.projectionId || manifest.reducerVersion !== this.reducerVersion ||
+          !sameCheckpointSources(manifest.checkpoints, this.#requireManifest().checkpoints)) return;
+      return { manifest, committed: isCommittedIntent(this.#writeIntent, manifest) };
+    } catch { return; }
   }
 
   async #readWriteIntent(): Promise<ProjectionWriteIntent | undefined> {
@@ -2417,11 +2883,16 @@ export class FileDurableProjectionIndex {
         throw projectionCorrupt("Projection write intent is truncated");
       }
       const encoded = bytes.toString("utf8");
+      try {
       const value = JSON.parse(encoded) as unknown;
       if (canonicalize(value) !== encoded) {
         throw projectionCorrupt("Projection write intent is not canonical");
       }
       return validateWriteIntent(value);
+      } catch (error) {
+        if (error instanceof DurableProjectionStorageError) throw error;
+        throw projectionCorrupt("Projection write intent contents are invalid", error);
+      }
     } finally {
       await handle.close();
     }
@@ -2468,56 +2939,11 @@ export class FileDurableProjectionIndex {
         // 凭据残留只会让下次打开按同一意图重放一次幂等清理。
       }
     }
+    this.#segmentEntries.forget(files);
     for (const file of files) {
       this.#directoryCache.delete(directoryPageIdFromFile(file) ?? "");
     }
     this.#writeIntent = undefined;
-  }
-
-  async #clearDerivedStorageStep(): Promise<boolean> {
-    this.#writeIntent = undefined;
-    this.#clearInProgress = true;
-    if (!this.#clearDirectory) {
-      claimStorageIo("ioOperations", 1);
-      this.#clearDirectory = await opendir(this.rootDir);
-    }
-    const files: string[] = [];
-    let exhausted = false;
-    try {
-      for (
-        let inspected = 0;
-        inspected < MAX_CLEAR_ENTRIES_PER_STEP;
-        inspected += 1
-      ) {
-        claimStorageIo("ioOperations", 1);
-        const entry = await this.#clearDirectory.read();
-        if (!entry) {
-          exhausted = true;
-          break;
-        }
-        if (entry.isFile()) files.push(path.join(this.rootDir, entry.name));
-      }
-    } catch (error) {
-      await this.#clearDirectory.close().catch(() => undefined);
-      this.#clearDirectory = undefined;
-      this.#clearInProgress = false;
-      throw error;
-    }
-    // 派生存储被整体重建，残留文件不会被新 manifest 引用。单个清理失败只留孤儿，
-    // 不得把 housekeeping 失败升级为权威日志不可恢复；游标仍推进到后续固定页。
-    try {
-      await durablyRemoveFiles(files);
-    } catch {
-      // 下一次完整重建会再次枚举孤儿；退休回收只处理 manifest 登记的对象。
-    }
-    if (!exhausted) return false;
-    await this.#clearDirectory.close().catch(() => undefined);
-    this.#clearDirectory = undefined;
-    this.#clearInProgress = false;
-    // 整个目录已完成一次有界遍历，按名登记的待清理义务随之作废。
-    this.#uncleared.clear();
-    this.#directoryCache.clear();
-    return true;
   }
 
   #requireWriteIntent(): ProjectionWriteIntent {
@@ -2551,27 +2977,59 @@ class SegmentReader {
   // never to the index or a later read view. Every returned entry still checks
   // its ordinal, digest and canonical payload before use.
   #dataWindow: { readonly start: number; readonly bytes: Buffer } | undefined;
+  #cacheChecked = false;
+  #files: { readonly data: FileHandle; readonly offsets: FileHandle } | undefined;
+  #opening: Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> | undefined;
   private constructor(
     readonly descriptor: SegmentDescriptor,
-    readonly data: FileHandle,
-    readonly offsets: FileHandle,
+    readonly rootDir: string,
     readonly runReadStep: FileDurableProjectionIndexOptions["runReadStep"],
+    readonly cache: SegmentEntryCache | undefined,
+    readonly integrity: AuthorityCacheIntegrity | undefined,
   ) {}
 
+  /** 文件按需打开：条目全部命中已核验缓存时不打开、不准入、不读盘。 */
   static async open(
     rootDir: string,
     descriptor: SegmentDescriptor,
     runReadStep?: FileDurableProjectionIndexOptions["runReadStep"],
+    cache?: SegmentEntryCache,
+    integrity?: AuthorityCacheIntegrity,
   ): Promise<SegmentReader> {
-    const operation = () => SegmentReader.openFiles(rootDir, descriptor, runReadStep);
-    return runProjectionReadStep(runReadStep, "segment-open", operation);
+    const reader = new SegmentReader(descriptor, rootDir, runReadStep, cache, integrity);
+    if (!cache) await reader.#handles();
+    return reader;
+  }
+
+  #handles(): Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> {
+    if (this.#files) return Promise.resolve(this.#files);
+    this.#opening ??= runProjectionReadStep(this.runReadStep, "segment-open", async () => {
+      const files = await SegmentReader.openFiles(this.rootDir, this.descriptor);
+      if (this.cache) {
+        try {
+          // 以已打开句柄的身份登记，之后缓存的条目都来自这一份文件。
+          this.cache.bind(this.descriptor.dataFile, segmentFileIdentity(await files.data.stat({ bigint: true })));
+        } catch (error) {
+          await Promise.all([files.data.close(), files.offsets.close()]);
+          throw error;
+        }
+        this.#cacheChecked = true;
+      }
+      return files;
+    }).then((files) => {
+      this.#files = files;
+      return files;
+    }, (error: unknown) => {
+      this.#opening = undefined;
+      throw error;
+    });
+    return this.#opening;
   }
 
   private static async openFiles(
     rootDir: string,
     descriptor: SegmentDescriptor,
-    runReadStep: FileDurableProjectionIndexOptions["runReadStep"],
-  ): Promise<SegmentReader> {
+  ): Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> {
     let data: FileHandle;
     try {
       claimStorageIo("ioOperations", 1);
@@ -2585,7 +3043,7 @@ class SegmentReader {
     try {
       claimStorageIo("ioOperations", 1);
       const offsets = await open(path.join(rootDir, descriptor.offsetsFile), "r");
-      return new SegmentReader(descriptor, data, offsets, runReadStep);
+      return { data, offsets };
     } catch (error) {
       await data.close();
       if (isNodeError(error, "ENOENT")) {
@@ -2600,8 +3058,8 @@ class SegmentReader {
 
   async get(key: string): Promise<SegmentEntry | undefined> {
     const index = await this.lowerBound(key);
-    const entry = await this.entry(index);
-    return entry?.key === key ? entry : undefined;
+    const verified = await this.#verified(index);
+    return verified?.key === key ? this.#materialize(index, verified) : undefined;
   }
 
   async getMany(keys: readonly string[]): Promise<ReadonlyMap<string, SegmentEntry>> {
@@ -2612,7 +3070,7 @@ class SegmentReader {
       const { low, high, from, to } = pending.pop()!;
       if (low >= high || from >= to) continue;
       const middle = low + Math.floor((high - low) / 2);
-      const entry = await this.entry(middle);
+      const entry = await this.#verified(middle);
       if (!entry) throw projectionCorrupt('Projection segment offset is invalid');
       let left = from, right = to;
       while (left < right) {
@@ -2620,7 +3078,7 @@ class SegmentReader {
         if (sorted[pivot]! < entry.key) left = pivot + 1; else right = pivot;
       }
       const matched = left < to && sorted[left] === entry.key;
-      if (matched) values.set(entry.key, entry);
+      if (matched) values.set(entry.key, await this.#materialize(middle, entry));
       pending.push({ low: middle + 1, high, from: left + Number(matched), to });
       pending.push({ low, high: middle, from, to: left });
     }
@@ -2632,7 +3090,7 @@ class SegmentReader {
     let high = this.descriptor.count;
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2);
-      const entry = await this.entry(middle);
+      const entry = await this.#verified(middle);
       if (!entry) {
         throw projectionCorrupt("Projection segment offset is invalid");
       }
@@ -2643,16 +3101,62 @@ class SegmentReader {
   }
 
   async entry(index: number): Promise<SegmentEntry | undefined> {
+    const verified = await this.#verified(index);
+    return verified && this.#materialize(index, verified);
+  }
+
+  /** 读取并核验一个条目；已核验的条目直接复用，只用于比较键时不解析值。 */
+  async #verified(index: number): Promise<VerifiedSegmentEntry | undefined> {
     if (index < 0 || index >= this.descriptor.count) return undefined;
+    if (this.cache && !this.#cacheChecked) await this.#checkCache();
+    const cached = this.cache?.get(this.descriptor.dataFile, index);
+    if (cached) return cached;
+    const entry = await this.#read(index);
+    if (entry) {
+      this.cache?.put(
+        this.descriptor.dataFile,
+        index,
+        entry.encoded !== undefined && entry.encoded.length > SEGMENT_ENTRY_CACHE_VALUE_BYTES
+          ? { key: entry.key, tombstone: entry.tombstone }
+          : entry,
+      );
+    }
+    return entry;
+  }
+
+  /** 本读取器首次复用缓存前核对数据文件身份；不符或文件已不在则丢弃该段缓存。 */
+  async #checkCache(): Promise<void> {
+    const file = this.descriptor.dataFile;
+    if (this.cache!.identity(file) !== undefined) {
+      const current = await runProjectionReadStep(this.runReadStep, "segment-open", async () => {
+        claimStorageIo("ioOperations", 1);
+        return stat(path.join(this.rootDir, file), { bigint: true }).then(segmentFileIdentity, () => undefined);
+      });
+      if (current !== this.cache!.identity(file)) this.cache!.forget([file]);
+    }
+    this.#cacheChecked = true;
+  }
+
+  async #materialize(index: number, entry: VerifiedSegmentEntry): Promise<SegmentEntry> {
+    if (entry.tombstone) return { key: entry.key, tombstone: true };
+    // 过大的值只缓存了键：重新读取并核验一次。
+    const encoded = entry.encoded ?? (await this.#read(index))?.encoded;
+    if (encoded === undefined) throw projectionCorrupt("Projection segment value is unavailable");
+    return { key: entry.key, value: JSON.parse(encoded) as JsonValue, tombstone: false };
+  }
+
+  async #read(index: number): Promise<VerifiedSegmentEntry | undefined> {
+    await this.#handles();
     const operation = () => this.readEntry(index);
     return runProjectionReadStep(this.runReadStep, "segment-entry", operation);
   }
 
-  private async readEntry(index: number): Promise<SegmentEntry | undefined> {
+  private async readEntry(index: number): Promise<VerifiedSegmentEntry | undefined> {
+    const { offsets } = this.#files!;
     const offsetBytes = Buffer.allocUnsafe(8);
     claimStorageIo("readBytes", offsetBytes.byteLength);
     claimStorageIo("ioOperations", 1);
-    const offsetRead = await this.offsets.read(offsetBytes, 0, 8, index * 8);
+    const offsetRead = await offsets.read(offsetBytes, 0, 8, index * 8);
     if (offsetRead.bytesRead !== 8) {
       throw projectionCorrupt("Projection segment offset table is truncated");
     }
@@ -2686,9 +3190,8 @@ class SegmentReader {
     const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, true);
     if (
       payloadRead.bytesRead !== payload.byteLength ||
-      !checksum(Buffer.concat([header.subarray(0, 20), payload])).equals(
-        header.subarray(20, 52),
-      )
+      !timingSafeEqual(segmentEntryChecksum(this.descriptor.dataFile, this.descriptor.authenticated === true,
+        header.subarray(0, 20), payload, this.integrity), header.subarray(20, 52))
     ) {
       throw projectionCorrupt("Projection segment entry checksum is invalid");
     }
@@ -2707,7 +3210,7 @@ class SegmentReader {
     if (canonicalize(value) !== encoded) {
       throw projectionCorrupt("Projection segment value is not canonical");
     }
-    return { key, value, tombstone: false };
+    return { key, encoded, tombstone: false };
   }
 
   async #readData(target: Buffer, position: number, readAhead: boolean): Promise<{ bytesRead: number }> {
@@ -2721,12 +3224,12 @@ class SegmentReader {
     if (!readAhead || target.length > SEGMENT_IO_BATCH_BYTES) {
       claimStorageIo("readBytes", target.length);
       claimStorageIo("ioOperations", 1);
-      return this.data.read(target, 0, target.length, position);
+      return this.#files!.data.read(target, 0, target.length, position);
     }
     const bytes = Buffer.allocUnsafe(SEGMENT_IO_BATCH_BYTES);
     claimStorageIo("readBytes", bytes.length);
     claimStorageIo("ioOperations", 1);
-    const read = await this.data.read(bytes, 0, bytes.length, position);
+    const read = await this.#files!.data.read(bytes, 0, bytes.length, position);
     this.#dataWindow = { start: position, bytes: bytes.subarray(0, read.bytesRead) };
     bytes.copy(target, 0, 0, Math.min(target.length, read.bytesRead));
     return { bytesRead: Math.min(target.length, read.bytesRead) };
@@ -2734,7 +3237,10 @@ class SegmentReader {
 
   async close(): Promise<void> {
     this.#dataWindow = undefined;
-    await Promise.all([this.data.close(), this.offsets.close()]);
+    const files = this.#files ?? await this.#opening?.catch(() => undefined);
+    this.#files = undefined;
+    this.#opening = undefined;
+    if (files) await Promise.all([files.data.close(), files.offsets.close()]);
   }
 }
 
@@ -2770,7 +3276,7 @@ function normalizeMutations(
   return normalized;
 }
 
-function encodeSegmentEntry(entry: StoredMutation, ordinal: number): Buffer {
+function encodeSegmentEntry(entry: StoredMutation, ordinal: number, dataFile: string, authenticated: boolean, integrity?: AuthorityCacheIntegrity): Buffer {
   const key = Buffer.from(entry.key, "utf8");
   const value = entry.tombstone
     ? Buffer.alloc(0)
@@ -2782,7 +3288,7 @@ function encodeSegmentEntry(entry: StoredMutation, ordinal: number): Buffer {
   header.writeUInt8(entry.tombstone ? SEGMENT_TOMBSTONE : 0, 8);
   header.writeUInt8(SEGMENT_FORMAT_VERSION, 9);
   header.writeBigUInt64BE(BigInt(ordinal), 12);
-  checksum(Buffer.concat([header.subarray(0, 20), payload])).copy(header, 20);
+  segmentEntryChecksum(dataFile, authenticated, header.subarray(0, 20), payload, integrity).copy(header, 20);
   return Buffer.concat([header, payload]);
 }
 
@@ -2838,6 +3344,19 @@ function validateManifest(value: unknown): ProjectionManifest {
     ? undefined
     : validateRetirementPagePointer(record.retirementRoot);
   const retirementCleanup = record.retirementCleanup;
+  if (record.rebuilding !== undefined && record.rebuilding !== true) throw new Error("Projection recovery state is invalid");
+  const recoveryTarget = record.rebuilding ? validateCheckpoints(record.recoveryTarget) : undefined;
+  const unrelatedThrough = record.rebuilding ? validateCheckpoints(record.unrelatedThrough) : undefined;
+  if (!record.rebuilding && (record.recoveryTarget !== undefined || record.unrelatedThrough !== undefined)) throw new Error("Projection recovery fields require building state");
+  if (recoveryTarget && unrelatedThrough) {
+    if (!sameCheckpointSources(recoveryTarget, checkpoints) || !sameCheckpointSources(unrelatedThrough, checkpoints)) throw new Error("Projection recovery sources changed");
+    for (const [source, point] of Object.entries(checkpoints)) {
+      if (point.lsn > recoveryTarget[source]!.lsn || recoveryTarget[source]!.lsn > unrelatedThrough[source]!.lsn ||
+          point.frameEndOffset > recoveryTarget[source]!.frameEndOffset || recoveryTarget[source]!.frameEndOffset > unrelatedThrough[source]!.frameEndOffset) {
+        throw new Error("Projection recovery coverage is out of order");
+      }
+    }
+  }
   if (
     retirementCleanup !== undefined &&
     (
@@ -2858,6 +3377,7 @@ function validateManifest(value: unknown): ProjectionManifest {
     ...(baseRoot === undefined ? {} : { baseRoot }),
     ...(retirementRoot === undefined ? {} : { retirementRoot }),
     ...(retirementCleanup === undefined ? {} : { retirementCleanup }),
+    ...(record.rebuilding === true ? { rebuilding: true as const, recoveryTarget: recoveryTarget!, unrelatedThrough: unrelatedThrough! } : {}),
   };
 }
 
@@ -2961,6 +3481,10 @@ function sameCheckpointSources(
   );
 }
 
+function sameOptionalCheckpoints(left: DurableProjectionCheckpoints | undefined, right: DurableProjectionCheckpoints | undefined): boolean {
+  return left === undefined || right === undefined ? left === right : sameCheckpoints(left, right);
+}
+
 function sameCheckpoints(
   left: DurableProjectionCheckpoints,
   right: DurableProjectionCheckpoints,
@@ -2991,6 +3515,7 @@ function validateSegmentDescriptor(value: unknown): SegmentDescriptor {
     (record.count as number) <= 0 ||
     typeof record.minKey !== "string" ||
     typeof record.maxKey !== "string"
+    || (record.authenticated !== undefined && record.authenticated !== true)
     || (record.level !== 0 && record.level !== 1)
   ) {
     throw new Error("Projection segment descriptor is invalid");
@@ -3010,6 +3535,7 @@ function validateSegmentDescriptor(value: unknown): SegmentDescriptor {
     id: record.id,
     dataFile: record.dataFile,
     offsetsFile: record.offsetsFile,
+    ...(record.authenticated === true ? { authenticated: true as const } : {}),
     count: record.count as number,
     minKey: record.minKey,
     maxKey: record.maxKey,
@@ -3145,7 +3671,7 @@ function validateRetirementPage(value: unknown): RetirementPage {
     !Number.isSafeInteger(record.retiredAtGeneration) ||
     (record.retiredAtGeneration as number) <= 0 ||
     !Array.isArray(record.files) ||
-    record.files.length === 0 ||
+    (record.files.length === 0 && record.tree === undefined) ||
     record.files.length > MAX_RETIREMENT_PAGE_FILES ||
     record.files.some((file) =>
       typeof file !== "string" || !isRetirableProjectionFile(file)
@@ -3162,6 +3688,7 @@ function validateRetirementPage(value: unknown): RetirementPage {
     retiredAtGeneration: record.retiredAtGeneration as number,
     files: [...record.files] as string[],
     ...(next === undefined ? {} : { next }),
+    ...(record.tree === undefined ? {} : { tree: validateDirectoryPagePointer(record.tree) }),
   };
 }
 
@@ -3245,6 +3772,7 @@ function normalizeManifestOptionals(
     generation: manifest.generation,
     checkpoints: manifest.checkpoints,
     deltaSegments: manifest.deltaSegments,
+    ...(manifest.rebuilding ? { rebuilding: true as const, recoveryTarget: manifest.recoveryTarget!, unrelatedThrough: manifest.unrelatedThrough! } : {}),
     ...(manifest.compaction === undefined
       ? {}
       : { compaction: manifest.compaction }),
@@ -3357,6 +3885,14 @@ function projectionCorrupt(
   );
 }
 
+function segmentEntryChecksum(dataFile: string, authenticated: boolean, header: Uint8Array, payload: Uint8Array, integrity?: AuthorityCacheIntegrity): Buffer {
+  if (!authenticated) return checksum(Buffer.concat([header, payload]));
+  // 随机不可变段身份、ordinal与物理键均进入认证，旧段的合法条目不能替换新段。
+  const signed = projectionIndexMac("segment", [Buffer.from(dataFile, "utf8"), header, payload], integrity);
+  if (!signed) throw projectionCorrupt("Projection integrity key is unavailable");
+  return signed;
+}
+
 function checksum(bytes: Uint8Array): Buffer {
   return createHash("sha256").update(bytes).digest();
 }
@@ -3385,6 +3921,11 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 export function durableProjectionDirectoryName(projectionId: string): string {
   return protocolDigest("DurableProjectionDirectory", 1, { projectionId })
     .slice("sha256:".length);
+}
+
+/** 当前版本目录：projectionId 与显式归约版本共同决定；同版本的旧（无版本后缀）目录可原地复用。 */
+export function durableProjectionVersionDirectoryName(projectionId: string, reducerVersion: number): string {
+  return durableProjectionDirectoryName(projectionId) + ".v" + reducerVersion;
 }
 
 function validateReadKeys(keys: readonly string[]): string[] {

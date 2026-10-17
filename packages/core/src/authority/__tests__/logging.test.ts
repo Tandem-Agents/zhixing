@@ -35,7 +35,12 @@ it("real WAL work reports actual reads and queue time with the owning startup ph
     await Promise.all([log.readSnapshot(), log.readSnapshot(), log.readSnapshot()]);
   });
   await log.stopStorageMaintenance();
-  const summaries = entries.filter(item => item.event === "work");
+  const work = entries.filter(item => item.event === "work");
+  // 正常停止只发布已在内存推进的有界进度（含闲置投影越过无关输入的覆盖位置），不属于启动阶段。
+  const stopPublications = work.filter(item => item.data!.operation === "projection.checkpoint" &&
+    !item.refs?.some(ref => ref.kind === "phase"));
+  expect(stopPublications.length).toBeLessThanOrEqual(1);
+  const summaries = work.filter(item => !stopPublications.includes(item));
   expect(summaries.length).toBeGreaterThan(0);
   expect(summaries.every(item => item.refs?.some(ref => ref.kind === "authority") && item.refs?.some(ref => ref.kind === "phase"))).toBe(true);
   expect(summaries.reduce((sum, item) => sum + Number(item.data!.operations), 0)).toBeGreaterThanOrEqual(4);
