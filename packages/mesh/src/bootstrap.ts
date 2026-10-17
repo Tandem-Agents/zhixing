@@ -2,7 +2,6 @@ import { createHmac, hkdfSync } from "node:crypto";
 import type {
   BlindRendezvousHello,
   DeviceRole,
-  HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshEndpointTransport,
   MeshRoleBootConfig,
@@ -10,6 +9,7 @@ import type {
   SecretStorePort,
 } from "@zhixing/core/contracts";
 import { canonicalize } from "./canonical.js";
+import type { TrustProjection } from "./trust-chain.js";
 import { MeshProtocolError } from "./errors.js";
 import type { MeshServiceClient } from "./request-channel.js";
 import { MeshRequestChannel } from "./request-channel.js";
@@ -65,7 +65,7 @@ export class HostLaunchPlanError extends Error {
 export function resolveHostLaunchPlan(input: {
   readonly localDeviceId: string;
   readonly configuration?: MeshRoleBootConfig;
-  readonly trust?: HomeTrustRecord;
+  readonly trust?: Pick<TrustProjection, "members" | "issuer">;
 }): HostLaunchPlan {
   assertDeviceId(input.localDeviceId, "Local mesh device id");
   if (!input.trust) {
@@ -151,7 +151,7 @@ export function resolveHostLaunchPlan(input: {
 export function resolveEffectiveMeshRoles(input: {
   readonly localDeviceId: string;
   readonly configuration?: MeshRoleBootConfig;
-  readonly trust?: HomeTrustRecord;
+  readonly trust?: Pick<TrustProjection, "members" | "issuer">;
 }): EffectiveMeshRoles {
   assertDeviceId(input.localDeviceId, "Local mesh device id");
   if (!input.trust) {

@@ -722,3 +722,6 @@ export function assertRecoveryKeyPair(rootPublicKey: string, backupPublicKey: st
   importEncodedPublicKey(rootPublicKey, "ed25519");
   importEncodedPublicKey(backupPublicKey, "x25519");
 }
+export { CURRENT_TRUST_PROJECTION_ID, currentTrustIndex, readCurrentTrust, readCurrentTrustRecord,
+  readTrustIdentity, readTrustGenesis } from "./trust-current-index.js";
+export type { CurrentTrustProjection, VerifiedTrustIdentity } from "./trust-current-index.js";

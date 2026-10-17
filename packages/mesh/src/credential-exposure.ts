@@ -3,6 +3,10 @@ import type {
   CredentialExposureRecord,
 } from "@zhixing/core/contracts";
 import { protocolDigest } from "./canonical.js";
+export {
+  CREDENTIAL_EXPOSURE_PROJECTION_ID, credentialExposureIndex,
+  exposureProjectionKey, readExposureProjection, readExposureRecords, assertIndexedCredentialRoute,
+} from "./credential-exposure-index.js";
 
 export function createCredentialExposureRecord(input: {
   readonly deviceId: string;

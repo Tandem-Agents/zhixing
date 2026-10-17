@@ -4,10 +4,11 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import type { FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { type FileAuthorityCommitLog, type DurableProjectionReadContext, type ProjectionTransactionDecision } from "@zhixing/core/authority";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
-  assertCredentialRouteAllowed,
+  assertIndexedCredentialRoute, credentialExposureIndex, CREDENTIAL_EXPOSURE_PROJECTION_ID,
+  exposureProjectionKey, readExposureProjection, readExposureRecords,
   createCredentialExposureRecord,
   createCredentialExposureRecordFromDescriptor,
   projectCredentialExposures,
@@ -17,46 +18,63 @@ import {
 export const CREDENTIAL_EXPOSURE_ROUTE_DESCRIPTOR = Object.freeze({
   owner: "current-device",
   protectedKinds: Object.freeze(["provider", "channel", "mcp", "webhook", "rendezvous"]),
-  excludedKinds: Object.freeze(["device-key"]),
+  excludedKinds: Object.freeze(["device-key", "authority-integrity"]),
   states: Object.freeze(["active", "compromised", "rotated"]),
 });
 
 export class CredentialExposureAuthority {
+  readonly #index: ReturnType<FileAuthorityCommitLog["durableProjection"]>;
   constructor(private readonly options: {
     readonly deviceId: string;
     readonly log: FileAuthorityCommitLog;
     readonly secretStore: SecretStorePort;
     readonly now?: () => string;
-  }) {}
+  }) {
+    this.#index = credentialExposureIndex(options.log);
+    options.log.registerCheckpointFlush?.(() => this.#index.flushCheckpoint?.());
+  }
 
   async projection(): Promise<CredentialExposureProjection> {
-    return projectCredentialExposures(
-      (await this.options.log.readStream<CredentialExposureRecord>("exposure"))
-        .map((entry) => entry.body),
+    return projectCredentialExposures(await readExposureRecords(this.#index));
+  }
+
+  /** 仅物化当前绑定状态；历史重复发布沿已有索引游标增量归约。 */
+  #transact(load: (current: DurableProjectionReadContext) => Promise<readonly CredentialExposureRecord[]>,
+    decide: (records: readonly CredentialExposureRecord[]) => ProjectionTransactionDecision<CredentialExposureRecord, CredentialExposureProjection>) {
+    return this.options.log.transactDurableProjection<CredentialExposureRecord, CredentialExposureProjection>(
+      CREDENTIAL_EXPOSURE_PROJECTION_ID, async current => decide(await load(current)),
     );
   }
 
   async rotationRequired() {
-    return (await this.projection()).rotationRequired;
+    return projectCredentialExposures(await readExposureRecords(this.#index, { state: "compromised" })).rotationRequired;
   }
 
   async publishActiveBindings(input: {
     readonly bindings: readonly CredentialBindingDescriptor[];
     readonly markedAt: string;
   }): Promise<CredentialExposureProjection> {
+    await this.ensureActiveBindings(input);
+    return this.projection();
+  }
+
+  /** Startup publishes only current descriptors; callers requesting the audit
+   * projection explicitly can still use publishActiveBindings/projection. */
+  async ensureActiveBindings(input: {
+    readonly bindings: readonly CredentialBindingDescriptor[];
+    readonly markedAt: string;
+  }): Promise<void> {
     const candidates = input.bindings.map((binding) =>
       createCredentialExposureRecordFromDescriptor({
         deviceId: this.options.deviceId,
         binding,
         markedAt: input.markedAt,
       }));
-    const result = await this.options.log.transactProjection<
-      readonly CredentialExposureRecord[],
-      CredentialExposureRecord,
-      CredentialExposureProjection
-    >(
-      [],
-      (records, entry) => [...records, entry.body],
+    await this.#transact(
+      async current => (await Promise.all(candidates.map(async candidate => {
+        const key = exposureProjectionKey(candidate);
+        return readExposureProjection(key, await current.get(key));
+      }))).filter((record): record is CredentialExposureRecord => record !== undefined),
       (records) => {
         const projected = projectCredentialExposures(records);
         const entries: Array<{ stream: "exposure"; body: CredentialExposureRecord }> = [];
@@ -84,9 +102,7 @@ export class CredentialExposureAuthority {
           ? { kind: "return", value: next }
           : { kind: "append", entries, value: next };
       },
-      { stream: "exposure" },
     );
-    return result.value;
   }
 
   async secretForRoute(input: {
@@ -107,8 +123,8 @@ export class CredentialExposureAuthority {
     readonly tenant?: string;
     readonly scopes?: readonly string[];
   }): Promise<void> {
-    assertCredentialRouteAllowed({
-      projection: await this.projection(),
+    await this.options.log.transactDurableProjection<never, void>(CREDENTIAL_EXPOSURE_PROJECTION_ID, async current => {
+      await assertIndexedCredentialRoute(current, {
       deviceId: this.options.deviceId,
       bindingId: input.ref.bindingId,
       service: input.service,
@@ -117,6 +133,8 @@ export class CredentialExposureAuthority {
         : {}),
       ...(input.tenant ? { tenant: input.tenant } : {}),
       ...(input.scopes ? { scopes: input.scopes } : {}),
+      });
+      return { kind: "return", value: undefined };
     });
   }
 
@@ -164,13 +182,13 @@ export class CredentialExposureAuthority {
       ...(input.rotationHint ? { rotationHint: input.rotationHint } : {}),
       markedAt,
     });
-    const result = await this.options.log.transactProjection<
-      readonly CredentialExposureRecord[],
-      CredentialExposureRecord,
-      CredentialExposureProjection
-    >(
-      [],
-      (records, entry) => [...records, entry.body],
+    await this.#transact(
+      async current => [
+        ...await readExposureRecords(current, { state: "compromised", deviceId: input.oldDeviceId,
+          bindingId: input.oldBindingId ?? input.ref.bindingId, service: input.service }),
+        ...await readExposureRecords(current, { state: "active", deviceId: this.options.deviceId,
+          bindingId: input.ref.bindingId, service: input.service }),
+      ],
       (records) => {
         const projected = projectCredentialExposures(records);
         const old = projected.records.find((record) =>
@@ -207,9 +225,8 @@ export class CredentialExposureAuthority {
           value: next,
         };
       },
-      { stream: "exposure" },
     );
-    return result.value;
+    return this.projection();
   }
 }
 
@@ -224,6 +241,16 @@ export function exposureGuardedSecretStore(
       if (route) await authority.assertRoute({ ref: route.ref, service: route.service });
       return store.get(ref);
     },
+    ...(store.getExisting ? { getExisting: async (ref: SecretRef) => {
+      const route = credentialRoute(ref);
+      if (route) await authority.assertRoute({ ref: route.ref, service: route.service });
+      return store.getExisting!(ref);
+    } } : {}),
+    ...(store.getOrCreate ? { getOrCreate: async (ref: SecretRef, create: () => string) => {
+      const route = credentialRoute(ref);
+      if (route) await authority.assertRoute({ ref: route.ref, service: route.service });
+      return store.getOrCreate!(ref, create);
+    } } : {}),
     delete: (ref) => store.delete(ref),
     list: (prefix) => store.list(prefix),
     unlockState: () => store.unlockState(),

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
@@ -10,6 +10,51 @@ import {
 } from "./credential-exposure-authority.js";
 
 describe("credential exposure authority", () => {
+  it("forwards the internal integrity key without treating it as a remote credential route", async () => {
+    const root = await createTempDir("integrity-key-exposure-boundary");
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")));
+    const backing = new MemorySecretStore();
+    const store = Object.assign(backing, {
+      getExisting: (ref: SecretRef) => backing.get(ref),
+      getOrCreate: async (ref: SecretRef, create: () => string) => {
+        const prior = await backing.get(ref);
+        if (prior !== null) return prior;
+        const value = create(); await backing.put(ref, value); return value;
+      },
+    });
+    const authority = new CredentialExposureAuthority({ deviceId: "synthetic-device", log, secretStore: store });
+    const route = vi.spyOn(authority, "assertRoute").mockRejectedValue(new Error("remote credentials blocked"));
+    try {
+      const guarded = exposureGuardedSecretStore(store, authority);
+      const ref = { kind: "authority-integrity" as const, bindingId: "startup-proofs:v1" };
+      expect(await guarded.getOrCreate!(ref, () => "synthetic-integrity")).toBe("synthetic-integrity");
+      expect(await guarded.getExisting!(ref)).toBe("synthetic-integrity");
+      expect(route).not.toHaveBeenCalled();
+      await expect(guarded.get({ kind: "provider", bindingId: "credential-provider-main" })).rejects.toThrow("remote credentials blocked");
+    } finally { route.mockRestore(); await log.stopStorageMaintenance(); }
+  });
+  it("folds repeated exposure history into current bindings without reading the complete stream", async () => {
+    const root = await createTempDir("credential-exposure-growth");
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")));
+    const secretStore = new MemorySecretStore();
+    const authority = new CredentialExposureAuthority({ deviceId: "device-growth", log, secretStore });
+    try {
+      const first = await authority.publishActiveBindings({ bindings: [{
+        bindingId: "credential-provider-growth", service: "provider", verification: "user-alias", revision: 1,
+      }], markedAt: "2026-01-01T00:00:00.000Z" });
+      const record = first.records[0]!;
+      await log.append(Array.from({ length: 64 }, (_, index) => ({ stream: "exposure", body: {
+        ...record, markedAt: new Date(Date.parse(record.markedAt) + index + 1).toISOString(),
+      } })));
+      const read = vi.spyOn(log, "readStream").mockRejectedValue(new Error("whole exposure history is not a query"));
+      try {
+        expect((await authority.projection()).records).toEqual([{ ...record, markedAt: "2026-01-01T00:00:00.064Z" }]);
+        expect(await authority.rotationRequired()).toEqual([]);
+        expect(read).not.toHaveBeenCalled();
+      } finally { read.mockRestore(); }
+    } finally { await log.stopStorageMaintenance(); }
+  });
+
   it("blocks only the compromised binding and restores it with one verified rotation envelope", async () => {
     const root = await createTempDir("credential-exposure");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -105,6 +150,15 @@ class MemorySecretStore implements SecretStorePort {
   async get(ref: SecretRef): Promise<string | null> {
     return this.#values.get(secretId(ref)) ?? null;
   }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = secretId(ref);
+    const existing = this.#values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.#values.set(storageKey, value);
+    return value;
+  }
+
 
   async delete(ref: SecretRef): Promise<void> {
     this.#values.delete(secretId(ref));
