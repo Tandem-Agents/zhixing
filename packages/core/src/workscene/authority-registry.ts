@@ -3,7 +3,6 @@ import type {
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
-  ProjectionCursor,
   RebuildableDurableProjectionIndex,
 } from "../authority/index.js";
 import { AuthorityStorageError } from "../authority/index.js";
@@ -103,8 +102,6 @@ export class AnchorWorksceneRegistry {
   readonly #clock: () => string;
   readonly #sceneIdFactory: (name: string) => string;
   readonly #durable: RebuildableDurableProjectionIndex;
-  #projection: WorksceneRegistryProjection | undefined;
-  #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
 
   constructor(options: AnchorWorksceneRegistryOptions) {
@@ -113,11 +110,7 @@ export class AnchorWorksceneRegistry {
     this.#sceneIdFactory =
       options.sceneIdFactory ??
       ((name) => `${slugify(name)}-${randomUUID().slice(0, 8)}`);
-    this.#durable = this.#log.durableProjection({
-      projectionId: WORKSCENE_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 1,
-      reduce: reduceWorksceneDurableProjection,
-    });
+    this.#durable = registerWorksceneAuthorityProjection(this.#log);
   }
 
   readonly stagedProjectionId = WORKSCENE_AUTHORITY_PROJECTION_ID;
@@ -125,20 +118,6 @@ export class AnchorWorksceneRegistry {
   /** Opens the durable projection before a synchronous owner commit planner is installed. */
   async initialize(): Promise<void> {
     await this.#ensureOpen();
-  }
-
-  /**
-   * Purely plans run-staged workscene writes against the current authority
-   * projection. Returned records are appended in the owning run commit; this
-   * method never mutates the live projection or the filesystem.
-   */
-  planStaged(records: readonly WorksceneStagedMutationRecord[]): WorksceneStagedMutationPlan {
-    return planWorksceneStaged(
-      cloneProjection(this.#state()),
-      records,
-      () => this.#clock(),
-      this.#sceneIdFactory,
-    );
   }
 
   async planStagedAtProjection(
@@ -275,15 +254,10 @@ export class AnchorWorksceneRegistry {
     requireIdentifier(sceneId, "Workscene id");
     requireRevision(deletionRevision);
     await this.#ensureOpen();
-    const transaction = await this.#log.transactProjection<
-      WorksceneRegistryProjection,
-      WorksceneRegistryRecord,
-      void
-    >(
-      this.#state(),
-      reduceRegistry,
-      (state) => {
-        const pending = state.pendingDeletions.get(sceneId);
+    await this.#log.transactDurableProjection<WorksceneRegistryRecord, void>(
+      WORKSCENE_AUTHORITY_PROJECTION_ID,
+      async (current) => {
+        const pending = readPendingDeletion(await current.get(workscenePendingKey(sceneId)));
         if (!pending) return { kind: "return", value: undefined };
         if (pending.deletionRevision !== deletionRevision) {
           throw new WorksceneConflictError(
@@ -306,10 +280,7 @@ export class AnchorWorksceneRegistry {
           value: undefined,
         };
       },
-      { cursor: this.#cursor, stream: REGISTRY_STREAM },
     );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
   }
 
   async apply(
@@ -324,15 +295,10 @@ export class AnchorWorksceneRegistry {
       normalized,
     );
     await this.#ensureOpen();
-    const transaction = await this.#log.transactProjection<
-      WorksceneRegistryProjection,
-      WorksceneRegistryRecord,
-      WorksceneAppliedResult
-    >(
-      this.#state(),
-      reduceRegistry,
-      (state) => {
-        const replay = state.requests.get(context.requestId);
+    const transaction = await this.#log.transactDurableProjection<WorksceneRegistryRecord, WorksceneAppliedResult>(
+      WORKSCENE_AUTHORITY_PROJECTION_ID,
+      async (current) => {
+        const replay = readWorksceneRequest(await current.get(worksceneRequestKey(context.requestId)));
         if (replay) {
           if (replay.mutationDigest !== mutationDigest || !replay.result) {
             throw new WorksceneConflictError(
@@ -341,11 +307,15 @@ export class AnchorWorksceneRegistry {
           }
           return { kind: "return", value: cloneResult(replay.result) };
         }
+        const createId = normalized.kind === "workscene-create" ? this.#sceneIdFactory(normalized.name) : undefined;
+        const state = await loadWorksceneProjectionForMutations(current,
+          [{ seq: 1, requestId: context.requestId, mutation: normalized }],
+          createId === undefined ? new Map() : new Map([[1, createId]]));
         const result = decideMutation(
           state,
           normalized,
           this.#clock(),
-          this.#sceneIdFactory,
+          () => createId!,
         );
         return {
           kind: "append",
@@ -365,21 +335,8 @@ export class AnchorWorksceneRegistry {
           value: result,
         };
       },
-      { cursor: this.#cursor, stream: REGISTRY_STREAM },
     );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
     return cloneResult(transaction.value);
-  }
-
-  #state(): WorksceneRegistryProjection {
-    if (!this.#projection) {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "Workscene registry has not been opened",
-      );
-    }
-    return this.#projection;
   }
 
   async #ensureOpen(): Promise<void> {
@@ -388,45 +345,17 @@ export class AnchorWorksceneRegistry {
   }
 
   async #open(): Promise<void> {
-    const snapshot = await this.#log.readSnapshot<WorksceneRegistryRecord>();
-    let state = emptyProjection();
-    let hasRegistryEntries = false;
-    for (const commit of snapshot.commits) {
-      for (const entry of commit.entries) {
-        if (entry.stream !== REGISTRY_STREAM) continue;
-        hasRegistryEntries = true;
-        state = reduceRegistry(
-          state,
-          entry as LogicalRecord<WorksceneRegistryRecord>,
-        );
+    // 当前注册表与幂等结果由既有耐久索引提供，启动不再重放管理操作历史。
+    await this.#log.transactDurableProjection<WorksceneRegistryRecord, void>(WORKSCENE_AUTHORITY_PROJECTION_ID, async current => {
+      const meta = readWorksceneMeta(await current.get(WORKSCENE_META_KEY));
+      if (meta.established) return { kind: "return", value: undefined };
+      if ((await current.scan({}, 1)).entries.length) {
+        throw corruptRegistry("Workscene registry facts exist before establishment");
       }
-    }
-    this.#cursor = snapshot.cursor;
-    if (!state.established) {
-      if (hasRegistryEntries) {
-        throw corruptRegistry(
-          "Workscene registry facts exist without an establishment record",
-        );
-      }
-      const commit = await this.#log.append<WorksceneRegistryRecord>([
-        {
-          stream: REGISTRY_STREAM,
-          body: {
-            t: "workscene-registry-established",
-            at: this.#clock(),
-          },
-        },
-      ]);
-      state = reduceRegistry(
-        state,
-        commit.entries[0] as LogicalRecord<WorksceneRegistryRecord>,
-      );
-      this.#cursor =
-        (await this.#log.readSnapshot<WorksceneRegistryRecord>()).cursor;
-    }
-    this.#projection = state;
+      return { kind: "append", entries: [{ stream: REGISTRY_STREAM,
+        body: { t: "workscene-registry-established", at: this.#clock() } }], value: undefined };
+    });
   }
-
 }
 
 function planWorksceneStaged(
@@ -569,6 +498,13 @@ async function reduceWorksceneDurableProjection(
         put(WORKSCENE_META_KEY, meta as unknown as JsonValue);
         break;
       case "workscene-control-applied": {
+        const selected = await loadWorksceneProjectionForMutations({ get, scan: (range, limit, continuation) => current.scan(range, limit, continuation) },
+          [{ seq: 1, requestId: record.requestId, mutation: record.mutation }],
+          record.result.kind === "workscene-applied" && record.result.operation === "create"
+            ? new Map([[1, record.result.scene.id]]) : new Map());
+        // 仍用同一领域状态机验证历史及候选；索引不能只凭结果字段直接覆盖状态。
+        if (!selected.established) throw corruptRegistry("Workscene registry facts exist before establishment");
+        reduceRegistry(selected, { stream: REGISTRY_STREAM, body: record });
         if (await get(worksceneRequestKey(record.requestId))) {
           throw corruptRegistry("Workscene request identity was reused");
         }
@@ -1401,4 +1337,14 @@ export class WorksceneRevisionError extends Error {
     );
     this.name = "WorksceneRevisionError";
   }
+}
+
+export function registerWorksceneAuthorityProjection(log: AuthorityCommitLog) {
+  return log.durableProjection({
+      projectionId: WORKSCENE_AUTHORITY_PROJECTION_ID,
+      inputs: { streams: [REGISTRY_STREAM] },
+      authenticated: true,
+      reducerVersion: 1,
+      reduce: reduceWorksceneDurableProjection,
+    });
 }

@@ -31,6 +31,7 @@ describe("AnchorWorksceneRegistry", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
       expect(await registry.get("missing")).toBeNull();
       const index = log.durableProjection({
         projectionId: "global-workscene-authority-v1", reducerVersion: 1, reduce: () => [],
+        inputs: { streams: ["intent:workscene-registry"] },
       });
       expect((await index.checkpoints()).authority?.lsn).toBe(2);
     } finally {

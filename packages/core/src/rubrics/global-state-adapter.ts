@@ -81,11 +81,7 @@ export class AnchorRubricGlobalStateAdapter implements GlobalStatePort {
     this.#artifacts = options.artifacts;
     this.#anchorEpoch = options.anchorEpoch;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    options.log.durableProjection<RubricAuthorityRecord>({
-      projectionId: RUBRIC_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 1,
-      reduce: reduceRubricDurableProjection,
-    });
+    registerRubricAuthorityProjection(options.log);
   }
 
   get deferredIntentProjectionId(): string {
@@ -503,4 +499,13 @@ function assertExpectedRevision(
   ) {
     throw new TypeError("Rubric revision is stale");
   }
+}
+
+export function registerRubricAuthorityProjection(log: AuthorityCommitLog) {
+  return log.durableProjection<RubricAuthorityRecord>({
+      projectionId: RUBRIC_AUTHORITY_PROJECTION_ID,
+      inputs: { streams: [RUBRIC_AUTHORITY_STREAM] },
+      reducerVersion: 1,
+      reduce: reduceRubricDurableProjection,
+    });
 }

@@ -1,10 +1,16 @@
+import { verifyProtocolStep } from "../protocol/index.js";
+import { rethrowUnloadedProtocolIdentity } from "../protocol/verification-identities.js";
 import { randomUUID } from "node:crypto";
 import type {
   AuthorityCommitLog,
-  ProjectionCursor,
+  DurableProjectionReadContext,
+  DurableProjectionMutation,
+  ProjectionTransactionDecision,
 } from "../authority/index.js";
-import { AuthorityStorageError } from "../authority/index.js";
+import { AuthorityStorageError, DurableProjectionRecordBindingError } from "../authority/index.js";
 import type {
+  CommitEnvelope,
+  JsonValue,
   EnvironmentPort,
   ImmediateRootResourceLease,
   LogicalRecord,
@@ -14,6 +20,7 @@ import type {
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import {
   canonicalize,
+  protocolDigest,
   createSignedEnvironmentControlGrant,
   createSignedWorkspaceProbeResult,
   validateWorkspaceProbeRequest,
@@ -39,6 +46,9 @@ import {
 import type { WorkspaceProbePersistencePort } from "./workspace-probe-persistence.js";
 
 const PROBE_STREAM = "executor:workspace-probes";
+const PROBE_INDEX_ID = "workspace-probe-state-v1";
+const PROBE_META = "meta";
+const PROBE_COMPLETED = "completed/";
 const PROBE_STEP_BUDGET: DeviceCapacityBudget = {
   occupancy: {
     memoryReservationBytes: 64 * 1024,
@@ -129,8 +139,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     string,
     { requestDigest: string; promise: Promise<WorkspaceProbeResult> }
   >();
-  #projection: ProbeProjection | undefined;
-  #cursor: ProjectionCursor | undefined;
+
   #opening: Promise<void> | undefined;
   #retentionTimer: NodeJS.Timeout | undefined;
   #retentionRunning: Promise<void> | undefined;
@@ -146,6 +155,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     this.#persistence = options.persistence;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
+    registerWorkspaceProbeProjection(options.log, options.verifier);
     this.#capacity = options.capacity;
     this.#storageMaintenance = options.storageMaintenance;
     this.#retentionRunner = new StorageMaintenanceTaskRunner(
@@ -160,10 +170,11 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   ): Promise<WorkspaceProbeResult> {
     let request: WorkspaceProbeRequest;
     try {
-      request = validateWorkspaceProbeRequest(input, this.#verifier, {
+      request = (await verifyProtocolStep(() => validateWorkspaceProbeRequest(input, this.#verifier, {
         requireActiveAt: false,
-      });
+      })));
     } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       throw new WorkspaceProbeRejectedError(
         error instanceof Error ? error.message : "Workspace probe request is invalid",
         { cause: error },
@@ -177,7 +188,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     const key = probeKey(request);
     const requestDigest = workspaceProbeRequestDigest(request);
     await this.#ensureOpen();
-    const durable = this.#state().entries.get(key);
+    const durable = await this.#entry(key);
     if (durable) {
       if (durable.requestDigest !== requestDigest) {
         throw new WorkspaceProbeConflictError(
@@ -206,87 +217,42 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     }
   }
 
-  async compact(
-    completedBefore: string,
-    limit = 64,
-    abort: AbortSignal = new AbortController().signal,
-  ): Promise<number> {
-    const cutoff = parseCanonicalTime(
-      completedBefore,
-      "Workspace probe retention cutoff",
-    );
+  async compact(completedBefore: string, limit = 64,
+    abort: AbortSignal = new AbortController().signal): Promise<number> {
+    parseCanonicalTime(completedBefore, "Workspace probe retention cutoff");
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) {
-      throw new RangeError(
-        "Workspace probe retirement page size must be between 1 and 256",
-      );
+      throw new RangeError("Workspace probe retirement page size must be between 1 and 256");
     }
     await this.#ensureOpen();
+    const candidates = await this.#log.transactDurableProjection<never, { key: string; requestDigest: string }[]>(
+      PROBE_INDEX_ID, async current => {
+        const page = await current.scan({ gte: PROBE_COMPLETED, lt: PROBE_COMPLETED + completedBefore }, limit);
+        const values: { key: string; requestDigest: string }[] = [];
+        for (const item of page.entries) {
+          const row = probeStoredObject(item.value);
+          if (Object.keys(row).length !== 3 || typeof row.key !== "string" || typeof row.completedAt !== "string" ||
+              typeof row.requestDigest !== "string" || item.key !== probeCompletionKey(row.key, row.completedAt)) throw invalidProbeIndex();
+          const state = await readProbeIndex(current, row.key, this.#verifier);
+          const entry = state.entries.get(row.key);
+          if (!entry?.result || entry.completedAt !== row.completedAt || entry.requestDigest !== row.requestDigest) throw invalidProbeIndex();
+          values.push({ key: row.key, requestDigest: row.requestDigest });
+        }
+        return { kind: "return", value: values };
+      });
     let retired = 0;
-    const page: ProbeProjection["completed"][number][] = [];
-    for (const entry of this.#state().completed) {
-      if (
-        parseCanonicalTime(entry.completedAt, "Workspace probe completion") >=
-        cutoff
-      ) {
-        break;
-      }
-      page.push(entry);
-      if (page.length === limit) break;
-    }
-    for (const candidate of page) {
+    for (const candidate of candidates.value) {
       if (abort.aborted) throw abort.reason;
-      const entry = this.#state().entries.get(candidate.key);
-      if (!entry?.result) continue;
-      const transaction = await runStorageMaintenanceStep(
-        this.#storageMaintenance,
-        storageMaintenanceRequest(
-          "workspace-probe-retirement",
-          workspaceProbeMaintenanceResource(this.#executorId),
-          {
-            key: candidate.key,
-            requestDigest: entry.requestDigest,
-          },
-          { obligation: "committed" },
-        ),
-        () =>
-          this.#log.transactProjection<
-            ProbeProjection,
-            WorkspaceProbeRecord,
-            boolean
-          >(
-            this.#state(),
-            (projection, record) =>
-              reduceProbeProjection(projection, record, this.#verifier),
-            (state) => {
-              const current = state.entries.get(candidate.key);
-              if (
-                !current?.result ||
-                current.requestDigest !== entry.requestDigest
-              ) {
-                return { kind: "return", value: false };
-              }
-              return {
-                kind: "append",
-                entries: [
-                  {
-                    stream: PROBE_STREAM,
-                    body: {
-                      t: "probe-retired",
-                      key: candidate.key,
-                      requestDigest: entry.requestDigest,
-                      at: this.#clock(),
-                    },
-                  },
-                ],
-                value: true,
-              };
-            },
-            { cursor: this.#cursor, stream: PROBE_STREAM },
-          ),
-      );
-      this.#projection = transaction.state;
-      this.#cursor = transaction.cursor;
-      if (transaction.value) retired += 1;
+      const transaction = await runStorageMaintenanceStep(this.#storageMaintenance,
+        storageMaintenanceRequest("workspace-probe-retirement", workspaceProbeMaintenanceResource(this.#executorId),
+          candidate, { obligation: "committed" }),
+        () => this.#transact(candidate.key, state => {
+          const current = state.entries.get(candidate.key);
+          if (!current?.result || current.requestDigest !== candidate.requestDigest) return { kind: "return", value: false };
+          return { kind: "append", value: true, entries: [{ stream: PROBE_STREAM, body: {
+            t: "probe-retired", key: candidate.key, requestDigest: candidate.requestDigest, at: this.#clock(),
+          } }] };
+        }));
+      if (transaction.value) retired++;
     }
     return retired;
   }
@@ -375,8 +341,9 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     abort: AbortSignal,
   ): Promise<WorkspaceProbeResult> {
     try {
-      validateWorkspaceProbeRequest(request, this.#verifier);
+      (await verifyProtocolStep(() => validateWorkspaceProbeRequest(request, this.#verifier)));
     } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       throw new WorkspaceProbeRejectedError(
         error instanceof Error ? error.message : "Workspace probe request is no longer active",
         { cause: error },
@@ -385,45 +352,16 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
     const resolved = await this.#environment.resolveWorkspace(
       request.bindingRef,
     );
-    const started = await this.#log.transactProjection<
-      ProbeProjection,
-      WorkspaceProbeRecord,
-      ProbeEntry | undefined
-    >(
-      this.#state(),
-      (projection, record) =>
-        reduceProbeProjection(projection, record, this.#verifier),
-      (state) => {
-        const current = state.entries.get(key);
-        if (current) {
-          if (current.requestDigest !== requestDigest) {
-            throw new WorkspaceProbeConflictError(
-              "Workspace probe identity was reused with another payload",
-            );
-          }
-          return { kind: "return", value: current };
-        }
-        return {
-          kind: "append",
-          entries: [
-            {
-              stream: PROBE_STREAM,
-              body: {
-                t: "probe-started-v2",
-                key,
-                requestDigest,
-                request: structuredClone(request),
-                at: this.#clock(),
-              },
-            },
-          ],
-          value: undefined,
-        };
-      },
-      { cursor: this.#cursor, stream: PROBE_STREAM },
-    );
-    this.#projection = started.state;
-    this.#cursor = started.cursor;
+    const started = await this.#transact<ProbeEntry | undefined>(key, state => {
+      const current = state.entries.get(key);
+      if (current) {
+        if (current.requestDigest !== requestDigest) throw new WorkspaceProbeConflictError("Workspace probe identity was reused with another payload");
+        return { kind: "return", value: current };
+      }
+      return { kind: "append", entries: [{ stream: PROBE_STREAM, body: {
+        t: "probe-started-v2", key, requestDigest, request: structuredClone(request), at: this.#clock(),
+      } }], value: undefined };
+    });
     if (started.value?.result) return structuredClone(started.value.result);
 
     const probe = await runWithDeviceCapacity(
@@ -452,61 +390,30 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
       },
       this.#signer,
     );
-    const completed = await this.#log.transactProjection<
-      ProbeProjection,
-      WorkspaceProbeRecord,
-      WorkspaceProbeResult
-    >(
-      this.#state(),
-      (projection, record) =>
-        reduceProbeProjection(projection, record, this.#verifier),
-      (state) => {
-        const current = state.entries.get(key);
-        if (!current || current.requestDigest !== requestDigest) {
-          throw new WorkspaceProbeConflictError(
-            "Workspace probe lost its durable start record",
-          );
-        }
-        if (current.result) {
-          if (canonicalize(current.result) !== canonicalize(result)) {
-            throw new WorkspaceProbeConflictError(
-              "Workspace probe completed with conflicting results",
-            );
-          }
-          return { kind: "return", value: current.result };
-        }
-        return {
-          kind: "append",
-          entries: [
-            {
-              stream: PROBE_STREAM,
-              body: {
-                t: "probe-completed",
-                key,
-                requestDigest,
-                result,
-                at: this.#clock(),
-              },
-            },
-          ],
-          value: result,
-        };
-      },
-      { cursor: this.#cursor, stream: PROBE_STREAM },
-    );
-    this.#projection = completed.state;
-    this.#cursor = completed.cursor;
+    const completed = await this.#transact<WorkspaceProbeResult>(key, state => {
+      const current = state.entries.get(key);
+      if (!current || current.requestDigest !== requestDigest) throw new WorkspaceProbeConflictError("Workspace probe lost its durable start record");
+      if (current.result) {
+        if (canonicalize(current.result) !== canonicalize(result)) throw new WorkspaceProbeConflictError("Workspace probe completed with conflicting results");
+        return { kind: "return", value: current.result };
+      }
+      return { kind: "append", entries: [{ stream: PROBE_STREAM, body: {
+        t: "probe-completed", key, requestDigest, result, at: this.#clock(),
+      } }], value: result };
+    });
     return structuredClone(completed.value);
   }
 
-  #state(): ProbeProjection {
-    if (!this.#projection) {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "Workspace probe log has not been opened",
-      );
-    }
-    return this.#projection;
+  #transact<T>(key: string, decide: (state: ProbeProjection) => ProjectionTransactionDecision<WorkspaceProbeRecord, T>) {
+    return this.#log.transactDurableProjection<WorkspaceProbeRecord, T>(PROBE_INDEX_ID, async current => {
+      const state = await readProbeIndex(current, key, this.#verifier);
+      if (!state.established || state.executorId !== this.#executorId) throw corruptProbeLog("Workspace probe log belongs to another executor");
+      return decide(state);
+    });
+  }
+
+  async #entry(key: string): Promise<ProbeEntry | undefined> {
+    return (await this.#transact(key, state => ({ kind: "return", value: state.entries.get(key) }))).value;
   }
 
   async #ensureOpen(): Promise<void> {
@@ -516,81 +423,30 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
 
   async #open(): Promise<void> {
     const persistence = await this.#persistence.inspectEstablishment();
-    if (
-      (persistence.establishmentMarker !== "absent" &&
-        persistence.establishmentMarker !== "present") ||
-      (persistence.authorityLog !== "absent" &&
-        persistence.authorityLog !== "present")
-    ) {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "Workspace probe persistence observation is invalid",
-      );
+    if ((persistence.establishmentMarker !== "absent" && persistence.establishmentMarker !== "present") ||
+        (persistence.authorityLog !== "absent" && persistence.authorityLog !== "present")) {
+      throw new AuthorityStorageError("commit-log-corrupt", "Workspace probe persistence observation is invalid");
     }
     const markerExists = persistence.establishmentMarker === "present";
     if (markerExists && persistence.authorityLog === "absent") {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "Established workspace probe log is missing",
-      );
+      throw new AuthorityStorageError("commit-log-corrupt", "Established workspace probe log is missing");
     }
-    const snapshot = await this.#log.readSnapshot<WorkspaceProbeRecord>();
-    let state = emptyProbeProjection();
-    for (const commit of snapshot.commits) {
-      for (const entry of commit.entries) {
-        if (entry.stream === PROBE_STREAM) {
-          state = reduceProbeProjection(
-            state,
-            entry as LogicalRecord<WorkspaceProbeRecord>,
-            this.#verifier,
-          );
-        }
+    // Absence is established by the index's verified complete source prefix.
+    // The reducer refuses any non-genesis record before establishment.
+    await this.#log.transactDurableProjection<WorkspaceProbeRecord, void>(PROBE_INDEX_ID, async current => {
+      const state = await readProbeIndex(current, undefined, this.#verifier);
+      if (state.established) {
+        if (state.executorId !== this.#executorId) throw corruptProbeLog("Workspace probe log belongs to another executor");
+        return { kind: "return", value: undefined };
       }
-    }
-    this.#cursor = snapshot.cursor;
-    if (!state.established) {
-      const probeEntriesExist = snapshot.commits.some((commit) =>
-        commit.entries.some((entry) => entry.stream === PROBE_STREAM),
-      );
-      if (markerExists || probeEntriesExist) {
-        throw new AuthorityStorageError(
-          "invalid-authority-record",
-          "Workspace probe log lacks its establishment fact",
-        );
-      }
-      await this.#log.append<WorkspaceProbeRecord>([
-        {
-          stream: PROBE_STREAM,
-          body: {
-            t: "probe-log-established",
-            executorId: this.#executorId,
-          },
-        },
-      ]);
-      const refreshed = await this.#log.readSnapshot<WorkspaceProbeRecord>();
-      state = emptyProbeProjection();
-      for (const commit of refreshed.commits) {
-        for (const entry of commit.entries) {
-          if (entry.stream === PROBE_STREAM) {
-            state = reduceProbeProjection(
-              state,
-              entry as LogicalRecord<WorkspaceProbeRecord>,
-              this.#verifier,
-            );
-          }
-        }
-      }
-      this.#cursor = refreshed.cursor;
-    }
-    if (state.executorId !== this.#executorId) {
-      throw new AuthorityStorageError(
-        "invalid-authority-record",
-        "Workspace probe log belongs to another executor",
-      );
-    }
-    this.#projection = state;
+      if (markerExists) throw corruptProbeLog("Workspace probe log lacks its establishment fact");
+      return { kind: "append", entries: [{ stream: PROBE_STREAM, body: {
+        t: "probe-log-established", executorId: this.#executorId,
+      } }], value: undefined };
+    });
     if (!markerExists) await this.#persistence.publishEstablishment();
   }
+
 }
 
 export interface EnvironmentProbeOwnerOptions {
@@ -707,6 +563,79 @@ export class MeshWorkspaceProbeAdapter implements WorkspaceProbePort {
       this.verifier,
     );
   }
+}
+
+function probeEntryKey(key: string): string { return "entry/" + protocolDigest("WorkspaceProbeIndexKey", 1, { key }); }
+function probeCompletionKey(key: string, completedAt: string): string { return PROBE_COMPLETED + completedAt + "/" + protocolDigest("WorkspaceProbeIndexKey", 1, { key }); }
+function invalidProbeIndex(): DurableProjectionRecordBindingError {
+  return new DurableProjectionRecordBindingError("Workspace probe derived identity is inconsistent");
+}
+function probeStoredObject(value: JsonValue | undefined): Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidProbeIndex();
+  return value;
+}
+
+/** One requested identity is decoded with the original codecs and fold.
+ * Historical requests/signatures are never materialized to answer this read. */
+async function readProbeIndex(current: DurableProjectionReadContext, key: string | undefined,
+  verifier: ProtocolSignatureVerifier): Promise<ProbeProjection> {
+  let state = emptyProbeProjection();
+  const meta = await current.get(PROBE_META);
+  if (meta !== undefined) {
+    const value = probeStoredObject(meta);
+    if (Object.keys(value).length !== 2 || value.established !== true || typeof value.executorId !== "string" ||
+        !value.executorId.length) throw invalidProbeIndex();
+    state = { ...state, established: true, executorId: value.executorId };
+  }
+  if (key === undefined) return state;
+  const stored = await current.get(probeEntryKey(key));
+  if (stored === undefined) return state;
+  try {
+    const row = probeStoredObject(stored);
+    if (Object.keys(row).length !== 3 || row.key !== key || row.executorId !== state.executorId || !state.established) throw invalidProbeIndex();
+    const entry = probeStoredObject(row.entry) as unknown as ProbeEntry;
+    const start: WorkspaceProbeRecord = entry.request
+      ? { t: "probe-started-v2", key, requestDigest: entry.requestDigest, request: entry.request, at: entry.startedAt }
+      : { t: "probe-started", key, requestDigest: entry.requestDigest, at: entry.startedAt };
+    state = reduceProbeProjection(state, { stream: PROBE_STREAM, body: start }, verifier);
+    if (entry.result !== undefined) {
+      state = reduceProbeProjection(state, { stream: PROBE_STREAM, body: {
+        t: "probe-completed", key, requestDigest: entry.requestDigest, result: entry.result, at: entry.completedAt!,
+      } }, verifier);
+    }
+    if (canonicalize(state.entries.get(key)) !== canonicalize(entry)) throw invalidProbeIndex();
+    return state;
+  } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
+    throw invalidProbeIndex();
+  }
+}
+
+async function reduceProbeIndex(envelope: CommitEnvelope<JsonValue>, current: DurableProjectionReadContext,
+  verifier: ProtocolSignatureVerifier): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const read: DurableProjectionReadContext = { get: async key => overlay.has(key) ? overlay.get(key) : current.get(key), scan: (...args) => current.scan(...args) };
+  const put = (key: string, value: JsonValue): void => { overlay.set(key, value); mutations.push({ kind: "put", key, value }); };
+  const remove = (key: string): void => { overlay.set(key, undefined); mutations.push({ kind: "tombstone", key }); };
+  for (const logical of envelope.entries) {
+    if (logical.stream !== PROBE_STREAM) continue;
+    const record = validateProbeRecord(logical.body as unknown as WorkspaceProbeRecord, verifier);
+    const key = record.t === "probe-log-established" ? undefined : record.key;
+    const prior = await readProbeIndex(read, key, verifier);
+    const previous = key === undefined ? undefined : prior.entries.get(key);
+    const next = reduceProbeProjection(prior, { stream: PROBE_STREAM, body: record }, verifier);
+    put(PROBE_META, { established: next.established, executorId: next.executorId! });
+    if (key !== undefined) {
+      if (previous?.completedAt) remove(probeCompletionKey(key, previous.completedAt));
+      const entry = next.entries.get(key);
+      if (entry) {
+        put(probeEntryKey(key), { key, executorId: next.executorId!, entry: entry as unknown as JsonValue });
+        if (entry.completedAt) put(probeCompletionKey(key, entry.completedAt), { key, completedAt: entry.completedAt, requestDigest: entry.requestDigest });
+      } else remove(probeEntryKey(key));
+    }
+  }
+  return mutations;
 }
 
 function reduceProbeProjection(
@@ -860,7 +789,8 @@ function validateProbeRecord(
       request = validateWorkspaceProbeRequest(record.request, verifier, {
         requireActiveAt: false,
       });
-    } catch {
+    } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       throw corruptProbeLog("Workspace probe request is malformed");
     }
     if (
@@ -873,7 +803,8 @@ function validateProbeRecord(
   if (record.t === "probe-completed") {
     try {
       validateWorkspaceProbeResult(record.result, verifier);
-    } catch {
+    } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       throw corruptProbeLog("Workspace probe result is malformed");
     }
   }
@@ -980,4 +911,12 @@ export class WorkspaceProbeRejectedError extends TypeError {
     super(message, options);
     this.name = "WorkspaceProbeRejectedError";
   }
+}
+
+export function registerWorkspaceProbeProjection(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier) {
+  return log.durableProjection({
+      projectionId: PROBE_INDEX_ID, reducerVersion: 1, authenticated: true,
+      inputs: { streams: [PROBE_STREAM] },
+      reduce: (envelope, current) => reduceProbeIndex(envelope, current, verifier),
+    });
 }

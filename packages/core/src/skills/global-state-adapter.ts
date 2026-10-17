@@ -18,7 +18,6 @@ import type {
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
-  ProjectionCursor,
   RebuildableDurableProjectionIndex,
 } from "../authority/index.js";
 import {
@@ -76,19 +75,13 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   readonly #anchorEpoch: number;
   readonly #clock: () => string;
   readonly #durable: RebuildableDurableProjectionIndex;
-  #projection: SkillProjection = emptyProjection();
-  #cursor: ProjectionCursor | undefined;
   #opening: Promise<void> | undefined;
 
   constructor(options: AnchorSkillGlobalStateAdapterOptions) {
     this.#log = options.log;
     this.#anchorEpoch = positiveInteger(options.anchorEpoch, "Skill anchor epoch");
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#durable = this.#log.durableProjection({
-      projectionId: SKILL_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 2,
-      reduce: reduceSkillDurableProjection,
-    });
+    this.#durable = registerSkillAuthorityProjection(this.#log);
   }
 
   readonly stagedProjectionId = SKILL_AUTHORITY_PROJECTION_ID;
@@ -273,16 +266,14 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     const candidateReferences = await this.#collectCandidateReferences([
       { requestId: context.requestId, mutation },
     ]);
-    const transaction = await this.#log.transactProjection<
-      SkillProjection,
+    const transaction = await this.#log.transactDurableProjection<
       SkillAuthorityRecord,
       { revision: number; catalogRevision: number }
     >(
-      this.#projection,
-      reduceRecord,
-      async (_state, transactionContext) => {
+      SKILL_AUTHORITY_PROJECTION_ID,
+      async (projection, transactionContext) => {
         const state = await loadSkillProjectionForMutations(
-          transactionContext.readProjection(SKILL_AUTHORITY_PROJECTION_ID),
+          projection,
           [{ requestId: context.requestId, mutation }],
         );
         const planned = planMutation(
@@ -313,14 +304,9 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         };
       },
       {
-        cursor: this.#cursor,
-        stream: SKILL_STREAM,
-        readProjectionIds: [SKILL_AUTHORITY_PROJECTION_ID],
         candidateReferences,
       },
     );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
     return transaction.value;
   }
 
@@ -352,22 +338,8 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   }
 
   async #ensureOpen(): Promise<void> {
-    this.#opening ??= this.#reload();
+    this.#opening ??= this.#refreshDurableProjection();
     await this.#opening;
-  }
-
-  async #reload(): Promise<void> {
-    const snapshot = await this.#log.readSnapshot<SkillAuthorityRecord>();
-    let state = emptyProjection();
-    for (const commit of snapshot.commits) {
-      for (const entry of commit.entries) {
-        if (entry.stream === SKILL_STREAM) {
-          state = reduceRecord(state, entry as LogicalRecord<SkillAuthorityRecord>);
-        }
-      }
-    }
-    this.#projection = state;
-    this.#cursor = snapshot.cursor;
   }
 
   #admit(
@@ -797,4 +769,14 @@ function conflict(code: AuthorityError["code"], message: string) {
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} is invalid`);
   return value;
+}
+
+export function registerSkillAuthorityProjection(log: AuthorityCommitLog) {
+  return log.durableProjection({
+      projectionId: SKILL_AUTHORITY_PROJECTION_ID,
+      inputs: { streams: [SKILL_STREAM] },
+      authenticated: true,
+      reducerVersion: 2,
+      reduce: reduceSkillDurableProjection,
+    });
 }

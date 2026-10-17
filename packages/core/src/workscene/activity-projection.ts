@@ -34,11 +34,7 @@ export class IncrementalWorksceneActivityProjection {
   #stopped = false;
 
   constructor(options: IncrementalWorksceneActivityProjectionOptions) {
-    this.#index = options.log.durableProjection<SessionInternalRecord>({
-      projectionId: "workscene-session-activity-v2",
-      reducerVersion: 1,
-      reduce: reduceIncrementalActivity,
-    });
+    this.#index = registerWorksceneActivityProjection(options.log);
   }
 
   async get(sceneId: string): Promise<string | undefined> {
@@ -401,4 +397,13 @@ function requireTime(value: string): string {
     throw new TypeError("Workscene activity time is invalid");
   }
   return value;
+}
+
+export function registerWorksceneActivityProjection(log: AuthorityCommitLog) {
+  return log.durableProjection<SessionInternalRecord>({
+      projectionId: "workscene-session-activity-v2",
+      inputs: { families: ["session-activity:"] },
+      reducerVersion: 1,
+      reduce: reduceIncrementalActivity,
+    });
 }

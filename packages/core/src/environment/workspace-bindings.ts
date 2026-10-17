@@ -4,10 +4,13 @@ import path from "node:path";
 import type {
   AuthorityCommitLog,
   PhysicalStorageStepRunner,
-  ProjectionCursor,
+  DurableProjectionReadContext,
+  DurableProjectionMutation,
 } from "../authority/index.js";
-import { AuthorityStorageError } from "../authority/index.js";
+import { AuthorityStorageError, DurableProjectionRecordBindingError, createDurableProjectionOverlay } from "../authority/index.js";
 import type {
+  CommitEnvelope,
+  JsonValue,
   CapabilityDescriptor,
   EnvironmentPort,
   ExecutorVersionInventory,
@@ -24,6 +27,7 @@ import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
 import { SerialTaskQueue } from "../persistence/index.js";
 import {
   assertResourceLeaseActiveAt,
+  canonicalize,
   protocolDigest,
   validateReservableResourceLease,
   type ProtocolSignatureVerifier,
@@ -40,6 +44,8 @@ import {
 import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
 
 const DIRECTORY_STREAM = "executor:workspace-bindings";
+const BINDING_INDEX_ID = "workspace-binding-state-v1";
+const BINDING_META = "meta";
 const ADMIN_STEP_BUDGET: DeviceCapacityBudget = {
   occupancy: {
     memoryReservationBytes: 64 * 1024,
@@ -239,7 +245,7 @@ export class WorkspaceBindingService
   readonly #resetGenesis: WorkspaceBindingServiceOptions["resetGenesis"];
   readonly #operations = new SerialTaskQueue();
   #projection: WorkspaceBindingProjection | undefined;
-  #cursor: ProjectionCursor | undefined;
+
   #opening: Promise<void> | undefined;
 
   constructor(options: WorkspaceBindingServiceOptions) {
@@ -253,6 +259,7 @@ export class WorkspaceBindingService
       "Workspace executorId",
     );
     this.#log = options.log;
+    registerWorkspaceBindingProjection(options.log);
     this.#persistence = options.persistence;
     this.#verifier = options.verifier;
     this.#capacity = options.capacity;
@@ -272,7 +279,7 @@ export class WorkspaceBindingService
 
   async resetReceipt(): Promise<WorkspaceBindingResetReceipt | undefined> {
     await this.#ensureOpen();
-    return this.#operations.run(async () => {
+    return this.#runOperation(async () => {
       await this.#synchronizeProjection();
       const receipt = this.#state().resetReceipt;
       return receipt ? structuredClone(receipt) : undefined;
@@ -284,8 +291,8 @@ export class WorkspaceBindingService
   ): Promise<LocalWorkspaceBinding[]> {
     this.#validateControl(control);
     await this.#ensureOpen();
-    return this.#operations.run(async () => {
-      await this.#synchronizeProjection();
+    return this.#runOperation(async () => {
+      await this.#synchronizeProjection(true);
       return [...this.#state().bindings.values()]
         .sort(
           (left, right) =>
@@ -316,7 +323,8 @@ export class WorkspaceBindingService
         return this.#transact(
           control.requestId,
           requestDigest,
-          (state) => {
+          request,
+          async (state, current) => {
             const duplicate = state.displayNames.get(
               displayNameKey(displayName),
             );
@@ -338,7 +346,7 @@ export class WorkspaceBindingService
                 "Workspace display name is already in use",
               );
             }
-            const candidateRef = this.#nextBindingRef(state);
+            const candidateRef = await this.#nextBindingRef(current);
             const binding: LocalWorkspaceBinding = {
               bindingRef: candidateRef,
               revision: 1,
@@ -389,6 +397,7 @@ export class WorkspaceBindingService
         return this.#transact(
           control.requestId,
           requestDigest,
+          request,
           (state) => {
             const current = state.bindings.get(bindingRef);
             if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
@@ -473,6 +482,7 @@ export class WorkspaceBindingService
       await this.#transact(
         control.requestId,
         requestDigest,
+        request,
         (state) => {
           const current = state.bindings.get(bindingRef);
           if (!current) throw new WorkspaceBindingNotFoundError(bindingRef);
@@ -537,12 +547,13 @@ export class WorkspaceBindingService
         );
       }
     };
-    const result = await this.#operations.run(() => {
+    const result = await this.#runOperation(() => {
       abort.throwIfAborted();
       return this.#transact(
         requestId,
         requestDigest,
-        (state) => {
+        request,
+        async (state, current) => {
           const samePath = [
             ...state.bindings.values(),
             ...[...state.stagedLegacy.values()]
@@ -575,7 +586,7 @@ export class WorkspaceBindingService
               "legacy-name-conflict",
             );
           }
-          const candidateRef = this.#nextBindingRef(state);
+          const candidateRef = await this.#nextBindingRef(current);
           const binding: LocalWorkspaceBinding = {
             bindingRef: candidateRef,
             revision: 1,
@@ -655,11 +666,12 @@ export class WorkspaceBindingService
           };
     const requestDigest = workspaceBindingRequestDigest(request);
     const requestId = `migration:${status}:${input.migrationId}:${input.sourceSnapshotToken}`;
-    await this.#operations.run(() => {
+    await this.#runOperation(() => {
       abort.throwIfAborted();
       return this.#transact(
         requestId,
         requestDigest,
+        request,
         (state) => {
           const terminal = state.migrationTerminals.get(
             migrationKey(input.migrationId, input.sourceSnapshotToken),
@@ -694,19 +706,18 @@ export class WorkspaceBindingService
     });
   }
 
-  async resolveWorkspace(
-    bindingRef: string,
-  ): Promise<{ absolutePath: string; workspaceBindingRevision: number }> {
+  async resolveWorkspace(bindingRef: string): Promise<{ absolutePath: string; workspaceBindingRevision: number }> {
     requireIdentifier(bindingRef, "Workspace bindingRef");
     await this.#ensureOpen();
-    return this.#operations.run(async () => {
-      await this.#synchronizeProjection();
-      const binding = this.#state().bindings.get(bindingRef);
+    return this.#runOperation(async () => {
+      const result = await this.#log.transactDurableProjection<never, LocalWorkspaceBinding | undefined>(BINDING_INDEX_ID, async current => {
+        const { state } = await readBindingIndex(current, { bindingRef });
+        if (!state.established || state.deviceId !== this.#deviceId) throw corruptDirectory("Workspace binding directory belongs to another device");
+        return { kind: "return", value: state.bindings.get(bindingRef) };
+      });
+      const binding = result.value;
       if (!binding) throw new WorkspaceBindingNotFoundError(bindingRef);
-      return {
-        absolutePath: binding.absolutePath,
-        workspaceBindingRevision: binding.workspaceBindingRevision,
-      };
+      return { absolutePath: binding.absolutePath, workspaceBindingRevision: binding.workspaceBindingRevision };
     });
   }
 
@@ -732,8 +743,8 @@ export class WorkspaceBindingService
 
   async capabilitySnapshot(): Promise<CapabilityDescriptor> {
     await this.#ensureOpen();
-    const workspaces = await this.#operations.run(async () => {
-      await this.#synchronizeProjection();
+    const workspaces = await this.#runOperation(async () => {
+      await this.#synchronizeProjection(true);
       return [...this.#state().bindings.values()]
         .sort((left, right) => left.bindingRef.localeCompare(right.bindingRef))
         .map(({ bindingRef, workspaceBindingRevision, displayName }) => ({
@@ -756,57 +767,28 @@ export class WorkspaceBindingService
   async #transact<T>(
     requestId: string,
     requestDigest: string,
-    decide: (state: WorkspaceBindingProjection) => {
-      value: T;
-      record?: WorkspaceBindingRecord;
-    },
+    request: WorkspaceBindingRequestIdentity,
+    decide: (state: WorkspaceBindingProjection, current: DurableProjectionReadContext) =>
+      { value: T; record?: WorkspaceBindingRecord } | Promise<{ value: T; record?: WorkspaceBindingRecord }>,
     runPhysicalStep?: PhysicalStorageStepRunner,
     assertReplayAllowed?: (state: WorkspaceBindingProjection) => void,
   ): Promise<T> {
-    const current = this.#state();
-    const transaction = await this.#log.transactProjection(
-      current,
-      reduceWorkspaceBindingProjection,
-      (state) => {
+    const transaction = await this.#log.transactDurableProjection<WorkspaceBindingRecord, T>(
+      BINDING_INDEX_ID, async current => {
+        const { state } = await readBindingIndex(current, { requestId, request });
+        if (!state.established || state.deviceId !== this.#deviceId) throw corruptDirectory("Workspace binding directory belongs to another device");
         assertReplayAllowed?.(state);
         const previous = state.requests.get(requestId);
         if (previous) {
-          if (previous.digest !== requestDigest) {
-            throw new WorkspaceBindingConflictError(
-              "Workspace requestId was reused with different inputs",
-            );
-          }
-          if (previous.binding) {
-            return {
-              kind: "return",
-              value: cloneBinding(previous.binding) as T,
-            };
-          }
-          return { kind: "return", value: undefined as T };
+          if (previous.digest !== requestDigest) throw new WorkspaceBindingConflictError("Workspace requestId was reused with different inputs");
+          return { kind: "return", value: previous.binding ? cloneBinding(previous.binding) as T : undefined as T };
         }
-        const decision = decide(state);
-        if (!decision.record) {
-          return { kind: "return", value: decision.value };
-        }
-        return {
-          kind: "append",
-          entries: [
-            {
-              stream: DIRECTORY_STREAM,
-              body: decision.record,
-            } satisfies LogicalRecord<WorkspaceBindingRecord>,
-          ],
-          value: decision.value,
-        };
+        const decision = await decide(state, current);
+        if (!decision.record) return { kind: "return", value: decision.value };
+        return { kind: "append", entries: [{ stream: DIRECTORY_STREAM, body: decision.record }], value: decision.value };
       },
-      {
-        cursor: this.#cursor,
-        stream: DIRECTORY_STREAM,
-        ...(runPhysicalStep ? { runPhysicalStep } : {}),
-      },
+      { ...(runPhysicalStep ? { runPhysicalStep } : {}) },
     );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
     return transaction.value;
   }
 
@@ -814,7 +796,7 @@ export class WorkspaceBindingService
     abort: AbortSignal,
     operation: (runPhysicalStep: PhysicalStorageStepRunner) => Promise<T>,
   ): Promise<T> {
-    return this.#operations.run(() =>
+    return this.#runOperation(() =>
       operation((physicalStep) =>
         runWithDeviceCapacity(
           this.#capacity,
@@ -833,6 +815,10 @@ export class WorkspaceBindingService
         ),
       ),
     );
+  }
+
+  #runOperation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#operations.run(operation);
   }
 
   #migrationPhysicalStep(
@@ -864,17 +850,14 @@ export class WorkspaceBindingService
     });
   }
 
-  #nextBindingRef(state: WorkspaceBindingProjection): string {
-    for (let attempt = 0; attempt < 32; attempt += 1) {
-      const candidate = requireIdentifier(
-        this.#bindingRefFactory(),
-        "Workspace bindingRef",
-      );
-      if (!state.usedBindingRefs.has(candidate)) return candidate;
+  async #nextBindingRef(current: DurableProjectionReadContext): Promise<string> {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const candidate = requireIdentifier(this.#bindingRefFactory(), "Workspace bindingRef");
+      const used = await bindingIndexValue(current, "used", candidate);
+      if (used === undefined) return candidate;
+      if (used !== true) throw invalidBindingIndex();
     }
-    throw new WorkspaceBindingConflictError(
-      "Workspace binding identity source repeatedly collided",
-    );
+    throw new WorkspaceBindingConflictError("Workspace binding identity source repeatedly collided");
   }
 
   #state(): WorkspaceBindingProjection {
@@ -892,91 +875,37 @@ export class WorkspaceBindingService
     return this.#opening;
   }
 
-  async #synchronizeProjection(): Promise<void> {
-    const transaction = await this.#log.transactProjection<
-      WorkspaceBindingProjection,
-      WorkspaceBindingRecord,
-      undefined
-    >(
-      this.#state(),
-      reduceWorkspaceBindingProjection,
-      () => ({ kind: "return", value: undefined }),
-      { cursor: this.#cursor, stream: DIRECTORY_STREAM },
-    );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
+  async #synchronizeProjection(includeBindings = false): Promise<void> {
+    const result = await this.#log.transactDurableProjection<never, WorkspaceBindingProjection>(BINDING_INDEX_ID, async current => {
+      const { state } = await readBindingIndex(current, { allBindings: includeBindings });
+      if (!state.established || state.deviceId !== this.#deviceId) throw corruptDirectory("Workspace binding directory belongs to another device");
+      return { kind: "return", value: state };
+    });
+    this.#projection = result.value;
   }
 
   async #open(): Promise<void> {
     const persistence = await this.#persistence.inspectEstablishment();
     const markerExists = persistence.establishmentMarker === "present";
     if (markerExists && persistence.authorityLog === "absent") {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "Established workspace binding log is missing",
-      );
+      throw new AuthorityStorageError("commit-log-corrupt", "Established workspace binding log is missing");
     }
-    const snapshot = await this.#log.readSnapshot<WorkspaceBindingRecord>();
-    let state = emptyWorkspaceBindingProjection();
-    for (const commit of snapshot.commits) {
-      for (const entry of commit.entries) {
-        if (entry.stream !== DIRECTORY_STREAM) continue;
-        state = reduceWorkspaceBindingProjection(state, entry);
+    await this.#log.transactDurableProjection<WorkspaceBindingRecord, void>(BINDING_INDEX_ID, async current => {
+      const { state } = await readBindingIndex(current);
+      if (state.established) {
+        if (state.deviceId !== this.#deviceId) throw corruptDirectory("Workspace binding directory belongs to another device");
+        return { kind: "return", value: undefined };
       }
-    }
-    this.#cursor = snapshot.cursor;
-    if (!state.established) {
-      const bindingEntriesExist = snapshot.commits.some((commit) =>
-        commit.entries.some((entry) => entry.stream === DIRECTORY_STREAM),
-      );
-      if (markerExists || bindingEntriesExist) {
-        throw new AuthorityStorageError(
-          "artifact-corrupt",
-          "Workspace binding directory lacks its establishment fact",
-        );
-      }
-      const commit = await this.#log.append<WorkspaceBindingRecord>([
-        {
-          stream: DIRECTORY_STREAM,
-          body: { t: "directory-established", deviceId: this.#deviceId },
-        },
-        ...(this.#resetGenesis
-          ? [
-              {
-                stream: DIRECTORY_STREAM,
-                body: {
-                  t: "catalog-reset" as const,
-                  ...this.#resetGenesis,
-                },
-              },
-            ]
-          : []),
-      ]);
-      for (const entry of commit.entries) {
-        state = reduceWorkspaceBindingProjection(
-          state,
-          entry as LogicalRecord<WorkspaceBindingRecord>,
-        );
-      }
-      const refreshed = await this.#log.readSnapshot<WorkspaceBindingRecord>();
-      state = emptyWorkspaceBindingProjection();
-      for (const envelope of refreshed.commits) {
-        for (const entry of envelope.entries) {
-          if (entry.stream !== DIRECTORY_STREAM) continue;
-          state = reduceWorkspaceBindingProjection(state, entry);
-        }
-      }
-      this.#cursor = refreshed.cursor;
-    }
-    this.#projection = state;
-    if (state.deviceId !== this.#deviceId) {
-      throw new AuthorityStorageError(
-        "invalid-authority-record",
-        "Workspace binding directory belongs to another device",
-      );
-    }
+      if (markerExists) throw new AuthorityStorageError("artifact-corrupt", "Workspace binding directory lacks its establishment fact");
+      return { kind: "append", entries: [
+        { stream: DIRECTORY_STREAM, body: { t: "directory-established", deviceId: this.#deviceId } },
+        ...(this.#resetGenesis ? [{ stream: DIRECTORY_STREAM, body: { t: "catalog-reset" as const, ...this.#resetGenesis } }] : []),
+      ], value: undefined };
+    });
+    await this.#synchronizeProjection();
     if (!markerExists) await this.#persistence.publishEstablishment();
   }
+
 }
 
 export function localEnvironmentControlSubject(
@@ -1090,6 +1019,233 @@ function normalizePatch(patch: WorkspaceBindingPatch): WorkspaceBindingPatch {
   return {
     absolutePath: normalizeWorkspacePath(absolutePath),
   };
+}
+
+interface BindingIndexSelection {
+  readonly bindingRef?: string;
+  readonly requestId?: string;
+  readonly request?: WorkspaceBindingRequestIdentity;
+  readonly record?: WorkspaceBindingRecord;
+  readonly allBindings?: boolean;
+}
+function bindingIndexKey(kind: string, id: string): string {
+  return kind + "/" + protocolDigest("WorkspaceBindingIndexKey", 1, { id });
+}
+function stagedIndexPrefix(migration: string): string { return bindingIndexKey("staged-migration", migration) + "/"; }
+function stagedIndexKey(migration: string, ref: string): string { return stagedIndexPrefix(migration) + protocolDigest("WorkspaceBindingIndexKey", 1, { id: ref }); }
+function invalidBindingIndex(): DurableProjectionRecordBindingError {
+  return new DurableProjectionRecordBindingError("Workspace binding derived identity is inconsistent");
+}
+function bindingIndexObject(value: JsonValue | undefined): Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidBindingIndex();
+  return value;
+}
+async function bindingIndexValue(current: DurableProjectionReadContext, kind: string, id: string): Promise<JsonValue | undefined> {
+  const value = await current.get(bindingIndexKey(kind, id));
+  if (value === undefined) return;
+  const row = bindingIndexObject(value);
+  if (Object.keys(row).length !== 3 || row.kind !== kind || row.id !== id || row.value === undefined) throw invalidBindingIndex();
+  return row.value;
+}
+function decodeIndexedBinding(value: JsonValue, ref: string): LocalWorkspaceBinding {
+  try {
+    const binding = value as unknown as LocalWorkspaceBinding;
+    validateBinding(binding);
+    if (binding.bindingRef !== ref) throw invalidBindingIndex();
+    return cloneBinding(binding);
+  } catch { throw invalidBindingIndex(); }
+}
+
+async function readBindingIndex(current: DurableProjectionReadContext, selection: BindingIndexSelection = {}): Promise<{ state: WorkspaceBindingProjection; bindingCount: number }> {
+  const state = emptyWorkspaceBindingProjection();
+  let bindingCount = 0;
+  const meta = await current.get(BINDING_META);
+  if (meta !== undefined) {
+    try {
+      const row = bindingIndexObject(meta);
+      const expected = row.resetReceipt === undefined ? 3 : 4;
+      if (Object.keys(row).length !== expected || row.established !== true || typeof row.deviceId !== "string" ||
+          typeof row.bindingCount !== "number" || !Number.isSafeInteger(row.bindingCount) || row.bindingCount < 0) throw invalidBindingIndex();
+      state.established = true;
+      state.deviceId = requireIdentifier(row.deviceId, "Workspace indexed device");
+      bindingCount = row.bindingCount;
+      if (row.resetReceipt !== undefined) {
+        const record = validateRecord({ t: "catalog-reset", ...bindingIndexObject(row.resetReceipt) } as unknown as WorkspaceBindingRecord);
+        if (record.t !== "catalog-reset") throw invalidBindingIndex();
+        const { t: _tag, ...receipt } = record;
+        state.resetReceipt = receipt;
+      }
+    } catch { throw invalidBindingIndex(); }
+  }
+  const refs = new Set<string>();
+  const loadBinding = async (ref: string): Promise<void> => {
+    if (refs.has(ref)) return;
+    refs.add(ref);
+    const value = await bindingIndexValue(current, "binding", ref);
+    if (value !== undefined) {
+      const binding = decodeIndexedBinding(value, ref);
+      const name = displayNameKey(binding.displayName);
+      if (await bindingIndexValue(current, "name", name) !== ref) throw invalidBindingIndex();
+      state.bindings.set(ref, binding);
+      state.displayNames.set(name, ref);
+    }
+    const used = await bindingIndexValue(current, "used", ref);
+    if (used !== undefined) {
+      if (used !== true) throw invalidBindingIndex();
+      state.usedBindingRefs.add(ref);
+    }
+    const owner = await bindingIndexValue(current, "legacy-owner", ref);
+    if (owner !== undefined) {
+      const row = bindingIndexObject(owner);
+      if (Object.keys(row).length !== 2 || typeof row.migrationId !== "string" || typeof row.sourceSnapshotToken !== "string") throw invalidBindingIndex();
+      state.legacyOwners.set(ref, { migrationId: row.migrationId, sourceSnapshotToken: row.sourceSnapshotToken });
+    }
+  };
+  const loadName = async (name: string): Promise<void> => {
+    const ref = await bindingIndexValue(current, "name", name);
+    if (ref === undefined) return;
+    if (typeof ref !== "string") throw invalidBindingIndex();
+    await loadBinding(ref);
+    if (state.displayNames.get(name) !== ref) throw invalidBindingIndex();
+  };
+  const loadStaged = async (ref: string): Promise<void> => {
+    if (state.stagedLegacy.has(ref)) return;
+    const value = await bindingIndexValue(current, "staged", ref);
+    if (value === undefined) return;
+    const row = bindingIndexObject(value);
+    if (Object.keys(row).length !== 3 || typeof row.migrationId !== "string" || typeof row.sourceSnapshotToken !== "string" || row.binding === undefined) throw invalidBindingIndex();
+    const binding = decodeIndexedBinding(row.binding, ref);
+    if (await bindingIndexValue(current, "staged-name", displayNameKey(binding.displayName)) !== ref) throw invalidBindingIndex();
+    state.stagedLegacy.set(ref, { migrationId: row.migrationId, sourceSnapshotToken: row.sourceSnapshotToken, binding });
+    await loadBinding(ref);
+  };
+  const request = selection.request ?? (selection.record && "request" in selection.record ? selection.record.request : undefined);
+  const requestId = selection.requestId ?? (selection.record && "requestId" in selection.record ? selection.record.requestId : undefined);
+  if (requestId !== undefined) {
+    const value = await bindingIndexValue(current, "request", requestId);
+    if (value !== undefined) {
+      try {
+        const outcome = bindingIndexObject(value);
+        const keys = ["digest", ...(outcome.binding === undefined ? [] : ["binding"]), ...(outcome.removed === undefined ? [] : ["removed"])];
+        if (Object.keys(outcome).sort().join(",") !== keys.sort().join(",") || typeof outcome.digest !== "string" ||
+            !/^sha256:[a-f0-9]{64}$/u.test(outcome.digest) || (outcome.binding !== undefined && outcome.removed !== undefined)) throw invalidBindingIndex();
+        if (outcome.binding !== undefined) validateBinding(outcome.binding as unknown as LocalWorkspaceBinding);
+        if (outcome.removed !== undefined) {
+          const removed = bindingIndexObject(outcome.removed);
+          if (Object.keys(removed).length !== 2 || typeof removed.bindingRef !== "string" ||
+              typeof removed.previousRevision !== "number" || !Number.isSafeInteger(removed.previousRevision) || removed.previousRevision < 1) throw invalidBindingIndex();
+        }
+        state.requests.set(requestId, structuredClone(outcome) as unknown as RequestOutcome);
+      } catch { throw invalidBindingIndex(); }
+    }
+  }
+  if (selection.allBindings || (!selection.record && request?.kind === "legacy-import")) {
+    let continuation: string | undefined;
+    do {
+      const page = await current.scan({ gte: "binding/", lt: "binding/\uffff" }, 64, continuation);
+      for (const entry of page.entries) {
+        const row = bindingIndexObject(entry.value);
+        if (row.kind !== "binding" || typeof row.id !== "string" || entry.key !== bindingIndexKey("binding", row.id)) throw invalidBindingIndex();
+        await loadBinding(row.id);
+      }
+      continuation = page.continuation;
+    } while (continuation);
+    if (state.bindings.size !== bindingCount) throw invalidBindingIndex();
+  }
+  if (selection.bindingRef !== undefined) await loadBinding(selection.bindingRef);
+  if (request && "bindingRef" in request) await loadBinding(request.bindingRef);
+  const targetName = request?.kind === "create" || request?.kind === "legacy-import" ? request.displayName
+    : request?.kind === "update" ? request.patch.displayName : undefined;
+  if (targetName !== undefined) await loadName(displayNameKey(targetName));
+  const record = selection.record;
+  if (record && "binding" in record) {
+    await loadBinding(record.binding.bindingRef);
+    await loadStaged(record.binding.bindingRef);
+    await loadName(displayNameKey(record.binding.displayName));
+  } else if (record && "bindingRef" in record) await loadBinding(record.bindingRef);
+  if (request && "migrationId" in request) {
+    const migration = migrationKey(request.migrationId, request.sourceSnapshotToken);
+    const terminal = await bindingIndexValue(current, "migration-terminal", migration);
+    if (terminal !== undefined) {
+      if (terminal !== "activated" && terminal !== "abandoned") throw invalidBindingIndex();
+      state.migrationTerminals.set(migration, terminal);
+    }
+    // An explicit legacy conversion consumes its own pending set. Ordinary
+    // startup and current binding reads never enumerate migration history.
+    const prefix = stagedIndexPrefix(migration);
+    let continuation: string | undefined;
+    do {
+      const page = await current.scan({ gte: prefix, lt: prefix + "\uffff" }, 64, continuation);
+      for (const entry of page.entries) {
+        const row = bindingIndexObject(entry.value);
+        if (Object.keys(row).length !== 2 || row.migration !== migration || typeof row.bindingRef !== "string" ||
+            entry.key !== stagedIndexKey(migration, row.bindingRef)) throw invalidBindingIndex();
+        await loadStaged(row.bindingRef);
+        const staged = state.stagedLegacy.get(row.bindingRef);
+        if (!staged || migrationKey(staged.migrationId, staged.sourceSnapshotToken) !== migration) throw invalidBindingIndex();
+        await loadName(displayNameKey(staged.binding.displayName));
+      }
+      continuation = page.continuation;
+    } while (continuation);
+    if (targetName !== undefined) {
+      const ref = await bindingIndexValue(current, "staged-name", displayNameKey(targetName));
+      if (ref !== undefined) {
+        if (typeof ref !== "string") throw invalidBindingIndex();
+        await loadStaged(ref);
+        if (displayNameKey(state.stagedLegacy.get(ref)!.binding.displayName) !== displayNameKey(targetName)) throw invalidBindingIndex();
+      }
+    }
+  }
+  return { state, bindingCount };
+}
+
+async function reduceWorkspaceBindingIndex(envelope: CommitEnvelope<JsonValue>, current: DurableProjectionReadContext): Promise<readonly DurableProjectionMutation[]> {
+  const mutations: DurableProjectionMutation[] = [];
+  const overlay = new Map<string, JsonValue | undefined>();
+  const read = createDurableProjectionOverlay(current, overlay);
+  const put = (key: string, value: JsonValue): void => { overlay.set(key, value); mutations.push({ kind: "put", key, value }); };
+  const remove = (key: string): void => { overlay.set(key, undefined); mutations.push({ kind: "tombstone", key }); };
+  const row = (kind: string, id: string, value: unknown): void => put(bindingIndexKey(kind, id), { kind, id, value: value as JsonValue });
+  for (const logical of envelope.entries) {
+    if (logical.stream !== DIRECTORY_STREAM) continue;
+    const record = validateRecord(logical.body as unknown as WorkspaceBindingRecord);
+    const previous = await readBindingIndex(read, { record });
+    if (record.t !== "directory-established" && !previous.state.established) throw corruptDirectory("Workspace binding record appeared before establishment");
+    if (record.t === "catalog-reset" && previous.bindingCount !== 0) throw corruptDirectory("Workspace catalog reset genesis is not the first catalog fact");
+    const next = reduceWorkspaceBindingProjection(previous.state, { stream: DIRECTORY_STREAM, body: record });
+    put(BINDING_META, { established: next.established, deviceId: next.deviceId!,
+      bindingCount: previous.bindingCount + next.bindings.size - previous.state.bindings.size,
+      ...(next.resetReceipt ? { resetReceipt: next.resetReceipt as unknown as JsonValue } : {}) });
+    const writeMap = (kind: string, before: ReadonlyMap<string, unknown>, after: ReadonlyMap<string, unknown>): void => {
+      for (const key of new Set([...before.keys(), ...after.keys()])) {
+        const prior = before.get(key), value = after.get(key);
+        if (value === undefined) { if (prior !== undefined) remove(bindingIndexKey(kind, key)); }
+        else if (prior === undefined || canonicalize(prior) !== canonicalize(value)) row(kind, key, value);
+      }
+    };
+    writeMap("binding", previous.state.bindings, next.bindings);
+    writeMap("name", previous.state.displayNames, next.displayNames);
+    writeMap("request", previous.state.requests, next.requests);
+    writeMap("legacy-owner", previous.state.legacyOwners, next.legacyOwners);
+    writeMap("migration-terminal", previous.state.migrationTerminals, next.migrationTerminals);
+    for (const ref of next.usedBindingRefs) if (!previous.state.usedBindingRefs.has(ref)) row("used", ref, true);
+    for (const ref of new Set([...previous.state.stagedLegacy.keys(), ...next.stagedLegacy.keys()])) {
+      const before = previous.state.stagedLegacy.get(ref), after = next.stagedLegacy.get(ref);
+      if (before && after && canonicalize(before) === canonicalize(after)) continue;
+      if (before) {
+        remove(bindingIndexKey("staged", ref));
+        remove(bindingIndexKey("staged-name", displayNameKey(before.binding.displayName)));
+        remove(stagedIndexKey(migrationKey(before.migrationId, before.sourceSnapshotToken), ref));
+      }
+      if (after) {
+        row("staged", ref, after);
+        row("staged-name", displayNameKey(after.binding.displayName), ref);
+        const migration = migrationKey(after.migrationId, after.sourceSnapshotToken);
+        put(stagedIndexKey(migration, ref), { migration, bindingRef: ref });
+      }
+    }
+  }
+  return mutations;
 }
 
 function reduceWorkspaceBindingProjection(
@@ -2018,4 +2174,11 @@ export class WorkspaceBindingControlError extends TypeError {
     super(message);
     this.name = "WorkspaceBindingControlError";
   }
+}
+
+export function registerWorkspaceBindingProjection(log: AuthorityCommitLog) {
+  return log.durableProjection({
+      projectionId: BINDING_INDEX_ID, reducerVersion: 1, authenticated: true,
+      inputs: { streams: [DIRECTORY_STREAM] }, reduce: reduceWorkspaceBindingIndex,
+    });
 }

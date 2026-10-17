@@ -48,12 +48,18 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
     const contentB = await fixture.artifacts.put(Buffer.from("replacement"));
     const id = skillNameToId("Skill");
     await commitStaged(fixture, [{ seq: 1, requestId: "create", mutation: { kind: "skill-create", mode: "main", record: { name: "Skill", description: "Useful", content: contentA } } }]);
-    const transact = fixture.log.transactProjection.bind(fixture.log);
-    vi.spyOn(fixture.log, "transactProjection").mockImplementationOnce(async (...args) => {
-      await commitStaged(fixture, [{ seq: 1, requestId: "replace", mutation: { kind: "skill-update", mode: "main", skillId: id, expectedRevision: 1, record: { name: "Skill", description: "Updated", content: contentB } } }]);
+    const transact = fixture.log.transactDurableProjection.bind(fixture.log);
+    let injected = false;
+    const intercept = vi.spyOn(fixture.log, "transactDurableProjection").mockImplementation(async (...args) => {
+      if (!injected && args[2]?.candidateReferences) {
+        injected = true;
+        await commitStaged(fixture, [{ seq: 1, requestId: "replace", mutation: { kind: "skill-update", mode: "main", skillId: id, expectedRevision: 1, record: { name: "Skill", description: "Updated", content: contentB } } }]);
+      }
       return transact(...args);
     });
     await expect(fixture.adapter.mutate({ kind: "skill-set-state", skillId: id, expectedRevision: 1, patch: { pinned: true } }, controlContext("stale-pin"))).rejects.toBeInstanceOf(SkillMutationConflictError);
+    expect(injected).toBe(true);
+    intercept.mockRestore();
     const result = await fixture.adapter.read({ kind: "skill-get", skillId: id }, readContext("after-race"));
     expect(result.kind === "skill-get" && result.entry).toMatchObject({ contentRef: contentB, revision: 2, pinned: false });
     expect((await fixture.log.readSnapshot()).commits).toHaveLength(2);

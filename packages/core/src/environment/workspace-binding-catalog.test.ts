@@ -268,13 +268,15 @@ describe("WorkspaceBindingCatalog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
 });
 
 function corruptLog(): AuthorityCommitLog {
+  const unavailable = async () => {
+    throw new AuthorityStorageError("commit-log-corrupt", "injected catalog corruption");
+  };
   return {
-    async readSnapshot() {
-      throw new AuthorityStorageError(
-        "commit-log-corrupt",
-        "injected catalog corruption",
-      );
-    },
+    readSnapshot: unavailable,
+    // Registering a projection is inert even when the source cannot be opened.
+    durableProjection: () => ({ get: unavailable, getMany: unavailable, scan: unavailable,
+      checkpoints: unavailable, rebuild: unavailable }),
+    transactDurableProjection: unavailable,
   } as unknown as AuthorityCommitLog;
 }
 

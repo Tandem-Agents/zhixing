@@ -121,7 +121,7 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     readonly at: string;
   }): Promise<{
     readonly records: readonly LogicalRecord[];
-    readonly outcomes: ReturnType<AnchorWorksceneRegistry["planStaged"]>["outcomes"];
+    readonly outcomes: Awaited<ReturnType<AnchorWorksceneRegistry["planStagedAtProjection"]>>["outcomes"];
   }> {
     return this.#registry.planStagedAtProjection(
       input.records.map((record) => {
