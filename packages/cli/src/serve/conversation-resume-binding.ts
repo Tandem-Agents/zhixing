@@ -34,6 +34,9 @@ interface AnchorConversationAdoptionReview {
 /** Anchor mechanism binding for the Conversation-owned resume command. */
 export function createAnchorConversationResumePort(input: Readonly<{
   identity: AnchorConversationResumeIdentity;
+  runReadiness: {
+    prepareConversationReadiness(conversationId: string): Promise<void>;
+  };
   recovery?: AnchorConversationResumeRecovery;
   adoptionReview: AnchorConversationAdoptionReview;
 }>): ConversationResumePort {
@@ -52,6 +55,7 @@ export function createAnchorConversationResumePort(input: Readonly<{
     recoverDependentLifecycle: async (
       conversationId: ConversationResumeIdentity,
     ) => {
+      await input.runReadiness.prepareConversationReadiness(conversationId);
       await input.recovery?.recoverConversation(conversationId);
     },
     reviewAdoption: async (request: ConversationResumeAdoptionInput) =>

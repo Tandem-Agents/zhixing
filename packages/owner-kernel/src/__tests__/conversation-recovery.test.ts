@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
+import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
+import { serialize } from 'node:v8';
 import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage, Signature } from '@zhixing/core/contracts';
 import { protocolDigest, canonicalize, createConversationSealedBundle } from '@zhixing/core/protocol';
 import { createTempDir } from '@zhixing/test-utils';
@@ -14,10 +15,11 @@ import { trackAuthorityLog } from './durable-io-test-support.js';
 const NOW = '2026-10-05T00:00:00.000Z';
 const signer = { sign(schema: string, version: number, payload: unknown): Signature { return { alg: 'test-sha256', keyId: 'device:test', sig: protocolDigest(schema, version, payload) }; } };
 const verifier = { verify(schema: string, version: number, payload: unknown, signature: Signature) { expect(signature).toEqual(signer.sign(schema, version, payload)); } };
-async function harness() {
+async function harness(startupProofs = false) {
   const root = await createTempDir('conversation-recovery');
   const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
-  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, 'log'), artifacts, { clock: () => NOW }));
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, 'log'), artifacts, { clock: () => NOW,
+    ...(startupProofs ? { integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 29)) } : {}) }));
   const resources = new AnchorResourceGovernor({ log, signer, verifier, guard: { assert() {} }, anchorEpoch: 1,
     localExecutorId: 'device:test', reporterKeyFor: () => 'device:test', clock: () => NOW });
   const journalAt = (epoch = 1) => new ConversationRunJournal({ conversationId: 'recovery-conversation', ownerEpoch: epoch, log, artifacts, signer, verifier,
@@ -30,6 +32,65 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
     ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'seed-ingress', receivedAt: NOW,
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
+
+it('persists short activity and migrates a verified legacy checkpoint without replaying closed input bodies', async () => {
+  const h = await harness(true);
+  const saves = vi.spyOn(h.log, 'saveProjectionCheckpoint');
+  const text = 'large closed input '.repeat(10000);
+  try {
+    await admit(h.journal, text);
+    await h.journal.cancelRun({ runId: 'seed-run', requestId: 'close-large-input' });
+    const source = (await h.log.readStream<any>('run:recovery-conversation')).find(entry => entry.body.t === 'admitted')!.body;
+    await h.log.stopStorageMaintenance();
+    const saved = saves.mock.calls.find(([key]) => key.startsWith('conversation-run-projection:v2:'))!;
+    expect(saved).toBeDefined();
+    const [key, cursor, compact] = saved as [string, typeof saved[1], any];
+    expect(cursor.lsn).toBeLessThan(256);
+    expect(compact.admittedByRun.get('seed-run').input).toBeUndefined();
+    expect(compact.admittedByRun.get('seed-run').record.input).toBeUndefined();
+    const legacy = structuredClone(compact);
+    delete legacy.appendedInputKeysByRun;
+    legacy.admittedByRun.set('seed-run', { ...legacy.admittedByRun.get('seed-run'), record: source, input: { parts: [{ type: 'text', text }] } });
+    delete legacy.admittedByRun.get('seed-run').inputDigest;
+    await h.log.saveProjectionCheckpoint(key.replace(':v2:', ':v1:'), cursor, legacy);
+    await h.log.deleteProjectionCheckpoint(key);
+    const artifacts = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('closed history must not be replayed'));
+    const snapshots = vi.spyOn(h.log, 'readSnapshot').mockRejectedValue(Error('full replay must not occur'));
+    try {
+      const restored = h.journalAt();
+      expect(await restored.restoreRecoveryCheckpoint()).toBe(true);
+      expect(await restored.runState('seed-run')).toBe('cancelled');
+      await admit(restored, text);
+      const migrated = await h.log.loadProjectionCheckpoint<any>(key);
+      expect(serialize(migrated!.state).byteLength).toBeLessThan(serialize(legacy).byteLength / 4);
+      expect(artifacts).not.toHaveBeenCalled(); expect(snapshots).not.toHaveBeenCalled();
+    } finally { artifacts.mockRestore(); snapshots.mockRestore(); }
+  } finally {
+    saves.mockRestore(); await h.log.stopStorageMaintenance();
+  }
+}, 30000);
+
+it('discards a partially reduced private run projection after a failed read', async () => {
+  const source = await harness(); await admit(source.journal);
+  await source.journal.cancelRun({ runId: 'seed-run', requestId: 'uncommitted-cancel-fixture' });
+  const cancelled = (await source.log.readAll()).at(-1)!;
+  const target = await harness(); await admit(target.journal);
+  const original = target.log.readProjection.bind(target.log);
+  let injected = false;
+  const read = vi.spyOn(target.log, 'readProjection').mockImplementation(async (initial, reduce, options) => {
+    if (!injected && options?.stream === 'run:recovery-conversation') {
+      injected = true;
+      let state = initial;
+      for (const entry of cancelled.entries) if (entry.stream === options.stream) state = await reduce(state, entry, cancelled);
+      throw new Error('private replay interrupted before publication');
+    }
+    return original(initial, reduce, options);
+  });
+  try { await expect(target.journal.runState('seed-run')).rejects.toThrow('private replay interrupted'); }
+  finally { read.mockRestore(); }
+  expect(injected).toBe(true);
+  expect(await target.journal.runState('seed-run')).toBe('queued');
+});
 
 it('only admits the earliest unfinished input to assignment scheduling', async () => {
   const h = await harness(); await admit(h.journal);

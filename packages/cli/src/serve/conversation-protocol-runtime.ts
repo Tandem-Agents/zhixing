@@ -50,6 +50,7 @@ import {
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
+  discoverConversationRecoveryCandidatesFromLog,
   ConversationAssignmentCancelledError,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
@@ -359,6 +360,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #pendingConversationRetirements = new Set<string>();
   #deliveryDrain: (() => Promise<void>) | undefined;
   #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  // 控制准入基线（检查点恢复或整份归约）只做一次：首发与恢复后的后台预备共享进行中的任务。
+  #controlBasis: Promise<void> | undefined;
   #recoveryRunning: Promise<number> | undefined;
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
@@ -643,6 +646,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryTimer) clearTimeout(this.#recoveryTimer);
     this.#recoveryTimer = undefined;
     await this.#recoveryRunning?.catch(() => 0);
+    await this.#controlBasis?.catch(() => undefined);
   }
 
   async recoverReadinessProjections(): Promise<number> {
@@ -1926,11 +1930,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       runId: `run:${randomUUID()}`,
     } as const;
     const recover = async () => {
-      const snapshot = await this.#authority.authorityLog.readSnapshot();
-      await this.#authority.controlAdmission.primeRecoverySnapshot(snapshot);
-      const imported = this.#adoptedConversations.get(input.conversationId);
-      const local = partitionConversationSnapshots(snapshot).get(input.conversationId) ?? emptyConversationSnapshot(snapshot);
-      await journal.primeRecoverySnapshot(imported ? await this.#snapshotWithImportedBase(imported.records, local) : local);
+      await this.#prepareControlBasis();
+      await this.#prepareConversationBasis(input.conversationId);
     };
     return retryControlAdmission(async () => {
       if (!journal.hasRecoveredInputProjection || !this.#authority.controlAdmission.hasRecoveredProjection) await recover();
@@ -2331,7 +2332,47 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async recoverConversation(conversationId: string): Promise<number> {
     this.#markRecovery(conversationId);
+    await this.prepareConversationReadiness(conversationId);
     return this.recover();
+  }
+
+  /** The selected conversation must be prepared before a surface reports ready. */
+  async prepareConversationReadiness(conversationId: string): Promise<void> {
+    await this.#prepareControlBasis();
+    await this.#prepareConversationBasis(conversationId);
+  }
+
+  /** 业务入口开放前追平控制索引；稳态仅续读未覆盖尾部，不再延后到首次发送。 */
+  #prepareControlBasis(): Promise<void> {
+    if (this.#authority.controlAdmission.hasRecoveredProjection) return Promise.resolve();
+    if (this.#controlBasis) return this.#controlBasis;
+    const preparing = this.#authority.controlAdmission.prepareRecovery().finally(() => {
+      if (this.#controlBasis === preparing) this.#controlBasis = undefined;
+    });
+    this.#controlBasis = preparing;
+    return preparing;
+  }
+
+  async #prepareConversationBasis(conversationId: string): Promise<void> {
+    const journal = this.#journal(conversationId);
+    if (journal.hasRecoveredInputProjection) return;
+    const imported = this.#adoptedConversations.get(conversationId);
+    if (!imported && await journal.restoreRecoveryCheckpoint()) return;
+    const snapshots = await this.#readConversationRecoverySnapshots([conversationId]);
+    const local = partitionConversationSnapshots(snapshots).get(conversationId) ?? emptyConversationSnapshot(snapshots);
+    await journal.primeRecoverySnapshot(imported ? await this.#snapshotWithImportedBase(imported.records, local) : local);
+  }
+
+  /** 缺少检查点时只读所需会话及其发布伴随，不复制整份权威日志。 */
+  async #readConversationRecoverySnapshots(conversationIds: readonly string[]): Promise<AuthorityLogSnapshot<unknown>> {
+    const result = await this.#authority.authorityLog.readProjection<CommitEnvelope<unknown>[], unknown>(
+      [], (commits, _record, envelope) => {
+        if (commits.at(-1)?.lsn !== envelope.lsn) commits.push(envelope);
+        return commits;
+      },
+      { streams: [...conversationIds.map(id => `run:${id}`), "publish", "final-outbox"] },
+    );
+    return { commits: result.state, cursor: result.cursor };
   }
 
   async completeLifecycleProjections(conversationId: string): Promise<number> {
@@ -2839,7 +2880,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         candidate.dispatch.envelope,
         candidate.dispatch.activation,
       );
-      const snapshot = journal.validateExecutorLedgerSnapshot(
+      const snapshot = await journal.validateExecutorLedgerSnapshot(
         await executor.queryLedger(
           candidate.assignmentId,
           this.#contexts.create(candidate.assignmentId, "executor.queryLedger", {
@@ -3076,19 +3117,35 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   async #recoverReadinessProjections(): Promise<number> {
     if (this.#recoveryDiscovered) return 0;
-    const snapshot = await this.#authority.authorityLog.readSnapshot();
-    const conversationSnapshots = partitionConversationSnapshots(snapshot);
+    await this.#prepareControlBasis();
+    // 发现只续算检查点之后的尾部；没有待恢复会话（常态）时不读出整份日志快照。
     const conversationIds = new Set(
-      [...discoverRecoveryConversations(snapshot.commits)].filter((conversationId) =>
+      [...await discoverConversationRecoveryCandidatesFromLog(this.#authority.authorityLog, this.#authority.artifacts)].filter((conversationId) =>
         this.#acceptsConversationId(conversationId),
       ),
     );
-    for (const conversationId of conversationIds) {
-      this.#markRecovery(conversationId);
-      const localSnapshot = conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot);
-      const imported = this.#adoptedConversations.get(conversationId);
-      await this.#journal(conversationId).primeRecoverySnapshot(imported
-        ? await this.#snapshotWithImportedBase(imported.records, localSnapshot) : localSnapshot);
+    if (conversationIds.size > 0) {
+      // 恢复出的待执行输入会立即经过控制准入重放：先从与已核验前缀一致的检查点恢复控制准入
+      // 与各候选会话日志，只为恢复不了的部分读出一次整份快照补齐，不让未收尾的少量工作把
+      // 启动成本拉回与历史成正比。
+      const unrestored: string[] = [];
+      for (const conversationId of conversationIds) {
+        this.#markRecovery(conversationId);
+        const journal = this.#journal(conversationId);
+        const imported = this.#adoptedConversations.get(conversationId);
+        if (!imported && !journal.hasRecoveredInputProjection) await journal.restoreRecoveryCheckpoint();
+        if (imported || !journal.hasRecoveredInputProjection) unrestored.push(conversationId);
+      }
+      if (unrestored.length > 0) {
+        const snapshot = await this.#readConversationRecoverySnapshots(unrestored);
+        const conversationSnapshots = partitionConversationSnapshots(snapshot);
+        for (const conversationId of unrestored) {
+          const localSnapshot = conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot);
+          const imported = this.#adoptedConversations.get(conversationId);
+          await this.#journal(conversationId).primeRecoverySnapshot(imported
+            ? await this.#snapshotWithImportedBase(imported.records, localSnapshot) : localSnapshot);
+        }
+      }
     }
     let resumed = 0;
     const queue = [...conversationIds];
@@ -3189,6 +3246,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   #finalizeConversationRetirement(conversationId: string): void {
     this.#pendingConversationRetirements.delete(conversationId);
+    this.#journals.get(conversationId)?.discardProjectionCheckpoints();
     this.#journals.delete(conversationId);
     this.#recoveryConversations.delete(conversationId);
     for (const [assignmentId, assignedConversationId] of this.#assignmentConversations) {
@@ -3679,160 +3737,7 @@ function replayCommittedRun(
   };
 }
 
-function discoverRecoveryConversations(
-  commits: readonly {
-    readonly entries: readonly { readonly stream: string; readonly body: unknown }[];
-  }[],
-): Set<string> {
-  type ConversationRecoveryFacts = {
-    deleted: boolean;
-    controlRecovery: boolean;
-    readonly lifecycleFacts: Set<number>;
-    readonly lifecycleProjections: Set<number>;
-    readonly runStates: Map<string, string>;
-    readonly commits: Map<string, number>;
-    readonly projected: Set<string>;
-    readonly acknowledged: Set<string>;
-    readonly terminalFinals: Set<number>;
-  };
-  const factsByConversation = new Map<string, ConversationRecoveryFacts>();
-  const publishDomains = new Map<string, Set<"session" | "global">>();
-  const factsFor = (conversationId: string) => {
-    let facts = factsByConversation.get(conversationId);
-    if (!facts) {
-      facts = {
-        deleted: false,
-        controlRecovery: false,
-        lifecycleFacts: new Set(),
-        lifecycleProjections: new Set(),
-        runStates: new Map(),
-        commits: new Map(),
-        projected: new Set(),
-        acknowledged: new Set(),
-        terminalFinals: new Set(),
-      };
-      factsByConversation.set(conversationId, facts);
-    }
-    return facts;
-  };
 
-  for (const commit of commits) {
-    for (const entry of commit.entries) {
-      const body = entry.body;
-      if (!body || typeof body !== "object" || Array.isArray(body)) continue;
-      const record = body as Record<string, unknown>;
-      if (entry.stream.startsWith("run:")) {
-        const conversationId = entry.stream.slice("run:".length);
-        const facts = factsFor(conversationId);
-        if (
-          record.t === "session-lifecycle" &&
-          typeof record.domainRevision === "number"
-        ) {
-          facts.lifecycleFacts.add(record.domainRevision);
-          if (record.mutation === "delete") facts.deleted = true;
-        } else if (
-          record.kind === "conversation-lifecycle-projection" &&
-          typeof record.domainRevision === "number"
-        ) {
-          facts.lifecycleProjections.add(record.domainRevision);
-        } else if (
-          record.t === "state" &&
-          typeof record.runId === "string" &&
-          typeof record.state === "string"
-        ) {
-          facts.runStates.set(record.runId, record.state);
-        } else if (
-          record.t === "committed" &&
-          typeof record.assignmentId === "string" &&
-          typeof record.commitRevision === "number"
-        ) {
-          facts.commits.set(record.assignmentId, record.commitRevision);
-          const summary = record.readSummary as { controlRecovery?: boolean } | undefined;
-          if (summary?.controlRecovery !== false) facts.controlRecovery = true;
-        } else if (
-          record.t === "bundle-ack-observed" &&
-          typeof record.assignmentId === "string"
-        ) {
-          facts.acknowledged.add(record.assignmentId);
-        } else if (
-          record.kind === "conversation-commit-projection" &&
-          typeof record.assignmentId === "string"
-        ) {
-          facts.projected.add(record.assignmentId);
-        }
-        continue;
-      }
-      if (
-        entry.stream === "publish" &&
-        record.t === "publish-decision" &&
-        typeof record.assignmentId === "string"
-      ) {
-        const required = new Set<"session" | "global">();
-        if (typeof record.sessionCount === "number" && record.sessionCount > 0) {
-          required.add("session");
-        }
-        if (typeof record.globalCount === "number" && record.globalCount > 0) {
-          required.add("global");
-        }
-        publishDomains.set(record.assignmentId, required);
-      } else if (
-        entry.stream === "publish" &&
-        record.t === "publish-progress" &&
-        record.state === "settled" &&
-        typeof record.assignmentId === "string" &&
-        (record.domain === "session" || record.domain === "global")
-      ) {
-        publishDomains.get(record.assignmentId)?.delete(record.domain);
-      } else if (
-        entry.stream === "final-outbox" &&
-        record.t === "final" &&
-        typeof record.conversationId === "string" &&
-        typeof record.commitRevision === "number" &&
-        (record.state === "published" || record.state === "expired")
-      ) {
-        factsFor(record.conversationId).terminalFinals.add(record.commitRevision);
-      }
-    }
-  }
-
-  const result = new Set<string>();
-  const openStates = new Set([
-    "queued",
-    "dispatched",
-    "running",
-    "cancel-requested",
-    "uncertain",
-  ]);
-  for (const [conversationId, facts] of factsByConversation) {
-    const hasPendingLifecycle = [...facts.lifecycleFacts].some(
-      (revision) => !facts.lifecycleProjections.has(revision),
-    );
-    if (hasPendingLifecycle) {
-      result.add(conversationId);
-      continue;
-    }
-    // A committed run may carry an unconsumed product continuation even when
-    // its final frame was acknowledged. Inspect that projection once at startup.
-    if (facts.controlRecovery) result.add(conversationId);
-    if (facts.deleted) continue;
-    if ([...facts.runStates.values()].some((state) => openStates.has(state))) {
-      result.add(conversationId);
-      continue;
-    }
-    for (const [assignmentId, revision] of facts.commits) {
-      if (
-        !facts.projected.has(assignmentId) ||
-        !facts.acknowledged.has(assignmentId) ||
-        !facts.terminalFinals.has(revision) ||
-        (publishDomains.get(assignmentId)?.size ?? 0) > 0
-      ) {
-        result.add(conversationId);
-        break;
-      }
-    }
-  }
-  return result;
-}
 
 function partitionConversationSnapshots(
   snapshot: AuthorityLogSnapshot<unknown>,

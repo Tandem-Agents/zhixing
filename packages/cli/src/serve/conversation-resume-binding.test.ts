@@ -24,6 +24,11 @@ describe("createAnchorConversationResumePort", () => {
           };
         },
       },
+      runReadiness: {
+        prepareConversationReadiness: async (conversationId) => {
+          calls.push(`ready:${conversationId}`);
+        },
+      },
       recovery: {
         recoverConversation: async (conversationId) => {
           calls.push(`recover:${conversationId}`);
@@ -49,7 +54,7 @@ describe("createAnchorConversationResumePort", () => {
         },
       }),
     ).resolves.toMatchObject({ status: "ready" });
-    expect(calls).toEqual(["touch:global-id", "recover:global-id"]);
+    expect(calls).toEqual(["touch:global-id", "ready:global-id", "recover:global-id"]);
     expect(reviewForSurface).toHaveBeenCalledWith({
       conversationId: "global-id",
       surfacePrincipal: "rpc:cli",
@@ -62,5 +67,25 @@ describe("createAnchorConversationResumePort", () => {
       }),
     ).resolves.toBeUndefined();
     expect(reviewForSurface).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps resume pending until selected run readiness is complete", async () => {
+    let finish!: () => void;
+    const readiness = new Promise<void>(resolve => { finish = resolve; });
+    const recoverConversation = vi.fn(async () => undefined);
+    const port = createAnchorConversationResumePort({
+      identity: { touch: async () => null },
+      runReadiness: { prepareConversationReadiness: async () => readiness },
+      recovery: { recoverConversation },
+      adoptionReview: { reviewForSurface: async () => undefined },
+    });
+    let settled = false;
+    const pending = port.recoverDependentLifecycle("restored").then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(recoverConversation).not.toHaveBeenCalled();
+    finish();
+    await pending;
+    expect(recoverConversation).toHaveBeenCalledWith("restored");
   });
 });

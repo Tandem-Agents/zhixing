@@ -249,7 +249,7 @@ describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
   it.each(["missed", "committed"])(
     "rejects %s as a replayed uncertain-resolution control result",
     async (state) => {
-      const { log, journal } = await createHarness();
+      const { artifacts, log, journal } = await createHarness();
       const source = sessionSource();
       const requestId = `invalid-resolution-${state}`;
       const openFactDigest = `sha256:${"a".repeat(64)}`;
@@ -269,7 +269,7 @@ describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
           decision: "user-abandoned",
         },
       });
-      await log.append([
+      const malformed = [
         {
           stream: "control",
           body: { t: "received", requestId, envelope },
@@ -287,7 +287,11 @@ describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
             },
           },
         },
-      ]);
+      ];
+      await expect(log.append(malformed)).rejects.toThrow("uncertain-resolve state is invalid");
+      // 合法写入口先拒绝；再由未注册派生状态的隔离写者构造已存在的损坏历史。
+      const raw = trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, { clock: () => NOW }));
+      await raw.append(malformed);
 
       await expect(
         journal.applyAuthority({
@@ -1223,9 +1227,14 @@ it("rejects a control receipt removed between receipt and target completion", as
   const disk = await import("node:fs/promises");
   const prefixBytes = (await disk.stat(log.logPath)).size;
   const transact = log.transactProjection.bind(log);
+  let removed = false;
   const interceptor = vi.spyOn(log, "transactProjection").mockImplementation(async (...args) => {
     const options = args[3];
-    if (options?.requiredPrefix) await disk.truncate(log.logPath, prefixBytes);
+    if (!removed && options?.readProjectionIds?.length) {
+      expect((await disk.stat(log.logPath)).size).toBeGreaterThan(prefixBytes);
+      await disk.truncate(log.logPath, prefixBytes);
+      removed = true;
+    }
     return transact(...args);
   });
   const source = inputSource("removed-receipt");
@@ -1235,6 +1244,7 @@ it("rejects a control receipt removed between receipt and target completion", as
       source, envelope: inputEnvelope("removed-receipt", source), stream: "run:seed",
       initial: {}, targetBase: { state: {}, cursor: snapshot.cursor }, reducer: state => state, decide,
     })).rejects.toThrow();
+    expect(removed).toBe(true);
     expect(decide).not.toHaveBeenCalled();
   } finally { interceptor.mockRestore(); }
 });

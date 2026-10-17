@@ -1,3 +1,5 @@
+import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { projectionCheckpointKey } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
   CommitEnvelope,
@@ -493,6 +495,7 @@ export function registerConversationTransferProjection(
 ): void {
   log.durableProjection<ConversationTransferLogRecord>({
     projectionId: CONVERSATION_TRANSFER_PROJECTION_ID,
+    inputs: { families: ["transfer:"] },
     reducerVersion: TRANSFER_PROJECTION_REDUCER_VERSION,
     reduce: async (envelope, current) =>
       reduceConversationTransferProjection(envelope, current, verifier),
@@ -674,7 +677,7 @@ export async function readConversationTransferState(
   >(
     undefined,
     (state, logical) =>
-      reduceConversationTransferLogRecord(state, logical.body, verifier),
+      verifyProtocolStep(() => reduceConversationTransferLogRecord(state, logical.body, verifier)),
     { stream: `transfer:${transferId}` },
   );
 }
@@ -702,26 +705,41 @@ async function readConversationTransferCommittedBaseRecord(
   );
 }
 
+/**
+ * 全部会话转移的当前状态。结果随检查点保存：重启后只续读其后的尾部，不为枚举转移流解析整份
+ * 历史；没有检查点时完整读取一次。
+ */
 export async function listConversationTransferStates(
   log: AuthorityCommitLog,
   verifier: ProtocolSignatureVerifier,
 ): Promise<readonly ConversationTransferState[]> {
-  const byTransfer = new Map<string, ConversationTransferState>();
-  for (const envelope of await log.readAll<ConversationTransferLogRecord>()) {
-    for (const entry of envelope.entries) {
-      if (!entry.stream.startsWith("transfer:")) continue;
-      if (isConversationTransferCommittedBase(entry.body)) continue;
+  const restored = await log.loadProjectionCheckpoint?.<ReadonlyMap<string, ConversationTransferState>>(TRANSFER_STATES_CHECKPOINT);
+  const initial: ReadonlyMap<string, ConversationTransferState> = restored?.state instanceof Map ? restored.state : new Map();
+  const read = await log.readProjection<ReadonlyMap<string, ConversationTransferState>, ConversationTransferLogRecord>(
+    initial,
+    async (current, entry) => {
+      if (!entry.stream.startsWith("transfer:")) return current;
+      if (isConversationTransferCommittedBase(entry.body)) return current;
+      // 日志内部重试时从未改动的起点重新归约。
+      const next = current === initial ? new Map(current) : current as Map<string, ConversationTransferState>;
       const transferId = entry.body.transferId;
-      byTransfer.set(
-        transferId,
-        reduceConversationTransfer(byTransfer.get(transferId), entry.body, verifier),
-      );
-    }
+      const previous = next.get(transferId);
+      next.set(transferId, await verifyProtocolStep(() => reduceConversationTransfer(previous, entry.body, verifier)));
+      return next;
+    },
+    restored ? { cursor: restored.cursor } : {},
+  );
+  if (read.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
+    await log.saveProjectionCheckpoint?.(TRANSFER_STATES_CHECKPOINT, read.cursor, read.state);
   }
-  return [...byTransfer.values()].sort((left, right) =>
+  return [...read.state.values()].sort((left, right) =>
     left.identity.transferId.localeCompare(right.identity.transferId)
   );
 }
+
+const TRANSFER_STATES_CHECKPOINT = projectionCheckpointKey(
+  "conversation-transfer-states", 1, reduceConversationTransfer, isConversationTransferCommittedBase,
+);
 
 export interface ConversationTransferAuthorityRecord {
   readonly lsn: number;

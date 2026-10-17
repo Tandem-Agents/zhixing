@@ -3,6 +3,7 @@ import { currentMaintenanceAbortSignal, StorageMaintenanceCancelledError } from 
 import {
   artifactJsonIndex,
   AuthorityStorageError,
+  DurableProjectionRecordBindingError,
   collectArtifactRefs,
   describeControlArtifactClosure,
   MAX_INLINE_LOGICAL_RECORD_BYTES,
@@ -46,6 +47,7 @@ import {
 } from "@zhixing/core/delivery";
 
 const MAX_AUTHORITY_PROJECTION_CACHES = 8;
+const CONTROL_PROJECTION_ID = "control-admission-v1";
 export const CONVERSATION_IDENTITY_PROJECTION_ID = "conversation-identities-v1";
 const CONVERSATION_IDENTITY_PREFIX = "identity:";
 const CONVERSATION_IDENTITY_REQUEST_PREFIX = "request:";
@@ -417,12 +419,12 @@ export class ControlAdmissionJournal {
   readonly #artifacts: ArtifactStore;
   readonly #operations = new SerialTaskQueue();
   readonly #identities: ReturnType<AuthorityCommitLog['durableProjection']>;
-  #projection = emptyProjection();
-  #projectionCursor: ProjectionCursor | undefined;
+  readonly #control: ReturnType<AuthorityCommitLog['durableProjection']>;
+  #recovered = false;
+  #writeInputsPrepared = false;
   readonly #authorityProjections = new Map<
     string,
     {
-      readonly control: ControlProjection;
       readonly target: unknown;
       readonly cursor: ProjectionCursor;
     }
@@ -431,6 +433,9 @@ export class ControlAdmissionJournal {
   constructor(log: AuthorityCommitLog, artifacts: ArtifactStore) {
     this.#log = log;
     this.#artifacts = artifacts;
+    // 幂等历史按键驻磁盘；一次准入只读本次请求及其 ingress 规范记录。
+    this.#control = registerControlAdmissionProjection(log, artifacts);
+    log.registerCheckpointFlush?.(() => this.#control.flushCheckpoint?.());
     this.#identities = registerConversationIdentityProjection(log, artifacts);
   }
 
@@ -465,12 +470,14 @@ export class ControlAdmissionJournal {
     const envelope = snapshotAdmittedControlEnvelope(input.envelope);
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
+    if (!this.#recovered) await this.#control.checkpoints();
     return this.#operations.run(async () => {
       const transaction = await this.#transact<
         StoredControlAdmissionValue
         | Extract<ControlTransactionValue, { kind: "pending" }>
         | undefined
       >(
+        envelope,
         (state) => {
           const request = getRequest(state, envelope.requestId);
           if (!request) {
@@ -512,8 +519,9 @@ export class ControlAdmissionJournal {
   /** Read the original input outcome without replaying input or admission effects. */
   async inputReceipt(input: { readonly conversationId: string; readonly turnId: string; readonly surfacePrincipal: string }): Promise<import('@zhixing/core/conversation/application').ConversationInputReceipt> {
     const requestId = `input:${protocolDigest("ConversationInputIdentity", 1, { surfacePrincipal: input.surfacePrincipal, ingressId: input.turnId })}`;
+    if (!this.#recovered) await this.#control.checkpoints();
     return this.#operations.run(async () => {
-      const transaction = await this.#transact<StoredControlAdmissionValue | undefined>((state) => {
+      const transaction = await this.#transact<StoredControlAdmissionValue | undefined>(requestId, (state) => {
         const request = getRequest(state, requestId);
         if (!request || request.surfacePrincipal !== input.surfacePrincipal || request.envelope.body.t !== 'input' ||
           request.envelope.body.conversationId !== input.conversationId || request.envelope.body.ingress.ingressId !== input.turnId || !request.storedResult) {
@@ -543,6 +551,7 @@ export class ControlAdmissionJournal {
     }
     const source = snapshotTrustedSource(input.source);
     assertTrustedSourceMatches(envelope, source);
+    await this.prepareRecovery();
     return this.#operations.run(() =>
       this.#apply(envelope, source.ingress, input.prepare)
     );
@@ -557,7 +566,7 @@ export class ControlAdmissionJournal {
     readonly stream: string;
     readonly initial: State;
     /** Verified target prefix; control receipts keep their independent current watermark. */
-    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor };
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -583,6 +592,8 @@ export class ControlAdmissionJournal {
       state: State,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
     ) => void;
+    /** 所属 owner 接管已验证的状态与游标；接管后控制适配不再保留同一可变状态。 */
+    readonly onProjected?: (state: State, cursor: ProjectionCursor) => void;
   }): Promise<ControlAdmissionOutcome> {
     const envelope = snapshotAdmittedControlEnvelope(input.envelope) as Envelope;
     if (envelope.body.t === "session-create") {
@@ -603,6 +614,7 @@ export class ControlAdmissionJournal {
         throw new TypeError("Authority control companion stream must be distinct");
       }
     }
+    await this.prepareRecovery();
     return this.#operations.run(async () => {
       const preparedEnvelope = await prepareEnvelope(
         envelope,
@@ -610,6 +622,7 @@ export class ControlAdmissionJournal {
         this.#artifacts,
       );
       const receipt = await this.#transact(
+        envelope,
         (state) =>
           decideControlReceipt({
             state,
@@ -645,7 +658,7 @@ export class ControlAdmissionJournal {
     readonly stream: string;
     readonly initial: State;
     /** Verified target prefix; control receipts keep their independent current watermark. */
-    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor };
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -671,14 +684,13 @@ export class ControlAdmissionJournal {
       state: State,
       commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
     ) => void;
+    readonly onProjected?: (state: State, cursor: ProjectionCursor) => void;
   }): Promise<ControlAdmissionOutcome> {
     type CombinedProjection = {
-      readonly control: ControlProjectionDraft;
       target: State;
     };
     const cached = this.#takeAuthorityProjection(input.stream) as
       | {
-          readonly control: ControlProjection;
           readonly target: State;
           readonly cursor: ProjectionCursor;
         }
@@ -686,15 +698,7 @@ export class ControlAdmissionJournal {
     // The supplied owner basis belongs to its current import generation; a
     // numerically newer combined cache must not replace it.
     const targetBase = input.targetBase;
-    const controlThrough = targetBase ? this.#projectionCursor?.lsn : undefined;
-    if (targetBase && (controlThrough === undefined || controlThrough < targetBase.cursor.lsn)) {
-      throw invalidControlRecord("Target projection is ahead of the verified control receipt");
-    }
     const initial: CombinedProjection = {
-      // Never share mutable maps with the ordinary control projection cache.
-      control: beginProjectionDraft(targetBase
-        ? { requests: new Map(this.#projection.requests), ingresses: new Map(this.#projection.ingresses) }
-        : cached?.control ?? emptyProjection()),
       target: targetBase?.state ?? cached?.target ?? input.initial,
     };
     try {
@@ -705,24 +709,17 @@ export class ControlAdmissionJournal {
       >(
         initial,
         async (state, record, commit) => {
-          if (record.stream === "control") {
-            if (controlThrough !== undefined && commit.lsn <= controlThrough) return state;
-            await reduceControlProjection(
-              state.control,
-              record,
-              commit,
-              this.#artifacts,
-            );
-          } else {
-            await input.observe?.(record, commit);
-            if (record.stream === input.stream) {
-              state.target = await input.reducer(state.target, record, commit);
-            }
+          await input.observe?.(record, commit);
+          if (record.stream === input.stream) {
+            state.target = await input.reducer(state.target, record, commit);
           }
           return state;
         },
         async (state, authorityPrefix) => {
-          const request = getRequest(state.control, input.canonicalRequestId);
+          const control = await readControlIndexState(
+            authorityPrefix.readProjection(CONTROL_PROJECTION_ID), input.canonicalRequestId, this.#artifacts,
+          );
+          const request = getRequest(control, input.canonicalRequestId);
           if (!request) {
             throw invalidControlRecord("Atomic control request has no received record");
           }
@@ -777,23 +774,27 @@ export class ControlAdmissionJournal {
           };
         },
         {
-          streams: ["control", input.stream, ...(input.companionStreams ?? [])],
-          ...(input.readProjectionIds
-            ? { readProjectionIds: input.readProjectionIds }
-            : {}),
-          ...(targetBase ? { cursor: targetBase.cursor, requiredPrefix: this.#projectionCursor! } : cached ? { cursor: cached.cursor } : {}),
+          streams: [input.stream, ...(input.companionStreams ?? [])],
+          // The combined wrapper is private. Mutable targets supply their
+          // owner's draft factory; immutable targets retain the verified basis.
+          createState: () => ({ target: targetBase?.createState ? targetBase.createState() : initial.target }),
+          readProjectionIds: [...new Set([CONTROL_PROJECTION_ID, ...(input.readProjectionIds ?? [])])],
+          ...(targetBase ? { cursor: targetBase.cursor } : cached ? { cursor: cached.cursor } : {}),
           candidateReferences: collectArtifactRefs([
             ...input.preparedEnvelope.references,
             ...(input.candidateReferences ?? []),
           ]),
         },
       );
-      const control = commitProjectionDraft(transaction.state.control);
-      this.#cacheAuthorityProjection(input.stream, {
-        control,
-        target: transaction.state.target,
-        cursor: transaction.cursor,
-      });
+      if (input.onProjected) {
+        try { input.onProjected(transaction.state.target, transaction.cursor); }
+        catch { /* 派生缓存接管失败不改变已经耐久提交的结果。 */ }
+      } else {
+        this.#cacheAuthorityProjection(input.stream, {
+          target: transaction.state.target,
+          cursor: transaction.cursor,
+        });
+      }
       if (transaction.commit) {
         try {
           input.onCommitted?.(transaction.state.target, transaction.commit);
@@ -814,7 +815,6 @@ export class ControlAdmissionJournal {
 
   #takeAuthorityProjection(stream: string):
     | {
-        readonly control: ControlProjection;
         readonly target: unknown;
         readonly cursor: ProjectionCursor;
       }
@@ -828,7 +828,6 @@ export class ControlAdmissionJournal {
   #cacheAuthorityProjection(
     stream: string,
     cached: {
-      readonly control: ControlProjection;
       readonly target: unknown;
       readonly cursor: ProjectionCursor;
     },
@@ -854,6 +853,7 @@ export class ControlAdmissionJournal {
       this.#artifacts,
     );
     const receipt = await this.#transact(
+      envelope,
       (state) =>
         decideControlReceipt({
           state,
@@ -889,6 +889,7 @@ export class ControlAdmissionJournal {
     const authorityEntries = snapshotAuthorityEntries(plan.authorityEntries ?? []);
     const preparedResult = await prepareResult(result, this.#artifacts);
     const completion = await this.#transact(
+      envelope,
       (state) =>
         decideControlCompletion({
           state,
@@ -931,6 +932,7 @@ export class ControlAdmissionJournal {
     alias: Extract<ControlTransactionValue, { kind: "alias" }>,
   ): Promise<ControlAdmissionOutcome> {
     const transaction = await this.#transact(
+      envelope,
       (state) =>
         decideAppliedAlias({
           state,
@@ -958,88 +960,159 @@ export class ControlAdmissionJournal {
   }
 
 
-  /** Prepare large stored control records outside serial exclusion before admission. */
-  async primeRecoverySnapshot(snapshot: import("@zhixing/core/authority").AuthorityLogSnapshot<unknown>): Promise<void> {
-    const candidate = beginProjectionDraft(emptyProjection());
-    const abort = currentMaintenanceAbortSignal();
-    let yieldAt = performance.now() + 8;
-    for (const commit of snapshot.commits) {
-      if (abort.aborted) throw new StorageMaintenanceCancelledError();
-      if (performance.now() >= yieldAt) { await new Promise<void>(setImmediate); yieldAt = performance.now() + 8; }
-      for (const record of commit.entries) {
-        if (record.stream === "control") await reduceControlProjection(candidate, record, commit, this.#artifacts);
-      }
+  /** 索引沿自己的耐久游标恢复，不再把全部控制历史物化成进程内 Map。 */
+  async prepareRecovery(): Promise<void> {
+    if (this.#writeInputsPrepared) return;
+    if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+    // Both fixed projections consume control writes, including job controls.
+    // Finish their candidates before the caller enters its domain coordinator.
+    if (this.#log.prepareProjections) {
+      await this.#log.prepareProjections([CONTROL_PROJECTION_ID, CONVERSATION_IDENTITY_PROJECTION_ID]);
+    } else {
+      await this.#control.checkpoints();
+      await this.#identities.checkpoints();
     }
-    await this.#operations.run(async () => {
-      // Install only a private basis. The next transaction validates the opaque
-      // prefix and catches up under its writer lock before making any decision.
-      if (!this.#projectionCursor || this.#projectionCursor.lsn <= snapshot.cursor.lsn) {
-        this.#projection = commitProjectionDraft(candidate);
-        this.#projectionCursor = snapshot.cursor;
-        this.#authorityProjections.clear();
-      }
-    });
+    if (this.#control.flushCheckpoint) await this.#control.flushCheckpoint();
+    else await this.#control.checkpoints();
+    if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+    this.#recovered = true;
+    this.#writeInputsPrepared = true;
   }
 
-  get hasRecoveredProjection(): boolean { return this.#projectionCursor !== undefined; }
+  get hasRecoveredProjection(): boolean { return this.#recovered; }
 
   async #transact(
-    decide: (
-      state: ControlProjectionDraft,
-    ) => ProjectionTransactionDecision<unknown, ControlTransactionValue>,
+    subject: AdmittedControlEnvelope | string,
+    decide: (state: ControlProjectionDraft) => ProjectionTransactionDecision<unknown, ControlTransactionValue>,
     candidateReferences: readonly ArtifactRef[],
-  ): Promise<
-    import("@zhixing/core/authority").ProjectionTransactionResult<
-      ControlProjectionDraft,
-      unknown,
-      ControlTransactionValue
-    >
-  >;
+  ): Promise<{ readonly value: ControlTransactionValue; readonly commit?: CommitEnvelope<unknown> }>;
   async #transact<Value>(
-    decide: (
-      state: ControlProjectionDraft,
-    ) => ProjectionTransactionDecision<unknown, Value>,
+    subject: AdmittedControlEnvelope | string,
+    decide: (state: ControlProjectionDraft) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[],
-  ): Promise<
-    import("@zhixing/core/authority").ProjectionTransactionResult<
-      ControlProjectionDraft,
-      unknown,
-      Value
-    >
-  >;
+  ): Promise<{ readonly value: Value; readonly commit?: CommitEnvelope<unknown> }>;
   async #transact<Value>(
-    decide: (
-      state: ControlProjectionDraft,
-    ) => ProjectionTransactionDecision<unknown, Value>,
+    subject: AdmittedControlEnvelope | string,
+    decide: (state: ControlProjectionDraft) => ProjectionTransactionDecision<unknown, Value>,
     candidateReferences: readonly ArtifactRef[],
   ) {
-    const draft = beginProjectionDraft(this.#projection);
-    try {
-      const transaction = await this.#log.transactProjection<
-        ControlProjectionDraft,
-        unknown,
-        Value
-      >(
-        draft,
-        (state, record, commit) =>
-          reduceControlProjection(state, record, commit, this.#artifacts),
-        decide,
-        {
-          stream: "control",
-          ...(this.#projectionCursor ? { cursor: this.#projectionCursor } : {}),
-          candidateReferences,
-        },
-      );
-      this.#projection = commitProjectionDraft(transaction.state);
-      this.#projectionCursor = transaction.cursor;
-      return transaction;
-    } catch (error) {
-      this.#projection = emptyProjection();
-      this.#projectionCursor = undefined;
-      this.#authorityProjections.clear();
-      throw error;
+    const transaction = await this.#log.transactDurableProjection<unknown, Value>(
+      CONTROL_PROJECTION_ID,
+      async (current) => decide(await readControlIndexState(current, subject, this.#artifacts)),
+      { candidateReferences },
+    );
+    this.#recovered = true;
+    return transaction;
+  }
+}
+
+/** exact 主记录保留完整绑定，ingress 二级记录只指向规范请求。 */
+function controlRequestKey(requestId: string): string { return `request:${requestId}`; }
+function controlIngressKey(key: string): string { return `ingress:${protocolDigest("ControlIngressIndex", 1, key)}`; }
+
+async function readControlIndexState(
+  current: DurableProjectionReadContext,
+  subject: AdmittedControlEnvelope | string,
+  artifacts: ArtifactStore,
+): Promise<ControlProjectionDraft> {
+  const state = beginProjectionDraft(emptyProjection());
+  const requestId = typeof subject === "string" ? subject : subject.requestId;
+  const request = await readIndexedControlRequest(current, requestId, artifacts);
+  if (request) state.base.requests.set(requestId, request);
+  const key = typeof subject === "string" ? request?.ingressKey : ingressKey(subject);
+  if (key) {
+    const indexed = await current.get(controlIngressKey(key));
+    if (indexed !== undefined) {
+      if (!isPlainRecord(indexed) || indexed.ingressKey !== key || typeof indexed.requestId !== "string" ||
+          Object.keys(indexed).sort().join(",") !== "ingressKey,requestId") {
+        throw new DurableProjectionRecordBindingError("Control ingress index binding is invalid");
+      }
+      const canonical = indexed.requestId === requestId ? request : await readIndexedControlRequest(current, indexed.requestId, artifacts);
+      if (!canonical || canonical.ingressKey !== key) {
+        throw new DurableProjectionRecordBindingError("Control ingress index has no matching canonical request");
+      }
+      state.base.requests.set(canonical.requestId, canonical);
+      state.base.ingresses.set(key, ingressProjection(canonical));
     }
   }
+  return state;
+}
+
+async function readIndexedControlRequest(
+  current: DurableProjectionReadContext,
+  requestId: string,
+  artifacts: ArtifactStore,
+): Promise<RequestProjection | undefined> {
+  const value = await current.get(controlRequestKey(requestId));
+  if (value === undefined) return undefined;
+  if (!isPlainRecord(value) || value.requestId !== requestId) {
+    throw new DurableProjectionRecordBindingError("Control request index identity is invalid");
+  }
+  let storedEnvelope: Stored<AdmittedControlEnvelope>;
+  try { storedEnvelope = snapshotStored<AdmittedControlEnvelope>(value.envelope); }
+  catch { throw new DurableProjectionRecordBindingError("Control request index envelope is invalid"); }
+  // 物理读取和准入失败保留自身错误分类，不能把压力误当派生索引损坏而整份重建。
+  const loaded = await loadStored(storedEnvelope, artifacts, "ControlEnvelope");
+  try {
+    const envelope = snapshotAdmittedControlEnvelope(loaded);
+    if (envelope.requestId !== requestId) throw new Error("envelope identity");
+    const ingress = value.ingress === undefined ? undefined : validateIngressContext(value.ingress as unknown as IngressContext);
+    assertDurableIngressMatches(envelope, ingress);
+    const expected = requestProjection(envelope, ingress);
+    if (value.storedResult !== undefined) {
+      expected.storedResult = snapshotStored<ControlResult>(value.storedResult);
+      assertAuthorityRevision(value.authorityRevision);
+      expected.authorityRevision = value.authorityRevision as number;
+    }
+    if (canonicalize({ ...expected, envelope: storedEnvelope }) !== canonicalize(value)) throw new Error("request binding");
+    return expected;
+  } catch {
+    throw new DurableProjectionRecordBindingError("Control request index binding is invalid");
+  }
+}
+
+async function reduceControlIndex(
+  envelope: CommitEnvelope<unknown>,
+  current: DurableProjectionReadContext,
+  artifacts: ArtifactStore,
+): Promise<readonly DurableProjectionMutation[]> {
+  const mutations = new Map<string, DurableProjectionMutation>();
+  const overlay: DurableProjectionReadContext = {
+    get: async (key) => {
+      const changed = mutations.get(key);
+      return changed ? changed.kind === "put" ? changed.value : undefined : current.get(key);
+    },
+    scan: (range, limit, continuation) => current.scan(range, limit, continuation),
+  };
+  for (const record of envelope.entries) {
+    if (record.stream !== "control") continue;
+    const body = record.body;
+    let subject: AdmittedControlEnvelope | string | undefined;
+    if (isPlainRecord(body) && body.t === "received") {
+      subject = snapshotAdmittedControlEnvelope(await loadStored(
+        snapshotStored<AdmittedControlEnvelope>(body.envelope), artifacts, "ControlEnvelope",
+      ));
+    } else if (isPlainRecord(body) && body.t === "applied" && typeof body.requestId === "string") {
+      subject = body.requestId;
+    }
+    const state = subject === undefined ? beginProjectionDraft(emptyProjection()) : await readControlIndexState(overlay, subject, artifacts);
+    await reduceControlProjection(state, record, envelope, artifacts);
+    for (const [id, request] of state.requests) {
+      const key = controlRequestKey(id);
+      const previous = await overlay.get(key);
+      const storedEnvelope = isPlainRecord(body) && body.t === "received" && body.requestId === id
+        ? snapshotStored<AdmittedControlEnvelope>(body.envelope)
+        : isPlainRecord(previous) ? snapshotStored<AdmittedControlEnvelope>(previous.envelope) : undefined;
+      if (!storedEnvelope) throw new DurableProjectionRecordBindingError("Control request index lost its envelope reference");
+      // 外置大输入继续保留CAS引用，不因派生索引的单值预算增加业务输入上限。
+      mutations.set(key, { kind: "put", key, value: { ...request, envelope: storedEnvelope } as unknown as JsonValue });
+    }
+    for (const [ingress, request] of state.ingresses) {
+      const key = controlIngressKey(ingress);
+      mutations.set(key, { kind: "put", key, value: { ingressKey: ingress, requestId: request.requestId } });
+    }
+  }
+  return [...mutations.values()];
 }
 
 function emptyProjection(): ControlProjection {
@@ -1048,16 +1121,6 @@ function emptyProjection(): ControlProjection {
 
 function beginProjectionDraft(base: ControlProjection): ControlProjectionDraft {
   return { base, requests: new Map(), ingresses: new Map() };
-}
-
-function commitProjectionDraft(draft: ControlProjectionDraft): ControlProjection {
-  for (const [requestId, request] of draft.requests) {
-    draft.base.requests.set(requestId, request);
-  }
-  for (const [key, ingress] of draft.ingresses) {
-    draft.base.ingresses.set(key, ingress);
-  }
-  return draft.base;
 }
 
 function getRequest(
@@ -1661,6 +1724,7 @@ export function registerConversationIdentityProjection(
 ) {
   return log.durableProjection<ControlRecord>({
     projectionId: CONVERSATION_IDENTITY_PROJECTION_ID,
+    inputs: { streams: ["control"] },
     reducerVersion: 2,
     reduce: (envelope, current) =>
       reduceConversationIdentityProjection(envelope, current, artifacts),
@@ -2169,4 +2233,14 @@ function assertIdentifier(value: unknown, label: string): asserts value is strin
 
 function invalidControlRecord(message: string): AuthorityStorageError {
   return new AuthorityStorageError("invalid-authority-record", message);
+}
+
+export function registerControlAdmissionProjection(log: AuthorityCommitLog, artifacts: ArtifactStore) {
+  return log.durableProjection({
+      projectionId: CONTROL_PROJECTION_ID,
+      inputs: { streams: ["control"] },
+      authenticated: true,
+      reducerVersion: 1,
+      reduce: (envelope, current) => reduceControlIndex(envelope, current, artifacts),
+    });
 }

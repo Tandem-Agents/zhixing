@@ -1,3 +1,5 @@
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
+import { projectionCheckpointKey } from "@zhixing/core/authority";
 import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
 import { Buffer } from "node:buffer";
 import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
@@ -10,6 +12,7 @@ import type { ConversationRecoveryRequest, ConversationRecoveryPage, Conversatio
 import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
 import { ConversationReadIndex, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
+import { createConversationProjectionDraft } from './conversation-projection-draft.js';
 import { ConversationMessageInputReader } from './conversation-message-input-reader.js';
 import { hasDurableStartedObservation } from './conversation-message-delivery.js';
 import { conversationCommitSummary } from './conversation-commit-summary.js';
@@ -48,6 +51,7 @@ import type {
   AssignmentActivationProof,
   AuthorityCallContext,
   AuthorityError,
+  CommitEnvelope,
   ConversationRunState,
   ConversationStatusNotice,
   ConversationInvocation,
@@ -137,6 +141,7 @@ import {
   validateLedgerSnapshot,
   validateIngressContext,
   validateMutationBatch,
+  validatePublishDecisionRecord,
   validateNonEmptyUserTurnInput,
   validateSupersedeProof,
   validateStreamFrame,
@@ -597,13 +602,18 @@ export interface ConversationDispatchPort {
 
 interface AdmittedProjection {
   readonly lsn: number;
-  readonly record: Extract<ConversationRunJournalRecord, { t: "admitted" }>;
-  readonly input: UserTurnInput;
+  readonly record: Omit<Extract<ConversationRunJournalRecord, { t: "admitted" }>, "input">;
+  readonly input?: UserTurnInput;
+  readonly inputDigest?: string;
 }
+
+type RetainedConversationEnvelope = Omit<PendingConversationDispatch["envelope"], "work"> & {
+  readonly work: Omit<PendingConversationDispatch["envelope"]["work"], "windowInput">;
+};
 
 interface AssignedProjection {
   readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-  readonly envelope: PendingConversationDispatch["envelope"];
+  readonly envelope: RetainedConversationEnvelope;
   readonly commit: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
   acked: boolean;
 }
@@ -672,6 +682,12 @@ interface PendingLifecycleProjection {
   readonly requestId: string;
 }
 
+// 会话运行日志的投影随该会话历史增长；检查点让每次冷启动后的首次使用只续算尾部。
+type JournalProjectionKind = "run" | "submission" | "publish" | "final";
+/** 各类会话投影检查点键的前缀（名称、版本、归约指纹），进程内只算一次。 */
+const journalCheckpointPrefixes = new Map<JournalProjectionKind, string>();
+const JOURNAL_CHECKPOINT_INTERVAL_LSN = 256;
+
 interface RunProjection {
   readonly conversationId: string;
   domainRevision: number;
@@ -710,7 +726,8 @@ interface RunProjection {
   >;
   readonly projectedLifecycleRevisions: Set<number>;
   readonly admittedByRun: Map<string, AdmittedProjection>;
-  readonly appendedInputs: Map<string, { readonly record: Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>; readonly input: UserTurnInput; readonly lsn: number }>;
+  readonly appendedInputs: Map<string, { readonly record: Omit<Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>, "input">; readonly input?: UserTurnInput; readonly lsn: number }>;
+  readonly appendedInputKeysByRun: Map<string, Set<string>>;
   readonly openInputAssignments: Map<string, string>;
   readonly closedInputAssignments: Set<string>;
   readonly inputConsumptions: Map<string, Extract<ConversationRunJournalRecord, { t: "run-input-consumed" }>>;
@@ -1154,14 +1171,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
     };
   }): Promise<void> {
-    const record = validateConversationChannelChallengeRecord(
+    const record = await verifyProtocolStep(() => validateConversationChannelChallengeRecord(
       {
         t: "channel-challenge-delivered",
         challengeId: input.challengeId,
         receipt: input.receipt,
       },
       this.#verifier,
-    );
+    ));
     await this.#transact<void>((state) => {
       const current =
         state.channelInteractions.deliveredByChallenge.get(input.challengeId);
@@ -1181,7 +1198,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly outcome: "cancelled" | "expired";
     readonly at: string;
   }): Promise<void> {
-    const record = validateConversationChannelChallengeRecord(
+    const record = await verifyProtocolStep(() => validateConversationChannelChallengeRecord(
       {
         t: "channel-challenge-closed",
         challengeId: input.challengeId,
@@ -1189,7 +1206,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         at: input.at,
       },
       this.#verifier,
-    );
+    ));
     await this.#transact<void>((state) => {
       const current =
         state.channelInteractions.closedByChallenge.get(input.challengeId);
@@ -1366,7 +1383,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly assignmentId: string;
     readonly interactionRequestId: string;
   }> {
-    const token = validateChannelChallengeToken(input.token, this.#verifier);
+    const token = await verifyProtocolStep(() => validateChannelChallengeToken(input.token, this.#verifier));
     if (token.ref.execution !== "conversation") {
       throw new TypeError(
         "Conversation channel callback requires a conversation token",
@@ -1408,6 +1425,94 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   get hasRecoveredInputProjection(): boolean { return this.#runProjection !== undefined; }
 
+  readonly #checkpointedThrough = new Map<JournalProjectionKind, number>();
+
+  /** 首次发送前尝试从检查点恢复运行投影；成功时调用方不必再读出整份日志快照。 */
+  async restoreRecoveryCheckpoint(): Promise<boolean> {
+    await this.#operations.run(() => this.#restoreProjection("run"));
+    return this.hasRecoveredInputProjection;
+  }
+
+  /** 该会话在本进程首次需要某个投影时从检查点恢复，只续算其后的尾部；导入了转移基线的会话不使用。 */
+  async #restoreProjection(kind: JournalProjectionKind): Promise<void> {
+    const key = this.#projectionCheckpointKey(kind);
+    if (!key || this.#projectionOf(kind) || !this.#log.loadProjectionCheckpoint) return;
+    const generation = this.#readBaseGeneration;
+    let restored = await this.#log.loadProjectionCheckpoint<never>(key);
+    let migrated = false;
+    if (!restored && kind === "run") {
+      const legacy = `${projectionCheckpointKey("conversation-run-projection", 1, this.#reduce)}:${this.#conversationId}:${this.#ownerEpoch}`;
+      restored = await this.#log.loadProjectionCheckpoint<never>(legacy);
+      migrated = restored !== undefined;
+      if (restored) restored = { ...restored, state: compactLegacyRunProjection(restored.state as RunProjection) as never };
+    }
+    if (!restored || this.#projectionOf(kind) || this.#readBaseGeneration !== generation) return;
+    this.#setProjection(kind, restored);
+    this.#checkpointedThrough.set(kind, migrated ? 0 : restored.cursor.lsn);
+    if (migrated) await this.#saveProjection(kind, true);
+  }
+
+  /** 会话删除并收束后丢弃本会话的投影检查点，避免已删除会话的缓存文件随时间累积。 */
+  discardProjectionCheckpoints(): void {
+    this.#unregisterCheckpointFlush?.();
+    this.#unregisterCheckpointFlush = undefined;
+    for (const kind of ["run", "submission", "publish", "final"] as const) {
+      const key = this.#projectionCheckpointKey(kind);
+      if (key) void this.#log.deleteProjectionCheckpoint?.(key);
+      if (kind === "run") void this.#log.deleteProjectionCheckpoint?.(
+        `${projectionCheckpointKey("conversation-run-projection", 1, this.#reduce)}:${this.#conversationId}:${this.#ownerEpoch}`,
+      );
+    }
+  }
+
+  #saveProjection(kind: JournalProjectionKind, force = false): Promise<void> | undefined {
+    const key = this.#projectionCheckpointKey(kind), current = this.#projectionOf(kind);
+    if (!key || !current || !this.#log.saveProjectionCheckpoint) return undefined;
+    if (!this.#unregisterCheckpointFlush) {
+      // 正式停止前补存本会话用到的投影：重启后只续算停止前最后一段尾部。
+      this.#unregisterCheckpointFlush = this.#log.registerCheckpointFlush?.(() =>
+        Promise.all((["run", "submission", "publish", "final"] as const).map((each) => this.#saveProjection(each, true))));
+    }
+    if (current.cursor.lsn - (this.#checkpointedThrough.get(kind) ?? 0) < (force ? 1 : JOURNAL_CHECKPOINT_INTERVAL_LSN)) return undefined;
+    this.#checkpointedThrough.set(kind, current.cursor.lsn);
+    return this.#log.saveProjectionCheckpoint(key, current.cursor, current.state);
+  }
+
+  #unregisterCheckpointFlush: (() => void) | undefined;
+
+  #projectionCheckpointKey(kind: JournalProjectionKind): string | undefined {
+    if (this.#readBaseGeneration !== 0) return undefined;
+    // 键带归约版本与该投影归约函数的指纹：归约逻辑改变后旧检查点不再被采用。
+    let prefix = journalCheckpointPrefixes.get(kind);
+    if (!prefix) {
+      const reducers = {
+        run: [this.#reduce], submission: [this.#reduceSubmissionGuard],
+        publish: [reducePublishRecord, reducePublishBody], final: [applyFinalRecord],
+      }[kind];
+      prefix = projectionCheckpointKey(`conversation-${kind}-projection`, kind === "run" ? 2 : 1, ...reducers);
+      journalCheckpointPrefixes.set(kind, prefix);
+    }
+    return `${prefix}:${this.#conversationId}:${this.#ownerEpoch}`;
+  }
+
+  #projectionOf(kind: JournalProjectionKind): { readonly state: unknown; readonly cursor: ProjectionCursor } | undefined {
+    switch (kind) {
+      case "run": return this.#runProjection;
+      case "submission": return this.#submissionGuardProjection;
+      case "publish": return this.#publishProjection;
+      case "final": return this.#finalProjection;
+    }
+  }
+
+  #setProjection(kind: JournalProjectionKind, value: { readonly state: never; readonly cursor: ProjectionCursor }): void {
+    switch (kind) {
+      case "run": this.#runProjection = value; return;
+      case "submission": this.#submissionGuardProjection = value; return;
+      case "publish": this.#publishProjection = value; return;
+      case "final": this.#finalProjection = value; return;
+    }
+  }
+
   async primeRecoverySnapshot(snapshot: AuthorityLogSnapshot<unknown>): Promise<void> {
     // Only private candidate state is folded outside the queues. Each physical
     // artifact leaf retains its normal bounded admission wait; no successful
@@ -1432,7 +1537,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       while (!next.done && (processed === 0 || (processed < 64 && checks.length < 64 && performance.now() < yieldAt))) {
         const { envelope, record } = next.value;
         if (record.stream === runStream(this.#conversationId)) {
-          run = await this.#reduce(run, record, envelope, checks);
+          run = await this.#reduceRunProjection(run, record, envelope, checks);
           const assignmentId = record.body && typeof record.body === "object" && !Array.isArray(record.body)
             ? (record.body as { assignmentId?: unknown }).assignmentId : undefined;
           if (typeof assignmentId === "string") assignments.add(assignmentId);
@@ -1469,7 +1574,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           await this.#operations.run(async () => {
             if (abort.aborted) throw new StorageMaintenanceCancelledError();
             if (this.#readBaseGeneration !== baseGeneration) throw new Error("Conversation recovery read base changed");
-            const validate = async () => { for (const check of checks) check(); };
+            const validate = async () => { for (const check of checks) await verifyProtocolStep(check); };
             if (checks.length && this.#resources) await this.#resources.coordinate(validate);
             else await validate();
             // coordinate may wait and performs a final synchronization. A base
@@ -1488,6 +1593,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               this.#publishProjection = { state: publish, cursor: snapshot.cursor };
             if (!this.#finalProjection || this.#finalProjection.cursor.lsn <= snapshot.cursor.lsn)
               this.#finalProjection = { state: final, cursor: snapshot.cursor };
+            for (const kind of ["run", "submission", "publish", "final"] as const) this.#saveProjection(kind);
           });
           checks.length = 0;
           break;
@@ -1867,7 +1973,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             !byRun ||
             ingressRun !== input.runId ||
             canonicalize(byRun.record.ingress) !== canonicalize(ingress) ||
-            canonicalize(byRun.input) !== canonicalize(userInput) ||
+            admittedInputDigest(byRun) !== protocolDigest("ConversationAdmittedInput", 1, userInput) ||
             canonicalize(byRun.record.attachments ?? []) !==
               canonicalize(attachments) ||
             canonicalize(byRun.record.invocation) !== canonicalize(invocation) ||
@@ -1926,7 +2032,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       label: "Control input attachments",
     });
     const prepared = await prepareStored(userInput, this.#artifacts);
-    const apply = () => input.admission.applyAuthority<
+    await input.admission.prepareRecovery();
+    const apply = (basis: { state: RunProjection; cursor: ProjectionCursor } | undefined,
+      onProjected: (state: RunProjection, cursor: ProjectionCursor) => void) => input.admission.applyAuthority<
       RunProjection,
       InitialControlEnvelope
     >({
@@ -1934,9 +2042,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       source: input.source,
       stream: runStream(this.#conversationId),
       initial: emptyProjection(this.#conversationId),
-      ...(this.#runProjection ? { targetBase: { state: structuredClone(this.#runProjection.state), cursor: this.#runProjection.cursor } } : {}),
+      ...(basis ? { targetBase: basis } : {}),
+      onProjected,
       reducer: (state, record, commit) =>
-        this.#reduce(
+        this.#reduceRunProjection(
           state,
           record as LogicalRecord<ConversationCommitLogRecord>,
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
@@ -2005,7 +2114,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (
             existingRunId !== input.runId ||
             !existing ||
-            canonicalize(existing.input) !== canonicalize(userInput) ||
+            admittedInputDigest(existing) !== protocolDigest("ConversationAdmittedInput", 1, userInput) ||
             canonicalize(existing.record.attachments ?? []) !==
               canonicalize(attachments) ||
             canonicalize(existing.record.ingress) !== canonicalize(ingress) ||
@@ -2099,8 +2208,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
       },
     });
-    const transact = () => this.#delivery ? this.#delivery.coordinate(apply) : apply();
-    return this.#operations.run(() => this.#resources ? this.#resources.coordinate(transact) : transact());
+    return this.#withRunProjection((basis, publish) => {
+      const application = () => apply(basis, publish);
+      const transact = () => this.#delivery ? this.#delivery.coordinate(application) : application();
+      return this.#resources ? this.#resources.coordinate(transact) : transact();
+    });
   }
 
   /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
@@ -2134,7 +2246,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const previous = state.inputConsumptions.get(`${assignmentId}/${input.boundary}`);
       const materialize = (keys: readonly string[]) => keys.map((key) => {
         const entry = state.appendedInputs.get(key)!;
-        return { ...userMessageFromTurnInput(entry.input), inputIdentity: structuredClone(entry.record.ingress.turnOrigin!.messageIdentity!) };
+        return { ...userMessageFromTurnInput(requireRetainedRunInput(entry)), inputIdentity: structuredClone(entry.record.ingress.turnOrigin!.messageIdentity!) };
       });
       if (state.assignmentByRun.get(runId) !== assignmentId) throw new Error("Stale input assignment");
       if (previous) return { kind: "return", value: materialize(previous.ingressKeys) };
@@ -2396,8 +2508,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (currentAssignment) {
       if (
         currentAssignment.record.assignmentId !== envelope.assignmentId ||
-        canonicalize(withoutSignature(currentAssignment.envelope)) !==
-          canonicalize(withoutSignature(envelope))
+        currentAssignment.record.dispatchDigest !== dispatchEnvelopeDigest(envelope)
       ) {
         throw new Error("Run already has a different durable assignment");
       }
@@ -2426,8 +2537,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (existing) {
           if (
             existing.record.assignmentId !== envelope.assignmentId ||
-            canonicalize(withoutSignature(existing.envelope)) !==
-              canonicalize(withoutSignature(envelope))
+            existing.record.dispatchDigest !== dispatchEnvelopeDigest(envelope)
           ) {
             throw new Error("Run already has a different durable assignment");
           }
@@ -2558,6 +2668,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (
           !runId ||
           !admitted ||
+          admitted.input === undefined ||
           current?.state !== "queued" ||
           state.assignmentByRun.has(runId) ||
           admitted.record.queuedPosition !== queuedPosition
@@ -3009,7 +3120,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
-    const applyAuthority = () => input.admission.applyAuthority<
+    await input.admission.prepareRecovery();
+    const applyAuthority = (basis: { state: RunProjection; cursor: ProjectionCursor } | undefined,
+      onProjected: (state: RunProjection, cursor: ProjectionCursor) => void) => input.admission.applyAuthority<
       RunProjection,
       ConversationControlEnvelope
     >({
@@ -3017,8 +3130,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       source: input.source,
       stream: runStream(this.#conversationId),
       initial: emptyProjection(this.#conversationId),
+      ...(basis ? { targetBase: basis } : {}),
+      onProjected,
       reducer: (state, record, commit) =>
-        this.#reduce(
+        this.#reduceRunProjection(
           state,
           record as LogicalRecord<ConversationCommitLogRecord>,
           commit as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
@@ -3349,10 +3464,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
       },
     });
-    const apply = () => this.#delivery
-      ? this.#delivery.coordinate(applyAuthority)
-      : applyAuthority();
-    return this.#resources ? this.#resources.coordinate(apply) : apply();
+    return this.#withRunProjection((basis, publish) => {
+      const application = () => applyAuthority(basis, publish);
+      const apply = () => this.#delivery ? this.#delivery.coordinate(application) : application();
+      return this.#resources ? this.#resources.coordinate(apply) : apply();
+    });
   }
 
   async closeQueuedRun(
@@ -3513,7 +3629,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     assignmentId: string,
     rawSnapshot: LedgerSnapshot,
   ): Promise<void> {
-    const ledger = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const ledger = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       ledger.assignmentId !== assignmentId ||
       ledger.phase !== "acked" ||
@@ -3617,12 +3733,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return transaction.value;
   }
 
-  validateExecutorDispatchResult(input: unknown): DispatchResult {
-    return validateDispatchResult(input, this.#verifier);
+  async validateExecutorDispatchResult(input: unknown): Promise<DispatchResult> {
+    return verifyProtocolStep(() => validateDispatchResult(input, this.#verifier));
   }
 
-  validateExecutorLedgerSnapshot(input: unknown): LedgerSnapshot {
-    return validateLedgerSnapshot(input, this.#verifier);
+  async validateExecutorLedgerSnapshot(input: unknown): Promise<LedgerSnapshot> {
+    return verifyProtocolStep(() => validateLedgerSnapshot(input, this.#verifier));
   }
 
   async reconcileCancellationEvidence(
@@ -3631,7 +3747,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     pages: AsyncIterable<LedgerEvidencePage>,
   ): Promise<boolean> {
     assertIdentifier(assignmentId, "Recovered assignment id");
-    const snapshotValue = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const snapshotValue = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       snapshotValue.assignmentId !== assignmentId ||
       snapshotValue.lastSeq <= 0 ||
@@ -3671,7 +3787,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     let expectedSeq = 1;
     const validation = createAssignmentLedgerValidationState(assignmentId);
     for await (const rawPage of pages) {
-      const page = validateLedgerEvidencePage(rawPage, this.#verifier);
+      const page = await verifyProtocolStep(() => validateLedgerEvidencePage(rawPage, this.#verifier));
       if (
         page.assignmentId !== assignmentId ||
         page.executorId !== assigned.record.executorId ||
@@ -3694,12 +3810,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (canonicalize(parsed) !== text) {
             throw new TypeError("Ledger evidence artifact is not canonical");
           }
-          body = validateAssignmentEntry(
+          body = (await verifyProtocolStep(() => validateAssignmentEntry(
             { recordSeq: rawEntry.recordSeq, body: parsed },
             this.#verifier,
-          ).body;
+          ))).body;
         } else {
-          body = validateAssignmentEntry(rawEntry, this.#verifier).body;
+          body = (await verifyProtocolStep(() => validateAssignmentEntry(rawEntry, this.#verifier))).body;
         }
         const entry: AssignmentEntry = { recordSeq: rawEntry.recordSeq, body };
         if (
@@ -3712,12 +3828,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         switch (body.t) {
           case "received": {
-            const activation = validateConversationActivation({
+            const activation = await verifyProtocolStep(() => validateConversationActivation({
               envelope: assigned.envelope,
               activation: body.activation as AssignmentActivationProof<"conversation">,
               dispatchRef: assigned.record.dispatchRef,
               verifier: this.#verifier,
-            });
+            }));
             const expectedActivation = buildConversationActivationPayload({
               envelope: assigned.envelope,
               dispatchRef: assigned.record.dispatchRef,
@@ -3759,11 +3875,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     sent: PendingConversationDispatch,
     result: Extract<DispatchResult, { accepted: false; outcome: "conflicting-redelivery" }>,
   ): Promise<"acked-original" | "opened-uncertain"> {
-    const validatedResult = validateDispatchResult(result, this.#verifier);
+    const validatedResult = await verifyProtocolStep(() => validateDispatchResult(result, this.#verifier));
     if (validatedResult.accepted || validatedResult.outcome !== "conflicting-redelivery") {
       throw new TypeError("Expected a conflicting dispatch result");
     }
-    const proof = validateDispatchConflictProof(validatedResult.proof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateDispatchConflictProof(validatedResult.proof, this.#verifier));
     const sentDispatchRef = dispatchEnvelopeArtifact(sent.envelope).ref;
     const sentActivationDigest = assignmentActivationDigest(withoutSignature(sent.activation));
     if (
@@ -3872,16 +3988,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async acceptDispatchRejection(
     response: Extract<DispatchResult, { accepted: false; outcome: "rejected-before-received" }>,
   ): Promise<void> {
-    const validatedResult = validateDispatchResult(response, this.#verifier);
+    const validatedResult = await verifyProtocolStep(() => validateDispatchResult(response, this.#verifier));
     if (validatedResult.accepted || validatedResult.outcome !== "rejected-before-received") {
       throw new TypeError("Expected a rejected-before-received dispatch result");
     }
-    const proof = validateDispatchRejectionProof(validatedResult.proof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateDispatchRejectionProof(validatedResult.proof, this.#verifier));
     await this.#acceptNotStartedTermination(proof);
   }
 
   async acceptSupersedeProof(rawProof: SupersedeProof): Promise<void> {
-    const proof = validateSupersedeProof(rawProof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateSupersedeProof(rawProof, this.#verifier));
     // Durable-source binding is judged once inside each transaction by the shared
     // predicate; this entry point only routes on the signed decision.
     if (proof.decision === "not-started-fenced") {
@@ -3991,11 +4107,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       assigned.record.runId,
     );
     if (!rejectionMessage) return { kind: "continue" };
-    this.#authorizeGuardSubmission(guard, context, {
+    await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
       mode: "durable-rejection",
       method: "submission.submitBundle",
       assignmentId: identity.assignmentId,
-    });
+    }));
     return {
       kind: "return",
       result: rejected("fence-rejected", rejectionMessage, false),
@@ -4070,7 +4186,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     assignmentId: string,
     rawSnapshot: LedgerSnapshot,
   ): Promise<void> {
-    const snapshot = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const snapshot = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       snapshot.assignmentId !== assignmentId ||
       (snapshot.phase !== "started" &&
@@ -4145,10 +4261,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     ) {
       throw new TypeError("Interaction mirror batch exceeds the durable record limit");
     }
-    const batch = validateConversationInteractionMirrorBatch(
+    const batch = await verifyProtocolStep(() => validateConversationInteractionMirrorBatch(
       rawBatch,
       this.#verifier,
-    );
+    ));
     if (batch.assignmentId !== assignmentId) {
       throw new TypeError("Interaction mirror batch names a different assignment");
     }
@@ -4270,7 +4386,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       method: "submission.submitCancelProof",
       assignmentId,
     });
-    const proof = validateCancelProof(rawProof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateCancelProof(rawProof, this.#verifier));
     if (proof.assignmentId !== assignmentId) {
       throw new TypeError("Cancel proof names a different assignment");
     }
@@ -4515,18 +4631,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         guardAssigned.record.runId,
       );
       if (rejectionMessage) {
-        this.#authorizeGuardSubmission(guard, ctx, {
+        await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, ctx, {
           mode: "durable-rejection",
           method: "submission.submitBundle",
           assignmentId,
-        });
+        }));
         return rejected("fence-rejected", rejectionMessage, false);
       }
-      this.#authorizeGuardSubmission(guard, ctx, {
+      await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, ctx, {
         mode: guardState === "uncertain" ? "settlement" : "active",
         method: "submission.submitBundle",
         assignmentId,
-      });
+      }));
     }
 
     let bundle: ReturnType<typeof validateConversationSealedBundle>;
@@ -4545,11 +4661,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const artifact = sealedBundleArtifact(bundle);
     if (guardCommitted) {
       if (canonicalize(guardCommitted.bundle.ref) !== canonicalize(artifact.ref)) {
-        this.#authorizeGuardSubmission(guard, ctx, {
+        await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, ctx, {
           mode: "active",
           method: "submission.submitBundle",
           assignmentId,
-        });
+        }));
         return rejected(
           "fence-rejected",
           "Assignment already committed another bundle",
@@ -4581,11 +4697,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           "Committed bundle does not match its durable assignment fence",
         );
       }
-      this.#authorizeGuardSubmission(guard, ctx, {
+      await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, ctx, {
         mode: "durable-replay",
         method: "submission.submitBundle",
         assignmentId,
-      });
+      }));
       this.#assertResourceUsageFinal(guardAssigned.record, bundle.usageFinal);
       return { committed: true, commitRevision: guardCommitted.commitRevision };
     }
@@ -5611,7 +5727,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       );
     }
     for (const event of input.events) {
-      if (!isAdvancementControlEvent(event, this.#verifier)) {
+      if (!await verifyProtocolStep(() => isAdvancementControlEvent(event, this.#verifier))) {
         throw new TypeError("Advancement event contract failed");
       }
       if ((event.type === "session_created" || event.type === "submission_settled") && event.conversationId !== this.#conversationId) throw new TypeError("Advancement event conversation mismatch");
@@ -5988,10 +6104,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     assigned: AssignedProjection,
   ): Promise<PendingConversationDispatch> {
     const bytes = await this.#artifacts.get(assigned.record.dispatchRef);
-    const envelope = validateConversationEnvelope(
+    const envelope = await verifyProtocolStep(() => validateConversationEnvelope(
       JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
       this.#verifier,
-    );
+    ));
     const payload = buildConversationActivationPayload({
       envelope,
       dispatchRef: assigned.record.dispatchRef,
@@ -6016,22 +6132,28 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       let selecting = false;
       try {
         return await this.#operations.run(async () => {
+          await this.#restoreProjection("run");
           const cached = this.#runProjection;
+          let draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
           const replay = async () => {
             try {
               return await this.#log.readProjection<
                 RunProjection,
                 unknown
               >(
-                cached?.state ?? emptyProjection(this.#conversationId),
-                (state, record, envelope) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, envelope),
+                draft?.state ?? emptyProjection(this.#conversationId),
+                this.#reduceRunProjection,
                 {
                   stream: runStream(this.#conversationId),
+                  createState: () => {
+                    draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
+                    return draft?.state ?? emptyProjection(this.#conversationId);
+                  },
                   ...(cached ? { cursor: cached.cursor } : {}),
                 },
               );
             } catch (error) {
-              // The failed candidate is private; retain the verified prefix.
+              // 候选与旧前缀隔离，失败不重新读取已经完成的历史。
               throw error;
             }
           };
@@ -6040,9 +6162,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           );
           if (abort.aborted) throw new StorageMaintenanceCancelledError();
           this.#runProjection = {
-            state: transaction.state,
+            state: draft && transaction.state === draft.state ? draft.finish() : transaction.state,
             cursor: transaction.cursor,
           };
+          this.#saveProjection("run");
           selecting = true;
           return select(transaction.state);
         });
@@ -6063,7 +6186,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if ('domainRevision' in body && typeof body.domainRevision === 'number' && body.domainRevision > throughRevision) return state;
       return this.#reduce(state, record, rawEnvelope);
     }
-    assertConversationRunRecord(body, this.#verifier);
+    await verifyProtocolStep(() => assertConversationRunRecord(body, this.#verifier));
     const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
     // The validated authority commit already supplies the atomic publish locator.
     // Read its session batch, never the dispatch, transcript or execution closure.
@@ -6081,13 +6204,46 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return state;
   };
 
+  /** 已验事实仅保留执行所需绑定；历史正文留在原制品及分页读模型，不重复进入启动检查点。 */
+  readonly #reduceRunProjection = async (
+    state: RunProjection,
+    record: LogicalRecord<unknown>,
+    envelope: CommitEnvelope<unknown>,
+    checks?: Array<() => void>,
+  ): Promise<RunProjection> => {
+    const next = await this.#reduce(state, record, envelope, checks);
+    const body = record.body as { t?: string; runId?: string; assignmentId?: string; ingressKey?: string };
+    if (body.t === "assigned" && body.assignmentId) {
+      const assigned = next.assignedById.get(body.assignmentId)!;
+      next.assignedById.set(body.assignmentId, { ...assigned, envelope: retainedConversationEnvelope(assigned.envelope) });
+    } else if (body.t === "admitted" && body.runId) {
+      const admitted = next.admittedByRun.get(body.runId)!;
+      const { input: _input, ...metadata } = admitted.record as Extract<ConversationRunJournalRecord, { t: "admitted" }>;
+      next.admittedByRun.set(body.runId, { ...admitted, record: metadata });
+    } else if (body.t === "run-input-appended" && body.runId && body.ingressKey) {
+      const appended = next.appendedInputs.get(body.ingressKey)!;
+      const { input: _input, ...metadata } = appended.record as Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>;
+      next.appendedInputs.set(body.ingressKey, { ...appended, record: metadata });
+      const keys = next.appendedInputKeysByRun.get(body.runId) ?? new Set<string>();
+      keys.add(body.ingressKey); next.appendedInputKeysByRun.set(body.runId, keys);
+    }
+    // 同一原子信封内的闭合验证仍可读取输入；整份该会话事实归约完成后才释放正文副本。
+    if (envelope.entries.findLast(entry => entry.stream === runStream(this.#conversationId)) === record) {
+      for (const entry of envelope.entries) {
+        const terminal = entry.body as { t?: string; runId?: string };
+        if (entry.stream === record.stream && terminal.t === "state" && terminal.runId) compactTerminalRunInput(next, terminal.runId);
+      }
+    }
+    return next;
+  };
+
   readonly #reduce = async (
     state: RunProjection,
     record: LogicalRecord<unknown>,
     rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
     checks?: Array<() => void>,
   ): Promise<RunProjection> => {
-    const verify = (check: () => void) => checks ? void checks.push(check) : check();
+    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
     const legacyTickets = checks && this.#legacyAbortTickets ? {
       authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
         checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
@@ -6170,7 +6326,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       );
       return state;
     }
-    assertConversationRunRecord(body, this.#verifier);
+    await verifyProtocolStep(() => assertConversationRunRecord(body, this.#verifier));
     switch (body.t) {
       case "session-meta": {
         assertWorksceneIdentity(this.#conversationId, body.sceneId);
@@ -6338,10 +6494,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           throw corruptRunJournal("Run assignment is not the earliest admitted run");
         }
         const bytes = await this.#artifacts.get(body.dispatchRef);
-        const dispatch = validateConversationEnvelope(
+        const dispatch = await verifyProtocolStep(() => validateConversationEnvelope(
           JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
           this.#verifier,
-        );
+        ));
         await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
         assertAssignedMatchesDispatch(
           body,
@@ -6353,7 +6509,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (!this.#resources) {
             throw corruptRunJournal("Anchor assignment has no resource coordinator");
           }
-          verify(() => { this.#resources!.assertActivationRecords({
+          await verify(() => { this.#resources!.assertActivationRecords({
             lease: dispatch.resourceLease,
             records: envelope.entries,
             acceptedAt: envelope.at,
@@ -6693,8 +6849,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Accepted cancellation has no durable assignment");
         }
-        verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           proof.decision === "not-started" ? "release" : "settle-release",
           envelope.entries,
@@ -6844,7 +7000,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
         }
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "release",
           envelope.entries,
@@ -6918,7 +7074,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const admitted = assigned
           ? state.admittedByRun.get(assigned.record.runId)
           : undefined;
-        applyConversationTicketRecord({
+        await applyConversationTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -6954,7 +7110,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return state;
       }
       case "ticket-revoked":
-        applyConversationTicketRecord({
+        await applyConversationTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -7056,12 +7212,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           );
         }
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptRunJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7071,12 +7228,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       case "channel-challenge-delivered":
       case "channel-challenge-closed":
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptRunJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7229,9 +7387,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (!assigned) throw corruptRunJournal("Assigned failure has no assignment");
           if (body.usageFinal) {
             const usageFinal = body.usageFinal;
-            verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
+            await verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
           }
-          verify(() => { this.#assertResourceTerminalRecords(
+          await verify(() => { this.#assertResourceTerminalRecords(
             assigned.record,
             body.usageFinal ? "settle-release" : "reclaim",
             envelope.entries,
@@ -7405,7 +7563,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 )),
           });
           if (conversationFact.resolution.kind.startsWith("user-")) {
-            verify(() => { this.#assertResourceTerminalRecords(
+            await verify(() => { this.#assertResourceTerminalRecords(
               assigned.record,
               "reclaim",
               envelope.entries,
@@ -7422,10 +7580,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return state;
       }
       case "advancement-event": {
-        const event = await loadStored(body.event, this.#artifacts);
-        if (!isAdvancementControlEvent(event, this.#verifier)) {
-          throw corruptRunJournal("Run journal contains an invalid advancement event");
-        }
+        const rawEvent = await loadStored(body.event, this.#artifacts);
+        const event = await verifyProtocolStep(() => {
+          if (!isAdvancementControlEvent(rawEvent, this.#verifier)) throw corruptRunJournal("Run journal contains an invalid advancement event");
+          return rawEvent;
+        });
         try {
           assertAdvancementEventBatchLegal(state.advancementSessions, [event]);
         } catch (error) {
@@ -7536,8 +7695,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ) {
           throw corruptRunJournal("Committed bundle does not bind its run journal fact");
         }
-        verify(() => { this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal); });
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal); });
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "settle-release",
           envelope.entries,
@@ -7657,7 +7816,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
     checks?: Array<() => void>,
   ): Promise<SubmissionGuardProjection> => {
-    const verify = (check: () => void) => checks ? void checks.push(check) : check();
+    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
     const legacyTickets = checks && this.#legacyAbortTickets ? {
       authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
         checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
@@ -7667,13 +7826,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (record.stream !== runStream(this.#conversationId)) {
       throw corruptRunJournal("Submission guard projection received a different stream");
     }
-    const body = record.body as unknown;
-    assertPlainRecord(body, "Submission guard record");
-    if ("kind" in body) {
-      assertConversationRunInternalRecord(body);
+    const uncheckedBody = record.body as unknown;
+    assertPlainRecord(uncheckedBody, "Submission guard record");
+    if ("kind" in uncheckedBody) {
+      assertConversationRunInternalRecord(uncheckedBody);
       return state;
     }
-    assertConversationRunRecord(body, this.#verifier);
+    const body = await verifyProtocolStep(() => { assertConversationRunRecord(uncheckedBody, this.#verifier); return uncheckedBody; });
     switch (body.t) {
       case "session-lifecycle":
         return state;
@@ -8005,8 +8164,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Submission guard cancellation has no assignment");
         }
-        verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           proof.decision === "not-started" ? "release" : "settle-release",
           envelope.entries,
@@ -8092,7 +8251,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ),
         });
         if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "release",
           envelope.entries,
@@ -8218,7 +8377,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                 )),
           });
           if (fact.resolution.kind.startsWith("user-") && assigned) {
-            verify(() => { this.#assertResourceTerminalRecords(
+            await verify(() => { this.#assertResourceTerminalRecords(
               assigned.record,
               "reclaim",
               envelope.entries,
@@ -8251,7 +8410,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const admitted = assigned
           ? state.admittedByRun.get(assigned.record.runId)
           : undefined;
-        applyConversationTicketRecord({
+        await applyConversationTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -8287,7 +8446,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         return state;
       }
       case "ticket-revoked":
-        applyConversationTicketRecord({
+        await applyConversationTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -8429,9 +8588,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (next === "failed" && assigned) {
           if (body.usageFinal) {
             const usageFinal = body.usageFinal;
-            verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
+            await verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
           }
-          verify(() => { this.#assertResourceTerminalRecords(
+          await verify(() => { this.#assertResourceTerminalRecords(
             assigned.record,
             body.usageFinal ? "settle-release" : "reclaim",
             envelope.entries,
@@ -8499,7 +8658,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         if (!assigned) {
           throw corruptRunJournal("Submission guard commit has no assignment");
         }
-        verify(() => { this.#assertResourceTerminalRecords(
+        await verify(() => { this.#assertResourceTerminalRecords(
           assigned.record,
           "settle-release",
           envelope.entries,
@@ -8551,6 +8710,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   ): Promise<SubmissionGuardProjection> {
     this.#assertSubmissionContextIdentity(context, identity);
     return this.#operations.run(async () => {
+      await this.#restoreProjection("submission");
       const cached = this.#submissionGuardProjection;
       const replay = async () => {
         try {
@@ -8579,10 +8739,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         state: transaction.state,
         cursor: transaction.cursor,
       };
+      this.#saveProjection("submission");
       if (context.principal.kind !== "assignment") return transaction.state;
       const capability = context.principal.capability;
       const assigned = transaction.state.assignedById.get(identity.assignmentId);
-      assertActivatedAssignmentCapability({
+      await verifyProtocolStep(() => assertActivatedAssignmentCapability({
         capability,
         activation: assigned
           ? {
@@ -8603,7 +8764,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         revoked: false,
         now: this.#clock(),
         deadlineAt: context.deadlineAt,
-      });
+      }));
       return transaction.state;
     });
   }
@@ -8728,7 +8889,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     assigned:
       | {
           readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-          readonly envelope?: PendingConversationDispatch["envelope"];
+          readonly envelope?: Pick<PendingConversationDispatch["envelope"], "capabilities">;
         }
       | undefined,
     revokedCapabilities: ReadonlySet<string>,
@@ -8780,6 +8941,31 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
   }
 
+  /**
+   * 控制适配在同一串行责任内临时接管运行投影，验证后归还精确游标。
+   * 没有第二缓存保留同一可变对象；只隔离实际访问的值，失败保留已验前缀。
+   */
+  async #withRunProjection<Value>(operation: (
+    basis: { readonly state: RunProjection; readonly cursor: ProjectionCursor; readonly createState: () => RunProjection } | undefined,
+    publish: (state: RunProjection, cursor: ProjectionCursor) => void,
+  ) => Promise<Value>): Promise<Value> {
+    return this.#operations.run(async () => {
+      await this.#restoreProjection("run");
+      const cached = this.#runProjection;
+      let draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
+      let candidate = cached && draft ? { state: draft.state, cursor: cached.cursor } : undefined;
+      const basis = candidate && { ...candidate, createState: () => {
+        draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
+        return draft?.state ?? emptyProjection(this.#conversationId);
+      } };
+      const value = await operation(basis, (state, cursor) => { candidate = { state, cursor }; });
+      if (candidate && draft && candidate.state === draft.state) candidate = { ...candidate, state: draft.finish() };
+      this.#runProjection = candidate;
+      this.#saveProjection("run");
+      return value;
+    });
+  }
+
   async #transact<Value>(
     decide: (
       state: RunProjection,
@@ -8789,15 +8975,17 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readProjectionIds: readonly string[] = [],
   ) {
     return this.#operations.run(async () => {
+      await this.#restoreProjection("run");
+      const cached = this.#runProjection;
+      let draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
       try {
-        const cached = this.#runProjection;
         const runTransaction = () => this.#log.transactProjection<
           RunProjection,
           unknown,
           Value
         >(
-          cached ? structuredClone(cached.state) : emptyProjection(this.#conversationId),
-          this.#reduce,
+          draft?.state ?? emptyProjection(this.#conversationId),
+          this.#reduceRunProjection,
           async (state, context) => {
             if (this.#currentAuthority) {
               await assertConversationTransferWriteAuthority(
@@ -8833,6 +9021,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           },
           {
             stream: runStream(this.#conversationId),
+            createState: () => {
+              draft = cached ? createConversationProjectionDraft(cached.state) : undefined;
+              return draft?.state ?? emptyProjection(this.#conversationId);
+            },
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
             readProjectionIds: this.#currentAuthority
@@ -8851,9 +9043,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           this.#resources ? this.#resources.coordinate(transact) : transact()
         );
         this.#runProjection = {
-          state: transaction.state,
+          state: draft && transaction.state === draft.state ? draft.finish() : transaction.state,
           cursor: transaction.cursor,
         };
+        this.#saveProjection("run");
         if (transaction.commit) {
           this.#publishStatusNotices(
             conversationStatusNoticesForCommit(
@@ -8866,8 +9059,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         return transaction;
       } catch (error) {
-        // Coordinator post-sync can fail after append. The original basis is
-        // still intact; the next transaction validates it and replays the tail.
+        // 协调器post-sync也可能在提交后失败；丢弃候选后从旧已验前缀追尾，不重读全部历史。
+        this.#runProjection = cached;
         throw error;
       }
     });
@@ -9004,6 +9197,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async #appendPublishProgress(progress: Extract<PublishRecord, { t: "publish-progress" }>) {
     await this.#operations.run(async () => {
       try {
+        await this.#restoreProjection("publish");
         const cached = this.#publishProjection;
         const transaction = await this.#log.transactProjection<
           PublishProjection,
@@ -9039,6 +9233,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state: transaction.state,
           cursor: transaction.cursor,
         };
+        this.#saveProjection("publish");
       } catch (error) {
         this.#publishProjection = undefined;
         throw error;
@@ -9049,6 +9244,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async #selectPublish<Value>(select: (state: PublishProjection) => Value): Promise<Value> {
     return this.#operations.run(async () => {
       try {
+        await this.#restoreProjection("publish");
         const cached = this.#publishProjection;
         const transaction = await this.#log.readProjection<
           PublishProjection,
@@ -9066,6 +9262,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state: transaction.state,
           cursor: transaction.cursor,
         };
+        this.#saveProjection("publish");
         return select(transaction.state);
       } catch (error) {
         this.#publishProjection = undefined;
@@ -9077,6 +9274,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   async #selectFinal<Value>(select: (state: FinalOutboxProjection) => Value): Promise<Value> {
     return this.#operations.run(async () => {
       try {
+        await this.#restoreProjection("final");
         const cached = this.#finalProjection;
         const transaction = await this.#log.readProjection<
           FinalOutboxProjection,
@@ -9102,6 +9300,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state: transaction.state,
           cursor: transaction.cursor,
         };
+        this.#saveProjection("final");
         return select(transaction.state);
       } catch (error) {
         this.#finalProjection = undefined;
@@ -9119,6 +9318,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const key = finalKey(frame);
     return this.#operations.run(async () => {
       try {
+        await this.#restoreProjection("final");
         const cached = this.#finalProjection;
         const result = await this.#log.transactProjection<
           FinalOutboxProjection,
@@ -9160,7 +9360,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             ...(cached ? { cursor: cached.cursor } : {}),
           },
         );
-        this.#finalProjection = { state: result.state, cursor: result.cursor };
+        this.#finalProjection = { state: result.state, cursor: result.cursor }; this.#saveProjection("final");
         return result.value;
       } catch (error) {
         this.#finalProjection = undefined;
@@ -9210,7 +9410,7 @@ export class InProcessConversationDispatcher {
   /** Deliver this exact issued assignment even if another reader already ACKed it. */
   async dispatchAssignment(item: PendingConversationDispatch): Promise<DispatchResult> {
     if (!this.#enabled) throw new Error("Conversation dispatch is disabled");
-    const outcome = this.#journal.validateExecutorDispatchResult(
+    const outcome = await this.#journal.validateExecutorDispatchResult(
       await this.#executor.dispatch(item.envelope, item.activation, this.#dispatchContext(item)),
     );
     if (outcome.accepted) await this.#journal.acknowledgeDispatch(item.assignmentId);
@@ -9224,7 +9424,7 @@ export class InProcessConversationDispatcher {
     const pending = await this.#journal.dispatchesAwaitingStarted();
     let recovered = 0;
     for (const item of pending) {
-      const snapshot = this.#journal.validateExecutorLedgerSnapshot(
+      const snapshot = await this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           item.assignmentId,
           this.#queryContext(item.assignmentId),
@@ -9287,14 +9487,14 @@ export class InProcessConversationDispatcher {
     const assignments = await this.#journal.assignmentsAwaitingRecovery();
     let recovered = 0;
     for (const candidate of assignments) {
-      const ledger = this.#journal.validateExecutorLedgerSnapshot(
+      const ledger = await this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           candidate.assignmentId,
           this.#queryContext(candidate.assignmentId),
         ),
       );
       if (ledger.phase === "dispatch-rejected") {
-        const outcome = this.#journal.validateExecutorDispatchResult(
+        const outcome = await this.#journal.validateExecutorDispatchResult(
           await this.#executor.dispatch(
             candidate.dispatch.envelope,
             candidate.dispatch.activation,
@@ -9354,7 +9554,7 @@ export class InProcessConversationDispatcher {
         }
         const result = await this.#submitSealedBundle(candidate.assignmentId);
         if (result.committed) {
-          const acknowledged = this.#journal.validateExecutorLedgerSnapshot(
+          const acknowledged = await this.#journal.validateExecutorLedgerSnapshot(
             await this.#executor.queryLedger(
               candidate.assignmentId,
               this.#queryContext(candidate.assignmentId),
@@ -9504,6 +9704,60 @@ export class InProcessConversationDispatcher {
   }
 }
 
+function requireRetainedRunInput(entry: { readonly input?: UserTurnInput }): UserTurnInput {
+  if (!entry.input) throw corruptRunJournal("Active run input payload is unavailable");
+  return entry.input;
+}
+
+function admittedInputDigest(entry: AdmittedProjection): string {
+  return entry.inputDigest ?? protocolDigest("ConversationAdmittedInput", 1, requireRetainedRunInput(entry));
+}
+
+function retainedConversationEnvelope(envelope: RetainedConversationEnvelope): RetainedConversationEnvelope {
+  if (!Object.hasOwn(envelope.work, "windowInput")) return envelope;
+  const { windowInput: _windowInput, ...work } = envelope.work as PendingConversationDispatch["envelope"]["work"];
+  return { ...envelope, work };
+}
+
+function compactTerminalRunInput(state: RunProjection, runId: string): void {
+  const terminal = state.stateByRun.get(runId)?.state;
+  if (terminal !== "committed" && terminal !== "cancelled" && terminal !== "failed" && terminal !== "expired") return;
+  const admitted = state.admittedByRun.get(runId);
+  if (admitted?.input) {
+    const digest = admittedInputDigest(admitted);
+    const { input: _input, ...retained } = admitted;
+    state.admittedByRun.set(runId, { ...retained, inputDigest: digest });
+  }
+  for (const key of state.appendedInputKeysByRun.get(runId) ?? []) {
+    const appended = state.appendedInputs.get(key);
+    if (appended?.input) {
+      const { input: _input, ...retained } = appended;
+      state.appendedInputs.set(key, retained);
+    }
+  }
+  state.appendedInputKeysByRun.delete(runId);
+}
+
+/** V1检查点已通过同一HMAC与日志边界验证；只迁移派生形状，不重读历史制品。 */
+function compactLegacyRunProjection(source: RunProjection): RunProjection {
+  const state = { ...source, appendedInputKeysByRun: new Map<string, Set<string>>() };
+  for (const [id, assigned] of state.assignedById) {
+    state.assignedById.set(id, { ...assigned, envelope: retainedConversationEnvelope(assigned.envelope) });
+  }
+  for (const [id, admitted] of state.admittedByRun) {
+    const { input: _input, ...record } = admitted.record as Extract<ConversationRunJournalRecord, { t: "admitted" }>;
+    state.admittedByRun.set(id, { ...admitted, record });
+  }
+  for (const [key, appended] of state.appendedInputs) {
+    const { input: _input, ...record } = appended.record as Extract<ConversationRunJournalRecord, { t: "run-input-appended" }>;
+    state.appendedInputs.set(key, { ...appended, record });
+    const keys = state.appendedInputKeysByRun.get(record.runId) ?? new Set<string>();
+    keys.add(key); state.appendedInputKeysByRun.set(record.runId, keys);
+  }
+  for (const runId of state.stateByRun.keys()) compactTerminalRunInput(state, runId);
+  return state;
+}
+
 function assertRunInputCommit(state: RunProjection, runId: string, assignmentId: string, messages: readonly Message[]): void {
   if (state.openInputAssignments.get(runId) === assignmentId) throw new Error("Run input must close before commit");
   const expected = expectedRunInputMessages(state, runId, assignmentId);
@@ -9519,8 +9773,8 @@ function expectedRunInputMessages(state: RunProjection, runId: string, assignmen
     .sort((a, b) => a.boundary - b.boundary)
     .flatMap((entry) => entry.ingressKeys.map((key) => state.appendedInputs.get(key)!));
   return [
-    ...(initialIdentity ? [{ ...userMessageFromTurnInput(initial.input), inputIdentity: initialIdentity }] : []),
-    ...consumed.map((entry) => ({ ...userMessageFromTurnInput(entry.input), inputIdentity: entry.record.ingress.turnOrigin!.messageIdentity! })),
+    ...(initialIdentity ? [{ ...userMessageFromTurnInput(requireRetainedRunInput(initial)), inputIdentity: initialIdentity }] : []),
+    ...consumed.map((entry) => ({ ...userMessageFromTurnInput(requireRetainedRunInput(entry)), inputIdentity: entry.record.ingress.turnOrigin!.messageIdentity! })),
   ];
 }
 
@@ -9544,6 +9798,7 @@ function emptyProjection(conversationId: string): RunProjection {
     projectedLifecycleRevisions: new Set(),
     admittedByRun: new Map(),
     appendedInputs: new Map(),
+    appendedInputKeysByRun: new Map(),
     openInputAssignments: new Map(),
     closedInputAssignments: new Set(),
     inputConsumptions: new Map(),
@@ -9841,7 +10096,7 @@ function validateTicketIssueRequest(input: DataPlaneTicketIssueRequest): void {
   }
 }
 
-function applyConversationTicketRecord(
+async function applyConversationTicketRecord(
   input: {
     readonly state: Pick<
       RunProjection,
@@ -9869,7 +10124,7 @@ function applyConversationTicketRecord(
     readonly originalSurfacePrincipal?: string;
     readonly hasAtomicReplacementRevocation?: boolean;
   },
-): void {
+): Promise<void> {
   const { state, record } = input;
   if (record.t === "ticket-revoked") {
     assertIdentifier(record.ticketId, "Revoked data-plane ticket id");
@@ -9883,7 +10138,7 @@ function applyConversationTicketRecord(
     return;
   }
 
-  const ticket = validateDataPlaneTicket(record.ticket, input.verifier);
+  const ticket = await verifyProtocolStep(() => validateDataPlaneTicket(record.ticket, input.verifier));
   const assigned = input.assigned;
   const replaced =
     record.replacesTicketId === undefined
@@ -11183,7 +11438,7 @@ function assertAssignedMatchesDispatch(
 
 function assertCapabilityMatchesAssignedEnvelope(
   capability: import("@zhixing/core/contracts").AuthorityCapability,
-  envelope: PendingConversationDispatch["envelope"],
+  envelope: Pick<PendingConversationDispatch["envelope"], "capabilities">,
 ): void {
   const assigned = envelope.capabilities.find(
     (candidate) => candidate.capId === capability.capId,
@@ -11793,4 +12048,226 @@ function snapshot<T>(value: T, label: string): T {
   } catch (error) {
     throw new TypeError(`${label} is not canonical protocol data`, { cause: error });
   }
+}
+
+
+type ConversationRecoveryFacts = {
+  deleted: boolean;
+  controlRecovery: boolean;
+  readonly lifecycleFacts: Set<number>;
+  readonly lifecycleProjections: Set<number>;
+  readonly runStates: Map<string, string>;
+  readonly commits: Map<string, number>;
+  readonly projected: Set<string>;
+  readonly acknowledged: Set<string>;
+  readonly terminalFinals: Set<number>;
+};
+
+/** 启动恢复发现的折叠状态：只含 Map、Set 与已校验记录，可整体存为投影检查点。 */
+interface ConversationRecoveryDiscoveryState {
+  readonly facts: Map<string, ConversationRecoveryFacts>;
+  readonly publishDecisions: Map<string, Extract<PublishRecord, { t: 'publish-decision' }>>;
+  readonly publishDomains: Map<string, Set<"session" | "global">>;
+}
+
+function emptyRecoveryDiscovery(): ConversationRecoveryDiscoveryState {
+  return { facts: new Map(), publishDecisions: new Map(), publishDomains: new Map() };
+}
+
+function foldRecoveryDiscovery(
+  state: ConversationRecoveryDiscoveryState,
+  entry: { readonly stream: string; readonly body: unknown },
+): void {
+  const factsFor = (conversationId: string) => {
+    let facts = state.facts.get(conversationId);
+    if (!facts) {
+      facts = {
+        deleted: false,
+        controlRecovery: false,
+        lifecycleFacts: new Set(),
+        lifecycleProjections: new Set(),
+        runStates: new Map(),
+        commits: new Map(),
+        projected: new Set(),
+        acknowledged: new Set(),
+        terminalFinals: new Set(),
+      };
+      state.facts.set(conversationId, facts);
+    }
+    return facts;
+  };
+  const publishDecisions = state.publishDecisions, publishDomains = state.publishDomains;
+  const body = entry.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  const record = body as Record<string, unknown>;
+  if (entry.stream.startsWith("run:")) {
+    const conversationId = entry.stream.slice("run:".length);
+    const facts = factsFor(conversationId);
+    if (
+      record.t === "session-lifecycle" &&
+      typeof record.domainRevision === "number"
+    ) {
+      facts.lifecycleFacts.add(record.domainRevision);
+      if (record.mutation === "delete") facts.deleted = true;
+    } else if (
+      record.kind === "conversation-lifecycle-projection" &&
+      typeof record.domainRevision === "number"
+    ) {
+      facts.lifecycleProjections.add(record.domainRevision);
+    } else if (
+      record.t === "state" &&
+      typeof record.runId === "string" &&
+      typeof record.state === "string"
+    ) {
+      facts.runStates.set(record.runId, record.state);
+    } else if (
+      record.t === "committed" &&
+      typeof record.assignmentId === "string" &&
+      typeof record.commitRevision === "number"
+    ) {
+      facts.commits.set(record.assignmentId, record.commitRevision);
+      const summary = record.readSummary as { controlRecovery?: boolean } | undefined;
+      if (summary?.controlRecovery !== false) facts.controlRecovery = true;
+    } else if (
+      record.t === "bundle-ack-observed" &&
+      typeof record.assignmentId === "string"
+    ) {
+      facts.acknowledged.add(record.assignmentId);
+    } else if (
+      record.kind === "conversation-commit-projection" &&
+      typeof record.assignmentId === "string"
+    ) {
+      facts.projected.add(record.assignmentId);
+    }
+    return;
+  }
+  if (
+    entry.stream === "publish" &&
+    record.t === "publish-decision" &&
+    typeof record.assignmentId === "string"
+  ) {
+    publishDecisions.set(record.assignmentId, validatePublishDecisionRecord(record));
+    const required = new Set<"session" | "global">();
+    if (typeof record.sessionCount === "number" && record.sessionCount > 0) {
+      required.add("session");
+    }
+    if (typeof record.globalCount === "number" && record.globalCount > 0) {
+      required.add("global");
+    }
+    publishDomains.set(record.assignmentId, required);
+  } else if (
+    entry.stream === "publish" &&
+    record.t === "publish-progress" &&
+    record.state === "settled" &&
+    typeof record.assignmentId === "string" &&
+    (record.domain === "session" || record.domain === "global")
+  ) {
+    publishDomains.get(record.assignmentId)?.delete(record.domain);
+  } else if (
+    entry.stream === "final-outbox" &&
+    record.t === "final" &&
+    typeof record.conversationId === "string" &&
+    typeof record.commitRevision === "number" &&
+    (record.state === "published" || record.state === "expired")
+  ) {
+    factsFor(record.conversationId).terminalFinals.add(record.commitRevision);
+  }
+}
+
+/** Owner-owned startup discovery shares the same publish semantics as commit. */
+export async function discoverConversationRecoveryCandidates(
+  commits: readonly {
+    readonly entries: readonly { readonly stream: string; readonly body: unknown }[];
+  }[],
+  artifacts: ArtifactStore,
+): Promise<Set<string>> {
+  const state = emptyRecoveryDiscovery();
+  for (const commit of commits) {
+    for (const entry of commit.entries) foldRecoveryDiscovery(state, entry);
+  }
+  return recoveryCandidatesOf(state, artifacts);
+}
+
+// 发现折叠覆盖全部历史；检查点让每次启动只续算其后的尾部，不再为得出“无待恢复”读出整份日志。
+const RECOVERY_DISCOVERY_CHECKPOINT = projectionCheckpointKey(
+  "conversation-recovery-discovery", 1, foldRecoveryDiscovery, emptyRecoveryDiscovery,
+);
+
+/** 直接在权威日志上发现待恢复会话：从与已核验前缀一致的检查点续算尾部，结果与整份快照折叠相同。 */
+export async function discoverConversationRecoveryCandidatesFromLog(
+  log: AuthorityCommitLog,
+  artifacts: ArtifactStore,
+): Promise<Set<string>> {
+  const restored = await log.loadProjectionCheckpoint?.<ConversationRecoveryDiscoveryState>(RECOVERY_DISCOVERY_CHECKPOINT);
+  const initial = restored?.state ?? emptyRecoveryDiscovery();
+  const projected = await log.readProjection<ConversationRecoveryDiscoveryState, unknown>(
+    initial,
+    // 首次写入前复制：日志在背压下重试时从未改动的起点重新归约。
+    (state, record) => {
+      const next = state === initial ? structuredClone(state) : state;
+      foldRecoveryDiscovery(next, record);
+      return next;
+    },
+    restored ? { cursor: restored.cursor } : {},
+  );
+  if (projected.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
+    void log.saveProjectionCheckpoint?.(RECOVERY_DISCOVERY_CHECKPOINT, projected.cursor, projected.state);
+  }
+  return recoveryCandidatesOf(projected.state, artifacts);
+}
+
+async function recoveryCandidatesOf(
+  state: ConversationRecoveryDiscoveryState,
+  artifacts: ArtifactStore,
+): Promise<Set<string>> {
+  // Counts identify possible work only. The commit owner, using the immutable
+  // batch and its durable outcomes, decides which domains actually owe an
+  // external publish. Legacy decisions without progress are checked here too.
+  const hasPendingPublish = async (assignmentId: string): Promise<boolean> => {
+    const unresolved = state.publishDomains.get(assignmentId);
+    if (!unresolved?.size) return false;
+    const decision = state.publishDecisions.get(assignmentId)!;
+    const text = Buffer.from(await artifacts.get(decision.batch.ref)).toString('utf8');
+    const batch = validateMutationBatch(JSON.parse(text));
+    if (canonicalize(batch) !== text || batch.assignmentId !== assignmentId) throw corruptRunJournal('Recovery publish batch binding is invalid');
+    validatePublishDecisionForBatch(decision, batch);
+    return [...unresolved].some(domain => domainPublishDecisionRequired(batch.records, decision.outcomes, domain));
+  };
+  const result = new Set<string>();
+  const openStates = new Set([
+    "queued",
+    "dispatched",
+    "running",
+    "cancel-requested",
+    "uncertain",
+  ]);
+  for (const [conversationId, facts] of state.facts) {
+    const hasPendingLifecycle = [...facts.lifecycleFacts].some(
+      (revision) => !facts.lifecycleProjections.has(revision),
+    );
+    if (hasPendingLifecycle) {
+      result.add(conversationId);
+      continue;
+    }
+    // A committed run may carry an unconsumed product continuation even when
+    // its final frame was acknowledged. Inspect that projection once at startup.
+    if (facts.controlRecovery) result.add(conversationId);
+    if (facts.deleted) continue;
+    if ([...facts.runStates.values()].some((state) => openStates.has(state))) {
+      result.add(conversationId);
+      continue;
+    }
+    for (const [assignmentId, revision] of facts.commits) {
+      if (
+        !facts.projected.has(assignmentId) ||
+        !facts.acknowledged.has(assignmentId) ||
+        !facts.terminalFinals.has(revision) ||
+        await hasPendingPublish(assignmentId)
+      ) {
+        result.add(conversationId);
+        break;
+      }
+    }
+  }
+  return result;
 }

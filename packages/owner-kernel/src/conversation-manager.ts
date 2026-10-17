@@ -683,8 +683,9 @@ export class ConversationManager implements ConversationCommitProjection {
    * `exists` 必须在 manager 的 id 串行门内执行,否则 RPC 层会形成
    * "exists=true → delete 完成 → getOrCreate 又重建持久身份" 的复活竞态。
    * 无持久目录的最小测试/ephemeral 场景可不传 exists,保持旧的纯内存语义。
+   * 会话恢复也复用此门准备运行体，避免首发才装填上下文。
    */
-  private async getOrCreateExisting(
+  async getOrCreateExisting(
     conversationId: string,
     exists?: ConversationExists,
   ): Promise<ManagedSession | undefined> {

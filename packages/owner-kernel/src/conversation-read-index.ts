@@ -27,91 +27,10 @@ export class ConversationReadIndex {
   readonly index;
   #base = new Map<string, JsonValue>();
   #baseRecords: readonly { lsn: number; at: string; stream: string; body: unknown }[] = [];
+  readonly #reducer: ConversationDirectoryReducer;
   constructor(readonly log: AuthorityCommitLog, readonly artifacts: ArtifactStore, readonly verifier: ProtocolSignatureVerifier) {
-    this.index = log.durableProjection<ConversationRunJournalRecord>({
-      projectionId: 'conversation-read-directory', reducerVersion: 12,
-      reduce: async (envelope, current, source) => this.#reduce(envelope.entries, envelope.at, envelope.lsn, key => current.get(key), source.checkpoint),
-    });
-  }
-  async #reduce(entries: readonly { stream: string; body: unknown }[], at: string, lsn: number, get: (key: string) => Promise<JsonValue | undefined>, checkpoint?: DurableLogCheckpoint, baseStart = 0): Promise<DurableProjectionMutation[]> {
-    const changes: DurableProjectionMutation[] = [], overlay = new Map<string, JsonValue>();
-    const read = (key: string) => overlay.has(key) ? Promise.resolve(overlay.get(key)) : get(key);
-    const put = (key: string, value: unknown) => { overlay.set(key, value as JsonValue); changes.push({ kind: 'put', key, value: value as JsonValue }); };
-    for (const [item, entry] of entries.entries()) {
-      if (checkpoint && entry.stream === 'final-outbox' && (entry.body as { t?: string })?.t === 'final') {
-        const final = validateFinalOutboxRecord(entry.body);
-        put(prefix(final.conversationId) + 'control:' + ordinal(lsn), checkpoint);
-      }
-      if (!entry.stream.startsWith('run:')) continue;
-      const id = entry.stream.slice(4), p = prefix(id), key = `${p}meta`, raw = entry.body;
-      if (!raw || typeof raw !== 'object' || !('t' in raw)) continue;
-      const directoryFact = ['committed', 'session-meta', 'session-control', 'session-lifecycle', 'advancement-event', 'admitted', 'run-input-appended', 'state'].includes(String(raw.t));
-      if (!directoryFact && !isMessageDeliveryFact(raw)) continue;
-      const body = validateConversationRunRecord(raw, this.verifier);
-      if (checkpoint && isMessageDeliveryFact(body)) put(p + 'message-fact:' + ordinal(lsn), checkpoint);
-      if (!directoryFact) continue;
-      if (checkpoint && ['admitted', 'run-input-appended', 'state'].includes(body.t)) {
-        put(p + 'control:' + ordinal(lsn), checkpoint);
-      }
-      if (checkpoint && (['session-meta', 'session-control', 'session-lifecycle', 'advancement-event'].includes(body.t) ||
-          body.t === 'committed' && (this.#publish(entries, body.assignmentId).publish?.sessionCount ?? 0) > 0)) {
-        put(p + 'session:' + ordinal(lsn), checkpoint);
-      }
-      if (body.t === 'admitted' || body.t === 'run-input-appended') {
-        if (body.t === 'admitted' && body.ingress.turnOrigin?.worksceneContinuation) put(p + 'continuation:' + JSON.stringify(body.runId), true);
-        // Older interactive admissions have a durable ingress ID but no message identity.
-        const identity = body.ingress.turnOrigin?.messageIdentity ?? { id: body.ingress.ingressId, source: { kind: 'user' as const } };
-        if (identity) {
-          const pointer: InputPointer = { runId: body.runId, inputKey: body.ingressKey, position: body.t === 'admitted' ? body.queuedPosition : body.position, lsn, identity, ...(checkpoint ? { checkpoint } : {}), item: checkpoint ? item : baseStart + item };
-          put(p + 'input:' + JSON.stringify(body.runId) + ':' + ordinal(pointer.position), pointer);
-          const order = timelineKey(lsn, item, !!checkpoint);
-          put(p + 'timeline:' + order, { key: order, lsn, kind: 'input', input: pointer });
-          if (identity.source.kind === 'conversation') put(p + 'communication:' + JSON.stringify(body.runId), true);
-        }
-        continue;
-      }
-      if (body.t === 'state') {
-        const statusKey = p + 'status:' + JSON.stringify(body.runId);
-        const previous = await read(statusKey) as unknown as StatusHistoryEntry | undefined;
-        const resolutions = entries.flatMap(entry => { const fact = entry.body as ConversationRunJournalRecord; return entry.stream === 'run:' + id && fact && 't' in fact && fact.t === 'resolution' && fact.runId === body.runId ? [fact.fact] : []; });
-        // Imported execution prefixes are verified by the transfer owner. An
-        // atomic closure identifies that prior uncertain state without loading it.
-        const previousState = previous?.state ?? (resolutions.some(fact => fact.resolution) ? 'uncertain' : undefined);
-        const status = projectStatusEntry(body, at, previousState, resolutions);
-        put(statusKey, status);
-        put(p + 'status-history:' + JSON.stringify(body.runId) + ':' + ordinal(body.statusRevision), status);
-        continue;
-      }
-      if (body.t === 'advancement-event') { put(p + 'has-advancement', true); continue; }
-          const meta: ReadMeta = { ...(await read(key) as unknown as ReadMeta ??
-            { count: 0, clearedThrough: 0, baseRevision: 0, activity: '1970-01-01T00:00:00.000Z' }) };
-          if (body.t === 'committed') {
-            meta.count++; meta.baseRevision = body.commitRevision; meta.activity = at;
-            const name = await this.#stagedName(entries, body.assignmentId); if (name !== undefined) meta.name = name;
-            const pointer: CommitPointer = { timelineKey: timelineKey(lsn, item, !!checkpoint), runId: body.runId, assignmentId: body.assignmentId, commitRevision: body.commitRevision, bundle: body.bundle.ref,
-              ...(body.readSummary ? { readSummary: body.readSummary } : {}), ...this.#publish(entries, body.assignmentId) };
-            put(p + 'commit-order:' + pointer.timelineKey, pointer);
-            put(p + 'timeline:' + pointer.timelineKey, { key: pointer.timelineKey, lsn, kind: 'commit', commit: pointer });
-            changes.push({ kind: 'put', key: `${p}commit:${ordinal(Number.MAX_SAFE_INTEGER - body.commitRevision)}`, value: pointer as unknown as JsonValue },
-              { kind: 'put', key: `${p}run:${JSON.stringify(body.runId)}`, value: pointer as unknown as JsonValue });
-          } else if (body.t === 'session-meta') { meta.sessionActivity = body.lastActiveAt; if (body.operation === 'delete') meta.deleted = true; }
-          else if (body.t === 'session-control') {
-            if (body.mutation.kind === 'session-meta' && body.mutation.patch.name !== undefined) meta.name = body.mutation.patch.name;
-            meta.activity = at;
-          } else if (body.t === 'session-lifecycle') {
-            if (body.mutation === 'clear') { meta.count = 0; meta.clearedThrough = meta.baseRevision; meta.clearId = body.requestId; meta.clearedLsn = lsn; }
-            else meta.deleted = true;
-            meta.activity = at;
-          }
-          put(key, meta);
-        }
-    return changes;
-  }
-  #publish(entries: readonly { stream: string; body: unknown }[], assignmentId: string): { publish?: CommitPointer['publish'] } {
-    const decisions = entries.filter(entry => entry.stream === 'publish' && (entry.body as { t?: string; assignmentId?: string })?.t === 'publish-decision' && (entry.body as { assignmentId?: string }).assignmentId === assignmentId);
-    if (!decisions.length) return {};
-    if (decisions.length !== 1) throw Error('conversation-read-publish-duplicate');
-    return { publish: validatePublishDecisionRecord(decisions[0]!.body) };
+    this.index = registerConversationReadProjection(log, artifacts, verifier);
+    this.#reducer = directoryBindings.get(log)!.reducer;
   }
   async finalConflicts(commit: CommitPointer): Promise<number> {
     const decision = commit.publish;
@@ -216,23 +135,6 @@ export class ConversationReadIndex {
     return { pointer, input: body.input };
     });
   }
-  async #stagedName(entries: readonly { stream: string; body: unknown }[], assignmentId: string): Promise<string | undefined> {
-    const decision = entries.find(entry => entry.stream === 'publish' && (entry.body as { t?: string; assignmentId?: string })?.t === 'publish-decision' &&
-      (entry.body as { assignmentId?: string }).assignmentId === assignmentId)?.body as { batch?: { ref?: unknown }; sessionCount?: number } | undefined;
-    if (!decision?.sessionCount) return;
-    const ref = decision.batch?.ref; assertArtifactRef(ref);
-    const json = artifactJsonIndex(this.artifacts);
-    while (!(await json.prepare(ref)).ready) await new Promise<void>(setImmediate);
-    const records = await json.node(ref, ['records']); if (records?.kind !== 'array') throw Error('conversation-directory-mutation-batch');
-    let name: string | undefined;
-    for (let i = 0; i < records.units; i++) {
-      if (await json.value(ref, ['records', i, 'domain'], 128) !== 'session' ||
-          await json.value(ref, ['records', i, 'mutation', 'kind'], 128) !== 'session-meta') continue;
-      const value = await json.value(ref, ['records', i, 'mutation', 'patch', 'name'], 4096);
-      if (value !== undefined) { if (typeof value !== 'string') throw Error('conversation-directory-name'); name = value; }
-    }
-    return name;
-  }
   /** The transfer owner already verified this immutable prefix. Keep only its
    * locators/metadata alongside the local index, never copied message bodies. */
   async installBase(records: readonly { lsn: number; at: string; stream: string; body: unknown }[]): Promise<void> {
@@ -240,7 +142,7 @@ export class ConversationReadIndex {
     let start = 0;
     while (start < records.length) {
       let end = start + 1; while (end < records.length && records[end]!.lsn === records[start]!.lsn) end++;
-      const changes = await this.#reduce(records.slice(start, end), records[start]!.at, records[start]!.lsn, async key => candidate.get(key), undefined, start);
+      const changes = await this.#reducer.reduce(records.slice(start, end), records[start]!.at, records[start]!.lsn, async key => candidate.get(key), undefined, start);
       for (const change of changes) if (change.kind === 'put') candidate.set(change.key, change.value);
       start = end;
     }
@@ -337,4 +239,125 @@ export class ConversationReadIndex {
       ...(value?.name ? { name: value.name } : {}), ...(scope.kind === 'workscene' ? { sceneId: scope.sceneId } : {}),
       lastActiveAt: value?.sessionActivity ?? value?.activity ?? '1970-01-01T00:00:00.000Z' };
   }
+}
+
+/** This reducer has no journal, imported-prefix state or runtime lifecycle. */
+class ConversationDirectoryReducer {
+  constructor(readonly artifacts: ArtifactStore, readonly verifier: ProtocolSignatureVerifier) {}
+  async reduce(entries: readonly { stream: string; body: unknown }[], at: string, lsn: number, get: (key: string) => Promise<JsonValue | undefined>, checkpoint?: DurableLogCheckpoint, baseStart = 0): Promise<DurableProjectionMutation[]> {
+    const changes: DurableProjectionMutation[] = [], overlay = new Map<string, JsonValue>();
+    const read = (key: string) => overlay.has(key) ? Promise.resolve(overlay.get(key)) : get(key);
+    const put = (key: string, value: unknown) => { overlay.set(key, value as JsonValue); changes.push({ kind: 'put', key, value: value as JsonValue }); };
+    for (const [item, entry] of entries.entries()) {
+      if (checkpoint && entry.stream === 'final-outbox' && (entry.body as { t?: string })?.t === 'final') {
+        const final = validateFinalOutboxRecord(entry.body);
+        put(prefix(final.conversationId) + 'control:' + ordinal(lsn), checkpoint);
+      }
+      if (!entry.stream.startsWith('run:')) continue;
+      const id = entry.stream.slice(4), p = prefix(id), key = `${p}meta`, raw = entry.body;
+      if (!raw || typeof raw !== 'object' || !('t' in raw)) continue;
+      const directoryFact = ['committed', 'session-meta', 'session-control', 'session-lifecycle', 'advancement-event', 'admitted', 'run-input-appended', 'state'].includes(String(raw.t));
+      if (!directoryFact && !isMessageDeliveryFact(raw)) continue;
+      const body = validateConversationRunRecord(raw, this.verifier);
+      if (checkpoint && isMessageDeliveryFact(body)) put(p + 'message-fact:' + ordinal(lsn), checkpoint);
+      if (!directoryFact) continue;
+      if (checkpoint && ['admitted', 'run-input-appended', 'state'].includes(body.t)) {
+        put(p + 'control:' + ordinal(lsn), checkpoint);
+      }
+      if (checkpoint && (['session-meta', 'session-control', 'session-lifecycle', 'advancement-event'].includes(body.t) ||
+          body.t === 'committed' && (this.#publish(entries, body.assignmentId).publish?.sessionCount ?? 0) > 0)) {
+        put(p + 'session:' + ordinal(lsn), checkpoint);
+      }
+      if (body.t === 'admitted' || body.t === 'run-input-appended') {
+        if (body.t === 'admitted' && body.ingress.turnOrigin?.worksceneContinuation) put(p + 'continuation:' + JSON.stringify(body.runId), true);
+        // Older interactive admissions have a durable ingress ID but no message identity.
+        const identity = body.ingress.turnOrigin?.messageIdentity ?? { id: body.ingress.ingressId, source: { kind: 'user' as const } };
+        if (identity) {
+          const pointer: InputPointer = { runId: body.runId, inputKey: body.ingressKey, position: body.t === 'admitted' ? body.queuedPosition : body.position, lsn, identity, ...(checkpoint ? { checkpoint } : {}), item: checkpoint ? item : baseStart + item };
+          put(p + 'input:' + JSON.stringify(body.runId) + ':' + ordinal(pointer.position), pointer);
+          const order = timelineKey(lsn, item, !!checkpoint);
+          put(p + 'timeline:' + order, { key: order, lsn, kind: 'input', input: pointer });
+          if (identity.source.kind === 'conversation') put(p + 'communication:' + JSON.stringify(body.runId), true);
+        }
+        continue;
+      }
+      if (body.t === 'state') {
+        const statusKey = p + 'status:' + JSON.stringify(body.runId);
+        const previous = await read(statusKey) as unknown as StatusHistoryEntry | undefined;
+        const resolutions = entries.flatMap(entry => { const fact = entry.body as ConversationRunJournalRecord; return entry.stream === 'run:' + id && fact && 't' in fact && fact.t === 'resolution' && fact.runId === body.runId ? [fact.fact] : []; });
+        // Imported execution prefixes are verified by the transfer owner. An
+        // atomic closure identifies that prior uncertain state without loading it.
+        const previousState = previous?.state ?? (resolutions.some(fact => fact.resolution) ? 'uncertain' : undefined);
+        const status = projectStatusEntry(body, at, previousState, resolutions);
+        put(statusKey, status);
+        put(p + 'status-history:' + JSON.stringify(body.runId) + ':' + ordinal(body.statusRevision), status);
+        continue;
+      }
+      if (body.t === 'advancement-event') { put(p + 'has-advancement', true); continue; }
+          const meta: ReadMeta = { ...(await read(key) as unknown as ReadMeta ??
+            { count: 0, clearedThrough: 0, baseRevision: 0, activity: '1970-01-01T00:00:00.000Z' }) };
+          if (body.t === 'committed') {
+            meta.count++; meta.baseRevision = body.commitRevision; meta.activity = at;
+            const name = await this.#stagedName(entries, body.assignmentId); if (name !== undefined) meta.name = name;
+            const pointer: CommitPointer = { timelineKey: timelineKey(lsn, item, !!checkpoint), runId: body.runId, assignmentId: body.assignmentId, commitRevision: body.commitRevision, bundle: body.bundle.ref,
+              ...(body.readSummary ? { readSummary: body.readSummary } : {}), ...this.#publish(entries, body.assignmentId) };
+            put(p + 'commit-order:' + pointer.timelineKey, pointer);
+            put(p + 'timeline:' + pointer.timelineKey, { key: pointer.timelineKey, lsn, kind: 'commit', commit: pointer });
+            changes.push({ kind: 'put', key: `${p}commit:${ordinal(Number.MAX_SAFE_INTEGER - body.commitRevision)}`, value: pointer as unknown as JsonValue },
+              { kind: 'put', key: `${p}run:${JSON.stringify(body.runId)}`, value: pointer as unknown as JsonValue });
+          } else if (body.t === 'session-meta') { meta.sessionActivity = body.lastActiveAt; if (body.operation === 'delete') meta.deleted = true; }
+          else if (body.t === 'session-control') {
+            if (body.mutation.kind === 'session-meta' && body.mutation.patch.name !== undefined) meta.name = body.mutation.patch.name;
+            meta.activity = at;
+          } else if (body.t === 'session-lifecycle') {
+            if (body.mutation === 'clear') { meta.count = 0; meta.clearedThrough = meta.baseRevision; meta.clearId = body.requestId; meta.clearedLsn = lsn; }
+            else meta.deleted = true;
+            meta.activity = at;
+          }
+          put(key, meta);
+        }
+    return changes;
+  }
+  #publish(entries: readonly { stream: string; body: unknown }[], assignmentId: string): { publish?: CommitPointer['publish'] } {
+    const decisions = entries.filter(entry => entry.stream === 'publish' && (entry.body as { t?: string; assignmentId?: string })?.t === 'publish-decision' && (entry.body as { assignmentId?: string }).assignmentId === assignmentId);
+    if (!decisions.length) return {};
+    if (decisions.length !== 1) throw Error('conversation-read-publish-duplicate');
+    return { publish: validatePublishDecisionRecord(decisions[0]!.body) };
+  }
+  async #stagedName(entries: readonly { stream: string; body: unknown }[], assignmentId: string): Promise<string | undefined> {
+    const decision = entries.find(entry => entry.stream === 'publish' && (entry.body as { t?: string; assignmentId?: string })?.t === 'publish-decision' &&
+      (entry.body as { assignmentId?: string }).assignmentId === assignmentId)?.body as { batch?: { ref?: unknown }; sessionCount?: number } | undefined;
+    if (!decision?.sessionCount) return;
+    const ref = decision.batch?.ref; assertArtifactRef(ref);
+    const json = artifactJsonIndex(this.artifacts);
+    while (!(await json.prepare(ref)).ready) await new Promise<void>(setImmediate);
+    const records = await json.node(ref, ['records']); if (records?.kind !== 'array') throw Error('conversation-directory-mutation-batch');
+    let name: string | undefined;
+    for (let i = 0; i < records.units; i++) {
+      if (await json.value(ref, ['records', i, 'domain'], 128) !== 'session' ||
+          await json.value(ref, ['records', i, 'mutation', 'kind'], 128) !== 'session-meta') continue;
+      const value = await json.value(ref, ['records', i, 'mutation', 'patch', 'name'], 4096);
+      if (value !== undefined) { if (typeof value !== 'string') throw Error('conversation-directory-name'); name = value; }
+    }
+    return name;
+  }
+}
+const directoryBindings = new WeakMap<AuthorityCommitLog, {
+  readonly reducer: ConversationDirectoryReducer;
+  readonly index: ReturnType<AuthorityCommitLog['durableProjection']>;
+}>();
+export function registerConversationReadProjection(log: AuthorityCommitLog, artifacts: ArtifactStore, verifier: ProtocolSignatureVerifier) {
+  const existing = directoryBindings.get(log);
+  if (existing) {
+    if (existing.reducer.verifier !== verifier) throw new TypeError('Conversation directory verifier is already bound by its owner');
+    return existing.index;
+  }
+  const reducer = new ConversationDirectoryReducer(artifacts, verifier);
+  const index = log.durableProjection<ConversationRunJournalRecord>({
+    projectionId: 'conversation-read-directory', reducerVersion: 12,
+    inputs: { families: ['run:'], streams: ['final-outbox'] },
+    reduce: (envelope, current, source) => reducer.reduce(envelope.entries, envelope.at, envelope.lsn, key => current.get(key), source.checkpoint),
+  });
+  directoryBindings.set(log, { reducer, index });
+  return index;
 }

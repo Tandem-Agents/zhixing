@@ -292,6 +292,15 @@ class MemorySecretStore implements SecretStorePort {
   async get(ref: SecretRef): Promise<string | null> {
     return this.values.get(secretKey(ref)) ?? null;
   }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = secretKey(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
 
   async delete(ref: SecretRef): Promise<void> {
     this.values.delete(secretKey(ref));
@@ -4141,11 +4150,11 @@ describe("ConversationProtocolRuntime", () => {
     const snapshotRead = vi.spyOn(restartedAuthority.authorityLog, "readSnapshot");
     const fullRead = vi.spyOn(restartedAuthority.authorityLog, "readAll");
     await restartedProtocol.recover();
-    expect(snapshotRead).toHaveBeenCalledTimes(1);
+    expect(snapshotRead).not.toHaveBeenCalled();
     expect(fullRead).not.toHaveBeenCalled();
     // 续跑的输入重放复用恢复时已校验的快照，不再追加一次全量读取。
     await vi.waitFor(() => expect(executions).toBe(1), { timeout: 10_000 });
-    expect(snapshotRead).toHaveBeenCalledTimes(1);
+    expect(snapshotRead).not.toHaveBeenCalled();
     expect(fullRead).not.toHaveBeenCalled();
 
     await vi.waitFor(async () => {
@@ -4462,6 +4471,40 @@ describe("ConversationProtocolRuntime", () => {
       apply.mockRestore();
     }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it.each([true, false])("prepares control admission before readiness without whole-log first-send reads (resumed: %s)", async (resumed) => {
+    const home = await createTempDir("conversation-protocol-control-warmup");
+    const secretStore = new MemorySecretStore();
+    const conversationId = `conversation-control-warmup-${resumed}`;
+    const runtimeFactory = { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) };
+    const first = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    await registerActiveConversation(first, conversationId, new Date().toISOString());
+    // 重启：新的进程内状态，控制准入尚无基线。
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    manager = new ConversationManager(runtimeFactory, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    try {
+      // 入口真正就绪时即有控制准入基线，不能把必需准备延后到首发。
+      await protocol.recoverReadinessProjections();
+      expect(authority.controlAdmission.hasRecoveredProjection).toBe(true);
+      if (resumed) {
+        await protocol.recoverConversation(conversationId);
+      }
+      expect(authority.controlAdmission.hasRecoveredProjection).toBe(true);
+      const snapshots = vi.spyOn(authority.authorityLog, "readSnapshot");
+      const admission = await protocol.admit({
+        conversationId, input: "first send after resume", invocation: { kind: "agent", source: "interactive" },
+        options: { source: "interactive", turnContext: { turnId: `rpc:control-warmup-${resumed}` } }, surfacePrincipal: "rpc:owner",
+      });
+      expect(admission.shouldSchedule).toBe(true);
+      expect(snapshots).not.toHaveBeenCalled();
+      snapshots.mockRestore();
+    } finally {
+      await protocol.stopRecoveryLoop();
+      await manager.disposeAll();
+    }
+  }, 30000);
 
   it("recovers first lookup pressure before admitting the exact same input", async () => {
     const home = await createTempDir("conversation-protocol-admission-lookup-pressure");

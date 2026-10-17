@@ -293,7 +293,7 @@ export interface PrepareMeshRuntimeInput {
   readonly jobRelayObligations: JobRelayObligationDirectory;
   readonly executor?: MeshRuntimeAssemblyOptions["executor"];
   readonly secretStore: SecretStorePort;
-  readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
+  readonly onTrustApplied?: (record: import("@zhixing/mesh/trust-chain").CurrentTrustProjection) => void | Promise<void>;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
 }
 

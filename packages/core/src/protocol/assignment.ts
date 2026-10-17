@@ -89,6 +89,11 @@ export interface ConversationActivationBinding {
   };
 }
 
+/** 已验派发的激活投影；激活绑定不消费模型窗口，不能替代完整派发的首次验真。 */
+export type ConversationActivationView = Pick<ConversationEnvelope,
+  "assignmentId" | "executorId" | "manifest" | "controlLease" | "permissionLease" | "resourceLease" | "capabilities" | "signature"
+> & { readonly work: Pick<ConversationEnvelope["work"], "runId" | "conversationId" | "ownerEpoch"> };
+
 export interface JobActivationBinding {
   readonly jobRunId: string;
   readonly taskId: string;
@@ -366,7 +371,7 @@ export function dispatchEnvelopeDigest(envelope: DispatchEnvelope): Digest {
 
 export function controlLeaseBindsDispatchEnvelope(
   lease: ControlLease,
-  envelope: DispatchEnvelope,
+  envelope: Pick<DispatchEnvelope, "assignmentId" | "controlLease">,
 ): boolean {
   return (
     lease.assignmentId === envelope.assignmentId &&
@@ -377,7 +382,7 @@ export function controlLeaseBindsDispatchEnvelope(
 }
 
 export function permissionSnapshotLeaseDigest(
-  envelope: DispatchEnvelope,
+  envelope: Pick<DispatchEnvelope, "permissionLease">,
 ): Digest {
   return protocolDigest(
     "PermissionSnapshotLease",
@@ -388,7 +393,7 @@ export function permissionSnapshotLeaseDigest(
 
 
 export function buildConversationActivationPayload(input: {
-  readonly envelope: ConversationEnvelope;
+  readonly envelope: ConversationActivationView;
   readonly dispatchRef: ArtifactRef;
   readonly commit: { readonly lsn: number; readonly envelopeDigest: Digest };
   readonly issuedAt: string;
@@ -513,7 +518,7 @@ export function validateAssignmentActivationProof(
 }
 
 export function validateConversationActivation(input: {
-  readonly envelope: ConversationEnvelope;
+  readonly envelope: ConversationActivationView;
   readonly activation: AssignmentActivationProof<"conversation">;
   readonly dispatchRef: ArtifactRef;
   readonly verifier: ProtocolSignatureVerifier;
@@ -3077,7 +3082,7 @@ function assertResourceLease(
 
 function assertActivationPayload(
   payload: AssignmentActivationPayload<"conversation">,
-  envelope: ConversationEnvelope,
+  envelope: ConversationActivationView,
   dispatchRef: ArtifactRef,
 ): void {
   assertActivationPayloadShape(payload);
