@@ -970,13 +970,18 @@ export interface CheckpointEnvelope extends WireSchemaV1<"CheckpointEnvelope"> {
 }
 
 export type SecretRef = {
-  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook" | "rendezvous";
+  kind: "provider" | "channel" | "mcp" | "device-key" | "webhook" | "rendezvous" | "authority-integrity";
   bindingId: string;
 };
 
 export interface SecretStorePort {
   put(ref: SecretRef, value: string): Promise<void>;
   get(ref: SecretRef): Promise<string | null>;
+  /** Opens an existing value without initializing any key, vault or backend binding. */
+  getExisting?(ref: SecretRef): Promise<string | null>;
+  /** Atomic within the backing store's cross-process write lock. The factory
+   * runs only for an absent entry; an existing value is never replaced. */
+  getOrCreate?(ref: SecretRef, create: () => string): Promise<string>;
   delete(ref: SecretRef): Promise<void>;
   list(prefix: string): Promise<SecretRef[]>;
   unlockState(): Promise<"unlocked" | "locked" | "unavailable">;

@@ -147,6 +147,19 @@ class BoundPlatformMasterKeyProvider implements MasterKeyProvider {
     return key;
   }
 
+  async loadReadOnly(): Promise<Buffer> {
+    if (this.delegate) return this.delegate.loadExisting();
+    const binding = await readBackendBinding(this.options.bindingPath);
+    const existing = await existingStoreFacts(this.options);
+    if (!binding && !existing.hasVault && !existing.hasKey) {
+      throw new ExistingMasterKeyUnavailableError("SecretStore has no existing backend binding or backing key");
+    }
+    const backend = binding ?? await inferBackendBinding(this.options, existing);
+    // Do not set the writer delegate: a later writer still owns any required
+    // legacy binding publication under its ordinary initialization lock.
+    return createBackendProvider(backend, this.options).loadExisting();
+  }
+
   async loadOrCreate(): Promise<Buffer> {
     if (this.delegate) return this.delegate.loadOrCreate();
     const existingBinding = await readBackendBinding(this.options.bindingPath);
@@ -317,6 +330,11 @@ class SerializedMasterKeyProvider implements MasterKeyProvider {
 
   async loadExisting(): Promise<Buffer> {
     return this.loadWithLock("existing");
+  }
+
+  async loadReadOnly(): Promise<Buffer> {
+    if (this.cached) return Buffer.from(this.cached);
+    return this.delegate.loadReadOnly ? this.delegate.loadReadOnly() : this.delegate.loadExisting();
   }
 
   private async loadWithLock(mode: "create" | "existing"): Promise<Buffer> {

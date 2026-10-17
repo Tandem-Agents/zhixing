@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -22,6 +22,41 @@ async function fixture() {
 }
 
 describe("EncryptedVaultSecretStore", () => {
+  it("reads an existing cache key without initializing a missing backend binding or lock", async () => {
+    const directory = await createTempDir("read-only-cache-key");
+    let protectedBytes: Buffer | undefined;
+    const options = { homeDir: directory, platform: "win32" as const,
+      commandRunner: async () => { throw Error("shell must not run"); },
+      windowsProtection: async (mode: "protect" | "unprotect", input: Uint8Array) => {
+        if (mode === "protect") { protectedBytes = Buffer.from(input); return Buffer.from("synthetic-wrapped-key"); }
+        return Buffer.from(protectedBytes!);
+      } };
+    const ref = { kind: "authority-integrity" as const, bindingId: "startup-proofs:v1" };
+    const writer = createPlatformSecretStore(options);
+    await writer.put(ref, "synthetic-cache-key");
+    // Simulate a valid legacy store, whose read visitor must not migrate it.
+    await rm(path.join(directory, "secret-vault.backend.json"));
+    const before = (await readdir(directory)).sort();
+    const reader = createPlatformSecretStore(options);
+    expect(await reader.getExisting(ref)).toBe("synthetic-cache-key");
+    expect((await readdir(directory)).sort()).toEqual(before);
+    const fresh = await createTempDir("read-only-absent-cache");
+    const absent = createPlatformSecretStore({ ...options, homeDir: fresh });
+    expect(await absent.getExisting(ref)).toBeNull();
+    expect(await readdir(fresh)).toEqual([]);
+    protectedBytes?.fill(0);
+  });
+  it('atomically creates one integrity identity across independent vault instances', async () => {
+    const { vaultPath, store } = await fixture();
+    const second = new EncryptedVaultSecretStore({ vaultPath, masterKey: new MemoryMasterKeyProvider(Buffer.alloc(32, 7)) });
+    const ref = { kind: 'authority-integrity' as const, bindingId: 'startup-proofs:v1' };
+    let creates = 0;
+    const values = await Promise.all([store, second, store, second].map(candidate => candidate.getOrCreate(ref, () => 'synthetic-' + ++creates)));
+    expect(new Set(values).size).toBe(1);
+    expect(creates).toBe(1);
+    await store.put(ref, 'invalid-existing-value');
+    expect(await second.getOrCreate(ref, () => { throw Error('must not replace an existing key'); })).toBe('invalid-existing-value');
+  });
   it('uses injected native protection and identity for every vault lock and retains locked semantics', async () => {
     const directory = await createTempDir('native-vault-ports'); let reads = 0, protectedBytes: Buffer | undefined;
     const options = { homeDir: directory, platform: 'win32' as const,

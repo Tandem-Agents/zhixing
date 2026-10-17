@@ -10,6 +10,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
 } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
@@ -26,6 +27,7 @@ const SECRET_KINDS = new Set<SecretRef["kind"]>([
   "device-key",
   "webhook",
   "rendezvous",
+  "authority-integrity",
 ]);
 
 interface VaultEnvelope {
@@ -86,6 +88,41 @@ export class EncryptedVaultSecretStore implements SecretStorePort {
       } finally {
         key.fill(0);
       }
+    });
+  }
+
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    assertSecretRef(ref);
+    return this.serialized(async () => {
+      const key = await this.requireKey();
+      let release: (() => Promise<void>) | undefined;
+      try {
+        release = await this.acquireLock();
+        const payload = await this.readPayload(key);
+        const id = encodeRef(ref);
+        if (Object.hasOwn(payload.entries, id)) return payload.entries[id]!;
+        const value = create();
+        if (typeof value !== "string") throw new TypeError("Secret factory must return a string");
+        payload.entries[id] = value;
+        await this.writePayload(payload, key);
+        return value;
+      } finally { key.fill(0); await release?.(); }
+    });
+  }
+
+  async getExisting(ref: SecretRef): Promise<string | null> {
+    assertSecretRef(ref);
+    return this.serialized(async () => {
+      const present = await stat(this.vaultPath).catch((error: unknown) => {
+        if (isNodeError(error, "ENOENT")) return undefined;
+        throw error;
+      });
+      if (!present) return null;
+      const key = this.masterKey.loadReadOnly ? await this.masterKey.loadReadOnly() : await this.masterKey.loadExisting();
+      try {
+        if (key.byteLength !== 32) throw new Error("SecretStore master key has an invalid length");
+        return (await this.readPayload(key)).entries[encodeRef(ref)] ?? null;
+      } finally { key.fill(0); }
     });
   }
 

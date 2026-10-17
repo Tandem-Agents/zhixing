@@ -6,6 +6,8 @@ export interface MasterKeyProvider {
   state(): Promise<MasterKeyState>;
   /** Opens the already-bound key without creating or replacing any backing fact. */
   loadExisting(): Promise<Buffer>;
+  /** Strict read visitor: no initialization lock or legacy backend-binding publication. */
+  loadReadOnly?(): Promise<Buffer>;
   loadOrCreate(): Promise<Buffer>;
 }
 
