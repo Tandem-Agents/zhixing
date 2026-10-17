@@ -1,17 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
-import { open, readFile, rename, rm, type FileHandle } from "node:fs/promises";
+import { open, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { syncDirectory } from "../persistence/index.js";
 import { durablyRemoveFiles } from "../persistence/durable-removal.js";
 import { frameIndexMac, frameIndexMacMatches, type AuthorityCacheIntegrity } from "./startup-proofs.js";
-import { AUTHORITY_WAL_HEADER_BYTES, AUTHORITY_WAL_TRAILER_BYTES } from "./wal-frame.js";
+import { AUTHORITY_WAL_HEADER_BYTES, AUTHORITY_WAL_TRAILER_BYTES, AUTHORITY_WAL_LEGACY_TRAILER_BYTES, AUTHORITY_WAL_MAX_PAYLOAD_BYTES } from "./wal-frame.js";
 
 /**
  * 认证帧索引：权威日志每个已核验帧的一行定长记录（帧尾偏移、载荷长度、载荷摘要、前缀摘要、
- * 单一流标记），以完整性密钥认证。它让持有密钥的日志在启动时只需读封条、核对一处帧尾并续扫
+ * 流摘要与帧类型），以完整性密钥认证。启动只读封条、核对头边界（legacy还核头帧载荷）并续扫
  * 尾部，不再整段读取、哈希或遍历历史；历史帧在真正被读取时按认证行逐帧核对载荷摘要。
  *
- * 只记录完整核验过的帧（逐帧解码、LSN 连续、前缀链与帧尾一致）或本进程刚写入的帧，因此按行
+ * 只记录完整核验过的帧（逐帧解码、连续LSN、sidecar/文件身份的前缀链；versioned另核帧尾证明）
+ * 或本进程刚写入的帧，因此按行
  * 核对过摘要的载荷与当初核验的字节完全相同。索引是可丢弃的派生缓存：任何一处对不上都放弃
  * 索引、退回完整核验并重建，绝不把索引自身的损坏当作日志损坏。
  *
@@ -34,10 +35,16 @@ const SEAL_FIXED_BYTES = 112;
 const ROWS_MAGIC = Buffer.from("ZXFI", "ascii");
 const SEAL_MAGIC = Buffer.from("ZXFS", "ascii");
 const EPOCH_BYTES = 16;
+const LEGACY_ROW_FLAG = 4;
+const STREAM_FLAGS = 3;
+const SOURCE_BINDING_FLAG = 1;
+const SOURCE_BINDING_BYTES = 32;
+const MAX_SEAL_BYTES = SEAL_FIXED_BYTES + (FRAME_INDEX_ROWS_PER_PAGE - 1) * FRAME_INDEX_ROW_BYTES + SOURCE_BINDING_BYTES + MAC_BYTES;
 /** 已认证页的进程内缓存上限（页数）。 */
 const PAGE_CACHE_LIMIT = 512;
 
 export interface FrameIndexRow {
+  readonly format: "legacy" | "versioned";
   readonly lsn: number;
   readonly frameEndOffset: number;
   readonly payloadBytes: number;
@@ -52,6 +59,8 @@ export interface FrameIndexRow {
 }
 
 export interface FrameIndexAppend {
+  /** Omitted by existing versioned writers; their FORMAT=2 bytes stay unchanged. */
+  readonly format?: "legacy" | "versioned";
   readonly frameEndOffset: number;
   readonly payloadBytes: number;
   readonly payloadDigest: Buffer;
@@ -76,7 +85,7 @@ export function frameStreamBloomMask(stream: string): bigint {
 
 /** 一行原始字节里的流摘要：单流为标记，多流为布隆位图。 */
 export function frameIndexRowStreams(row: Buffer): { readonly streamTag: bigint } | { readonly streamBloom: bigint } | undefined {
-  const flags = row.readUInt8(12);
+  const flags = rowFlags(row) & STREAM_FLAGS;
   return flags === 1 ? { streamTag: row.readBigUInt64BE(16) }
     : flags === 2 ? { streamBloom: row.readBigUInt64BE(16) }
       : undefined;
@@ -99,11 +108,13 @@ function encodeRow(row: FrameIndexAppend): Buffer {
   bytes.writeBigUInt64BE(BigInt(row.frameEndOffset), 0);
   bytes.writeUInt32BE(row.payloadBytes, 8);
   const streams = [...new Set(row.streams)];
+  const format = row.format === "legacy" ? LEGACY_ROW_FLAG : 0;
+  bytes.writeUInt8(format, 12);
   if (streams.length === 1) {
-    bytes.writeUInt8(1, 12);
+    bytes.writeUInt8(format | 1, 12);
     bytes.writeBigUInt64BE(frameStreamTag(streams[0]!), 16);
   } else if (streams.length > 1) {
-    bytes.writeUInt8(2, 12);
+    bytes.writeUInt8(format | 2, 12);
     bytes.writeBigUInt64BE(streams.reduce((bits, stream) => bits | frameStreamBloomMask(stream), 0n), 16);
   }
   row.payloadDigest.copy(bytes, 24, 0, 32);
@@ -112,18 +123,69 @@ function encodeRow(row: FrameIndexAppend): Buffer {
 }
 
 function decodeRow(bytes: Buffer, lsn: number): FrameIndexRow {
+  const flags = validateRow(bytes);
+  if (!Number.isSafeInteger(lsn) || lsn < 1) throw new FrameIndexUnavailableError("Frame index LSN is invalid");
+  const format = flags & LEGACY_ROW_FLAG ? "legacy" : "versioned";
   const frameEndOffset = Number(bytes.readBigUInt64BE(0));
   const payloadBytes = bytes.readUInt32BE(8);
   return {
+    format,
     lsn,
     frameEndOffset,
     payloadBytes,
-    payloadOffset: frameEndOffset - AUTHORITY_WAL_TRAILER_BYTES - payloadBytes,
+    payloadOffset: frameEndOffset - trailerBytes(format) - payloadBytes,
     payloadDigest: bytes.subarray(24, 56),
     prefixDigest: `sha256:${bytes.subarray(56, 88).toString("hex")}`,
-    ...(bytes.readUInt8(12) === 1 ? { streamTag: bytes.readBigUInt64BE(16) }
-      : bytes.readUInt8(12) === 2 ? { streamBloom: bytes.readBigUInt64BE(16) } : {}),
+    ...((flags & STREAM_FLAGS) === 1 ? { streamTag: bytes.readBigUInt64BE(16) }
+      : (flags & STREAM_FLAGS) === 2 ? { streamBloom: bytes.readBigUInt64BE(16) } : {}),
   };
+}
+
+function trailerBytes(format: "legacy" | "versioned"): number {
+  return format === "legacy" ? AUTHORITY_WAL_LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES;
+}
+
+function rowFlags(bytes: Buffer): number {
+  if (bytes.byteLength !== FRAME_INDEX_ROW_BYTES) throw new FrameIndexUnavailableError("Frame index row length is invalid");
+  const flags = bytes.readUInt8(12);
+  if ((flags & ~(LEGACY_ROW_FLAG | STREAM_FLAGS)) !== 0 || (flags & STREAM_FLAGS) === STREAM_FLAGS ||
+      bytes[13] !== 0 || bytes[14] !== 0 || bytes[15] !== 0 ||
+      ((flags & STREAM_FLAGS) === 0 && bytes.readBigUInt64BE(16) !== 0n)) {
+    throw new FrameIndexUnavailableError("Frame index row flags are invalid");
+  }
+  return flags;
+}
+
+function validateRow(bytes: Buffer): number {
+  const flags = rowFlags(bytes), end = Number(bytes.readBigUInt64BE(0)), payload = bytes.readUInt32BE(8);
+  if (!Number.isSafeInteger(end) || payload < 1 || payload > AUTHORITY_WAL_MAX_PAYLOAD_BYTES ||
+      end < AUTHORITY_WAL_HEADER_BYTES + payload + trailerBytes(flags & LEGACY_ROW_FLAG ? "legacy" : "versioned")) {
+    throw new FrameIndexUnavailableError("Frame index row offsets are invalid");
+  }
+  return flags;
+}
+
+/** Validate a bounded page without allocating a decoded object for every filtered row. */
+function validateRows(rows: Buffer, previousEnd?: number, legacy?: boolean): void {
+  for (let offset = 0; offset < rows.byteLength; offset += FRAME_INDEX_ROW_BYTES) {
+    const row = rows.subarray(offset, offset + FRAME_INDEX_ROW_BYTES), flags = validateRow(row);
+    if (legacy !== undefined && !!(flags & LEGACY_ROW_FLAG) !== legacy) {
+      throw new FrameIndexUnavailableError("Frame index row format does not match its source");
+    }
+    const end = Number(row.readBigUInt64BE(0));
+    if (previousEnd !== undefined && end !== previousEnd + AUTHORITY_WAL_HEADER_BYTES + row.readUInt32BE(8) +
+        trailerBytes(flags & LEGACY_ROW_FLAG ? "legacy" : "versioned")) {
+      throw new FrameIndexUnavailableError("Frame index rows are not contiguous");
+    }
+    previousEnd = end;
+  }
+}
+
+/** Physical identity supplements the sidecar logId for a headerless legacy WAL. */
+interface FrameIndexSource { readonly dev: bigint; readonly ino: bigint }
+function sourceBinding(source: FrameIndexSource | undefined): Buffer | undefined {
+  return source && createHash("sha256").update("zhixing-frame-index-source\0")
+    .update(source.dev.toString()).update("\0").update(source.ino.toString()).digest();
 }
 
 function pageMacInput(logIdBytes: Buffer, epoch: Buffer, page: number, rows: Buffer): Buffer[] {
@@ -134,6 +196,7 @@ function pageMacInput(logIdBytes: Buffer, epoch: Buffer, page: number, rows: Buf
 }
 
 interface SealContents {
+  readonly sourceBinding?: Buffer;
   readonly epoch: Buffer;
   readonly fullPages: number;
   readonly partial: Buffer;
@@ -151,6 +214,7 @@ export class AuthenticatedFrameIndex {
   readonly #logIdBytes: Buffer;
   readonly #dataStart: number;
   readonly #emptyPrefix: string;
+  readonly #sourceBinding: Buffer | undefined;
   #epoch: Buffer;
   /** 行文件中已认证落盘、且被本实例写过或读过的封条承认的整页数。 */
   #persistedPages: number;
@@ -177,6 +241,7 @@ export class AuthenticatedFrameIndex {
     this.#logIdBytes = Buffer.from(logId, "base64url");
     this.#dataStart = dataStart;
     this.#emptyPrefix = emptyPrefix;
+    this.#sourceBinding = seal.sourceBinding;
     this.#epoch = seal.epoch;
     this.#persistedPages = seal.fullPages;
     this.#memoryRows = [];
@@ -191,10 +256,11 @@ export class AuthenticatedFrameIndex {
   }
 
   /** 新纪元的空索引：覆盖到日志数据区起点。文件在第一次 flush 时写出。 */
-  static create(rootDir: string, logId: string, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity): AuthenticatedFrameIndex {
+  static create(rootDir: string, logId: string, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity, source?: FrameIndexSource): AuthenticatedFrameIndex {
     const index = new AuthenticatedFrameIndex(rootDir, logId, dataStart, emptyPrefix, {
       epoch: randomBytes(EPOCH_BYTES), fullPages: 0, partial: Buffer.alloc(0),
       headLsn: 0, headFrameEnd: dataStart, headPrefix: emptyPrefix,
+      ...(source ? { sourceBinding: sourceBinding(source)! } : {}),
     }, integrity);
     index.#dirty = true;
     return index;
@@ -204,12 +270,12 @@ export class AuthenticatedFrameIndex {
    * 读取并认证封条。封条缺失、认证不过、格式或日志身份不符、行文件短于封条承认的整页时返回
    * undefined；调用方据此完整核验并重建。
    */
-  static async open(rootDir: string, logId: string, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity): Promise<AuthenticatedFrameIndex | undefined> {
+  static async open(rootDir: string, logId: string, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity, source?: FrameIndexSource): Promise<AuthenticatedFrameIndex | undefined> {
     const sealPath = path.join(rootDir, SEAL_FILE);
-    const bytes = await readFile(sealPath).catch(missingFile);
+    const bytes = await readSealBytes(sealPath);
     if (!bytes) return undefined;
     const logIdBytes = Buffer.from(logId, "base64url");
-    const seal = decodeSeal(bytes, logIdBytes, dataStart, emptyPrefix, integrity);
+    const seal = decodeSeal(bytes, logIdBytes, dataStart, emptyPrefix, integrity, sourceBinding(source));
     if (!seal) return undefined;
     if (seal.fullPages > 0) {
       const rows = await open(path.join(rootDir, ROWS_FILE), "r").catch(missingFile);
@@ -242,8 +308,12 @@ export class AuthenticatedFrameIndex {
 
   /** 追加下一帧的行；必须与当前头部首尾相接。 */
   append(row: FrameIndexAppend): void {
-    const expectedEnd = this.#headFrameEnd + AUTHORITY_WAL_HEADER_BYTES + row.payloadBytes + AUTHORITY_WAL_TRAILER_BYTES;
-    if (row.frameEndOffset !== expectedEnd || row.payloadDigest.byteLength !== 32 ||
+    if (row.format !== undefined && row.format !== "legacy" && row.format !== "versioned") throw new FrameIndexUnavailableError("Frame index frame format is invalid");
+    if ((row.format === "legacy") !== !!this.#sourceBinding) throw new FrameIndexUnavailableError("Frame index frame format does not match its source");
+    const expectedEnd = this.#headFrameEnd + AUTHORITY_WAL_HEADER_BYTES + row.payloadBytes + trailerBytes(row.format ?? "versioned");
+    if (!Number.isSafeInteger(row.frameEndOffset) || !Number.isSafeInteger(this.#headLsn + 1) ||
+        !Number.isSafeInteger(row.payloadBytes) || row.payloadBytes < 1 || row.payloadBytes > AUTHORITY_WAL_MAX_PAYLOAD_BYTES ||
+        row.frameEndOffset !== expectedEnd || row.payloadDigest.byteLength !== 32 ||
         !/^sha256:[a-f0-9]{64}$/u.test(row.prefixDigest)) {
       throw new FrameIndexUnavailableError("Frame index row does not extend its head");
     }
@@ -318,9 +388,8 @@ export class AuthenticatedFrameIndex {
       this.#pages.set(page, cached);
       return cached;
     }
-    const handle = await open(this.#rowsPath, "r").catch(() => {
-      throw new FrameIndexUnavailableError("Frame index rows are missing");
-    });
+    const handle = await open(this.#rowsPath, "r").catch(missingFile);
+    if (!handle) throw new FrameIndexUnavailableError("Frame index rows are missing");
     let record: Buffer;
     try {
       record = Buffer.allocUnsafe(PAGE_RECORD_BYTES);
@@ -333,6 +402,7 @@ export class AuthenticatedFrameIndex {
     if (!frameIndexMacMatches("frame-index-page", pageMacInput(this.#logIdBytes, this.#epoch, page, rows), record.subarray(PAGE_BYTES), this.integrity)) {
       throw new FrameIndexUnavailableError("Frame index page failed authentication");
     }
+    validateRows(rows, page === 0 ? this.#dataStart : undefined, !!this.#sourceBinding);
     if (this.#pages.size >= PAGE_CACHE_LIMIT) this.#pages.delete(this.#pages.keys().next().value!);
     this.#pages.set(page, rows);
     return rows;
@@ -345,8 +415,8 @@ export class AuthenticatedFrameIndex {
   async flush(): Promise<void> {
     if (!this.#dirty) return;
     if (!frameIndexMac("frame-index-seal", [], this.integrity)) return;
-    const existing = await readFile(this.#sealPath).catch(missingFile);
-    const disk = existing ? decodeSeal(existing, this.#logIdBytes, this.#dataStart, this.#emptyPrefix, this.integrity) : undefined;
+    const existing = await readSealBytes(this.#sealPath);
+    const disk = existing ? decodeSeal(existing, this.#logIdBytes, this.#dataStart, this.#emptyPrefix, this.integrity, this.#sourceBinding) : undefined;
     let basePages = this.#persistedPages;
     if (disk) {
       // 磁盘上是其他纪元（已被重建）：不在别人的行文件上续写。
@@ -393,6 +463,7 @@ export class AuthenticatedFrameIndex {
     const sealBytes = encodeSeal(this.#logIdBytes, {
       epoch: this.#epoch, fullPages, partial,
       headLsn: this.#headLsn, headFrameEnd: this.#headFrameEnd, headPrefix: this.#headPrefix,
+      ...(this.#sourceBinding ? { sourceBinding: this.#sourceBinding } : {}),
     }, this.integrity);
     if (!sealBytes) return;
     const temporary = `${this.#sealPath}.${randomBytes(6).toString("hex")}.tmp`;
@@ -420,7 +491,7 @@ export class AuthenticatedFrameIndex {
 function rowsHeaderMatches(header: Buffer, logIdBytes: Buffer, epoch: Buffer): boolean {
   return header.subarray(0, 4).equals(ROWS_MAGIC) && header.readUInt16BE(4) === FORMAT &&
     header.readUInt16BE(6) === FRAME_INDEX_ROW_BYTES && header.readUInt32BE(8) === FRAME_INDEX_ROWS_PER_PAGE &&
-    header.subarray(12, 28).equals(epoch) && header.subarray(32, 64).equals(logIdBytes);
+    header.subarray(12, 28).equals(epoch) && header.readUInt32BE(28) === 0 && header.subarray(32, 64).equals(logIdBytes);
 }
 
 async function writeRowsHeader(file: string, logIdBytes: Buffer, epoch: Buffer): Promise<void> {
@@ -458,6 +529,7 @@ function encodeSeal(logIdBytes: Buffer, seal: SealContents, integrity?: Authorit
   const fixed = Buffer.alloc(SEAL_FIXED_BYTES);
   SEAL_MAGIC.copy(fixed, 0);
   fixed.writeUInt16BE(FORMAT, 4);
+  if (seal.sourceBinding) fixed.writeUInt16BE(SOURCE_BINDING_FLAG, 6);
   logIdBytes.copy(fixed, 8);
   seal.epoch.copy(fixed, 40);
   fixed.writeUInt32BE(seal.fullPages, 56);
@@ -465,34 +537,54 @@ function encodeSeal(logIdBytes: Buffer, seal: SealContents, integrity?: Authorit
   fixed.writeBigUInt64BE(BigInt(seal.headLsn), 64);
   fixed.writeBigUInt64BE(BigInt(seal.headFrameEnd), 72);
   Buffer.from(seal.headPrefix.slice("sha256:".length), "hex").copy(fixed, 80);
-  const body = Buffer.concat([fixed, seal.partial]);
+  const body = Buffer.concat([fixed, seal.partial, ...(seal.sourceBinding ? [seal.sourceBinding] : [])]);
   const mac = frameIndexMac("frame-index-seal", [body], integrity);
   return mac && Buffer.concat([body, mac]);
 }
 
-function decodeSeal(bytes: Buffer, logIdBytes: Buffer, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity): SealContents | undefined {
+function decodeSeal(bytes: Buffer, logIdBytes: Buffer, dataStart: number, emptyPrefix: string, integrity?: AuthorityCacheIntegrity, expectedBinding?: Buffer): SealContents | undefined {
   if (bytes.byteLength < SEAL_FIXED_BYTES + MAC_BYTES) return undefined;
   const body = bytes.subarray(0, bytes.byteLength - MAC_BYTES);
   if (!body.subarray(0, 4).equals(SEAL_MAGIC) || body.readUInt16BE(4) !== FORMAT ||
       !body.subarray(8, 40).equals(logIdBytes)) return undefined;
   const fullPages = body.readUInt32BE(56);
   const partialRows = body.readUInt32BE(60);
+  const flags = body.readUInt16BE(6);
+  if ((flags & ~SOURCE_BINDING_FLAG) !== 0 || !!(flags & SOURCE_BINDING_FLAG) !== !!expectedBinding) return undefined;
+  const partialEnd = SEAL_FIXED_BYTES + partialRows * FRAME_INDEX_ROW_BYTES;
   if (partialRows >= FRAME_INDEX_ROWS_PER_PAGE ||
-      body.byteLength !== SEAL_FIXED_BYTES + partialRows * FRAME_INDEX_ROW_BYTES) return undefined;
+      body.byteLength !== partialEnd + (expectedBinding ? SOURCE_BINDING_BYTES : 0)) return undefined;
   if (!frameIndexMacMatches("frame-index-seal", [body], bytes.subarray(bytes.byteLength - MAC_BYTES), integrity)) return undefined;
+  if (expectedBinding && !body.subarray(partialEnd).equals(expectedBinding)) return undefined;
   const headLsn = Number(body.readBigUInt64BE(64));
   const headFrameEnd = Number(body.readBigUInt64BE(72));
   const headPrefix = `sha256:${body.subarray(80, 112).toString("hex")}`;
   if (!Number.isSafeInteger(headLsn) || headLsn !== fullPages * FRAME_INDEX_ROWS_PER_PAGE + partialRows ||
       !Number.isSafeInteger(headFrameEnd) || headFrameEnd < dataStart) return undefined;
   if (headLsn === 0 && (headFrameEnd !== dataStart || headPrefix !== emptyPrefix)) return undefined;
-  const partial = Buffer.from(body.subarray(SEAL_FIXED_BYTES));
+  const partial = Buffer.from(body.subarray(SEAL_FIXED_BYTES, partialEnd));
+  try { validateRows(partial, fullPages === 0 ? dataStart : undefined, !!expectedBinding); }
+  catch (error) { if (error instanceof FrameIndexUnavailableError) return undefined; throw error; }
   // 头部指针必须与最后一行一致（最后一行在未满页里时可直接核对）。
   if (partialRows > 0) {
     const last = decodeRow(partial.subarray((partialRows - 1) * FRAME_INDEX_ROW_BYTES), headLsn);
     if (last.frameEndOffset !== headFrameEnd || last.prefixDigest !== headPrefix) return undefined;
   }
-  return { epoch: Buffer.from(body.subarray(40, 56)), fullPages, partial, headLsn, headFrameEnd, headPrefix };
+  return { epoch: Buffer.from(body.subarray(40, 56)), fullPages, partial, headLsn, headFrameEnd, headPrefix,
+    ...(expectedBinding ? { sourceBinding: Buffer.from(expectedBinding) } : {}) };
+}
+
+/** A malformed derived seal cannot force an unbounded startup allocation/read. */
+async function readSealBytes(file: string): Promise<Buffer | undefined> {
+  const handle = await open(file, "r").catch(missingFile);
+  if (!handle) return undefined;
+  try {
+    const size = (await handle.stat()).size;
+    if (!Number.isSafeInteger(size) || size < SEAL_FIXED_BYTES + MAC_BYTES || size > MAX_SEAL_BYTES) return undefined;
+    const bytes = Buffer.allocUnsafe(size);
+    const { bytesRead } = await handle.read(bytes, 0, size, 0);
+    return bytesRead === size ? bytes : undefined;
+  } finally { await handle.close(); }
 }
 
 function missingFile(error: unknown): undefined {

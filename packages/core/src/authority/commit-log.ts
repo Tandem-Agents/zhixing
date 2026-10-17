@@ -973,6 +973,16 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       const indexed = await this.#authenticatedRow(checkpoint.lsn);
       const handle = await open(this.logPath, "r");
       try {
+        if (indexed) {
+          const start = indexed.payloadOffset - AUTHORITY_WAL_HEADER_BYTES;
+          const bytes = await this.#readExactAt(handle, start, indexed.frameEndOffset - start);
+          const envelope = this.#verifyIndexedFrame(indexed, bytes, 0) ??
+            parseEnvelope(bytes.subarray(AUTHORITY_WAL_HEADER_BYTES, AUTHORITY_WAL_HEADER_BYTES + indexed.payloadBytes));
+          if (envelope.lsn !== checkpoint.lsn) {
+            throw new AuthorityStorageError("commit-log-corrupt", "Authority envelope does not match its durable source checkpoint");
+          }
+          return envelope as CommitEnvelope<Body>;
+        }
         const metadata = await readWalVersion(handle);
         const boundary = await verifyAuthorityWalFrameBoundary(
           this.#walReader(handle, metadata.size),
@@ -984,13 +994,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         const scanned = await scanAuthorityWalFrames(
           this.#walReader(handle, frameBytes, boundary.frameStartOffset),
           (payload, _offset, frameMetadata, nextOffset) => {
-            // 认证模式下载荷还须与认证索引记载的摘要一致。
-            if (indexed && !createHash("sha256").update(payload).digest().equals(indexed.payloadDigest)) {
-              throw new AuthorityStorageError(
-                "commit-log-corrupt",
-                `Authority WAL frame ${checkpoint.lsn} does not match its authenticated index`,
-              );
-            }
             const envelope = parseEnvelope(payload);
             // legacy 帧不携带帧级锚点,此时以信封自身的 lsn 作唯一身份依据;
             // versioned 帧则两者都必须与 checkpoint 吻合。
@@ -2149,6 +2152,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       if (this.#frameIndex) {
         try {
           this.#frameIndex.append({
+            format: this.#requireLogFormat(),
             frameEndOffset,
             payloadBytes: bytes.byteLength,
             payloadDigest: createHash("sha256").update(bytes).digest(),
@@ -2232,19 +2236,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   /**
-   * 认证模式：开启启动证明、带版本头的日志，且组合入口在打开前注入了本 home 的缓存密钥。
+   * 认证模式：开启启动证明，且组合入口在打开前注入了本 home 的缓存密钥。
    * 有钥只读访问者可复用现有认证证明，缺失或失效时严格回退；不发布或删除缓存。
-   * legacy 维持严格路径直到 B3。
+   * legacy 复用同一索引，但封条还须绑定无文件头的实际来源身份。
    */
   async #authenticatedMode(): Promise<boolean> {
-    if (!this.#startupProofs || !this.#integrity || this.#requireLogFormat() !== "versioned") return false;
+    if (!this.#startupProofs || !this.#integrity) return false;
     if (!this.#readOnly) return true;
     if (this.#readOnlyIndexLogId !== this.#requireLogId()) {
       this.#readOnlyIndexLogId = this.#requireLogId();
       this.#readOnlyIndexUsable = undefined;
     }
     this.#readOnlyIndexUsable ??= !!await AuthenticatedFrameIndex.open(this.rootDir, this.#requireLogId(),
-      this.#logDataStartOffset(), emptyLogPrefix(this.#requireLogId()), this.#integrity);
+      this.#logDataStartOffset(), emptyLogPrefix(this.#requireLogId()), this.#integrity,
+      this.#requireLogFormat() === "legacy" ? await readWalVersion(this.logPath) : undefined);
     return this.#readOnlyIndexUsable;
   }
 
@@ -2257,17 +2262,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const tail = this.#verifiedTail;
     const index = this.#frameIndex;
     if (this.#readOnly && index && metadata.size - index.sealedFrameEnd > maximumAuthorityRecoveryTailBytes()) {
-      return this.#openAuthenticated();
+      return this.#openAuthenticated(metadata);
     }
     if (index && tail && tail.logId === this.#requireLogId() &&
         index.headLsn === tail.lastLsn && index.headFrameEnd === tail.bytes) {
       if (matchesWalVersion(tail, metadata)) return tail.lastLsn;
       if (tail.device === metadata.dev && tail.inode === metadata.ino && metadata.size >= tail.bytes) {
         try {
-          await this.#verifyFrameBoundary(tail.bytes, tail.lastLsn, tail.prefixDigest);
+          await this.#verifyFrameBoundary(tail.bytes, tail.lastLsn, tail.prefixDigest, index);
         } catch (error) {
-          if (!(error instanceof AuthorityStorageError)) throw error;
-          return this.#openAuthenticated();
+          if (!(error instanceof AuthorityStorageError || error instanceof FrameIndexUnavailableError)) throw error;
+          return this.#openAuthenticated(metadata);
         }
         verifiedWalViews.delete(this.logPath);
         this.#operationView = undefined;
@@ -2278,15 +2283,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         return extended.lastLsn;
       }
     }
-    return this.#openAuthenticated();
+    return this.#openAuthenticated(metadata);
   }
 
   /**
-   * 按封条打开认证帧索引：核对封条头部那一帧仍在当前日志上（帧尾的 LSN 与前缀摘要），再只续扫
+   * 按封条打开认证帧索引：核对头部仍在当前日志上（versioned帧尾；legacy认证行及载荷），再续扫
    * 其后的尾部。封条缺失、认证不过或头部不在当前日志上（日志被替换、截短或损坏）时完整核验并
    * 以新纪元重建索引。
    */
-  async #openAuthenticated(): Promise<number> {
+  async #openAuthenticated(metadata?: WalFileVersion): Promise<number> {
     this.#frameIndex = undefined;
     this.#verifiedTail = undefined;
     verifiedWalViews.delete(this.logPath);
@@ -2294,12 +2299,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const logId = this.#requireLogId();
     const dataStart = this.#logDataStartOffset();
     const emptyPrefix = emptyLogPrefix(logId);
-    let index = await AuthenticatedFrameIndex.open(this.rootDir, logId, dataStart, emptyPrefix, this.#integrity);
+    const source = this.#requireLogFormat() === "legacy" ? metadata ?? await readWalVersion(this.logPath) : undefined;
+    let index = await AuthenticatedFrameIndex.open(this.rootDir, logId, dataStart, emptyPrefix, this.#integrity, source);
+    // Truncation invalidates an old derived head. On an unchanged physical
+    // legacy source, however, a present head with different authenticated bytes
+    // is an authority failure, not permission to discard its proof and accept it.
+    if (index && source && index.headFrameEnd > source.size) index = undefined;
     if (index) {
       try {
-        await this.#verifyFrameBoundary(index.headFrameEnd, index.headLsn, index.headPrefix);
+        await this.#verifyFrameBoundary(index.headFrameEnd, index.headLsn, index.headPrefix, index);
       } catch (error) {
-        if (!(error instanceof AuthorityStorageError)) throw error;
+        if (source && error instanceof AuthorityStorageError) throw error;
+        if (!(error instanceof AuthorityStorageError || error instanceof FrameIndexUnavailableError)) throw error;
         index = undefined;
       }
     }
@@ -2308,7 +2319,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         this.#readOnlyIndexUsable = false;
         return this.#loadLastLsn();
       }
-      index = AuthenticatedFrameIndex.create(this.rootDir, logId, dataStart, emptyPrefix, this.#integrity);
+      // A rejected but correctly authenticated old seal must not veto the new
+      // epoch at flush. Only derived files are discarded, under the WAL lock.
+      await AuthenticatedFrameIndex.discard(this.rootDir);
+      index = AuthenticatedFrameIndex.create(this.rootDir, logId, dataStart, emptyPrefix, this.#integrity, source);
       // 旧版的已核验帧证明旁路已由认证帧索引取代。
       await durablyRemoveFiles([path.join(this.rootDir, "verified-frames-v1.json")]).catch(() => undefined);
     }
@@ -2322,8 +2336,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     return extended.lastLsn;
   }
 
-  /** 核对 `frameEndOffset` 处那一帧的帧尾记载的 LSN 与前缀摘要（只读两处定长字节）。 */
-  async #verifyFrameBoundary(frameEndOffset: number, lsn: number, prefixDigest: string): Promise<void> {
+  /** Versioned has a footer proof; legacy needs the authenticated row and its payload. */
+  async #verifyFrameBoundary(frameEndOffset: number, lsn: number, prefixDigest: string, index: AuthenticatedFrameIndex): Promise<void> {
     if (lsn === 0) {
       if (frameEndOffset !== this.#logDataStartOffset() || prefixDigest !== emptyLogPrefix(this.#requireLogId())) {
         throw new AuthorityStorageError("commit-log-corrupt", "Empty authenticated WAL boundary is invalid");
@@ -2332,6 +2346,15 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     const handle = await open(this.logPath, "r");
     try {
+      if (this.#requireLogFormat() === "legacy") {
+        const row = await index.row(lsn);
+        if (row.frameEndOffset !== frameEndOffset || row.prefixDigest !== prefixDigest) {
+          throw new FrameIndexUnavailableError("Frame index head does not match its seal");
+        }
+        const start = row.payloadOffset - AUTHORITY_WAL_HEADER_BYTES;
+        this.#verifyIndexedFrame(row, await this.#readExactAt(handle, start, frameEndOffset - start), 0);
+        return;
+      }
       const metadata = await readWalVersion(handle);
       const boundary = await verifyAuthorityWalFrameBoundary(this.#walReader(handle, metadata.size), frameEndOffset);
       if (boundary.metadata?.lsn !== lsn || boundary.metadata.prefixDigest !== prefixDigest) {
@@ -2373,13 +2396,17 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             );
           }
           prefixDigest = advanceProjectionPrefix(logId, prefixDigest, envelope);
-          if (frameMetadata?.lsn !== envelope.lsn || frameMetadata.prefixDigest !== prefixDigest) {
+          const proofMatches = this.#requireLogFormat() === "versioned"
+            ? frameMetadata?.lsn === envelope.lsn && frameMetadata.prefixDigest === prefixDigest
+            : frameMetadata === undefined;
+          if (!proofMatches) {
             throw new AuthorityStorageError(
               "commit-log-corrupt",
               `Authority WAL frame proof is invalid at byte ${startOffset + offset}`,
             );
           }
           index.append({
+            format: this.#requireLogFormat(),
             frameEndOffset: startOffset + nextOffset,
             payloadBytes: payload.byteLength,
             payloadDigest: createHash("sha256").update(payload).digest(),
@@ -2404,9 +2431,21 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   /** 认证模式下第 `lsn` 帧的索引行；严格模式返回 undefined。 */
   async #authenticatedRow(lsn: number): Promise<FrameIndexRow | undefined> {
     if (!await this.#authenticatedMode()) return undefined;
-    const lastLsn = await this.#loadLastLsn();
-    if (lsn > lastLsn || !this.#frameIndex) return undefined;
-    return this.#frameIndex.row(lsn);
+    const read = async () => {
+      const lastLsn = await this.#loadLastLsn();
+      return lsn <= lastLsn ? this.#frameIndex?.row(lsn) : undefined;
+    };
+    try { return await read(); }
+    catch (error) {
+      if (!(error instanceof FrameIndexUnavailableError)) throw error;
+      this.#frameIndex = undefined;
+      this.#verifiedTail = undefined;
+      this.#operationView = undefined;
+      verifiedWalViews.delete(this.logPath);
+      if (this.#readOnly) this.#readOnlyIndexUsable = false;
+      else await AuthenticatedFrameIndex.discard(this.rootDir);
+      return read();
+    }
   }
 
   /**
@@ -2521,7 +2560,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       }
       const stopped = await this.#forEachAuthenticatedFrame(index, handle, first, until,
         capture ? undefined : select,
-        async (row, window, payloadStart) => {
+        async (row, window, payloadStart, legacyEnvelope) => {
           if (capture) {
             if (chunks[chunks.length - 1] !== window) chunks.push(window);
             frames.push({ lsn: row.lsn, frameEndOffset: row.frameEndOffset, prefixDigest: row.prefixDigest,
@@ -2529,7 +2568,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               ...(row.streamTag === undefined ? {} : { streamTag: row.streamTag }),
               ...(row.streamBloom === undefined ? {} : { streamBloom: row.streamBloom }) });
           }
-          const envelope = JSON.parse(window.toString("utf8", payloadStart, payloadStart + row.payloadBytes)) as CommitEnvelope<JsonValue>;
+          const envelope = legacyEnvelope ?? JSON.parse(window.toString("utf8", payloadStart, payloadStart + row.payloadBytes)) as CommitEnvelope<JsonValue>;
           const proceed = await visit(envelope, { logId, lsn: row.lsn, frameEndOffset: row.frameEndOffset, prefixDigest: row.prefixDigest });
           return proceed === false && row.frameEndOffset < tail.bytes ? false : undefined;
         });
@@ -2560,7 +2599,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     first: number,
     last: number,
     select: EnvelopeSelection | undefined,
-    onFrame: (row: FrameIndexRow, window: Buffer, payloadStart: number) => boolean | void | Promise<boolean | void>,
+    onFrame: (row: FrameIndexRow, window: Buffer, payloadStart: number, legacyEnvelope?: CommitEnvelope<JsonValue>) => boolean | void | Promise<boolean | void>,
   ): Promise<FrameIndexRow | undefined> {
     let lsn = first;
     let yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
@@ -2596,21 +2635,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         for (let index = start; index < end; index += 1) {
           const row = selected[index]!;
           const payloadStart = row.payloadOffset - windowStart;
-          // 认证索引不能掩盖帧结构损坏：载荷、帧头、帧尾及边界身份一起核对。
-          const frame = decodeAuthorityWalFrame(window, payloadStart - AUTHORITY_WAL_HEADER_BYTES);
-          if (frame.kind !== "complete" || frame.nextOffset !== row.frameEndOffset - windowStart ||
-              frame.payload.byteLength !== row.payloadBytes || frame.metadata?.lsn !== row.lsn ||
-              frame.metadata.prefixDigest !== row.prefixDigest) {
-            throw new AuthorityStorageError("commit-log-corrupt", "Authority WAL frame boundary does not match its authenticated index");
-          }
-          const payload = frame.payload;
-          if (!createHash("sha256").update(payload).digest().equals(row.payloadDigest)) {
-            throw new AuthorityStorageError(
-              "commit-log-corrupt",
-              `Authority WAL frame ${row.lsn} does not match its authenticated index`,
-            );
-          }
-          if (await onFrame(row, window, payloadStart) === false) return row;
+          const legacyEnvelope = this.#verifyIndexedFrame(row, window, payloadStart - AUTHORITY_WAL_HEADER_BYTES);
+          if (await onFrame(row, window, payloadStart, legacyEnvelope) === false) return row;
         }
         start = end;
         if (performance.now() >= yieldAt) {
@@ -2618,6 +2644,31 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           yieldAt = performance.now() + AUTHORITY_WAL_SCAN_SLICE_MS;
         }
       }
+    }
+    return undefined;
+  }
+
+  /** A legacy prefix is authenticated by the index, never invented from its 12-byte footer. */
+  #verifyIndexedFrame(row: FrameIndexRow, bytes: Buffer, frameStart: number): CommitEnvelope<JsonValue> | undefined {
+    const frame = decodeAuthorityWalFrame(bytes, frameStart);
+    if (row.format !== this.#requireLogFormat() || frame.kind !== "complete" ||
+        frame.nextOffset - frameStart !== row.frameEndOffset - row.payloadOffset + AUTHORITY_WAL_HEADER_BYTES ||
+        frame.payload.byteLength !== row.payloadBytes ||
+        (row.format === "legacy" ? frame.metadata !== undefined
+          : frame.metadata?.lsn !== row.lsn || frame.metadata.prefixDigest !== row.prefixDigest)) {
+      throw new AuthorityStorageError("commit-log-corrupt", "Authority WAL frame boundary does not match its authenticated index");
+    }
+    if (!createHash("sha256").update(frame.payload).digest().equals(row.payloadDigest)) {
+      throw new AuthorityStorageError("commit-log-corrupt", `Authority WAL frame ${row.lsn} does not match its authenticated index`);
+    }
+    if (row.format === "legacy") {
+      // The authenticated digest binds the canonical envelope that was fully
+      // validated at index construction; materialize it once for LSN and reader.
+      let envelope: CommitEnvelope<JsonValue>;
+      try { envelope = JSON.parse(frame.payload.toString("utf8")) as CommitEnvelope<JsonValue>; }
+      catch { throw new AuthorityStorageError("commit-log-corrupt", "Authenticated legacy envelope is invalid"); }
+      if (envelope?.lsn !== row.lsn) throw new AuthorityStorageError("commit-log-corrupt", "Authenticated legacy envelope LSN is invalid");
+      return envelope;
     }
     return undefined;
   }
@@ -3354,8 +3405,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
     // 认证模式：边界直接与认证索引对应行核对，不读日志文件。
     if (await this.#authenticatedMode()) {
-      const lastLsn = await this.#loadLastLsn();
-      const row = checkpoint.lsn <= lastLsn ? await this.#frameIndex?.row(checkpoint.lsn).catch(() => undefined) : undefined;
+      const row = await this.#authenticatedRow(checkpoint.lsn);
       if (row) {
         if (row.frameEndOffset !== checkpoint.frameEndOffset || row.prefixDigest !== checkpoint.prefixDigest) {
           throw new AuthorityStorageError(

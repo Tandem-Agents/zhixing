@@ -13,13 +13,13 @@ export const AUTHORITY_WAL_FILE_HEADER_BYTES = 72;
 export const AUTHORITY_WAL_HEADER_BYTES = 16;
 export const AUTHORITY_WAL_TRAILER_BYTES = 84;
 export const AUTHORITY_WAL_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
-const LEGACY_TRAILER_BYTES = 12;
+export const AUTHORITY_WAL_LEGACY_TRAILER_BYTES = 12;
 const PREFIX_BYTES = 32;
 
 /** Existing legal frame bound, shared by recovery admission and its tests. */
 export function authorityWalMaximumFrameBytes(format: "legacy" | "versioned" = "versioned"): number {
   return AUTHORITY_WAL_HEADER_BYTES + AUTHORITY_WAL_MAX_PAYLOAD_BYTES +
-    (format === "legacy" ? LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES);
+    (format === "legacy" ? AUTHORITY_WAL_LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES);
 }
 
 export interface AuthorityWalFileHeader {
@@ -70,7 +70,7 @@ export interface AuthorityWalFrameBoundary {
   readonly frameStartOffset: number;
   /**
    * 帧级锚点。仅 versioned 帧携带:legacy 帧的 trailer 只有 magic、长度与补码,
-   * 没有 lsn 与前缀摘要,因此按 checkpoint 定位后无法再做帧级身份复验。
+   * 没有 lsn 与前缀摘要。legacy调用者须另用认证索引与载荷身份，不能从这段帧尾虚构前缀证明。
    */
   readonly metadata?: AuthorityWalFrameMetadata;
 }
@@ -109,7 +109,7 @@ export function encodeAuthorityWalFrame(
   const length = payload.byteLength;
   const complement = lengthComplement(length);
   const trailerBytes =
-    metadata === undefined ? LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES;
+    metadata === undefined ? AUTHORITY_WAL_LEGACY_TRAILER_BYTES : AUTHORITY_WAL_TRAILER_BYTES;
   const frame = Buffer.allocUnsafe(
     AUTHORITY_WAL_HEADER_BYTES + length + trailerBytes,
   );
@@ -155,7 +155,7 @@ export function decodeAuthorityWalFrame(
   const trailerOffset = payloadStart + payloadBytes;
   const trailerBytes =
     version === LEGACY_FRAME_VERSION
-      ? LEGACY_TRAILER_BYTES
+      ? AUTHORITY_WAL_LEGACY_TRAILER_BYTES
       : AUTHORITY_WAL_TRAILER_BYTES;
   const nextOffset = trailerOffset + trailerBytes;
   if (nextOffset > bytes.byteLength) return { kind: "incomplete" };
@@ -233,7 +233,7 @@ export async function scanAuthorityWalFrames(
     const { payloadBytes, version } = decodeFrameHeader(header, 0, offset);
     const trailerBytes =
       version === LEGACY_FRAME_VERSION
-        ? LEGACY_TRAILER_BYTES
+        ? AUTHORITY_WAL_LEGACY_TRAILER_BYTES
         : AUTHORITY_WAL_TRAILER_BYTES;
     const frameBytes =
       AUTHORITY_WAL_HEADER_BYTES + payloadBytes + trailerBytes;
@@ -320,7 +320,7 @@ export async function verifyAuthorityWalFrameBoundary(
   if (
     !Number.isSafeInteger(frameEndOffset) ||
     frameEndOffset > reader.size ||
-    frameEndOffset < AUTHORITY_WAL_HEADER_BYTES + LEGACY_TRAILER_BYTES
+    frameEndOffset < AUTHORITY_WAL_HEADER_BYTES + AUTHORITY_WAL_LEGACY_TRAILER_BYTES
   ) {
     throw corruptFrame("Authority WAL checkpoint boundary is invalid");
   }
@@ -337,7 +337,7 @@ export async function verifyAuthorityWalFrameBoundary(
   const legacy = await tryFrameBoundary(
     reader,
     frameEndOffset,
-    LEGACY_TRAILER_BYTES,
+    AUTHORITY_WAL_LEGACY_TRAILER_BYTES,
     LEGACY_FRAME_VERSION,
   );
   if (legacy) return legacy;
@@ -391,7 +391,7 @@ async function tryFrameBoundary(
   ) {
     return undefined;
   }
-  if (trailerBytes === LEGACY_TRAILER_BYTES) {
+  if (trailerBytes === AUTHORITY_WAL_LEGACY_TRAILER_BYTES) {
     return { frameStartOffset };
   }
   const rawLsn = trailer.readBigUInt64BE(12);
