@@ -123,11 +123,7 @@ export async function checkStartupConfiguration(
         message: `SecretStore 当前状态：${secretState}`,
       };
     }
-    const credentialReadGuard = await createCredentialReadGuard(
-      credentialsHomeDir,
-      secretStore,
-    );
-    const preparedCredentials = await loadConfigurationSnapshot({
+    const preparedCredentials = await withCredentialReadGuard(credentialsHomeDir, secretStore, credentialReadGuard => loadConfigurationSnapshot({
       configPath,
       store: secretStore,
       records: options.records,
@@ -136,7 +132,7 @@ export async function checkStartupConfiguration(
       ...(credentialReadGuard
         ? { authorizeCredentialRead: credentialReadGuard }
         : {}),
-    });
+    }));
     credentials = preparedCredentials.credentials;
     config = preparedCredentials.config;
     credentialGeneration = preparedCredentials.generation;
@@ -186,11 +182,7 @@ export async function checkStartupConfiguration(
 
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
-    const updatedCredentialReadGuard = await createCredentialReadGuard(
-      credentialsHomeDir,
-      secretStore,
-    );
-    const updatedCredentialSnapshot = await loadConfigurationSnapshot({
+    const updatedCredentialSnapshot = await withCredentialReadGuard(credentialsHomeDir, secretStore, updatedCredentialReadGuard => loadConfigurationSnapshot({
       configPath,
       store: secretStore,
       records: options.records,
@@ -199,7 +191,7 @@ export async function checkStartupConfiguration(
       ...(updatedCredentialReadGuard
         ? { authorizeCredentialRead: updatedCredentialReadGuard }
         : {}),
-    });
+    }));
     return {
       kind: "ready",
       configurationCompleted: true,
@@ -218,44 +210,46 @@ export async function checkStartupConfiguration(
   return { kind: "non-tty", missingLabels };
 }
 
-async function createCredentialReadGuard(
+async function withCredentialReadGuard<Result>(
   home: string,
   secretStore: SecretStorePort,
-): Promise<
-  | ((input: {
+  use: (guard?: (input: {
       readonly kind: "provider" | "channel" | "mcp";
       readonly id: string;
       readonly ref: SecretRef;
-    }) => Promise<boolean>)
-  | undefined
-> {
-  const store = new FileMeshBootstrapStore(home);
-  const trust = await store.loadTrustRecord();
-  if (!trust) return undefined;
-  const deviceRefs = await secretStore.list("device-key/device/v1/");
-  if (deviceRefs.length !== 1) return undefined;
-  const deviceId = deviceRefs[0]!.bindingId.slice("device/v1/".length);
-  if (!trust.members.some((member) =>
-    member.device.deviceId === deviceId && member.state === "active")) return undefined;
-  const authority = new CredentialExposureAuthority({
-    deviceId,
-    log: store.authorityLog(),
-    secretStore,
-  });
-  return async ({ kind, id }) => {
-    try {
-      await authority.assertRoute({
-        ref: {
-          kind,
-          bindingId: `credential-${kind}-${id}`,
-        },
-        service: kind,
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
+    }) => Promise<boolean>) => Promise<Result>,
+): Promise<Result> {
+  const store = await FileMeshBootstrapStore.open(home, undefined, { readOnly: true, secretStore });
+  try {
+    const trust = await store.loadCurrentTrust();
+    if (!trust) return await use();
+    const deviceRefs = await secretStore.list("device-key/device/v1/");
+    if (deviceRefs.length !== 1) return await use();
+    const deviceId = deviceRefs[0]!.bindingId.slice("device/v1/".length);
+    if (!trust.members.some((member) =>
+      member.device.deviceId === deviceId && member.state === "active")) return await use();
+    const authority = new CredentialExposureAuthority({
+      deviceId,
+      log: store.authorityLog(),
+      secretStore,
+    });
+    return await use(async ({ kind, id }) => {
+      try {
+        await authority.assertRoute({
+          ref: {
+            kind,
+            bindingId: `credential-${kind}-${id}`,
+          },
+          service: kind,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  } finally {
+    await store.stopStorageMaintenance();
+  }
 }
 
 function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[] {
@@ -271,4 +265,3 @@ function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[]
     }];
   }
 }
-

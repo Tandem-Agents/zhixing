@@ -1,3 +1,4 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import type { MeshRequestChannelOptions } from "@zhixing/mesh/request-channel";
 import { once } from "node:events";
 import {
@@ -7,7 +8,6 @@ import {
 } from "node:net";
 import type {
   DeviceRole,
-  HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   SecretStorePort,
@@ -42,14 +42,25 @@ import type {
 const PROTOCOL_RANGE = { min: "1", max: "1" } as const;
 const RELAY_HELLO_TTL_MS = 60_000;
 
+function activeTrust(record: CurrentTrustProjection): CurrentTrustProjection {
+  const { homeId, trustEpoch, chainHead, issuer, recoveryRootPublicKey, recoveryBackupPublicKey,
+    recoveryActivationDigest, pendingResetEvent } = record;
+  return { homeId, trustEpoch, chainHead, issuer,
+    ...(recoveryRootPublicKey === undefined ? {} : { recoveryRootPublicKey }),
+    ...(recoveryBackupPublicKey === undefined ? {} : { recoveryBackupPublicKey }),
+    ...(recoveryActivationDigest === undefined ? {} : { recoveryActivationDigest }),
+    ...(pendingResetEvent === undefined ? {} : { pendingResetEvent }),
+    members: record.members.filter(member => member.state === "active") };
+}
+
 export interface MeshControlPlaneTrustProjectionPort {
-  readonly loadTrustRecord: () => Promise<HomeTrustRecord | undefined>;
+  readonly loadCurrentTrust: () => Promise<CurrentTrustProjection | undefined>;
 }
 
 export interface ProductionMeshControlPlaneOptions {
   readonly logging?: MeshRequestChannelOptions;
   readonly localIdentity: DeviceKey;
-  readonly trust: HomeTrustRecord;
+  readonly trust: CurrentTrustProjection;
   readonly configuration: MeshRoleBootConfig;
   readonly endpoints: MeshEndpointDirectory;
   readonly transportPeers: readonly TrustedMeshPeer[];
@@ -68,7 +79,7 @@ export interface ProductionMeshControlPlaneOptions {
     connection: SecureMeshConnection,
   ) => void | Promise<void>;
   readonly onTrustReconciled?: (
-    record: HomeTrustRecord,
+    record: CurrentTrustProjection,
   ) => void | Promise<void>;
   readonly onConnectionError?: (error: Error) => void;
   readonly watchTrust?: boolean;
@@ -90,14 +101,14 @@ export class ProductionMeshControlPlane {
   readonly #peers = new Map<string, TrustedMeshPeer>();
   readonly #roles: ReadonlySet<string>;
   readonly #replayWindow = new HandshakeReplayWindow();
-  #trust: HomeTrustRecord;
+  #trust: CurrentTrustProjection;
   #directServer: NetServer | undefined;
   #disposeEndpointService: (() => void) | undefined;
   #started = false;
 
   constructor(private readonly options: ProductionMeshControlPlaneOptions) {
     this.connections = options.connections ?? new MeshConnectionRegistry({ logging: options.logging });
-    this.#trust = options.trust;
+    this.#trust = activeTrust(options.trust);
     for (const peer of options.transportPeers) {
       this.#peers.set(peer.identity.deviceId, peer);
     }
@@ -144,11 +155,12 @@ export class ProductionMeshControlPlane {
     this.#disposeEndpointService = undefined;
   }
 
-  currentTrust(): HomeTrustRecord {
+  currentTrust(): CurrentTrustProjection {
     return this.#trust;
   }
 
-  async reconcileTrust(record: HomeTrustRecord): Promise<void> {
+  async reconcileTrust(record: CurrentTrustProjection): Promise<void> {
+    record = activeTrust(record);
     if (record.homeId !== this.#trust.homeId || record.trustEpoch < this.#trust.trustEpoch) {
       throw new Error("Mesh trust reconciliation rejected another home or epoch rollback");
     }
@@ -208,7 +220,7 @@ export class ProductionMeshControlPlane {
       await abortableDelay(1_000, this.#abort.signal).catch(() => undefined);
       if (this.#abort.signal.aborted) return;
       try {
-        const record = await this.options.trustProjection.loadTrustRecord();
+        const record = await this.options.trustProjection.loadCurrentTrust();
         if (record) await this.reconcileTrust(record);
       } catch (error) {
         const reason = asError(error);

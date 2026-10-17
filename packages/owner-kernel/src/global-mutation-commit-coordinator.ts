@@ -1,11 +1,13 @@
+import { projectionCheckpointKey } from "@zhixing/core/authority";
 import { Buffer } from "node:buffer";
-import { collectArtifactRefs } from "@zhixing/core/authority";
+import { assertArtifactRef, collectArtifactRefs } from "@zhixing/core/authority";
 import type {
   ArtifactStore,
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
   ProjectionTransactionContext,
+  DurableLogCheckpoint,
 } from "@zhixing/core/authority";
 import type {
   GlobalStagedMutation,
@@ -13,6 +15,7 @@ import type {
   LogicalRecord,
   ScheduleWriteMutation,
   TaskDefinition,
+  ArtifactRef,
 } from "@zhixing/core/contracts";
 import { validateTaskDefinition } from "@zhixing/core/protocol";
 import { CommittedMutationMaterializationError } from "@zhixing/core/protocol";
@@ -29,18 +32,46 @@ import {
 } from "./scheduler-mutation-commit.js";
 
 export const SCHEDULE_AUTHORITY_PROJECTION_ID = "global-schedule-authority-v1";
+export const SCHEDULE_AUTHORITY_REDUCER_VERSION = 2;
 
 const SCHEDULE_DEFINITION_PREFIX = "definition:";
 const SCHEDULE_PENDING_PREFIX = "pending:";
 const SCHEDULE_MATERIALIZATION_STREAM = "job:schedule-materialization";
 
 /** Enumerate task journals without treating the schedule coordinator's own stream as a task. */
+/**
+ * 全部定时任务标识（`job:` 流名）。结果随检查点保存：重启后只续读其后的尾部，不为枚举流名
+ * 解析整份历史；没有检查点时完整读取一次。
+ */
 export async function listScheduleTaskIds(log: AuthorityCommitLog): Promise<readonly string[]> {
-  const streams = (await log.readAll()).flatMap((commit) => commit.entries)
-    .map((entry) => entry.stream)
-    .filter((stream) => stream.startsWith("job:") && stream.length > 4 && stream !== SCHEDULE_MATERIALIZATION_STREAM);
-  return [...new Set(streams.map((stream) => stream.slice(4)))].sort();
+  const restored = await log.loadProjectionCheckpoint?.<readonly string[]>(SCHEDULE_TASK_IDS_CHECKPOINT);
+  const initial = new Set<string>(Array.isArray(restored?.state) ? restored.state : []);
+  const read = await log.readProjection<Set<string>, unknown>(
+    initial,
+    (current, entry) => {
+      const taskId = scheduleTaskIdOf(entry.stream);
+      if (taskId === undefined || current.has(taskId)) return current;
+      // 日志内部重试时从未改动的起点重新收集。
+      const next = current === initial ? new Set(current) : current;
+      next.add(taskId);
+      return next;
+    },
+    restored ? { cursor: restored.cursor } : {},
+  );
+  const taskIds = [...read.state].sort();
+  if (read.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
+    await log.saveProjectionCheckpoint?.(SCHEDULE_TASK_IDS_CHECKPOINT, read.cursor, taskIds);
+  }
+  return taskIds;
 }
+
+function scheduleTaskIdOf(stream: string): string | undefined {
+  return stream.startsWith("job:") && stream.length > 4 && stream !== SCHEDULE_MATERIALIZATION_STREAM
+    ? stream.slice(4)
+    : undefined;
+}
+
+const SCHEDULE_TASK_IDS_CHECKPOINT = projectionCheckpointKey("schedule-task-ids", 1, scheduleTaskIdOf);
 
 type CoordinatorOutcome = GlobalMutationPublishOutcome | SchedulePublishOutcome;
 
@@ -58,6 +89,7 @@ export interface GlobalMutationCommitCoordinatorOptions {
  */
 export class GlobalMutationCommitCoordinator {
   readonly #log: AuthorityCommitLog;
+  readonly #artifacts: ArtifactStore;
   readonly #participants: readonly GlobalMutationCommitParticipant[];
   readonly #refreshSchedule: (taskIds: readonly string[]) => Promise<void>;
   readonly #scheduleDefinitionFor: (taskId: string) => TaskDefinition | undefined;
@@ -65,6 +97,7 @@ export class GlobalMutationCommitCoordinator {
 
   constructor(options: GlobalMutationCommitCoordinatorOptions) {
     this.#log = options.log;
+    this.#artifacts = options.artifacts;
     this.#participants = [...(options.participants ?? [])];
     const ids = this.#participants.map((participant) => participant.stagedProjectionId);
     if (new Set(ids).size !== ids.length) {
@@ -72,12 +105,7 @@ export class GlobalMutationCommitCoordinator {
     }
     this.#refreshSchedule = options.refreshSchedule;
     this.#scheduleDefinitionFor = options.scheduleDefinitionFor;
-    this.#scheduleProjection = options.log.durableProjection({
-      projectionId: SCHEDULE_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 1,
-      reduce: (envelope, current) =>
-        reduceScheduleProjection(envelope, current, options.artifacts),
-    });
+    this.#scheduleProjection = registerScheduleAuthorityProjection(options.log, options.artifacts);
   }
 
   get readProjectionIds(): readonly string[] {
@@ -147,7 +175,7 @@ export class GlobalMutationCommitCoordinator {
     const definitions = await loadScheduleDefinitions(scheduleProjection, [
       ...scheduleRecords.map((record) => scheduleMutationTaskId(record.mutation, record.requestId)),
       ...(input.sourceTaskId ? [input.sourceTaskId] : []),
-    ]);
+    ], this.#artifacts, input.context.readEnvelopeAt ?? (checkpoint => this.#log.readEnvelopeAt(checkpoint)));
     const source = input.sourceTaskId
       ? sourceForDefinition(definitions.get(input.sourceTaskId))
       : input.source;
@@ -305,10 +333,27 @@ export class GlobalMutationCommitCoordinator {
   }
 }
 
+export function registerScheduleAuthorityProjection(log: AuthorityCommitLog, artifacts: ArtifactStore) {
+  return log.durableProjection({ projectionId: SCHEDULE_AUTHORITY_PROJECTION_ID,
+    reducerVersion: SCHEDULE_AUTHORITY_REDUCER_VERSION, authenticated: true,
+    inputs: { families: ["job:"] },
+    reduce: (envelope, current, source) => reduceScheduleProjection(envelope, current, artifacts, source.checkpoint),
+  });
+}
+
+interface ScheduleDefinitionLocator {
+  readonly taskId: string;
+  readonly taskRevision: number;
+  readonly state: TaskDefinition["state"];
+  readonly kind: TaskDefinition["definition"]["kind"];
+  readonly definition: { readonly ref: ArtifactRef } | { readonly source: { readonly checkpoint: DurableLogCheckpoint; readonly item: number } };
+}
+
 async function reduceScheduleProjection(
   envelope: import("@zhixing/core/contracts").CommitEnvelope<JsonValue>,
   current: DurableProjectionReadContext,
   artifacts: ArtifactStore,
+  checkpoint: DurableLogCheckpoint,
 ): Promise<readonly DurableProjectionMutation[]> {
   const mutations: DurableProjectionMutation[] = [];
   const overlay = new Map<string, JsonValue | undefined>();
@@ -322,21 +367,20 @@ async function reduceScheduleProjection(
     mutations.push({ kind: "tombstone", key });
     overlay.set(key, undefined);
   };
-  for (const logical of envelope.entries) {
+  for (const [item, logical] of envelope.entries.entries()) {
     const body = logical.body;
     if (logical.stream.startsWith("job:") && isTaskRevisionRecord(body)) {
       const definition = await loadTaskDefinition(body.def, artifacts);
       if (
-        definition.taskId !== body.taskId ||
+        logical.stream !== `job:${body.taskId}` || definition.taskId !== body.taskId ||
         definition.taskRevision !== body.taskRevision ||
         definition.state !== body.state ||
         definition.definition.kind !== body.kind
       ) {
         throw new Error("Schedule task revision does not bind its definition");
       }
-      const currentDefinition = readTaskDefinition(
+      const currentDefinition = readScheduleLocator(definition.taskId,
         await read(scheduleDefinitionKey(definition.taskId)),
-        true,
       );
       if (
         currentDefinition &&
@@ -349,7 +393,8 @@ async function reduceScheduleProjection(
       }
       put(
         scheduleDefinitionKey(definition.taskId),
-        definition as unknown as JsonValue,
+        { taskId: definition.taskId, taskRevision: definition.taskRevision, state: definition.state, kind: definition.definition.kind,
+          definition: isArtifactReference(body.def) ? { ref: body.def.ref } : { source: { checkpoint, item } } } as unknown as JsonValue,
       );
       put(schedulePendingKey(definition.taskId), {
         taskId: definition.taskId,
@@ -376,16 +421,32 @@ async function reduceScheduleProjection(
 async function loadScheduleDefinitions(
   projection: DurableProjectionReadContext,
   taskIds: readonly string[],
+  artifacts: ArtifactStore,
+  readEnvelope: NonNullable<ProjectionTransactionContext["readEnvelopeAt"]>,
 ): Promise<Map<string, TaskDefinition>> {
   const result = new Map<string, TaskDefinition>();
   for (const taskId of [...new Set(taskIds)].sort((left, right) =>
     left.localeCompare(right, "en-US")
   )) {
-    const definition = readTaskDefinition(
-      await projection.get(scheduleDefinitionKey(taskId)),
-      true,
-    );
-    if (definition) result.set(taskId, definition);
+    const locator = readScheduleLocator(taskId, await projection.get(scheduleDefinitionKey(taskId)));
+    if (!locator) continue;
+    let stored: JsonValue;
+    if ("ref" in locator.definition) stored = { ref: locator.definition.ref } as unknown as JsonValue;
+    else {
+      const { checkpoint, item } = locator.definition.source;
+      const envelope = await readEnvelope(checkpoint);
+      const entry = envelope.entries[item];
+      if (!entry || entry.stream !== `job:${taskId}` || !isTaskRevisionRecord(entry.body) ||
+          entry.body.taskId !== taskId || entry.body.taskRevision !== locator.taskRevision) {
+        throw new Error("Schedule definition source does not match its locator");
+      }
+      stored = entry.body.def;
+    }
+    const definition = await loadTaskDefinition(stored, artifacts);
+    if (definition.taskId !== taskId || definition.taskRevision !== locator.taskRevision || definition.state !== locator.state || definition.definition.kind !== locator.kind) {
+      throw new Error("Schedule definition does not match its locator");
+    }
+    result.set(taskId, definition);
   }
   return result;
 }
@@ -405,12 +466,22 @@ async function loadTaskDefinition(
   return validateTaskDefinition(stored as unknown as TaskDefinition);
 }
 
-function readTaskDefinition(
+function readScheduleLocator(
+  taskId: string,
   value: JsonValue | undefined,
-  optional = false,
-): TaskDefinition | undefined {
-  if (value === undefined && optional) return undefined;
-  return validateTaskDefinition(value as unknown as TaskDefinition);
+): ScheduleDefinitionLocator | undefined {
+  if (value === undefined) return;
+  if (!isPlainRecord(value) || Object.keys(value).sort().join(",") !== "definition,kind,state,taskId,taskRevision" ||
+      value.taskId !== taskId || !Number.isSafeInteger(value.taskRevision) || Number(value.taskRevision) < 1 ||
+      typeof value.state !== "string" || typeof value.kind !== "string" || !isPlainRecord(value.definition)) throw new Error("Schedule definition locator is invalid");
+  if ("ref" in value.definition) assertArtifactRef(value.definition.ref);
+  else {
+    const source = value.definition.source;
+    if (!isPlainRecord(source) || !isPlainRecord(source.checkpoint) || !Number.isSafeInteger(source.item) || Number(source.item) < 0) {
+      throw new Error("Schedule definition source locator is invalid");
+    }
+  }
+  return value as unknown as ScheduleDefinitionLocator;
 }
 
 function readSchedulePending(
@@ -486,10 +557,10 @@ function isScheduleMaterialized(value: JsonValue): value is {
     Number.isSafeInteger(value.targetRevision);
 }
 
-function isArtifactReference(value: JsonValue): value is { readonly ref: string } {
+function isArtifactReference(value: JsonValue): value is { readonly ref: ArtifactRef } & JsonValue {
   return isPlainRecord(value) &&
     Object.keys(value).join(",") === "ref" &&
-    typeof value.ref === "string";
+    isPlainRecord(value.ref) && typeof value.ref.digest === "string" && typeof value.ref.bytes === "number";
 }
 
 function isPlainRecord(value: unknown): value is Record<string, JsonValue> {

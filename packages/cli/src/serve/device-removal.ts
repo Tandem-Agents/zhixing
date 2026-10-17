@@ -245,7 +245,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
   async #operationStateForTarget(
     targetDeviceId: string,
   ): Promise<DeviceLifecycleOperation | undefined> {
-    const operations = (await this.#journal.operations())
+    const operations = (await this.#journal.activeFor(targetDeviceId))
       .filter((operation) =>
         operation.identity.kind === "executor-removal" &&
         operation.identity.targetDeviceId === targetDeviceId,
@@ -255,7 +255,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     if (active.length > 1) {
       throw new Error("Paired device has conflicting active removal operations");
     }
-    return active[0] ?? operations.at(-1);
+    return active[0] ?? await this.#journal.latest("executor-removal", targetDeviceId);
   }
 
   async commitReady(input: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt> {
@@ -455,7 +455,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     readonly operationId: string;
     readonly abort: DeviceLifecycleAbort;
   } | undefined> {
-    const operations = (await this.#journal.operations()).filter((operation) =>
+    const operations = (await this.#journal.activeFor(targetDeviceId)).filter((operation) =>
       operation.identity.kind === "executor-removal" &&
       operation.identity.targetDeviceId === targetDeviceId &&
       operation.phase !== "terminal" &&
@@ -975,7 +975,7 @@ export class ExecutorRemovalTarget {
     cleanupReady(receipt: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt>;
     terminal(operationId: string): Promise<ExecutorRemovalReceipt | undefined>;
   }): Promise<void> {
-    for (const operation of await this.#journal.operations()) {
+    for (const operation of await this.#journal.activeFor(this.options.deviceKey.deviceId)) {
       if (operation.identity.kind !== "executor-removal") continue;
       if (
         operation.phase === "authority-decided" ||
@@ -1015,7 +1015,7 @@ export class ExecutorRemovalTarget {
 
   async restoreLocalAdmissionGate(): Promise<readonly string[]> {
     const active: string[] = [];
-    for (let operation of await this.#journal.operations()) {
+    for (let operation of await this.#journal.activeFor(this.options.deviceKey.deviceId)) {
       if (
         operation.identity.kind !== "executor-removal" ||
         operation.phase === "terminal" ||

@@ -6,6 +6,9 @@ import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { runStartupCheck } from "../startup.js";
 import { checkStartupConfiguration } from "../runtime/startup-application.js";
+import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
 
 class MemoryStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -27,6 +30,15 @@ class MemoryStore implements SecretStorePort {
   }
   async put(ref: SecretRef, value: string) { this.values.set(key(ref), value); }
   async get(ref: SecretRef) { return this.values.get(key(ref)) ?? null; }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = key(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
   async delete(ref: SecretRef) { this.values.delete(key(ref)); }
   async list(prefix: string) {
     return [...this.values.keys()].filter((value) => value.startsWith(prefix)).map((value) => {
@@ -41,6 +53,31 @@ class MemoryStore implements SecretStorePort {
 }
 
 describe("startup SecretStore boundary", () => {
+  it("closes the read-only trust and exposure guard after a trusted-home configuration read or failure", async () => {
+    const homeDir = await createTempDir("startup-trusted-read-guard");
+    const secrets = new MemoryStore();
+    const device = await DeviceKey.generate();
+    await persistDeviceKey(secrets, device);
+    const writer = new FileMeshBootstrapStore(homeDir, device);
+    try {
+      await writer.initializeLocalHome({ key: device,
+        identity: enrollDeviceIdentity(device, { displayName: "synthetic", platform: "linux", enrolledAt: "2026-10-16T00:00:00.000Z" }),
+        roles: ["anchor", "executor"], homeId: "startup-read-guard", at: "2026-10-16T00:00:00.000Z" });
+    } finally { await writer.stopStorageMaintenance(); }
+    await writeFile(path.join(homeDir, "config.jsonc"), JSON.stringify({ llm: { main: { provider: "deepseek", model: "deepseek-chat" } } }));
+    await writeCredentials({ providers: { deepseek: { apiKey: "synthetic-guard-key" } } }, { store: secrets });
+    const close = vi.spyOn(FileMeshBootstrapStore.prototype, "stopStorageMaintenance");
+    const options = { homeDir, mode: "repl" as const, isTTY: false, secretStore: secrets, edit: async () => ({ kind: "non-tty" as const }) };
+    try {
+      expect(await checkStartupConfiguration(options)).toMatchObject({ kind: "ready" });
+      expect(close).toHaveBeenCalledTimes(1);
+      const trustRead = vi.spyOn(FileMeshBootstrapStore.prototype, "loadCurrentTrust").mockRejectedValueOnce(new Error("synthetic source unavailable"));
+      try { expect(await checkStartupConfiguration(options)).toMatchObject({ kind: "secret-store-error", message: "synthetic source unavailable" }); }
+      finally { trustRead.mockRestore(); }
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally { close.mockRestore(); }
+  }, 60_000);
+
   it.each(["repl", "host", "pairing"] as const)("%s 首配编辑端口通过 owner 保存后重读，不依赖终端或模型", async mode => {
     const homeDir = await createTempDir("startup-edit-port");
     const store = new MemoryStore();

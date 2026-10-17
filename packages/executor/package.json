@@ -5,6 +5,10 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./startup-definitions": {
+      "types": "./dist/startup-definitions.d.ts",
+      "import": "./dist/startup-definitions.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

@@ -1,5 +1,5 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import type {
-  HomeTrustRecord,
   WorkspaceProbeRequest,
   WorkspaceProbeResult,
 } from "@zhixing/core/contracts";
@@ -9,7 +9,7 @@ import type { WorksceneRemoteWorkspaceProbePort } from "./workscene-directory.js
 import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 
 type LiveMeshTopologyTrust = {
-  current(): HomeTrustRecord;
+  current(): CurrentTrustProjection;
 };
 
 /** Explicit single-machine implementation: remote workspace probing is unavailable. */

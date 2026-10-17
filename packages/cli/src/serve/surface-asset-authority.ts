@@ -51,6 +51,8 @@ export interface CreateSurfaceAssetAuthorityOptions {
   readonly authorityRoot: string;
   readonly log: FileAuthorityCommitLog;
   readonly retentionLogs: readonly FileAuthorityCommitLog[];
+  /** 日志由统一 home 入口持有时为 false：停止资产权威不停止共享日志。 */
+  readonly ownsLogs?: boolean;
   readonly artifacts: FileArtifactStore;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
@@ -111,6 +113,7 @@ function buildSurfaceAssetAuthority(
     receiver: staging.recovery,
     storageMaintenance: options.storageMaintenance,
     maintenanceResourceId: options.artifacts.rootDir,
+    ownsSourceLogs: options.ownsLogs !== false,
   });
   const projection = new SurfaceAssetProjection(
     options.log,
@@ -154,21 +157,11 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
 
   constructor(
     private readonly log: FileAuthorityCommitLog,
-    private readonly artifacts: FileArtifactStore,
+    artifacts: FileArtifactStore,
     private readonly anchorEpoch: number,
     private readonly lifecycle: ArtifactLifecycleIndex,
   ) {
-    this.#grantIndex = log.durableProjection({
-      projectionId: SURFACE_ASSET_PROJECTION_ID,
-      reducerVersion: 7,
-      reduce: (envelope, current, source) =>
-        reduceSurfaceAssetIndex(
-          envelope,
-          current,
-          source,
-          this.artifacts,
-        ),
-    });
+    this.#grantIndex = registerSurfaceAssetProjection(log, artifacts);
   }
 
   synchronize(): Promise<void> {
@@ -289,6 +282,10 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     limit: number,
   ): Promise<readonly SurfaceAssetGrant[]> {
     return this.lifecycle.activeSurfaceGrants(surfacePrincipal, limit);
+  }
+
+  listActiveGrantPage(after: string | undefined, limit: number): Promise<readonly SurfaceAssetGrant[]> {
+    return this.lifecycle.activeGrantPage(after, limit);
   }
 
   nextActiveGrantExpiry(): Promise<string | undefined> {
@@ -1281,4 +1278,19 @@ function createGrantId(at: string): string {
     value >>= 5n;
   }
   return `grt-${encoded}`;
+}
+
+export function registerSurfaceAssetProjection(log: FileAuthorityCommitLog, artifacts: FileArtifactStore) {
+  return log.durableProjection({
+      projectionId: SURFACE_ASSET_PROJECTION_ID,
+      inputs: { streams: ["control"], families: ["run:"] },
+      reducerVersion: 7,
+      reduce: (envelope, current, source) =>
+        reduceSurfaceAssetIndex(
+          envelope,
+          current,
+          source,
+          artifacts,
+        ),
+    });
 }

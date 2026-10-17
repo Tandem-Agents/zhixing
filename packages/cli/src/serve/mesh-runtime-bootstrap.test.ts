@@ -111,10 +111,8 @@ describe("production mesh runtime bootstrap", () => {
       homeId: "home-retired",
       at: "2026-08-12T00:00:00.000Z",
     });
-    const journal = new DeviceLifecycleJournal(
-      local.bootstrapStore.authorityLog(),
-      createTrustedDeviceProtocolVerifier([identity]),
-    );
+    // 统一入口已用本 home 的活验签器登记生命周期定义；同一日志的其他 journal 沿用该登记。
+    const journal = new DeviceLifecycleJournal(local.bootstrapStore.authorityLog());
     await journal.accept({
       v: 1,
       kind: "anchor-uninstall",
@@ -408,6 +406,15 @@ class MemorySecretStore implements SecretStorePort {
   async get(ref: SecretRef): Promise<string | null> {
     return this.values.get(key(ref)) ?? null;
   }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = key(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
 
   async delete(ref: SecretRef): Promise<void> {
     this.values.delete(key(ref));

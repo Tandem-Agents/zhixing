@@ -781,6 +781,24 @@ describe("CoreHostConnection", () => {
     await conn.dispose();
   });
 
+  it("keeps waiting for one-time projection recovery beyond the former minute before connecting", async () => {
+    let now = 0;
+    const client = makeFakeClient();
+    const spawn = vi.fn(async () => {
+      now = 75_000;
+      return { ok: false, recoverable: true, reason: "still preparing projections" };
+    });
+    const conn = new CoreHostConnection({
+      discover: async () => { if (now < 80_000) throw new ServerNotRunningError("not ready"); return endpoint; },
+      spawn, createClient: () => asClient(client), clientVersion: "0.1.0",
+      clock: () => now, sleep: async ms => { now += ms; },
+    });
+    await expect(conn.getClient()).resolves.toBe(asClient(client));
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(now).toBeGreaterThanOrEqual(80_000);
+    await conn.dispose();
+  });
+
   it("dispose cancels an in-flight startup wait", async () => {
     let started!: () => void;
     const start = new Promise<void>((resolve) => { started = resolve; });

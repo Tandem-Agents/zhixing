@@ -1,7 +1,7 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import type {
   DeviceIdentity,
   DeviceRole,
-  HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   SecretStorePort,
@@ -13,13 +13,12 @@ import {
   type MeshEndpointDirectory,
 } from "@zhixing/mesh/bootstrap";
 import { canonicalize } from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import { deleteDeviceKey } from "@zhixing/mesh/device-key-store";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
-import { FileAuthorityCommitLog, DeviceLifecycleJournal } from "@zhixing/core/authority";
-import path from "node:path";
+import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
@@ -32,7 +31,6 @@ import {
   type PlannedAnchorPostInstallDescriptor,
   type PlannedAnchorTransferStagingArea,
 } from "./planned-anchor-transfer.js";
-import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import {
   completeDisasterRecoveryInstallationBeforeBootstrap,
   type DisasterRecoveryPostInstallDescriptor,
@@ -60,7 +58,7 @@ export type MeshRuntimeBootstrap =
       readonly bootstrapProjection: MeshBootstrapProjectionPorts;
       readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
       readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
-      readonly trust: HomeTrustRecord;
+      readonly trust: CurrentTrustProjection;
       readonly configuration: MeshRoleBootConfig;
       readonly endpoints: MeshEndpointDirectory;
       readonly transportPeers: readonly TrustedMeshPeer[];
@@ -79,6 +77,10 @@ export async function prepareMeshRuntimeBootstrap(input: {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly deviceCapacity?: DeviceCapacityArbiterPort;
+  /** Full Host composition prepares its domain dependencies before entering
+   * any domain queue. Short management commands keep demand-only preparation. */
+  readonly prepareRuntimeBeforeDomains?: boolean;
   readonly configuration?: MeshRoleBootConfig;
   readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
   readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
@@ -86,62 +88,39 @@ export async function prepareMeshRuntimeBootstrap(input: {
   const configuration = input.configuration === undefined
     ? undefined
     : validateMeshRoleBootConfig(input.configuration);
-  const bootstrapStore = new FileMeshBootstrapStore(
-    input.zhixingHome,
-    undefined,
-    { storageMaintenance: input.storageMaintenance, records: input.records },
-  );
-  const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
-  const trustEvents = await bootstrapStore.loadTrustEvents();
-  const preRuntimeTrust = await bootstrapStore.loadTrustRecord();
-  const trustedIdentities = new Map(
-    trustEvents.flatMap((event) => event.body.t === "genesis"
-      ? [event.body.issuer]
-      : event.body.t === "enroll"
-        ? [event.body.device]
-        : [])
-      .map((identity) => [identity.deviceId, identity] as const),
-  );
-  if (preRuntimeTrust?.issuer.issuerPublicKey) {
-    const issuerMember = preRuntimeTrust.members.find((member) =>
-      member.device.deviceId === preRuntimeTrust.issuer.deviceId);
-    if (!issuerMember) throw new Error("Current issuer is missing from the trust projection");
-    trustedIdentities.set(preRuntimeTrust.issuer.issuerKeyId, Object.freeze({
-      ...issuerMember.device,
-      deviceId: preRuntimeTrust.issuer.issuerKeyId,
-      publicKey: preRuntimeTrust.issuer.issuerPublicKey,
-    }));
-  }
-  const verifier = trustEvents.length === 0
-    ? undefined
-    : createTrustedDeviceProtocolVerifier([...trustedIdentities.values()]);
-  const executorLog = new FileAuthorityCommitLog(
-    path.join(path.resolve(input.zhixingHome), "distributed-runtime", "executor-authority"),
-    bootstrapStore.artifactStore(),
-    { storageMaintenance: input.storageMaintenance, records: input.records },
-  );
-  const [authorityOperations, executorOperations, existingDeviceKey] = await Promise.all([
-    new DeviceLifecycleJournal(bootstrapStore.authorityLog(), verifier).operations(),
-    new DeviceLifecycleJournal(executorLog, verifier).operations(),
-    loadExistingDeviceKey(input.secretStore),
-  ]);
-  const relevant = [...authorityOperations, ...executorOperations].filter((operation) => {
-    if (operation.identity.kind === "executor-removal") {
-      return existingDeviceKey
-        ? operation.identity.targetDeviceId === existingDeviceKey.deviceId
-        : true;
-    }
-    if (operation.identity.kind === "anchor-uninstall") {
-      return existingDeviceKey
-        ? operation.identity.currentDeviceId === existingDeviceKey.deviceId
-        : true;
-    }
-    return operation.identity.kind === "stop" && existingDeviceKey !== undefined;
+  // 统一入口：本进程该 home 的权威日志 owner，先登记自校验的当前信任投影，再登记全部固定定义。
+  const bootstrapStore = await FileMeshBootstrapStore.open(input.zhixingHome, undefined, {
+    secretStore: input.secretStore,
+    storageMaintenance: input.storageMaintenance,
+    records: input.records,
+    deviceCapacity: input.deviceCapacity,
   });
-  const terminalRetirement = [...relevant].reverse().find((operation) =>
-    operation.phase === "terminal" &&
-    (operation.identity.kind === "executor-removal" ||
-      operation.identity.kind === "anchor-uninstall"));
+  try {
+    return await prepareWithBootstrapStore(input, configuration, bootstrapStore);
+  } catch (error) {
+    await bootstrapStore.stopStorageMaintenance().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function prepareWithBootstrapStore(
+  input: Parameters<typeof prepareMeshRuntimeBootstrap>[0],
+  configuration: MeshRoleBootConfig | undefined,
+  bootstrapStore: FileMeshBootstrapStore,
+): Promise<MeshRuntimeBootstrap> {
+  const sources = bootstrapStore.authoritySources()!;
+  const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
+  // 普通启动只读取已验当前视图；历史身份在既有异步校验边界按 keyId 精确补齐。
+  const preRuntimeTrust = await bootstrapStore.loadCurrentTrust();
+  if (input.prepareRuntimeBeforeDomains) {
+    await sources.prepareRuntime("runtime-prepare", configuration !== undefined && !configuration.enabledRoles.includes("anchor"));
+  }
+  const existingDeviceKey = await loadExistingDeviceKey(input.secretStore);
+  const [authorityLifecycle, executorLifecycle] = await Promise.all([
+    new DeviceLifecycleJournal(sources.authority).startupState(existingDeviceKey?.deviceId),
+    new DeviceLifecycleJournal(sources.executor).startupState(existingDeviceKey?.deviceId),
+  ]);
+  const terminalRetirement = executorLifecycle.retirement ?? authorityLifecycle.retirement;
   if (terminalRetirement) {
     if (
       terminalRetirement.identity.kind !== "executor-removal" &&
@@ -157,8 +136,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
       ? "This device was removed; pair it again to create a new identity"
       : "This duty-device home was permanently uninstalled; use the recovery flow to restore it");
   }
-  const hasActiveLifecycle = relevant.some((operation) =>
-    operation.phase !== "terminal" && operation.phase !== "aborted");
+  const hasActiveLifecycle = authorityLifecycle.active || executorLifecycle.active;
   if (hasActiveLifecycle && !existingDeviceKey) {
     throw new Error("Device lifecycle recovery requires the existing local identity");
   }
@@ -178,9 +156,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
         deviceId: deviceKey.deviceId,
         secretStore: input.secretStore,
         bootstrapStore,
-        verifier: createTrustedDeviceProtocolVerifier(
-          trust.members.map((member) => member.device),
-        ),
+        verifier: sources.verifier,
         staging: input.plannedAnchorTransferStaging,
       })
     : undefined;
@@ -254,8 +230,8 @@ export async function prepareMeshRuntimeBootstrap(input: {
     configuration,
     endpoints,
     transportPeers: await bootstrapProjection.transportPeers.loadTransportPeers(),
-    // Historical signatures remain verifiable after revocation; live authorization
-    // is carried separately so a revoked peer can never regain an active capability.
+    // Only live members are materialized here. Revoked signers remain available
+    // through the source-bound exact identity resolver, without active authority.
     trustedIdentities: trust.members.map((member) => member.device),
     authorizedDeviceIds: trust.members
       .filter((member) => member.state === "active")

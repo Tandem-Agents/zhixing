@@ -159,6 +159,15 @@ class MemorySecretStore implements SecretStorePort {
   async get(ref: SecretRef): Promise<string | null> {
     return this.#values.get(secretKey(ref)) ?? null;
   }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = secretKey(ref);
+    const existing = this.#values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.#values.set(storageKey, value);
+    return value;
+  }
+
 
   async delete(ref: SecretRef): Promise<void> {
     this.#values.delete(secretKey(ref));

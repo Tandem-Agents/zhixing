@@ -141,6 +141,7 @@ import {
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { provePriorHostExited, reclaimRetiredContentCopies } from "./retired-projection-copies.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
 import {
@@ -199,7 +200,7 @@ async function runExecutorProcess(
   const lifecycleLog = bootstrap.mesh.bootstrapStore.authorityLog();
   const lifecycleHomeId = (await lifecycleLog.originCheckpoint()).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleLog);
-  const startupStopOperations = (await lifecycleJournal.active()).filter((operation) =>
+  const startupStopOperations = (await lifecycleJournal.activeFor(bootstrap.mesh.deviceKey.deviceId)).filter((operation) =>
     operation.identity.kind === "stop" &&
     operation.identity.homeId === lifecycleHomeId &&
     operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId);
@@ -261,6 +262,11 @@ async function runExecutorProcess(
       },
     });
     executorServerLifecycle.acquireBinding(localServerBinding);
+    // 端口单例刚取得、发现文件尚未覆盖：当场取得前一宿主的原生退出证明（见 Host 同名步骤）。
+    const priorHostExitProven = await provePriorHostExited({
+      pidPath: getDefaultPidPath(zhixingHome),
+      portPath: getDefaultPortPath(zhixingHome),
+    });
     const loadManagedState = (intent: Parameters<typeof loadCurrentManagedServiceState>[0]) =>
       loadCurrentManagedServiceState(intent, zhixingHome, bootstrap.secretStore);
     const reconcileManagedState = (
@@ -993,6 +999,11 @@ async function runExecutorProcess(
         ),
       hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath(zhixingHome) : undefined },
     });
+    // Host.ready 边界：两本日志全部固定投影显式准备并按日志记录就绪位置。
+    const homeAuthority = bootstrap.mesh.bootstrapStore.authoritySources();
+    if (homeAuthority) {
+      await homeAuthority.prepareRuntime("host-ready", true);
+    }
     const localConversationServer = await runServer({
       lockPaths: { pidPath: getDefaultPidPath(zhixingHome), portPath: getDefaultPortPath(zhixingHome) },
       context: serverContext,
@@ -1039,6 +1050,13 @@ async function runExecutorProcess(
     });
     executorServerLifecycle.assertRunningServer(localConversationServer);
     executorServerLifecycle.startHeartbeat();
+    if (homeAuthority) {
+      void reclaimRetiredContentCopies({
+        log: homeAuthority.authority,
+        priorHostExitProven,
+        records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
+      }).catch(() => undefined);
+    }
     if (processMode === "on-demand") {
       executorServerLifecycle.startIdleTimer(
         async () => {

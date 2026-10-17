@@ -1,7 +1,8 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import { randomUUID } from "node:crypto";
 import type { RpcEncodedJsonSource, RpcRequestDeadline } from '@zhixing/server/client';
 
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
+
 import { canonicalize } from "@zhixing/core/protocol";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
@@ -58,9 +59,9 @@ export async function createCurrentAnchorSurfaceRpcClient(options: {
   }
   const deviceKey = await loadExistingDeviceKey(secretStore);
   if (!deviceKey) throw new CoreHostUnavailableError("这台设备尚未完成配对");
-  const bootstrapStore = new FileMeshBootstrapStore(homeDir, deviceKey);
+  const bootstrapStore = await FileMeshBootstrapStore.open(homeDir, deviceKey, { secretStore });
   const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
-  const trust = await bootstrapStore.loadTrustRecord();
+  const trust = await bootstrapStore.loadCurrentTrust();
   if (!trust) {
     await bootstrapStore.stopStorageMaintenance();
     throw new CoreHostUnavailableError("这台设备尚未完成配对");
@@ -83,7 +84,7 @@ export async function createCurrentAnchorSurfaceRpcClient(options: {
       endpointDirectory: bootstrapProjection.endpoints,
       transportPeerDirectory: bootstrapProjection.transportPeers,
       trustProjection: Object.freeze({
-        loadTrustRecord: () => bootstrapStore.loadTrustRecord(),
+        loadCurrentTrust: () => bootstrapStore.loadCurrentTrust(),
       }),
       services,
       onTrustReconciled: (record) => client?.reconcileOwner(record),
@@ -280,7 +281,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     return this.#closing;
   }
 
-  async reconcileOwner(record: HomeTrustRecord): Promise<void> {
+  async reconcileOwner(record: CurrentTrustProjection): Promise<void> {
     if (this.#closed) return;
     const identity = canonicalize(record);
     if (

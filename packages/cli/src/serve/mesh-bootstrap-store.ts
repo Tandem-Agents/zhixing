@@ -11,6 +11,7 @@ import type {
   MeshEndpointDescriptor,
   PairingStreamRecord,
   RecoveryActivationPlan,
+  SecretStorePort,
 } from "@zhixing/core/contracts";
 import {
   ArtifactLifecycleIndex,
@@ -20,7 +21,8 @@ import {
   type ArtifactCheckpointRetentionPort,
 } from "@zhixing/core/authority";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { credentialExposureIndex } from "@zhixing/mesh/credential-exposure";
+import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { ensureDurableDirectory, SerialTaskQueue, syncDirectory } from "@zhixing/core/persistence";
 import {
   MeshEndpointDirectory,
@@ -39,6 +41,8 @@ import {
   replayTrustChain,
   type TrustProjection,
   verifyHomeTrustRecord,
+  currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord,
+  type CurrentTrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import type {
@@ -66,6 +70,7 @@ import type {
   MeshTransportPeerDirectoryPersistencePort,
 } from "./mesh-bootstrap-projection.js";
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
+import type { HomeAuthoritySourcesLease } from "./home-authority-sources.js";
 
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
@@ -92,6 +97,7 @@ interface PersistedTransportTrust {
 export interface FileMeshBootstrapStoreOptions {
   readonly records?: import("@zhixing/core/logging").LogRecordPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
+  readonly sources?: HomeAuthoritySourcesLease;
 }
 
 export interface RecoveryRootActivationReplay {
@@ -114,6 +120,33 @@ export class FileMeshBootstrapStore
   readonly #completionFile: string;
   readonly #checkpointLifecycle: ArtifactLifecycleIndex;
   readonly #endpointWrites = new SerialTaskQueue();
+  readonly #sources: HomeAuthoritySourcesLease | undefined;
+
+  /**
+   * 生产入口：经统一 home 权威入口打开。写者与本进程其他写者共享同一组物理日志 owner；
+   * readOnly 只读取已验事实，不创建权威文件、不写派生缓存。
+   */
+  static async open(rootDir: string, issuerKey: DeviceKey | undefined, options: Omit<FileMeshBootstrapStoreOptions, "sources"> & {
+    readonly secretStore?: SecretStorePort;
+    readonly readOnly?: boolean;
+    readonly deviceCapacity?: DeviceCapacityArbiterPort;
+  }): Promise<FileMeshBootstrapStore> {
+    const { openHomeAuthoritySources } = await import("./home-authority-sources.js");
+    const sources = await openHomeAuthoritySources({
+      home: rootDir,
+      secretStore: options.secretStore,
+      readOnly: options.readOnly,
+      records: options.records,
+      storageMaintenance: options.storageMaintenance,
+      deviceCapacity: options.deviceCapacity,
+    });
+    try {
+      return new FileMeshBootstrapStore(rootDir, issuerKey, { ...options, sources });
+    } catch (error) {
+      await sources.close();
+      throw error;
+    }
+  }
 
   constructor(
     readonly rootDir: string,
@@ -121,13 +154,16 @@ export class FileMeshBootstrapStore
     options: FileMeshBootstrapStoreOptions = {},
   ) {
     this.issuerKey = issuerKey;
+    this.#sources = options.sources;
     const distributedRoot = path.join(path.resolve(rootDir), "distributed-runtime");
-    this.#artifacts = new FileArtifactStore(path.join(distributedRoot, "artifacts"));
-    this.#log = new FileAuthorityCommitLog(
+    this.#artifacts = options.sources?.sources.artifacts ?? new FileArtifactStore(path.join(distributedRoot, "artifacts"));
+    this.#log = options.sources?.sources.authority ?? new FileAuthorityCommitLog(
       path.join(distributedRoot, "authority"),
       this.#artifacts,
-      { storageMaintenance: options.storageMaintenance, records: options.records },
+      { storageMaintenance: options.storageMaintenance, records: options.records, startupProofs: true },
     );
+    credentialExposureIndex(this.#log);
+    currentTrustIndex(this.#log);
     const staging = createSurfaceAssetStagingInfrastructure({
       distributedRoot,
       storageMaintenance: options.storageMaintenance,
@@ -141,6 +177,8 @@ export class FileMeshBootstrapStore
       receiver: staging.recovery,
       storageMaintenance: options.storageMaintenance,
       maintenanceResourceId: this.#artifacts.rootDir,
+      // 统一入口提供的日志由其 owner 停止；只有自建日志随本存储一起停止。
+      ownsSourceLogs: !options.sources,
     });
     this.#endpointFile = path.join(distributedRoot, "mesh-endpoints.json");
     this.#peerFile = path.join(distributedRoot, "mesh-peers.json");
@@ -155,7 +193,21 @@ export class FileMeshBootstrapStore
 
   async stopStorageMaintenance(): Promise<void> {
     await this.#checkpointLifecycle.stopStorageMaintenance();
-    await this.#log.stopStorageMaintenance();
+    if (this.#sources) await this.#sources.close();
+    else await this.#log.stopStorageMaintenance();
+  }
+
+  authoritySources() { return this.#sources?.sources; }
+
+  async loadCurrentTrust(): Promise<CurrentTrustProjection | undefined> {
+    if (this.#sources) return this.#sources.sources.currentTrust();
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+      async current => ({ kind: "return", value: await readCurrentTrust(current) }))).value;
+  }
+
+  /** 只读入口在 home 尚未建立权威日志时不创建它，信任状态即为不存在。 */
+  #authorityAbsent(): boolean {
+    return this.#sources?.sources.authorityPresent() === false;
   }
 
   authorityLog(): FileAuthorityCommitLog {
@@ -190,7 +242,24 @@ export class FileMeshBootstrapStore
     return events.length === 0 ? undefined : replayTrustChain(events);
   }
 
+  /**
+   * 当前签名信任记录。信任投影在每条信任事件/记录提交时已沿链自校验并核对签名记录与全部
+   * 成员，这里按投影保存的定位精确读取那一帧，不再重放整条信任链。没有信任链时为 undefined，
+   * 记录缺失或落后于链头时与旧实现同样拒绝。显式整链审计仍用 loadTrustEvents。
+   */
   async loadTrustRecord(): Promise<HomeTrustRecord | undefined> {
+    if (this.#authorityAbsent()) return undefined;
+    // 只读访问者没有缓存密钥，派生索引只能在内存重建；与 C8 严格路径相同，只按流读取信任记录并整链核对。
+    if (this.#sources?.sources.readOnly && !this.#sources.sources.integrity) return this.#loadTrustRecordByReplay();
+    const result = await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+      async (current, context) => ({
+        kind: "return",
+        value: await readCurrentTrustRecord(current, (checkpoint) => context.readEnvelopeAt!(checkpoint)),
+      }));
+    return result.value;
+  }
+
+  async #loadTrustRecordByReplay(): Promise<HomeTrustRecord | undefined> {
     const records = await this.#log.readStream<TrustStreamRecord>("trust");
     const events: HomeTrustEvent[] = [];
     let latest: HomeTrustRecord | undefined;

@@ -246,9 +246,11 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   const deviceCapacity = options.logging?.capacity ?? createDeviceCapacityRuntime(
     `${zhixingHome}/distributed-runtime/capacity`,
   );
-  const store = new FileMeshBootstrapStore(zhixingHome, key, {
+  const store = await FileMeshBootstrapStore.open(zhixingHome, key, {
+    secretStore,
     records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
     storageMaintenance: deviceCapacity.storage,
+    deviceCapacity: deviceCapacity.arbiter,
   });
   const bootstrapProjection = createMeshBootstrapProjectionPorts(store);
   const routedSecretStore = exposureGuardedSecretStore(

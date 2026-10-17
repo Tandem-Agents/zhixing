@@ -1,3 +1,4 @@
+import { verifyProtocolStep } from "@zhixing/core/protocol";
 import type {
   AnchorTransferAbort,
   AnchorTransferCommand,
@@ -763,12 +764,12 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
   #projection(): Promise<PlannedAnchorCandidateProjection> {
     return this.log.rebuildProjection(
       emptyCandidateProjection(),
-      (projection, entry) => reduceCandidateProjection(
+      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
         projection,
         entry,
         this.verifier,
         this.includeTransferState,
-      ),
+      )),
       { streams: this.#streams() },
     );
   }
@@ -780,12 +781,12 @@ export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJour
   ) {
     return this.log.transactProjection(
       emptyCandidateProjection(),
-      (projection, entry) => reduceCandidateProjection(
+      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
         projection,
         entry,
         this.verifier,
         this.includeTransferState,
-      ),
+      )),
       decide,
       { streams: this.#streams() },
     );
@@ -845,12 +846,12 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
       PlannedAnchorTransferState
     >(
       emptyCandidateProjection(),
-      (projection, entry) => reduceCandidateProjection(
+      (projection, entry) => verifyProtocolStep(() => reduceCandidateProjection(
         projection,
         entry,
         this.verifier,
         true,
-      ),
+      )),
       (projection) => {
         const candidate = projection.claims.get(record.transferId);
         if (!candidate) throw new Error("Migration prepare has no durable candidate claim");
@@ -901,7 +902,7 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
       PlannedRecord
     >(
       new Map<string, PlannedAnchorTransferState>(),
-      (states, entry) => reduceJournal(states, entry, this.verifier),
+      (states, entry) => verifyProtocolStep(() => reduceJournal(states, entry, this.verifier)),
       { stream: ANCHOR_TRANSFER_STREAM },
     );
   }
@@ -925,7 +926,7 @@ export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournal
       PlannedAnchorTransferState
     >(
       new Map(),
-      (states, entry) => reduceJournal(states, entry, this.verifier),
+      (states, entry) => verifyProtocolStep(() => reduceJournal(states, entry, this.verifier)),
       (states) => {
         const current = states.get(record.transferId);
         const next = reducePlannedAnchorTransfer(current, record, this.verifier);

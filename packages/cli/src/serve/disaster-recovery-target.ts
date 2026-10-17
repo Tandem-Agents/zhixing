@@ -1,3 +1,4 @@
+import { verifyProtocolStep } from "@zhixing/core/protocol";
 import type {
   ArtifactRef,
   CommitEnvelope,
@@ -156,12 +157,12 @@ export class DisasterRecoveryTransferJournal {
   async states(): Promise<ReadonlyMap<string, DisasterRecoveryState>> {
     return this.log.rebuildProjection<ReadonlyMap<string, DisasterRecoveryState>>(
       new Map<string, DisasterRecoveryState>(),
-      (states, entry) => reduceDisasterJournal(
+      (states, entry) => verifyProtocolStep(() => reduceDisasterJournal(
         states,
         entry,
         this.verifiers,
         this.now(),
-      ),
+      )),
       { stream: DISASTER_TRANSFER_STREAM },
     );
   }
@@ -176,12 +177,12 @@ export class DisasterRecoveryTransferJournal {
       DisasterRecoveryState
     >(
       new Map(),
-      (states, entry) => reduceDisasterJournal(
+      (states, entry) => verifyProtocolStep(() => reduceDisasterJournal(
         states,
         entry,
         this.verifiers,
         this.now(),
-      ),
+      )),
       (states) => {
         const current = states.get(record.transferId);
         const next = reduceDisasterRecovery(

@@ -1,8 +1,10 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import {
   bindDurableProjectionMutations,
   DurableProjectionStorageError,
   durableProjectionDirectoryName,
+  durableProjectionVersionDirectoryName,
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileDurableProjectionIndex,
@@ -71,7 +73,7 @@ describe("surface asset authority", () => {
         { stream: "control", body: { t: "authority-time-frontier", frontier: at } },
       ]);
       const index = log.durableProjection({
-        projectionId: "surface-asset-grants", reducerVersion: 7, reduce: () => [],
+        projectionId: "surface-asset-grants", reducerVersion: 7, inputs: { streams: ["control"], families: ["run:"] }, reduce: () => [],
       });
       expect(await index.get("meta/durable-time")).toBe(at);
       expect((await index.checkpoints()).authority?.lsn).toBe(2);
@@ -779,6 +781,7 @@ describe("surface asset authority", () => {
       log.durableProjection({
         projectionId: "surface-asset-grants",
         reducerVersion: 7,
+        inputs: { streams: ["control"], families: ["run:"] },
         reduce(envelope, _current, source) {
           const issued = envelope.entries.find((entry) =>
             entry.stream === "control" &&
@@ -870,6 +873,7 @@ describe("surface asset authority", () => {
       log.durableProjection({
         projectionId: "surface-asset-grants",
         reducerVersion: 7,
+        inputs: { streams: ["control"], families: ["run:"] },
         reduce(envelope, _current, source) {
           const issued = envelope.entries.find((entry) =>
             entry.stream === "control" &&
@@ -1363,17 +1367,12 @@ function surfaceGrantIndexKey(
   }`;
 }
 
-function surfaceProjectionIndex(
-  log: FileAuthorityCommitLog,
-): FileDurableProjectionIndex {
+function surfaceProjectionIndex(log: FileAuthorityCommitLog): FileDurableProjectionIndex {
+  const current = path.join(log.rootDir, "projections", durableProjectionVersionDirectoryName("surface-asset-grants", 7));
+  const legacy = path.join(log.rootDir, "projections", durableProjectionDirectoryName("surface-asset-grants"));
   return new FileDurableProjectionIndex({
-    rootDir: path.join(
-      log.rootDir,
-      "projections",
-      durableProjectionDirectoryName("surface-asset-grants"),
-    ),
-    projectionId: "surface-asset-grants",
-    reducerVersion: 7,
+    rootDir: existsSync(path.join(current, "manifest.json")) ? current : legacy,
+    projectionId: "surface-asset-grants", reducerVersion: 7,
   });
 }
 

@@ -539,6 +539,15 @@ class MemorySecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();
   async put(ref: SecretRef, value: string): Promise<void> { this.values.set(key(ref), value); }
   async get(ref: SecretRef): Promise<string | null> { return this.values.get(key(ref)) ?? null; }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = key(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
   async delete(ref: SecretRef): Promise<void> { this.values.delete(key(ref)); }
   async list(prefix: string): Promise<SecretRef[]> {
     return [...this.values.keys()].filter((value) => value.startsWith(prefix)).map((value) => {

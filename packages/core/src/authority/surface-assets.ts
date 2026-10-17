@@ -1,3 +1,5 @@
+import { verifyProtocolStep } from "../protocol/index.js";
+import { AuthorityPreparationRequired } from "./recovery-work.js";
 import type {
   ArtifactRef,
   ControlRecord,
@@ -77,6 +79,7 @@ export interface SurfaceAssetGrantLedgerIssuedResult
 }
 
 export interface SurfaceAssetGrantLedger {
+  listActiveGrantPage(after: string | undefined, limit: number): Promise<readonly SurfaceAssetGrant[]>;
   load(): Promise<SurfaceAssetGrantLedgerSnapshot>;
   synchronize(): Promise<void>;
   /** 空闲维护：追平派生索引并完成挂起的合并；未实现时视为无事可做。 */
@@ -306,6 +309,10 @@ export class SurfaceAssetCoordinator {
       } catch (error) {
         const retryAfterMs = maintenanceRetryDelayMs(error);
         if (retryAfterMs === undefined || isHoldingMaintenanceExclusion()) throw error;
+        if (error instanceof AuthorityPreparationRequired && error.prepareOutside) {
+          await error.prepareOutside();
+          continue;
+        }
         deadline ??= Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
         if (Date.now() >= deadline) throw error;
         await waitForMaintenanceRetry(
@@ -340,16 +347,21 @@ export class SurfaceAssetCoordinator {
     const key = requestKey(binding.scope, surfacePrincipal, binding.requestId);
     return this.#serving(() =>
       this.#runQueueWithRecoverRetry(async (recoveryFailed) => {
+        // These reads and validators precede grant/retirement effects. Only
+        // this prefix may resume after preparing a candidate outside the queue.
+        const readIssued = async () => {
+          try {
+            const durable = await this.options.ledger.findIssuedByRequestKey(key);
+            return durable ? this.#replayGrant(
+              await verifyProtocolStep(() => validateSurfaceAssetGrant(durable, this.options.verifier)),
+              binding, surfacePrincipal,
+            ) : undefined;
+          } catch (error) { recoveryFailed(error); throw error; }
+        };
         if (!this.#recovered) {
           // durable-first exact replay:不依赖热投影、当前资格、时钟与签名器。
-          const durable = await this.options.ledger.findIssuedByRequestKey(key);
-          if (durable) {
-            return this.#replayGrant(
-              validateSurfaceAssetGrant(durable, this.options.verifier),
-              binding,
-              surfacePrincipal,
-            );
-          }
+          const durable = await readIssued();
+          if (durable) return durable;
           try {
             await this.#recoverLocked();
           } catch (error) {
@@ -357,18 +369,16 @@ export class SurfaceAssetCoordinator {
             throw error;
           }
         }
-        const durable = await this.options.ledger.findIssuedByRequestKey(key);
-        if (durable) {
-          return this.#replayGrant(
-            validateSurfaceAssetGrant(durable, this.options.verifier),
-            binding,
-            surfacePrincipal,
-          );
-        }
-
-        if (!(await this.options.authorizeScope(binding.scope))) {
-          throw new TypeError("Surface asset scope is not owned by this authority");
-        }
+        const durable = await readIssued();
+        if (durable) return durable;
+        try {
+          if (!(await this.options.authorizeScope(binding.scope))) {
+            throw new TypeError("Surface asset scope is not owned by this authority");
+          }
+          if (binding.kind === "asset-download" && !(await this.options.canDownload(binding.scope, binding.assets))) {
+            throw new Error("Surface asset download is outside the visible asset set");
+          }
+        } catch (error) { recoveryFailed(error); throw error; }
         const issuedAt = this.#time.observe().iso;
         await this.#retireExpired(Date.parse(issuedAt));
         const unsigned = {
@@ -389,15 +399,8 @@ export class SurfaceAssetCoordinator {
           unsigned as Parameters<typeof createSignedSurfaceAssetGrant>[0],
           this.options.signer,
         );
-        const quota = await this.options.ledger.quotaSnapshot(
-          candidate.scope,
-          candidate.assets,
-        );
-        if (candidate.kind === "asset-download") {
-          if (!(await this.options.canDownload(candidate.scope, candidate.assets))) {
-            throw new Error("Surface asset download is outside the visible asset set");
-          }
-        } else {
+        if (candidate.kind === "asset-upload") {
+          const quota = await this.options.ledger.quotaSnapshot(candidate.scope, candidate.assets);
           await this.#assertQuota(candidate, quota);
         }
 
@@ -476,28 +479,39 @@ export class SurfaceAssetCoordinator {
     });
   }
 
+  /** Reconcile live device grants without enumerating historical trust membership. */
+  async reconcileDeviceSurfaces(activeDeviceIds: ReadonlySet<string>): Promise<void> {
+    await this.#runRecovered(async () => {
+      let after: string | undefined;
+      for (;;) {
+        const grants = await this.options.ledger.listActiveGrantPage(after, MAX_SURFACE_ASSET_COLLECTION_REFS);
+        if (grants.length === 0) return;
+        const revoked = grants.filter(grant => grant.surfacePrincipal.startsWith("surface:device:") &&
+          !activeDeviceIds.has(grant.surfacePrincipal.slice("surface:device:".length)));
+        if (revoked.length) await this.#revokeIds(revoked.map(grant => grant.grantId), "surface-revoked");
+        after = grants.at(-1)!.grantId;
+      }
+    });
+  }
+
   async assertUploadAdoption(
     request: SurfaceAssetAdoptionRequest,
   ): Promise<void> {
-    await this.#runRecovered(async () => {
-      const issued = await this.options.ledger.findIssuedByRequestKey(
-        requestKey(request.scope, request.surfacePrincipal, request.requestId),
-      );
-      const grant = issued
-        ? await this.options.ledger.findActiveGrant(issued.grantId, issued)
-        : undefined;
-      if (!grant || grant.kind !== "asset-upload") {
-        throw new TypeError("Surface asset upload grant is unknown or revoked");
-      }
+    await this.#runRecovered(async (recoveryFailed) => {
       const assets = request.assets.map(({ digest, bytes }) => ({ digest, bytes }));
-      if (
-        grant.payloadDigest !== request.payloadDigest ||
-        canonicalize(grant.assets) !== canonicalize(assets)
-      ) {
-        throw new TypeError(
-          "Surface asset upload grant does not bind this control request",
+      let grant: SurfaceAssetGrant;
+      try {
+        const issued = await this.options.ledger.findIssuedByRequestKey(
+          requestKey(request.scope, request.surfacePrincipal, request.requestId),
         );
-      }
+        const active = issued ? await this.options.ledger.findActiveGrant(issued.grantId, issued) : undefined;
+        if (!active || active.kind !== "asset-upload") throw new TypeError("Surface asset upload grant is unknown or revoked");
+        grant = active;
+        if (grant.payloadDigest !== request.payloadDigest || canonicalize(grant.assets) !== canonicalize(assets)) {
+          throw new TypeError("Surface asset upload grant does not bind this control request");
+        }
+      } catch (error) { recoveryFailed(error); throw error; }
+      // Expiry retirement and promotion start after the replayable read prefix.
       const now = this.#time.observe();
       await this.#retireExpired(now.ms);
       if (!(await this.options.ledger.findActiveGrant(grant.grantId, grant))) {
@@ -828,7 +842,7 @@ export class SurfaceAssetCoordinator {
     use: SurfaceAssetGrantOperationBinding,
     ref: ArtifactRef,
   ): Promise<OperationPin> {
-    const grant = validateSurfaceAssetGrant(input, this.options.verifier);
+    const grant = (await verifyProtocolStep(() => validateSurfaceAssetGrant(input, this.options.verifier)));
     const now = this.#time.observe();
     const activeBeforeRetirement = await this.options.ledger.findActiveGrant(
       grant.grantId,
@@ -871,12 +885,12 @@ export class SurfaceAssetCoordinator {
   }
 
   /** 请求路径:调用方在等,前台语境由此单点声明。 */
-  async #runRecovered<T>(task: () => Promise<T>): Promise<T> {
+  async #runRecovered<T>(task: (recoveryFailed: (error: unknown) => void) => Promise<T>): Promise<T> {
     return this.#serving(() => this.#runRecoveredIn(task));
   }
 
   /** 已由所有者声明语境的路径(周期回收)直接走这里,不得被覆盖成前台。 */
-  async #runRecoveredIn<T>(task: () => Promise<T>): Promise<T> {
+  async #runRecoveredIn<T>(task: (recoveryFailed: (error: unknown) => void) => Promise<T>): Promise<T> {
     return this.#runQueueWithRecoverRetry(async (recoveryFailed) => {
       try {
         await this.#recoverLocked();
@@ -884,14 +898,14 @@ export class SurfaceAssetCoordinator {
         recoveryFailed(error);
         throw error;
       }
-      return task();
+      return task(recoveryFailed);
     });
   }
 
   async #runQueueWithRecoverRetry<T>(
     operation: (recoveryFailed: (error: unknown) => void) => Promise<T>,
   ): Promise<T> {
-    const deadline = Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
+    let deadline: number | undefined;
     for (;;) {
       let recoveryFailure: unknown;
       try {
@@ -911,10 +925,15 @@ export class SurfaceAssetCoordinator {
         if (
           retryAfterMs === undefined ||
           isHoldingMaintenanceExclusion() ||
-          Date.now() >= deadline
+          (deadline !== undefined && Date.now() >= deadline)
         ) {
           throw error;
         }
+        if (error instanceof AuthorityPreparationRequired && error.prepareOutside) {
+          await error.prepareOutside();
+          continue;
+        }
+        deadline ??= Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
         await waitForMaintenanceRetry(
           Math.min(retryAfterMs, Math.max(0, deadline - Date.now())),
         );

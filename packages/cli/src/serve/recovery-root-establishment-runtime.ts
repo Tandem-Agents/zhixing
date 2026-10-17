@@ -63,7 +63,7 @@ export class RecoveryRootEstablishmentRuntime {
       endpointDirectory: input.mesh.bootstrapProjection.endpoints,
       transportPeerDirectory: input.mesh.bootstrapProjection.transportPeers,
       trustProjection: Object.freeze({
-        loadTrustRecord: () => input.mesh.bootstrapStore.loadTrustRecord(),
+        loadCurrentTrust: () => input.mesh.bootstrapStore.loadCurrentTrust(),
       }),
       services: this.services,
       credentialRouteGuard: new CredentialExposureAuthority({

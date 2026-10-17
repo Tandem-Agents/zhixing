@@ -181,11 +181,12 @@ async function openResetApprovalContext(options: BackupCommandOptions): Promise<
   const deviceId = refs[0]!.bindingId.slice("device/v1/".length);
   const key = await loadDeviceKey(secretStore, deviceId);
   if (!key) throw new Error("当前设备身份不可用");
-  const store = new FileMeshBootstrapStore(home, key, { records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }), storageMaintenance: options.storageMaintenance ?? options.logging?.capacity.storage });
+  const store = await FileMeshBootstrapStore.open(home, key, { secretStore, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }), storageMaintenance: options.storageMaintenance ?? options.logging?.capacity.storage });
+  // 只读取签共识所需的当前信任；读完即释放日志，不把维护生命周期留给调用方。
   const [projection, record] = await Promise.all([
     store.loadTrustProjection(),
     store.loadTrustRecord(),
-  ]);
+  ]).finally(() => store.stopStorageMaintenance());
   if (!projection || !record || canonicalize(projection.chainHead) !== canonicalize(record.chainHead)) {
     throw new Error("当前设备缺少可验证的最新信任记录");
   }
@@ -739,7 +740,7 @@ async function openContext(
   const capacity = options.storageMaintenance
     ? { storage: options.storageMaintenance }
     : options.logging?.capacity ?? ownedCapacity!;
-  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance: capacity.storage, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
+  const store = await FileMeshBootstrapStore.open(home, key, { secretStore, storageMaintenance: capacity.storage, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
   const close = async (): Promise<void> => { try { await store.stopStorageMaintenance(); } finally { ownedCapacity?.close(); } };
   try {
     let projection = await store.loadTrustProjection();
@@ -967,7 +968,7 @@ async function connectPairedTarget(
       endpointDirectory: bootstrap.bootstrapProjection.endpoints,
       transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
       trustProjection: Object.freeze({
-        loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
+        loadCurrentTrust: () => bootstrap.bootstrapStore.loadCurrentTrust(),
       }),
       services: new MeshServiceRegistry(),
       credentialRouteGuard: new CredentialExposureAuthority({

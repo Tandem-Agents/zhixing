@@ -101,7 +101,7 @@ export class HostStopCoordinator {
     });
     // “查找已有停止或提交新停止”串行执行，两个并发请求不会各自提交互相冲突的操作。
     const admission = this.#admission.then(async () => {
-      const running = (await this.options.journal.active()).find((operation) =>
+      const running = (await this.options.journal.activeFor(this.options.localDeviceId)).find((operation) =>
         operation.identity.kind === "stop" &&
         operation.identity.operationId !== operationId &&
         operation.identity.homeId === this.options.homeId &&
@@ -142,7 +142,7 @@ export class HostStopCoordinator {
   }
 
   async resumeActive(): Promise<readonly DeviceLifecycleOperation[]> {
-    const operations = await this.options.journal.active();
+    const operations = await this.options.journal.activeFor(this.options.localDeviceId);
     const resumed: DeviceLifecycleOperation[] = [];
     for (const operation of operations) {
       if (operation.identity.kind !== "stop") continue;

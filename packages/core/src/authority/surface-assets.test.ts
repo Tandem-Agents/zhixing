@@ -213,6 +213,11 @@ class MemoryLedger implements SurfaceAssetGrantLedger {
       .slice(0, limit);
   }
 
+  async listActiveGrantPage(after: string | undefined, limit: number) {
+    return this.#activeGrants().filter(grant => after === undefined || grant.grantId > after)
+      .sort((a, b) => a.grantId < b.grantId ? -1 : a.grantId > b.grantId ? 1 : 0).slice(0, limit);
+  }
+
   async nextActiveGrantExpiry() {
     return this.#activeGrants()
       .map(({ expiry }) => expiry)
@@ -1159,6 +1164,22 @@ describe("surface asset coordinator", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, (
         reason: "surface-revoked",
       },
     ]);
+  });
+
+  it("revokes live grants of absent device surfaces without historical trust members", async () => {
+    const { coordinator, ledger } = await fixture();
+    const asset = ref(Buffer.from("asset"));
+    const issued = [];
+    for (const id of ["revoked", "active"]) {
+      issued.push(await coordinator.issue({ kind: "asset-upload", scope,
+        surfacePrincipal: `surface:device:${id}`, requestId: `request-${id}`,
+        assets: [asset], payloadDigest }));
+    }
+    await coordinator.reconcileDeviceSurfaces(new Set(["active"]));
+    expect(await ledger.findActiveGrant(issued[0]!.grantId)).toBeUndefined();
+    expect(await ledger.findActiveGrant(issued[1]!.grantId)).toBeDefined();
+    await coordinator.reconcileDeviceSurfaces(new Set(["active"]));
+    expect(ledger.records.filter(record => record.t === "asset-grant-revoked")).toHaveLength(1);
   });
 
   it("releases only unlanded reservations when revoked", async () => {

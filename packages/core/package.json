@@ -208,6 +208,10 @@
       "types": "./dist/authority/index.d.ts",
       "import": "./dist/authority/index.js"
     },
+    "./authority/startup-definitions": {
+      "types": "./dist/authority/startup-definitions.d.ts",
+      "import": "./dist/authority/startup-definitions.js"
+    },
     "./delivery": {
       "types": "./dist/delivery/index.d.ts",
       "import": "./dist/delivery/index.js"

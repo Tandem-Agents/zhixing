@@ -521,7 +521,7 @@ async function openRecoveryContext(
   const ownedCapacity = !options.storageMaintenance && !options.logging
     ? createDeviceCapacityRuntime(path.join(home, "distributed-runtime", "capacity")) : undefined;
   const storageMaintenance = options.storageMaintenance ?? options.logging?.capacity.storage ?? ownedCapacity!.storage;
-  const store = new FileMeshBootstrapStore(home, key, { storageMaintenance, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
+  const store = await FileMeshBootstrapStore.open(home, key, { secretStore, storageMaintenance, records: options.logging?.bind(AUTHORITY_LOG_SOURCE, { scope: "storage" }) });
   let staging: DisasterRecoveryStagingArea | undefined;
   const close = async (): Promise<void> => {
     try { await staging?.close(); } finally { try { await store.stopStorageMaintenance(); } finally { ownedCapacity?.close(); } }
@@ -611,7 +611,7 @@ async function openRecoveryEvidenceMesh(
     endpointDirectory: bootstrap.bootstrapProjection.endpoints,
     transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
     trustProjection: Object.freeze({
-      loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
+      loadCurrentTrust: () => bootstrap.bootstrapStore.loadCurrentTrust(),
     }),
     services: new MeshServiceRegistry(),
     recoveryEvidencePeerIds: peerIds,
@@ -688,7 +688,7 @@ async function openInventoryTargets(
     endpointDirectory: bootstrap.bootstrapProjection.endpoints,
     transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
     trustProjection: Object.freeze({
-      loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
+      loadCurrentTrust: () => bootstrap.bootstrapStore.loadCurrentTrust(),
     }),
     services: new MeshServiceRegistry(),
     credentialRouteGuard: new CredentialExposureAuthority({

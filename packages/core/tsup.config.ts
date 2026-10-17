@@ -59,6 +59,7 @@ const entry = [
     "src/persistence/index.ts",
     "src/paths.ts",
     "src/authority/index.ts",
+    "src/authority/startup-definitions.ts",
     "src/delivery/index.ts",
     "src/delivery/application.ts",
     "src/delivery/channel-effect.ts",

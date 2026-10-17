@@ -1,4 +1,5 @@
-import type { HomeTrustRecord, MeshRoleBootConfig } from "@zhixing/core/contracts";
+import type { MeshRoleBootConfig } from "@zhixing/core/contracts";
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import path from "node:path";
 import {
   resolveHostLaunchPlan,
@@ -40,7 +41,7 @@ export type ManagedServiceReconcileTrigger =
 export interface ManagedServiceCurrentState {
   readonly localDeviceId: string;
   readonly configuration?: MeshRoleBootConfig;
-  readonly trust?: HomeTrustRecord;
+  readonly trust?: Pick<CurrentTrustProjection, "members" | "issuer">;
   readonly spec?: ManagedServiceSpec;
 }
 

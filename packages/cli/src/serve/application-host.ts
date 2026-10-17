@@ -328,6 +328,8 @@ export class PersistentApplicationHost<Options> {
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
+      deviceCapacity: deviceCapacity.arbiter,
+      prepareRuntimeBeforeDomains: true,
       plannedAnchorTransferStaging,
       disasterRecoveryStaging,
       ...(this.#configuration.topology.mesh

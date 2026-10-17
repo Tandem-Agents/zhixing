@@ -11,15 +11,17 @@ import { DeviceLifecycleJournal } from "./device-lifecycle-journal.js";
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
+// 同一物理日志只登记一个活验签器；测试身份无状态，全部 journal 共用同一实例。
+const IDENTITY: ProtocolSigner & ProtocolSignatureVerifier = {
+  sign(schemaId, version, payload) {
+    return { alg: "test", keyId: "device-anchor", sig: protocolDigest(schemaId, version, payload) };
+  },
+  verify(schemaId, version, payload, signature) {
+    expect(signature).toEqual(this.sign(schemaId, version, payload));
+  },
+};
 function identity(): ProtocolSigner & ProtocolSignatureVerifier {
-  return {
-    sign(schemaId, version, payload) {
-      return { alg: "test", keyId: "device-anchor", sig: protocolDigest(schemaId, version, payload) };
-    },
-    verify(schemaId, version, payload, signature) {
-      expect(signature).toEqual(this.sign(schemaId, version, payload));
-    },
-  };
+  return IDENTITY;
 }
 
 describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
@@ -67,8 +69,14 @@ describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
 
   it("fails closed when the physical stream contains a malformed lifecycle record", async () => {
     const fixture = await createFixture();
-    await fixture.log.append([{ stream: "device-lifecycle", body: { v: 1, t: "accepted" } }]);
+    const malformed = [{ stream: "device-lifecycle", body: { v: 1, t: "accepted" } }];
+    await expect(fixture.log.append(malformed)).rejects.toThrow("incomplete or unknown");
+    expect((await fixture.log.checkpoint()).lsn).toBe(0);
+    // Retain source validation against a writer without the registered reducer.
+    const unregistered = new FileAuthorityCommitLog(fixture.log.rootDir, fixture.log.artifactStore);
+    await unregistered.append(malformed);
     await expect(fixture.journal.active()).rejects.toThrow("incomplete or unknown");
+    await unregistered.stopStorageMaintenance();
   });
 
   it("reuses verified prefixes while observing another journal and isolating returned objects", async () => {
@@ -77,7 +85,7 @@ describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     (accepted.identity as { requestId: string }).requestId = "caller-mutation";
     const read = vi.spyOn(fixture.log, "readProjection");
     await expect(fixture.journal.state("stop-1")).resolves.toMatchObject({ identity: { requestId: "request-stop" } });
-    expect(read.mock.calls[0]![2]?.cursor).toBeDefined();
+    expect(read).not.toHaveBeenCalled();
     const other = new DeviceLifecycleJournal(fixture.log, identity());
     await other.advance("stop-1", "gate-closed");
     await expect(fixture.journal.state("stop-1")).resolves.toMatchObject({ phase: "gate-closed" });
@@ -112,6 +120,68 @@ describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () =
     const ready = await fixture.journal.state("stop-1");
     await expect(fixture.journal.terminal("stop-1", "stopped", ready!.evidence))
       .resolves.toMatchObject({ phase: "terminal" });
+  });
+});
+
+describe("DeviceLifecycleJournal durable current state", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("restores verifier and plain readers without loading a historical scalar projection", async () => {
+    const { AuthorityCacheIntegrity } = await import("./startup-proofs.js");
+    const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 4));
+    {
+      const root = await createTempDir("device-lifecycle-checkpoint");
+      const open = () => new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
+        clock: () => "2026-08-12T00:00:00.000Z", integrity,
+      });
+      const log = open();
+      const plain = new DeviceLifecycleJournal(log, identity());
+      await plain.accept(stopIdentity());
+      await plain.advance("stop-1", "gate-closed");
+      // 进度远不足一个检查点间隔：正式停止前仍补存。
+      await log.stopStorageMaintenance();
+
+      // 所有者先登记带验签器的定义，之后的普通读者沿用同一登记。
+      for (const plainReader of [false, true]) {
+        const reopened = open();
+        const read = vi.spyOn(reopened, "readProjection");
+        const registered = new DeviceLifecycleJournal(reopened, identity());
+        const journal = plainReader ? new DeviceLifecycleJournal(reopened) : registered;
+        await expect(journal.state("stop-1")).resolves.toMatchObject({ phase: "gate-closed" });
+        // No full operations Map or scalar replay cursor enters the process.
+        expect(read).not.toHaveBeenCalled();
+        await reopened.stopStorageMaintenance();
+      }
+    }
+  });
+
+  it("opens current gates without enumerating completed stop operations", async () => {
+    const { AuthorityCacheIntegrity } = await import("./startup-proofs.js");
+    const { FileDurableProjectionIndex } = await import("./durable-projection-index.js");
+    const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 48));
+    const root = await createTempDir("device-lifecycle-growth");
+    const open = () => new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), { integrity });
+    const writer = open();
+    let cold: FileAuthorityCommitLog | undefined;
+    const journal = new DeviceLifecycleJournal(writer, identity());
+    try {
+      for (let n = 0; n < 20; n++) {
+        const id = "old-stop-" + n;
+        await journal.accept({ ...stopIdentity(), operationId: id, requestId: id });
+        for (const phase of ["gate-closed", "work-settled", "flushed", "ready-to-stop"] as const) await journal.advance(id, phase);
+        await journal.terminal(id, "stopped");
+      }
+      await writer.stopStorageMaintenance();
+      cold = open();
+      const scan = vi.spyOn(FileDurableProjectionIndex.prototype, "scan");
+      try {
+        expect(await new DeviceLifecycleJournal(cold, identity()).startupState("device-a")).toEqual({ active: false });
+        expect(scan.mock.calls.length).toBeLessThanOrEqual(2);
+        expect(scan.mock.calls.every(call => call[1] === 1)).toBe(true);
+      } finally { scan.mockRestore(); }
+      expect(await new DeviceLifecycleJournal(cold).state("old-stop-0")).toMatchObject({ phase: "terminal" });
+    } finally {
+      await cold?.stopStorageMaintenance();
+      await writer.stopStorageMaintenance();
+    }
   });
 });
 

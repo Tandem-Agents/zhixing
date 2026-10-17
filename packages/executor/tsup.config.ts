@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/startup-definitions.ts",
     "src/runtime-role.ts",
     "src/assignment-ledger.ts",
     "src/assignment-stream-spool.ts",

@@ -89,11 +89,7 @@ export class DeferredGlobalIntentRepository implements DeferredGlobalIntentPort 
     }
     this.#options = options;
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#projection = options.log.durableProjection<IntentStreamRecord>({
-      projectionId: DEFERRED_INTENT_PROJECTION_ID,
-      reducerVersion: 1,
-      reduce: reduceIntentProjection,
-    });
+    this.#projection = registerDeferredIntentProjection(options.log);
   }
 
   async recover(): Promise<void> {
@@ -487,4 +483,13 @@ export function confirmedIntentRecord(
       reviewedAt: context.at,
     },
   };
+}
+
+export function registerDeferredIntentProjection(log: AuthorityCommitLog) {
+  return log.durableProjection<IntentStreamRecord>({
+      projectionId: DEFERRED_INTENT_PROJECTION_ID,
+      inputs: { families: ["intent:"] },
+      reducerVersion: 1,
+      reduce: reduceIntentProjection,
+    });
 }

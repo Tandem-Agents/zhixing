@@ -20,7 +20,7 @@ import {
   type DeviceLifecycleProjection,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
-import { projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
+import { credentialExposureIndex, projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 
 interface CurrentDeviceRetirementProjection {
@@ -40,6 +40,7 @@ export async function commitCurrentDeviceRetirementTransaction(options: {
   readonly identity: AnchorUninstallLifecycleIdentity;
   readonly acceptedWork: DeviceLifecycleEvidenceRef;
 }): Promise<void> {
+  credentialExposureIndex(options.log);
   const { acceptedWork, identity } = options;
   if (
     acceptedWork.kind !== "accepted-work" ||

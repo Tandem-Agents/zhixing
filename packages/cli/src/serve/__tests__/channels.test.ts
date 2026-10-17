@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import ts from "typescript";
-import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal } from "@zhixing/core/authority";
+import { FileAuthorityCommitLog, FileArtifactStore, DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { HostStopCoordinator, freezeHostStopAcceptedWork, settleHostStopAcceptedWork, type HostStopAcceptedWorkPorts } from "../host-stop-lifecycle.js";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
@@ -82,6 +82,7 @@ async function fixture(ids = ["one"], options: Record<string, unknown> = {}, bin
   const configuration = new ChannelConfiguration(configPath, store);
   const artifactDirectory = join(root, "extensions", "artifacts");
   const log = new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "authority-artifacts")));
+  registerDeviceLifecycleProjection(log);
   let owner = true;
   const routes = new Map();
   const make = async () => {

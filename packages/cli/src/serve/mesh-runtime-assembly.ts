@@ -1,3 +1,4 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
@@ -9,7 +10,6 @@ import type {
 import type {
   AuthorityCallContext,
   DeviceRole,
-  HomeTrustRecord,
   MeshEndpointDescriptor,
   MeshRoleBootConfig,
   RunExecutorPort,
@@ -295,9 +295,9 @@ function routedSubmissionMeshRole(
 }
 
 export interface MeshRuntimeAssemblyOptions {
-  readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
+  readonly onTrustApplied?: (record: CurrentTrustProjection) => void | Promise<void>;
   readonly zhixingHome: string;
-  readonly trust: HomeTrustRecord;
+  readonly trust: CurrentTrustProjection;
   readonly configuration: MeshRoleBootConfig;
   readonly endpoints: MeshEndpointDirectory;
   readonly transportPeers: readonly TrustedMeshPeer[];
@@ -337,14 +337,14 @@ export interface MeshRuntimeAssemblyOptions {
 
 /** Stable Host topology projection; trust updates change data, never construction wiring. */
 export class MeshExecutorTopologyTrustState {
-  #current: HomeTrustRecord;
+  #current: CurrentTrustProjection;
   #plannedCommittedTargetDeviceId: string | undefined;
 
-  constructor(initial: HomeTrustRecord) {
+  constructor(initial: CurrentTrustProjection) {
     this.#current = initial;
   }
 
-  current(): HomeTrustRecord {
+  current(): CurrentTrustProjection {
     return this.#current;
   }
 
@@ -356,7 +356,7 @@ export class MeshExecutorTopologyTrustState {
     this.#plannedCommittedTargetDeviceId = deviceId;
   }
 
-  accept(record: HomeTrustRecord): void {
+  accept(record: CurrentTrustProjection): void {
     this.#current = record;
   }
 }
@@ -915,7 +915,7 @@ export class MeshRuntimeAssembly
       endpointDirectory: options.bootstrapProjection.endpoints,
       transportPeerDirectory: options.bootstrapProjection.transportPeers,
       trustProjection: Object.freeze({
-        loadTrustRecord: () => options.bootstrapStore.loadTrustRecord(),
+        loadCurrentTrust: () => options.bootstrapStore.loadCurrentTrust(),
       }),
       services: this.services,
       terminalOnly: {
@@ -931,6 +931,7 @@ export class MeshRuntimeAssembly
       }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
+        options.bootstrapStore.authoritySources()?.rememberCurrentTrust(record);
         options.executorTopologyTrust.accept(record);
         for (const deviceId of this.#deviceRemovalGuards.keys()) {
           if (!record.members.some((member) =>
@@ -961,16 +962,9 @@ export class MeshRuntimeAssembly
           if (this.#postInstallTransitionPending) {
             await this.#loadLiveDisasterPostInstall(record);
           }
-          for (const member of record.members) {
-            if (
-              member.state !== "active" ||
-              !member.roles.includes("surface")
-            ) {
-              await options.authority.surfaceAssets.revokeSurface(
-                `surface:device:${member.device.deviceId}`,
-              );
-            }
-          }
+          await options.authority.surfaceAssets.reconcileDeviceSurfaces(new Set(record.members
+            .filter(member => member.state === "active" && member.roles.includes("surface"))
+            .map(member => member.device.deviceId)));
         }
       },
       onConnection: async (connection) => {
@@ -1130,7 +1124,7 @@ export class MeshRuntimeAssembly
     );
   }
 
-  #installDeviceRemovalIssuer(record: HomeTrustRecord, issuerKey: DeviceKey | undefined): void {
+  #installDeviceRemovalIssuer(record: CurrentTrustProjection, issuerKey: DeviceKey | undefined): void {
     const shouldOwn = record.issuer.deviceId === this.options.authority.deviceId;
     const expectedPublicKey = record.issuer.issuerPublicKey ?? record.members.find((member) =>
       member.device.deviceId === record.issuer.deviceId)?.device.publicKey;
@@ -1433,7 +1427,7 @@ export class MeshRuntimeAssembly
     this.#deviceRemovalGuards.set(targetDeviceId, operationId);
   }
 
-  async applyDeviceRemovalTrust(record: HomeTrustRecord): Promise<void> {
+  async applyDeviceRemovalTrust(record: CurrentTrustProjection): Promise<void> {
     await this.#control.reconcileTrust(record);
     const revoked = record.members
       .filter((member) => member.state !== "active")
@@ -1741,7 +1735,7 @@ export class MeshRuntimeAssembly
     this.#worker?.resumeAccepting();
   }
 
-  #plannedAnchorRoleFor(trust: HomeTrustRecord): string {
+  #plannedAnchorRoleFor(trust: CurrentTrustProjection): string {
     const roleEnabled = this.options.configuration.enabledRoles.includes("anchor");
     const local = trust.members.find((member) =>
       member.device.deviceId === this.options.authority.deviceId);
@@ -1752,7 +1746,7 @@ export class MeshRuntimeAssembly
       : "disabled";
   }
 
-  #installInitialPlannedAnchorRole(trust: HomeTrustRecord): void {
+  #installInitialPlannedAnchorRole(trust: CurrentTrustProjection): void {
     const role = this.#plannedAnchorRoleFor(trust);
     if (role === this.#plannedAnchorRole) return;
     if (
@@ -1766,7 +1760,7 @@ export class MeshRuntimeAssembly
     this.#activatePlannedAnchorRole(role);
   }
 
-  async #replacePlannedAnchorRole(trust: HomeTrustRecord): Promise<void> {
+  async #replacePlannedAnchorRole(trust: CurrentTrustProjection): Promise<void> {
     const role = this.#plannedAnchorRoleFor(trust);
     if (role === this.#plannedAnchorRole) return;
     this.#disposePlannedAnchorTarget?.();
@@ -1984,7 +1978,7 @@ export class MeshRuntimeAssembly
     if (this.#started) await this.#startControl();
   }
 
-  async #loadLiveDisasterPostInstall(record: HomeTrustRecord): Promise<void> {
+  async #loadLiveDisasterPostInstall(record: CurrentTrustProjection): Promise<void> {
     const completion = await completeDisasterRecoveryInstallationBeforeBootstrap({
       deviceId: this.options.authority.deviceId,
       secretStore: this.options.secretStore,
@@ -1994,7 +1988,7 @@ export class MeshRuntimeAssembly
     if (
       !completion ||
       completion.installation.trustRecord.issuer.deviceId !== record.issuer.deviceId ||
-      canonicalize(completion.installation.trustRecord) !== canonicalize(record)
+      canonicalize(completion.installation.trustRecord) !== canonicalize(await this.options.bootstrapStore.loadTrustRecord())
     ) {
       throw new Error("Current disaster recovery installation has no exact live descriptor");
     }

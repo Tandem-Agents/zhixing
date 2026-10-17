@@ -22,7 +22,10 @@ import { SchedulerJobCommitParticipant } from "../scheduler-job-commit.js";
 import {
   GlobalMutationCommitCoordinator,
   listScheduleTaskIds,
+  registerScheduleAuthorityProjection,
 } from "../global-mutation-commit-coordinator.js";
+import { readdir, readFile } from "node:fs/promises";
+import { AuthorityCacheIntegrity, durableProjectionVersionDirectoryName } from "@zhixing/core/authority";
 import {
   planScheduleMutationCommit,
   scheduleMutationTaskId,
@@ -239,6 +242,47 @@ describe("scheduler mutation owners", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, (
       "conflicted",
       "granted",
     ]);
+  });
+
+  it("keeps only a source locator in the schedule projection and still decides against the exact definition", async () => {
+    const root = await createTempDir("schedule-reference-locator");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    // 带缓存密钥：认证投影落盘，才能检查派生段里是否复制了定义内容。
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => "2026-08-05T00:00:00.000Z", integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 61)),
+    }));
+    const coordinator = new GlobalMutationCommitCoordinator({
+      log, artifacts, refreshSchedule: async () => {}, scheduleDefinitionFor: () => undefined,
+    });
+    const transact = async (assignmentId: string, records: readonly { seq: number; requestId: string; mutation: ScheduleWriteMutation }[]) =>
+      (await log.transactProjection({}, (state) => state, async (_state, context) => {
+        const prepared = await coordinator.prepare({ assignmentId, records, context, source: { createdInTurn: "ingress-1" } });
+        return prepared.records.length === 0
+          ? { kind: "return" as const, value: prepared.outcomes }
+          : { kind: "append" as const, entries: prepared.records, value: prepared.outcomes };
+      }, { readProjectionIds: coordinator.readProjectionIds })).value;
+    const marker = "b2-unique-schedule-definition-marker";
+    const requestId = "schedule:assignment:locator";
+    const taskId = scheduleTaskIdForRequest(requestId);
+    expect((await transact("assignment", [{ seq: 1, requestId,
+      mutation: { kind: "schedule-create", spec: { ...SPEC, action: { kind: "agent-turn" as const, prompt: marker } } } }])).get(1))
+      .toMatchObject({ t: "granted", targetRevision: 1 });
+    const index = registerScheduleAuthorityProjection(log, artifacts);
+    const stored = await index.get("definition:" + taskId) as Record<string, unknown>;
+    // 派生投影只保留定位与必要元数据，任务定义本身不被复制进可长期保留的派生段。
+    expect(Object.keys(stored).sort()).toEqual(["definition", "kind", "state", "taskId", "taskRevision"]);
+    expect(Object.keys(stored.definition as object)).toEqual(["source"]);
+    await index.flushCheckpoint!();
+    const directory = path.join(root, "authority", "projections", durableProjectionVersionDirectoryName("global-schedule-authority-v1", 2));
+    for (const file of await readdir(directory)) {
+      expect((await readFile(path.join(directory, file))).includes(marker)).toBe(false);
+    }
+    // 之后的决定按定位精确读出原定义并完整校验：同一修订的变更与旧修订的冲突照常裁决。
+    expect((await transact("assignment-b", [{ seq: 1, requestId: "disable-locator",
+      mutation: { kind: "schedule-set-state", taskId, taskRevision: 1, state: "disabled" } }])).get(1))
+      .toMatchObject({ t: "granted", targetRevision: 2 });
+    expect((await transact("assignment-c", [{ seq: 1, requestId: "disable-stale",
+      mutation: { kind: "schedule-set-state", taskId, taskRevision: 1, state: "disabled" } }])).get(1)?.t).toBe("conflicted");
   });
 
   it("conversation publisher rejects stale epochs and refreshes committed tasks", async () => {

@@ -3,6 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/runtime.ts",
+    "src/startup-definitions.ts",
     "src/types.ts",
     "src/conversation-manager.ts",
     "src/conversation-agent-turn-admission.ts",

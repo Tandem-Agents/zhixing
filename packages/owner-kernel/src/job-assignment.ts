@@ -1,3 +1,4 @@
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
@@ -950,11 +951,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     const prepared =
       input.prepared === undefined
         ? undefined
-        : (validateChannelInteractionRelayRecord(
+        : (await verifyProtocolStep(() => validateChannelInteractionRelayRecord(
             input.prepared,
             this.#verifier,
-          ) as JobChannelChallengePreparedRecord);
-    const cursor = validateChannelInteractionRelayRecord(
+          )) as JobChannelChallengePreparedRecord);
+    const cursor = await verifyProtocolStep(() => validateChannelInteractionRelayRecord(
       {
         t: "channel-relay-cursor",
         jobRunId: ref.jobRunId,
@@ -963,7 +964,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         checkpoint,
       },
       this.#verifier,
-    ) as Extract<
+    )) as Extract<
       ChannelInteractionRelayRecord,
       { readonly t: "channel-relay-cursor" }
     >;
@@ -1114,7 +1115,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     };
     readonly at?: string;
   }): Promise<ChannelInteractionGrant> {
-    const token = validateChannelChallengeToken(input.token, this.#verifier);
+    const token = await verifyProtocolStep(() => validateChannelChallengeToken(input.token, this.#verifier));
     if (token.ref.execution !== "job") {
       throw new TypeError("Job channel callback requires a job token");
     }
@@ -1404,14 +1405,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       readonly platformMessage?: import("@zhixing/core/contracts").ChannelMessageRef;
     };
   }): Promise<void> {
-    const record = validateChannelInteractionRelayRecord(
+    const record = await verifyProtocolStep(() => validateChannelInteractionRelayRecord(
       {
         t: "channel-challenge-delivered",
         challengeId: input.challengeId,
         receipt: input.receipt,
       },
       this.#verifier,
-    );
+    ));
     await this.#transact<void>((state) => {
       const current =
         state.channelInteractions.deliveredByChallenge.get(input.challengeId);
@@ -1431,7 +1432,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly outcome: "cancelled" | "expired";
     readonly at: string;
   }): Promise<void> {
-    const record = validateChannelInteractionRelayRecord(
+    const record = await verifyProtocolStep(() => validateChannelInteractionRelayRecord(
       {
         t: "channel-challenge-closed",
         challengeId: input.challengeId,
@@ -1439,7 +1440,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         at: input.at,
       },
       this.#verifier,
-    );
+    ));
     await this.#transact<void>((state) => {
       const current =
         state.channelInteractions.closedByChallenge.get(input.challengeId);
@@ -2129,7 +2130,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     assignmentId: string,
     rawSnapshot: LedgerSnapshot,
   ): Promise<void> {
-    const ledger = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const ledger = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       ledger.assignmentId !== assignmentId ||
       ledger.phase !== "acked" ||
@@ -2182,15 +2183,15 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     }, [preflight.expected.bundleRef]);
   }
 
-  validateExecutorLedgerSnapshot(input: unknown): LedgerSnapshot {
-    return validateLedgerSnapshot(input, this.#verifier);
+  async validateExecutorLedgerSnapshot(input: unknown): Promise<LedgerSnapshot> {
+    return verifyProtocolStep(() => validateLedgerSnapshot(input, this.#verifier));
   }
 
   async reconcileStarted(
     assignmentId: string,
     rawSnapshot: LedgerSnapshot,
   ): Promise<void> {
-    const ledger = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const ledger = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       ledger.assignmentId !== assignmentId ||
       (ledger.phase !== "started" &&
@@ -2233,7 +2234,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     rawSnapshot: LedgerSnapshot,
     pages: AsyncIterable<LedgerEvidencePage>,
   ): Promise<boolean> {
-    const ledger = validateLedgerSnapshot(rawSnapshot, this.#verifier);
+    const ledger = await verifyProtocolStep(() => validateLedgerSnapshot(rawSnapshot, this.#verifier));
     if (
       ledger.assignmentId !== assignmentId ||
       ledger.lastSeq <= 0 ||
@@ -2260,7 +2261,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     let expectedSeq = 1;
     const validation = createAssignmentLedgerValidationState(assignmentId);
     for await (const rawPage of pages) {
-      const page = validateLedgerEvidencePage(rawPage, this.#verifier);
+      const page = await verifyProtocolStep(() => validateLedgerEvidencePage(rawPage, this.#verifier));
       if (
         page.assignmentId !== assignmentId ||
         page.executorId !== assigned.record.executorId ||
@@ -2278,12 +2279,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           if (canonicalize(parsed) !== text) {
             throw new TypeError("Ledger evidence artifact is not canonical");
           }
-          body = validateAssignmentEntry(
+          body = (await verifyProtocolStep(() => validateAssignmentEntry(
             { recordSeq: rawEntry.recordSeq, body: parsed },
             this.#verifier,
-          ).body;
+          ))).body;
         } else {
-          body = validateAssignmentEntry(rawEntry, this.#verifier).body;
+          body = (await verifyProtocolStep(() => validateAssignmentEntry(rawEntry, this.#verifier))).body;
         }
         if (
           body.t === "control-lease-renewed" &&
@@ -2294,12 +2295,12 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           );
         }
         if (body.t === "received") {
-          const activation = validateJobActivation({
+          const activation = await verifyProtocolStep(() => validateJobActivation({
             envelope: assigned.envelope,
             activation: body.activation as AssignmentActivationProof<"job">,
             dispatchRef: assigned.record.dispatchRef,
             verifier: this.#verifier,
-          });
+          }));
           const expectedActivation = buildJobActivationPayload({
             envelope: assigned.envelope,
             dispatchRef: assigned.record.dispatchRef,
@@ -2641,11 +2642,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       assigned.record.jobRunId,
     );
     if (!rejectionMessage) return { kind: "continue" };
-    this.#authorizeGuardSubmission(guard, context, {
+    await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
       mode: "durable-rejection",
       method: "submission.submitBundle",
       assignmentId: identity.assignmentId,
-    });
+    }));
     return {
       kind: "return",
       result: rejected("fence-rejected", rejectionMessage, false),
@@ -2728,10 +2729,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     ) {
       throw new TypeError("Interaction mirror batch exceeds the durable record limit");
     }
-    const batch = validateAssignmentInteractionMirrorBatch(
+    const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
       rawBatch,
       this.#verifier,
-    );
+    ));
     if (batch.assignmentId !== assignmentId) {
       throw new TypeError("Interaction mirror batch names a different assignment");
     }
@@ -2849,10 +2850,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     const proof =
       rawProof === undefined
         ? undefined
-        : validateInteractionSettlementStreamProof(
+        : await verifyProtocolStep(() => validateInteractionSettlementStreamProof(
             rawProof,
             this.#verifier,
-          );
+          ));
     await this.#transact<void>((state) => {
       const completed =
         state.completedInteractionSettlements.get(assignmentId);
@@ -3106,6 +3107,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     readonly envelope: JobControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
+    await input.admission.prepareRecovery();
     const outcome = await this.#delivery.coordinate(() => input.admission.applyAuthority<
       JobProjection,
       JobControlEnvelope
@@ -3581,7 +3583,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   }
 
   async acceptSupersedeProof(rawProof: SupersedeProof): Promise<void> {
-    const proof = validateSupersedeProof(rawProof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateSupersedeProof(rawProof, this.#verifier));
     await this.#transact<void>((state) => {
       const assigned = state.assignedById.get(proof.assignmentId);
       if (!assigned) throw new Error("Supersede proof names an unknown assignment");
@@ -3682,11 +3684,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       { accepted: false; outcome: "rejected-before-received" }
     >,
   ): Promise<void> {
-    const result = validateDispatchResult(rawResult, this.#verifier);
+    const result = await verifyProtocolStep(() => validateDispatchResult(rawResult, this.#verifier));
     if (result.accepted || result.outcome !== "rejected-before-received") {
       throw new TypeError("Dispatch rejection path requires a rejection result");
     }
-    const proof = validateAssignmentTerminationProof(result.proof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateAssignmentTerminationProof(result.proof, this.#verifier));
     await this.#transact<void>((state) => {
       const assigned = state.assignedById.get(proof.assignmentId);
       if (!assigned) throw new Error("Dispatch rejection names an unknown assignment");
@@ -3745,7 +3747,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       method: "submission.submitCancelProof",
       assignmentId,
     });
-    const proof = validateCancelProof(rawProof, this.#verifier);
+    const proof = await verifyProtocolStep(() => validateCancelProof(rawProof, this.#verifier));
     await this.#transact<void>((state) => {
       const assigned = state.assignedById.get(assignmentId);
       if (!assigned) {
@@ -3882,7 +3884,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     sent: PendingJobDispatch,
     rawResult: DispatchResult,
   ): Promise<"acked-original" | "opened-uncertain"> {
-    const result = validateDispatchResult(rawResult, this.#verifier);
+    const result = await verifyProtocolStep(() => validateDispatchResult(rawResult, this.#verifier));
     if (result.accepted || result.outcome !== "conflicting-redelivery") {
       throw new TypeError("Dispatch conflict path requires a conflict result");
     }
@@ -4039,18 +4041,18 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         guardAssigned.record.jobRunId,
       );
       if (rejectionMessage) {
-        this.#authorizeGuardSubmission(guard, context, {
+        await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
           mode: "durable-rejection",
           method: "submission.submitBundle",
           assignmentId,
-        });
+        }));
         return rejected("fence-rejected", rejectionMessage, false);
       }
-      this.#authorizeGuardSubmission(guard, context, {
+      await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
         mode: guardState === "uncertain" ? "settlement" : "active",
         method: "submission.submitBundle",
         assignmentId,
-      });
+      }));
     }
     let bundle: JobBundle;
     try {
@@ -4068,11 +4070,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     if (guardCommitted) {
       const artifact = sealedBundleArtifact(bundle);
       if (canonicalize(guardCommitted.ref) !== canonicalize(artifact.ref)) {
-        this.#authorizeGuardSubmission(guard, context, {
+        await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
           mode: "active",
           method: "submission.submitBundle",
           assignmentId,
-        });
+        }));
         return rejected("fence-rejected", "Assignment committed another bundle", false);
       }
       const occurrence = guard.occurrences.get(guardAssigned.record.jobRunId);
@@ -4103,11 +4105,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           "Committed bundle does not match its durable assignment fence",
         );
       }
-      this.#authorizeGuardSubmission(guard, context, {
+      await verifyProtocolStep(() => this.#authorizeGuardSubmission(guard, context, {
         mode: "durable-replay",
         method: "submission.submitBundle",
         assignmentId,
-      });
+      }));
       this.#assertAssignmentUsageFinal(guardAssigned.record, bundle.usageFinal);
       this.#commitParticipant?.wakePendingPublishing?.(this.#taskId);
       return { committed: true, commitRevision: guardCommitted.jobRevision };
@@ -4462,14 +4464,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         anchorEpoch: this.#anchorEpoch,
         attempt: 1,
       });
-      assertSystemLease(
+      await verifyProtocolStep(() => assertSystemLease(
         prepared.lease,
         this.#taskId,
         jobRunId,
         this.#anchorEpoch,
         1,
         this.#verifier,
-      );
+      ));
       fence = validateSystemJobFence({
         taskId: this.#taskId,
         jobRunId,
@@ -4542,16 +4544,17 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       if (!recoverRunning) {
         throw new Error("System job is already owned by an active runner");
       }
-      const recovered = await this.#systemResources.recover({ fence: active.fence });
+      const durableFence = active.fence;
+      const recovered = await this.#systemResources.recover({ fence: durableFence });
       if (recovered.kind === "reuse") {
-        assertSystemLease(
+        await verifyProtocolStep(() => assertSystemLease(
           recovered.lease,
           this.#taskId,
           jobRunId,
           this.#anchorEpoch,
-          active.fence.attempt,
+          durableFence.attempt,
           this.#verifier,
-        );
+        ));
         if (recovered.lease.reservationId !== active.fence.reservationId) {
           throw new TypeError("Reused system lease does not bind the durable fence");
         }
@@ -4559,14 +4562,14 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         fence = active.fence;
       } else {
         const attempt = active.fence.attempt + 1;
-        assertSystemLease(
+        await verifyProtocolStep(() => assertSystemLease(
           recovered.lease,
           this.#taskId,
           jobRunId,
           this.#anchorEpoch,
           attempt,
           this.#verifier,
-        );
+        ));
         fence = validateSystemJobFence({
           ...active.fence,
           reservationId: recovered.lease.reservationId,
@@ -4862,8 +4865,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     );
   }
 
-  validateExecutorDispatchResult(result: DispatchResult): DispatchResult {
-    return validateDispatchResult(result, this.#verifier);
+  async validateExecutorDispatchResult(result: DispatchResult): Promise<DispatchResult> {
+    return verifyProtocolStep(() => validateDispatchResult(result, this.#verifier));
   }
 
   async #closeQueued(
@@ -5481,7 +5484,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     if (raw.stream !== jobStream(this.#taskId)) {
       return state;
     }
-    const body = validateJobJournalRecord(raw.body, this.#verifier);
+    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
     const envelopeRecords = envelope.entries
       .filter((entry) => entry.stream === jobStream(this.#taskId))
       .map((entry) => entry.body as JobJournalRecord);
@@ -5782,10 +5785,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           throw corruptJobJournal("Job assignment is invalid or lacks its atomic state");
         }
         const bytes = await this.#artifacts.get(body.dispatchRef);
-        const dispatch = validateJobEnvelope(
+        const dispatch = await verifyProtocolStep(() => validateJobEnvelope(
           JSON.parse(Buffer.from(bytes).toString("utf8")) as JobEnvelope,
           this.#verifier,
-        );
+        ));
         await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
         const dispatchArtifact = dispatchEnvelopeArtifact(dispatch);
         if (
@@ -6345,7 +6348,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       case "ticket-issued": {
         const assigned = state.assignedById.get(body.ticket.assignmentId);
-        applyJobTicketRecord({
+        await applyJobTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -6379,7 +6382,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         return state;
       }
       case "ticket-revoked":
-        applyJobTicketRecord({
+        await applyJobTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -6400,10 +6403,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         return state;
       case "interaction-mirror": {
         const assigned = state.assignedById.get(body.assignmentId);
-        const batch = validateAssignmentInteractionMirrorBatch(
+        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
           body.batch,
           this.#verifier,
-        );
+        ));
         const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
         const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
           upTo: 0,
@@ -6495,12 +6498,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           );
         }
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -6511,12 +6515,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       case "channel-challenge-closed":
       case "channel-challenge-granted":
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -6558,12 +6563,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           );
         }
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7097,7 +7103,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       if (context.principal.kind !== "assignment") return transaction.state;
       const capability = context.principal.capability;
       const assigned = transaction.state.assignedById.get(identity.assignmentId);
-      assertActivatedAssignmentCapability({
+      await verifyProtocolStep(() => assertActivatedAssignmentCapability({
         capability,
         activation: assigned
           ? {
@@ -7118,7 +7124,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         revoked: false,
         now: this.#clock(),
         deadlineAt: context.deadlineAt,
-      });
+      }));
       return transaction.state;
     });
   }
@@ -7173,7 +7179,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     if (raw.stream !== jobStream(this.#taskId)) {
       throw corruptJobJournal("Job submission guard received a different stream");
     }
-    const body = validateJobJournalRecord(raw.body, this.#verifier);
+    const body = await verifyProtocolStep(() => validateJobJournalRecord(raw.body, this.#verifier));
     const envelopeRecords = envelope.entries
       .filter((entry) => entry.stream === jobStream(this.#taskId))
       .map((entry) => entry.body as JobJournalRecord);
@@ -7699,10 +7705,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       case "interaction-mirror": {
         const assigned = state.assignedById.get(body.assignmentId);
-        const batch = validateAssignmentInteractionMirrorBatch(
+        const batch = await verifyProtocolStep(() => validateAssignmentInteractionMirrorBatch(
           body.batch,
           this.#verifier,
-        );
+        ));
         const batchKey = `${body.assignmentId}:${interactionMirrorBatchDigest(batch)}`;
         const mirrored = state.interactionMirrors.get(body.assignmentId) ?? {
           upTo: 0,
@@ -7781,12 +7787,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           );
         }
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7797,12 +7804,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       case "channel-challenge-closed":
       case "channel-challenge-granted":
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7841,12 +7849,13 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           );
         }
         try {
-          state.channelInteractions = advanceChannelInteractionJournal(
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
             state.channelInteractions,
             body,
             this.#verifier,
-          );
+          ));
         } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
           throw corruptJobJournal(
             error instanceof Error ? error.message : String(error),
           );
@@ -7915,7 +7924,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       }
       case "ticket-issued": {
         const assigned = state.assignedById.get(body.ticket.assignmentId);
-        applyJobTicketRecord({
+        await applyJobTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -7951,7 +7960,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
         return state;
       }
       case "ticket-revoked":
-        applyJobTicketRecord({
+        await applyJobTicketRecord({
           state,
           record: body,
           verifier: this.#verifier,
@@ -8618,7 +8627,7 @@ export class InProcessJobDispatcher {
     const pending = await this.#journal.pendingDispatches();
     const outcomes: DispatchResult[] = [];
     for (const item of pending) {
-      const outcome = this.#journal.validateExecutorDispatchResult(
+      const outcome = await this.#journal.validateExecutorDispatchResult(
         await this.#executor.dispatch(
           item.envelope,
           item.activation,
@@ -8643,7 +8652,7 @@ export class InProcessJobDispatcher {
     const pending = await this.#journal.dispatchesAwaitingStarted();
     let recovered = 0;
     for (const item of pending) {
-      const ledger = this.#journal.validateExecutorLedgerSnapshot(
+      const ledger = await this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           item.assignmentId,
           this.#queryContext(item.assignmentId),
@@ -8792,7 +8801,7 @@ export class InProcessJobDispatcher {
     const candidates = await this.#journal.assignmentsAwaitingRecovery();
     let recovered = 0;
     for (const candidate of candidates) {
-      const ledger = this.#journal.validateExecutorLedgerSnapshot(
+      const ledger = await this.#journal.validateExecutorLedgerSnapshot(
         await this.#executor.queryLedger(
           candidate.assignmentId,
           this.#queryContext(candidate.assignmentId),
@@ -8804,7 +8813,7 @@ export class InProcessJobDispatcher {
           // 永久停止，保持 uncertain 与 open fact 待用户裁决或迟到 bundle。
           continue;
         }
-        const result = this.#journal.validateExecutorDispatchResult(
+        const result = await this.#journal.validateExecutorDispatchResult(
           await this.#executor.dispatch(
             candidate.dispatch.envelope,
             candidate.dispatch.activation,
@@ -8866,7 +8875,7 @@ export class InProcessJobDispatcher {
         }
         const result = await this.#submitSealedBundle(candidate.assignmentId);
         if (result.committed) {
-          const acknowledged = this.#journal.validateExecutorLedgerSnapshot(
+          const acknowledged = await this.#journal.validateExecutorLedgerSnapshot(
             await this.#executor.queryLedger(
               candidate.assignmentId,
               this.#queryContext(candidate.assignmentId),
@@ -9902,7 +9911,7 @@ function validateJobTicketIssueRequest(input: DataPlaneTicketIssueRequest): void
   }
 }
 
-function applyJobTicketRecord(input: {
+async function applyJobTicketRecord(input: {
   readonly state: Pick<
     JobProjection,
     | "ticketsById"
@@ -9925,7 +9934,7 @@ function applyJobTicketRecord(input: {
   readonly assignmentActive: boolean;
   readonly originalSurfacePrincipal?: string;
   readonly hasAtomicReplacementRevocation?: boolean;
-}): void {
+}): Promise<void> {
   const { state, record } = input;
   if (record.t === "ticket-revoked") {
     assertIdentifier(record.ticketId, "Revoked data-plane ticket id");

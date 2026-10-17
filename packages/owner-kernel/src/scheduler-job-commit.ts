@@ -86,11 +86,7 @@ export class SchedulerJobCommitParticipant implements JobCommitParticipant {
       "Job publish pending page size",
     );
     this.#onFatal = options.onFatal;
-    this.#pending = options.log.durableProjection({
-      projectionId: JOB_PUBLISH_PENDING_PROJECTION_ID,
-      reducerVersion: 1,
-      reduce: reduceJobPublishPending,
-    });
+    this.#pending = registerJobPublishPendingProjection(options.log);
   }
 
   get readProjectionIds(): readonly string[] {
@@ -542,4 +538,13 @@ function positiveSafeInteger(value: number, label: string): number {
     throw new TypeError(`${label} must be a positive integer`);
   }
   return value;
+}
+
+export function registerJobPublishPendingProjection(log: AuthorityCommitLog) {
+  return log.durableProjection({
+      projectionId: JOB_PUBLISH_PENDING_PROJECTION_ID,
+      inputs: { streams: ["publish"], families: ["job:"] },
+      reducerVersion: 1,
+      reduce: reduceJobPublishPending,
+    });
 }

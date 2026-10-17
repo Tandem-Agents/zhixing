@@ -1106,6 +1106,15 @@ class MemoryStore implements SecretStorePort {
     this.values.set(id(ref), value);
   }
   async get(ref: SecretRef) { return this.values.get(id(ref)) ?? null; }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = id(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
   async delete(ref: SecretRef) { this.values.delete(id(ref)); }
   async list() { return []; }
   async unlockState() { return "unlocked" as const; }

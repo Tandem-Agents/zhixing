@@ -58,6 +58,7 @@ vi.mock("./mesh-device-key.js", () => ({
 
 vi.mock("./mesh-bootstrap-store.js", () => ({
   FileMeshBootstrapStore: class {
+    static async open() { return new this(); }
     async stopStorageMaintenance() {}
     async loadTrustRecord() {
       return {

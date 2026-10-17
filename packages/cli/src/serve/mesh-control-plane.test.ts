@@ -249,8 +249,13 @@ describe("production mesh control plane", () => {
 
     expect(executorControl.connections.has(anchor.identity.deviceId)).toBe(true);
     expect(onTrustReconciled).toHaveBeenCalledTimes(2);
-    expect(onTrustReconciled).toHaveBeenNthCalledWith(1, initialTrust);
-    expect(onTrustReconciled).toHaveBeenNthCalledWith(2, joinedTrust);
+    for (const [index, record] of [initialTrust, joinedTrust].entries()) {
+      const view = onTrustReconciled.mock.calls[index]![0];
+      expect(view).toEqual({ homeId: record.homeId, trustEpoch: record.trustEpoch,
+        chainHead: record.chainHead, issuer: record.issuer,
+        members: record.members.filter(member => member.state === "active") });
+      expect(view).not.toHaveProperty("signature");
+    }
 
     await anchorControl.reconcileTrust({
       ...joinedTrust,
@@ -563,7 +568,7 @@ function controlPlanePersistence(store: FileMeshBootstrapStore) {
     endpointDirectory: projection.endpoints,
     transportPeerDirectory: projection.transportPeers,
     trustProjection: Object.freeze({
-      loadTrustRecord: () => store.loadTrustRecord(),
+      loadCurrentTrust: () => store.loadCurrentTrust(),
     }),
   };
 }
@@ -576,6 +581,15 @@ class MemorySecretStore implements SecretStorePort {
   async get(ref: SecretRef): Promise<string | null> {
     return this.values.get(`${ref.kind}/${ref.bindingId}`) ?? null;
   }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = `${ref.kind}/${ref.bindingId}`;
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
   async delete(ref: SecretRef): Promise<void> {
     this.values.delete(`${ref.kind}/${ref.bindingId}`);
   }

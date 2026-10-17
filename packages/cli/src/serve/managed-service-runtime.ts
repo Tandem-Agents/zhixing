@@ -110,9 +110,9 @@ async function loadCurrentManagedServiceStateFromConfig(
   const key = await loadExistingDeviceKey(secretStore);
   let trust;
   if (key) {
-    const store = new FileMeshBootstrapStore(homeDir, key);
+    const store = await FileMeshBootstrapStore.open(homeDir, key, { secretStore, readOnly: true });
     try {
-      trust = await store.loadTrustRecord();
+      trust = await store.loadCurrentTrust();
     } finally {
       await store.stopStorageMaintenance();
     }
@@ -134,7 +134,7 @@ function createCurrentManagedServiceStateProjector(homeDir: string) {
     readonly config: ReturnType<typeof loadConfig>;
     readonly binding: PlatformSecretStoreBackend;
     readonly key: Awaited<ReturnType<typeof loadExistingDeviceKey>>;
-    readonly trust: Awaited<ReturnType<FileMeshBootstrapStore["loadTrustRecord"]>>;
+    readonly trust: Awaited<ReturnType<FileMeshBootstrapStore["loadCurrentTrust"]>>;
   }): ManagedServiceCurrentState => {
     const { config, binding, key, trust } = snapshot;
     const localDeviceId = key?.deviceId ?? `unregistered:${homeDigest(homeDir)}`;

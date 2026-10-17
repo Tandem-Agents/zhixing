@@ -9,6 +9,15 @@ class FixtureSecrets implements SecretStorePort {
   readonly values = new Map<string, string>();
   key(ref: SecretRef) { return `${ref.kind}/${ref.bindingId}`; }
   async get(ref: SecretRef) { return this.values.get(this.key(ref)) ?? null; }
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const storageKey = this.key(ref);
+    const existing = this.values.get(storageKey);
+    if (existing !== undefined) return existing;
+    const value = create();
+    this.values.set(storageKey, value);
+    return value;
+  }
+
   async put(ref: SecretRef, value: string) { this.values.set(this.key(ref), value); }
   async delete(ref: SecretRef) { this.values.delete(this.key(ref)); }
   async list(prefix: string): Promise<SecretRef[]> {

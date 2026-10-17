@@ -298,7 +298,7 @@ export function deviceLifecycleSubjectKey(identity: DeviceLifecycleIdentity): st
   return `${identity.homeId}\u0000${deviceLifecycleSubject(identity)}`;
 }
 
-function deviceLifecycleSubjectKeys(identity: DeviceLifecycleIdentity): readonly string[] {
+export function deviceLifecycleSubjectKeys(identity: DeviceLifecycleIdentity): readonly string[] {
   const primary = deviceLifecycleSubjectKey(identity);
   if (identity.kind !== "stop") return [primary];
   return [primary, `${identity.homeId}\u0000device:${identity.localDeviceId}`];
@@ -687,6 +687,54 @@ export function reduceDeviceLifecycleProjection(
   return { operations, activeSubjects };
 }
 
+/** Codec for the authenticated current/exact lifecycle projection. Signature
+ * verification of a new abort remains a reducer obligation; readers can also
+ * verify its retained evidence with their own verifier. */
+export function validateDeviceLifecycleOperation(input: unknown): DeviceLifecycleOperation {
+  const value = cloneObject(input, "Device lifecycle operation");
+  exact(value, ["identity", "subjectDeviceId", "phase", "evidence", "recordDigests", "peerEffects",
+    ...(value.abort === undefined ? [] : ["abort"]),
+    ...(value.terminalOutcome === undefined ? [] : ["terminalOutcome"])], "Device lifecycle operation");
+  const identity = validateIdentity(value.identity);
+  if (value.subjectDeviceId !== subjectDeviceId(identity)) throw new TypeError("Lifecycle operation subject is inconsistent");
+  const phases = new Set<string>([...deviceLifecyclePhases(identity), ...(identity.kind === "stop" ? [] : ["aborted"])]);
+  if (typeof value.phase !== "string" || !phases.has(value.phase)) throw new TypeError("Lifecycle operation phase is invalid");
+  const recordDigests = cloneObject(value.recordDigests, "Lifecycle record digests");
+  for (const item of Object.values(recordDigests)) digest(item, "Lifecycle record digest");
+  if (recordDigests.accepted !== protocolDigest("DeviceLifecycleRecord", 1, { v: 1, t: "accepted", identity })) {
+    throw new TypeError("Lifecycle operation does not bind its acceptance");
+  }
+  const phaseKey = value.phase === "accepted" ? "accepted" : value.phase === "terminal" || value.phase === "aborted" ? value.phase : `phase:${value.phase}`;
+  if (!recordDigests[phaseKey]) throw new TypeError("Lifecycle phase has no durable record");
+  if (!Array.isArray(value.peerEffects)) throw new TypeError("Lifecycle peer effects are invalid");
+  const peerEffects = value.peerEffects.map(effect => {
+    const record = validateDeviceLifecycleRecord({ v: 1, t: "peer-effect", operationId: identity.operationId, effect });
+    if (record.t !== "peer-effect") throw new TypeError("Lifecycle peer effect is invalid");
+    return record.effect;
+  });
+  let abort: DeviceLifecycleAbort | undefined;
+  if (value.abort !== undefined) {
+    const record = validateDeviceLifecycleRecord({ v: 1, t: "aborted", operationId: identity.operationId, abort: value.abort });
+    if (record.t !== "aborted" || value.phase !== "aborted" || identity.kind === "stop" || record.abort.operationId !== identity.operationId || record.abort.homeId !== identity.homeId ||
+        record.abort.subjectDeviceId !== value.subjectDeviceId || record.abort.authorizedByDeviceId !== abortAuthority(identity)) {
+      throw new TypeError("Lifecycle abort does not bind its operation");
+    }
+    abort = record.abort;
+  } else if (value.phase === "aborted") throw new TypeError("Lifecycle abort evidence is missing");
+  if (value.phase === "terminal") {
+    if (typeof value.terminalOutcome !== "string") throw new TypeError("Lifecycle terminal outcome is missing");
+    assertTerminalOutcome(identity.kind, value.terminalOutcome);
+  } else if (value.terminalOutcome !== undefined) throw new TypeError("Unfinished lifecycle has a terminal outcome");
+  // The operation accumulates evidence from several individually bounded
+  // records, including intentional repeated references. The record-level
+  // 256-item/unique restriction must not be imposed on this aggregate.
+  if (!Array.isArray(value.evidence)) throw new TypeError("Lifecycle accumulated evidence is invalid");
+  const evidence = value.evidence.map(item => validateEvidence([item])[0]!);
+  return { identity, subjectDeviceId: value.subjectDeviceId as string, phase: value.phase as DeviceLifecyclePhase,
+    evidence, recordDigests: recordDigests as Record<string, string>, peerEffects,
+    ...(abort ? { abort } : {}), ...(value.terminalOutcome === undefined ? {} : { terminalOutcome: value.terminalOutcome as DeviceLifecycleOperation["terminalOutcome"] }) };
+}
+
 function validateIdentity(input: unknown): DeviceLifecycleIdentity {
   const value = cloneObject(input, "Device lifecycle identity");
   if (value.v !== 1) throw new TypeError("Device lifecycle identity version must be 1");
@@ -906,16 +954,14 @@ function nonNegativeInteger(value: unknown, label: string): asserts value is num
 }
 
 function assertNextPhase(current: DeviceLifecycleOperation, next: DeviceLifecyclePhase): void {
-  if (current.identity.kind === "stop") {
-    assertSequential(STOP_PHASES, current.phase, next, "stop");
-    return;
-  }
-  if (current.identity.kind === "executor-removal") {
-    assertSequential(REMOVAL_PHASES, current.phase, next, "executor removal");
-    return;
-  }
-  const path = current.identity.path.kind;
-  const phases = path === "migration"
+  assertSequential(deviceLifecyclePhases(current.identity), current.phase, next,
+    current.identity.kind === "executor-removal" ? "executor removal" : current.identity.kind === "anchor-uninstall" ? "anchor uninstall" : "stop");
+}
+
+function deviceLifecyclePhases(identity: DeviceLifecycleIdentity): readonly DeviceLifecyclePhase[] {
+  if (identity.kind === "stop") return STOP_PHASES;
+  if (identity.kind === "executor-removal") return REMOVAL_PHASES;
+  return identity.path.kind === "migration"
     ? ["accepted", "gate-frozen", "transfer-committed", "cleanup-complete", "terminal"] as const
     : [
         "accepted",
@@ -929,7 +975,6 @@ function assertNextPhase(current: DeviceLifecycleOperation, next: DeviceLifecycl
         "cleanup-complete",
         "terminal",
       ] as const;
-  assertSequential(phases, current.phase, next, "anchor uninstall");
 }
 
 function assertSequential(

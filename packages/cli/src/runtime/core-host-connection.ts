@@ -42,7 +42,10 @@ import type { LogRecordPort } from "@zhixing/core/logging";
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
 // One deadline covers OS admission, process launch and durable recovery. Child
 // failure still short-circuits this budget; no phase or retry renews it.
-const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 60_000;
+// A first upgrade may build versioned projections in bounded pages before
+// Host.ready. This cancellable recovery window is separate from the measured
+// ordinary-startup latency; spawn and discovery still share one deadline.
+const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */

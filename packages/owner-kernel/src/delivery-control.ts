@@ -58,6 +58,7 @@ export function createDeliveryResolutionCorrectnessPort(input: {
       let applied:
         | Extract<DeliveryStreamRecord, { t: "delivery-resolved" }>
         | undefined;
+      await input.admission.prepareRecovery();
       const outcome = await input.authority.coordinate(() =>
         input.admission.applyAuthority<DeliveryProjection, typeof envelope>({
           envelope,

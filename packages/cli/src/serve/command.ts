@@ -298,6 +298,7 @@ import {
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { endpointProcessMayBeOldHost, ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { provePriorHostExited, reclaimRetiredContentCopies } from "./retired-projection-copies.js";
 import { AnchorInternalStopLifecycle } from "./anchor-internal-stop.js";
 import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
 import {
@@ -478,7 +479,7 @@ async function runServerProcess(
   const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
   const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleAuthorityLog);
-  const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
+  const localLifecycleOperations = (await lifecycleJournal.activeFor(bootstrap.mesh.deviceKey.deviceId)).filter((operation) =>
     (operation.identity.kind === "stop" &&
       operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "executor-removal" &&
@@ -550,6 +551,13 @@ async function runServerProcess(
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
   });
   hostShellLifecycle.acquireBinding(serverBinding);
+  // 端口单例刚取得、本宿主尚未覆盖发现文件：当场核对残留的前一宿主记录是否已原生退出。
+  // 这是回收旧二进制专用派生副本的唯一退出证明来源（标记消失或取得单例本身都不是证明）。
+  const priorHostExitProven = await provePriorHostExited({
+    pidPath: getDefaultPidPath(zhixingHome),
+    portPath: getDefaultPortPath(zhixingHome),
+  });
+  const homeAuthority = bootstrap.mesh.bootstrapStore.authoritySources();
 
   const registry = new CleanupRegistry({
     activeOwners: plan.activeCleanupOwners,
@@ -2714,6 +2722,18 @@ async function runServerProcess(
     },
     resume: createAnchorConversationResumePort({
       identity: conversationDirectory,
+      runReadiness: {
+        prepareConversationReadiness: async (conversationId) => {
+          await boundConversationProtocol.prepareConversationReadiness(conversationId);
+          await boundConversations!.getOrCreateExisting(conversationId, () =>
+            conversationIdentityLifecycle.identityExists(conversationId));
+          // Terminal.usable 边界：所选会话的必要状态就绪后，按日志记录派生状态的就绪位置；
+          // 此后首发只处理该位置之后的新事实，不补做此前的欠账或初建。
+          if (homeAuthority) {
+            await homeAuthority.prepareRuntime("terminal-usable");
+          }
+        },
+      },
       ...(advancementRecovery ? { recovery: advancementRecovery } : {}),
       adoptionReview: schedulerGenerationOwner.postAdoptionReview,
     }),
@@ -3194,6 +3214,11 @@ async function runServerProcess(
     await reconcileManagedState("managed-preflight");
     throw new Error("Managed host admission changed during startup");
   }
+  // Host.ready 边界：两本日志的全部固定投影在发布就绪前显式准备到同一已验位置，并按日志记录。
+  // 启动早期统一入口已完成升级初建与尾部追平，这里只确认并记录水位，不依赖启动恰好发生写入。
+  if (homeAuthority) {
+    await observeLogPhase(startupRecords, "prepare-projections", () => homeAuthority.prepareRuntime("host-ready"));
+  }
   runner = await runServer({
     exitOnSignal: false,
     context: serverCtx,
@@ -3385,6 +3410,16 @@ async function runServerProcess(
       }
     },
   });
+
+  // 就绪之后在后台复核旧二进制专用的调度内容副本：有前一宿主原生退出证明才逐页回收，
+  // 否则保留目录并如实记录清理义务未完成；停止维护时在页边界停下，下次启动接续。
+  if (homeAuthority) {
+    void reclaimRetiredContentCopies({
+      log: homeAuthority.authority,
+      priorHostExitProven,
+      records: bootstrap.bindLogs?.(AUTHORITY_LOG_SOURCE, { scope: "storage" }),
+    }).catch(() => undefined);
+  }
 
   // idle reaper —— 仅后台宿主装配:前台进程的生命周期归终端(用户
   // Ctrl+C),reaper 管的是没有终端的后台宿主——这是进程形态差异,不是档位。

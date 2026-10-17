@@ -1,175 +1,190 @@
-import type { LogicalRecord } from "../contracts/index.js";
 import {
-  DEVICE_LIFECYCLE_STREAM,
-  emptyDeviceLifecycleProjection,
-  reduceDeviceLifecycleProjection,
+  DEVICE_LIFECYCLE_STREAM, reduceDeviceLifecycleProjection, validateDeviceLifecycleAbort,
   validateDeviceLifecycleRecord,
-  type DeviceLifecycleAbort,
-  type DeviceLifecycleEvidenceRef,
-  type DeviceLifecycleIdentity,
-  type DeviceLifecycleOperation,
-  type DeviceLifecyclePeerEffect,
-  type DeviceLifecyclePhase,
-  type DeviceLifecycleProjection,
+  type DeviceLifecycleAbort, type DeviceLifecycleEvidenceRef, type DeviceLifecycleIdentity,
+  type DeviceLifecycleOperation, type DeviceLifecyclePeerEffect, type DeviceLifecyclePhase,
   type DeviceLifecycleRecord,
 } from "../protocol/index.js";
 import type { ProtocolSignatureVerifier } from "../protocol/signature.js";
-import type { AuthorityCommitLog, ProjectionCursor } from "./interfaces.js";
-import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
+import type { AuthorityCommitLog } from "./interfaces.js";
+import {
+  DurableProjectionRecordBindingError,
+  type DurableProjectionReadContext, type RebuildableDurableProjectionIndex,
+} from "./durable-projection-index.js";
+import {
+  LIFECYCLE_PROJECTION_ID, LIFECYCLE_OPERATION_PREFIX, lifecycleActivePrefix,
+  lifecycleDecisionState, lifecycleIndexedOperation, lifecycleLatestKey,
+  lifecycleOperationKey, lifecycleRetirementKey, readLifecycleStored,
+  reduceLifecycleIndex, resolveLifecyclePointer, validateLifecycleActivePointer,
+  compareLifecycleAcceptance,
+  lifecycleTargetDeviceId,
+} from "./device-lifecycle-projection.js";
 
 type AdvancedPhase = Exclude<DeviceLifecyclePhase, "accepted" | "terminal" | "aborted">;
-type CachedLifecycleProjection = { readonly state: DeviceLifecycleProjection; readonly cursor: ProjectionCursor };
+interface SharedLifecycleIndex {
+  readonly index: RebuildableDurableProjectionIndex;
+  readonly verifier: ProtocolSignatureVerifier;
+}
+const shared = new WeakMap<AuthorityCommitLog, SharedLifecycleIndex>();
 
-// 同一进程内，同一日志、同一校验器上的各个日志实例共享已回放的投影：宿主启动时
-// 多处各自建实例，否则会把随每次启停增长的全部生命周期记录各回放一遍。只按完全
-// 相同的校验器共享（无校验器时无法归约经签名的中止记录，不能借用校验过的结果）；
-// 投影由归约产生新映射，对外结果均为副本，共享的基线不会被调用方修改。
-const sharedProjections = new WeakMap<AuthorityCommitLog, Map<ProtocolSignatureVerifier | null, CachedLifecycleProjection>>();
+/** The home composition registers one immutable live verification port before
+ * any journal opens. Stop-only readers use that same domain definition. */
+export function registerDeviceLifecycleProjection(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier): RebuildableDurableProjectionIndex {
+  const existing = shared.get(log);
+  if (existing) {
+    if (existing.verifier !== verifier) throw new TypeError("Device lifecycle verifier is already bound by its owner");
+    return existing.index;
+  }
+  const index = log.durableProjection({
+    projectionId: LIFECYCLE_PROJECTION_ID, reducerVersion: 1, authenticated: true,
+    inputs: { streams: [DEVICE_LIFECYCLE_STREAM] },
+    reduce: (envelope, current) => reduceLifecycleIndex(envelope, current, verifier),
+  });
+  shared.set(log, { index, verifier });
+  return index;
+}
 
-
+/** Current subject ownership and exact operation history share the original
+ * reducer and WAL transaction. Completed operations never enter startup memory. */
 export class DeviceLifecycleJournal {
-  readonly #queue = new SerialTaskQueue();
-  constructor(
-    private readonly log: AuthorityCommitLog,
-    private readonly abortVerifier?: ProtocolSignatureVerifier,
-  ) {}
-
-  get #cached(): CachedLifecycleProjection | undefined {
-    return sharedProjections.get(this.log)?.get(this.abortVerifier ?? null);
+  readonly #projection: SharedLifecycleIndex;
+  constructor(private readonly log: AuthorityCommitLog, verifier?: ProtocolSignatureVerifier) {
+    if (verifier) registerDeviceLifecycleProjection(log, verifier);
+    const existing = shared.get(log);
+    if (!existing) throw new TypeError("Device lifecycle projection must be registered by its owner before opening a journal");
+    this.#projection = existing;
   }
 
-  set #cached(value: CachedLifecycleProjection) {
-    let entries = sharedProjections.get(this.log);
-    if (!entries) sharedProjections.set(this.log, entries = new Map());
-    const key = this.abortVerifier ?? null;
-    const prior = entries.get(key);
-    // 并发实例可能以较旧的游标收尾；只前进，不回退到更早的基线。
-    if (!prior || value.cursor.lsn >= prior.cursor.lsn) entries.set(key, value);
+  #read<T>(read: (current: DurableProjectionReadContext) => Promise<T>): Promise<T> {
+    return this.log.transactDurableProjection<never, T>(LIFECYCLE_PROJECTION_ID, async current =>
+      ({ kind: "return", value: await read(current) })).then(result => result.value);
   }
 
-  async state(operationId: string): Promise<DeviceLifecycleOperation | undefined> {
-    const operation = (await this.#projection()).operations.get(operationId);
-    return operation && structuredClone(operation);
+  #checked(operation: DeviceLifecycleOperation): DeviceLifecycleOperation {
+    if (operation.abort) {
+      validateDeviceLifecycleAbort(operation.abort, this.#projection.verifier);
+    }
+    return structuredClone(operation);
   }
 
-  async active(): Promise<readonly DeviceLifecycleOperation[]> {
-    const projection = await this.#projection();
-    return [...new Set(projection.activeSubjects.values())]
-      .map((operationId) => projection.operations.get(operationId))
-      .filter((operation): operation is DeviceLifecycleOperation => operation !== undefined)
-      .map(operation => structuredClone(operation));
-  }
-
-  async operations(): Promise<readonly DeviceLifecycleOperation[]> {
-    return [...(await this.#projection()).operations.values()].map(operation => structuredClone(operation));
-  }
-
-  async accept(identity: DeviceLifecycleIdentity): Promise<DeviceLifecycleOperation> {
-    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "accepted", identity }));
-  }
-
-  async advance(
-    operationId: string,
-    phase: AdvancedPhase,
-    evidence: readonly DeviceLifecycleEvidenceRef[] = [],
-  ): Promise<DeviceLifecycleOperation> {
-    return this.#append(validateDeviceLifecycleRecord({
-      v: 1,
-      t: "advanced",
-      operationId,
-      phase,
-      evidence,
-    }));
-  }
-
-  async abort(operationId: string, abort: DeviceLifecycleAbort): Promise<DeviceLifecycleOperation> {
-    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "aborted", operationId, abort }));
-  }
-
-  async peerEffect(
-    operationId: string,
-    effect: DeviceLifecyclePeerEffect,
-  ): Promise<DeviceLifecycleOperation> {
-    return this.#append(validateDeviceLifecycleRecord({
-      v: 1,
-      t: "peer-effect",
-      operationId,
-      effect,
-    }));
-  }
-
-  async terminal(
-    operationId: string,
-    outcome: "stopped" | "removed" | "retired",
-    evidence: readonly DeviceLifecycleEvidenceRef[] = [],
-  ): Promise<DeviceLifecycleOperation> {
-    return this.#append(validateDeviceLifecycleRecord({
-      v: 1,
-      t: "terminal",
-      operationId,
-      outcome,
-      evidence,
-    }));
-  }
-
-  #append(record: DeviceLifecycleRecord): Promise<DeviceLifecycleOperation> {
-    return this.#queue.run(async () => { return this.#appendUnlocked(record); });
-  }
-
-  async #appendUnlocked(record: DeviceLifecycleRecord): Promise<DeviceLifecycleOperation> {
-    const operationId = record.t === "accepted" ? record.identity.operationId : record.operationId;
-    const result = await this.log.transactProjection<
-      DeviceLifecycleProjection,
-      unknown,
-      DeviceLifecycleOperation
-    >(
-      this.#cached?.state ?? emptyDeviceLifecycleProjection(),
-      (projection, entry) => this.#reduce(projection, entry),
-      (projection) => {
-        const next = reduceDeviceLifecycleProjection(projection, record, this.abortVerifier);
-        const operation = next.operations.get(operationId);
-        if (!operation) throw new Error("Lifecycle transaction did not produce an operation");
-        if (next === projection) return { kind: "return", value: operation };
-        return {
-          kind: "append",
-          entries: [{ stream: DEVICE_LIFECYCLE_STREAM, body: record }],
-          value: operation,
-        };
-      },
-      {
-        stream: DEVICE_LIFECYCLE_STREAM,
-        ...(this.#cached ? { cursor: this.#cached.cursor } : {}),
-        candidateReferences: record.t === "advanced" || record.t === "terminal"
-          ? record.evidence.flatMap((item) => item.artifact ? [item.artifact] : [])
-          : record.t === "peer-effect"
-            ? record.effect.evidence.flatMap((item) => item.artifact ? [item.artifact] : [])
-          : [],
-      },
-    );
-    this.#cached = { state: result.state, cursor: result.cursor };
-    return structuredClone(result.value);
-  }
-
-  #projection(): Promise<DeviceLifecycleProjection> {
-    return this.#queue.run(async () => {
-      // The log revalidates the physical prefix on every read. Reducers return
-      // new maps, and public results are copied, so failed work or callers
-      // cannot mutate the cached, verified basis.
-      const result = await this.log.readProjection<DeviceLifecycleProjection, unknown>(
-        this.#cached?.state ?? emptyDeviceLifecycleProjection(),
-        (projection, entry) => this.#reduce(projection, entry),
-        { stream: DEVICE_LIFECYCLE_STREAM, ...(this.#cached ? { cursor: this.#cached.cursor } : {}) },
-      );
-      this.#cached = { state: result.state, cursor: result.cursor };
-      return result.state;
+  state(operationId: string): Promise<DeviceLifecycleOperation | undefined> {
+    return this.#read(async current => {
+      const stored = readLifecycleStored(await current.get(lifecycleOperationKey(operationId)), operationId);
+      return stored && this.#checked(stored.operation);
     });
   }
 
-  #reduce(
-    projection: DeviceLifecycleProjection,
-    entry: LogicalRecord<unknown>,
-  ): DeviceLifecycleProjection {
-    if (entry.stream !== DEVICE_LIFECYCLE_STREAM) return projection;
-    return reduceDeviceLifecycleProjection(projection, entry.body, this.abortVerifier);
+  async #active(current: DurableProjectionReadContext, deviceId?: string,
+    kind?: DeviceLifecycleOperation["identity"]["kind"], firstOnly = false): Promise<DeviceLifecycleOperation[]> {
+    const prefix = lifecycleActivePrefix(deviceId, kind);
+    const result: DeviceLifecycleOperation[] = [];
+    let continuation: string | undefined;
+    do {
+      const page = await current.scan({ gte: prefix, lt: prefix + "\uffff" }, firstOnly ? 1 : 64, continuation);
+      for (const entry of page.entries) {
+        validateLifecycleActivePointer(entry.key, entry.value, prefix);
+        const stored = await resolveLifecyclePointer(current, entry.value);
+        if (!stored || stored.operation.phase === "terminal" || stored.operation.phase === "aborted" ||
+            (deviceId !== undefined && lifecycleTargetDeviceId(stored.operation) !== deviceId) ||
+            (kind !== undefined && stored.operation.identity.kind !== kind)) {
+          throw new DurableProjectionRecordBindingError("Lifecycle active directory does not bind an active subject");
+        }
+        result.push(this.#checked(stored.operation));
+      }
+      if (firstOnly) break;
+      continuation = page.continuation;
+    } while (continuation);
+    return result;
+  }
+
+  active(): Promise<readonly DeviceLifecycleOperation[]> {
+    return this.#read(current => this.#active(current));
+  }
+
+  activeFor(deviceId: string): Promise<readonly DeviceLifecycleOperation[]> {
+    return this.#read(current => this.#active(current, deviceId));
+  }
+
+  latest(kind: DeviceLifecycleOperation["identity"]["kind"], deviceId: string): Promise<DeviceLifecycleOperation | undefined> {
+    return this.#read(async current => {
+      const stored = await resolveLifecyclePointer(current, await current.get(lifecycleLatestKey(kind, deviceId)));
+      if (stored && (stored.operation.identity.kind !== kind || lifecycleTargetDeviceId(stored.operation) !== deviceId)) {
+        throw new DurableProjectionRecordBindingError("Lifecycle latest directory changes subject");
+      }
+      return stored && this.#checked(stored.operation);
+    });
+  }
+
+  /** Bootstrap needs only a local safety gate and the last terminal retirement.
+   * With no local identity, one non-stop active operation proves recovery is needed. */
+  startupState(deviceId?: string): Promise<{ readonly active: boolean; readonly retirement?: DeviceLifecycleOperation }> {
+    return this.#read(async current => {
+      const stored = await resolveLifecyclePointer(current, await current.get(lifecycleRetirementKey(deviceId)));
+      if (stored && (stored.operation.phase !== "terminal" || stored.operation.identity.kind === "stop" ||
+          (deviceId !== undefined && stored.operation.subjectDeviceId !== deviceId))) {
+        throw new DurableProjectionRecordBindingError("Lifecycle retirement directory changes subject");
+      }
+      const active = deviceId === undefined
+        ? (await this.#active(current, undefined, "executor-removal", true)).length > 0 ||
+          (await this.#active(current, undefined, "anchor-uninstall", true)).length > 0
+        : (await this.#active(current, deviceId, undefined, true)).length > 0 ||
+          (await this.#active(current, undefined, "stop", true)).length > 0;
+      return { active, ...(stored ? { retirement: this.#checked(stored.operation) } : {}) };
+    });
+  }
+
+  /** Explicit history query only; normal startup uses startupState/activeFor. */
+  operations(): Promise<readonly DeviceLifecycleOperation[]> {
+    return this.#read(async current => {
+      const values: ReturnType<typeof lifecycleIndexedOperation>[] = [];
+      let continuation: string | undefined;
+      do {
+        const page = await current.scan({ gte: LIFECYCLE_OPERATION_PREFIX, lt: LIFECYCLE_OPERATION_PREFIX + "\uffff" }, 64, continuation);
+        for (const entry of page.entries) {
+          const stored = lifecycleIndexedOperation(entry.value);
+          if (entry.key !== lifecycleOperationKey(stored.operation.identity.operationId)) {
+            throw new DurableProjectionRecordBindingError("Lifecycle operation directory changes identity");
+          }
+          values.push(stored);
+        }
+        continuation = page.continuation;
+      } while (continuation);
+      return values.sort(compareLifecycleAcceptance).map(value => this.#checked(value.operation));
+    });
+  }
+
+  accept(identity: DeviceLifecycleIdentity): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "accepted", identity }));
+  }
+  advance(operationId: string, phase: AdvancedPhase, evidence: readonly DeviceLifecycleEvidenceRef[] = []): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "advanced", operationId, phase, evidence }));
+  }
+  abort(operationId: string, abort: DeviceLifecycleAbort): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "aborted", operationId, abort }));
+  }
+  peerEffect(operationId: string, effect: DeviceLifecyclePeerEffect): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "peer-effect", operationId, effect }));
+  }
+  terminal(operationId: string, outcome: "stopped" | "removed" | "retired", evidence: readonly DeviceLifecycleEvidenceRef[] = []): Promise<DeviceLifecycleOperation> {
+    return this.#append(validateDeviceLifecycleRecord({ v: 1, t: "terminal", operationId, outcome, evidence }));
+  }
+
+  async #append(record: DeviceLifecycleRecord): Promise<DeviceLifecycleOperation> {
+    const operationId = record.t === "accepted" ? record.identity.operationId : record.operationId;
+    const result = await this.log.transactDurableProjection<DeviceLifecycleRecord, DeviceLifecycleOperation>(
+      LIFECYCLE_PROJECTION_ID,
+      async current => {
+        const before = await lifecycleDecisionState(current, record);
+        const next = reduceDeviceLifecycleProjection(before, record, this.#projection.verifier);
+        const operation = next.operations.get(operationId);
+        if (!operation) throw new Error("Lifecycle transaction did not produce an operation");
+        if (next === before) return { kind: "return", value: this.#checked(operation) };
+        return { kind: "append", entries: [{ stream: DEVICE_LIFECYCLE_STREAM, body: record }], value: this.#checked(operation) };
+      },
+      { candidateReferences: record.t === "advanced" || record.t === "terminal"
+        ? record.evidence.flatMap(item => item.artifact ? [item.artifact] : [])
+        : record.t === "peer-effect" ? record.effect.evidence.flatMap(item => item.artifact ? [item.artifact] : []) : [] },
+    );
+    return result.value;
   }
 }

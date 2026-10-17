@@ -1,5 +1,6 @@
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import path from "node:path";
-import type { HomeTrustRecord } from "@zhixing/core/contracts";
+
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   FilePairedCheckpointStaging,
@@ -43,7 +44,7 @@ export function createPairedCheckpointCommandReceiverInfrastructure(input: {
 
 export function createPersistentPairedCheckpointCommandReceiverInfrastructure(input: {
   readonly zhixingHome: string;
-  readonly trust: HomeTrustRecord;
+  readonly trust: CurrentTrustProjection;
   readonly deviceId: string;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
@@ -82,7 +83,7 @@ export function createPersistentPairedCheckpointCommandReceiverInfrastructure(in
 
 export function createRecoveryRootPairedCheckpointCommandReceiverInfrastructure(input: {
   readonly zhixingHome: string;
-  readonly trust: HomeTrustRecord;
+  readonly trust: CurrentTrustProjection;
   readonly deviceId: string;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;

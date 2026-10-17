@@ -108,6 +108,11 @@ export interface ArtifactLifecycleIndexOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   /** 规范维护身份中的物理 ArtifactStore 标识；生产装配必须传真实存储根。 */
   readonly maintenanceResourceId?: string;
+  /**
+   * 源日志的维护生命周期是否归本索引（缺省为是）。统一 home 入口共享的日志由其组合 owner
+   * 按引用计数停止，任何单个使用者关闭自己的索引都不能停掉别人仍在使用的日志。
+   */
+  readonly ownsSourceLogs?: boolean;
 }
 
 export interface ArtifactQuotaSnapshot {
@@ -272,6 +277,7 @@ export class ArtifactLifecycleIndex {
   readonly #temporaryPresence: SurfaceAssetTemporaryPresencePort;
   readonly #receiver: SurfaceAssetTemporaryRecoveryPort;
   readonly #logs: readonly FileAuthorityCommitLog[];
+  readonly #ownsSourceLogs: boolean;
   #sources: readonly LifecycleSource[] | undefined;
   readonly #sourceHeads = new Map<string, DurableLogCheckpoint>();
   #retentionRebuildRequired = false;
@@ -282,6 +288,7 @@ export class ArtifactLifecycleIndex {
       throw new TypeError("Artifact lifecycle index requires an authority log");
     }
     this.#logs = [...new Set(options.logs)];
+    this.#ownsSourceLogs = options.ownsSourceLogs !== false;
     this.#artifacts = options.artifacts;
     this.#temporaryArtifacts = options.temporaryArtifacts;
     this.#temporaryPresence = options.temporaryPresence;
@@ -366,7 +373,7 @@ export class ArtifactLifecycleIndex {
   async stopStorageMaintenance(): Promise<void> {
     await this.#maintenanceRunner.stop();
     await this.#index.stopStorageMaintenance();
-    for (const log of this.#logs) await log.stopStorageMaintenance();
+    if (this.#ownsSourceLogs) for (const log of this.#logs) await log.stopStorageMaintenance();
   }
 
   async #runSynchronized<T>(operation: () => Promise<T>): Promise<T> {
@@ -615,6 +622,22 @@ export class ArtifactLifecycleIndex {
       limit,
       (grant) => surfaceGrantKey(grant.surfacePrincipal, grant.grantId),
     );
+  }
+
+  /** Logical key pagination over the live grant index, independent of old trust members. */
+  async activeGrantPage(after: string | undefined, limit: number): Promise<readonly SurfaceAssetGrant[]> {
+    assertPageLimit(limit, "Active grant");
+    return this.#runSynchronized(async () => {
+      const page = await this.#records.scan({
+        ...(after === undefined ? { gte: ACTIVE_GRANT_PREFIX } : { gt: activeGrantKey(after) }),
+        lt: `${ACTIVE_GRANT_PREFIX}\uffff`,
+      }, limit);
+      const grants: SurfaceAssetGrant[] = [];
+      for (const { key, value } of page.entries) {
+        grants.push(await this.#indexedGrant(value, key, grant => activeGrantKey(grant.grantId), this.#records));
+      }
+      return grants;
+    });
   }
 
   async nextGrantExpiry(): Promise<string | undefined> {

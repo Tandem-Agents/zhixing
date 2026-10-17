@@ -129,7 +129,7 @@ import {
   createSurfaceAssetAuthority,
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
-import { createLiveTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
+import { openHomeAuthoritySources, type HomeAuthoritySourcesLease } from "./serve/home-authority-sources.js";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -537,6 +537,7 @@ export async function setupAuthorityRuntime(
   // 义务与定时任务,等函数返回后再注册,"恢复后、返回前失败"的窗口里就没有任何
   // 人持有停止句柄。闭包读取下方逐步赋值的资源变量,未构造的部分停止即空操作,
   // 因此注册点不需要判断"第一个可能启动维护的步骤在哪"。
+  let authoritySources: HomeAuthoritySourcesLease | undefined;
   let authorityLog: FileAuthorityCommitLog | undefined;
   let executorLog: FileAuthorityCommitLog | undefined;
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
@@ -551,8 +552,8 @@ export async function setupAuthorityRuntime(
     await surfaceAssets?.stopStorageMaintenance();
     await worksceneGlobalState?.stop();
     await workspaceBindings?.stop();
-    await authorityLog?.stopStorageMaintenance();
-    await executorLog?.stopStorageMaintenance();
+    // 日志由本进程该 home 的统一入口持有；最后一个使用者释放时才停止其维护。
+    await authoritySources?.close();
   };
   const startupRollback = options.startupRollback ?? new StartupRollback();
   const startupCleanup = startupRollback.register(
@@ -561,26 +562,22 @@ export async function setupAuthorityRuntime(
   );
   try {
     const authorityRoot = path.join(options.zhixingHome, "distributed-runtime");
-    const artifacts = new FileArtifactStore(
-      path.join(authorityRoot, "artifacts"),
-      { runReadStep: artifactReadCapacity(options.deviceCapacity) },
-    );
+    // 统一 home 入口：同进程同 home 的权威日志、制品库与活验签器只有一个 owner，
+    // 固定领域定义在任何写入前已登记。commit 时间戳与本 stack 其余组件必须同钟:
+    // 租约活性等判定以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
+    authoritySources = await openHomeAuthoritySources({
+      home: options.zhixingHome,
+      secretStore: options.secretStore,
+      records: options.records,
+      storageMaintenance: options.storageMaintenance,
+      deviceCapacity: options.deviceCapacity,
+      ...(options.clock ? { clock: options.clock } : {}),
+    });
+    const sources = authoritySources.sources;
+    const artifacts = sources.artifacts;
     const rubricArtifacts = projectAdvancementRubricArtifacts(artifacts);
     const anchorEnabled = options.enableAnchor ?? true;
-    authorityLog = anchorEnabled
-      ? new FileAuthorityCommitLog(
-          path.join(authorityRoot, "authority"),
-          artifacts,
-          {
-            storageMaintenance: options.storageMaintenance,
-            runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
-            records: options.records,
-            // commit 时间戳与本 stack 其余组件必须同钟:租约活性等判定
-            // 以 commit.at 与注入时钟做差,分裂时钟会产生假过期。
-            ...(options.clock ? { clock: options.clock } : {}),
-          },
-        )
-      : undefined;
+    authorityLog = anchorEnabled ? sources.authority : undefined;
     const localExecutorEnabled = options.enableLocalExecutor ?? true;
     const ownerRuntime = anchorEnabled || localExecutorEnabled
       ? await Promise.all([
@@ -594,18 +591,7 @@ export async function setupAuthorityRuntime(
     const executorRuntime = localExecutorEnabled
       ? await import("@zhixing/executor")
       : undefined;
-    executorLog = localExecutorEnabled
-      ? new FileAuthorityCommitLog(
-          path.join(authorityRoot, "executor-authority"),
-          artifacts,
-          {
-            storageMaintenance: options.storageMaintenance,
-            runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
-            records: options.records,
-            ...(options.clock ? { clock: options.clock } : {}),
-          },
-        )
-      : undefined;
+    executorLog = localExecutorEnabled ? sources.executor : undefined;
     let anchorEpoch = options.anchorEpoch ?? 1;
     if (
       options.installedAuthorityGeneration &&
@@ -651,15 +637,17 @@ export async function setupAuthorityRuntime(
       options.authorizedDeviceIds ?? [...trustedIdentities.keys()],
     );
     authorizedDeviceIds.add(identity.deviceId);
-    const verifier = createLiveTrustedDeviceProtocolVerifier((deviceId) =>
-      trustedIdentities.get(deviceId)
-    );
+    // 与 C8 一样始终可验本机与当前信任记录中的成员签名；其余历史身份由日志在操作边界精确补齐。
+    sources.bindLocalIdentity(identity);
+    for (const candidate of trustedIdentities.values()) sources.identities.remember(candidate, true);
+    const verifier = sources.verifier;
     const clock = options.clock ?? (() => new Date().toISOString());
     surfaceAssets = authorityLog
       ? createSurfaceAssetAuthority({
           authorityRoot,
           log: authorityLog,
           retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
+          ownsLogs: false,
           artifacts,
           signer: key,
           verifier,
@@ -939,7 +927,7 @@ export async function setupAuthorityRuntime(
           deviceId: key.deviceId,
           log: authorityLog,
           secretStore: options.secretStore,
-        }).publishActiveBindings({
+        }).ensureActiveBindings({
           bindings: descriptor.credentialBindings,
           markedAt: descriptor.at,
         });
@@ -998,6 +986,8 @@ export async function setupAuthorityRuntime(
                 storageMaintenance: options.storageMaintenance,
                 runProjectionReadStep: projectionReadCapacity(options.deviceCapacity),
                 records: options.records,
+                startupProofs: true,
+                integrity: sources.integrity,
                 clock,
               },
             );
@@ -1880,6 +1870,7 @@ export async function setupAuthorityRuntime(
         authorityRoot,
         log: authorityLog,
         retentionLogs: [authorityLog, ...(executorLog ? [executorLog] : [])],
+        ownsLogs: false,
         artifacts,
         signer: key,
         verifier,
@@ -2139,6 +2130,13 @@ export async function setupAuthorityRuntime(
             );
           }
           trustedIdentities.set(candidate.deviceId, candidate);
+          sources.identities.remember(candidate, deviceIds.includes(candidate.deviceId));
+        }
+        for (const key of trustedIdentities.keys()) {
+          if (key !== identity.deviceId && !deviceIds.includes(key)) {
+            trustedIdentities.delete(key);
+            sources.identities.demote(key);
+          }
         }
         authorizedDeviceIds.clear();
         authorizedDeviceIds.add(identity.deviceId);

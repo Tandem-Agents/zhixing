@@ -134,6 +134,6 @@ export type {
   ProjectionTransactionResult,
   ProjectionTransactionReducer,
 } from "./interfaces.js";
-export { DeviceLifecycleJournal } from "./device-lifecycle-journal.js";
+export { DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "./device-lifecycle-journal.js";
 export { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, AuthorityProjectionUnavailable, maximumAuthorityRecoveryTailBytes } from "./recovery-work.js";
 export type { AuthorityPreparedWatermark } from "./recovery-work.js";
