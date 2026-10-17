@@ -676,7 +676,8 @@ describe("DataPlaneTicketRegistry", { timeout: 30_000 }, () => {
       if (!result.ok) expect(String(result.error)).toContain("qualification failed");
       expect(active).toBe(0); expect(maximum).toBeLessThanOrEqual(4);
       expect(assignments.dataPlaneBinding).not.toHaveBeenCalled();
-      expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual(failing ? [32] : [32, 3]);
+      // 全部有效票据的绑定在恢复开始时一次查询，不按批反复回放账本。
+      expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual([35]);
     } finally { released = true; for (const gate of gates) gate.resolve(); await recovering; }
   });
 
@@ -806,7 +807,7 @@ it('retires a recovered invalid binding batch durably before revoking its consum
   await recovered.maintain();
   expect(spool.revokeConsumer).toHaveBeenCalledTimes(35); expect(spool.qualifyConsumer).not.toHaveBeenCalled();
   expect(assignments.dataPlaneBinding).not.toHaveBeenCalled();
-  expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual([32, 3]);
+  expect(assignments.dataPlaneBindings.mock.calls.map(args => args[0].length)).toEqual([35]);
 }, 30_000);
 
 

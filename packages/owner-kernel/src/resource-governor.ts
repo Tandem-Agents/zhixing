@@ -1,3 +1,5 @@
+import { verifyProtocolStep } from "@zhixing/core/protocol";
+import { projectionCheckpointKey } from "@zhixing/core/authority";
 import type {
   AdmissionClass,
   AssignmentReservationRequest,
@@ -64,6 +66,9 @@ import {
 import type { SystemJobResourceCoordinator } from "./job-assignment.js";
 
 const GOVERNOR_STREAM = "governor";
+// 资源治理投影在进程内本就以“较早截止点压缩后的状态 + 后续尾部”续算；持久化检查点
+// 与该缓存等价，只让冷启动不必从头回放全部治理记录。推进足够多时后台刷新。
+const GOVERNOR_CHECKPOINT_INTERVAL_LSN = 256;
 const DEFAULT_LEASE_TTL_MS = 15 * 60_000;
 const MAX_LEASE_TTL_MS = 24 * 60 * 60_000;
 const DEFAULT_CANDIDATE_TTL_MS = 5_000;
@@ -173,6 +178,8 @@ export class AnchorResourceGovernor
 
   constructor(options: AnchorResourceGovernorOptions) {
     this.#log = options.log;
+    // 正式停止前补存检查点：重启后只续算停止前最后一段尾部。
+    options.log.registerCheckpointFlush?.(() => this.#checkpoint(true));
     this.#signer = options.signer;
     this.#verifier = options.verifier;
     this.#guard = options.guard;
@@ -461,7 +468,7 @@ export class AnchorResourceGovernor
     budget: ResourceLease["budget"],
     ctx: AuthorityCallContext,
   ): Promise<ChildResourceLease> {
-    const validatedParent = validateReservableResourceLease(parent, this.#verifier);
+    const validatedParent = (await verifyProtocolStep(() => validateReservableResourceLease(parent, this.#verifier)));
     assertBudgetWithinBudget(budget, validatedParent.budget);
     const reservationId = childReservationId(parent.reservationId, workload);
     return this.#withAuthorizedResourceCall(
@@ -538,7 +545,7 @@ export class AnchorResourceGovernor
     },
     ctx: AuthorityCallContext,
   ): Promise<void> {
-    const validated = validateReservableResourceLease(lease, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
     requireIdentifier(usage.usageId, "Resource usageId");
     resourceBudgetUsage(usage);
     await this.#withAuthorizedResourceCall<void>(
@@ -593,7 +600,7 @@ export class AnchorResourceGovernor
     },
     ctx: AuthorityCallContext,
   ): Promise<void> {
-    const validated = validateReservableResourceLease(lease, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
     const normalized = resourceBudgetUsage(usage);
     requireIdentifier(usage.usageId, "Reserved resource usageId");
     await this.#withAuthorizedResourceCall<void>(
@@ -637,7 +644,7 @@ export class AnchorResourceGovernor
   }
 
   async settle(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void> {
-    const validated = validateReservableResourceLease(lease, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
     await this.#withAuthorizedResourceCall(
       validated,
       ctx,
@@ -647,7 +654,7 @@ export class AnchorResourceGovernor
   }
 
   async release(lease: ResourceLease, ctx: AuthorityCallContext): Promise<void> {
-    const validated = validateReservableResourceLease(lease, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
     await this.#withAuthorizedResourceCall(
       validated,
       ctx,
@@ -701,7 +708,7 @@ export class AnchorResourceGovernor
     if (ctx.principal.kind !== "usage-reporter") {
       throw new TypeError("Usage report requires a usage-reporter principal");
     }
-    const validated = validateUsageReport(report, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateUsageReport(report, this.#verifier)));
     if (
       validated.reporterId !== ctx.principal.executorId ||
       validated.signature.keyId !== this.#reporterKeyFor(validated.reporterId)
@@ -1116,7 +1123,7 @@ export class AnchorResourceGovernor
   }
 
   async #terminal(lease: ResourceLease, kind: "settle" | "release" | "reclaim"): Promise<void> {
-    const validated = validateReservableResourceLease(lease, this.#verifier);
+    const validated = (await verifyProtocolStep(() => validateReservableResourceLease(lease, this.#verifier)));
     await this.#transact<void>((state) => {
       const current = state.reservations.get(validated.reservationId);
       if (!current || canonicalize(current.lease) !== canonicalize(validated)) {
@@ -1370,13 +1377,14 @@ export class AnchorResourceGovernor
         activation = await this.#assignedCapabilityActivation(
           root.lease as AssignmentResourceLease,
         );
-        assertAcceptedResourceCapabilityBinding({
+        const acceptedCapIds = activation.acceptedCapIds;
+        (await verifyProtocolStep(() => assertAcceptedResourceCapabilityBinding({
           context: ctx,
           method,
           rootLease: root.lease as AssignmentResourceLease,
-          acceptedCapIds: activation.acceptedCapIds,
+          acceptedCapIds,
           verifier: this.#verifier,
-        });
+        })));
       }
       const preview = decide(state);
       if (preview.kind === "return") return preview.value;
@@ -1386,14 +1394,14 @@ export class AnchorResourceGovernor
           throw new Error("Assignment resource root disappeared during authorization");
         }
         const rootLease = root.lease as AssignmentResourceLease;
-        assertActivatedResourceCapability({
+        (await verifyProtocolStep(() => assertActivatedResourceCapability({
           context: ctx,
           method,
           rootLease,
           activeCapIds: activation.activeCapIds,
           verifier: this.#verifier,
           now: activation.acceptedAt,
-        });
+        })));
         this.#assertCapabilityDeadline(
           ctx.principal.capability,
           activation.acceptedAt,
@@ -1553,16 +1561,41 @@ export class AnchorResourceGovernor
     return this.#monotonicClock() >= this.#leaseDeadlines.get(lease.reservationId)!.deadline;
   }
 
+  #checkpointedThrough = 0;
+
+  /** 本进程首次需要投影时，先从与已核验前缀一致的检查点恢复，只回放其后的记录。 */
+  async #restoreCheckpoint(): Promise<void> {
+    if (this.#projection || !this.#log.loadProjectionCheckpoint) return;
+    const restored = await this.#log.loadProjectionCheckpoint<GovernorProjection>(this.#checkpointKey());
+    if (!restored || this.#projection) return;
+    this.#projection = { state: restored.state, cursor: restored.cursor };
+    this.#checkpointedThrough = restored.cursor.lsn;
+  }
+
+  /** 键带归约版本与归约函数指纹：归约或保留规则改变后旧检查点不再被采用，只多回放一次。 */
+  #checkpointKey(): string {
+    return projectionCheckpointKey("anchor-resource-governor-projection", 1, this.#applyRetainedRecord, this.#compactProjection);
+  }
+
+  #checkpoint(force = false): Promise<void> | undefined {
+    const current = this.#projection;
+    if (!current || !this.#log.saveProjectionCheckpoint ||
+        current.cursor.lsn - this.#checkpointedThrough < (force ? 1 : GOVERNOR_CHECKPOINT_INTERVAL_LSN)) return undefined;
+    this.#checkpointedThrough = current.cursor.lsn;
+    return this.#log.saveProjectionCheckpoint(this.#checkpointKey(), current.cursor, current.state);
+  }
+
   async #synchronizeUnlocked(): Promise<void> {
+    await this.#restoreCheckpoint();
     const cached = this.#projection;
     const retentionCutoff = this.#retentionCutoff();
     const initial = cached?.state ?? emptyGovernorProjection();
     let retentionApplied = false;
     const transaction = await this.#log.readProjection<GovernorProjection, unknown>(
       initial,
-      (state, record, envelope) => {
+      async (state, record, envelope) => {
         if (record.stream !== GOVERNOR_STREAM) return state;
-        const next = this.#applyRetainedRecord(
+        const next = await this.#applyRetainedRecord(
           state === cached?.state ? cloneGovernorProjection(state) : state,
           record.body,
           envelope.at,
@@ -1574,6 +1607,7 @@ export class AnchorResourceGovernor
       },
       {
         stream: GOVERNOR_STREAM,
+        createState: () => { retentionApplied = false; return cached?.state ?? emptyGovernorProjection(); },
         ...(cached ? { cursor: cached.cursor } : {}),
       },
     );
@@ -1581,6 +1615,7 @@ export class AnchorResourceGovernor
       state: this.#compactProjection(transaction.state),
       cursor: transaction.cursor,
     };
+    this.#checkpoint();
   }
 
   async #transact<Value>(
@@ -1608,6 +1643,7 @@ export class AnchorResourceGovernor
           readonly value: Value;
         },
   ): Promise<Value> {
+      await this.#restoreCheckpoint();
       const cached = this.#projection;
       const retentionCutoff = this.#retentionCutoff();
       // 只在第一次写入前复制缓存基线：没有新记录、也不追加的事务不复制整份投影；日志内部
@@ -1616,9 +1652,9 @@ export class AnchorResourceGovernor
       let retentionApplied = false;
       const transaction = await this.#log.transactProjection<GovernorProjection, unknown, Value>(
         initial,
-        (state, record, envelope) => {
+        async (state, record, envelope) => {
           if (record.stream !== GOVERNOR_STREAM) return state;
-          const next = this.#applyRetainedRecord(
+          const next = await this.#applyRetainedRecord(
             state === cached?.state ? cloneGovernorProjection(state) : state,
             record.body,
             envelope.at,
@@ -1642,6 +1678,7 @@ export class AnchorResourceGovernor
         },
         {
           stream: GOVERNOR_STREAM,
+          createState: () => { retentionApplied = false; return cached?.state ?? emptyGovernorProjection(); },
           ...(cached ? { cursor: cached.cursor } : {}),
         },
       );
@@ -1649,6 +1686,7 @@ export class AnchorResourceGovernor
         state: this.#compactProjection(transaction.state),
         cursor: transaction.cursor,
       };
+      this.#checkpoint();
       this.#pruneCandidates();
       return transaction.value;
   }
@@ -1657,16 +1695,16 @@ export class AnchorResourceGovernor
     return compactGovernorProjection(state, this.#retentionCutoff());
   }
 
-  #applyRetainedRecord(
+  async #applyRetainedRecord(
     state: GovernorProjection,
     record: unknown,
     envelopeAt: string,
     retentionCutoff: string,
     retentionApplied: boolean,
-  ): GovernorProjection {
-    const next = applyGovernorRecordAt(
+  ): Promise<GovernorProjection> {
+    const next = (await verifyProtocolStep(() => applyGovernorRecordAt(
       state, record, envelopeAt, MAX_LEASE_TTL_MS, this.#verifier,
-    );
+    )));
     // The cutoff is frozen for this replay. Once pruned, only these records
     // can introduce another terminal timestamp. Every record is still fully
     // validated and reduced; the first record and final projection always prune.

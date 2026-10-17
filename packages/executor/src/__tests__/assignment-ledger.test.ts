@@ -4,6 +4,7 @@ import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
+  AuthorityCacheIntegrity,
   AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -555,7 +556,7 @@ async function createHarness(
   return { ...harness, dispatch };
 }
 
-async function createFormalReceiptHarness(options: { clock?: () => string; monotonicClock?: () => number; shortPermission?: boolean } = {}) {
+async function createFormalReceiptHarness(options: { clock?: () => string; monotonicClock?: () => number; shortPermission?: boolean; startupProofs?: boolean } = {}) {
   const h = await createHarness(options);
   const clock = options.clock ?? (() => NOW);
   const { digest: _digest, signature: _signature, ...root } = h.unsigned.resourceLease;
@@ -570,7 +571,8 @@ async function createFormalReceiptHarness(options: { clock?: () => string; monot
   const envelope = createSignedConversationEnvelope({ ...h.unsigned, permissionLease, resourceLease: lease }, h.identity, h.identity);
   const activation = signConversationActivation(buildConversationActivationPayload({ envelope,
     dispatchRef: dispatchEnvelopeArtifact(envelope).ref, commit: h.dispatch.activation.commit, issuedAt: NOW }), h.identity);
-  const log = new FileAuthorityCommitLog(path.join(h.root, "formal-executor"), h.artifacts, { clock });
+  const log = new FileAuthorityCommitLog(path.join(h.root, "formal-executor"), h.artifacts, { clock,
+    ...(options.startupProofs === true ? { integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 5)) } : {}) });
   onTestFinished(() => log.stopStorageMaintenance());
   const reopen = () => {
     const governor = new ExecutorResourceGovernor({ log, signer: h.identity, verifier: h.identity, guard: { assert() {} },
@@ -746,9 +748,28 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       ]);
       expect(batch).toEqual([{ ref: h.activation.ref, executorId: h.envelope.executorId, ownerKeyId: h.activation.signature.keyId }, undefined, undefined]);
       expect(read).toHaveBeenCalledTimes(1);
-      expect(await h.ledger.dataPlaneBindings(Array.from({ length: 64 }, () => ({ assignmentId: ASSIGNMENT_ID, use: "observe" as const })))).toHaveLength(64);
-      await expect(h.ledger.dataPlaneBindings(Array.from({ length: 65 }, () => ({ assignmentId: ASSIGNMENT_ID })))).rejects.toThrow("64");
+      expect(await h.ledger.dataPlaneBindings(Array.from({ length: 4096 }, () => ({ assignmentId: ASSIGNMENT_ID, use: "observe" as const })))).toHaveLength(4096);
+      await expect(h.ledger.dataPlaneBindings(Array.from({ length: 4097 }, () => ({ assignmentId: ASSIGNMENT_ID })))).rejects.toThrow("4096");
     } finally { read.mockRestore(); }
+  });
+
+  it("reuses recovered bindings across restarts until the assignment's own stream changes", async () => {
+    const h = await createFormalReceiptHarness({ startupProofs: true });
+    await h.ledger.dispatch(h.envelope, h.activation, ownerContext(ASSIGNMENT_ID, "executor.dispatch"));
+    const requests = [{ assignmentId: ASSIGNMENT_ID, use: "observe" as const }, { assignmentId: ASSIGNMENT_ID, use: "abort" as const }];
+    const binding = { ref: h.activation.ref, executorId: h.envelope.executorId, ownerKeyId: h.activation.signature.keyId };
+    expect(await h.ledger.dataPlaneBindings(requests)).toEqual([binding, binding]);
+    const get = vi.spyOn(h.artifacts, "get");
+    try {
+      // 重启后分派流没有新记录：沿用上次恢复的绑定，不重新归约、不再读取并验签分派信封。
+      expect(await h.reopen().ledger.dataPlaneBindings(requests)).toEqual([binding, binding]);
+      expect(get).not.toHaveBeenCalled();
+      // 分派流有了新记录（取代栅栏）：重新归约，主动使用的绑定随之失效。
+      await h.ledger.supersede(ASSIGNMENT_ID, { fenceSeq: 1, requestId: "binding-supersede" }, ownerContext(ASSIGNMENT_ID, "executor.supersede"));
+      get.mockClear();
+      expect(await h.reopen().ledger.dataPlaneBindings(requests)).toEqual([binding, undefined]);
+      expect(get).toHaveBeenCalled();
+    } finally { get.mockRestore(); }
   });
 
   it("keeps expired monotonic permissions expired across successful and failed receipt scans", async () => {
@@ -5172,19 +5193,19 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     }
 
     const owner = await createHarness();
-    expect(() =>
+    await expect(
       owner.journal.validateExecutorDispatchResult({
         v: 1,
         accepted: true,
         futureField: true,
       } as never),
-    ).toThrow("Accepted dispatch result");
-    expect(() =>
+    ).rejects.toThrow("Accepted dispatch result");
+    await expect(
       owner.journal.validateExecutorDispatchResult({
         v: 2,
         accepted: true,
       } as never),
-    ).toThrow("version must be 1");
+    ).rejects.toThrow("version must be 1");
     await expect(
       owner.journal.reconcileStarted(ASSIGNMENT_ID, {
         v: 1,
@@ -5339,7 +5360,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     };
     const authorityRevision =
       ((await wrongApplied.log.readAll()).at(-1)?.lsn ?? 0) + 1;
-    await wrongApplied.log.append([
+    const wrongAppliedRecords = [
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5383,7 +5404,14 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
           },
         },
       },
-    ]);
+    ];
+    await expect(wrongApplied.log.append(wrongAppliedRecords)).rejects.toThrow(
+      "Control applied record has no received predecessor",
+    );
+    // 正式写入口已拒绝；隔离写者用于继续验证已有损坏历史的冷读拒绝。
+    const rawResolution = new FileAuthorityCommitLog(wrongApplied.log.rootDir, wrongApplied.artifacts, { clock: () => NOW });
+    onTestFinished(() => rawResolution.stopStorageMaintenance());
+    await rawResolution.append(wrongAppliedRecords);
     await expect(wrongApplied.journal.currentState(RUN_ID)).rejects.toThrow(
       "missing its atomic authority facts",
     );

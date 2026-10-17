@@ -1,3 +1,4 @@
+import { verifyProtocolStep } from "@zhixing/core/protocol";
 import type {
   AuthorityCommitLog,
   PhysicalStorageStepRunner,
@@ -90,6 +91,9 @@ export class DataPlaneAssignmentInactiveError extends Error {
   }
 }
 
+/** 票据恢复单次绑定查询的票据数上限（与账本的批量上限一致）。 */
+const RECOVERY_BINDING_QUERY_LIMIT = 4096;
+
 export interface DataPlaneAssignmentBinding {
   readonly ref: ExecutionRef;
   readonly executorId: string;
@@ -160,7 +164,7 @@ export class DataPlaneTicketRegistry {
 
   async accept(input: unknown): Promise<DataPlaneTicket> {
     await this.maintain(undefined, 0);
-    const ticket = validateDataPlaneTicket(input, this.#verifier);
+    const ticket = (await verifyProtocolStep(() => validateDataPlaneTicket(input, this.#verifier)));
     if (ticket.executorId !== this.#executorId) {
       throw new TypeError("Data-plane ticket targets a different executor");
     }
@@ -432,13 +436,22 @@ export class DataPlaneTicketRegistry {
       let failed = false;
       let failure: unknown;
       const fail = (error: unknown) => { if (!failed) { failed = true; failure = error; } };
+      // 一次查询全部有效票据的分派绑定：账本只为新出现或有新记录的分派回放日志，不按批反复整遍回放。
+      let allBindings: (DataPlaneAssignmentBinding | undefined)[] | undefined;
+      if (this.#assignments.dataPlaneBindings) {
+        allBindings = [];
+        for (let offset = 0; offset < entries.length; offset += RECOVERY_BINDING_QUERY_LIMIT) {
+          const chunk = entries.slice(offset, offset + RECOVERY_BINDING_QUERY_LIMIT);
+          const result = await this.#assignments.dataPlaneBindings(chunk.map(entry => ({ assignmentId: entry.ticket.assignmentId,
+            use: entry.ticket.kind === "abort" ? "abort" as const : "observe" as const })));
+          if (result.length !== chunk.length) throw new Error("Assignment binding batch length mismatch");
+          allBindings.push(...result);
+        }
+      }
       try {
         for (let offset = 0; offset < entries.length && !failed; offset += 32) {
           const batch = entries.slice(offset, offset + 32);
-          const bindings = this.#assignments.dataPlaneBindings
-            ? await this.#assignments.dataPlaneBindings(batch.map(entry => ({ assignmentId: entry.ticket.assignmentId,
-              use: entry.ticket.kind === "abort" ? "abort" as const : "observe" as const }))) : undefined;
-          if (bindings && bindings.length !== batch.length) throw new Error("Assignment binding batch length mismatch");
+          const bindings = allBindings?.slice(offset, offset + batch.length);
           if (bindings) {
             const retirements = batch.flatMap((entry, index) => {
               const reason = this.#retirementReason(entry, bindings[index]);
@@ -750,14 +763,14 @@ export class DataPlaneTicketRegistry {
       current?.state ?? emptyProjection(),
       (state, logical, envelope) =>
         reduceTicketRegistry(
-          state,
+          state === current?.state ? cloneTicketProjection(state) : state,
           logical,
           envelope,
           this.#executorId,
           this.#verifier,
         ),
       () => ({ kind: "return", value: undefined }),
-      current ? { cursor: current.cursor } : {},
+      { createState: () => current?.state ?? emptyProjection(), ...(current ? { cursor: current.cursor } : {}) },
     );
     this.#projection = { state: transaction.state, cursor: transaction.cursor };
     return this.#projection;
@@ -778,18 +791,22 @@ export class DataPlaneTicketRegistry {
       current?.state ?? emptyProjection(),
       (state, logical, envelope) =>
         reduceTicketRegistry(
-          state,
+          state === current?.state ? cloneTicketProjection(state) : state,
           logical,
           envelope,
           this.#executorId,
           this.#verifier,
         ),
       decide,
-      current ? { cursor: current.cursor } : {},
+      { createState: () => current?.state ?? emptyProjection(), ...(current ? { cursor: current.cursor } : {}) },
     );
     this.#projection = { state: transaction.state, cursor: transaction.cursor };
     return transaction;
   }
+}
+
+function cloneTicketProjection(state: TicketRegistryProjection): TicketRegistryProjection {
+  return { accepted: new Map(state.accepted), retired: new Map(state.retired), retiredThrough: state.retiredThrough };
 }
 
 function emptyProjection(): TicketRegistryProjection {

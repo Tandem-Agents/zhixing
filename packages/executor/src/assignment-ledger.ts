@@ -1,3 +1,4 @@
+import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { AssignmentLeaseClock, leaseClockStream, leaseClockRecord, readLeaseClockRecord, leaseTime } from "./assignment-lease-clock.js";
 import { Buffer } from "node:buffer";
 import { StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
@@ -16,6 +17,7 @@ import {
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
   type RebuildableDurableProjectionIndex,
+  projectionCheckpointKey,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
@@ -144,7 +146,7 @@ import {
   type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
 import type { ExecutorAssignmentResourceCoordinator } from "./resource-governor.js";
-import type { DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
+import type { DataPlaneAssignmentBinding, DataPlaneTicketRegistry } from "./data-plane-ticket-registry.js";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 
 type ConversationEnvelope = Extract<
@@ -570,6 +572,14 @@ type AbortCause =
 
 const DEFAULT_MAX_PENDING_INTERACTIONS = 32;
 const DEFAULT_MAX_CACHED_ASSIGNMENTS = 64;
+/** 一次绑定查询的分派数上限（票据恢复一次查询全部有效票据）。 */
+export const DATA_PLANE_BINDING_BATCH_LIMIT = 4096;
+
+/** 票据恢复保存的分派绑定：观察用与主动使用（中止等）各一份。 */
+interface StoredDataPlaneBinding {
+  readonly observe?: DataPlaneAssignmentBinding;
+  readonly active?: DataPlaneAssignmentBinding;
+}
 const MAX_WIDTH_CANONICAL_TIME = "+275760-09-13T00:00:00.000Z";
 
 /** Durable executor-side assignment protocol shared by conversation and job execution. */
@@ -627,16 +637,7 @@ export class ConversationAssignmentLedger implements
     this.#dataPlaneTickets = options.dataPlaneTickets;
     this.#assignmentRecordV2Writes =
       options.assignmentRecordV2Writes ?? false;
-    this.#jobRecoveryIndex = this.#log.durableProjection({
-      projectionId: "executor-job-interaction-obligations",
-      reducerVersion: 5,
-      reduce: (envelope, current) =>
-        reduceJobRecoveryIndex(
-          envelope,
-          current,
-          this.#verifier,
-        ),
-    });
+    this.#jobRecoveryIndex = registerExecutorJobRecoveryProjection(this.#log, this.#verifier);
     this.#maxPendingInteractions =
       options.maxPendingInteractions ?? DEFAULT_MAX_PENDING_INTERACTIONS;
     if (
@@ -668,7 +669,7 @@ export class ConversationAssignmentLedger implements
   async dispatch(
     ...[rawEnvelope, rawActivation, ctx]: RunDispatchArguments
   ): Promise<DispatchResult> {
-    const controlBinding = validateDispatchControlBinding(rawEnvelope, this.#verifier);
+    const controlBinding = await verifyProtocolStep(() => validateDispatchControlBinding(rawEnvelope, this.#verifier));
     const assignmentId = assertDispatchIdentity(rawEnvelope, this.#executorId);
     if (
       controlBinding.assignmentId !== assignmentId ||
@@ -702,23 +703,25 @@ export class ConversationAssignmentLedger implements
     let activationPayload: AnyAssignmentActivationPayload;
     try {
       envelope = rawEnvelope.execution === "conversation"
-        ? validateConversationEnvelope(rawEnvelope, this.#verifier)
-        : validateJobEnvelope(rawEnvelope, this.#verifier);
+        ? await verifyProtocolStep(() => validateConversationEnvelope(rawEnvelope, this.#verifier))
+        : await verifyProtocolStep(() => validateJobEnvelope(rawEnvelope, this.#verifier));
       activation = snapshot(rawActivation, "Assignment activation proof");
-      activationPayload = envelope.execution === "conversation"
-        ? validateConversationActivation({
-            envelope,
+      const validatedEnvelope = envelope;
+      activationPayload = validatedEnvelope.execution === "conversation"
+        ? await verifyProtocolStep(() => validateConversationActivation({
+            envelope: validatedEnvelope,
             activation: activation as AssignmentActivationProof<"conversation">,
             dispatchRef: artifact.ref,
             verifier: this.#verifier,
-          })
-        : validateJobActivation({
-            envelope,
+          }))
+        : await verifyProtocolStep(() => validateJobActivation({
+            envelope: validatedEnvelope,
             activation: activation as AssignmentActivationProof<"job">,
             dispatchRef: artifact.ref,
             verifier: this.#verifier,
-          });
+          }));
     } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
       const authorityError = invalidDispatchError(error);
       return this.#rejectBeforeReceived(
         assignmentId,
@@ -887,7 +890,8 @@ export class ConversationAssignmentLedger implements
                 retryable: false,
               };
             }
-          } catch {
+          } catch (error) {
+            rethrowUnloadedProtocolIdentity(error);
             permissionError = {
               code: "invalid",
               message: "Permission snapshot is invalid",
@@ -1164,7 +1168,7 @@ export class ConversationAssignmentLedger implements
   async abortWithTicket(
     input: ExecutionAbortRequest,
   ): Promise<SurfaceAbortDisposition> {
-    const request = validateExecutionAbortRequest(input, this.#verifier);
+    const request = await verifyProtocolStep(() => validateExecutionAbortRequest(input, this.#verifier));
     const ticketDigest = dataPlaneTicketDigest(request.ticket);
     const existing = await this.#select(request.assignmentId, (state) => ({
       matching: state.aborts.some(
@@ -1480,10 +1484,10 @@ export class ConversationAssignmentLedger implements
     outcome: InteractionOutcome,
   ): Promise<InteractionMirrorEntry> {
     assertIdentifier(requestId, "Interaction requestId");
-    const validatedOutcome = validateAssignmentInteractionOutcome(
+    const validatedOutcome = await verifyProtocolStep(() => validateAssignmentInteractionOutcome(
       outcome,
       this.#verifier,
-    );
+    ));
     const body = snapshot(
       {
         v: 1 as const,
@@ -1543,14 +1547,14 @@ export class ConversationAssignmentLedger implements
     if (transaction.value.existing) {
       return mirrorEntry(transaction.value.existing);
     }
-    return validateAssignmentInteractionMirrorEntry({
+    return await verifyProtocolStep(() => validateAssignmentInteractionMirrorEntry({
       ordinal: transaction.value.ordinal!,
       seq: transaction.value.recordSeq!,
       requestId,
       kind: "allow-once",
       outcome: validatedOutcome,
       at: transaction.commit!.at,
-    }, this.#verifier);
+    }, this.#verifier));
   }
 
   async jobInteractionOutcome(
@@ -1719,7 +1723,7 @@ export class ConversationAssignmentLedger implements
   }): Promise<ChannelInteractionAnswerPreparation> {
     assertIdentifier(input.assignmentId, "Channel answer assignmentId");
     assertIdentifier(input.requestId, "Channel answer requestId");
-    const grant = validateChannelInteractionGrant(input.grant, this.#verifier);
+    const grant = await verifyProtocolStep(() => validateChannelInteractionGrant(input.grant, this.#verifier));
     const at = input.at ?? this.#clock();
     const selected = await this.#select(input.assignmentId, (state) => ({
       ref: state.received?.body.activation.ref,
@@ -1741,7 +1745,7 @@ export class ConversationAssignmentLedger implements
         requested: selected.requested,
       },
     );
-    const outcome = validateAssignmentInteractionOutcome({
+    const outcome = await verifyProtocolStep(() => validateAssignmentInteractionOutcome({
       t: "answered",
       authority: { via: "channel-grant", grant },
       decision: grant.decision,
@@ -1750,7 +1754,7 @@ export class ConversationAssignmentLedger implements
         channelInteractionConfirmationDecision(grant.decision),
       ),
       by: channelResponderPrincipal(grant.responder),
-    }, this.#verifier) as Extract<
+    }, this.#verifier)) as Extract<
       InteractionOutcome,
       { readonly t: "answered" }
     >;
@@ -1776,25 +1780,70 @@ export class ConversationAssignmentLedger implements
     return this.#select(assignmentId, state => this.#dataPlaneBinding(state, use));
   }
 
-  /** Bounded recovery read: one verified prefix, no live cache/deadline mutations. */
+  /**
+   * Bounded recovery read: one verified prefix, no live cache/deadline mutations.
+   *
+   * 分派的绑定只取决于该分派自己的流：上次恢复保存的绑定在该流此后没有新记录时依然成立，直接
+   * 沿用；只有新出现或有新记录的分派一次性从头归约。已验签的旧分派不在每次启动重复验签，恢复
+   * 成本随最近活动而不随历史与有效票据数增长。
+   */
   async dataPlaneBindings(requests: readonly { readonly assignmentId: string; readonly use?: DataPlaneTicketUse }[]) {
-    if (requests.length > 64) throw new RangeError("Data-plane binding batch exceeds 64 requests");
+    if (requests.length > DATA_PLANE_BINDING_BATCH_LIMIT) {
+      throw new RangeError(`Data-plane binding batch exceeds ${DATA_PLANE_BINDING_BATCH_LIMIT} requests`);
+    }
     for (const request of requests) assertIdentifier(request.assignmentId, "Data-plane assignment id");
     if (requests.length === 0) return [];
     return this.#operations.run(async () => {
-      const states = new Map(requests.map(request => [assignmentStream(request.assignmentId), emptyProjection(request.assignmentId)]));
-      const read = await this.#log.readProjection(states, async (candidate, record, commit) => {
-        if (record.stream === leaseClockStream(this.#executorId)) {
-          for (const state of candidate.values()) await this.#reduce(state, record, commit);
+      const wanted = [...new Set(requests.map(request => request.assignmentId))];
+      const key = this.#bindingCheckpointKey();
+      const saved = await this.#log.loadProjectionCheckpoint?.<ReadonlyMap<string, StoredDataPlaneBinding>>(key);
+      const known = saved && saved.state instanceof Map ? saved.state : undefined;
+      const bindings = new Map<string, StoredDataPlaneBinding>();
+      let cursor: ProjectionCursor | undefined;
+      const reusable = known ? wanted.filter(id => known.has(id)) : [];
+      if (saved && known && reusable.length > 0) {
+        // 只找出检查点之后有新记录的分派；不归约、不验签。
+        const tail = await this.#log.readProjection<Set<string>, unknown>(new Set(), (touched, record) => {
+          touched.add(record.stream);
+          return touched;
+        }, { streams: reusable.map(assignmentStream), cursor: saved.cursor });
+        cursor = tail.cursor;
+        for (const id of reusable) if (!tail.state.has(assignmentStream(id))) bindings.set(id, known.get(id)!);
+      }
+      const fresh = wanted.filter(id => !bindings.has(id));
+      if (fresh.length > 0) {
+        const clock = leaseClockStream(this.#executorId);
+        const states = new Map(fresh.map(id => [assignmentStream(id), emptyProjection(id)]));
+        const read = await this.#log.readProjection(states, async (candidate, record, commit) => {
+          if (record.stream === clock) {
+            // 时钟记录只解析一次，再按与 #reduce 相同的规则施加到每个分派状态。
+            const next = readLeaseClockRecord(record.body, this.#executorId);
+            for (const state of candidate.values()) applyLeaseClock(state, next);
+            return candidate;
+          }
+          const state = candidate.get(record.stream);
+          if (!state) throw corruptLedger("Binding batch received an unselected stream");
+          await this.#reduce(state, record, commit);
           return candidate;
+        }, { streams: [...states.keys(), clock] });
+        cursor ??= read.cursor;
+        for (const id of fresh) {
+          const state = read.state.get(assignmentStream(id))!;
+          bindings.set(id, { observe: this.#dataPlaneBinding(state, "observe"), active: this.#dataPlaneBinding(state) });
         }
-        const state = candidate.get(record.stream);
-        if (!state) throw corruptLedger("Binding batch received an unselected stream");
-        await this.#reduce(state, record, commit);
-        return candidate;
-      }, { streams: [...states.keys(), leaseClockStream(this.#executorId)] });
-      return requests.map(request => this.#dataPlaneBinding(read.state.get(assignmentStream(request.assignmentId))!, request.use));
+      }
+      // 以较早的那个游标保存：沿用的绑定截至该游标成立，从头归约的绑定此后若再有记录，下次即被识别并重算。
+      if (cursor) await this.#log.saveProjectionCheckpoint?.(key, cursor, bindings);
+      return requests.map(request => {
+        const binding = bindings.get(request.assignmentId)!;
+        return request.use === "observe" ? binding.observe : binding.active;
+      });
     });
+  }
+
+  /** 绑定检查点的键带归约与绑定规则的指纹：规则改变后旧绑定不再被沿用。 */
+  #bindingCheckpointKey(): string {
+    return `${projectionCheckpointKey("executor-data-plane-bindings", 1, this.#reduce, this.#dataPlaneBinding)}:${this.#executorId}`;
   }
 
   #dataPlaneBinding(state: LedgerProjection, use?: DataPlaneTicketUse) {
@@ -2186,7 +2235,7 @@ export class ConversationAssignmentLedger implements
     const resolved: InteractionMirrorEntry[] = [];
     if (transaction.commit) {
       resolved.push(
-        ...transaction.value.appended.map((item) =>
+        ...await verifyProtocolStep(() => transaction.value.appended.map((item) =>
           validateAssignmentInteractionMirrorEntry({
             ordinal: item.ordinal,
             seq: item.recordSeq,
@@ -2195,7 +2244,7 @@ export class ConversationAssignmentLedger implements
             outcome: item.outcome,
             at: transaction.commit!.at,
           }, this.#verifier),
-        ),
+        )),
       );
     }
     return { pending: transaction.value.pending, resolved };
@@ -2326,10 +2375,10 @@ export class ConversationAssignmentLedger implements
       throw new Error("Assignment cannot seal a conversation result before started");
     }
     const envelopeBytes = await this.#artifacts.get(state.received.body.envelope.ref);
-    const envelope = validateConversationEnvelope(
+    const envelope = await verifyProtocolStep(() => validateConversationEnvelope(
       JSON.parse(Buffer.from(envelopeBytes).toString("utf8")) as ConversationEnvelope,
       this.#verifier,
-    );
+    ));
     const staged = state.stagedMutations;
     const runRecordDependencies: ArtifactRef[] = [];
     if (isReferenceContainer(input.runRecord)) {
@@ -2423,10 +2472,10 @@ export class ConversationAssignmentLedger implements
       throw new Error("Assignment cannot seal a job result before started");
     }
     const envelopeBytes = await this.#artifacts.get(state.received.body.envelope.ref);
-    const envelope = validateJobEnvelope(
+    const envelope = await verifyProtocolStep(() => validateJobEnvelope(
       JSON.parse(Buffer.from(envelopeBytes).toString("utf8")) as JobEnvelope,
       this.#verifier,
-    );
+    ));
     if (canonicalize(input.fence) !== canonicalize(envelope.work.fence)) {
       throw new TypeError("Job seal fence does not match the durable dispatch");
     }
@@ -2525,8 +2574,8 @@ export class ConversationAssignmentLedger implements
     const bytes = await this.#artifacts.get(received.envelope.ref);
     const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
     const envelope = raw.execution === "conversation"
-      ? validateConversationEnvelope(raw, this.#verifier)
-      : validateJobEnvelope(raw, this.#verifier);
+      ? await verifyProtocolStep(() => validateConversationEnvelope(raw, this.#verifier))
+      : await verifyProtocolStep(() => validateJobEnvelope(raw, this.#verifier));
     const capability = envelope.capabilities.find((candidate) =>
       received.activation.capIds.includes(candidate.capId) &&
       candidate.assignmentId === assignmentId &&
@@ -2976,8 +3025,8 @@ export class ConversationAssignmentLedger implements
       throw corruptLedger("Assignment envelope does not bind its ledger");
     }
     return raw.execution === "conversation"
-      ? validateConversationEnvelope(raw, this.#verifier)
-      : validateJobEnvelope(raw, this.#verifier);
+      ? await verifyProtocolStep(() => validateConversationEnvelope(raw, this.#verifier))
+      : await verifyProtocolStep(() => validateJobEnvelope(raw, this.#verifier));
   }
 
   async cancelProof(assignmentId: string): Promise<CancelProofBody | undefined> {
@@ -3803,16 +3852,13 @@ export class ConversationAssignmentLedger implements
     receiptRetirement = false,
   ): Promise<LedgerProjection> => {
     if (record.stream === leaseClockStream(this.#executorId)) {
-      const next = readLeaseClockRecord(record.body, this.#executorId);
-      if (next < state.leaseTimeFrontier) throw corruptLedger("Executor lease time frontier regressed");
-      state.leaseTimeFrontier = next;
-      state.leaseClockActivated = true;
+      applyLeaseClock(state, readLeaseClockRecord(record.body, this.#executorId));
       return state;
     }
     if (record.stream !== assignmentStream(state.assignmentId)) {
       throw corruptLedger("Assignment projection received a different stream");
     }
-    const entry = validateAssignmentEntry(record.body, this.#verifier);
+    const entry = await verifyProtocolStep(() => validateAssignmentEntry(record.body, this.#verifier));
     if (entry.recordSeq !== state.lastSeq + 1) {
       throw corruptLedger("Assignment record sequence is not contiguous");
     }
@@ -3821,8 +3867,8 @@ export class ConversationAssignmentLedger implements
       const bytes = await this.#artifacts.get(entry.body.envelope.ref);
       const raw = JSON.parse(Buffer.from(bytes).toString("utf8")) as AssignmentEnvelope;
       const envelope = raw.execution === "conversation"
-        ? validateConversationEnvelope(raw, this.#verifier)
-        : validateJobEnvelope(raw, this.#verifier);
+        ? await verifyProtocolStep(() => validateConversationEnvelope(raw, this.#verifier))
+        : await verifyProtocolStep(() => validateJobEnvelope(raw, this.#verifier));
       receivedEnvelope = envelope;
       if (requiresExecutorResourceReceipt(envelope.resourceLease)) {
         if (!this.#resources) {
@@ -3861,21 +3907,22 @@ export class ConversationAssignmentLedger implements
       ) {
         throw corruptLedger("received assignment does not bind durable owner control");
       }
+      const receivedActivation = entry.body.activation;
       if (envelope.execution === "conversation") {
-        validateConversationActivation({
+        await verifyProtocolStep(() => validateConversationActivation({
           envelope,
           activation:
-            entry.body.activation as AssignmentActivationProof<"conversation">,
+            receivedActivation as AssignmentActivationProof<"conversation">,
           dispatchRef: artifact.ref,
           verifier: this.#verifier,
-        });
+        }));
       } else {
-        validateJobActivation({
+        await verifyProtocolStep(() => validateJobActivation({
           envelope,
-          activation: entry.body.activation as AssignmentActivationProof<"job">,
+          activation: receivedActivation as AssignmentActivationProof<"job">,
           dispatchRef: artifact.ref,
           verifier: this.#verifier,
-        });
+        }));
       }
     }
     if (entry.body.t === "control-lease-renewed") {
@@ -3888,7 +3935,8 @@ export class ConversationAssignmentLedger implements
       });
     }
     if (entry.body.t === "halted") {
-      const proof = validateCancelProof(entry.body.proof, this.#verifier);
+      const rawProof = entry.body.proof;
+      const proof = await verifyProtocolStep(() => validateCancelProof(rawProof, this.#verifier));
       if (proof.executorId !== this.#executorId) {
         throw corruptLedger("Cancel proof names a different executor");
       }
@@ -5238,6 +5286,13 @@ function assertFence(
   assertIdentifier(value.requestId, `${label} requestId`);
 }
 
+/** 施加一条执行器租约时间前沿：只能前进，此后的旧式租约写入一律拒绝。 */
+function applyLeaseClock(state: LedgerProjection, next: number): void {
+  if (next < state.leaseTimeFrontier) throw corruptLedger("Executor lease time frontier regressed");
+  state.leaseTimeFrontier = next;
+  state.leaseClockActivated = true;
+}
+
 function corruptLedger(message: string): AuthorityStorageError {
   return new AuthorityStorageError("invalid-authority-record", message);
 }
@@ -5251,3 +5306,17 @@ function snapshot<T>(value: T, label: string): T {
 }
 
 export { ConversationAssignmentLedger as AssignmentLedger };
+
+export function registerExecutorJobRecoveryProjection(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier) {
+  return log.durableProjection({
+      projectionId: "executor-job-interaction-obligations",
+      inputs: { families: ["assignment:"] },
+      reducerVersion: 5,
+      reduce: (envelope, current) =>
+        reduceJobRecoveryIndex(
+          envelope,
+          current,
+          verifier,
+        ),
+    });
+}
