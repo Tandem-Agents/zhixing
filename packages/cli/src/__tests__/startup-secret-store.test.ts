@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { FileLockBusyError } from "@zhixing/core/persistence";
+import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import { writeCredentials } from "@zhixing/providers";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -9,6 +11,8 @@ import { checkStartupConfiguration } from "../runtime/startup-application.js";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
+import { createLocalConfigurationApplication } from "../serve/local-configuration-application.js";
+import { CredentialExposureAuthority } from "../serve/credential-exposure-authority.js";
 
 class MemoryStore implements SecretStorePort {
   readonly values = new Map<string, string>();
@@ -53,6 +57,40 @@ class MemoryStore implements SecretStorePort {
 }
 
 describe("startup SecretStore boundary", () => {
+  it.each([
+    new FileLockBusyError('synthetic-authority'),
+    new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 25 }),
+  ])('reports a blocked configuration authority without claiming the credential store is broken: %s', async error => {
+    const homeDir = await createTempDir('startup-preparation-unavailable');
+    await writeFile(path.join(homeDir, 'config.jsonc'), JSON.stringify({ llm: { main: { provider: 'deepseek', model: 'deepseek-chat' } } }));
+    const edit = vi.fn(async () => ({ kind: 'non-tty' as const }));
+    const result = await checkStartupConfiguration({ homeDir, mode: 'repl', secretStore: new MemoryStore(), edit,
+      configuration: { read: async () => { throw error; }, edit: async () => { throw Error('must not edit'); } } });
+    expect(result).toMatchObject({ kind: 'read-unavailable', message: expect.stringContaining('稍后重试') });
+    expect(edit).not.toHaveBeenCalled();
+  });
+  it("a reused local configuration port rechecks committed exposure before returning credentials", async () => {
+    const homeDir = await createTempDir("configuration-fresh-policy"), store = new MemoryStore();
+    const device = await DeviceKey.generate(); await persistDeviceKey(store, device);
+    const writer = await FileMeshBootstrapStore.open(homeDir, device, { secretStore: store });
+    try {
+      await writer.initializeLocalHome({ key: device,
+        identity: enrollDeviceIdentity(device, { displayName: "synthetic", platform: "linux", enrolledAt: "2026-10-17T00:00:00.000Z" }),
+        roles: ["anchor", "executor"], homeId: "configuration-fresh-policy", at: "2026-10-17T00:00:00.000Z" });
+      const application = createLocalConfigurationApplication({ homeDir, configPath: path.join(homeDir, "config.jsonc"), store });
+      const initial = await application.read();
+      await application.edit(initial, { config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
+        credentials: { providers: { deepseek: { apiKey: "synthetic-only" } } } });
+      expect((await application.read()).credentials.providers?.deepseek?.apiKey).toBe("synthetic-only");
+      const exposure = new CredentialExposureAuthority({ deviceId: device.deviceId, log: writer.authorityLog(), secretStore: store });
+      const record = (await exposure.publishActiveBindings({ bindings: [{
+        bindingId: `user-alias:${device.deviceId}:credential-provider-deepseek`, service: "provider-deepseek", verification: "user-alias", revision: 1,
+      }], markedAt: "2026-10-17T00:00:00.000Z" })).records[0]!;
+      await writer.authorityLog().append([{ stream: "exposure", body: { ...record, state: "compromised", markedAt: "2026-10-17T00:01:00.000Z" } }]);
+      expect((await application.read()).credentials.providers?.deepseek).toBeUndefined();
+    } finally { await writer.stopStorageMaintenance(); }
+  }, 60_000);
+
   it("closes the read-only trust and exposure guard after a trusted-home configuration read or failure", async () => {
     const homeDir = await createTempDir("startup-trusted-read-guard");
     const secrets = new MemoryStore();

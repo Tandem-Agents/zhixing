@@ -1,6 +1,7 @@
 /** Node 配置保存/应用编排，复用 Configuration、Secret、Channel 与 MCP owners。 */
 import type { ChannelStatus } from "@zhixing/core/channels";
-import { loadConfig, loadConfigurationSnapshot, editConfiguration } from "@zhixing/providers/configuration";
+import { loadConfig } from "@zhixing/providers/configuration";
+import { createLocalConfigurationApplication } from "../serve/local-configuration-application.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { canonicalize } from "@zhixing/core/protocol";
 import { ChannelConfiguration } from "./extensions/channel-configuration.js";
@@ -125,9 +126,9 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   const secretStore = deps.secretStore ?? createPlatformSecretStore({ homeDir });
 
   // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
-  const sourceOptions = { configPath, store: secretStore, records: deps.configurationRecords,
-    processIdentityResolver: deps.processIdentityResolver };
-  const { config, credentials } = await loadConfigurationSnapshot(sourceOptions);
+  const localConfiguration = createLocalConfigurationApplication({ homeDir, configPath, store: secretStore,
+    records: deps.configurationRecords, processIdentityResolver: deps.processIdentityResolver });
+  const { config, credentials } = await localConfiguration.read();
   const managed = opts.kind === "config" && deps.readExtensions ? await deps.readExtensions() : undefined;
   const channelCatalog = managed ? listSupportedChannels(managed) : undefined;
   const channelSetup = managed && deps.readExtensionLocalSetup ? await deps.readExtensionLocalSetup() : undefined;
@@ -168,7 +169,7 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
         const retryIds = ids.filter((id) => pendingIds.has(id) && result.channelIntents?.[id] === undefined &&
           canonicalize(config.messaging?.[id] ?? null) === canonicalize(result.config.messaging?.[id] ?? null) &&
           canonicalize(credentials.channels?.[id] ?? null) === canonicalize(result.credentials.channels?.[id] ?? null));
-        await editConfiguration({ config, credentials }, result, { ...sourceOptions,
+        await localConfiguration.edit({ config, credentials }, result, {
           prepare: channelStates ? (store, source) => configuration.preparePublications(store, ids,
             source.config, { channels: source.credentials.channels }, channelStates, result.channelIntents, retryIds) : undefined,
         });
@@ -180,9 +181,9 @@ export async function editRuntimeConfiguration(deps: ConfigurationApplicationDep
   if (opts.mcpApplication) {
     const application = opts.mcpApplication({
       save: async (edit) => {
-        await editConfiguration({ config, credentials },
+        await localConfiguration.edit({ config, credentials },
           { config: { mcp: { servers: edit.servers } }, credentials: { mcp: edit.credentials } },
-          { ...sourceOptions, scope: "mcp" });
+          { scope: "mcp" });
       },
       activate: async () => {
         if (deps.state.activeTurnPromise) await deps.state.activeTurnPromise.catch(() => {});

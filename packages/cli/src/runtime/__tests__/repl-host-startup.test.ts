@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { connectReplHost } from "../repl-host-startup.js";
+import { CoreHostUnavailableError } from "../core-host-connection.js";
 import type { StartupCheckResult } from "../../startup.js";
 
 function fixture() {
@@ -11,6 +12,17 @@ function fixture() {
 }
 
 describe("REPL Host startup", () => {
+  it('preserves an in-progress upgrade instead of probing credentials, and permits an explicit retry', async () => {
+    const f = fixture();
+    const error = new CoreHostUnavailableError('still preparing', '等待本机服务就绪超时。', true);
+    f.connection.ensure.mockRejectedValueOnce(error);
+    f.checkConfiguration.mockResolvedValue({ kind: 'secret-store-error', filePath: 'synthetic', message: 'authority busy' });
+    expect(await connectReplHost(f)).toEqual({ kind: 'unavailable', error });
+    expect(f.checkConfiguration).not.toHaveBeenCalled();
+    expect(await connectReplHost(f)).toEqual({ kind: 'connected' });
+    expect(f.connection.ensure).toHaveBeenCalledTimes(2);
+    expect(f.checkConfiguration).not.toHaveBeenCalled();
+  });
   it.each(['before', 'ensure-fails', 'ensure-returns', 'configuration'] as const)('does not enter another startup phase after cancellation at %s', async at => {
     const f = fixture(), abort = new AbortController();
     if (at === 'before') abort.abort();

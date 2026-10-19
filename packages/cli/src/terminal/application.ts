@@ -647,7 +647,7 @@ class TerminalApplication {
           });
           this.#abort.signal.throwIfAborted();
           if (result.kind === 'ready' || result.kind === 'cancelled') return result.kind;
-          throw Error(result.kind === 'secret-store-error' ? '本机凭据仓库不可用。' : '设备配置尚未完成。');
+          throw Error(result.kind === 'read-unavailable' ? result.message : result.kind === 'secret-store-error' ? '本机凭据仓库不可用。' : '设备配置尚未完成。');
         },
       });
     } catch {
@@ -693,7 +693,7 @@ class TerminalApplication {
     this.#abort.signal.throwIfAborted();
     if (result.kind === 'configuration') {
       if (result.result.kind === 'cancelled') { void this.#close(0, 'startup-cancelled'); return; }
-      const message = result.result.kind === 'secret-store-error'
+      const message = result.result.kind === 'read-unavailable' ? result.result.message : result.result.kind === 'secret-store-error'
         ? '本机凭据仓库当前不可用。请先恢复系统凭据访问，再重试。'
         : '本机配置未就绪。请修复配置后重试，或退出查看运行记录。';
       await this.#unavailable(message); return;

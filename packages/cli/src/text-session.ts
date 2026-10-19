@@ -362,7 +362,7 @@ export function presentTextStartupResult(result: Exclude<StartupCheckResult, { k
   } else if (result.kind === 'semantic-error') {
     output.line(`[配置错误] ${result.filePath}`);
     for (const issue of result.issues) output.line(`${issue.field}：${issue.reason}\n修复：${issue.fix}`);
-  } else output.line(`[${result.kind === 'secret-store-error' ? '秘密存储不可用' : '配置错误'}] ${result.message}\n${result.filePath}`);
+  } else output.line(`[${result.kind === 'read-unavailable' ? '配置暂不可读' : result.kind === 'secret-store-error' ? '秘密存储不可用' : '配置错误'}] ${result.message}\n${result.filePath}`);
   return 2;
 }
 

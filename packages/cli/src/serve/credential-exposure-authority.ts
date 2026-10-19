@@ -50,6 +50,20 @@ export class CredentialExposureAuthority {
     return projectCredentialExposures(await readExposureRecords(this.#index, { state: "compromised" })).rotationRequired;
   }
 
+  /** Configuration generations name logical entries; capability publication
+   * names the current device's alias and service. Check both current and legacy
+   * representations without changing the exact route authorization policy. */
+  async assertConfigurationRoute(kind: "provider" | "channel" | "mcp", id: string): Promise<void> {
+    if (!["provider", "channel", "mcp"].includes(kind) || typeof id !== "string" || !id || id.trim() !== id || /[\u0000-\u001f\u007f]/u.test(id)) throw new TypeError("Configuration credential route is invalid");
+    const logical = `credential-${kind}-${id}`;
+    await this.options.log.transactDurableProjection<never, void>(CREDENTIAL_EXPOSURE_PROJECTION_ID, async current => {
+      for (const [bindingId, service] of [[`user-alias:${this.options.deviceId}:${logical}`, `${kind}-${id}`], [logical, kind]]) {
+        await assertIndexedCredentialRoute(current, { deviceId: this.options.deviceId, bindingId: bindingId!, service: service! });
+      }
+      return { kind: "return", value: undefined };
+    });
+  }
+
   async publishActiveBindings(input: {
     readonly bindings: readonly CredentialBindingDescriptor[];
     readonly markedAt: string;

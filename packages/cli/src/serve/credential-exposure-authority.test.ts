@@ -10,6 +10,26 @@ import {
 } from "./credential-exposure-authority.js";
 
 describe("credential exposure authority", () => {
+  it.each(["provider", "channel", "mcp"] as const)("configuration %s checks both the published local alias and legacy logical route", async kind => {
+    const root = await createTempDir("local-configuration-route");
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")));
+    const authority = new CredentialExposureAuthority({ deviceId: "local", log, secretStore: new MemorySecretStore() });
+    try {
+      for (const legacy of [false, true]) {
+        const id = legacy ? "legacy" : "current";
+        const projection = await authority.publishActiveBindings({ bindings: [{
+          bindingId: legacy ? `credential-${kind}-${id}` : `user-alias:local:credential-${kind}-${id}`,
+          service: legacy ? kind : `${kind}-${id}`, verification: "user-alias", revision: 1,
+        }], markedAt: "2026-10-17T00:00:00.000Z" });
+        const record = projection.records.find(record => record.service === (legacy ? kind : `${kind}-${id}`))!;
+        await authority.assertConfigurationRoute(kind, id);
+        await log.append([{ stream: "exposure", body: { ...record, state: "compromised", markedAt: "2026-10-17T00:01:00.000Z" } }]);
+        await expect(authority.assertConfigurationRoute(kind, id)).rejects.toThrow(/blocked|rotated/i);
+        await authority.assertConfigurationRoute(kind, "unrelated");
+      }
+    } finally { await log.stopStorageMaintenance(); }
+  });
+
   it("forwards the internal integrity key without treating it as a remote credential route", async () => {
     const root = await createTempDir("integrity-key-exposure-boundary");
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")));

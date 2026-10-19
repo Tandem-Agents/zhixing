@@ -1,25 +1,24 @@
 /** Node 首配检查、owner 保存及重读；终端只提供编辑回调。 */
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core/paths";
-import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { SecretStorePort } from "@zhixing/core/contracts";
+import { FileLockBusyError } from "@zhixing/core/persistence";
+import { StorageMaintenanceAdmissionError } from "@zhixing/core/resources";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import {
   ConfigSchemaError,
   CredentialsSchemaError,
   getGlobalConfigPath,
   loadConfig,
-  loadConfigurationSnapshot,
 
   validateConfigSemantics,
-  editConfiguration,
   type CredentialStoreCoordinator,
   type ConfigSemanticIssue,
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing/providers/configuration";
 import { createPlatformSecretStore } from "@zhixing/secrets";
-import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
-import { CredentialExposureAuthority } from "../serve/credential-exposure-authority.js";
+import type { LocalConfigurationPort } from "../serve/local-configuration-application.js";
 import {
   projectRuntimeSecrets,
   type RuntimeSecretProjections,
@@ -58,10 +57,13 @@ export type StartupCheckResult =
   | { kind: "cancelled" }
   | { kind: "schema-error"; filePath: string; message: string }
   | { kind: "secret-store-error"; filePath: string; message: string }
+  | { kind: "read-unavailable"; filePath: string; message: string }
   | { kind: "semantic-error"; filePath: string; issues: ConfigSemanticIssue[] }
   | { kind: "non-tty"; missingLabels: string[] };
 
 export interface StartupApplicationOptions {
+  /** Trusted local Configuration application; available without a Host. */
+  configuration?: LocalConfigurationPort;
   processIdentityResolver?: import('@zhixing/core/persistence').FileLockOptions['processIdentityResolver'];
   records?: import("@zhixing/core/logging").LogRecordPort;
   /** 入口固定的数据根；配置文件可单独指定。 */
@@ -111,6 +113,7 @@ export async function checkStartupConfiguration(
   if (initialIssues.length > 0) return { kind: "semantic-error", filePath: configPath, issues: initialIssues };
 
   let secretStore: SecretStorePort & CredentialStoreCoordinator;
+  let configuration: LocalConfigurationPort;
   try {
     secretStore =
       options.secretStore ??
@@ -123,22 +126,21 @@ export async function checkStartupConfiguration(
         message: `SecretStore 当前状态：${secretState}`,
       };
     }
-    const preparedCredentials = await withCredentialReadGuard(credentialsHomeDir, secretStore, credentialReadGuard => loadConfigurationSnapshot({
-      configPath,
-      store: secretStore,
-      records: options.records,
+    configuration = options.configuration ?? (await import("../serve/local-configuration-application.js")).createLocalConfigurationApplication({
+      homeDir: credentialsHomeDir, configPath, store: secretStore, records: options.records,
       processIdentityResolver: options.processIdentityResolver,
-      legacyHomeDir: credentialsHomeDir,
-      ...(credentialReadGuard
-        ? { authorizeCredentialRead: credentialReadGuard }
-        : {}),
-    }));
+    });
+    const preparedCredentials = await configuration.read();
     credentials = preparedCredentials.credentials;
     config = preparedCredentials.config;
     credentialGeneration = preparedCredentials.generation;
   } catch (err) {
     if (err instanceof CredentialsSchemaError) {
       return { kind: "schema-error", filePath: err.filePath, message: err.message };
+    }
+    if (err instanceof FileLockBusyError || err instanceof StorageMaintenanceAdmissionError) {
+      return { kind: "read-unavailable", filePath: credentialsHomeDir,
+        message: "本机数据正在准备或繁忙，暂时无法读取配置，请稍后重试。" };
     }
     return {
       kind: "secret-store-error",
@@ -176,22 +178,12 @@ export async function checkStartupConfiguration(
   // 4. 缺失 + TTY → 跑编辑器
   const editorResult = await options.edit({
     config, credentials, configPath,
-    save: (result) => editConfiguration({ config, credentials }, result, { configPath, store: secretStore, records: options.records,
-      processIdentityResolver: options.processIdentityResolver }),
+    save: (result) => configuration.edit({ config, credentials }, result),
   });
 
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
-    const updatedCredentialSnapshot = await withCredentialReadGuard(credentialsHomeDir, secretStore, updatedCredentialReadGuard => loadConfigurationSnapshot({
-      configPath,
-      store: secretStore,
-      records: options.records,
-      processIdentityResolver: options.processIdentityResolver,
-      legacyHomeDir: credentialsHomeDir,
-      ...(updatedCredentialReadGuard
-        ? { authorizeCredentialRead: updatedCredentialReadGuard }
-        : {}),
-    }));
+    const updatedCredentialSnapshot = await configuration.read();
     return {
       kind: "ready",
       configurationCompleted: true,
@@ -208,48 +200,6 @@ export async function checkStartupConfiguration(
 
   // editorResult.kind === "non-tty"——此处理论上不到达（前面已检查 isTTY）
   return { kind: "non-tty", missingLabels };
-}
-
-async function withCredentialReadGuard<Result>(
-  home: string,
-  secretStore: SecretStorePort,
-  use: (guard?: (input: {
-      readonly kind: "provider" | "channel" | "mcp";
-      readonly id: string;
-      readonly ref: SecretRef;
-    }) => Promise<boolean>) => Promise<Result>,
-): Promise<Result> {
-  const store = await FileMeshBootstrapStore.open(home, undefined, { readOnly: true, secretStore });
-  try {
-    const trust = await store.loadCurrentTrust();
-    if (!trust) return await use();
-    const deviceRefs = await secretStore.list("device-key/device/v1/");
-    if (deviceRefs.length !== 1) return await use();
-    const deviceId = deviceRefs[0]!.bindingId.slice("device/v1/".length);
-    if (!trust.members.some((member) =>
-      member.device.deviceId === deviceId && member.state === "active")) return await use();
-    const authority = new CredentialExposureAuthority({
-      deviceId,
-      log: store.authorityLog(),
-      secretStore,
-    });
-    return await use(async ({ kind, id }) => {
-      try {
-        await authority.assertRoute({
-          ref: {
-            kind,
-            bindingId: `credential-${kind}-${id}`,
-          },
-          service: kind,
-        });
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  } finally {
-    await store.stopStorageMaintenance();
-  }
 }
 
 function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[] {

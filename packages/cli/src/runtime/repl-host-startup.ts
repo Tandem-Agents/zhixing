@@ -1,4 +1,5 @@
 import type { StartupCheckResult } from "../startup.js";
+import { CoreHostUnavailableError } from "./core-host-connection.js";
 
 export type ReplHostStartupResult =
   | { kind: "connected" }
@@ -30,6 +31,11 @@ export async function connectReplHost(input: {
   const initial = await connect();
   input.signal?.throwIfAborted();
   if (initial.kind === "connected") return initial;
+  // A long first projection upgrade is owned by the running daemon. A second
+  // local configuration read can contend with that preparation and turn its
+  // resource/lock failure into a misleading credential error. Keep the original
+  // bounded-attempt result; an explicit retry gets a new connection attempt.
+  if (initial.error instanceof CoreHostUnavailableError && initial.error.startupPending) return initial;
   const configuration = await input.checkConfiguration();
   input.signal?.throwIfAborted();
   if (configuration.kind !== "ready") return { kind: "configuration", result: configuration };

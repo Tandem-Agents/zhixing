@@ -50,7 +50,7 @@ const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
-  constructor(reason: string, readonly publicReason = "本机服务连接失败，请查看运行日志。") {
+  constructor(reason: string, readonly publicReason = "本机服务连接失败，请查看运行日志。", readonly startupPending = false) {
     super(`知行暂时不可用：${reason}`);
     this.name = "CoreHostUnavailableError";
   }
@@ -124,6 +124,8 @@ export interface CoreHostConnectionDeps {
     ok: boolean;
     reason?: string;
     publicReason?: string;
+    /** The daemon still owns preparation after this bounded connection attempt. */
+    startupPending?: boolean;
     recoverable?: boolean;
     mode?: "managed" | "on-demand" | "none";
   }>;
@@ -189,6 +191,7 @@ export function defaultCoreHostConnectionDeps(zhixingHome: string, records?: Log
         ok: result.ok,
         reason: result.status === "starting" ? "等待本机服务就绪超时，可重试或用 zz logs 查看原因" : result.reason,
         publicReason: result.launchMode === "none" ? "这台设备不需要后台运行" : result.status === "starting" ? "等待本机服务就绪超时。" : "本机服务启动失败。",
+        startupPending: result.status === "starting",
         // The daemon owner now observes this child for the whole attempt, including
         // exit and concurrent healthy-owner takeover. No second recovery window.
         recoverable: false,
@@ -831,7 +834,7 @@ export class CoreHostConnection implements CoreHostRpcLink {
         : await this.tryDiscover(opts.acceptEndpoint);
       if (endpoint) return endpoint;
       opts.signal.throwIfAborted();
-      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason, spawned.publicReason);
+      throw new CoreHostUnavailableError(spawned.reason ?? opts.unableToStartReason, spawned.publicReason, spawned.startupPending);
     }
     const endpoint = await this.waitForDiscoverableService({
       deadlineAt: opts.deadlineAt,

@@ -152,7 +152,7 @@ describe("Node configuration application home and commit boundaries", () => {
     });
     const reload = vi.fn(async () => undefined);
     await edit({ zhixingHome: home, configPath, state: { activeTurnPromise: null }, requestHostReload: reload });
-    expect(calls.snapshot).toHaveBeenCalledWith({ configPath, store: { marker: "selected-store" } });
+    expect(calls.snapshot).toHaveBeenCalledWith({ configPath, legacyHomeDir: home, store: { marker: "selected-store" } });
     expect(calls.write).toHaveBeenCalledWith({ config: current, credentials: {} },
       { kind: "completed", config: updated, credentials: {} }, { configPath, store: { marker: "selected-store" }, prepare: undefined });
     expect(calls.store).toHaveBeenCalledWith({ homeDir: home });

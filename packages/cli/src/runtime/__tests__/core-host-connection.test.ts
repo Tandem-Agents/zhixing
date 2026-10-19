@@ -770,13 +770,13 @@ describe("CoreHostConnection", () => {
       spawn: async (attempt) => {
         expect(attempt?.deadlineAt).toBe(1000);
         now = 700;
-        return { ok: false, recoverable: true, reason: "still starting" };
+        return { ok: false, recoverable: true, startupPending: true, reason: "still starting" };
       },
       createClient: () => asClient(makeFakeClient()),
       clock: () => now, sleep: async (ms) => { now += ms; },
       startupRecoveryTimeoutMs: 1000, startupRecoveryPollMs: 50,
     });
-    await expect(conn.ensure()).rejects.toBeInstanceOf(CoreHostUnavailableError);
+    await expect(conn.ensure()).rejects.toMatchObject({ name: 'CoreHostUnavailableError', startupPending: true });
     expect(now).toBe(1000);
     await conn.dispose();
   });
