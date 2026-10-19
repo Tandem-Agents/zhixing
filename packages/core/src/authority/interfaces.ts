@@ -9,11 +9,21 @@ import type {
   DurableProjectionDefinition,
   DurableProjectionReadContext,
   RebuildableDurableProjectionIndex,
+  DurableProjectionMutation,
 } from "./durable-projection-index.js";
 
 export type PhysicalStorageStepRunner = <T>(
   operation: () => Promise<T>,
 ) => Promise<T>;
+
+/** Derived exclusively from the complete verified home trust chain. */
+export interface VerifiedAnchorTenure {
+  readonly homeId: string;
+  readonly anchorEpoch: number;
+  readonly deviceId: string;
+  readonly chainHead: { readonly seq: number; readonly eventDigest: string };
+  readonly checkpoint: DurableLogCheckpoint;
+}
 
 /** Synchronous guard evaluated inside the AuthorityCommitLog append lock. */
 export type AuthorityAppendAdmissionGuard = (
@@ -44,6 +54,17 @@ export interface ArtifactStore {
     limit: number,
   ): Promise<Uint8Array>;
   has(ref: ArtifactRef): Promise<boolean>;
+}
+
+/** Disposable artifact-bound pages. The owner's real checkpoint only isolates
+ * cache generations; imported facts never acquire local WAL positions. */
+export interface ArtifactProjectionCache {
+  prepare<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  read<T>(operation: (view: DurableProjectionReadContext) => Promise<T>): Promise<T>;
+  update<T>(operation: (view: DurableProjectionReadContext) => Promise<{
+    readonly mutations: readonly DurableProjectionMutation[]; readonly value: T;
+  }>): Promise<T>;
+  reset(): Promise<void>;
 }
 
 export interface ArtifactReferenceCursor {
@@ -228,6 +249,8 @@ export interface AuthorityCommitLog {
   durableProjection<Body = JsonValue>(
     definition: DurableProjectionDefinition<Body>,
   ): RebuildableDurableProjectionIndex;
+  artifactProjection?(binding: { readonly projectionId: string; readonly reducerVersion: number;
+    readonly artifact: ArtifactRef; readonly ownerCheckpoint: DurableLogCheckpoint }): ArtifactProjectionCache;
   transactDurableProjection<Body = JsonValue, Value = void>(
     projectionId: string,
     decide: (
@@ -239,6 +262,8 @@ export interface AuthorityCommitLog {
     options?: Pick<ProjectionTransactionOptions, "candidateReferences" | "readProjectionIds" | "runPhysicalStep">,
   ): Promise<{
     readonly value: Value;
+    /** Opaque proof of the same prefix used by the indexed decision. */
+    readonly cursor: ProjectionCursor;
     readonly commit?: CommitEnvelope<Body>;
   }>;
   /** Reducers preserve the caller's verified basis (immutable reduction or

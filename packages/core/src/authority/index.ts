@@ -119,6 +119,8 @@ export type {
   ArtifactDeletionResult,
   ArtifactRetentionSnapshot,
   ArtifactStore,
+  ArtifactProjectionCache,
+  VerifiedAnchorTenure,
   MutableArtifactStore,
   PhysicalStorageStepRunner,
   AuthorityCommitLog,

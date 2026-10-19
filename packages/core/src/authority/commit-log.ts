@@ -357,6 +357,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #runProjectionReadStep: FileAuthorityCommitLogOptions["runProjectionReadStep"];
   readonly #durableProjections = new Map<string, RegisteredDurableProjection>();
+  readonly #artifactProjections = new Map<string, { readonly state: FileDurableProjectionIndex; readonly cache: import('./interfaces.js').ArtifactProjectionCache }>();
+  readonly #artifactPreparationAbort = new AbortController();
+  readonly #artifactPreparations = new Set<Promise<unknown>>();
   readonly #refreshedProjections = new Set<RegisteredDurableProjection>();
   #stopMaintenance: Promise<void> | undefined;
   readonly #appendAdmissionGuards = new Set<AuthorityAppendAdmissionGuard>();
@@ -631,6 +634,51 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  artifactProjection(binding: { readonly projectionId: string; readonly reducerVersion: number;
+    readonly artifact: ArtifactRef; readonly ownerCheckpoint: DurableLogCheckpoint }): import('./interfaces.js').ArtifactProjectionCache {
+    const { ownerCheckpoint, ...identityBinding } = binding;
+    if (ownerCheckpoint.logId !== this.#requireLogId()) throw new TypeError('Artifact projection belongs to another authority owner');
+    const key = canonicalize({ ...identityBinding, ownerLogId: ownerCheckpoint.logId }), existing = this.#artifactProjections.get(key);
+    if (existing) return existing.cache;
+    const identity = createHash('sha256').update(canonicalize(identityBinding)).digest('hex');
+    const checkpoints = { owner: ownerCheckpoint };
+    const locked = <T>(operation: () => Promise<T>) => this.#sourceScope.getStore()?.active
+      ? operation() : this.#withLogLock('projection.prepare', operation);
+    const state = new FileDurableProjectionIndex({
+      projectionId: binding.projectionId, reducerVersion: binding.reducerVersion, authenticated: true,
+      integrity: this.#integrity, readOnly: this.#readOnly, managedRecovery: false,
+      rootDir: path.join(this.rootDir, 'projections', durableProjectionVersionDirectoryName(binding.projectionId, binding.reducerVersion), identity),
+      allowSegmentReclamation: this.#owner, withSourceLock: locked,
+      runDetached: operation => this.#sourceScope.exit(operation), storageMaintenance: this.#storageMaintenance,
+      runReadStep: this.#runProjectionReadStep,
+    });
+    const open = async () => { await state.initialize(checkpoints); await state.refreshPublishedState(); };
+    const view = createBoundDurableProjectionReadContext(state);
+    const cache: import('./interfaces.js').ArtifactProjectionCache = {
+      prepare: operation => {
+        if (this.#maintenanceStopped) return Promise.reject(new StorageMaintenanceCancelledError());
+        const pending = this.#sourceScope.exit(() => runDetachedMaintenanceContext('recovery', () => operation(this.#artifactPreparationAbort.signal)));
+        this.#artifactPreparations.add(pending);
+        void pending.finally(() => this.#artifactPreparations.delete(pending)).catch(() => undefined);
+        return pending;
+      },
+      read: operation => locked(async () => { await open(); return operation(view); }),
+      update: operation => locked(async () => {
+        if (this.#readOnly) throw new TypeError('Read-only authority cannot publish artifact-derived pages');
+        await open();
+        const result = await operation(view);
+        state.publish(await state.prepare(bindDurableProjectionMutations(result.mutations)), checkpoints);
+        // A completed bounded page and its progress marker become durable
+        // together. The source artifact remains the sole rebuilding source.
+        await state.flush({ compact: false });
+        return result.value;
+      }),
+      reset: () => locked(async () => { await state.reset(checkpoints); }),
+    };
+    this.#artifactProjections.set(key, { state, cache });
+    return cache;
+  }
+
   /**
    * Publishes one frozen source prefix and its target-side install decision as one
    * physical WAL replacement. The imported envelopes keep their source LSN and
@@ -874,6 +922,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   async #stopStorageMaintenance(): Promise<void> {
     this.#maintenanceStopped = true;
+    this.#artifactPreparationAbort.abort();
+    await Promise.allSettled([...this.#artifactPreparations]);
     // 正式停止前补存各投影的检查点：重启后只需续算很短的尾部。检查点只是缓存，失败不影响停止。
     if (this.#startupProofs) {
       await Promise.allSettled([...this.#checkpointFlushes].map(async (flush) => flush()));
@@ -900,6 +950,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     for (const projection of this.#durableProjections.values()) {
       await projection.state.stopStorageMaintenance();
     }
+    for (const projection of this.#artifactProjections.values()) await projection.state.stopStorageMaintenance();
     this.#workObserver.flush();
     await closeArtifactJsonIndex(this.artifactStore);
   }
@@ -1309,6 +1360,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     options: Pick<ProjectionTransactionOptions, "candidateReferences" | "readProjectionIds" | "runPhysicalStep"> = {},
   ): Promise<{
     readonly value: Value;
+    readonly cursor: ProjectionCursor;
     readonly commit?: CommitEnvelope<Body>;
   }> {
     const projection = this.#durableProjections.get(projectionId);
@@ -1344,7 +1396,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           projection.read,
           this.#transactionContext(lastLsn, at, new Map(readProjections.map(([id, dependency]) => [id, dependency.read]))),
         )));
-        if (decision.kind === "return") return { value: decision.value };
+        if (decision.kind === "return") return { value: decision.value, cursor: this.#projectionCursor(lastLsn) };
         const entries = normalizeEntries(decision.entries);
         assertTransactionReferencesProtected(
           collectRetainedArtifactRefs(entries),
@@ -1354,6 +1406,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         const commit = await this.#append(entries, at, candidate);
         return {
           value: decision.value,
+          cursor: this.#projectionCursor(commit.lsn),
           commit: commit as CommitEnvelope<Body>,
         };
       }));
@@ -1638,6 +1691,35 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     } };
   }
 
+  #projectionSource(checkpoint: DurableLogCheckpoint, envelope: CommitEnvelope<unknown>, candidate = false): import('./durable-projection-index.js').DurableProjectionSource {
+    const scope = this.#sourceScope.getStore();
+    return { checkpoint, originCheckpoint: this.#durableCheckpoint(0), ...(candidate ? { candidate: true as const } : {}),
+      readPreparedProjection: id => {
+        if (!scope?.active || this.#sourceScope.getStore() !== scope) throw new TypeError('Projection dependency escaped its source scope');
+        const projection = this.#durableProjections.get(id);
+        if (!projection) throw new TypeError(`Durable projection dependency is not registered: ${id}`);
+        if (projection.failure !== undefined) throw projection.failure;
+        const point = projection.state.checkpoints().authority;
+        if (!point || point.logId !== checkpoint.logId || point.lsn < checkpoint.lsn - Number(candidate)) throw new AuthorityPreparationRequired([id]);
+        const assertActive = () => { if (!scope.active || this.#sourceScope.getStore() !== scope) throw new TypeError('Projection dependency escaped its source scope'); };
+        return {
+          get: key => { assertActive(); return projection.read.get(key); },
+          scan: (range, limit, continuation) => { assertActive(); return projection.read.scan(range, limit, continuation); },
+        };
+      }, readEnvelopeAt: async location => {
+      if (!scope?.active || this.#sourceScope.getStore() !== scope || location.lsn > checkpoint.lsn) {
+        throw new TypeError('Source locator is outside its projection reduction');
+      }
+      if (location.lsn === checkpoint.lsn) {
+        if (location.logId !== checkpoint.logId || location.prefixDigest !== checkpoint.prefixDigest || location.frameEndOffset !== checkpoint.frameEndOffset) {
+          throw new TypeError('Projection source locator does not bind its current envelope');
+        }
+        return envelope;
+      }
+      return this.#readEnvelopeAt(location);
+    } };
+  }
+
   async #scanLogicalProjection(projection: RegisteredDurableProjection, range: DurableProjectionScanRange,
     limit: number, continuation?: string): Promise<DurableProjectionScanPage> {
     const checkpoint = projection.state.checkpoints().authority!;
@@ -1895,7 +1977,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             if (boundary.lsn > data.lsn && (state.readiness() === "ready" || boundary.lsn <= state.recoveryTarget()!.authority!.lsn)) {
               if (boundary.lsn !== data.lsn + 1) continue;
               if (consumes) {
-                const mutations = await verifyProtocolStep(() => projection.reduce(envelope, projection.read, { checkpoint: boundary }));
+                const mutations = await verifyProtocolStep(() => projection.reduce(envelope, projection.read, this.#projectionSource(boundary, envelope)));
                 const prepared = await state.prepare(bindDurableProjectionMutations(mutations));
                 state.publish(prepared, { authority: boundary });
               } else state.coverUnchangedSource({ authority: boundary });
@@ -2087,7 +2169,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           const mutations = await verifyProtocolStep(() => projection.reduce(
             envelope as unknown as CommitEnvelope<JsonValue>,
             projection.read,
-            { checkpoint },
+            this.#projectionSource(checkpoint, envelope, true),
           ));
           return projection.state.prepare(
             bindDurableProjectionMutations(mutations),
@@ -3638,7 +3720,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
 
   async #withObservedLogLock<T>(operation: () => Promise<T>, observation: ReturnType<AuthorityWorkObserver["begin"]>, releaseAtBoundary = false, tryOnly = false): Promise<T> {
     if (tryOnly && this.#lockedOperations > 0) throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "slots", retryAfterMs: 25 });
-    const maintenanceDeadline = Date.now() + 5_000;
+    // Initial projection preparation can make useful progress for much longer
+    // than five seconds. Its work must not consume the subsequent backpressure
+    // wait budget. Start that one bounded window at the first retryable failure;
+    // later failures never renew it.
+    let maintenanceDeadline: number | undefined;
     const hydratedIdentities = new Set<string>();
     for (;;) {
       try {
@@ -3715,17 +3801,18 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         // 内层日志锁已释放不代表调用栈已离开全部互斥区。若外层设施仍持有
         // 串行权，等待后重试会把容量背压扩散成整条设施队列阻塞；交给最外层
         // 所有者在退出其互斥区后重驱。
+        if (retryAfterMs !== undefined) maintenanceDeadline ??= Date.now() + 5_000;
         if (
           retryAfterMs === undefined ||
           isHoldingMaintenanceExclusion() ||
-          Date.now() >= maintenanceDeadline
+          Date.now() >= maintenanceDeadline!
         ) {
           throw error;
         }
         observation.stage("maintenance-retry");
         const retrying = performance.now();
         await waitForMaintenanceRetry(
-          Math.min(retryAfterMs, Math.max(0, maintenanceDeadline - Date.now())),
+          Math.min(retryAfterMs, Math.max(0, maintenanceDeadline! - Date.now())),
         );
         observation.data.retryWaitMs += performance.now() - retrying;
         observation.data.retries++;

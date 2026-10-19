@@ -6,6 +6,7 @@ import { acquireFileLock, withFileLockProcessIdentity } from "../../persistence/
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import { FileArtifactStore } from "../artifact-store.js";
 import { artifactJsonIndex } from "../artifact-json-index.js";
+import { StorageMaintenanceAdmissionError } from "../../resources/index.js";
 async function fixture() {
   const root = await createTempDir("read-projection");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -13,6 +14,42 @@ async function fixture() {
   onTestFinished(() => log.stopStorageMaintenance());
   return { log, artifacts };
 }
+it.each([false, true])('starts the bounded backpressure window after prior work, without renewing it (persistent=%s)', async persistent => {
+  const { log } = await fixture();
+  await log.checkpoint();
+  const realNow = Date.now.bind(Date);
+  let elapsed = 0, attempts = 0;
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + elapsed);
+  const pressure = () => new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'ioOperations', retryAfterMs: 1 });
+  try {
+    const operation = log.transactProjection(0, (state: number) => state + 1, () => {
+      attempts++;
+      // A real preparation page can take longer than the retry window before
+      // its first transient failure; that work must not spend the wait budget.
+      if (attempts === 1 || persistent) { elapsed += 6_000; throw pressure(); }
+      return { kind: 'append' as const, entries: [{ stream: 'extensions', body: { value: 1 } }], value: 'accepted' };
+    }, { stream: 'extensions' });
+    if (persistent) await expect(operation).rejects.toBeInstanceOf(StorageMaintenanceAdmissionError);
+    else expect((await operation).value).toBe('accepted');
+    expect(attempts).toBe(2);
+  } finally { clock.mockRestore(); }
+  expect((await log.checkpoint()).lsn).toBe(persistent ? 0 : 1);
+});
+it('returns the indexed transaction prefix for a separately prepared finite projection', async () => {
+  const { log } = await fixture();
+  log.durableProjection<{ value: number }>({ projectionId: 'finite-view', reducerVersion: 1, inputs: { streams: ['extensions'] },
+    reduce: envelope => envelope.entries.filter(entry => entry.stream === 'extensions').map(entry => ({ kind: 'put', key: 'value', value: entry.body.value })) });
+  await log.append([{ stream: 'extensions', body: { value: 7 } }]);
+  const basis = await log.transactDurableProjection('finite-view', async current => ({ kind: 'return', value: await current.get('value') }));
+  expect(basis.cursor.lsn).toBe(1);
+  const reduce = vi.fn((state: number, record: { body: { value: number } }) => state + record.body.value);
+  const next = await log.transactProjection(basis.value as number, reduce,
+    () => ({ kind: 'append', entries: [{ stream: 'extensions', body: { value: 2 } }], value: 'accepted' }),
+    { stream: 'extensions', cursor: basis.cursor });
+  expect(next.state).toBe(9); expect(reduce).toHaveBeenCalledOnce();
+  const updated = await log.transactDurableProjection('finite-view', () => ({ kind: 'append', entries: [{ stream: 'extensions', body: { value: 11 } }], value: undefined }));
+  expect(updated.cursor.lsn).toBe(updated.commit!.lsn);
+});
 it('retains the Authority and artifact platform owner for later requests from another async root', async () => {
   const read = vi.fn(async () => ({ kind: 'present' as const, birth: 'resource-owner' }));
   const { log, artifacts } = await withFileLockProcessIdentity({ read }, fixture);
@@ -175,6 +212,26 @@ it('keeps an independently verifiable boundary for every frame in a bounded tail
   expect(page.checkpoints).toHaveLength(3);
   for (let index = 0; index < 3; index++) expect(await log.readEnvelopeAt(page.checkpoints[index]!)).toEqual(page.commits[index]);
   expect((await log.readTail(page.checkpoints[0]!, 3)).commits.map(e => e.lsn)).toEqual([2,3,4]);
+});
+
+it('limits projection source readers to their verified prefix and live reduction', async () => {
+  const { log } = await fixture();
+  let previous: import('../index.js').DurableLogCheckpoint | undefined;
+  let escaped: import('../index.js').DurableProjectionSource['readEnvelopeAt'];
+  const projection = log.durableProjection({ projectionId: 'test.scoped-replay-source', reducerVersion: 1,
+    async reduce(envelope, _current, source) {
+      const read = source.readEnvelopeAt!;
+      if (previous) expect((await read(previous)).lsn).toBe(envelope.lsn - 1);
+      expect((await read(source.checkpoint)).envelopeDigest).toBe(envelope.envelopeDigest);
+      await expect(read({ ...source.checkpoint, lsn: envelope.lsn + 1 })).rejects.toThrow('outside');
+      await expect(read({ ...source.checkpoint, prefixDigest: 'sha256:' + '0'.repeat(64) })).rejects.toThrow('bind');
+      previous = source.checkpoint; escaped = read;
+      return [{ kind: 'put', key: 'head', value: envelope.lsn }];
+    } });
+  await log.append([{ stream: 'control', body: { value: 1 } }]);
+  await log.append([{ stream: 'control', body: { value: 2 } }]);
+  expect(await projection.get('head')).toBe(2);
+  await expect(escaped!(previous!)).rejects.toThrow('outside');
 });
 
 it.each(['legacy', 'versioned'] as const)('reads sparse verified envelope batches without separate writer turns: %s', async format => {

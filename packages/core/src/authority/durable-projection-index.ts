@@ -176,6 +176,13 @@ export function createDurableProjectionOverlay(
 
 export interface DurableProjectionSource {
   readonly checkpoint: DurableLogCheckpoint;
+  readonly originCheckpoint?: DurableLogCheckpoint;
+  readonly candidate?: true;
+  /** Prepared dependency in this locked source. Historical reducers must use
+   * their own checkpoint to select immutable position-bound rows from it. */
+  readonly readPreparedProjection?: (projectionId: string) => DurableProjectionReadContext;
+  /** Exact prior source reads within this reducer's verified, live log scope. */
+  readonly readEnvelopeAt?: (checkpoint: DurableLogCheckpoint) => Promise<CommitEnvelope<unknown>>;
 }
 
 export type DurableProjectionReducer<Body = JsonValue> = (
