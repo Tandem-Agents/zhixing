@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,10 +13,17 @@ import { ExtensionOnboarding } from "./onboarding.js";
 import type { ExtensionBinding, ExtensionCandidate, ExtensionOperation } from "./contracts.js";
 
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+const owners: FileAuthorityCommitLog[] = [];
+const managers: ExtensionOnboarding[] = [];
+afterEach(async () => {
+  for (const manager of managers.splice(0)) await manager.stop();
+  for (const owner of owners.splice(0)) await owner.stopStorageMaintenance();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "extension-onboarding-")); roots.push(root);
-  const log = () => new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "facts")));
+  const owner = new FileAuthorityCommitLog(join(root, "authority"), new FileArtifactStore(join(root, "facts"))); owners.push(owner);
+  const log = () => owner;
   const application = new ExtensionApplication({ log, assertOwner() {} });
   const code = "export const fixture = true;";
   const candidate: ExtensionCandidate = { manifest: { id: "fixture", version: "1.0.0", digest: createHash("sha256").update(code).digest("hex"),
@@ -25,14 +32,51 @@ async function fixture() {
   const binding: ExtensionBinding = { manifest: candidate.manifest, configurationRevision: "config", projectionRevision: "local" };
   const archive = new ExtensionCandidates(join(root, "candidates"));
   const notifications: ExtensionOperation[] = [];
-  const manager = new ExtensionOnboarding(application, new ExtensionArtifacts(join(root, "artifacts")), archive, {
+  const ports: ConstructorParameters<typeof ExtensionOnboarding>[3] = {
     validate() {}, configuration: async () => undefined, discard: async () => {}, changed: async () => {},
     notify: async op => { notifications.push(op); }, isActive: () => true,
-  });
-  return { root, log, application, candidate, binding, archive, manager, notifications };
+  };
+  const manager = new ExtensionOnboarding(application, new ExtensionArtifacts(join(root, "artifacts")), archive, ports); managers.push(manager);
+  return { root, log, application, candidate, binding, archive, manager, notifications, ports };
 }
 
 describe("durable extension onboarding", () => {
+  it("continues a recovery page and revisits an earlier operation changed during the next page", async () => {
+    const f = await fixture();
+    for (let i = 0; i < 33; i++) await f.application.prepare(`op-${i}`, `app-${i}`, { conversationId: "scene", request: "接入" });
+    const original = f.ports.notify;
+    vi.spyOn(f.ports, "notify").mockImplementation(async op => {
+      await original(op);
+      if (op.id === "op-32") {
+        const first = (await f.application.operation("op-0"))!;
+        await f.application.block(first.id, first.revision, "需要修正");
+        f.manager.requestReconcile();
+      }
+    });
+    await f.manager.reconcile();
+    expect(f.notifications).toHaveLength(32);
+    await vi.waitFor(() => expect(f.notifications).toHaveLength(34), { timeout: 15_000 });
+    expect(f.notifications.at(-1)).toMatchObject({ id: "op-0", phase: "blocked" });
+    await f.manager.stop();
+  }, 30_000);
+
+  it("stop drains the current notification but leaves its durable acknowledgement for recovery", async () => {
+    const f = await fixture();
+    await f.application.prepare("pending", "app", { conversationId: "scene", request: "接入" });
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(f.ports, "notify").mockImplementation(async () => { entered(); await gate; });
+    const work = f.manager.reconcile(); await started;
+    let stopped = false; const stopping = f.manager.stop().then(() => { stopped = true; });
+    await Promise.resolve(); expect(stopped).toBe(false);
+    release(); await work; await stopping;
+    expect((await f.application.operation("pending"))?.notifiedRevision).toBeUndefined();
+    expect((await f.application.workPage()).operations.map(op => op.id)).toContain("pending");
+    f.manager.requestReconcile(); await new Promise(resolve => setImmediate(resolve));
+    expect(f.ports.notify).toHaveBeenCalledTimes(1);
+  });
+
   it.each((["update", "repair"] as const).flatMap(purpose => [undefined, true, false].flatMap(enabled =>
     (["ready", "blocked", "cancelled"] as const).map(outcome => ({ purpose, enabled, outcome })))))(
     "isolates later configuration verification from completed $purpose (enabled=$enabled, outcome=$outcome)", async ({ purpose, enabled, outcome }) => {

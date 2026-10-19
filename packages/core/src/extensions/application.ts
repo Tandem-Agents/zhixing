@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { AuthorityCommitLog, ProjectionCursor, ProjectionTransactionDecision } from "../authority/interfaces.js";
-import type { LogicalRecord } from "../contracts/index.js";
+import type { AuthorityCommitLog, ProjectionTransactionDecision } from "../authority/interfaces.js";
+import type { DurableProjectionReadContext } from "../authority/durable-projection-index.js";
+import {
+  EXTENSION_INDEX_ID, extensionIndex, readExtensionState, readExtensionSnapshot,
+  readExtensionInstance, readExtensionOperation, readExtensionInstances,
+  latestExtensionOperation, extensionWorkPage,
+  type ExtensionReadSet,
+} from "./authority-index.js";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -29,17 +35,9 @@ interface InstanceRecord { readonly kind: "extension-instance"; readonly instanc
 interface OperationRecord { readonly kind: "extension-operation"; readonly operation: ExtensionOperation }
 type RecordBody = InstanceRecord | OperationRecord;
 interface State { instances: ReadonlyMap<string, ExtensionInstance>; operations: ReadonlyMap<string, ExtensionOperation> }
-const empty = (): State => ({ instances: new Map(), operations: new Map() });
 function withoutReason(instance: ExtensionInstance): Omit<ExtensionInstance, "reason"> {
   const { reason: _reason, ...rest } = instance;
   return rest;
-}
-
-function reduce(state: State, record: LogicalRecord<RecordBody>): State {
-  if (record.stream !== EXTENSION_AUTHORITY_STREAM) return state;
-  if (record.body.kind === "extension-instance") return { ...state, instances: new Map(state.instances).set(record.body.instance.id, record.body.instance) };
-  if (record.body.kind === "extension-operation") return { ...state, operations: new Map(state.operations).set(record.body.operation.id, record.body.operation) };
-  throw new Error("Invalid extension authority record");
 }
 
 export const extensionList = defineProductApiQuery<"extensions.list", void, ExtensionPublicSnapshot>("extensions.list");
@@ -72,8 +70,6 @@ export const EXTENSION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
 
 /** All durable decisions are short Authority transactions, never transport waits. */
 export class ExtensionApplication {
-  private projection?: { log: AuthorityCommitLog; state: State; cursor: ProjectionCursor };
-
   constructor(private readonly ports: {
     readonly log: () => AuthorityCommitLog;
     readonly assertOwner: () => void;
@@ -81,39 +77,49 @@ export class ExtensionApplication {
   }) {}
 
   async list(): Promise<ExtensionSnapshot> {
-    const log = this.ports.log();
-    const cached = this.projection?.log === log ? this.projection : undefined;
-    try {
-      // Authority validates the cursor on every read, including external writes
-      // and prefix replacement. The reducer is immutable, so concurrent reads
-      // can share the prefix without an outer lock that prevents recovery retry.
-      const result = await log.readProjection<State, RecordBody>(
-        cached?.state ?? empty(), reduce,
-        { stream: EXTENSION_AUTHORITY_STREAM, ...(cached ? { cursor: cached.cursor } : {}) },
-      );
-      this.projection = { log, state: result.state, cursor: result.cursor };
-      const state = result.state;
-      return { instances: [...state.instances.values()].map((entry) => structuredClone({ ...entry, intentRevision: entry.intentRevision ?? 1 })),
+    // The explicit product query keeps its complete historical response.
+    return this.snapshot(true);
+  }
+
+  /** Startup/recovery working set: current instances and their exact current operations. */
+  current(): Promise<ExtensionSnapshot> { return this.snapshot(false); }
+  instances(): Promise<readonly ExtensionInstance[]> { return this.read(readExtensionInstances); }
+  latestOperation(instanceId: string): Promise<ExtensionOperation | undefined> {
+    return this.read(current => latestExtensionOperation(current, instanceId));
+  }
+  activeOperations(instanceId: string): Promise<readonly ExtensionOperation[]> {
+    return this.read(async current => [...(await readExtensionState(current, { instanceId })).operations.values()]
+      .filter(extensionOperationActive).map(operation => structuredClone(operation)));
+  }
+  workPage(after?: string, limit = 64) {
+    return this.read(async current => structuredClone(await extensionWorkPage(current, after, limit)));
+  }
+  private snapshot(history: boolean): Promise<ExtensionSnapshot> {
+    return this.read(async current => {
+      const state = await readExtensionSnapshot(current, history);
+      return { instances: structuredClone([...state.instances.values()]),
         ...(state.operations.size ? { operations: structuredClone([...state.operations.values()]) } : {}) };
-    } catch (error) {
-      this.projection = undefined;
-      throw error;
-    }
+    });
+  }
+  private async read<T>(read: (current: DurableProjectionReadContext) => Promise<T>): Promise<T> {
+    const log = this.ports.log(); extensionIndex(log);
+    return (await log.transactDurableProjection<never, T>(EXTENSION_INDEX_ID,
+      async current => ({ kind: "return", value: await read(current) }))).value;
   }
 
   async get(id: string): Promise<ExtensionInstance | undefined> {
-    return (await this.list()).instances.find((instance) => instance.id === id);
+    return this.read(current => readExtensionInstance(current, id));
   }
 
   async operation(id: string): Promise<ExtensionOperation | undefined> {
-    return (await this.list()).operations?.find((entry) => entry.id === id);
+    return this.read(current => readExtensionOperation(current, id));
   }
 
   async prepare(id: string, instanceId: string, source: NonNullable<ExtensionOperation["source"]>, purpose?: "update" | "repair"): Promise<ExtensionOperation> {
     if (![id, instanceId].every((value) => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)) ||
         !source || typeof source.conversationId !== "string" || !source.conversationId || source.conversationId.length > 256 ||
         typeof source.request !== "string" || !source.request.trim() || source.request.length > 16000) throw new TypeError("Invalid extension request");
-    return this.decide((state) => {
+    return this.decide({ operationId: id, instanceId }, (state) => {
       const previous = state.operations.get(id);
       if (previous) {
         if (previous.instanceId !== instanceId || previous.source?.conversationId !== source.conversationId || previous.source?.request !== source.request || previous.purpose !== purpose) throw new Error("Extension request identity conflict");
@@ -150,7 +156,7 @@ export class ExtensionApplication {
 
   async candidate(id: string, revision: number, manifest: ExtensionManifest): Promise<ExtensionOperation> {
     const candidate = validateExtensionManifest(manifest);
-    return this.decide((state) => {
+    return this.decide({ operationId: id }, (state) => {
       const current = state.operations.get(id);
       if (!current || current.revision !== revision) throw new ExtensionRevisionConflict();
       const instance = state.instances.get(current.instanceId);
@@ -166,7 +172,7 @@ export class ExtensionApplication {
   /** Trial and rollback input commit together, before retiring the old generation. */
   async trial(id: string, revision: number, binding: ExtensionBinding): Promise<ExtensionInstance> {
     const checked = validateExtensionBinding(binding);
-    return this.decide((state) => {
+    return this.decide({ operationId: id, exclusiveKey: checked.exclusiveKey }, (state) => {
       const operation = state.operations.get(id);
       if (!operation || operation.revision !== revision || operation.phase !== "configuration" || operation.candidate?.digest !== checked.manifest.digest) throw new ExtensionRevisionConflict();
       const current = state.instances.get(operation.instanceId);
@@ -194,7 +200,7 @@ export class ExtensionApplication {
   }
 
   async complete(id: string, revision: number, generation: string, verification?: unknown): Promise<void> {
-    await this.decide((state) => {
+    await this.decide({ operationId: id }, (state) => {
       const operation = state.operations.get(id);
       const instance = operation && state.instances.get(operation.instanceId);
       if (!operation || operation.revision !== revision || operation.phase !== "verifying" || !instance?.enabled ||
@@ -219,7 +225,7 @@ export class ExtensionApplication {
   }
 
   private async finishUnsuccessful(id: string, revision: number, phase: "blocked" | "cancelled", reason?: string): Promise<void> {
-    await this.decide((state) => {
+    await this.decide({ operationId: id }, (state) => {
       const operation = state.operations.get(id);
       if (!operation || operation.revision !== revision) throw new ExtensionRevisionConflict();
       if (!extensionOperationActive(operation)) return { value: undefined, records: [] };
@@ -240,7 +246,7 @@ export class ExtensionApplication {
   }
 
   async notified(id: string, revision: number, continuation?: unknown): Promise<void> {
-    await this.decide((state) => {
+    await this.decide({ operationId: id }, (state) => {
       const operation = state.operations.get(id);
       if (!operation || operation.revision !== revision) return { value: undefined, records: [] };
       return { value: undefined, records: [{ kind: "extension-operation", operation: { ...operation, notifiedRevision: revision,
@@ -249,7 +255,7 @@ export class ExtensionApplication {
   }
 
   private async changeOperation(id: string, revision: number, change: (current: ExtensionOperation) => ExtensionOperation): Promise<ExtensionOperation> {
-    return this.decide((state) => {
+    return this.decide({ operationId: id }, (state) => {
       const current = state.operations.get(id);
       if (!current || current.revision !== revision || !extensionOperationActive(current)) throw new ExtensionRevisionConflict();
       const operation = { ...change(current), revision: revision + 1 };
@@ -262,7 +268,7 @@ export class ExtensionApplication {
     const checked = validateExtensionBinding(binding);
     return this.change(id, (current) => current ?? {
       id, revision: 1, enabled, intentRevision: 1, binding: checked, generation: null, phase: "stopped",
-    });
+    }, false, checked.exclusiveKey);
   }
 
   async setEnabled(id: string, enabled: boolean, expectedRevision: number): Promise<ExtensionInstance> {
@@ -287,7 +293,7 @@ export class ExtensionApplication {
       return { ...previous, binding: checked, enabled: enabled ?? current!.enabled, revision: current!.revision + 1,
         intentRevision: (current!.intentRevision ?? 1) + (enabled === undefined ? 0 : 1),
         generation: null, phase: "stopped" };
-    }, true);
+    }, true, checked.exclusiveKey);
   }
 
   async begin(id: string, expectedRevision: number): Promise<ExtensionInstance> {
@@ -310,7 +316,7 @@ export class ExtensionApplication {
   }
 
   async observe(id: string, generation: string, phase: "running" | "blocked", reason?: string, recoveryExhausted = false): Promise<boolean> {
-    return this.decide((state) => {
+    return this.decide({ instanceId: id }, (state) => {
       const current = state.instances.get(id);
       if (!current) throw new Error("Unknown extension instance");
       if (!current.enabled || current.generation !== generation) return { value: false, records: [] };
@@ -358,12 +364,12 @@ export class ExtensionApplication {
     if (!Number.isSafeInteger(revision) || current.revision !== revision) throw new ExtensionRevisionConflict();
   }
 
-  private async change(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh = false): Promise<ExtensionInstance> {
-    return this.ports.commitDecision ? this.ports.commitDecision(() => this.commit(id, decide, configurationRefresh)) : this.commit(id, decide, configurationRefresh);
+  private async change(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh = false, exclusiveKey?: string): Promise<ExtensionInstance> {
+    return this.ports.commitDecision ? this.ports.commitDecision(() => this.commit(id, decide, configurationRefresh, exclusiveKey)) : this.commit(id, decide, configurationRefresh, exclusiveKey);
   }
 
-  private async commit(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh: boolean): Promise<ExtensionInstance> {
-    return this.transact<ExtensionInstance>((state) => {
+  private async commit(id: string, decide: (current: ExtensionInstance | undefined) => ExtensionInstance, configurationRefresh: boolean, exclusiveKey?: string): Promise<ExtensionInstance> {
+    return this.transact<ExtensionInstance>({ instanceId: id, exclusiveKey }, (state) => {
         this.ports.assertOwner();
         const current = state.instances.get(id);
         let instance = decide(current);
@@ -426,8 +432,8 @@ export class ExtensionApplication {
       other.id !== instance.id && other.enabled && other.binding.exclusiveKey === instance.binding.exclusiveKey)) throw new Error("Exclusive extension resource is already claimed");
   }
 
-  private async decide<T>(decide: (state: State) => { value: T; records: RecordBody[] }): Promise<T> {
-    const execute = () => this.transact<T>((state) => {
+  private async decide<T>(readSet: ExtensionReadSet, decide: (state: State) => { value: T; records: RecordBody[] }): Promise<T> {
+    const execute = () => this.transact<T>(readSet, (state) => {
       this.ports.assertOwner();
       const result = decide(state);
       return result.records.length ? { kind: "append", entries: result.records.map((body) => ({ stream: EXTENSION_AUTHORITY_STREAM, body })), value: structuredClone(result.value) }
@@ -436,21 +442,10 @@ export class ExtensionApplication {
     return this.ports.commitDecision ? this.ports.commitDecision(execute) : execute();
   }
 
-  private async transact<T>(decide: (state: State) => ProjectionTransactionDecision<RecordBody, T>): Promise<T> {
+  private async transact<T>(readSet: ExtensionReadSet, decide: (state: State) => ProjectionTransactionDecision<RecordBody, T>): Promise<T> {
     const log = this.ports.log();
-    const cached = this.projection?.log === log ? this.projection : undefined;
-    try {
-      // Reuse only the verified prefix. Authority still holds the write lock,
-      // validates any changed bytes and applies the decision to the latest tail.
-      const result = await log.transactProjection(cached?.state ?? empty(), reduce, decide, {
-        stream: EXTENSION_AUTHORITY_STREAM,
-        ...(cached ? { cursor: cached.cursor } : {}),
-      });
-      this.projection = { log, state: result.state, cursor: result.cursor };
-      return result.value;
-    } catch (error) {
-      this.projection = undefined;
-      throw error;
-    }
+    extensionIndex(log);
+    return (await log.transactDurableProjection<RecordBody, T>(EXTENSION_INDEX_ID,
+      async current => decide(await readExtensionState(current, readSet)))).value;
   }
 }

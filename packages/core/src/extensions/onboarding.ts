@@ -20,12 +20,17 @@ export interface ExtensionOnboardingPorts {
 /** Replays durable decisions, not a scheduler or a second operation authority. */
 export class ExtensionOnboarding {
   private pending = false;
+  private restartRequested = false;
   private running: Promise<void> | undefined;
+  private after: string | undefined;
+  private continuation: ReturnType<typeof setImmediate> | undefined;
+  private closed = false;
+  private readonly requested = new Set<string>();
   constructor(readonly application: ExtensionApplication, private readonly artifacts: ExtensionArtifacts,
     private readonly candidates: ExtensionCandidates, private readonly ports: ExtensionOnboardingPorts) {}
 
   async manage(request: ExtensionManagementRequest) {
-    if (!this.ports.isActive()) throw new Error("扩展管理等待当前设备就绪");
+    if (this.closed || !this.ports.isActive()) throw new Error("扩展管理等待当前设备就绪");
     switch (request.action) {
       case "prepare": await this.application.prepare(request.id, request.instanceId, request.source); break;
       case "update": case "repair": await this.application.prepare(request.id, request.instanceId, request.source, request.action); break;
@@ -53,30 +58,64 @@ export class ExtensionOnboarding {
       }
       case "cancel": await this.application.cancel(request.id, request.expectedRevision); break;
       case "disable": {
-        const snapshot = await this.application.list();
-        const instance = snapshot.instances.find(item => item.id === request.instanceId);
-        if (instance) await this.application.setEnabled(instance.id, false, instance.revision);
+        const instance = await this.application.get(request.instanceId);
+        if (instance) await this.ports.changed(await this.application.setEnabled(instance.id, false, instance.revision));
         else {
-          const operations = snapshot.operations?.filter(op => op.instanceId === request.instanceId && extensionOperationActive(op)) ?? [];
+          const operations = await this.application.activeOperations(request.instanceId);
           if (!operations.length) throw new Error("没有此连接或接入操作");
-          for (const operation of operations) await this.application.cancel(operation.id, operation.revision);
+          for (const operation of operations) { await this.application.cancel(operation.id, operation.revision); this.requested.add(operation.id); }
         }
         break;
       }
       case "status": break;
       default: throw new TypeError("Invalid extension management action");
     }
-    await this.reconcile();
+    await this.reconcile("id" in request ? request.id : undefined);
     return this.application.list();
   }
 
-  reconcile(): Promise<void> {
+  reconcile(operationId?: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (operationId) this.requested.add(operationId);
     this.pending = true;
+    this.restartRequested = true;
+    const running = this.runPage();
+    return operationId ? running.then(() => {
+      if (!this.closed && this.ports.isActive() && this.requested.has(operationId)) return this.reconcile(operationId);
+    }) : running;
+  }
+
+  /** Recovery is owned here, but unrelated pending effects are not a ready barrier. */
+  requestReconcile(): void {
+    if (this.closed) return;
+    this.pending = true;
+    this.restartRequested = true;
+    this.schedule();
+  }
+
+  private schedule(): void {
+    if (!this.pending || this.closed || !this.ports.isActive() || this.continuation || this.running) return;
+    this.continuation = setImmediate(() => {
+      this.continuation = undefined;
+      void this.runPage().catch(() => undefined);
+    });
+    this.continuation.unref();
+  }
+
+  async stop(): Promise<void> {
+    this.closed = true;
+    if (this.continuation) clearImmediate(this.continuation);
+    this.continuation = undefined; this.requested.clear();
+    await this.running;
+  }
+
+  private runPage(): Promise<void> {
     if (this.running) return this.running;
     const run = async () => {
-      while (this.pending && this.ports.isActive()) {
+      if (this.pending && !this.closed && this.ports.isActive()) {
         this.pending = false;
-        const snapshot = await this.application.list();
+        if (this.after === undefined) this.restartRequested = false;
+        const snapshot = await this.application.current();
         for (const instance of snapshot.instances) {
           if (!instance.enabled || instance.phase !== "blocked" || !instance.recoveryExhausted || (instance.admission && !instance.admission.ready) ||
               snapshot.operations?.some(op => op.instanceId === instance.id && extensionOperationActive(op))) continue;
@@ -84,68 +123,91 @@ export class ExtensionOnboarding {
           if (source) await this.application.prepare(`repair-${createHash("sha256").update(`${instance.id}:${instance.generation}`).digest("hex")}`, instance.id,
             { ...source, request: "连接有限恢复已耗尽。定位并修复原有能力，不更换账号、扩权、增功能或清除历史。" }, "repair");
         }
-        for (const previous of (await this.application.list()).operations ?? []) {
-          if (!this.ports.isActive()) return;
-          let operation = previous;
-          let restoringArtifact = false;
-          let configuringExisting = false;
+        const selected = [...this.requested].slice(0, 32);
+        for (const id of selected) {
+          if (this.closed || !this.ports.isActive()) return;
+          const operation = await this.application.operation(id);
+          if (operation) await this.reconcileOperation(operation);
+          this.requested.delete(id);
+        }
+        const page = await this.application.workPage(this.after, 32);
+        for (const previous of page.operations) {
+          if (this.closed || !this.ports.isActive()) return;
+          if (!selected.includes(previous.id)) await this.reconcileOperation(previous);
+        }
+        this.after = page.after;
+        this.pending ||= page.after !== undefined || this.requested.size > 0 || this.restartRequested;
+      }
+    };
+    let completed = false;
+    this.running = run().then(() => { completed = true; }).finally(() => {
+      this.running = undefined;
+      if (completed) this.schedule();
+    });
+    return this.running;
+  }
+
+  private async reconcileOperation(previous: ExtensionOperation): Promise<void> {
+    if (this.closed || !this.ports.isActive()) return;
+    const current = await this.application.operation(previous.id);
+    if (!current) return;
+    let operation = current;
+    let restoringArtifact = false;
+    let configuringExisting = false;
+    try {
+      if (operation.phase === "preparing" && operation.notifiedRevision === operation.revision &&
+          await this.ports.preparationClosed?.(operation)) {
+        await this.application.block(operation.id, operation.revision, "准备运行已结束，尚未提交有效候选；未安装或启用连接");
+      }
+      if (operation.phase === "configuration") {
+        restoringArtifact = true;
+        const saved = await this.candidates.read(operation.candidate!.digest);
+        await this.artifacts.import(saved.manifest, Buffer.from(saved.code));
+        restoringArtifact = false;
+        const configuredInstance = await this.application.get(operation.instanceId);
+        configuringExisting = Boolean(configuredInstance);
+        const binding = await this.ports.configuration(operation);
+        if (binding) {
           try {
-            if (operation.phase === "preparing" && operation.notifiedRevision === operation.revision &&
-                await this.ports.preparationClosed?.(operation)) {
-              await this.application.block(operation.id, operation.revision, "准备运行已结束，尚未提交有效候选；未安装或启用连接");
-            }
-            if (operation.phase === "configuration") {
-              restoringArtifact = true;
-              const saved = await this.candidates.read(operation.candidate!.digest);
-              await this.artifacts.import(saved.manifest, Buffer.from(saved.code));
-              restoringArtifact = false;
-              const configuredInstance = await this.application.get(operation.instanceId);
-              configuringExisting = Boolean(configuredInstance);
-              const binding = await this.ports.configuration(operation);
-              if (binding) {
-                try {
-                  if (operation.previous) await this.ports.replacement?.(operation, binding);
-                  const instance = await this.application.trial(operation.id, operation.revision, binding);
-                  await this.ports.changed(instance);
-                } catch (error) {
-                  // Existing instances borrow a committed immutable projection,
-                  // including failed first trials. Only initial preparation owns
-                  // an uncommitted projection that can be discarded on conflict.
-                  if (error instanceof ExtensionRevisionConflict && !configuredInstance && !operation.previous &&
-                      !(await this.application.get(operation.instanceId))) await this.ports.discard(operation.instanceId, binding);
-                  throw error;
-                }
-              }
-            }
-            const instance = await this.application.get(operation.instanceId);
-            // Only reconcile a durable start/stop decision. A status query must
-            // not reset the runtime's finite retry budget after a fault.
-            if (instance && (!instance.enabled || instance.phase === "stopped")) await this.ports.changed(instance);
+            if (operation.previous) await this.ports.replacement?.(operation, binding);
+            const instance = await this.application.trial(operation.id, operation.revision, binding);
+            await this.ports.changed(instance);
           } catch (error) {
-            if (!(error instanceof ExtensionRevisionConflict)) {
-              const current = await this.application.operation(operation.id);
-              if (current && extensionOperationActive(current) && (restoringArtifact || configuringExisting || current.phase !== "configuration" || current.previous)) {
-                await this.application.block(current.id, current.revision, restoringArtifact ? "本机候选制品缺失或校验失败，需要重新准备；未开放正常使用" : "接入执行受阻，请查询操作并检查候选合同；未开放正常使用").catch(() => undefined);
-              } else if (current?.phase === "configuration") {
-                await this.application.waiting(current.id, current.revision, "请在目标设备的 /config 消息通道中补全并保存配置；候选尚未开放使用").catch(() => undefined);
-              }
-            }
-          }
-          const settled = await this.application.get(operation.instanceId);
-          if (settled && settled.phase === "stopped") await this.ports.changed(settled);
-          operation = (await this.application.operation(operation.id))!;
-          // Verification is type-owned and can advance several checkpoints. Do
-          // not wake a model on every network event; only user-action/results.
-          if ((operation.phase !== "verifying" || !operation.verification) && operation.notifiedRevision !== operation.revision && this.ports.isActive()) {
-            try {
-              const continuation = await this.ports.notify(operation);
-              await this.application.notified(operation.id, operation.revision, continuation);
-            } catch { /* A durable result remains pending until a later access/recovery. */ }
+            // Existing instances borrow a committed immutable projection,
+            // including failed first trials. Only initial preparation owns
+            // an uncommitted projection that can be discarded on conflict.
+            if (error instanceof ExtensionRevisionConflict && !configuredInstance && !operation.previous &&
+                !(await this.application.get(operation.instanceId))) await this.ports.discard(operation.instanceId, binding);
+            throw error;
           }
         }
       }
-    };
-    this.running = run().finally(() => { this.running = undefined; });
-    return this.running;
+      const instance = await this.application.get(operation.instanceId);
+      // Only reconcile a durable start/stop decision. A status query must
+      // not reset the runtime's finite retry budget after a fault.
+      if (instance && (!instance.enabled || instance.phase === "stopped")) await this.ports.changed(instance);
+    } catch (error) {
+      if (!(error instanceof ExtensionRevisionConflict)) {
+        const current = await this.application.operation(operation.id);
+        if (current && extensionOperationActive(current) && (restoringArtifact || configuringExisting || current.phase !== "configuration" || current.previous)) {
+          await this.application.block(current.id, current.revision, restoringArtifact ? "本机候选制品缺失或校验失败，需要重新准备；未开放正常使用" : "接入执行受阻，请查询操作并检查候选合同；未开放正常使用").catch(() => undefined);
+        } else if (current?.phase === "configuration") {
+          await this.application.waiting(current.id, current.revision, "请在目标设备的 /config 消息通道中补全并保存配置；候选尚未开放使用").catch(() => undefined);
+        }
+      }
+    }
+    const settled = await this.application.get(operation.instanceId);
+    if (settled && settled.phase === "stopped") await this.ports.changed(settled);
+    const refreshed = await this.application.operation(operation.id);
+    if (!refreshed) return;
+    operation = refreshed;
+    // Verification is type-owned and can advance several checkpoints. Do
+    // not wake a model on every network event; only user-action/results.
+    if ((operation.phase !== "verifying" || !operation.verification) && operation.notifiedRevision !== operation.revision && !this.closed && this.ports.isActive()) {
+      try {
+        const continuation = await this.ports.notify(operation);
+        if (!this.closed && this.ports.isActive()) await this.application.notified(operation.id, operation.revision, continuation);
+      } catch { /* A durable result remains pending until a later access/recovery. */ }
+    }
   }
 }

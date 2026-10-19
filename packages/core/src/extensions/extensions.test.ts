@@ -15,14 +15,18 @@ import { ExtensionPeer } from "./protocol.js";
 
 const roots: string[] = [];
 const runtimes: ManagedExtensions[] = [];
+const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
+  await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance()));
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function fixture(mode = "normal", projection = async () => ({ mode }), recordsFor?: ConstructorParameters<typeof ManagedExtensions>[0]["recordsFor"]) {
   const root = await mkdtemp(join(tmpdir(), "zhixing-extensions-")); roots.push(root);
   const log = new FileAuthorityCommitLog(root, new FileArtifactStore(join(root, "authority-artifacts")));
+  logs.push(log);
   const application = new ExtensionApplication({ log: () => log, assertOwner() {} });
   const bytes = await readFile(new URL("./__fixtures__/worker.mjs", import.meta.url));
   const manifest = validateExtensionManifest({ id: "fixture", version: "1.0.0", digest: createHash("sha256").update(bytes).digest("hex"),
@@ -39,52 +43,51 @@ async function fixture(mode = "normal", projection = async () => ({ mode }), rec
 }
 
 describe("managed extensions", () => {
-  it("reads through a verified cursor while observing peer decisions and isolating returned state", async () => {
+  it("reads indexed current state while observing peer decisions and isolating returned state", async () => {
     const f = await fixture();
     await f.application.adopt("one", f.binding);
-    const read = vi.spyOn(f.log, "readProjection");
+    const read = vi.spyOn(f.log, "readProjection").mockRejectedValue(new Error("Whole extension replay must not be reachable"));
     const initial = await f.application.list();
-    const firstCursor = (await read.mock.results[0]!.value).cursor;
     Object.assign(initial.instances[0]!.binding, { projectionRevision: "caller-mutation" });
-    const peer = new ExtensionApplication({ log: () => new FileAuthorityCommitLog(f.root, new FileArtifactStore(join(f.root, "authority-artifacts"))), assertOwner() {} });
+    const peerLog = new FileAuthorityCommitLog(f.root, new FileArtifactStore(join(f.root, "authority-artifacts"))); logs.push(peerLog);
+    const peer = new ExtensionApplication({ log: () => peerLog, assertOwner() {} });
     await peer.setEnabled("one", false, 1);
     const results = await Promise.all([f.application.list(), f.application.list()]);
-    expect(read.mock.calls[1]![2]?.cursor).toBe(firstCursor);
+    expect(read).not.toHaveBeenCalled();
     for (const result of results) {
       expect(result.instances[0]!.enabled).toBe(false);
       expect(result.instances[0]!.binding.projectionRevision).toBe(f.binding.projectionRevision);
     }
   });
 
-  it("drops failed projections and never reuses a cursor across Authority owners", async () => {
+  it("propagates an unavailable index and never reuses state across Authority owners", async () => {
     const f = await fixture();
     const other = await fixture();
     await f.application.adopt("one", f.binding);
     let selected = f.log;
     const application = new ExtensionApplication({ log: () => selected, assertOwner() {} });
     await application.list();
-    const read = vi.spyOn(f.log, "readProjection");
+    const read = vi.spyOn(f.log, "transactDurableProjection");
     read.mockRejectedValueOnce(new Error("read failed"));
     await expect(application.list()).rejects.toThrow("read failed");
     expect((await application.list()).instances).toHaveLength(1);
-    expect(read.mock.calls[1]![2]?.cursor).toBeUndefined();
     selected = other.log;
     expect((await application.list()).instances).toHaveLength(0);
   });
 
-  it("reuses committed prefixes without hiding peer conflicts or writing for unchanged queries", async () => {
+  it("keeps queries read-only and decides at fresh indexed state without hiding peer conflicts", async () => {
     const f = await fixture();
     await f.application.adopt("one", f.binding);
-    // Windows may finalize file metadata on close; obtain the read cursor first.
     await f.application.list();
-    const transactions = vi.spyOn(f.log, "transactProjection");
+    const before = await f.log.checkpoint();
+    const transactions = vi.spyOn(f.log, "transactProjection").mockRejectedValue(new Error("Whole extension transaction must not be reachable"));
     await f.application.list();
     await f.application.list();
     expect(transactions).not.toHaveBeenCalled();
+    expect(await f.log.checkpoint()).toEqual(before);
     await f.application.setEnabled("one", false, 1);
-    expect(transactions.mock.calls[0]![3]?.cursor).toBeDefined();
+    expect((await f.log.checkpoint()).lsn).toBe(before.lsn + 1);
     await f.application.list();
-    transactions.mockClear();
     await f.application.list();
     expect(transactions).not.toHaveBeenCalled();
 

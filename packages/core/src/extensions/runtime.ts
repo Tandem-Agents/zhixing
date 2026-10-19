@@ -36,7 +36,7 @@ export class ManagedExtensions {
     this.allowed = true;
     this.paused = false;
     if (!this.ports.isOwner()) return;
-    const { instances } = await this.ports.application.list();
+    const instances = await this.ports.application.instances();
     await Promise.all(instances.map((instance) => this.reconcile(instance)));
   }
 

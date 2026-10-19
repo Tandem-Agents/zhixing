@@ -153,12 +153,12 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   const migrationFailures = new Set<string>();
   const observations = new Set<Promise<void>>();
   let onboarding: ExtensionOnboarding | undefined;
-  const snapshot = async () => { instances = (await application.list()).instances; };
+  const snapshot = async () => { instances = (await application.instances()); };
   const changedOperation = () => {
     // 关闭后不再登记新的观察：关闭过程中的回调不得在释放后继续读写权威日志。
     if (closed) return;
-    const observation = snapshot().then(() => onboarding?.reconcile()).then(async () => {
-      for (const instance of (await application.list()).instances) await verification.resume(instance);
+    const observation = snapshot().then(() => onboarding?.requestReconcile()).then(async () => {
+      for (const instance of (await application.instances())) await verification.resume(instance);
     }).catch(() => undefined);
     observations.add(observation); void observation.finally(() => observations.delete(observation));
   };
@@ -221,7 +221,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   // candidates require the preparation/admission workflow, not a directory scan.
   const adoptConfigured = async () => {
     // Older installations already have an adopted binding but no source archive.
-    for (const instance of (await application.list()).instances) {
+    for (const instance of (await application.instances())) {
       const seed = seeds.find(item => item.manifest.digest === instance.binding.manifest.digest);
       if (!seed) continue;
       try { await candidates.read(seed.manifest.digest); }
@@ -236,7 +236,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       if (await application.get(id)) continue;
       // Dynamic candidates (including cancelled operations) never become a
       // distribution migration just because their type matches a seed.
-      if ((await application.list()).operations?.some(operation => operation.instanceId === id)) continue;
+      if (await application.latestOperation(id)) continue;
       const seed = seeds.find(({ manifest }) => manifest.type === "channel" && manifest.id === (entry.type ?? id));
       if (!seed) { migrationFailures.add(id); options.logger.error("Channel '%s': no admitted artifact", id); continue; }
       try {
@@ -300,7 +300,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
   const applyConfiguration = async (ids: readonly string[], recovering = false) => {
     await adoptConfigured();
     const entries = options.configuration.entries();
-    for (const instance of (await application.list()).instances) {
+    for (const instance of (await application.instances())) {
       if (instance.binding.manifest.type !== "channel" || !ids.includes(instance.id)) continue;
       try {
       if (!entries[instance.id]) {
@@ -325,8 +325,9 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
       }
     }
     await snapshot();
-    await onboarding?.reconcile();
-    return application.list();
+    if (recovering) onboarding?.requestReconcile();
+    else await onboarding?.reconcile();
+    return recovering ? application.current() : application.list();
   };
   onboarding = new ExtensionOnboarding(application, artifacts, candidates, {
     validate: (manifest) => { channelDeclaration(manifest); },
@@ -371,14 +372,19 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     isActive: () => active && ownerRequested && !closed && !admissionPaused && options.isCurrentOwner(),
   });
   const productApi = application.contribution({
-    changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); await onboarding?.reconcile(); },
+    changed: async (instance) => { await runtime.reconcile(instance); await snapshot(); onboarding?.requestReconcile(); },
     refresh, applyConfiguration,
     manage: (request) => onboarding!.manage(request),
     localSetup: async () => {
       const instructions: Record<string, string> = {};
-      for (const operation of (await application.list()).operations ?? []) {
-        if (["configuration", "verifying"].includes(operation.phase)) instructions[operation.instanceId] = `保存凭据并启用后，本人在对应 APP 的目标会话发送：连接 ${await verification.code(operation)}；再在同一会话按收到的回复确认。`;
-      }
+      let after: string | undefined;
+      do {
+        const page = await application.workPage(after);
+        for (const operation of page.operations) {
+          if (["configuration", "verifying"].includes(operation.phase)) instructions[operation.instanceId] = `保存凭据并启用后，本人在对应 APP 的目标会话发送：连接 ${await verification.code(operation)}；再在同一会话按收到的回复确认。`;
+        }
+        after = page.after;
+      } while (after);
       return instructions;
     },
   });
@@ -416,11 +422,11 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     const revision = connectionRevision;
     if (closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()) return;
     await applyConfiguration([...new Set([...Object.keys(options.configuration.entries()),
-      ...(await application.list()).instances.map((instance) => instance.id)])], true);
+      ...(await application.instances()).map((instance) => instance.id)])], true);
     if (revision !== connectionRevision || closed || !active || !ownerRequested || !consumers || !options.isCurrentOwner()) return;
     admissionPaused = false;
     await runtime.resume();
-    await onboarding?.reconcile();
+    onboarding?.requestReconcile();
   };
   await snapshot();
   return {
@@ -469,6 +475,7 @@ export async function setupChannels(options: SetupChannelsOptions): Promise<Setu
     dispose: async () => {
       connectionRevision++; closed = true; ownerRequested = false; consumers = undefined;
       await runtime.close();
+      await onboarding?.stop();
       // 等到观察集合真正清空：等待期间完成的观察可能已登记后继观察。
       while (observations.size) await Promise.all(observations);
     },
