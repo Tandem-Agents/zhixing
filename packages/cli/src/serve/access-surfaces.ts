@@ -178,7 +178,6 @@ export interface PrepareAuthorityServicesInput {
 export async function prepareAuthorityServices(
   input: PrepareAuthorityServicesInput,
 ) {
-  const { meshBootstrap: inputMeshBootstrap, meshExecutorTopologyTrust: inputMeshExecutorTopologyTrust } = input;
   const authorityRuntime = input.authorityRuntime;
   if (!authorityRuntime) {
     throw new Error("Authority integration requires the prepared Authority runtime");
@@ -227,10 +226,6 @@ export async function prepareAuthorityServices(
       verifier: authorityRuntime.verifier,
       verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
         authority: authorityRuntime,
-        currentAnchorDeviceId: () =>
-          inputMeshBootstrap.mode === "trusted-home"
-            ? inputMeshExecutorTopologyTrust!.currentAnchorDeviceId()
-            : authorityRuntime.deviceId,
       }),
       capacity: input.advancementCapacity,
     });
@@ -1030,6 +1025,7 @@ export async function createLocalConversationOwner(
   const executorResources = inputAuthorityRuntime.executorResourceGovernor;
   const localOwner = localConversationOwnerRuntime({
     artifacts: inputAuthorityRuntime.artifacts,
+    conversationAuthority: inputAuthorityRuntime.conversationAuthority,
     deviceId: inputAuthorityRuntime.deviceId,
     executorCapabilities: inputAuthorityRuntime.executorCapabilities,
     executorId: inputAuthorityRuntime.executorId,

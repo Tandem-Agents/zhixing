@@ -329,7 +329,8 @@ export function classifyRegisteredArtifactReferences(
       }
       return unconditionalOnly(batch);
     }
-    if (envelope?.v !== 1) throw new TypeError("version must be 1");
+    if (!envelope || envelope.v !== 1 && !(envelope.v === 2 && envelope.execution === 'conversation' &&
+        Number.isSafeInteger(envelope.anchorEpoch) && Number(envelope.anchorEpoch) > 0)) throw new TypeError('Unsupported dispatch version or anchor tenure');
     if (envelope.assignmentId !== root.assignmentId) {
       throw new TypeError("assignmentId does not match its authority record");
     }

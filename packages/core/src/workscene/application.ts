@@ -31,6 +31,7 @@ export {
   validateWorksceneControl,
   validateWorksceneTaskHandoff,
   type WorksceneContinuationPort,
+  type WorksceneContinuationQuery,
   type WorksceneContinuationSource,
   type WorksceneTaskReference,
 } from "./continuation.js";

@@ -5,13 +5,15 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type DurableLogCheckpoint,
+  type VerifiedAnchorTenure,
 } from "@zhixing/core/authority";
 import { ProtocolVerificationIdentityCache, type ProtocolSignatureVerifier } from "@zhixing/core/protocol";
 import type { DeviceIdentity, SecretStorePort } from "@zhixing/core/contracts";
 import type { LogRecordPort } from "@zhixing/core/logging";
 import type { DeviceCapacityArbiterPort, StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { bindConversationAnchorTenure } from './conversation-anchor-tenure.js';
 import {
-  currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readTrustIdentity,
+  CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readTrustIdentity, readCurrentAnchorTenure, readCurrentTrustMember,
   type CurrentTrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import { createLiveTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
@@ -54,8 +56,8 @@ const SHARED_REQUIRED = [...CORE_WRITE_REQUIRED, "device-lifecycle-state-v1", "c
 const AUTHORITY_REQUIRED = [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED, "credential-exposures-v1",
   "global-skill-authority-v1", "global-workscene-authority-v1", "global-rubric-authority-v1",
   "workscene-session-activity-v2", "global-schedule-authority-v1", "job-publish-pending-v1",
-  "conversation-read-directory", "surface-asset-grants"] as const;
-const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "workspace-binding-state-v1", "workspace-probe-state-v1",
+  "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "conversation-submission-state-v1", "surface-asset-grants"] as const;
+const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "conversation-recovery-pending-v1", "workspace-binding-state-v1", "workspace-probe-state-v1",
   "executor-job-interaction-obligations"] as const;
 
 /**
@@ -123,6 +125,9 @@ export class HomeAuthoritySources {
   readonly verifier: ProtocolSignatureVerifier;
   readonly identities = new ProtocolVerificationIdentityCache();
   #authorityPresent = false;
+  #knownAnchorTenure: VerifiedAnchorTenure | undefined;
+  #trustKnown = false;
+  #trustUnavailable = false;
 
   private constructor(
     readonly home: string,
@@ -144,6 +149,9 @@ export class HomeAuthoritySources {
       ...(options.clock ? { clock: options.clock } : {}),
     };
     this.authority = new FileAuthorityCommitLog(path.join(root, "authority"), this.artifacts, shared);
+    this.authority.registerAppendAdmissionGuard(entries => {
+      if (entries.some(entry => entry.stream === 'trust')) this.invalidateKnownTrust();
+    });
     this.executor = new FileAuthorityCommitLog(path.join(root, "executor-authority"), this.artifacts, shared);
     this.verifier = createLiveTrustedDeviceProtocolVerifier((keyId) => this.identities.identityFor(keyId));
     this.identities.setSourceReader(() => this.authority.sourceIdentity());
@@ -162,7 +170,7 @@ export class HomeAuthoritySources {
     const integrity = await loadAuthorityCacheIntegrity(options.secretStore, readOnly);
     const sources = new HomeAuthoritySources(options.home, readOnly, integrity, options);
     try {
-      currentTrustIndex(sources.authority);
+      bindConversationAnchorTenure(sources.authority);
       sources.#authorityPresent = !readOnly || await exists(sources.authority.logPath);
       // 与 C8 运行时验签器一致，本机已有的受保护设备身份始终可验；必须在准备投影之前登记，
       // 否则升级首开的初建会把单机期本机签名的历史记录判为不受信。只读取既有密钥，不创建。
@@ -214,7 +222,7 @@ export class HomeAuthoritySources {
       registerWorkspaceProbeProjection } = core;
     const { registerControlAdmissionProjection, registerConversationIdentityProjection, registerScheduleAuthorityProjection,
       registerJobPublishPendingProjection, registerDeferredIntentProjection, registerConversationReadProjection,
-      registerConversationTransferProjection } = owner;
+      registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection } = owner;
     const { registerExecutorJobRecoveryProjection } = executorDefinitions;
     const { credentialExposureIndex } = mesh;
     const { registerSurfaceAssetProjection } = surfaceAssets;
@@ -225,6 +233,9 @@ export class HomeAuthoritySources {
       registerConversationIdentityProjection(log, artifacts);
       registerDeferredIntentProjection(log);
       registerConversationTransferProjection(log, verifier);
+      // Global recovery discovery reads both sources before a local conversation
+      // kernel is mounted. Prepare this fixed discovery index at Host.ready.
+      registerConversationRecoveryProjection(log, artifacts);
     }
     credentialExposureIndex(authority);
     registerSkillAuthorityProjection(authority);
@@ -234,7 +245,8 @@ export class HomeAuthoritySources {
     registerScheduleAuthorityProjection(authority, artifacts);
     registerJobPublishPendingProjection(authority);
     registerConversationReadProjection(authority, artifacts, verifier);
-    registerSurfaceAssetProjection(authority, artifacts);
+    registerConversationRunProjection(authority, artifacts, verifier);
+    registerSurfaceAssetProjection(authority, artifacts, verifier);
     registerWorkspaceBindingProjection(executor);
     registerWorkspaceProbeProjection(executor, verifier);
     registerExecutorJobRecoveryProjection(executor, verifier);
@@ -249,10 +261,32 @@ export class HomeAuthoritySources {
   async currentTrust(): Promise<CurrentTrustProjection | undefined> {
     if (!this.#authorityPresent) return undefined;
     const result = await this.authority.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
-      async (view) => ({ kind: "return", value: await readCurrentTrust(view) }));
+      async (view) => ({ kind: "return", value: { trust: await readCurrentTrust(view), tenure: await readCurrentAnchorTenure(view) } }));
     const source = this.authority.sourceIdentity();
     if (source) this.identities.bindSource(source);
-    if (result.value) this.rememberCurrentTrust(result.value);
+    if (result.value.trust) this.rememberCurrentTrust(result.value.trust);
+    this.#rememberAnchorTenure(result.value.tenure);
+    return result.value.trust;
+  }
+
+  knownAnchorTenure(): VerifiedAnchorTenure | undefined { return this.#trustUnavailable ? undefined : this.#knownAnchorTenure; }
+  knowsTrustDomain(): boolean { return this.#trustKnown; }
+  invalidateKnownTrust(): void { this.#trustKnown = true; this.#trustUnavailable = true; }
+  #rememberAnchorTenure(tenure: VerifiedAnchorTenure | undefined): void {
+    const previous = this.#knownAnchorTenure;
+    if (previous && (!tenure || tenure.homeId !== previous.homeId || tenure.anchorEpoch < previous.anchorEpoch ||
+        tenure.chainHead.seq < previous.chainHead.seq || tenure.anchorEpoch === previous.anchorEpoch && tenure.deviceId !== previous.deviceId)) {
+      this.invalidateKnownTrust(); throw new Error('Verified trust tenure regressed or changed its home');
+    }
+    this.#knownAnchorTenure = tenure; this.#trustUnavailable = false;
+    if (tenure) this.#trustKnown = true;
+  }
+
+  async currentAnchorAuthorization(deviceId: string) {
+    const result = await this.authority.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async view => ({
+      kind: 'return' as const, value: { tenure: await readCurrentAnchorTenure(view), member: await readCurrentTrustMember(view, deviceId) },
+    }));
+    this.#rememberAnchorTenure(result.value.tenure);
     return result.value;
   }
 

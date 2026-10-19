@@ -6,7 +6,7 @@ import type {
   Signature,
   WireContractV1,
 } from "./foundation.js";
-import type { WireSchemaV1 } from "../types/distributed.js";
+import type { WireSchemaV1, WireSchemaIdentity } from "../types/distributed.js";
 
 export type ExecutionKind = "conversation" | "job";
 
@@ -261,9 +261,11 @@ export type ResourceSelector = `${
   | "asset"}:${string}`;
 
 export type AuthorityCapability<E extends ExecutionKind = ExecutionKind> =
-  WireSchemaV1<"AuthorityCapability"> &
+  WireSchemaIdentity<"AuthorityCapability"> &
     (E extends "conversation"
       ? {
+          v: 1 | 2;
+          anchorEpoch?: number;
           capId: string;
           executorId: string;
           scope: { execution: "conversation"; conversationId: string };
@@ -276,6 +278,7 @@ export type AuthorityCapability<E extends ExecutionKind = ExecutionKind> =
           signature: Signature;
         }
       : {
+          v: 1;
           capId: string;
           executorId: string;
           scope: { execution: "job"; taskId: string };
@@ -488,7 +491,9 @@ export interface UsageReport extends WireSchemaV1<"UsageReport"> {
   signature: Signature;
 }
 
-export interface ControlLease extends WireSchemaV1<"ControlLease"> {
+export interface ControlLease extends WireSchemaIdentity<"ControlLease"> {
+  v: 1 | 2;
+  anchorEpoch?: number;
   controlLeaseId: string;
   assignmentId: string;
   authority: AuthorityEpochRef;
@@ -554,7 +559,9 @@ export interface AssignmentArtifactTransferGrant
   signature: Signature;
 }
 
-export interface OwnerControlGrant extends WireSchemaV1<"OwnerControlGrant"> {
+export interface OwnerControlGrant extends WireSchemaIdentity<"OwnerControlGrant"> {
+  v: 1 | 2;
+  anchorEpoch?: number;
   assignmentId: string;
   scope: AuthorityEpochRef;
   methods: OwnerControlMethodId[];

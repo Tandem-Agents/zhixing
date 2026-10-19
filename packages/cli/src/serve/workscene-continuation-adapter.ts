@@ -33,7 +33,7 @@ export function createWorksceneContinuationPort(input: {
     },
     stop: async (conversationId, runId, requestId) => {
       const source = (
-        await protocol.worksceneContinuationSources(conversationId)
+        await protocol.worksceneContinuationSources(conversationId, { runId })
       ).find((item) => item.runId === runId);
       if (!source) throw new Error("原委托不存在");
       await protocol.cancel({
@@ -47,9 +47,9 @@ export function createWorksceneContinuationPort(input: {
         reason: { kind: "user-cancel", source: "rpc", pressedAt: Date.now() },
       });
     },
-    read: async (conversationId) =>
+    read: async (conversationId, query) =>
       Promise.all(
-        (await protocol.worksceneContinuationSources(conversationId)).map(
+        (await protocol.worksceneContinuationSources(conversationId, query)).map(
           async (source) => ({
             ...source,
             current:

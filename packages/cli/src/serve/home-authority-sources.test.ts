@@ -12,6 +12,7 @@ import { FileAuthorityCommitLog, durableProjectionDirectoryName } from "@zhixing
 import { verifyProtocolStep } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { mkdir, writeFile } from "node:fs/promises";
+import { conversationRecoveryPage } from "@zhixing/owner-kernel/conversation-assignment";
 
 const AT = "2026-10-16T00:00:00.000Z";
 
@@ -93,6 +94,9 @@ describe("home authority sources", () => {
     try {
       const ready = await lease.sources.prepareRuntime("host-ready");
       for (const [position, log] of [lease.sources.authority, lease.sources.executor].entries()) {
+        // Exercise the actual recovery consumer after the boundary; comparing
+        // only the original registration list with itself missed this dependency.
+        await conversationRecoveryPage(log, lease.sources.artifacts);
         expect(new Set(ready[position]!.projections)).toEqual(registered.get(log.rootDir));
       }
     } finally { await lease.close(); spy.mockRestore(); }

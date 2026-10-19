@@ -14,6 +14,7 @@ export class ConversationSessionReadModel<State extends { readonly domainRevisio
   readonly #operations = new SerialTaskQueue();
   #generation = 0;
   #base: readonly CommitEnvelope<unknown>[] = [];
+  #baseSource: { current(): Promise<State>; atRevision(through: number): Promise<State> } | undefined;
   #cache: { state: State; cursor: DurableLogCheckpoint } | undefined;
 
   constructor(
@@ -38,6 +39,14 @@ export class ConversationSessionReadModel<State extends { readonly domainRevisio
       const payload = { v: 1 as const, ...group };
       return { ...payload, envelopeDigest: protocolDigest('CommitEnvelope', 1, payload) };
     });
+    this.#baseSource = undefined;
+    this.#generation++;
+    this.#cache = undefined;
+  }
+
+  installBaseSource(source: { current(): Promise<State>; atRevision(through: number): Promise<State> }): void {
+    this.#base = [];
+    this.#baseSource = source;
     this.#generation++;
     this.#cache = undefined;
   }
@@ -57,7 +66,8 @@ export class ConversationSessionReadModel<State extends { readonly domainRevisio
     if (cached?.cursor.lsn) await this.log.readEnvelopeAt(cached.cursor);
     if (cached && cached.cursor.logId !== head.logId) throw new Error('Session read prefix changed');
     if (cached && cached.cursor.lsn >= head.lsn) return;
-    let state = cached ? structuredClone(cached.state) : this.empty(), afterLsn = cached?.cursor.lsn ?? 0;
+    let state = cached ? structuredClone(cached.state) : this.#baseSource ? await this.#baseSource.current() : this.empty();
+    let afterLsn = cached?.cursor.lsn ?? 0;
     const fold = async (envelope: CommitEnvelope<unknown>) => {
       if (signal.aborted) throw new StorageMaintenanceCancelledError();
       for (const record of envelope.entries) if (this.#relevant(record)) state = await this.reduce(state, record, envelope);
@@ -98,7 +108,9 @@ export class ConversationSessionReadModel<State extends { readonly domainRevisio
       const before = revision(cached.state);
       if (before === undefined) return { value: undefined };
       const through = before - 1;
-      let state = this.empty(), afterLsn = 0;
+      const initialBase = this.#baseSource ? await this.#baseSource.current() : undefined;
+      let state = initialBase ? initialBase.domainRevision > through
+        ? await this.#baseSource!.atRevision(through) : initialBase : this.empty(), afterLsn = 0;
       const fold = async (envelope: CommitEnvelope<unknown>) => {
         for (const record of envelope.entries) {
           if (signal.aborted) throw new StorageMaintenanceCancelledError();

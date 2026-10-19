@@ -144,6 +144,7 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
         kind: "capability-gap",
       });
     }
+    await this.#options.verifyCurrentOwner(request);
     const resolved = await this.#options.environment.resolveWorkspace(
       request.workspace.bindingRef,
     );
@@ -170,6 +171,7 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
           execute,
         )
       : await execute();
+    await this.#options.verifyCurrentOwner(request);
     return await this.#options.journal.complete(request, result);
   }
 
@@ -242,6 +244,7 @@ export class ExecutorEvidenceHandler implements EvidenceHandlerPort {
     const out: CollectedItem[] = [];
     for (const item of request.items) {
       abort.throwIfAborted();
+      await this.#options.verifyCurrentOwner(request);
       out.push(
         await collectItem(
           workspaceRoot,

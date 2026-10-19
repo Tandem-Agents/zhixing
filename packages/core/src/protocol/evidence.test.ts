@@ -222,7 +222,7 @@ describe("evidence protocol", () => {
       "incomplete or unknown",
     );
     expect(() =>
-      validateEvidenceRequest({ ...req, v: 2 }, verifier),
+      validateEvidenceRequest({ ...req, v: 3 }, verifier),
     ).toThrow("version");
     const pack = bundle();
     expect(() =>

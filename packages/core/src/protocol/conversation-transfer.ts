@@ -766,9 +766,9 @@ function assertStreamRanges(input: unknown, lastLsn: number): void {
     if ((entry.lastLsn as number) < (entry.firstLsn as number) || (entry.lastLsn as number) > lastLsn) {
       throw new TypeError(`${label} range is invalid`);
     }
-    if ((entry.recordCount as number) > (entry.lastLsn as number) - (entry.firstLsn as number) + 1) {
-      throw new TypeError(`${label} record count exceeds its LSN range`);
-    }
+    // LSN identifies an atomic envelope, which can carry several logical
+    // records for this stream. Exact counts are checked against the signed
+    // exported stream; the number of envelopes is not a record-count bound.
     if (compareCanonicalStrings(previous, entry.stream as string) >= 0) {
       throw new TypeError("Conversation transfer streams must be unique and canonically sorted");
     }

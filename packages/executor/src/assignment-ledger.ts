@@ -199,9 +199,15 @@ export interface OwnerControlRequest {
   readonly requestId: string;
   readonly body: unknown;
   readonly expectedOwnerDeviceId?: string;
+  readonly anchorEpoch?: number;
 }
 
 export interface OwnerControlAuthorizer {
+  readonly readProjectionIds?: readonly string[];
+  prepare?(context: AuthorityCallContext, request: OwnerControlRequest, authenticatedCallerDeviceId: string):
+    Promise<((prefix: ProjectionTransactionContext) => Promise<void>) | undefined>;
+  prepareExecution?(control: { readonly authority: AuthorityEpochRef; readonly ownerDeviceId: string; readonly lease: ControlLease }):
+    Promise<((prefix: ProjectionTransactionContext) => Promise<void>) | undefined>;
   authorize(
     context: AuthorityCallContext,
     request: OwnerControlRequest,
@@ -695,6 +701,7 @@ export class ConversationAssignmentLedger implements
         ),
       },
       expectedOwnerDeviceId: controlBinding.ownerDeviceId,
+      ...(controlBinding.anchorEpoch === undefined ? {} : { anchorEpoch: controlBinding.anchorEpoch }),
     });
 
     let envelope: AssignmentEnvelope;
@@ -1303,9 +1310,11 @@ export class ConversationAssignmentLedger implements
   }
 
   async start(assignmentId: string): Promise<{ readonly started: boolean }> {
+    const current = await this.#prepareExecutionAuthority(assignmentId, true);
     const transaction = await this.#transact<{ started: boolean }>(
       assignmentId,
-      (state) => {
+      async (state, prefix) => {
+        await current?.(state, prefix);
         if (state.aborts.length > 0) {
           throw new AssignmentStartCancelledError(assignmentId);
         }
@@ -1328,7 +1337,7 @@ export class ConversationAssignmentLedger implements
           return { kind: "return", value: { started: false } };
         }
         throw new Error("Assignment cannot start before a durable received record");
-      },
+      }, [], false, this.#ownerControl.readProjectionIds,
     );
     return transaction.value;
   }
@@ -1349,9 +1358,11 @@ export class ConversationAssignmentLedger implements
     ) {
       throw new TypeError("Side-effect target is invalid");
     }
+    const current = await this.#prepareExecutionAuthority(assignmentId);
     const transaction = await this.#transact<{ effectSeq: number }>(
       assignmentId,
-      (state) => {
+      async (state, prefix) => {
+        await current?.(state, prefix);
         if (state.phase !== "started" || state.aborts.length > 0) {
           throw new Error("Side effects require an active, unfenced assignment");
         }
@@ -1371,7 +1382,7 @@ export class ConversationAssignmentLedger implements
           ],
           value: { effectSeq },
         };
-      },
+      }, [], false, this.#ownerControl.readProjectionIds,
     );
     return transaction.value;
   }
@@ -3213,8 +3224,21 @@ export class ConversationAssignmentLedger implements
     request: OwnerControlRequest,
     authenticatedCallerDeviceId = ownerControlCallerDeviceId(context),
   ): Promise<void> {
-    const transaction = await this.#transact<boolean>(request.assignmentId, (state) => {
+    const verifyCurrent = await this.#ownerControl.prepare?.(context, request, authenticatedCallerDeviceId);
+    const transaction = await this.#transact<boolean>(request.assignmentId, async (state, prefix) => {
+      await verifyCurrent?.(prefix);
       const durableAuthority = state.control?.authority ?? authorityForProjection(state);
+      const grant = context.principal.kind === 'owner-control' ? context.principal.grant : undefined;
+      if (verifyCurrent && request.method === 'executor.queryLedger' && grant?.v === 2 && grant.scope.execution === 'conversation' &&
+          durableAuthority?.execution === 'conversation' && grant.scope.conversationId === durableAuthority.conversationId &&
+          grant.scope.ownerEpoch > durableAuthority.ownerEpoch) {
+        const authorized = this.#ownerControl.authorize(context, { ...request, authority: grant.scope,
+          expectedOwnerDeviceId: grant.callerDeviceId }, authenticatedCallerDeviceId);
+        if (canonicalize(authorized.authority) !== canonicalize(grant.scope) || authorized.ownerDeviceId !== grant.callerDeviceId) throw new TypeError('Historical ledger query has no current owner authorization');
+        // Current owners may settle an inherited exact result. This read never
+        // renews the historical execution lease or authorizes a new action.
+        return { kind: 'return', value: true };
+      }
       const durableOwnerDeviceId =
         state.control?.ownerDeviceId ??
         state.received?.body.activation.signature.keyId;
@@ -3279,7 +3303,7 @@ export class ConversationAssignmentLedger implements
         entries: [assignmentRecord(request.assignmentId, entry)],
         value: true,
       };
-    });
+    }, [], false, this.#ownerControl.readProjectionIds);
     if (!transaction.value) {
       throw new TypeError("Owner control lease is no longer active");
     }
@@ -3631,7 +3655,9 @@ export class ConversationAssignmentLedger implements
       | PermissionSnapshotLease<"conversation">
       | PermissionSnapshotLease<"job">,
   ): Promise<readonly PermissionRule[]> {
-    const transaction = await this.#transact<readonly PermissionRule[] | undefined>(assignmentId, (state) => {
+    const current = await this.#prepareExecutionAuthority(assignmentId);
+    const transaction = await this.#transact<readonly PermissionRule[] | undefined>(assignmentId, async (state, prefix) => {
+      await current?.(state, prefix);
       const received = state.received?.body.activation;
       const active =
         state.phase === "started" &&
@@ -3688,9 +3714,29 @@ export class ConversationAssignmentLedger implements
         lastMatchedAt: 0,
         matchCount: 0,
       })) };
-    });
+    }, [], false, this.#ownerControl.readProjectionIds);
     if (transaction.value === undefined) throw new TypeError("Permission snapshot lease is inactive, expired, or misbound");
     return transaction.value;
+  }
+
+  async #prepareExecutionAuthority(assignmentId: string, terminalReplay = false) {
+    if (!this.#ownerControl.prepareExecution) return;
+    const selected = await this.#select(assignmentId, state => ({ phase: state.phase,
+      control: state.control ? snapshot(state.control, 'Execution control authority') : undefined }));
+    if (terminalReplay && selected.phase !== 'received' && selected.phase !== 'started') return;
+    if (!selected.control) throw new TypeError('Execution has no accepted control authority');
+    const check = await this.#ownerControl.prepareExecution(selected.control);
+    if (!check) return;
+    const identity = (control: NonNullable<LedgerProjection['control']>) => canonicalize({
+      authority: control.authority, ownerDeviceId: control.ownerDeviceId,
+      controlLeaseId: control.lease.controlLeaseId, anchorEpoch: control.lease.anchorEpoch ?? null,
+    });
+    const prepared = identity(selected.control);
+    return async (state: LedgerProjection, prefix: ProjectionTransactionContext) => {
+      if (terminalReplay && state.phase !== 'received' && state.phase !== 'started') return;
+      if (!state.control || identity(state.control) !== prepared) throw new TypeError('Execution authority changed during preparation');
+      await check(prefix);
+    };
   }
 
   async #select<Value>(
@@ -3731,9 +3777,10 @@ export class ConversationAssignmentLedger implements
     decide: (
       state: LedgerProjection,
       context: ProjectionTransactionContext,
-    ) => ProjectionTransactionDecision<unknown, Value>,
+    ) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [],
     receiptRetirement = false,
+    readProjectionIds: readonly string[] = [],
   ) {
     assertIdentifier(assignmentId, "Assignment id");
     return this.#operations.run(async () => {
@@ -3746,8 +3793,8 @@ export class ConversationAssignmentLedger implements
         >(
           cached?.state ?? emptyProjection(assignmentId),
           (state, record, commit) => this.#reduce(state === cached?.state ? structuredClone(state) : state, record, commit, receiptRetirement),
-          (state, context) => {
-            const decision = decide(state, context);
+          async (state, context) => {
+            const decision = await decide(state, context);
             if (decision.kind !== "append") return decision;
             const resourceRecords = this.#prepareResourceTerminalRecords(
               state,
@@ -3762,6 +3809,7 @@ export class ConversationAssignmentLedger implements
             streams: [assignmentStream(assignmentId), leaseClockStream(this.#executorId)],
             ...(cached ? { cursor: cached.cursor } : {}),
             candidateReferences,
+            readProjectionIds,
           },
         );
         const transaction = await (

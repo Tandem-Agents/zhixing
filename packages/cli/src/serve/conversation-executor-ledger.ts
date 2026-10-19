@@ -25,6 +25,7 @@ export interface ConversationExecutorLedgerOptions {
       ConversationOwnerRuntimeStack,
       | "executorLog"
       | "artifacts"
+      | "conversationAuthority"
       | "executorId"
       | "signer"
       | "verifier"
@@ -67,7 +68,7 @@ export function createConversationExecutorLedger(
     executorId: options.authority.executorId,
     signer: options.authority.signer,
     verifier: options.authority.verifier,
-    ownerControl: createOwnerControlAuthorizer(options.authority.verifier, clock),
+    ownerControl: createOwnerControlAuthorizer(options.authority.verifier, clock, options.authority.conversationAuthority),
     resources: options.authority.assignmentResources,
     usageFinal: options.usageFinal,
     snapshotFor: (executorId: string): ExecutorCapabilitySnapshot | undefined =>

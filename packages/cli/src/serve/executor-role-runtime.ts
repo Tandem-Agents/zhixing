@@ -417,7 +417,6 @@ async function runExecutorProcess(
       verifier: authority.verifier,
       verifyCurrentOwner: createConversationEvidenceAuthorityVerifier({
         authority,
-        currentAnchorDeviceId,
       }),
       capacity: deviceCapacity.workload("workload-advancement"),
     });
@@ -428,6 +427,7 @@ async function runExecutorProcess(
     const executorResources = authority.executorResourceGovernor;
     const localOwnerRuntime = localConversationOwnerRuntime({
       artifacts: authority.artifacts,
+      conversationAuthority: authority.conversationAuthority,
       deviceId: authority.deviceId,
       executorCapabilities: authority.executorCapabilities,
       executorId: authority.executorId,

@@ -2255,6 +2255,21 @@ live 与 startup 共用 planned phase driver：本端 durable decision 先于远
 
 signed `HomeTrustRecord` 是迁后 current-owner 与 trust 的共同事实。current-authority/current-conversation resolver、session/global/task/channel/confirmation/notification 及 planned 管理入口在副作用前逐次消费它；旧 issuer/epoch 永久拒绝，target 离线只稳定拒绝而不回退。认证 peer 重连只可验签补齐本次 planned commit 唯一缺失的 issuer-transition，不建设 continuous sync。current anchor 组合根恰一 source/recovery owner，本次 anchor target 恰一有限 receiver/recovery owner，executor-only、surface、disabled 和其他非当前设备零 migration owner。公开 targets 只由无 key/staging 副作用的 readiness snapshot 投影 `{opaque targetId,displayName,ready,code?}`；TTY 只按可用设备名称与序号选择，非 TTY 只接受唯一 displayName，重名稳定拒绝且不展示 raw ID，strict prepare 内部才消费 targetId。公开旅程只显示“值班设备”、可行动 ready 缺口及准备/收束/传输/接管阶段。commit 前只允许当前权威签名 abort，commit 后只能前向重驱，late abort 永久拒绝；人工 disaster recovery、`domain-reset`、pending-reenroll 与凭据轮换按本单元下文合同启用，恢复应用与全局连续同步仍未启用。
 
+#### 6.3.1 已收编会话的权威承接与锚点任期
+
+2026-10-18，总控与战略架构师基于“收编后真实计划迁居：历史可读、新owner写被拒”的反例明确以下合同，随终端迁移包1a直接依赖实现。这里规定权威依据，不把当前草稿视作已通过验收，不新增迁居产品、常驻同步服务或通用证明平台。
+
+- **历史来源与当前owner分开。** ConversationTransferCommit/manifest中的targetDeviceId和nextOwnerEpoch记录收编时的目标与会话代际，保持签名、摘要及源位置不变。收编成功后会话属于锚点域，当前owner由已认证权威承接关系决定；不能永久固定为历史目标，也不能拿调用方fallback覆盖。
+- **会话代际。** 原生锚点域会话沿用ownerEpoch=当前anchorEpoch。已收编会话使用`ownerEpoch = baseOwnerEpoch + (currentAnchorEpoch - baseAnchorEpoch)`，其中baseOwnerEpoch为收编commit.nextOwnerEpoch，baseAnchorEpoch为完成收编那一任的已认证anchorEpoch。新收编在同一committed/committed-base提交写入基点，来源是锁定前缀的当前权威，不能接受调用方自报。完整旧资料从收编提交位置与已验安装前缀一次性派生并维护当前索引；不得按设备ID、墙钟或任意默认值猜测。安装连续性缺证时精确拒绝依赖写入，不回退epoch，不阻止独立可证读取或无依赖会话。
+- **锚点任期与trustEpoch分开。** 当前合同的issuer-transition只有migration和disaster-recovery两种，均推进anchorEpoch；在完整已验home信任链上，以创世anchorEpoch加issuer-transition次数派生任期T及该任锚点设备，增量持久化到现有当前信任投影。domain-reset及恢复根操作只按各自合同更新信任，不凭trustEpoch差值计算T。锚点的InstalledAuthorityGeneration.anchorEpoch须与同一已验链头派生值一致；矛盾应显式拒绝，不能默认1。该规则不让未启用mesh的单机启动强制建信任链、联网或建立恢复根，本机形态保持原权威装配。
+- **远端当前性。** 锚点域会话新签发的EvidenceRequest、会话域能力及派发/控制授权绑定携带签名覆盖的anchorEpoch任期。执行端核对请求任期和已验证持久信任视图T，并要求签名设备为该任当前锚点；DeviceKey签名有效本身不证明当前任期。请求T小于本地值拒绝，大于本地值须经已有认证重连/信任追赶路径补齐并验证连续链段后再判定，不能相信自报T、跳过中间transition或仅替换快照。无法补齐则按现有可恢复错误处理，不执行未获证明的新动作。新任期首次请求、跨多次迁居落后及同设备重任都服从这条规则。
+- **会话授权一致性仍保留。** 当前锚点基于自己的已验会话状态声明ownerEpoch；执行端在任期与当前签名者成立后，检查该值与实际绑定的能力、lease、派发、激活或取证对象一致，不再用执行端默认anchorEpoch或仅观察到的最大ownerEpoch代替当前性。不同载体按自身已有签名关联验证，不假设EvidenceRequest含有不存在的能力字段。不以缺少任期字段推断本地域；本地域身份与未被收编的写权仍须本机耐久事实证明。纯重定向不签发写权，可按当前已验HomeTrustRecord给出目标。
+- **既有失效与迟到语义不放宽。** 已知更高任期必须拒绝旧任期新动作，不能用TTL豁免。尚未知替代事实的分区设备不能凭本地信息承诺即时全局知晓；仍须保持源端永久fence、已接受工作exact-set收束/承接、assignment幂等与短lease有效期的既有合同，TTL不单独构成当前性证明。实际验证若发现迟到旧请求可在闭包之外执行新动作，应视为本包回归/缺口并修复，不能把它当作新获允许的窗口。灾备无源fence时保持其原有撤销、信任换代和准入要求，不以planned的源端关闭代替灾备保护。
+- **旧签名资料兼容。** 不给历史已签对象补字段或重算签名。新任期绑定按既有协议兼容机制演进；历史验签/读取、耐久exact replay和既有结算按其合同保留。缺任期的旧对象不得自动获得新fresh授权；确需重新签发时由当前权威根据原耐久状态沿既有流程处理，不能因升级丢失已接受工作，也不能保留通用弱校验分支。
+- **统一责任与有界成本。** 共享窄current-owner/当前任期解析服务当前写栅栏、目标加载与恢复、旧source路由和执行端授权；核心不反向依赖CLI/UI或原始网络接口，由组合层注入现有端口。历史manifest目标匹配改为已认证代际连续性验证，不直接删除。当前决定绑定同一已验位置，普通查询与启动读当前索引或exact历史；迁居不遍历改写全部已收编会话，启动不重放全部迁居链。旧基点/信任投影升级初建单列，正常二开有界。
+
+本直接依赖至少验证：原生及已收编会话迁居后的首发/取证、A→B→A、多次迁居落后追赶、执行端重启、旧owner/旧assignment首次或迟到请求、单独trust变更、灾备承接、本机/mesh同谓词、完整新旧资料与缺证隔离。测试不得把迁居后epoch硬写成原值；设计通过不替代包1a原有全量构建、来源一致性、两规模及真实终端完成门。
+
 ### 6.4 设备状态与 UncertainResolution
 
 | # | 当前态 | 触发 | 守卫 | 次态 | 动作 |

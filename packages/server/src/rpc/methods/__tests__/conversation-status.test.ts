@@ -3,6 +3,17 @@ import { buildBuiltinRegistry } from "../index.js";
 import { RPC_ERROR_CODES } from "../../protocol.js";
 
 describe("session.statusHistory", () => {
+  it('routes current control targets without permitting history payload or unauthenticated access', async () => {
+    const read = vi.fn(async () => ({ targets: [] })), registry = buildBuiltinRegistry();
+    const context = { connection: { authenticated: true }, server: { serverInfoRuntime: { conversationRecovery: read } } };
+    const request = { mode: 'control-targets', conversationId: 'conversation-b' };
+    await expect(registry.dispatch('session.statusHistory', request, context as never)).resolves.toEqual({ targets: [] });
+    expect(read).toHaveBeenCalledExactlyOnceWith(request);
+    await expect(registry.dispatch('session.statusHistory', { ...request, historyRunIds: ['old'] }, context as never))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    context.connection.authenticated = false;
+    await expect(registry.dispatch('session.statusHistory', request, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.UNAUTHORIZED });
+  });
   it('routes finite recovery reads through the authenticated current owner and validates checkpoint identities', async () => {
     const read = vi.fn(async () => ({ facts: [], hasMore: false, reset: false }));
     const registry = buildBuiltinRegistry();

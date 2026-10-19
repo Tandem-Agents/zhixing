@@ -6,8 +6,10 @@ export {
   protocolBytes,
   protocolDigest,
   protocolDigestOfCanonicalParts,
+  createProtocolDigestAccumulator,
 } from "./canonical.js";
 export type { ByteDigestAccumulator } from "./canonical.js";
+export { assertOwnerTenureVersion, assertCurrentAnchorTenure } from './owner-tenure.js';
 export { assignmentMutationRequestId } from "./assignment-mutation.js";
 export {
   createSignedEnvironmentControlGrant,

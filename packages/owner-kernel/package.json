@@ -4,6 +4,10 @@
   "description": "知行对话 owner 内核 — 会话权威、运行提交与确认聚合",
   "type": "module",
   "exports": {
+    "./conversation-owner-authority": {
+      "types": "./dist/conversation-owner-authority.d.ts",
+      "import": "./dist/conversation-owner-authority.js"
+    },
     "./startup-definitions": {
       "types": "./dist/startup-definitions.d.ts",
       "import": "./dist/startup-definitions.js"

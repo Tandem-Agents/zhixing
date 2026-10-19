@@ -17,7 +17,7 @@ export function parseConversationRecoveryRequest(raw: unknown): ConversationReco
     if (!keys(point, ['logId', 'lsn', 'frameEndOffset', 'prefixDigest']) || !isProtocolIdentifier(point.logId) ||
         !integer(point.lsn) || !integer(point.frameEndOffset) || typeof point.prefixDigest !== 'string' || point.prefixDigest.length > 128) fail();
   };
-  if (value.mode === 'context') {
+  if (value.mode === 'context' || value.mode === 'control-targets') {
     if (!keys(value, ['mode', 'conversationId']) || !isProtocolIdentifier(value.conversationId)) fail();
     return value as unknown as ConversationRecoveryRequest;
   }

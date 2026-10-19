@@ -20,6 +20,8 @@ import {
 export interface TrustProjection {
   readonly homeId: string;
   readonly trustEpoch: number;
+  /** Genesis tenure plus verified issuer transitions; independent of resets. */
+  readonly anchorEpoch: number;
   readonly chainHead: { readonly seq: number; readonly eventDigest: string };
   readonly issuer: {
     readonly deviceId: string;
@@ -87,6 +89,7 @@ export function initializeTrustChain(genesis: HomeTrustEvent): TrustProjection {
   return freezeProjection({
     homeId: genesis.homeId,
     trustEpoch: 1,
+    anchorEpoch: 1,
     chainHead: { seq: 0, eventDigest: homeTrustEventDigest(genesis) },
     issuer: {
       deviceId: genesis.body.issuer.deviceId,
@@ -122,6 +125,7 @@ export function applyTrustEvent(
     state: member.state,
   }));
   let trustEpoch = current.trustEpoch;
+  let anchorEpoch = current.anchorEpoch;
   let issuer = { ...current.issuer };
   let recoveryRootPublicKey = current.recoveryRootPublicKey;
   let recoveryBackupPublicKey = current.recoveryBackupPublicKey;
@@ -298,6 +302,8 @@ export function applyTrustEvent(
         throw new TypeError("Issuer transition target is invalid");
       }
       trustEpoch = event.body.nextTrustEpoch;
+      anchorEpoch += 1;
+      if (!Number.isSafeInteger(anchorEpoch)) throw new TypeError('Anchor tenure exceeds the supported integer range');
       issuer = {
         deviceId: target.device.deviceId,
         issuerKeyId: event.body.toIssuerKeyId,
@@ -312,6 +318,7 @@ export function applyTrustEvent(
   return freezeProjection({
     homeId: current.homeId,
     trustEpoch,
+    anchorEpoch,
     chainHead: { seq: event.seq, eventDigest: homeTrustEventDigest(event) },
     issuer,
     ...(recoveryRootPublicKey ? { recoveryRootPublicKey } : {}),
@@ -660,6 +667,7 @@ function requiredActiveMember(
 function freezeProjection(input: {
   homeId: string;
   trustEpoch: number;
+  anchorEpoch: number;
   chainHead: { seq: number; eventDigest: string };
   issuer: { deviceId: string; issuerKeyId: string; issuerPublicKey?: string };
   recoveryRootPublicKey?: string;
@@ -723,5 +731,6 @@ export function assertRecoveryKeyPair(rootPublicKey: string, backupPublicKey: st
   importEncodedPublicKey(backupPublicKey, "x25519");
 }
 export { CURRENT_TRUST_PROJECTION_ID, currentTrustIndex, readCurrentTrust, readCurrentTrustRecord,
-  readTrustIdentity, readTrustGenesis } from "./trust-current-index.js";
-export type { CurrentTrustProjection, VerifiedTrustIdentity } from "./trust-current-index.js";
+  readTrustIdentity, readTrustGenesis, readAnchorTenureAt, readCurrentAnchorTenure, readCurrentTrustMember,
+  readVerifiedTrustProgress, readTrustReconciliationPage } from "./trust-current-index.js";
+export type { CurrentTrustProjection, VerifiedTrustIdentity, VerifiedAnchorTenure } from "./trust-current-index.js";

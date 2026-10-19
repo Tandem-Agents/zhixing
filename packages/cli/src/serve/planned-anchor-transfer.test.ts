@@ -7,6 +7,7 @@ import type {
   Signature,
 } from "@zhixing/core/contracts";
 import {
+  canonicalize,
   createSignedAnchorTransferAbort,
   createSignedAnchorTransferCommand,
   type ProtocolSignatureVerifier,
@@ -28,9 +29,14 @@ import {
   loadActiveAnchorIssuerKey,
   loadAnchorIssuerKey,
 } from "@zhixing/mesh/device-key-store";
-import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
+import { applyTrustEvent, buildHomeTrustRecord, createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
+import { localConversationId } from '@zhixing/core/conversation';
+import { ConversationRunJournal } from '@zhixing/owner-kernel/conversation-assignment';
+import { loadCommittedConversationBase, resolveCurrentConversationAuthority } from '@zhixing/owner-kernel/conversation-transfer';
+import { importAuthenticatedBase } from '../../../owner-kernel/src/__tests__/imported-base-fixture.js';
 import { describe, expect, it, onTestFinished } from "vitest";
+import { createConversationAuthorityVerifier } from "./conversation-authority-verifier.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   PlannedAnchorTransferJournal,
@@ -57,6 +63,126 @@ const NOW = Date.now();
 const AT = new Date(NOW).toISOString();
 const TRANSFER_ID = "xfer-01J00000000000000000000001";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+it.each(['current', 'legacy'] as const)('keeps adopted conversation authority usable after a real planned anchor transfer (%s basis)', async (format) => {
+  const f = await createFixture(), clock = () => new Date().toISOString();
+  const conversationId = localConversationId(f.peerKey.deviceId, '01J00000000000000000000009');
+  const journal = (store: FileMeshBootstrapStore, key: DeviceKey, ownerEpoch: number) => new ConversationRunJournal({
+    conversationId, ownerEpoch, log: store.authorityLog(), artifacts: store.artifactStore(), signer: key, verifier: f.verifier, clock,
+    currentAuthority: { deviceId: key.deviceId, executorId: key.deviceId },
+    submission: { authenticate() {}, authorize() {} }, authority: { decideAtPrefix: () => ({ committed: true, commitRevision: 1 }) },
+    projection: { async project() {} },
+  });
+  const local = journal(f.peerStore, f.peerKey, 1);
+  const admit = (owner: ConversationRunJournal, id: string, position: number) => owner.admit({ runId: id, ingressKey: id, queuedPosition: position,
+    userInput: { parts: [{ type: 'text', text: id }] }, invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: f.peerKey.deviceId, ingressId: id, receivedAt: AT } });
+  await admit(local, 'before-adoption', 0);
+  await local.cancelRun({ runId: 'before-adoption', requestId: 'cancel-local' });
+  const anchor = journal(f.sourceStore, f.sourceKey, 2);
+  const publication = await importAuthenticatedBase({ sourceLog: f.peerStore.authorityLog(), sourceArtifacts: f.peerStore.artifactStore(), sourceJournal: local,
+    targetLog: f.sourceStore.authorityLog(), targetArtifacts: f.sourceStore.artifactStore(), conversationId, sourceOwnerEpoch: 1,
+    sourceDeviceId: f.peerKey.deviceId, targetDeviceId: f.sourceKey.deviceId, signer: f.peerKey, targetSigner: f.sourceKey, verifier: f.verifier, clock,
+    legacyOwnerBasis: format === 'legacy' });
+  const marker = (await f.sourceStore.authorityLog().readAll()).flatMap(envelope => envelope.entries)
+    .map(entry => entry.body as { t?: string; v?: number; ownerBasis?: unknown })
+    .find(body => body.t === 'conversation-transfer-committed-base');
+  expect(marker?.v).toBe(format === 'legacy' ? 1 : 2);
+  if (format === 'legacy') expect(marker).not.toHaveProperty('ownerBasis');
+  await anchor.installImportedBase(publication.source);
+  await admit(anchor, 'at-first-anchor', 1);
+  await anchor.cancelRun({ runId: 'at-first-anchor', requestId: 'cancel-anchor' });
+  await f.owner.prepare({ requestId: 'move-adopted', transferId: TRANSFER_ID, targetDeviceId: f.targetKey.deviceId });
+  await f.owner.freeze({ requestId: 'move-adopted', transferId: TRANSFER_ID });
+  const migrated = await f.owner.commit({ requestId: 'move-adopted', transferId: TRANSFER_ID });
+  expect(migrated.phase).toBe('committed');
+  const restored = await loadCommittedConversationBase(f.targetStore.authorityLog(), f.targetStore.artifactStore(), f.verifier, publication.manifest.transferId);
+  const current = await resolveCurrentConversationAuthority(f.targetStore.authorityLog(), f.verifier, conversationId,
+    { deviceId: f.targetKey.deviceId, ownerEpoch: 2 });
+  expect(current.ownerEpoch).toBe(publication.manifest.nextOwnerEpoch + 1);
+  const next = journal(f.targetStore, f.targetKey, current.ownerEpoch);
+  await next.installImportedBase(restored.source);
+  expect(await next.currentState('before-adoption')).toBe('cancelled');
+  expect(await next.currentState('at-first-anchor')).toBe('cancelled');
+  const resolved = await resolveCurrentConversationAuthority(f.targetStore.authorityLog(), f.verifier, conversationId,
+    { deviceId: f.targetKey.deviceId, ownerEpoch: 2 });
+  expect.soft(resolved).toMatchObject({ deviceId: f.targetKey.deviceId, ownerEpoch: 3, anchorEpoch: 2, state: 'current' });
+  const before = await f.targetStore.authorityLog().checkpoint();
+  let writeError: string | undefined;
+  try { await admit(next, 'after-migration', 2); } catch (error) { writeError = error instanceof Error ? error.message : String(error); }
+  const after = await f.targetStore.authorityLog().checkpoint();
+  console.log('ADOPTED_PLANNED_EVIDENCE', JSON.stringify({ format, conversationId, adoption: publication.manifest.transferId,
+    planned: TRANSFER_ID, originalTarget: publication.manifest.targetDeviceId, currentDevice: f.targetKey.deviceId,
+    adoptedOwnerEpoch: publication.manifest.nextOwnerEpoch, resolved, historyRecovered: true, writeError, walUnchanged: before.lsn === after.lsn }));
+  expect.soft(writeError).toBeUndefined();
+  expect(after.lsn).toBeGreaterThan(before.lsn);
+  expect(await next.currentState('after-migration')).toBe('queued');
+}, 120_000);
+
+it('catches up multiple tenures without publishing partial pages and rejects stale authority after restart', async () => {
+  const f = await createFixture();
+  let state = f.sourceTrust;
+  const events = [];
+  for (let index = 0; index < 20; index++) {
+    const event = createSignedTrustEvent({ current: state, signer: f.sourceKey, at: AT,
+      body: { t: 'role-change', deviceId: f.peerKey.deviceId, roles: index % 2 ? ['executor'] : ['executor', 'surface'] } });
+    state = applyTrustEvent(state, event); events.push(event);
+  }
+  await f.sourceStore.authorityLog().append([
+    ...events.map(event => ({ stream: 'trust', body: { t: 'home-trust-event', event } })),
+    { stream: 'trust', body: { t: 'home-trust-record', record: buildHomeTrustRecord(state, f.sourceKey) } },
+  ]);
+  const move = async (from: DeviceKey, to: DeviceKey) => {
+    const event = createSignedTrustEvent({ current: state, signer: from, at: AT,
+      body: { t: 'issuer-transition', reason: 'migration', signedBy: 'issuer', nextTrustEpoch: state.trustEpoch + 1,
+        fromIssuerKeyId: state.issuer.issuerKeyId, toIssuerKeyId: to.deviceId, toDeviceId: to.deviceId } });
+    state = await f.sourceStore.appendTrustEvent({ event, issuerKey: to });
+  };
+  await move(f.sourceKey, f.targetKey); await move(f.targetKey, f.sourceKey);
+  const definitions = new Map<string, MeshServiceDefinition>();
+  registerPlannedAnchorTrustReconciliationService({ register(id: string, definition: MeshServiceDefinition) {
+    definitions.set(id, definition); return () => definitions.delete(id);
+  } } as MeshServiceRegistry, { store: f.sourceStore, authorizePeer: id => id === f.peerKey.deviceId });
+  const connection = { peer: { deviceId: f.peerKey.deviceId } } as unknown as SecureMeshConnection;
+  let calls = 0, fault: 'interrupt' | 'skip' | undefined = 'interrupt';
+  const client = { request: async (id: string, payload: Uint8Array) => {
+    calls++;
+    if (fault === 'interrupt' && calls === 2) throw new Error('injected interrupted trust page');
+    const definition = definitions.get(id)!;
+    expect(definition.authorize?.(connection)).toBe(true);
+    const bytes = await definition.handler(payload, connection, new AbortController().signal);
+    if (fault === 'skip' && calls === 2) {
+      const value = JSON.parse(Buffer.from(bytes).toString('utf8')); value.events.shift();
+      return Buffer.from(canonicalize(value));
+    }
+    return bytes;
+  } };
+  const before = await f.peerStore.authorityLog().checkpoint();
+  await expect(reconcilePlannedAnchorTrustFromPeer(client, { store: f.peerStore, localDeviceId: f.peerKey.deviceId })).rejects.toThrow('interrupted');
+  expect(await f.peerStore.authorityLog().checkpoint()).toEqual(before);
+  calls = 0; fault = 'skip';
+  await expect(reconcilePlannedAnchorTrustFromPeer(client, { store: f.peerStore, localDeviceId: f.peerKey.deviceId })).rejects.toThrow('skips');
+  expect(await f.peerStore.authorityLog().checkpoint()).toEqual(before);
+  calls = 0; fault = undefined;
+  const result = await reconcilePlannedAnchorTrustFromPeer(client, { store: f.peerStore, localDeviceId: f.peerKey.deviceId });
+  expect(result.anchorEpoch).toBe(3); expect(result.issuer.deviceId).toBe(f.sourceKey.deviceId);
+  expect(calls).toBe(4);
+  await f.peerStore.stopStorageMaintenance();
+  const restarted = await FileMeshBootstrapStore.open(f.peerStore.rootDir, f.peerKey, { secretStore: new MemoryStore() });
+  onTestFinished(() => restarted.stopStorageMaintenance());
+  expect((await restarted.loadCurrentTrust())?.anchorEpoch).toBe(3);
+  const authority = createConversationAuthorityVerifier({ sources: restarted.authoritySources()!, deviceId: f.peerKey.deviceId,
+    localOwnerEpoch: 1, standaloneAnchorEpoch: () => undefined });
+  const claim = { conversationId: 'adopted-conversation', ownerEpoch: 42, anchorEpoch: 3, signerDeviceId: f.sourceKey.deviceId };
+  await authority.verify(claim); // Conversation epoch is not the anchor tenure.
+  await expect(authority.verify({ ...claim, anchorEpoch: 1 })).rejects.toThrow();
+  await expect(authority.verify({ ...claim, anchorEpoch: undefined })).rejects.toThrow('signed tenure');
+  await expect(authority.verify({ ...claim, signerDeviceId: f.targetKey.deviceId })).rejects.toThrow();
+  authority.installTrustCatchUp(async () => { await reconcilePlannedAnchorTrustFromPeer(client, { store: restarted, localDeviceId: f.peerKey.deviceId }); });
+  await move(f.sourceKey, f.targetKey);
+  await authority.verify({ ...claim, ownerEpoch: 43, anchorEpoch: 4, signerDeviceId: f.targetKey.deviceId });
+  await expect(authority.verify(claim)).rejects.toThrow();
+}, 120_000);
 
 describe("planned anchor transfer prepared phase", {
   timeout: DURABLE_IO_TEST_TIMEOUT_MS,

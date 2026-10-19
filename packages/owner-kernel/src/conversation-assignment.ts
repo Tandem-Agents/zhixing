@@ -1,5 +1,16 @@
+import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
 import { projectionCheckpointKey } from "@zhixing/core/authority";
+import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from "./conversation-publish-obligations.js";
+import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
+export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
+import { registerConversationRunProjection, readConversationSubmissionState, conversationWorkingVersion } from './conversation-run-state-index.js';
+import { prepareConversationRunView, conversationDecisionScope, readConversationExactValue, type ConversationDecisionScope } from './conversation-run-state-view.js';
+import { CONVERSATION_RUN_STATE_PROJECTION_ID } from './conversation-run-state-index.js';
+import type { JsonValue } from '@zhixing/core/contracts';
+import { readConversationStateField } from './conversation-run-state-index.js';
+import { conversationStateFieldPrefix, decodeConversationState } from './conversation-run-state-index.js';
+import { readConversationRunRoot } from './conversation-run-state-extras.js';
 import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
 import { Buffer } from "node:buffer";
 import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
@@ -13,6 +24,8 @@ import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry }
 import { ConversationReadIndex, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
 import { createConversationProjectionDraft } from './conversation-projection-draft.js';
+import type { ConversationBaseSource } from './conversation-base-source.js';
+import { registerConversationBaseSource } from './conversation-base-registry.js';
 import { ConversationMessageInputReader } from './conversation-message-input-reader.js';
 import { hasDurableStartedObservation } from './conversation-message-delivery.js';
 import { conversationCommitSummary } from './conversation-commit-summary.js';
@@ -59,7 +72,6 @@ import type {
   ContentAssetRef,
   DataPlaneTicket,
   ControlResult,
-  ControlRecord,
   ControlResultBody,
   FinalFrame,
   FinalOutboxRecord,
@@ -179,6 +191,8 @@ import {
   CONVERSATION_TRANSFER_PROJECTION_ID,
   assertConversationTransferWriteAuthority,
   registerConversationTransferProjection,
+  conversationAnchorAtPrefix,
+  conversationAnchorProjectionIds,
 } from "./conversation-transfer.js";
 import {
   assertAdmissionReplayContract,
@@ -261,7 +275,7 @@ type ConversationUncertainResolutionFact = Extract<
   { subject: { execution: "conversation" } }
 >;
 
-type ConversationCommitLogRecord =
+export type ConversationCommitLogRecord =
   | ConversationRunJournalRecord
   | ConversationRunInternalRecord
   | GovernorRecord
@@ -600,21 +614,24 @@ export interface ConversationDispatchPort {
   ): Promise<SupersedeProof>;
 }
 
-interface AdmittedProjection {
+export interface AdmittedProjection {
+  readonly domainRevision?: number;
   readonly lsn: number;
   readonly record: Omit<Extract<ConversationRunJournalRecord, { t: "admitted" }>, "input">;
   readonly input?: UserTurnInput;
   readonly inputDigest?: string;
+  readonly inputRef?: ArtifactRef;
 }
 
 type RetainedConversationEnvelope = Omit<PendingConversationDispatch["envelope"], "work"> & {
   readonly work: Omit<PendingConversationDispatch["envelope"]["work"], "windowInput">;
 };
 
-interface AssignedProjection {
+export interface AssignedProjection {
   readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-  readonly envelope: RetainedConversationEnvelope;
-  readonly commit: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
+  readonly envelope?: RetainedConversationEnvelope;
+  readonly commit?: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string };
+  readonly origin?: ConversationBaseLocation;
   acked: boolean;
 }
 
@@ -683,15 +700,18 @@ interface PendingLifecycleProjection {
 }
 
 // 会话运行日志的投影随该会话历史增长；检查点让每次冷启动后的首次使用只续算尾部。
-type JournalProjectionKind = "run" | "submission" | "publish" | "final";
+type JournalProjectionKind = "run" | "submission";
 /** 各类会话投影检查点键的前缀（名称、版本、归约指纹），进程内只算一次。 */
 const journalCheckpointPrefixes = new Map<JournalProjectionKind, string>();
-const JOURNAL_CHECKPOINT_INTERVAL_LSN = 256;
 
-interface RunProjection {
+export interface RunProjection {
   readonly conversationId: string;
   domainRevision: number;
   deleted: boolean;
+  hasDurableIdentity?: boolean;
+  activeAdvancementSessionId?: string;
+  advancementStatuses?: Map<string, AdvancementSession['status']>;
+  pendingLifecycleCount?: number;
   readonly advancementSessions: AdvancementFoldMap;
   readonly advancementWrites: Map<
     string,
@@ -703,9 +723,10 @@ interface RunProjection {
   >;
   readonly taskListRequestIds: Set<string>;
   taskList: TaskListState;
-  readonly segments: SegmentRecord[];
+  readonly segments: Pick<SegmentRecord, "segmentId" | "timestamp">[];
   readonly worksceneControls: Map<string, { readonly record: TranscriptRunRecord; readonly advancementSessionId?: string }>;
   clearedThroughLsn: number;
+  clearedThroughRevision?: number;
   sessionName?: string;
   lastActiveAt?: string;
   sessionMeta?: Extract<
@@ -734,6 +755,7 @@ interface RunProjection {
   readonly runByIngress: Map<string, string>;
   readonly assignedById: Map<string, AssignedProjection>;
   readonly assignmentByRun: Map<string, string>;
+  readonly assignmentAttemptByRun?: Map<string, number>;
   readonly stateByRun: Map<
     string,
     { readonly state: ConversationRunState; readonly statusRevision: number }
@@ -828,7 +850,8 @@ interface RunProjection {
   channelInteractions: ChannelInteractionJournalState;
 }
 
-interface SubmissionGuardProjection {
+export interface SubmissionGuardProjection {
+  readonly assignmentAttemptByRun?: Map<string, number>;
   readonly admittedByRun: Map<
     string,
     {
@@ -845,7 +868,8 @@ interface SubmissionGuardProjection {
     string,
     {
       readonly record: Extract<ConversationRunJournalRecord, { t: "assigned" }>;
-      readonly commit: {
+      readonly origin?: ConversationBaseLocation;
+      readonly commit?: {
         readonly lsn: number;
         readonly envelopeDigest: string;
         readonly at: string;
@@ -1001,6 +1025,14 @@ export interface ConversationChannelFrameAdoption {
 }
 
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
+class ConversationWorkingSetChanged extends StorageMaintenanceAdmissionError {
+  constructor() {
+    super({ kind: 'backpressured', blockedBy: 'derived-preparation', retryAfterMs: 1 });
+    this.name = 'ConversationWorkingSetChanged';
+    this.message = 'Conversation working set changed during preparation';
+  }
+}
+
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
   readonly #ownerEpoch: number;
@@ -1033,18 +1065,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #statusListeners = new Set<
     (notice: ConversationStatusNotice) => void | Promise<void>
   >();
+  #importedBaseSource: ConversationBaseSource | undefined;
   #runProjection:
     | { readonly state: RunProjection; readonly cursor: ProjectionCursor }
     | undefined;
-  #continuationStopProjection: { readonly state: { through: number; requests: Map<string, string>; stopped: Set<string> }; readonly cursor: ProjectionCursor } | undefined;
   #submissionGuardProjection:
     | { readonly state: SubmissionGuardProjection; readonly cursor: ProjectionCursor }
-    | undefined;
-  #publishProjection:
-    | { readonly state: PublishProjection; readonly cursor: ProjectionCursor }
-    | undefined;
-  #finalProjection:
-    | { readonly state: FinalOutboxProjection; readonly cursor: ProjectionCursor }
     | undefined;
 
   constructor(options: ConversationRunJournalOptions) {
@@ -1068,6 +1094,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     this.#resources = options.resources;
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#legacyAbortTickets = options.legacyAbortTickets;
+    registerConversationRunProjection(options.log, options.artifacts, options.verifier, options.legacyAbortTickets,
+      { delivery: options.delivery, currentAuthority: options.currentAuthority, resources: options.resources });
     this.#currentAuthority = options.currentAuthority;
     registerConversationIdentityProjection(options.log, options.artifacts);
     if (options.currentAuthority) {
@@ -1113,18 +1141,20 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async taskList(): Promise<TaskListState> {
-    return this.#sessionRead.read((state) => snapshot(state.taskList, "Session task list"));
+    return this.#select((state) => snapshot(state.taskList, "Session task list"));
   }
 
   /** Retry decisions use their original input, never a later list or a new index target. */
   async taskListBeforeMutation(requestId: string): Promise<TaskListState | undefined> {
     assertIdentifier(requestId, "Task-list mutation request id");
-    return this.#sessionRead.beforeRevision(state => {
+    const revision = await this.#select(state => {
       const request = state.sessionMutationDigests.get(requestId);
       if (!request) return undefined;
       if (!state.taskListRequestIds.has(requestId)) throw new Error('Request belongs to another session mutation');
       return request.domainRevision;
-    }, state => snapshot(state.taskList, 'Task-list mutation base'));
+    }, conversationDecisionScope({ requestId }));
+    if (revision === undefined) return undefined;
+    return this.#sessionRead.beforeRevision(() => revision, state => snapshot(state.taskList, 'Task-list mutation base'));
   }
 
   async sessionMutationRequest(requestId: string): Promise<
@@ -1160,7 +1190,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             prepared: structuredClone(prepared),
             ...(delivered ? { delivered: structuredClone(delivered) } : {}),
           };
-        }),
+        }), conversationDecisionScope({  }),
     );
   }
 
@@ -1190,7 +1220,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: [runRecord(this.#conversationId, record)],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ input }));
   }
 
   async closeChannelChallenge(input: {
@@ -1218,7 +1248,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: [runRecord(this.#conversationId, record)],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ input }));
   }
 
   async adoptConversationChannelFrame(
@@ -1370,7 +1400,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           entries: [runRecord(this.#conversationId, closed)],
           value: { closed },
         };
-      },
+      }, [], [], conversationDecisionScope({ frameInput }),
     );
     return transaction.value;
   }
@@ -1411,7 +1441,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         assignmentId: prepared.assignmentId,
         interactionRequestId: prepared.token.interactionRequestId,
       };
-    });
+    }, conversationDecisionScope({ input }));
   }
 
   async primeImportedReadBase(records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[]): Promise<void> {
@@ -1423,12 +1453,75 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     });
   }
 
+  async installImportedBase(source: ConversationBaseSource): Promise<void> {
+    await this.#operations.run(async () => {
+      this.#importedBaseSource = source;
+      registerConversationBaseSource(this.#artifacts, source);
+      this.#readIndex.installBaseView(source);
+      this.#messageRead.installBaseView(source);
+      this.#sessionRead.installBaseSource({
+        current: () => this.#readImportedSessionState(source),
+        atRevision: through => this.#readImportedSessionState(source, through),
+      });
+    });
+  }
+
+  async #readImportedSessionState(source: ConversationBaseSource, throughRevision?: number): Promise<RunProjection> {
+    const state = emptyProjection(this.#conversationId);
+    if (throughRevision === undefined) return source.read(async view => {
+      const root = await readConversationRunRoot(view, this.#conversationId);
+      state.domainRevision = root.domainRevision; state.deleted = root.deleted;
+      state.clearedThroughLsn = root.clearedThroughLsn; state.taskList = structuredClone(root.taskList ?? { items: [] });
+      state.sessionName = root.sessionName; state.sessionMeta = root.sessionMeta; state.lastActiveAt = root.lastActiveAt;
+      if (root.latestSegment) state.segments.push(root.latestSegment);
+      for (const name of ['sessionMetaByRequest', 'sessionMutationDigests', 'advancementWrites', 'advancementSessions', 'taskListRequestIds'] as const) {
+        const p = conversationStateFieldPrefix(this.#conversationId, 'extra-' + name);
+        let after: string | undefined;
+        do {
+          const page = await view.scan({ ...(after ? { gt: after } : { gte: p }), lt: p + '\uffff' }, 64);
+          for (const entry of page.entries) {
+            const row = entry.value as unknown as { key: string; value: JsonValue };
+            if (typeof row.key !== 'string') throw corruptRunJournal('Imported session row has no identity');
+            if (name === 'taskListRequestIds') state.taskListRequestIds.add(row.key);
+            else (state[name] as Map<string, unknown>).set(row.key, decodeConversationState(row.value));
+          }
+          after = page.continuation ? page.entries.at(-1)!.key : undefined;
+        } while (after);
+      }
+      return state;
+    });
+    const p = 'source/session-range/'; let after: string | undefined;
+    do {
+      const page = await source.read(view => view.scan({ ...(after ? { gt: after } : { gte: p }), lt: p + '\uffff' }, 64));
+      for (const entry of page.entries) {
+        if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+        const range = entry.value as unknown as { firstRevision: number; lastRevision: number; firstRecord: number };
+        if (range.firstRevision > throughRevision) return state;
+        const group = await source.group(range.firstRecord);
+        if (!group) throw corruptRunJournal('Imported session revision has no source group');
+        for (const record of group.entries) {
+          if (state.domainRevision >= throughRevision) break;
+          if (record.stream === runStream(this.#conversationId)) await this.#reduceSessionFacts(state, record, group, group.sourceLsn, throughRevision);
+        }
+        if (state.domainRevision >= throughRevision) return state;
+      }
+      after = page.continuation ? page.entries.at(-1)!.key : undefined;
+    } while (after);
+    return state;
+  }
+
   get hasRecoveredInputProjection(): boolean { return this.#runProjection !== undefined; }
 
   readonly #checkpointedThrough = new Map<JournalProjectionKind, number>();
 
   /** 首次发送前尝试从检查点恢复运行投影；成功时调用方不必再读出整份日志快照。 */
   async restoreRecoveryCheckpoint(): Promise<boolean> {
+    if (this.#readBaseGeneration === 0) {
+      const prepared = await prepareConversationRunView({ log: this.#log, artifacts: this.#artifacts, verifier: this.#verifier,
+        conversationId: this.#conversationId, scope: {}, previous: this.#runProjection?.state, legacy: this.#legacyAbortTickets });
+      this.#runProjection = { state: prepared.state, cursor: prepared.cursor };
+      return true;
+    }
     await this.#operations.run(() => this.#restoreProjection("run"));
     return this.hasRecoveredInputProjection;
   }
@@ -1456,7 +1549,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   discardProjectionCheckpoints(): void {
     this.#unregisterCheckpointFlush?.();
     this.#unregisterCheckpointFlush = undefined;
-    for (const kind of ["run", "submission", "publish", "final"] as const) {
+    for (const kind of ["run", "submission"] as const) {
       const key = this.#projectionCheckpointKey(kind);
       if (key) void this.#log.deleteProjectionCheckpoint?.(key);
       if (kind === "run") void this.#log.deleteProjectionCheckpoint?.(
@@ -1465,17 +1558,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
   }
 
-  #saveProjection(kind: JournalProjectionKind, force = false): Promise<void> | undefined {
-    const key = this.#projectionCheckpointKey(kind), current = this.#projectionOf(kind);
-    if (!key || !current || !this.#log.saveProjectionCheckpoint) return undefined;
-    if (!this.#unregisterCheckpointFlush) {
-      // 正式停止前补存本会话用到的投影：重启后只续算停止前最后一段尾部。
-      this.#unregisterCheckpointFlush = this.#log.registerCheckpointFlush?.(() =>
-        Promise.all((["run", "submission", "publish", "final"] as const).map((each) => this.#saveProjection(each, true))));
-    }
-    if (current.cursor.lsn - (this.#checkpointedThrough.get(kind) ?? 0) < (force ? 1 : JOURNAL_CHECKPOINT_INTERVAL_LSN)) return undefined;
-    this.#checkpointedThrough.set(kind, current.cursor.lsn);
-    return this.#log.saveProjectionCheckpoint(key, current.cursor, current.state);
+  #saveProjection(_kind: JournalProjectionKind, _force = false): undefined {
+    // Historical scalar checkpoints are retired. The source owner persists the
+    // keyed projections; imported-prefix preparation keeps only its live view.
+    return undefined;
   }
 
   #unregisterCheckpointFlush: (() => void) | undefined;
@@ -1499,8 +1585,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     switch (kind) {
       case "run": return this.#runProjection;
       case "submission": return this.#submissionGuardProjection;
-      case "publish": return this.#publishProjection;
-      case "final": return this.#finalProjection;
     }
   }
 
@@ -1508,8 +1592,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     switch (kind) {
       case "run": this.#runProjection = value; return;
       case "submission": this.#submissionGuardProjection = value; return;
-      case "publish": this.#publishProjection = value; return;
-      case "final": this.#finalProjection = value; return;
     }
   }
 
@@ -1521,9 +1603,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const abort = currentMaintenanceAbortSignal();
     let run = emptyProjection(this.#conversationId);
     let submission = emptySubmissionGuardProjection();
-    let publish = emptyPublishProjection();
-    const final = emptyFinalProjection();
-    const assignments = new Set<string>();
     const records = (function* () {
       for (const envelope of snapshot.commits) for (const record of envelope.entries) yield { envelope, record };
     })();
@@ -1538,21 +1617,9 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const { envelope, record } = next.value;
         if (record.stream === runStream(this.#conversationId)) {
           run = await this.#reduceRunProjection(run, record, envelope, checks);
-          const assignmentId = record.body && typeof record.body === "object" && !Array.isArray(record.body)
-            ? (record.body as { assignmentId?: unknown }).assignmentId : undefined;
-          if (typeof assignmentId === "string") assignments.add(assignmentId);
           submission = await this.#reduceSubmissionGuard(submission,
             record as LogicalRecord<ConversationCommitLogRecord>,
             envelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>, checks);
-        } else if (record.stream === "publish" && record.body && typeof record.body === "object" && !Array.isArray(record.body) &&
-          typeof (record.body as { assignmentId?: unknown }).assignmentId === "string" &&
-          assignments.has((record.body as { assignmentId: string }).assignmentId)) {
-          publish = await reducePublishRecord(publish, record as LogicalRecord<PublishRecord>,
-            envelope as import("@zhixing/core/contracts").CommitEnvelope<PublishRecord>, this.#artifacts);
-        } else if (record.stream === "final-outbox" && record.body && typeof record.body === "object" && !Array.isArray(record.body) &&
-          (record.body as { conversationId?: unknown }).conversationId === this.#conversationId) {
-          await applyFinalRecord(final, record.body as FinalOutboxRecord, envelope.at,
-            envelope as import("@zhixing/core/contracts").CommitEnvelope<FinalOutboxRecord>, this.#artifacts);
         }
         next = records.next();
         processed++;
@@ -1589,11 +1656,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               this.#runProjection = { state: run, cursor: snapshot.cursor };
             if (!this.#submissionGuardProjection || this.#submissionGuardProjection.cursor.lsn <= snapshot.cursor.lsn)
               this.#submissionGuardProjection = { state: submission, cursor: snapshot.cursor };
-            if (!this.#publishProjection || this.#publishProjection.cursor.lsn <= snapshot.cursor.lsn)
-              this.#publishProjection = { state: publish, cursor: snapshot.cursor };
-            if (!this.#finalProjection || this.#finalProjection.cursor.lsn <= snapshot.cursor.lsn)
-              this.#finalProjection = { state: final, cursor: snapshot.cursor };
-            for (const kind of ["run", "submission", "publish", "final"] as const) this.#saveProjection(kind);
+            for (const kind of ["run", "submission"] as const) this.#saveProjection(kind);
           });
           checks.length = 0;
           break;
@@ -1622,12 +1685,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       domainRevision: state.domainRevision,
       commitRevision: state.commits.at(-1)?.commitRevision ?? 0,
       deleted: state.deleted,
-      hasDurableIdentity:
+      hasDurableIdentity: state.hasDurableIdentity ?? (
         state.sessionMeta !== undefined ||
         state.admittedByRun.size > 0 ||
-        state.lifecycleByRequest.size > 0,
-      pendingLifecycleProjections: state.pendingLifecycleProjections.size,
-    }));
+        state.lifecycleByRequest.size > 0),
+      pendingLifecycleProjections: state.pendingLifecycleCount ?? state.pendingLifecycleProjections.size,
+    }), conversationDecisionScope({  }));
   }
 
   async transactDeferredIntent<Value>(input: {
@@ -1648,7 +1711,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       async (state, authorityPrefix) => input.decide(
         {
           ownerEpoch: this.#ownerEpoch,
-          hasDurableIdentity:
+          hasDurableIdentity: state.hasDurableIdentity ||
             state.sessionMeta !== undefined ||
             state.admittedByRun.size > 0 ||
             state.lifecycleByRequest.size > 0 ||
@@ -1665,7 +1728,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       [
         CONVERSATION_IDENTITY_PROJECTION_ID,
         DEFERRED_INTENT_PROJECTION_ID,
-      ],
+      ], conversationDecisionScope({ input }),
     );
     return transaction.value;
   }
@@ -1740,7 +1803,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: worksceneSessionMetaEntries(this.#conversationId, meta),
         value: { revision: domainRevision, at: input.at },
       };
-    });
+    }, [], [], conversationDecisionScope({ input }));
     return transaction.value;
   }
 
@@ -1814,7 +1877,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: worksceneSessionMetaEntries(this.#conversationId, meta),
         value: { revision: domainRevision, at: input.at },
       };
-    });
+    }, [], [], conversationDecisionScope({ input }));
     return transaction.value;
   }
 
@@ -1842,7 +1905,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             requestId: record.requestId,
           }
         : undefined;
-    });
+    }, conversationDecisionScope({ requestId }));
   }
 
   async completeLifecycleProjection(
@@ -1887,7 +1950,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: true,
       };
-    });
+    }, [], [], conversationDecisionScope({ input }));
     return transaction.value;
   }
 
@@ -1897,7 +1960,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const pending = await this.#select((state) =>
       [...state.pendingLifecycleProjections.values()]
         .sort((left, right) => left.domainRevision - right.domainRevision)
-        .map((record) => snapshot(record, "Pending lifecycle projection")),
+        .map((record) => snapshot(record, "Pending lifecycle projection")), conversationDecisionScope({ project }),
     );
     let projected = 0;
     for (const record of pending) {
@@ -1973,7 +2036,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             !byRun ||
             ingressRun !== input.runId ||
             canonicalize(byRun.record.ingress) !== canonicalize(ingress) ||
-            admittedInputDigest(byRun) !== protocolDigest("ConversationAdmittedInput", 1, userInput) ||
+            !admittedInputMatches(byRun, userInput) ||
             canonicalize(byRun.record.attachments ?? []) !==
               canonicalize(attachments) ||
             canonicalize(byRun.record.invocation) !== canonicalize(invocation) ||
@@ -2005,7 +2068,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: undefined,
         };
       },
-      collectArtifactRefs([prepared.references, attachments]),
+      collectArtifactRefs([prepared.references, attachments]), [], conversationDecisionScope({ input }),
     );
   }
 
@@ -2114,7 +2177,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           if (
             existingRunId !== input.runId ||
             !existing ||
-            admittedInputDigest(existing) !== protocolDigest("ConversationAdmittedInput", 1, userInput) ||
+            !admittedInputMatches(existing, userInput) ||
             canonicalize(existing.record.attachments ?? []) !==
               canonicalize(attachments) ||
             canonicalize(existing.record.ingress) !== canonicalize(ingress) ||
@@ -2166,7 +2229,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         if (worksceneTaskConflictsWithAdvancement(
           ingress.turnOrigin,
-          [...state.advancementSessions.values()].find((session) => session.status === "active")?.id,
+          state.activeAdvancementSessionId ?? [...state.advancementSessions.values()].find((session) => session.status === "active")?.id,
           invocation.kind === "agent" ? invocation.advancement?.sessionId : undefined,
         )) {
           return { result: rejectedControl("fence-rejected", "目标场景已有独立验收中的任务，未接纳另一项委托") };
@@ -2212,7 +2275,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const application = () => apply(basis, publish);
       const transact = () => this.#delivery ? this.#delivery.coordinate(application) : application();
       return this.#resources ? this.#resources.coordinate(transact) : transact();
-    });
+    }, conversationDecisionScope({ input }));
   }
 
   /** 执行方取得通用输入端口；领域消息和消费事实仍只属于本 owner。 */
@@ -2222,7 +2285,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (!assigned || assigned.record.runId !== runId || assigned.record.executorId !== executorId || state.assignmentByRun.get(runId) !== assignmentId) {
         throw new Error("Input does not belong to the authenticated executor assignment");
       }
-    });
+    }, conversationDecisionScope({ runId, assignmentId, executorId }));
   }
 
   async openRunInput(runId: string, assignmentId: string): Promise<RunInputPort> {
@@ -2233,7 +2296,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if (state.closedInputAssignments.has(assignmentId)) throw new Error("Run input is already closed");
       if (state.openInputAssignments.get(runId) === assignmentId) return { kind: "return", value: undefined };
       return { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-opened", runId, assignmentId })], value: undefined };
-    });
+    }, [], [], conversationDecisionScope({ runId, assignmentId }));
     return {
       receive: (boundary) => this.receiveRunInput(runId, assignmentId, boundary),
       close: () => this.closeRunInput(runId, assignmentId),
@@ -2267,7 +2330,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: [runRecord(this.#conversationId, { t: "run-input-consumed", runId, assignmentId, boundary: input.boundary, ingressKeys: keys })],
         value: materialize(keys),
       };
-    });
+    }, [], [], conversationDecisionScope({ runId, assignmentId, input }));
     return result.value;
   }
 
@@ -2275,7 +2338,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     // 关闭事实同时终结未消费来信的本次投递；原文保留可读，但不重开运行或重置额度。
     await this.#transact<void>((state) => state.openInputAssignments.get(runId) !== assignmentId
       ? { kind: "return", value: undefined }
-      : { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-closed", runId, assignmentId })], value: undefined });
+      : { kind: "append", entries: [runRecord(this.#conversationId, { t: "run-input-closed", runId, assignmentId })], value: undefined }, [], [], conversationDecisionScope({ runId, assignmentId }));
   }
 
   async messageStatus(messageId: string): Promise<ConversationMessageStatus | undefined> {
@@ -2292,13 +2355,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return (await this.#readIndex.state(this.#conversationId)).deleted === true;
   }
 
-  async recoveryPage(request: ConversationRecoveryRequest, base?: {
+  async recoveryPage(request: ConversationRecoveryRequest, legacyBase?: {
     readonly id: string;
     readonly records: readonly import('./conversation-transfer.js').ConversationTransferAuthorityRecord[];
     readonly clearId?: string;
     readonly clearedThroughLsn: number;
   }): Promise<ConversationRecoveryPage> {
     if (request.conversationId !== this.#conversationId) throw new TypeError('Recovery cursor belongs to another conversation');
+    if (request.mode === 'control-targets') return this.#readIndex.controlTargets(this.#conversationId);
     if (request.mode === 'body-page') {
       const generation = this.#readBaseGeneration;
       const page = await (request.includeInputs || request.cursor?.history
@@ -2316,6 +2380,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if ('ready' in summary) throw Error('Committed metadata index is being prepared');
       return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch, commitRevision: commit.commitRevision, summary };
     }
+    const importedSource = this.#importedBaseSource;
+    const sourceMeta = importedSource ? await importedSource.read(view => view.get('directory/' + JSON.stringify(this.#conversationId) + ':meta')) as unknown as { clearId?: string; clearedLsn?: number } | undefined : undefined;
+    const base = importedSource ? { id: importedSource.namespace, clearId: sourceMeta?.clearId, clearedThroughLsn: sourceMeta?.clearedLsn ?? 0,
+      count: importedSource.recordCount, page: (start: number) => importedSource.recordsPage(start) } : legacyBase ? {
+      ...legacyBase, count: legacyBase.records.length, page: async (start: number) => legacyBase.records.slice(start, start + 63),
+    } : undefined;
     const readGeneration = this.#readBaseGeneration;
     const head = await this.#log.checkpoint();
     const lifecycleOf = async () => {
@@ -2364,7 +2434,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const origin = !request.cursor || reset || request.cursor.after.lsn === 0 ? await this.#log.originCheckpoint() : undefined;
     let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
       conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
-      clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.records.length ?? 0,
+      clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.count ?? 0,
       historyThroughCommitRevision,
       ...(request.historyThroughInputLsn !== undefined ? { historyThroughInputLsn: request.historyThroughInputLsn } : {}),
       upper: head, after: origin!, item: 0,
@@ -2418,7 +2488,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     };
     // Each finite chunk reads its control keys against one verified authority
     // view. It is discarded before the next chunk; lifecycle is rechecked below.
-    const imported = base?.records.slice(cursor.baseItem, cursor.baseItem + 63) ?? [];
+    const imported = base ? await base.page(cursor.baseItem) : [];
     const importedControls = await controlFor(baseVisible ? imported.filter(record => record.lsn > base!.clearedThroughLsn) : []);
     for (const record of imported) {
       if (facts.length >= 32) break;
@@ -2426,7 +2496,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       cursor = { ...cursor, baseItem: cursor.baseItem + 1 };
     }
     // A bounded scan also yields on logs containing unrelated conversation facts.
-    if (facts.length < 32 && cursor.baseItem >= (base?.records.length ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
+    if (facts.length < 32 && cursor.baseItem >= (base?.count ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
       // Select this conversation's authoritative envelope locators in one
       // verified directory read. The batch still verifies the complete WAL;
       // unrelated conversations do not force empty RPC pages or repeated scans.
@@ -2475,7 +2545,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
     const current = await lifecycleOf();
     if (readGeneration !== this.#readBaseGeneration || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
-    return { facts, cursor, hasMore: cursor.baseItem < (base?.records.length ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
+    return { facts, cursor, hasMore: cursor.baseItem < (base?.count ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
   }
 
   async assign(
@@ -2503,7 +2573,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : undefined,
         assignmentIdInUse: state.assignedById.has(envelope.assignmentId),
       };
-    });
+    }, conversationDecisionScope({ unsignedEnvelope }));
     const currentAssignment = existingState.currentAssignment;
     if (currentAssignment) {
       if (
@@ -2599,7 +2669,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: { assignmentId: envelope.assignmentId },
         };
       },
-      [artifact.ref, ...envelopeReferences],
+      [artifact.ref, ...envelopeReferences], [], conversationDecisionScope({ unsignedEnvelope }),
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
@@ -2617,7 +2687,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         !state.closedAssignments.has(candidate.record.assignmentId)
           ? snapshot(candidate, "Pending dispatch")
           : undefined,
-      ),
+      ), conversationDecisionScope({  }),
     );
     return assigned ? [await this.#materializeDispatch(assigned)] : [];
   }
@@ -2638,13 +2708,13 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         );
       }
       return assigned.record.executorId;
-    });
+    }, conversationDecisionScope({  }));
   }
 
   /** accepted run 的冻结 dispatch；推进取证只从这条 owner 权威事实派生目标。 */
   async advancementEvidenceDispatch(
     runId: string,
-  ): Promise<PendingConversationDispatch | undefined> {
+  ): Promise<Pick<PendingConversationDispatch, 'envelope'> | undefined> {
     assertIdentifier(runId, "Run id");
     const assigned = await this.#select((state) => {
       const committed = state.commits.find((candidate) => candidate.runId === runId);
@@ -2654,8 +2724,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         throw corruptRunJournal("Committed run has no durable assignment");
       }
       return snapshot(projection, "Advancement evidence assignment");
-    });
-    return assigned ? await this.#materializeDispatch(assigned) : undefined;
+    }, conversationDecisionScope({ runId }));
+    if (!assigned) return;
+    const envelope = await verifyProtocolStep(() => this.#artifacts.get(assigned.record.dispatchRef)
+      .then(bytes => validateConversationEnvelope(JSON.parse(Buffer.from(bytes).toString('utf8')), this.#verifier)));
+    if (envelope.assignmentId !== assigned.record.assignmentId || envelope.work.conversationId !== this.#conversationId || envelope.work.runId !== runId) {
+      throw corruptRunJournal('Historical evidence dispatch does not bind its committed run');
+    }
+    return { envelope };
   }
 
   /** Inputs that are durably admitted but have no active assignment, in FIFO order. */
@@ -2697,7 +2773,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             : {}),
           queuedPosition,
         };
-      }),
+      }), conversationDecisionScope({  }, { hydrate: true }),
     );
   }
 
@@ -2708,7 +2784,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   /** Exact durable identity and source for each currently cancellable run. */
   async cancellableRuns(): Promise<ConversationRunControlDescriptor[]> {
-    return this.#select((state) => cancellableRunDescriptors(state));
+    return this.#select((state) => cancellableRunDescriptors(state), conversationDecisionScope({  }));
   }
 
   async runControlDescriptor(
@@ -2726,7 +2802,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               ingressId: admitted.record.ingress.ingressId,
             }
         : undefined;
-    });
+    }, conversationDecisionScope({ runId }));
   }
 
   /**
@@ -2738,6 +2814,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     requestId: string,
   ): Promise<{ t: "answered"; decisionDigest: string } | { t: "closed" } | undefined> {
     assertIdentifier(requestId, "Interaction request id");
+    if (this.#readBaseGeneration === 0) return readConversationExactValue(this.#log, this.#conversationId, 'interactionOutcome', requestId);
     return this.#select((state) => {
       for (const batch of state.mirrorBatches.values()) {
         for (const entry of batch.batch.entries) {
@@ -2748,7 +2825,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
       }
       return undefined;
-    });
+    }, conversationDecisionScope({ requestId }));
   }
 
   async runByIngress(
@@ -2756,6 +2833,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     source: ConversationInvocation["source"],
   ): Promise<{ readonly runId: string; readonly state: ConversationRunState } | undefined> {
     assertIdentifier(ingressId, "Ingress id");
+    if (this.#readBaseGeneration === 0) return (await this.#log.transactDurableProjection<never,
+      { runId: string; state: ConversationRunState } | undefined>(CONVERSATION_RUN_STATE_PROJECTION_ID, async view => {
+      const ids = await readConversationStateField(view, this.#conversationId, 'extra-runByIngressIdentity', canonicalize([ingressId, source])) as string[] | undefined;
+      if (!ids?.length) return { kind: 'return', value: undefined };
+      if (ids.length > 1) throw corruptRunJournal('Ingress identity is bound to multiple durable runs');
+      const current = await readConversationStateField(view, this.#conversationId, 'stateByRun', ids[0]!) as { state: ConversationRunState } | undefined;
+      if (!current) throw corruptRunJournal('Ingress-bound run has no durable state');
+      return { kind: 'return', value: { runId: ids[0]!, state: current.state } };
+    })).value;
     return this.#select((state) => {
       let match:
         | { readonly runId: string; readonly state: ConversationRunState }
@@ -2777,12 +2863,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         match = { runId, state: current };
       }
       return match;
-    });
+    }, conversationDecisionScope({ ingressId, source }));
   }
 
   async nextAssignmentAttempt(runId: string): Promise<number> {
     assertIdentifier(runId, "Run id");
-    return this.#select((state) => nextConversationAssignmentAttempt(state, runId));
+    return this.#select((state) => nextConversationAssignmentAttempt(state, runId), conversationDecisionScope({ runId }));
   }
 
   /** 待确认或前序任务未结清时，仅保留耐久输入，不进入全局资源候选队列。 */
@@ -2798,7 +2884,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const blockingRunId = state.activeRunId !== undefined && state.activeRunId !== runId
         ? state.activeRunId : first !== admitted.record.queuedPosition && first !== undefined ? state.queuedRunByPosition.get(first) : undefined;
       return blockingRunId ? { ready: false, blockingRunId } : { ready: first === admitted.record.queuedPosition };
-    });
+    }, conversationDecisionScope({ runId }));
   }
 
   async dispatchesAwaitingStarted(): Promise<PendingConversationDispatch[]> {
@@ -2809,7 +2895,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         !state.closedAssignments.has(candidate.record.assignmentId)
           ? snapshot(candidate, "Dispatch awaiting started")
           : undefined,
-      ),
+      ), conversationDecisionScope({  }),
     );
     return assigned ? [await this.#materializeDispatch(assigned)] : [];
   }
@@ -2829,7 +2915,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId }));
   }
 
   async issueDataPlaneTicket(
@@ -2942,7 +3028,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ],
           value: ticket,
         };
-      },
+      }, [], [], conversationDecisionScope({ input }),
     );
     return transaction.value;
   }
@@ -2963,7 +3049,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: true,
       };
-    });
+    }, [], [], conversationDecisionScope({ ticketId }));
     return transaction.value;
   }
 
@@ -2999,7 +3085,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               ],
               value,
             };
-      },
+      }, [], [], conversationDecisionScope({  }, { allTickets: true, ticketAt: this.#clock() }),
     );
     return transaction.value;
   }
@@ -3046,7 +3132,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ],
           value: fence,
         };
-      },
+      }, [], [], conversationDecisionScope({ assignmentId, requestId }),
     );
     return transaction.value;
   }
@@ -3066,7 +3152,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               fence: { fenceSeq: request.fenceSeq, requestId: request.requestId },
             }
           : undefined;
-      }),
+      }), conversationDecisionScope({  }),
     );
     return pending ? [pending] : [];
   }
@@ -3090,7 +3176,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               fence: { fenceSeq: fence.fenceSeq, requestId: fence.requestId },
             }
           : undefined;
-      }),
+      }), conversationDecisionScope({  }),
     );
     return pending ? [pending] : [];
   }
@@ -3110,7 +3196,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           authorityPrefix.nextLsn,
           resourceRecords,
         );
-      },
+      }, [], [], conversationDecisionScope({ input }),
     );
     return transaction.value;
   }
@@ -3120,6 +3206,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly envelope: ConversationControlEnvelope;
     readonly source: TrustedControlSource;
   }): Promise<ControlAdmissionOutcome> {
+    const cancelRunId = input.envelope.body.t === "cancel" ? input.envelope.body.runId : undefined;
+    // A committed delegation source keeps its workscene control in the indexed
+    // read view, not in the control-admission replay. Read that immutable
+    // record before the control transaction so the cancel decision sees the
+    // same pending handoff as continuation recovery.
+    const pendingWorkspaceControl = cancelRunId === undefined ? undefined : await this.#select(
+      state => state.worksceneControls.get(cancelRunId)?.record,
+      conversationDecisionScope({ runId: cancelRunId }, { workscene: true }),
+    );
     await input.admission.prepareRecovery();
     const applyAuthority = (basis: { state: RunProjection; cursor: ProjectionCursor } | undefined,
       onProjected: (state: RunProjection, cursor: ProjectionCursor) => void) => input.admission.applyAuthority<
@@ -3300,7 +3395,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           const current = state.stateByRun.get(body.runId);
           // A committed delegation source has finished its Run, not its entrusted work.
           // The control receipt revokes continuation without rewriting the committed Run.
-          if (current?.state === "committed" && hasPendingWorksceneTask(state.worksceneControls.get(body.runId)?.record ?? {})) {
+          const workspaceControl = state.worksceneControls.get(body.runId)?.record ?? pendingWorkspaceControl;
+          if (current?.state === "committed" && hasPendingWorksceneTask(workspaceControl ?? {})) {
             return { result: { v: 1, status: "ok", body: { t: "cancel", runState: "committed" } } };
           }
           if (
@@ -3468,7 +3564,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       const application = () => applyAuthority(basis, publish);
       const apply = () => this.#delivery ? this.#delivery.coordinate(application) : application();
       return this.#resources ? this.#resources.coordinate(apply) : apply();
-    });
+    }, conversationDecisionScope({ input }));
   }
 
   async closeQueuedRun(
@@ -3498,7 +3594,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ runId, outcome }));
   }
 
   async failAssignedRun(
@@ -3542,7 +3638,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ runId, assignmentId, reason, usageFinal }));
   }
 
   async assignmentsAwaitingRecovery(): Promise<
@@ -3615,7 +3711,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           state: current,
           assigned: snapshot(assigned, "Recoverable assignment"),
         }];
-      }),
+      }), conversationDecisionScope({  }),
     );
     return Promise.all(
       candidates.map(async ({ assigned, ...candidate }) => ({
@@ -3649,7 +3745,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         expected: conversationBundleAcknowledgementRecord(assignmentId, committed),
         existing: state.bundleAcknowledgements.get(assignmentId),
       };
-    });
+    }, conversationDecisionScope({ assignmentId, rawSnapshot }));
     assertLedgerAcknowledgesCommittedConversationBundle(ledger, preflight.expected);
     if (preflight.existing) {
       if (canonicalize(preflight.existing) !== canonicalize(preflight.expected)) {
@@ -3682,7 +3778,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         entries: [runRecord(this.#conversationId, expected)],
         value: undefined,
       };
-    }, [preflight.expected.bundleRef]);
+    }, [preflight.expected.bundleRef], [], conversationDecisionScope({ assignmentId, rawSnapshot }));
   }
 
   async markAssignmentUncertain(
@@ -3729,7 +3825,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: fact,
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId, cause }));
     return transaction.value;
   }
 
@@ -3771,7 +3867,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               state.assignmentByRun.get(assigned.record.runId) === assignmentId,
           }
         : undefined;
-    });
+    }, conversationDecisionScope({ assignmentId, rawSnapshot, pages }, { hydrate: true }));
     if (!current) throw new Error("Ledger evidence names an unknown assignment");
     const { assigned, runState, isCurrent } = current;
     if (!isCurrent) throw new Error("Ledger evidence belongs to a historical assignment");
@@ -3820,7 +3916,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         const entry: AssignmentEntry = { recordSeq: rawEntry.recordSeq, body };
         if (
           body.t === "control-lease-renewed" &&
-          !controlLeaseBindsDispatchEnvelope(body.lease, assigned.envelope)
+          !controlLeaseBindsDispatchEnvelope(body.lease, requireAssignedEnvelope(assigned))
         ) {
           throw new TypeError(
             "Control lease evidence does not bind the durable assignment",
@@ -3829,19 +3925,19 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         switch (body.t) {
           case "received": {
             const activation = await verifyProtocolStep(() => validateConversationActivation({
-              envelope: assigned.envelope,
+              envelope: requireAssignedEnvelope(assigned),
               activation: body.activation as AssignmentActivationProof<"conversation">,
               dispatchRef: assigned.record.dispatchRef,
               verifier: this.#verifier,
             }));
             const expectedActivation = buildConversationActivationPayload({
-              envelope: assigned.envelope,
+              envelope: requireAssignedEnvelope(assigned),
               dispatchRef: assigned.record.dispatchRef,
               commit: {
-                lsn: assigned.commit.lsn,
-                envelopeDigest: assigned.commit.envelopeDigest,
+                lsn: requireLocalAssignedCommit(assigned).lsn,
+                envelopeDigest: requireLocalAssignedCommit(assigned).envelopeDigest,
               },
-              issuedAt: assigned.commit.at,
+              issuedAt: requireLocalAssignedCommit(assigned).at,
             });
             if (
               canonicalize(body.envelope.ref) !== canonicalize(assigned.record.dispatchRef) ||
@@ -3892,7 +3988,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const expectedAssigned = await this.#select((state) => {
       const assigned = state.assignedById.get(sent.assignmentId);
       return assigned ? snapshot(assigned, "Expected assigned dispatch") : undefined;
-    });
+    }, conversationDecisionScope({ sent, result }, { hydrate: true }));
     if (!expectedAssigned) throw new Error("Dispatch conflict names an unknown assignment");
     const expected = await this.#materializeDispatch(expectedAssigned);
     const expectedDispatchRef = dispatchEnvelopeArtifact(expected.envelope).ref;
@@ -3980,7 +4076,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: "opened-uncertain",
         };
       },
-      [proof.acceptedDispatchRef, proof.conflictingDispatchRef],
+      [proof.acceptedDispatchRef, proof.conflictingDispatchRef], [], conversationDecisionScope({ sent, result }, { hydrate: true }),
     );
     return transaction.value;
   }
@@ -4077,7 +4173,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ rawProof }));
   }
 
   /** Runs the submission guard before a remote adapter dereferences request assets. */
@@ -4179,7 +4275,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId, ctx }));
   }
 
   async reconcileStarted(
@@ -4233,7 +4329,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId, rawSnapshot }));
   }
 
   async mirrorInteractions(
@@ -4368,7 +4464,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           mirrorDigest: batch.mirrorDigest,
         },
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId, rawBatch, ctx }));
     return transaction.value;
   }
 
@@ -4590,7 +4686,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         ],
         value: undefined,
       };
-    });
+    }, [], [], conversationDecisionScope({ assignmentId, rawProof, ctx }));
   }
 
   async submitBundle(
@@ -4807,7 +4903,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         kind: "proceed" as const,
         assigned: snapshot(assigned, "Bundle preflight assignment"),
       };
-    });
+    }, conversationDecisionScope({ rawBundle, ctx }, { hydrate: true }));
     if (preflight.kind === "return") return preflight.value;
     const preflightBody = bundle.body;
     if (
@@ -4846,7 +4942,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       runRecord: committedRunRecord,
     } = closure;
     try {
-      validateWorksceneContinuationCommit(committedRunRecord, preflight.assigned.envelope.work);
+      validateWorksceneContinuationCommit(committedRunRecord, requireAssignedEnvelope(preflight.assigned).work);
     } catch (error) {
       return rejected("fence-rejected", error instanceof Error ? error.message : "Invalid workscene commit", false);
     }
@@ -5291,7 +5387,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         };
         },
         [...references, ...compiledDelivery.references, ...stagedReferences],
-        this.#publisher?.readProjectionIds ?? [],
+        this.#publisher?.readProjectionIds ?? [], conversationDecisionScope({ rawBundle, ctx, mutationBatch: batch }, { hydrate: true }),
       ).catch((error: unknown) => {
         if (error instanceof TransactionArtifactReferenceError) {
           return { value: rejected("missing-base", "Staged artifact dependencies changed; resubmit the bundle", true) };
@@ -5319,7 +5415,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const pending = await this.#select((state) =>
       [...state.pendingCommitProjections.values()].map((committed) =>
         snapshot(committed, "Pending commit projection"),
-      ),
+      ), conversationDecisionScope({  }),
     );
     let projected = 0;
     for (const committed of pending) {
@@ -5362,7 +5458,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           entries: [runRecord(this.#conversationId, progress)],
           value: true,
         };
-      });
+      }, [], [], conversationDecisionScope({  }));
       if (transaction.value) projected += 1;
     }
     return projected;
@@ -5396,8 +5492,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             };
           }),
         };
-      }),
-      this.#select((state) => state.committedByAssignment.has(assignmentId)),
+      }, [assignmentId]),
+      this.#select((state) => state.committedByAssignment.has(assignmentId), conversationDecisionScope({ assignmentId })),
     ]);
     if (!projection) return 0;
     const { decision, batch } = projection;
@@ -5408,14 +5504,19 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       throw new Error("Staged mutation publisher is not configured");
     }
     let applied = 0;
-    for (const { domain, plan, progress } of projection.domains) {
+    for (const { domain, plan, progress: storedProgress } of projection.domains) {
+      let progress = storedProgress;
       const domainCount =
         domain === "session" ? decision.sessionCount : decision.globalCount;
-      if (domainCount === 0) continue;
-      if (!plan || !progress) {
+      if (domainCount === 0 || !domainPublishDecisionRequired(batch.records, decision.outcomes, domain)) continue;
+      if (!plan) {
         throw corruptRunJournal(
           "Publish decision has no durable domain recovery plan",
         );
+      }
+      if (!progress) {
+        await this.#appendPublishProgress({ t: 'publish-progress', assignmentId, domain, upToSeq: 0, state: 'pending' });
+        progress = { state: 'pending', upToSeq: 0 };
       }
       if (progress.state === "settled") continue;
       const currentIndex =
@@ -5500,7 +5601,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           const assignmentId = state.assignmentByCommitRevision.get(record.commitRevision);
           return assignmentId ? [[record.commitRevision, assignmentId] as const] : [];
         }),
-      ),
+      ), conversationDecisionScope({ pending }),
     );
     const conflictCount = await this.#selectPublish((state) =>
       new Map(
@@ -5508,7 +5609,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           assignmentId,
           state.conflictsByAssignment.get(assignmentId)?.length ?? 0,
         ]),
-      ),
+      ), [...assignmentByRevision.values()],
     );
     return pending.map(({ record }) => {
       const assignmentId = assignmentByRevision.get(record.commitRevision);
@@ -5525,7 +5626,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     let published = 0;
     for (const frame of await this.pendingFinalFrames()) {
       const assignmentId = await this.#select((state) =>
-        state.assignmentByCommitRevision.get(frame.commitRevision),
+        state.assignmentByCommitRevision.get(frame.commitRevision), conversationDecisionScope({ frame }),
       );
       const publishResults = assignmentId
         ? await this.publishResults(assignmentId)
@@ -5541,7 +5642,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const projection = await this.#selectFinal((state) =>
       [...(state.publishedByConversation.get(this.#conversationId)?.values() ?? [])].map(
         (entry) => snapshot(entry, "Published final frame"),
-      ),
+      ), cutoff,
     );
     let expired = 0;
     for (const { record, at } of projection.sort(
@@ -5614,20 +5715,34 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   async runState(runId: string): Promise<ConversationRunState | undefined> {
     assertIdentifier(runId, "Run id");
-    return this.#select((state) => state.stateByRun.get(runId)?.state);
+    return this.#select((state) => state.stateByRun.get(runId)?.state, conversationDecisionScope({ runId }));
+  }
+
+  worksceneContinuationFrontiers(root: { conversationId: string; runId: string }) {
+    return this.#readIndex.continuationFrontiers(root);
   }
 
   /** Continuation facts are derived from admission, commit, lifecycle and control authority. */
-  async worksceneContinuationSources(): Promise<readonly WorksceneContinuationSource[]> {
+  async worksceneContinuationSources(query?: import("@zhixing/core/workscene/application").WorksceneContinuationQuery): Promise<readonly WorksceneContinuationSource[]> {
+    // Unfinished obligations are discovered from bounded keyed markers: a queued
+    // child stays visible without scanning admitted history, and a cancelled
+    // child leaves the candidate set at its own cancelling fact.
+    const member = query && 'rootMember' in query ? await this.#readIndex.continuationMember(this.#conversationId, query.rootMember) : undefined;
+    const pending = query && 'rootMember' in query ? (member ? [member] : []) : query && 'runId' in query ? [query.runId] : query && 'parent' in query
+      ? await this.#readIndex.continuationChildren(this.#conversationId, query.parent)
+      : await this.#readIndex.pendingObligationRuns(this.#conversationId);
+    if (!pending.length) return [];
+    const selected = new Set(pending);
+    const obligations = await this.#readIndex.continuationPending(this.#conversationId, pending);
     const sources = await this.#select((state) => {
-      return [...state.admittedByRun.values()].flatMap(({ record: admitted, lsn }) => {
+      return [...state.admittedByRun.values()].filter(value => selected.has(value.record.runId)).flatMap(({ record: admitted, lsn, domainRevision }) => {
         const control = state.worksceneControls.get(admitted.runId);
         const record = control?.record;
         const runState = record ? "committed" : state.stateByRun.get(admitted.runId)?.state;
         if (!record && !admitted.ingress.turnOrigin?.worksceneContinuation) return [];
         const advancement = record?.advancement ?? (admitted.invocation.kind === "agent" ? admitted.invocation.advancement : undefined);
         const advancementSessionId = control?.advancementSessionId ?? advancement?.sessionId;
-        const active = advancementSessionId ? state.advancementSessions.get(advancementSessionId)?.status === "active" : true;
+        const active = advancementSessionId ? (state.advancementStatuses?.get(advancementSessionId) ?? state.advancementSessions.get(advancementSessionId)?.status) === "active" : true;
         const result = record
           ? record.messages.filter((message) => message.role === "assistant").at(-1)
             ?.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") ||
@@ -5635,11 +5750,12 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : `受托运行状态为 ${runState}，任务未完成。可能已经产生部分动作；先核对原运行记录，不重复执行已发生或不确定的副作用。`;
         return [{
           admissionLsn: lsn,
+          pending: obligations.has(admitted.runId),
           conversationId: this.#conversationId,
           runId: admitted.runId,
           ingressId: admitted.ingress.ingressId,
           state: runState as WorksceneContinuationSource["state"],
-          current: !state.deleted && active && lsn > state.clearedThroughLsn,
+          current: !state.deleted && active && (domainRevision === undefined ? lsn > state.clearedThroughLsn : domainRevision >= (state.clearedThroughRevision ?? 0)),
           ...(record?.postTurnControl ? { control: structuredClone(record.postTurnControl) } : {}),
           result,
           ...(admitted.ingress.turnOrigin ? { origin: structuredClone(admitted.ingress.turnOrigin) } : {}),
@@ -5649,36 +5765,15 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           ...(advancementSessionId ? { advancementSessionId } : {}),
         }];
       });
-    });
+    }, conversationDecisionScope({  }, { workscene: true, runs: pending }));
     if (sources.length === 0) return [];
-    // Empty batch cancellation still stops handed-off work. Its existing control
-    // receipt is authoritative; this cursor is only a rebuildable read cache.
-    const stoppedAt = await this.#operations.run(async () => {
-      const cached = this.#continuationStopProjection;
-      const result = await this.#log.transactProjection<{ through: number; requests: Map<string, string>; stopped: Set<string> }, ControlRecord, void>(
-        cached?.state ?? { through: 0, requests: new Map(), stopped: new Set() },
-        async (state, record, envelope) => {
-          if (record.body.t === "received") {
-            const request = await loadStored<import("@zhixing/core/contracts").ControlEnvelope>(record.body.envelope, this.#artifacts);
-            if (request.body.t === "cancel" && request.body.conversationId === this.#conversationId) state.requests.set(record.body.requestId, request.body.runId);
-          }
-          if (record.body.t !== "applied") return state;
-          const applied = await loadStored<ControlResult>(record.body.result, this.#artifacts);
-          if (applied.status === "ok") {
-            if (applied.body.t === "cancel-batch" && applied.body.conversationId === this.#conversationId) state.through = envelope.lsn;
-            const runId = state.requests.get(record.body.requestId);
-            if (applied.body.t === "cancel" && runId) state.stopped.add(runId);
-          }
-          state.requests.delete(record.body.requestId);
-          return state;
-        },
-        () => ({ kind: "return", value: undefined }),
-        { stream: "control", ...(cached ? { cursor: cached.cursor } : {}) },
-      );
-      this.#continuationStopProjection = { state: result.state, cursor: result.cursor };
-      return result.state;
-    });
-    return sources.map(({ admissionLsn, ...source }) => ({ ...source, current: source.current && admissionLsn > stoppedAt.through && !stoppedAt.stopped.has(source.runId) }));
+    sources.sort((left, right) => left.admissionLsn - right.admissionLsn);
+    // Applied stops are durable keyed rows: no per-instance replay of the
+    // control stream, and the stopped source stays visible for an idempotent
+    // stop replay exactly as before.
+    const stopped = await this.#readIndex.stoppedRuns(this.#conversationId, sources.map(source => source.runId));
+    return sources.map(({ admissionLsn: _position, ...source }) => ({ ...source,
+      current: source.current && !stopped.has(source.runId) }));
   }
 
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
@@ -5784,7 +5879,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       },
       collectArtifactRefs(
         prepared.flatMap((candidate) => candidate.references),
-      ),
+      ), [], conversationDecisionScope({ input }, { advancement: true }),
     );
     return transaction.value;
   }
@@ -5795,11 +5890,11 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       this.#select((state) => {
         const record = state.committedByAssignment.get(assignmentId);
         return record ? snapshot(record, "Committed assignment") : undefined;
-      }),
+      }, conversationDecisionScope({ assignmentId })),
       this.#selectPublish((state) => {
         const records = state.conflictsByAssignment.get(assignmentId);
         return records ? snapshot(records, "Publish conflicts") : undefined;
-      }),
+      }, [assignmentId]),
     ]);
     if (!committed || !conflicts) return undefined;
     return projectPublishConflicts({
@@ -5814,7 +5909,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       this.#select((state) => {
         const record = state.committedByAssignment.get(assignmentId);
         return record ? snapshot(record, "Committed assignment") : undefined;
-      }),
+      }, conversationDecisionScope({ assignmentId })),
       this.#selectPublish((state) => {
         const decision = state.decisions.get(assignmentId);
         const batch = state.batches.get(assignmentId);
@@ -5824,7 +5919,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               batch: snapshot(batch, "Publish mutation batch"),
             }
           : undefined;
-      }),
+      }, [assignmentId]),
     ]);
     if (!committed || !source) return [];
     return projectPublishResults({
@@ -5843,7 +5938,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       return state.commits
         .slice(start)
         .map((committed) => snapshot(committed, "Final history commit"));
-    });
+    }, conversationDecisionScope({ afterCommitRevision }, { historyAfter: afterCommitRevision }));
     const publishSources = await this.#selectPublish((state) =>
       new Map(commits.flatMap((committed) => {
         const decision = state.decisions.get(committed.assignmentId);
@@ -5854,7 +5949,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               batch: snapshot(batch, "Final history mutation batch"),
             }] as const]
           : [];
-      })),
+      })), commits.map(committed => committed.assignmentId),
     );
     const output: CommittedConversationResult[] = [];
     for (const committed of commits) {
@@ -5899,7 +5994,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const committed = await this.#select((state) => {
       const record = state.commits.find((candidate) => candidate.runId === runId);
       return record ? snapshot(record, "Committed run replay") : undefined;
-    });
+    }, conversationDecisionScope({ runId }));
     if (!committed) return undefined;
     const bytes = await this.#artifacts.get(committed.bundle.ref);
     const bundle = validateConversationSealedBundle(
@@ -5927,7 +6022,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async currentState(runId: string): Promise<ConversationRunState | undefined> {
-    return this.#select((state) => state.stateByRun.get(runId)?.state);
+    return this.#select((state) => state.stateByRun.get(runId)?.state, conversationDecisionScope({ runId }));
   }
 
   async currentResolution(
@@ -5936,7 +6031,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#select((state) => {
       const resolution = state.resolutionsByRun.get(runId);
       return resolution ? snapshot(resolution, "Current resolution") : undefined;
-    });
+    }, conversationDecisionScope({ runId }));
   }
 
   async #acceptNotStartedTermination(
@@ -6097,7 +6192,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }),
       );
       return { kind: "append", entries, value: undefined };
-    });
+    }, [], [], conversationDecisionScope({ proof }));
   }
 
   async #materializeDispatch(
@@ -6112,10 +6207,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       envelope,
       dispatchRef: assigned.record.dispatchRef,
       commit: {
-        lsn: assigned.commit.lsn,
-        envelopeDigest: assigned.commit.envelopeDigest,
+        lsn: requireLocalAssignedCommit(assigned).lsn,
+        envelopeDigest: requireLocalAssignedCommit(assigned).envelopeDigest,
       },
-      issuedAt: assigned.commit.at,
+      issuedAt: requireLocalAssignedCommit(assigned).at,
     });
     return {
       assignmentId: assigned.record.assignmentId,
@@ -6124,7 +6219,99 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     };
   }
 
-  async #select<Value>(select: (state: RunProjection) => Value): Promise<Value> {
+  async #prepareWorkingSet(scope: ConversationDecisionScope) {
+    const prepared = await prepareConversationRunView({ log: this.#log, artifacts: this.#artifacts, verifier: this.#verifier,
+      conversationId: this.#conversationId, scope, previous: this.#runProjection?.state, legacy: this.#legacyAbortTickets,
+      ...(this.#importedBaseSource ? { baseSource: this.#importedBaseSource } : {}) });
+    if (scope.advancement) prepared.state.advancementSessions.clear();
+    if (scope.advancement) for (const [id, value] of await this.#sessionRead.read(state => structuredClone([...state.advancementSessions]))) prepared.state.advancementSessions.set(id, value);
+    return prepared;
+  }
+
+  async #checkWorkingSet(context: ProjectionTransactionContext, version: string): Promise<void> {
+    if (await conversationWorkingVersion(context.readProjection(CONVERSATION_RUN_STATE_PROJECTION_ID), this.#conversationId) !== version) throw new ConversationWorkingSetChanged();
+  }
+
+  async #repeatWorkingSet<Value>(operation: () => Promise<Value>): Promise<Value> {
+    const abort = currentMaintenanceAbortSignal(); let deadline: number | undefined;
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      try { return await operation(); } catch (error) {
+        const delay = error instanceof ConversationWorkingSetChanged ? 0 : maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        deadline ??= performance.now() + 5_000;
+        if (performance.now() >= deadline) throw error;
+        if (delay) await waitForMaintenanceRetry(Math.min(delay, deadline - performance.now()));
+        else await new Promise<void>(setImmediate);
+      }
+    }
+  }
+
+  async #select<Value>(select: (state: RunProjection) => Value, scope: ConversationDecisionScope = {}): Promise<Value> {
+    if (this.#readBaseGeneration !== 0) return this.#selectLegacy(select);
+    return this.#repeatWorkingSet(async () => {
+      const prepared = await this.#prepareWorkingSet(scope);
+      const result = await this.#log.transactDurableProjection<never, Value>(CONVERSATION_RUN_STATE_PROJECTION_ID, async (_current, context) => {
+        await this.#checkWorkingSet(context, prepared.version);
+        return { kind: 'return', value: select(prepared.state) };
+      });
+      this.#runProjection = { state: prepared.state, cursor: result.cursor };
+      return result.value;
+    });
+  }
+
+  async #transact<Value>(decide: (state: RunProjection, prefix: ProjectionTransactionContext) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
+    candidateReferences: readonly ArtifactRef[] = [], readProjectionIds: readonly string[] = [], scope: ConversationDecisionScope = {}) {
+    if (this.#readBaseGeneration !== 0) return this.#transactLegacy(decide, candidateReferences, readProjectionIds);
+    return this.#repeatWorkingSet(async () => {
+      const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
+      return this.#operations.run(async () => {
+        let candidateLsn: number | undefined;
+        const run = () => this.#log.transactProjection<RunProjection, unknown, Value>(prepared.state,
+          (state, record, envelope) => envelope.lsn === candidateLsn ? this.#reduceRunProjection(state, record, envelope) : state,
+          async (state, context) => {
+            await this.#checkWorkingSet(context, prepared.version);
+            if (this.#currentAuthority) await assertConversationTransferWriteAuthority(context.readProjection(CONVERSATION_TRANSFER_PROJECTION_ID), this.#conversationId,
+              { deviceId: this.#currentAuthority.deviceId, ownerEpoch: this.#ownerEpoch }, await conversationAnchorAtPrefix(this.#log, context));
+            candidateLsn = context.nextLsn;
+            const decision = await decide(state, context);
+            if (decision.kind !== 'append') return decision;
+            const statuses = conversationStatusDeliveryInputs(this.#conversationId, state, decision.entries, context.at);
+            const delivery = this.#delivery?.prepareConversationStatuses(statuses) ?? { accepted: true as const, records: [] };
+            if (!delivery.accepted) throw corruptRunJournal(delivery.error.message);
+            return { ...decision, entries: [...this.#prepareResourceTerminalRecords(state, decision.entries), ...decision.entries, ...delivery.records] };
+          }, { stream: runStream(this.#conversationId), cursor: prepared.cursor, candidateReferences,
+            readProjectionIds: [...new Set([CONVERSATION_RUN_STATE_PROJECTION_ID, ...readProjectionIds, ...(this.#currentAuthority ? [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.#log)] : [])])],
+            createState: () => { candidateLsn = undefined; return createConversationProjectionDraft(prepared.state).state; } });
+        const coordinate = () => this.#delivery ? this.#delivery.coordinate(run) : run();
+        const result = await (this.#resources ? this.#resources.coordinate(coordinate) : coordinate());
+        // This cache owns only immutable current payloads; every next decision
+        // obtains its metadata again from the same-head indexed authority.
+        this.#runProjection = { state: result.state, cursor: result.cursor };
+        if (result.commit) this.#publishStatusNotices(conversationStatusNoticesForCommit(result.state, result.commit, this.#conversationId, this.#ownerEpoch));
+        return result;
+      });
+    });
+  }
+
+  async #withRunProjection<Value>(operation: (
+    basis: { readonly state: RunProjection; readonly cursor: ProjectionCursor; readonly createState: () => RunProjection;
+      readonly readProjectionIds?: readonly string[]; readonly validateAtPrefix?: (context: ProjectionTransactionContext) => Promise<void> } | undefined,
+    publish: (state: RunProjection, cursor: ProjectionCursor) => void,
+  ) => Promise<Value>, scope: ConversationDecisionScope = {}): Promise<Value> {
+    if (this.#readBaseGeneration !== 0) return this.#withRunProjectionLegacy(operation);
+    return this.#repeatWorkingSet(async () => {
+      const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
+      return this.#operations.run(async () => {
+        const createState = () => createConversationProjectionDraft(prepared.state).state;
+        return operation({ state: createState(), cursor: prepared.cursor, createState,
+          readProjectionIds: [CONVERSATION_RUN_STATE_PROJECTION_ID], validateAtPrefix: context => this.#checkWorkingSet(context, prepared.version),
+        }, (state, cursor) => { this.#runProjection = { state, cursor }; });
+      });
+    });
+  }
+
+  async #selectLegacy<Value>(select: (state: RunProjection) => Value): Promise<Value> {
     const abort = currentMaintenanceAbortSignal();
     let retryDeadline: number | undefined;
     for (;;) {
@@ -6181,13 +6368,21 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   readonly #reduceSessionRead = async (state: RunProjection, record: LogicalRecord<unknown>, rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>, throughRevision = Infinity): Promise<RunProjection> => {
+    return this.#reduceSessionFacts(state, record, rawEnvelope, rawEnvelope.lsn, throughRevision);
+  };
+
+  readonly #reduceSessionFacts = async (state: RunProjection, record: LogicalRecord<unknown>, facts: ConversationFactGroup<unknown>, sourceLsn: number,
+    throughRevision = Infinity): Promise<RunProjection> => {
     const body = record.body as ConversationRunJournalRecord;
+    if (!body || typeof body !== 'object' || !('t' in body) || !['session-meta', 'session-control', 'session-lifecycle', 'advancement-event', 'committed'].includes(body.t)) return state;
     if (!('t' in body) || body.t !== 'committed') {
       if ('domainRevision' in body && typeof body.domainRevision === 'number' && body.domainRevision > throughRevision) return state;
-      return this.#reduce(state, record, rawEnvelope);
+      await verifyProtocolStep(() => assertConversationRunRecord(body, this.#verifier));
+      return reduceConversationSessionFact({ conversationId: this.#conversationId, artifacts: this.#artifacts, verifier: this.#verifier },
+        state, body as Extract<ConversationRunJournalRecord, { t: 'session-meta' | 'session-control' | 'session-lifecycle' | 'advancement-event' }>, facts as ConversationFactGroup, sourceLsn);
     }
     await verifyProtocolStep(() => assertConversationRunRecord(body, this.#verifier));
-    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
+    const envelope = facts as ConversationFactGroup;
     // The validated authority commit already supplies the atomic publish locator.
     // Read its session batch, never the dispatch, transcript or execution closure.
     const sidecars = submissionCommitSidecars(envelope, this.#conversationId, body);
@@ -6215,7 +6410,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const body = record.body as { t?: string; runId?: string; assignmentId?: string; ingressKey?: string };
     if (body.t === "assigned" && body.assignmentId) {
       const assigned = next.assignedById.get(body.assignmentId)!;
-      next.assignedById.set(body.assignmentId, { ...assigned, envelope: retainedConversationEnvelope(assigned.envelope) });
+      next.assignedById.set(body.assignmentId, { ...assigned, envelope: retainedConversationEnvelope(requireAssignedEnvelope(assigned)) });
     } else if (body.t === "admitted" && body.runId) {
       const admitted = next.admittedByRun.get(body.runId)!;
       const { input: _input, ...metadata } = admitted.record as Extract<ConversationRunJournalRecord, { t: "admitted" }>;
@@ -6237,2509 +6432,33 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return next;
   };
 
-  readonly #reduce = async (
-    state: RunProjection,
-    record: LogicalRecord<unknown>,
-    rawEnvelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
-    checks?: Array<() => void>,
-  ): Promise<RunProjection> => {
-    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
-    const legacyTickets = checks && this.#legacyAbortTickets ? {
-      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
-        checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
-      },
-    } : this.#legacyAbortTickets;
+  readonly #reduce = (state: RunProjection, record: LogicalRecord<unknown>, envelope: CommitEnvelope<unknown>, checks?: Array<() => void>) =>
+    reduceConversationRunState({ conversationId: this.#conversationId, artifacts: this.#artifacts, verifier: this.#verifier,
+      legacyAbortTickets: this.#legacyAbortTickets, resources: this.#resources, delivery: this.#delivery, currentAuthority: this.#currentAuthority,
+      assertResourceUsageFinal: (assigned, usage) => this.#assertResourceUsageFinal(assigned, usage),
+      assertResourceTerminalRecords: (assigned, mode, entries) => this.#assertResourceTerminalRecords(assigned, mode, entries),
+    }, state, record, envelope, checks);
 
-    if (record.stream !== runStream(this.#conversationId)) {
-      return state;
-    }
-    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
-    const body = snapshot(
-      record.body as ConversationRunJournalRecord | ConversationRunInternalRecord,
-      "Run journal record",
-    );
-    if ("kind" in body) {
-      assertConversationRunInternalRecord(body);
-      if (body.kind === "conversation-commit-projection") {
-        const committed = state.committedByAssignment.get(body.assignmentId);
-        if (
-          !committed ||
-          committed.runId !== body.runId ||
-          committed.commitRevision !== body.commitRevision ||
-          state.projectedByAssignment.has(body.assignmentId)
-        ) {
-          throw corruptRunJournal("Projection progress does not name one unprojected commit");
-        }
-        const bytes = await this.#artifacts.get(committed.bundle.ref);
-        const bundle = validateConversationSealedBundle(
-          JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
-        );
-        if (bundle.digest !== body.digest) {
-          throw corruptRunJournal("Projection progress digest does not match its bundle");
-        }
-        state.projectedByAssignment.set(body.assignmentId, body);
-        state.pendingCommitProjections.delete(body.assignmentId);
-        return state;
-      }
-      if (body.kind === "conversation-lifecycle-projection") {
-        const pending = state.pendingLifecycleProjections.get(body.domainRevision);
-        if (
-          !pending ||
-          pending.mutation !== body.mutation ||
-          pending.requestId !== body.requestId ||
-          state.projectedLifecycleRevisions.has(body.domainRevision)
-        ) {
-          throw corruptRunJournal(
-            "Lifecycle projection progress does not name one pending lifecycle fact",
-          );
-        }
-        state.projectedLifecycleRevisions.add(body.domainRevision);
-        state.pendingLifecycleProjections.delete(body.domainRevision);
-        return state;
-      }
-      if (body.kind === "session-activity") {
-        throw corruptRunJournal(
-          "Session activity record was written to the run stream",
-        );
-      }
-      if (body.kind !== "content-asset-index") {
-        return state;
-      }
-      const committed = state.commits.at(-1);
-      if (
-        !committed ||
-        state.contentByRevision.has(committed.commitRevision) ||
-        !envelopeContainsCommit(envelope, this.#conversationId, committed)
-      ) {
-        throw corruptRunJournal("Content index has no unique committed run");
-      }
-      const bundleBytes = await this.#artifacts.get(committed.bundle.ref);
-      const bundle = validateConversationSealedBundle(
-        JSON.parse(Buffer.from(bundleBytes).toString("utf8")) as SealedBundle,
-      );
-      if (canonicalize(body.entries) !== canonicalize(bundle.body.contentAssets)) {
-        throw corruptRunJournal("Content index does not match its committed bundle");
-      }
-      state.contentByRevision.set(
-        committed.commitRevision,
-        snapshot(body.entries, "Content asset index"),
-      );
-      return state;
-    }
-    await verifyProtocolStep(() => assertConversationRunRecord(body, this.#verifier));
-    switch (body.t) {
-      case "session-meta": {
-        assertWorksceneIdentity(this.#conversationId, body.sceneId);
-        const current = state.sessionMeta;
-        if (
-          body.domainRevision !== state.domainRevision + 1 ||
-          state.sessionMetaByRequest.has(body.requestId) ||
-          (body.operation === "create" && current !== undefined) ||
-          (body.operation !== "create" &&
-            (!current || current.sceneId !== body.sceneId)) ||
-          (body.operation !== "delete" && state.deleted) ||
-          (current !== undefined &&
-            Date.parse(body.lastActiveAt) < Date.parse(current.lastActiveAt))
-        ) {
-          throw corruptRunJournal(
-            "Session metadata transition is not the unique next owner mutation",
-          );
-        }
-        if (
-          !envelopeContainsSessionActivity(
-            envelope,
-            this.#conversationId,
-            body,
-          )
-        ) {
-          throw corruptRunJournal(
-            "Session metadata transition lacks its atomic activity fact",
-          );
-        }
-        state.domainRevision = body.domainRevision;
-        state.sessionMeta = body;
-        state.sessionMetaByRequest.set(body.requestId, body);
-        if (body.operation === "delete") {
-          state.deleted = true;
-          state.pendingLifecycleProjections.set(body.domainRevision, {
-            mutation: "delete",
-            domainRevision: body.domainRevision,
-            requestId: body.requestId,
-          });
-        }
-        return state;
-      }
-      case "session-control": {
-        const digest = protocolDigest("SessionControlMutation", 1, body.mutation);
-        const existing = state.sessionMutationDigests.get(body.requestId);
-        if (existing !== undefined) {
-          if (existing.digest !== digest || existing.domainRevision !== body.domainRevision) {
-            throw corruptRunJournal(
-              "Session mutation request is already bound to another payload",
-            );
-          }
-          return state;
-        }
-        if (body.domainRevision !== state.domainRevision + 1 || state.deleted) {
-          throw corruptRunJournal("Session mutation revision or terminal state is invalid");
-        }
-        state.domainRevision = body.domainRevision;
-        state.sessionMutationDigests.set(body.requestId, {
-          digest,
-          domainRevision: body.domainRevision,
-        });
-        if (body.mutation.kind === 'task-list-op') state.taskListRequestIds.add(body.requestId);
-        applyProjectedSessionMutation(state, body.mutation);
-        state.lastActiveAt = envelope.at;
-        return state;
-      }
-      case "session-lifecycle": {
-        if (
-          body.domainRevision !== state.domainRevision + 1 ||
-          state.deleted ||
-          state.lifecycleByRequest.has(body.requestId)
-        ) {
-          throw corruptRunJournal("Session lifecycle revision or terminal state is invalid");
-        }
-        state.domainRevision = body.domainRevision;
-        state.lifecycleByRequest.set(body.requestId, body);
-        state.pendingLifecycleProjections.set(body.domainRevision, body);
-        if (body.mutation === "clear") {
-          state.clearedThroughLsn = envelope.lsn;
-          state.taskList = { items: [] };
-          state.segments.length = 0;
-        } else {
-          state.deleted = true;
-        }
-        state.lastActiveAt = envelope.at;
-        return state;
-      }
-      case "run-input-opened": {
-        if (state.assignmentByRun.get(body.runId) !== body.assignmentId || state.closedInputAssignments.has(body.assignmentId) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid input opening");
-        state.openInputAssignments.set(body.runId, body.assignmentId);
-        return state;
-      }
-      case "run-input-closed": {
-        if (state.openInputAssignments.get(body.runId) !== body.assignmentId) throw corruptRunJournal("Invalid input closing");
-        state.openInputAssignments.delete(body.runId);
-        state.closedInputAssignments.add(body.assignmentId);
-        return state;
-      }
-      case "run-input-appended": {
-        if (!state.openInputAssignments.has(body.runId) || state.runByIngress.has(body.ingressKey) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid appended input");
-        const input = validateNonEmptyUserTurnInput(await loadStored(body.input, this.#artifacts));
-        state.appendedInputs.set(body.ingressKey, { record: body, input, lsn: envelope.lsn });
-        state.runByIngress.set(body.ingressKey, body.runId);
-        return state;
-      }
-      case "run-input-consumed": {
-        const key = `${body.assignmentId}/${body.boundary}`;
-        const prior = [...state.inputConsumptions.values()].filter((value) => value.assignmentId === body.assignmentId);
-        if (state.openInputAssignments.get(body.runId) !== body.assignmentId || state.inputConsumptions.has(key) ||
-            prior.some((value) => value.boundary >= body.boundary) ||
-            body.ingressKeys.some((id) => state.appendedInputs.get(id)?.record.runId !== body.runId || prior.some((value) => value.ingressKeys.includes(id)))) throw corruptRunJournal("Invalid input consumption");
-        state.inputConsumptions.set(key, body);
-        return state;
-      }
-      case "admitted": {
-        if (state.deleted) {
-          throw corruptRunJournal("Deleted conversation contains a later admitted run");
-        }
-        assertAdmissionReplayContract({
-          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
-          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
-          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
-          hasAtomicQueuedState: envelopeHasRunState(
-            envelope,
-            this.#conversationId,
-            body.runId,
-            "queued",
-            1,
-            undefined,
-          ),
-        });
-        const input = await loadStored(body.input, this.#artifacts);
-        try {
-          validateNonEmptyUserTurnInput(input);
-        } catch {
-          throw corruptRunJournal("Run journal contains invalid user input");
-        }
-        state.admittedByRun.set(body.runId, { record: body, input, lsn: envelope.lsn });
-        state.runByIngress.set(body.ingressKey, body.runId);
-        return state;
-      }
-      case "assigned": {
-        const admitted = state.admittedByRun.get(body.runId);
-        const current = state.stateByRun.get(body.runId);
-        assertAssignmentReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          runAlreadyAssigned: state.assignmentByRun.has(body.runId),
-          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
-          isEarliestQueuedRun:
-            admitted !== undefined &&
-            state.queuedPositionHeap[0] === admitted.record.queuedPosition,
-          hasAtomicDispatchedState:
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              body.runId,
-              "dispatched",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-        });
-        if (!admitted) {
-          throw corruptRunJournal("Run assignment is not the earliest admitted run");
-        }
-        const bytes = await this.#artifacts.get(body.dispatchRef);
-        const dispatch = await verifyProtocolStep(() => validateConversationEnvelope(
-          JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
-          this.#verifier,
-        ));
-        await resolveDispatchArtifactClosure(dispatch, this.#artifacts);
-        assertAssignedMatchesDispatch(
-          body,
-          dispatch,
-          admitted.record.ingress,
-          this.#conversationId,
-        );
-        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
-          if (!this.#resources) {
-            throw corruptRunJournal("Anchor assignment has no resource coordinator");
-          }
-          await verify(() => { this.#resources!.assertActivationRecords({
-            lease: dispatch.resourceLease,
-            records: envelope.entries,
-            acceptedAt: envelope.at,
-          }); });
-        }
-        state.assignedById.set(body.assignmentId, {
-          record: body,
-          envelope: dispatch,
-          commit: {
-            lsn: envelope.lsn,
-            envelopeDigest: envelope.envelopeDigest,
-            at: envelope.at,
-          },
-          acked: false,
-        });
-        state.assignmentByRun.set(body.runId, body.assignmentId);
-        state.recoveryAssignments.add(body.assignmentId);
-        state.mirrorStateByAssignment.set(body.assignmentId, {
-          ordinal: 0,
-          mirrorDigest: interactionMirrorSeed(body.assignmentId),
-          mirroredUpTo: 0,
-          requestIds: new Set(),
-        });
-        return state;
-      }
-      case "dispatch-acked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertDispatchAcknowledgementReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.superseded.has(body.assignmentId),
-          assignmentClosed: state.closedAssignments.has(body.assignmentId),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
-        }
-        assigned.acked = true;
-        return state;
-      }
-      case "supersede-requested": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertSupersedeRequestReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-        });
-        state.supersedeRequests.set(body.assignmentId, body);
-        return state;
-      }
-      case "supersede-started-observed": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertSupersedeStartedObservationReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          observationAlreadyExists: state.supersedeStartedObservations.has(
-            body.assignmentId,
-          ),
-        });
-        state.supersedeStartedObservations.set(body.assignmentId, body);
-        return state;
-      }
-      case "dispatch-conflict": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const key = dispatchConflictKey(proof);
-        assertDispatchConflictReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          proofBindsAssignment:
-            assigned !== undefined &&
-            proof.assignmentId === body.assignmentId &&
-            proof.executorId === assigned.record.executorId,
-          handling: body.handling,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.superseded.has(body.assignmentId),
-          assignmentClosed: state.closedAssignments.has(body.assignmentId),
-          conflictAlreadySeen: state.conflictByAssignment.has(body.assignmentId),
-        });
-        if (!assigned || !current || state.conflicts.has(key)) {
-          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
-        }
-        const expectedActivation = buildConversationActivationPayload({
-          envelope: assigned.envelope,
-          dispatchRef: assigned.record.dispatchRef,
-          commit: {
-            lsn: assigned.commit.lsn,
-            envelopeDigest: assigned.commit.envelopeDigest,
-          },
-          issuedAt: assigned.commit.at,
-        });
-        const expectedActivationDigest = assignmentActivationDigest(expectedActivation);
-        const acceptedMatches =
-          canonicalize(proof.acceptedDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          proof.acceptedActivationDigest === expectedActivationDigest;
-        const conflictingMatches =
-          canonicalize(proof.conflictingDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          proof.conflictingActivationDigest === expectedActivationDigest;
-        const atomicHandling =
-          body.handling === "acked-original"
-            ? envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "dispatch-acked" &&
-                  candidate.assignmentId === body.assignmentId,
-              )
-            : envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "resolution" &&
-                  candidate.runId === assigned.record.runId &&
-                  candidate.fact.subject.execution === "conversation" &&
-                  candidate.fact.subject.assignmentId === body.assignmentId &&
-                  candidate.fact.cause === "dispatch-conflict" &&
-                  candidate.fact.resolution === undefined,
-              ) &&
-              envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "cancel-fence" &&
-                  candidate.assignmentId === body.assignmentId,
-              ) &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                assigned.record.runId,
-                "uncertain",
-                current.statusRevision + 1,
-                body.assignmentId,
-              ) &&
-              envelopeRevokesRemainingCapabilities(
-                envelope,
-                this.#conversationId,
-                state,
-                assigned,
-              );
-        assertDispatchConflictHandlingReplayContract({
-          handling: body.handling,
-          acceptedMatches,
-          conflictingMatches,
-          atomicHandling,
-        });
-        state.conflicts.set(key, body);
-        state.conflictByAssignment.set(body.assignmentId, body);
-        return state;
-      }
-      case "dispatch-conflict-contained": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const open = assigned
-          ? state.resolutionsByRun.get(assigned.record.runId)
-          : undefined;
-        const conflict = state.conflictByAssignment.get(body.assignmentId);
-        const cancelProof = "cause" in proof ? proof : undefined;
-        const supersedeProof =
-          "decision" in proof && proof.decision === "not-started-fenced"
-            ? proof
-            : undefined;
-        const terminatesForRedispatch =
-          cancelProof?.decision === "not-started" || supersedeProof !== undefined;
-        if (
-          !assigned ||
-          current?.state !== "uncertain" ||
-          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
-          !open ||
-          open.resolution !== undefined ||
-          open.cause !== "dispatch-conflict" ||
-          open.openFactDigest !== body.openFactDigest ||
-          state.containedFacts.has(body.openFactDigest) ||
-          !conflict ||
-          (!cancelProof && !supersedeProof) ||
-          !proofBindsConversationSource(
-            state,
-            assigned,
-            proof,
-            this.#conversationId,
-            legacyTickets,
-          ) ||
-          (terminatesForRedispatch &&
-            (!envelopeHasResolution(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              open.openFactDigest,
-              true,
-            ) ||
-              !envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                assigned.record.runId,
-                "queued",
-                current.statusRevision + 1,
-                body.assignmentId,
-              ) ||
-              !envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "assignment-superseded" &&
-                  candidate.assignmentId === body.assignmentId &&
-                  sameTerminationProof(
-                    candidate.proof,
-                    proof as AssignmentTerminationProof,
-                  ),
-              ))) ||
-          proof.lastRecordSeq <= conflict.proof.receivedRecordSeq
-        ) {
-          throw corruptRunJournal("Dispatch conflict containment is invalid or duplicated");
-        }
-        state.containedFacts.add(body.openFactDigest);
-        state.containmentByAssignment.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "cancel-contained": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const open = assigned
-          ? state.resolutionsByRun.get(assigned.record.runId)
-          : undefined;
-        if (
-          !assigned ||
-          current?.state !== "uncertain" ||
-          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
-          !open ||
-          open.resolution !== undefined ||
-          open.cause === "dispatch-conflict" ||
-          open.openFactDigest !== body.openFactDigest ||
-          state.containedFacts.has(body.openFactDigest) ||
-          proof.decision !== "halted" ||
-          !proofBindsConversationSource(
-            state,
-            assigned,
-            proof,
-            this.#conversationId,
-            legacyTickets,
-          )
-        ) {
-          throw corruptRunJournal("Cancellation containment is invalid or duplicated");
-        }
-        state.containedFacts.add(body.openFactDigest);
-        state.containmentByAssignment.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "cancel-proof-accepted": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertCancelProofAcceptedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
-          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
-          proofDecision: proof.decision,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          hasAtomicCancelledState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              "cancelled",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesRemainingCapabilities(
-              envelope,
-              this.#conversationId,
-              state,
-              assigned,
-            ),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Accepted cancellation has no durable assignment");
-        }
-        await verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          proof.decision === "not-started" ? "release" : "settle-release",
-          envelope.entries,
-        ); });
-        state.acceptedCancellations.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        return state;
-      }
-      case "not-started-rejected": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const kind = assignmentTerminationProofKind(proof);
-        const open = assigned
-          ? state.resolutionsByRun.get(assigned.record.runId)
-          : undefined;
-        const contradictory =
-          hasDurableStartedObservation(state, body.assignmentId) ||
-          (kind === "dispatch-rejection" && open?.cause === "dispatch-conflict");
-        const proofBindsSource =
-          assigned !== undefined &&
-          proofBindsConversationSource(
-            state,
-            assigned,
-            proof,
-            this.#conversationId,
-            legacyTickets,
-          );
-        const rejectionKey = rejectedNotStartedKey(body.assignmentId, kind);
-        if (
-          !assigned ||
-          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
-          !proofBindsSource ||
-          !contradictory ||
-          (current?.state !== "uncertain" &&
-            (!current ||
-              !envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "resolution" &&
-                  candidate.runId === assigned.record.runId &&
-                  candidate.fact.subject.execution === "conversation" &&
-                  candidate.fact.subject.assignmentId === body.assignmentId &&
-                  candidate.fact.cause ===
-                    (kind === "cancel" ? "cancel-unproven" : "ledger-unknown") &&
-                  candidate.fact.resolution === undefined,
-              ) ||
-              !envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                assigned.record.runId,
-                "uncertain",
-                current.statusRevision + 1,
-                body.assignmentId,
-              ) ||
-              !envelopeRevokesRemainingCapabilities(
-                envelope,
-                this.#conversationId,
-                state,
-                assigned,
-              ))) ||
-          state.rejectedNotStarted.has(rejectionKey)
-        ) {
-          throw corruptRunJournal(
-            "Rejected not-started proof is invalid or duplicated",
-          );
-        }
-        state.rejectedNotStarted.set(rejectionKey, body);
-        return state;
-      }
-      case "assignment-superseded": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const proof = body.proof;
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const kind = assignmentTerminationProofKind(proof);
-        const open = assigned
-          ? state.resolutionsByRun.get(assigned.record.runId)
-          : undefined;
-        assertAssignmentSupersededReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          assignmentAlreadyClosed: state.superseded.has(body.assignmentId),
-          currentState: current?.state,
-          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          proofKind: kind,
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              current.state === "cancel-requested" ? "cancelled" : "queued",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesRemainingCapabilities(
-              envelope,
-              this.#conversationId,
-              state,
-              assigned,
-            ),
-          hasAtomicResolutionClose:
-            assigned !== undefined &&
-            open !== undefined &&
-            envelopeHasResolution(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              open.openFactDigest,
-              true,
-            ),
-          conflictOpen:
-            open !== undefined &&
-            open.cause === "dispatch-conflict" &&
-            open.resolution === undefined,
-          hasAtomicConflictContainment:
-            open !== undefined &&
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "dispatch-conflict-contained" &&
-                candidate.assignmentId === body.assignmentId &&
-                candidate.openFactDigest === open.openFactDigest &&
-                sameTerminationProof(candidate.proof, proof),
-            ),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
-        }
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          "release",
-          envelope.entries,
-        ); });
-        state.superseded.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
-          state.assignmentByRun.delete(assigned.record.runId);
-        }
-        state.closedAssignments.add(body.assignmentId);
-        return state;
-      }
-      case "cancel-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const opensConflict = envelopeHasRunRecord(
-          envelope,
-          this.#conversationId,
-          (candidate) =>
-            candidate.t === "dispatch-conflict" &&
-            candidate.assignmentId === body.assignmentId &&
-            candidate.handling === "opened-uncertain",
-        );
-        const targetState = opensConflict ? "uncertain" : "cancel-requested";
-        assertCancelFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              targetState,
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-        });
-        if (!assigned || !current) {
-          throw corruptRunJournal("Cancel fence is invalid or duplicated");
-        }
-        state.cancelOrigins.set(
-          body.assignmentId,
-          current.state as "dispatched" | "running",
-        );
-        state.cancelFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "capability-revoked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const key = `${body.assignmentId}\0${body.capId}`;
-        assertCapabilityRevocationReplayContract({
-          assignmentExists: assigned !== undefined,
-          capabilityBelongsToAssignment: assigned?.record.capIds.includes(body.capId) ?? false,
-          alreadyRevoked: state.revokedCapabilities.has(key),
-        });
-        state.revokedCapabilities.add(key);
-        return state;
-      }
-      case "ticket-issued": {
-        const assigned = state.assignedById.get(body.ticket.assignmentId);
-        const admitted = assigned
-          ? state.admittedByRun.get(assigned.record.runId)
-          : undefined;
-        await applyConversationTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          conversationId: this.#conversationId,
-          assigned: assigned?.record,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) ===
-              assigned.record.assignmentId,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentClosed: state.closedAssignments.has(
-            body.ticket.assignmentId,
-          ),
-          assignmentActive:
-            assigned !== undefined &&
-            (state.stateByRun.get(assigned.record.runId)?.state ===
-              "dispatched" ||
-              state.stateByRun.get(assigned.record.runId)?.state ===
-                "running") &&
-            !state.cancelFences.has(body.ticket.assignmentId),
-          originalSurfacePrincipal: admitted?.record.ingress.surfacePrincipal,
-          hasAtomicReplacementRevocation:
-            body.replacesTicketId === undefined ||
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "ticket-revoked" &&
-                candidate.ticketId === body.replacesTicketId,
-            ),
-        });
-        return state;
-      }
-      case "ticket-revoked":
-        await applyConversationTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          conversationId: this.#conversationId,
-          assignmentIsCurrent: false,
-          assignmentAcknowledged: false,
-          assignmentClosed: false,
-          assignmentActive: false,
-        });
-        return state;
-      case "ticket-sync-frontier":
-        applyConversationTicketSyncFrontier(
-          state,
-          body.expiresThrough,
-          envelope.at,
-        );
-        return state;
-      case "interaction-mirror": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const batch = body.batch;
-        const batchDigest = interactionMirrorBatchDigest(batch);
-        if (
-          !assigned ||
-          batch.assignmentId !== body.assignmentId ||
-          batch.executorId !== assigned.record.executorId ||
-          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
-          state.closedAssignments.has(body.assignmentId) ||
-          state.mirrorBatches.has(batchDigest)
-        ) {
-          throw corruptRunJournal("Interaction mirror has no assignment");
-        }
-        const mirrorState = state.mirrorStateByAssignment.get(body.assignmentId);
-        if (!mirrorState || batch.entries.length === 0) {
-          throw corruptRunJournal("Interaction mirror has no durable entries");
-        }
-        const current = state.stateByRun.get(assigned.record.runId)?.state;
-        if (
-          current !== "dispatched" &&
-          current !== "running" &&
-          !(
-            (current === "cancel-requested" || current === "uncertain") &&
-            state.cancelFences.has(body.assignmentId)
-          )
-        ) {
-          throw corruptRunJournal("Interaction mirror is outside its authorized state");
-        }
-        if (
-          batch.previousDigest !== mirrorState.mirrorDigest ||
-          batch.entries[0]!.ordinal !== mirrorState.ordinal + 1
-        ) {
-          throw corruptRunJournal("Interaction mirror does not continue its audit prefix");
-        }
-        let lastSeq = mirrorState.mirroredUpTo;
-        let lastOrdinal = mirrorState.ordinal;
-        const batchRequestIds = new Set<string>();
-        for (const rawEntry of batch.entries) {
-          const entry = validateConversationInteractionMirrorEntry(rawEntry);
-          if (
-            entry.ordinal !== lastOrdinal + 1 ||
-            entry.seq <= lastSeq ||
-            mirrorState.requestIds.has(entry.requestId) ||
-            batchRequestIds.has(entry.requestId)
-          ) {
-            throw corruptRunJournal(
-              "Interaction mirror sequence or request identity is invalid",
-            );
-          }
-          lastSeq = entry.seq;
-          lastOrdinal = entry.ordinal;
-          batchRequestIds.add(entry.requestId);
-        }
-        mirrorState.ordinal = lastOrdinal;
-        mirrorState.mirrorDigest = batch.mirrorDigest;
-        mirrorState.mirroredUpTo = lastSeq;
-        for (const requestId of batchRequestIds) mirrorState.requestIds.add(requestId);
-        state.mirrorBatches.set(batchDigest, body);
-        return state;
-      }
-      case "channel-challenge-prepared": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const admitted = assigned
-          ? state.admittedByRun.get(assigned.record.runId)
-          : undefined;
-        if (
-          !assigned ||
-          !admitted ||
-          admitted.record.ingress.kind !== "channel" ||
-          body.ref.conversationId !== this.#conversationId ||
-          body.ref.runId !== assigned.record.runId ||
-          body.ref.ownerEpoch !== assigned.record.ownerEpoch ||
-          canonicalize(body.responder) !==
-            canonicalize(admitted.record.ingress.responder) ||
-          canonicalize(body.token.route) !==
-            canonicalize(admitted.record.ingress.replyTarget)
-        ) {
-          throw corruptRunJournal(
-            "Conversation channel challenge does not bind its assignment ingress",
-          );
-        }
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptRunJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      }
-      case "channel-challenge-delivered":
-      case "channel-challenge-closed":
-        try {
-          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
-            state.channelInteractions,
-            body,
-            this.#verifier,
-          ));
-        } catch (error) {
-    rethrowUnloadedProtocolIdentity(error);
-          throw corruptRunJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        return state;
-      case "state": {
-        const admitted = state.admittedByRun.get(body.runId);
-        if (!admitted) {
-          throw corruptRunJournal("Run state has no admitted run");
-        }
-        try {
-          this.#delivery?.assertConversationStatuses(
-            // Preparation and replay both compare the complete transaction's
-            // status obligations, including batches with non-notifying states.
-            conversationStatusDeliveryInputs(
-              this.#conversationId, state, envelope.entries, envelope.at,
-            ),
-            envelope,
-          );
-        } catch (error) {
-          throw corruptRunJournal(
-            error instanceof Error
-              ? `Conversation status delivery is invalid: ${error.message}`
-              : "Conversation status delivery is invalid",
-          );
-        }
-        const current = state.stateByRun.get(body.runId);
-        const mappedAssignmentId = state.assignmentByRun.get(body.runId);
-        const closedEarlierInEnvelope =
-          body.assignmentId !== undefined &&
-          mappedAssignmentId === undefined &&
-          state.closedAssignments.has(body.assignmentId) &&
-          envelopeClosesAssignment(
-            envelope,
-            this.#conversationId,
-            body.runId,
-            body.assignmentId,
-          );
-        assertStateReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          nextState: body.state,
-          nextRevision: body.statusRevision,
-          assignmentId: body.assignmentId,
-          assignmentBindingValid:
-            mappedAssignmentId === body.assignmentId || closedEarlierInEnvelope,
-          unassignedBindingValid: mappedAssignmentId === undefined,
-          hasAtomicAssignment:
-            current?.state !== "queued" ||
-            body.state !== "dispatched" ||
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "assigned" &&
-                candidate.runId === body.runId &&
-                candidate.assignmentId === body.assignmentId,
-            ),
-        });
-        if (
-          current?.state === "queued" &&
-          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
-        ) {
-          try {
-            assertQueuedTerminalDequeue(
-              envelope.entries,
-              {
-                kind: "run",
-                id: body.runId,
-                attempt: nextConversationAssignmentAttempt(state, body.runId),
-              },
-              body.state,
-            );
-          } catch (error) {
-            throw corruptRunJournal(
-              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
-            );
-          }
-        }
-        const committed = state.commits.at(-1);
-        assertStateAtomicReplayContract({
-          currentState: current?.state,
-          nextState: body.state,
-          hasAtomicCancelFence: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "cancel-fence" &&
-              candidate.assignmentId === body.assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId ===
-                body.runId,
-          ),
-          hasAtomicOpenResolution: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "resolution" &&
-              candidate.runId === body.runId &&
-              candidate.fact.subject.assignmentId === body.assignmentId &&
-              candidate.fact.resolution === undefined,
-          ),
-          hasAtomicSupersede: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "assignment-superseded" &&
-              candidate.assignmentId === body.assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId ===
-                body.runId,
-          ),
-          hasAtomicTermination: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              (candidate.t === "cancel-proof-accepted" ||
-                candidate.t === "assignment-superseded") &&
-              candidate.assignmentId === body.assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId ===
-                body.runId,
-          ),
-          hasAtomicResolutionClose: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "resolution" &&
-              candidate.runId === body.runId &&
-              candidate.fact.subject.assignmentId === body.assignmentId &&
-              candidate.fact.resolution !== undefined,
-          ),
-          hasAtomicCommit:
-            committed !== undefined &&
-            committed.runId === body.runId &&
-            committed.assignmentId === body.assignmentId &&
-            envelopeContainsCommit(envelope, this.#conversationId, committed),
-        });
-        if (
-          body.state === "failed" &&
-          body.assignmentId !== undefined &&
-          !envelopeRevokesRemainingCapabilities(
-            envelope,
-            this.#conversationId,
-            state,
-            state.assignedById.get(body.assignmentId)!,
-          )
-        ) {
-          throw corruptRunJournal("Assigned failure is not atomic with capability revocation");
-        }
-        if (body.state === "failed" && body.assignmentId !== undefined) {
-          const assigned = state.assignedById.get(body.assignmentId);
-          if (!assigned) throw corruptRunJournal("Assigned failure has no assignment");
-          if (body.usageFinal) {
-            const usageFinal = body.usageFinal;
-            await verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
-          }
-          await verify(() => { this.#assertResourceTerminalRecords(
-            assigned.record,
-            body.usageFinal ? "settle-release" : "reclaim",
-            envelope.entries,
-          ); });
-        }
-        if (body.state === "uncertain" && current?.state !== "uncertain") {
-          const assignmentId = state.assignmentByRun.get(body.runId);
-          if (
-            !assignmentId ||
-            (current?.state !== "dispatched" &&
-              current?.state !== "running" &&
-              current?.state !== "cancel-requested")
-          ) {
-            throw corruptRunJournal("Uncertain state has no durable active origin");
-          }
-          state.uncertainOrigins.set(assignmentId, current.state);
-        }
-        const nextActiveRunId = nextActiveRunIdForReplay({
-          activeRunId: state.activeRunId,
-          runId: body.runId,
-          currentState: current?.state,
-          nextState: body.state,
-        });
-        if (current?.state === "queued") {
-          removeQueuedRun(state, admitted.record.queuedPosition, body.runId);
-        }
-        if (body.state === "queued") {
-          addQueuedRun(state, admitted.record.queuedPosition, body.runId);
-        }
-        state.activeRunId = nextActiveRunId;
-        state.stateByRun.set(body.runId, {
-          state: body.state,
-          statusRevision: body.statusRevision,
-        });
-        if (body.state === "failed" && body.assignmentId !== undefined) {
-          state.assignmentByRun.delete(body.runId);
-          state.closedAssignments.add(body.assignmentId);
-        }
-        if (
-          body.assignmentId !== undefined &&
-          (body.state === "queued" ||
-            body.state === "cancelled" ||
-            body.state === "failed" ||
-            body.state === "expired")
-        ) {
-          state.recoveryAssignments.delete(body.assignmentId);
-        }
-        const history = state.statusHistoryByRun.get(body.runId) ?? [];
-        if (history.length + 1 !== body.statusRevision) {
-          throw corruptRunJournal("Run status history index is not contiguous");
-        }
-        history.push(projectStatusEntry(body, envelope.at, current?.state,
-          conversationResolutionFactsInEnvelope(envelope, this.#conversationId, body.runId)));
-        state.statusHistoryByRun.set(body.runId, history);
-        return state;
-      }
-      case "resolution": {
-        const fact = snapshot(body.fact, "Uncertain resolution fact");
-        const conversationFact = fact as ConversationUncertainResolutionFact;
-        const assigned = state.assignedById.get(conversationFact.subject.assignmentId);
-        // Subject identity self-consistency (openFactDigest over subject/openedAt/cause)
-        // is enforced by the shared record validator; this predicate binds the subject
-        // to the durable authority (conversation, run, owner epoch).
-        assertConversationResolutionBinding({
-          execution: fact.subject.execution,
-          conversationId:
-            fact.subject.execution === "conversation"
-              ? fact.subject.conversationId
-              : undefined,
-          subjectRunId:
-            fact.subject.execution === "conversation" ? fact.subject.runId : undefined,
-          recordRunId: body.runId,
-          authorityConversationId: this.#conversationId,
-          subjectOwnerEpoch:
-            fact.subject.execution === "conversation"
-              ? fact.subject.ownerEpoch
-              : undefined,
-          authorityOwnerEpoch: assigned?.record.ownerEpoch,
-        });
-        const currentAssignmentId = state.assignmentByRun.get(body.runId);
-        const closesEarlierInEnvelope =
-          currentAssignmentId === undefined &&
-          state.closedAssignments.has(conversationFact.subject.assignmentId) &&
-          envelopeClosesAssignment(
-            envelope,
-            this.#conversationId,
-            body.runId,
-            conversationFact.subject.assignmentId,
-          );
-        if (!assigned) {
-          throw corruptRunJournal("Uncertain resolution fact has no durable assignment");
-        }
-        const existing = state.resolutionsByRun.get(body.runId);
-        const current = state.stateByRun.get(body.runId);
-        if (!conversationFact.resolution) {
-          assertResolutionOpenReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned.record.runId === body.runId,
-            assignmentIsCurrent:
-              currentAssignmentId === conversationFact.subject.assignmentId,
-            currentState: current?.state,
-            alreadyOpen: isOpenResolutionFact(existing),
-            cause: conversationFact.cause,
-            hasAtomicUncertainState:
-              current !== undefined &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                body.runId,
-                "uncertain",
-                current.statusRevision + 1,
-                conversationFact.subject.assignmentId,
-              ),
-            hasAtomicDispatchConflict: envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "dispatch-conflict" &&
-                candidate.assignmentId === conversationFact.subject.assignmentId &&
-                candidate.handling === "opened-uncertain",
-            ),
-          });
-        } else {
-          assertResolutionClosureReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned.record.runId === body.runId,
-            assignmentIsCurrentOrAtomicallyClosed:
-              currentAssignmentId === conversationFact.subject.assignmentId ||
-              closesEarlierInEnvelope,
-            conflictOpen: conversationFact.cause === "dispatch-conflict",
-            resolutionKind: conversationFact.resolution.kind,
-          });
-          const nextState = resolutionTargetState(conversationFact.resolution.kind);
-          assertResolutionCloseAtomicReplayContract({
-            cause: conversationFact.cause,
-            kind: conversationFact.resolution.kind,
-            existingOpenMatches:
-              existing?.openFactDigest === conversationFact.openFactDigest &&
-              existing.resolution === undefined,
-            hasAtomicTargetState:
-              current !== undefined &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                body.runId,
-                nextState,
-                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
-                conversationFact.subject.assignmentId,
-              ),
-            allCapabilitiesRevoked: envelopeRevokesRemainingCapabilities(
-              envelope,
-              this.#conversationId,
-              state,
-              assigned,
-            ),
-            hasRequiredCompanion:
-              (conversationFact.resolution.kind !==
-                "proven-not-started-redispatched" ||
-                envelopeHasRunRecord(
-                  envelope,
-                  this.#conversationId,
-                  (candidate) =>
-                    candidate.t === "assignment-superseded" &&
-                    candidate.assignmentId === conversationFact.subject.assignmentId,
-                )) &&
-              (!conversationFact.resolution.kind.startsWith("user-") ||
-                envelopeHasSuccessfulUncertainControl(
-                  envelope,
-                  nextState,
-                  conversationFact.resolution.factDigest,
-                )),
-          });
-          if (conversationFact.resolution.kind.startsWith("user-")) {
-            await verify(() => { this.#assertResourceTerminalRecords(
-              assigned.record,
-              "reclaim",
-              envelope.entries,
-            ); });
-          }
-        }
-        state.resolutionsByRun.set(body.runId, conversationFact);
-        if (conversationFact.resolution) {
-          state.closedAssignments.add(conversationFact.subject.assignmentId);
-          if (state.assignmentByRun.get(body.runId) === conversationFact.subject.assignmentId) {
-            state.assignmentByRun.delete(body.runId);
-          }
-        }
-        return state;
-      }
-      case "advancement-event": {
-        const rawEvent = await loadStored(body.event, this.#artifacts);
-        const event = await verifyProtocolStep(() => {
-          if (!isAdvancementControlEvent(rawEvent, this.#verifier)) throw corruptRunJournal("Run journal contains an invalid advancement event");
-          return rawEvent;
-        });
-        try {
-          assertAdvancementEventBatchLegal(state.advancementSessions, [event]);
-        } catch (error) {
-          throw corruptRunJournal(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-        const existingWrite = state.advancementWrites.get(body.requestId);
-        if (existingWrite) {
-          if (
-            existingWrite.domainRevision !== body.domainRevision ||
-            existingWrite.eventsDigest !== body.eventsDigest
-          ) {
-            throw corruptRunJournal(
-              "Advancement write identity has conflicting durable payloads",
-            );
-          }
-        } else {
-          if (body.domainRevision <= state.domainRevision) {
-            throw corruptRunJournal(
-              "Advancement event domain revision is not monotonic",
-            );
-          }
-          state.advancementWrites.set(body.requestId, {
-            domainRevision: body.domainRevision,
-            eventsDigest: body.eventsDigest,
-          });
-          state.domainRevision = body.domainRevision;
-        }
-        if (event.type === "submission_settled") {
-          if (event.conversationId !== this.#conversationId || body.requestId !== advancementSubmissionRequestId(this.#conversationId, event.receipt.identity.surfacePrincipal, event.receipt.identity.submissionId)) throw corruptRunJournal("Advancement submission identity mismatch");
-          const write = state.advancementWrites.get(body.requestId)!;
-          if (write.receipt && canonicalize(write.receipt) !== canonicalize(event.receipt)) throw corruptRunJournal("Conflicting advancement receipt");
-          state.advancementWrites.set(body.requestId, { ...write, receipt: structuredClone(event.receipt) });
-        }
-        applyAdvancementEvent(state.advancementSessions, event);
-        return state;
-      }
-      case "committed": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const openResolution = state.resolutionsByRun.get(body.runId);
-        assertCommittedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentBindsRun: assigned?.record.runId === body.runId,
-          assignmentIsCurrent: state.assignmentByRun.get(body.runId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyCommitted: state.committedByAssignment.has(body.assignmentId),
-          conflictOpen:
-            openResolution?.cause === "dispatch-conflict" && !openResolution.resolution,
-          commitRevisionMatchesAssignedBase:
-            assigned !== undefined &&
-            body.commitRevision === assigned.record.baseRevision + 1,
-          hasAtomicCommittedState:
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              body.runId,
-              "committed",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesRemainingCapabilities(
-              envelope,
-              this.#conversationId,
-              state,
-              assigned,
-            ),
-        });
-        if (!assigned || !current) {
-          throw corruptRunJournal(
-            "Committed run does not match a complete unique assignment closure",
-          );
-        }
-        const previous = state.commits.at(-1);
-        if (
-          previous &&
-          body.commitRevision !== previous.commitRevision + 1
-        ) {
-          throw corruptRunJournal("Committed run revision is not contiguous");
-        }
-        const bytes = await this.#artifacts.get(body.bundle.ref);
-        const bundle = validateConversationSealedBundle(
-          JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
-        );
-        assertHistoricalBundleFence({
-          assignedExecutorId: assigned.record.executorId,
-          assignedOwnerEpoch: assigned.record.ownerEpoch,
-          assignedBaseRevision: assigned.record.baseRevision,
-          bundleExecutorId: bundle.executorId,
-          bundleOwnerEpoch: bundle.body.ownerEpoch,
-          bundleBaseRevision: bundle.body.baseRevision,
-          conflictOpen:
-            openResolution?.cause === "dispatch-conflict" &&
-            openResolution.resolution === undefined,
-        });
-        if (
-          canonicalize(sealedBundleArtifact(bundle).ref) !== canonicalize(body.bundle.ref) ||
-          bundle.assignmentId !== body.assignmentId ||
-          bundle.body.runId !== body.runId ||
-          bundle.body.conversationId !== this.#conversationId ||
-          bundle.body.baseRevision + 1 !== body.commitRevision
-        ) {
-          throw corruptRunJournal("Committed bundle does not bind its run journal fact");
-        }
-        await verify(() => { this.#assertResourceUsageFinal(assigned.record, bundle.usageFinal); });
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          "settle-release",
-          envelope.entries,
-        ); });
-        const admitted = state.admittedByRun.get(body.runId);
-        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
-        let closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
-        try {
-          if (state.openInputAssignments.get(body.runId) === body.assignmentId) throw Error('Run input must close before commit');
-          closure = admitted.record.ingress.kind !== 'channel' && !admitted.record.ingress.turnOrigin?.worksceneContinuation
-            ? await validateConversationBundleClosure(bundle, this.#artifacts, expectedRunInputMessages(state, body.runId, body.assignmentId))
-            : await validateConversationBundleClosure(bundle, this.#artifacts);
-          validateWorksceneContinuationCommit('metadata' in closure ? closure.metadata : closure.runRecord, assigned.envelope.work);
-          if (!('metadata' in closure)) assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
-        } catch (error) {
-          if (isOperationalArtifactFailure(error)) throw error;
-          throw corruptRunJournal(
-            error instanceof Error
-              ? `Committed bundle closure is invalid: ${error.message}`
-              : "Committed bundle closure is invalid",
-          );
-        }
-        if (
-          !envelopeHasConversationCommitSidecars(
-            envelope,
-            this.#conversationId,
-            body,
-            bundle,
-            closure.batch,
-          )
-        ) {
-          throw corruptRunJournal(
-            "Committed run is missing its content, publish, or final sidecars",
-          );
-        }
-        const committedMetadata = 'metadata' in closure ? closure.metadata : closure.runRecord;
-        try {
-          this.#delivery?.assertConversationCommit(
-            {
-              at: envelope.at,
-              conversationId: this.#conversationId,
-              runId: body.runId,
-              assignmentId: body.assignmentId,
-              commitRevision: body.commitRevision,
-              conversationLifecycleSource: {
-                owner: "conversation",
-                id: `${this.#conversationId}:${body.runId}`,
-                revision: String(body.commitRevision),
-              },
-              assignmentLifecycleSource: {
-                owner: "assignment",
-                id: `${assigned.record.executorId === this.#currentAuthority?.executorId ? "local" : "relay"}:${body.assignmentId}`,
-                revision: assigned.record.dispatchDigest,
-              },
-              ingress: admitted.record.ingress,
-              runRecord: committedMetadata,
-              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
-            },
-            envelope,
-          );
-        } catch (error) {
-          throw corruptRunJournal(
-            error instanceof Error
-              ? `Committed delivery companions are invalid: ${error.message}`
-              : "Committed delivery companions are invalid",
-          );
-        }
-        const expectedSummary = conversationCommitSummary(committedMetadata);
-        const { controlRecovery: _recovery, ...legacySummary } = expectedSummary;
-        if (body.readSummary && canonicalize(body.readSummary) !== canonicalize(body.readSummary.controlRecovery === undefined ? legacySummary : expectedSummary)) {
-          throw corruptRunJournal('Committed read summary does not match its authoritative record');
-        }
-        state.committedByAssignment.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        state.bundleAcknowledgementOutbox.add(body.assignmentId);
-        state.commits.push(body);
-        state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
-        state.pendingCommitProjections.set(body.assignmentId, body);
-        if (!('metadata' in closure) && (closure.runRecord.postTurnControl || state.admittedByRun.get(closure.runRecord.runId)?.record.ingress.turnOrigin?.worksceneContinuation)) {
-          const advancement = [...state.advancementSessions.values()].find((session) => session.status === "active");
-          state.worksceneControls.set(closure.runRecord.runId, {
-            record: snapshot(closure.runRecord, "Committed workscene control"),
-            ...(advancement ? { advancementSessionId: advancement.id } : {}),
-          });
-        }
-        applyCommittedSessionMutations(state, closure.batch?.records ?? []);
-        state.lastActiveAt = envelope.at;
-        return state;
-      }
-      case "bundle-ack-observed": {
-        const committed = state.committedByAssignment.get(body.assignmentId);
-        if (
-          !committed ||
-          state.bundleAcknowledgements.has(body.assignmentId) ||
-          !bundleAcknowledgementBindsCommitted({
-            observedBundleRef: body.bundleRef,
-            observedCommitRevision: body.commitRevision,
-            expectedBundleRef: committed.bundle.ref,
-            expectedCommitRevision: committed.commitRevision,
-          })
-        ) {
-          throw corruptRunJournal(
-            "Bundle acknowledgement observation does not bind one committed conversation bundle",
-          );
-        }
-        state.bundleAcknowledgements.set(body.assignmentId, body);
-        state.recoveryAssignments.delete(body.assignmentId);
-        state.bundleAcknowledgementOutbox.delete(body.assignmentId);
-        return state;
-      }
-    }
-  };
 
-  readonly #reduceSubmissionGuard = async (
-    state: SubmissionGuardProjection,
+  readonly #reduceSubmissionGuard = async (state: SubmissionGuardProjection,
     record: LogicalRecord<ConversationCommitLogRecord>,
     envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
-    checks?: Array<() => void>,
-  ): Promise<SubmissionGuardProjection> => {
-    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
-    const legacyTickets = checks && this.#legacyAbortTickets ? {
-      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
-        checks.push(() => { try { this.#legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
-      },
-    } : this.#legacyAbortTickets;
-
-    if (record.stream !== runStream(this.#conversationId)) {
-      throw corruptRunJournal("Submission guard projection received a different stream");
-    }
-    const uncheckedBody = record.body as unknown;
-    assertPlainRecord(uncheckedBody, "Submission guard record");
-    if ("kind" in uncheckedBody) {
-      assertConversationRunInternalRecord(uncheckedBody);
-      return state;
-    }
-    const body = await verifyProtocolStep(() => { assertConversationRunRecord(uncheckedBody, this.#verifier); return uncheckedBody; });
-    switch (body.t) {
-      case "session-lifecycle":
-        return state;
-      case "admitted": {
-        assertAdmissionReplayContract({
-          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
-          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
-          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
-          hasAtomicQueuedState: envelopeHasRunState(
-            envelope,
-            this.#conversationId,
-            body.runId,
-            "queued",
-            1,
-            undefined,
-          ),
-        });
-        state.admittedByRun.set(body.runId, {
-          ingressKey: body.ingressKey,
-          queuedPosition: body.queuedPosition,
-          ingress: body.ingress,
-        });
-        state.runByIngress.set(body.ingressKey, body.runId);
-        return state;
-      }
-      case "assigned": {
-        const capIds = new Set(body.capIds);
-        const runId = body.runId;
-        const assignmentId = body.assignmentId;
-        const admitted = state.admittedByRun.get(runId);
-        const current = state.stateByRun.get(runId);
-        assertAssignmentReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          runAlreadyAssigned: state.assignmentByRun.has(runId),
-          assignmentAlreadyKnown: state.assignedById.has(assignmentId),
-          isEarliestQueuedRun:
-            admitted !== undefined &&
-            state.queuedPositionHeap[0] === admitted.queuedPosition,
-          hasAtomicDispatchedState:
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              runId,
-              "dispatched",
-              current.statusRevision + 1,
-              assignmentId,
-            ),
-        });
-        if (!admitted) {
-          throw corruptRunJournal("Run assignment is not the earliest admitted run");
-        }
-        state.assignedById.set(assignmentId, {
-          record: body,
-          commit: {
-            lsn: envelope.lsn,
-            envelopeDigest: envelope.envelopeDigest,
-            at: envelope.at,
-          },
-          capIds,
-          acked: false,
-        });
-        state.assignmentByRun.set(runId, assignmentId);
-        return state;
-      }
-      case "dispatch-acked": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertDispatchAcknowledgementReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          alreadyAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
-          assignmentClosed: state.closedAssignments.has(body.assignmentId),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
-        }
-        assigned.acked = true;
-        return state;
-      }
-      case "dispatch-conflict": {
-        const assignmentId = body.assignmentId;
-        const assigned = state.assignedById.get(assignmentId);
-        const proof = body.proof;
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertDispatchConflictReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
-          currentState: current?.state,
-          proofBindsAssignment:
-            assigned !== undefined &&
-            proof.assignmentId === assignmentId &&
-            proof.executorId === assigned.record.executorId,
-          handling: body.handling,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentSuperseded: state.closedAssignments.has(assignmentId),
-          assignmentClosed: state.closedAssignments.has(assignmentId),
-          conflictAlreadySeen: state.conflictAssignments.has(assignmentId),
-        });
-        if (!assigned || !current) {
-          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
-        }
-        const expectedActivation = buildConversationActivationPayloadFromBinding({
-          binding: {
-            runId: assigned.record.runId,
-            conversationId: this.#conversationId,
-            ownerEpoch: assigned.record.ownerEpoch,
-            assignmentId: assigned.record.assignmentId,
-            executorId: assigned.record.executorId,
-            dispatchRef: assigned.record.dispatchRef,
-            manifestDigest: assigned.record.manifestDigest,
-            permissionLeaseDigest: assigned.record.permissionLeaseDigest,
-            capIds: assigned.record.capIds,
-            reservation: assigned.record.reservation,
-          },
-          commit: {
-            lsn: assigned.commit.lsn,
-            envelopeDigest: assigned.commit.envelopeDigest,
-          },
-          issuedAt: assigned.commit.at,
-        });
-        const expectedActivationDigest = assignmentActivationDigest(expectedActivation);
-        const acceptedMatches =
-          canonicalize(proof.acceptedDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          proof.acceptedActivationDigest === expectedActivationDigest;
-        const conflictingMatches =
-          canonicalize(proof.conflictingDispatchRef) ===
-            canonicalize(assigned.record.dispatchRef) &&
-          proof.conflictingActivationDigest === expectedActivationDigest;
-        const atomicHandling =
-          body.handling === "acked-original"
-            ? envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "dispatch-acked" &&
-                  candidate.assignmentId === assignmentId,
-              )
-            : envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "resolution" &&
-                  candidate.runId === assigned.record.runId &&
-                  candidate.fact.subject.execution === "conversation" &&
-                  candidate.fact.subject.assignmentId === assignmentId &&
-                  candidate.fact.cause === "dispatch-conflict" &&
-                  candidate.fact.resolution === undefined,
-              ) &&
-              envelopeHasRunRecord(
-                envelope,
-                this.#conversationId,
-                (candidate) =>
-                  candidate.t === "cancel-fence" &&
-                  candidate.assignmentId === assignmentId,
-              ) &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                assigned.record.runId,
-                "uncertain",
-                current.statusRevision + 1,
-                assignmentId,
-              ) &&
-              envelopeRevokesCapabilities(
-                envelope,
-                this.#conversationId,
-                state.revokedCapabilities,
-                assignmentId,
-                assigned.capIds,
-                state.ticketIdsByAssignment.get(assignmentId) ?? [],
-                state.revokedTickets,
-              );
-        assertDispatchConflictHandlingReplayContract({
-          handling: body.handling,
-          acceptedMatches,
-          conflictingMatches,
-          atomicHandling,
-        });
-        state.conflictAssignments.add(assignmentId);
-        if (body.handling === "opened-uncertain") {
-          state.openConflictAssignments.add(assignmentId);
-        }
-        return state;
-      }
-      case "supersede-requested": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertSupersedeRequestReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-        });
-        state.supersedeRequests.set(body.assignmentId, body);
-        return state;
-      }
-      case "supersede-started-observed": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertSupersedeStartedObservationReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          observationAlreadyExists: state.supersedeStartedAssignments.has(
-            body.assignmentId,
-          ),
-        });
-        state.supersedeStartedAssignments.add(body.assignmentId);
-        state.durableStartedAssignments.add(body.assignmentId);
-        return state;
-      }
-      case "cancel-fence": {
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const opensConflict = envelopeHasRunRecord(
-          envelope,
-          this.#conversationId,
-          (candidate) =>
-            candidate.t === "dispatch-conflict" &&
-            candidate.assignmentId === body.assignmentId &&
-            candidate.handling === "opened-uncertain",
-        );
-        assertCancelFenceReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
-          fenceSeq: body.fenceSeq,
-          envelopeLsn: envelope.lsn,
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              opensConflict ? "uncertain" : "cancel-requested",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-        });
-        state.cancelFences.set(body.assignmentId, body);
-        return state;
-      }
-      case "cancel-proof-accepted": {
-        const proof = body.proof;
-        const assigned = state.assignedById.get(body.assignmentId);
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        assertCancelProofAcceptedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
-          currentState: current?.state,
-          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
-          durableStartedObserved: state.durableStartedAssignments.has(body.assignmentId),
-          proofDecision: proof.decision,
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          hasAtomicCancelledState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              "cancelled",
-              current.statusRevision + 1,
-              body.assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesCapabilities(
-              envelope,
-              this.#conversationId,
-              state.revokedCapabilities,
-              body.assignmentId,
-              assigned.capIds,
-              state.ticketIdsByAssignment.get(body.assignmentId) ?? [],
-              state.revokedTickets,
-            ),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Submission guard cancellation has no assignment");
-        }
-        await verify(() => { this.#assertResourceUsageFinal(assigned.record, proof.usageFinal); });
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          proof.decision === "not-started" ? "release" : "settle-release",
-          envelope.entries,
-        ); });
-        state.acceptedCancellations.add(body.assignmentId);
-        return state;
-      }
-      case "assignment-superseded": {
-        const assignmentId = body.assignmentId;
-        const assigned = state.assignedById.get(assignmentId);
-        const proof = body.proof;
-        const current = assigned
-          ? state.stateByRun.get(assigned.record.runId)
-          : undefined;
-        const kind = assignmentTerminationProofKind(proof);
-        const open = assigned
-          ? state.resolutionsByRun.get(assigned.record.runId)
-          : undefined;
-        assertAssignmentSupersededReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
-          assignmentAlreadyClosed: state.closedAssignments.has(assignmentId),
-          currentState: current?.state,
-          durableStartedObserved: state.durableStartedAssignments.has(assignmentId),
-          proofBindsDurableSource:
-            assigned !== undefined &&
-            proofBindsConversationSource(
-              state,
-              assigned,
-              proof,
-              this.#conversationId,
-              legacyTickets,
-            ),
-          proofKind: kind,
-          hasAtomicTargetState:
-            assigned !== undefined &&
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              current.state === "cancel-requested" ? "cancelled" : "queued",
-              current.statusRevision + 1,
-              assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesCapabilities(
-              envelope,
-              this.#conversationId,
-              state.revokedCapabilities,
-              assignmentId,
-              assigned.capIds,
-              state.ticketIdsByAssignment.get(assignmentId) ?? [],
-              state.revokedTickets,
-            ),
-          hasAtomicResolutionClose:
-            assigned !== undefined &&
-            open !== undefined &&
-            envelopeHasResolution(
-              envelope,
-              this.#conversationId,
-              assigned.record.runId,
-              open.openFactDigest,
-              true,
-            ),
-          conflictOpen:
-            open !== undefined &&
-            open.cause === "dispatch-conflict" &&
-            open.resolution === undefined,
-          hasAtomicConflictContainment:
-            open !== undefined &&
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "dispatch-conflict-contained" &&
-                candidate.assignmentId === assignmentId &&
-                candidate.openFactDigest === open.openFactDigest &&
-                sameTerminationProof(candidate.proof, proof),
-            ),
-        });
-        if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          "release",
-          envelope.entries,
-        ); });
-        state.assignmentByRun.delete(assigned.record.runId);
-        state.closedAssignments.add(assignmentId);
-        state.openConflictAssignments.delete(assignmentId);
-        return state;
-      }
-      case "resolution": {
-        const fact = body.fact as ConversationUncertainResolutionFact;
-        const runId = body.runId;
-        const assignmentId = fact.subject.assignmentId;
-        const assigned = state.assignedById.get(assignmentId);
-        assertConversationResolutionBinding({
-          execution: body.fact.subject.execution,
-          conversationId:
-            body.fact.subject.execution === "conversation"
-              ? body.fact.subject.conversationId
-              : undefined,
-          subjectRunId:
-            body.fact.subject.execution === "conversation"
-              ? body.fact.subject.runId
-              : undefined,
-          recordRunId: body.runId,
-          authorityConversationId: this.#conversationId,
-          subjectOwnerEpoch:
-            fact.subject.execution === "conversation"
-              ? fact.subject.ownerEpoch
-              : undefined,
-          authorityOwnerEpoch: assigned?.record.ownerEpoch,
-        });
-        const currentAssignmentId = state.assignmentByRun.get(runId);
-        const closesEarlierInEnvelope =
-          currentAssignmentId === undefined &&
-          state.closedAssignments.has(assignmentId) &&
-          envelopeClosesAssignment(
-            envelope,
-            this.#conversationId,
-            runId,
-            assignmentId,
-          );
-        const current = state.stateByRun.get(runId);
-        const existing = state.resolutionsByRun.get(runId);
-        if (!fact.resolution) {
-          assertResolutionOpenReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.runId === runId,
-            assignmentIsCurrent: currentAssignmentId === assignmentId,
-            currentState: current?.state,
-            alreadyOpen: isOpenResolutionFact(existing),
-            cause: fact.cause,
-            hasAtomicUncertainState:
-              current !== undefined &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                runId,
-                "uncertain",
-                current.statusRevision + 1,
-                assignmentId,
-              ),
-            hasAtomicDispatchConflict: envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "dispatch-conflict" &&
-                candidate.assignmentId === assignmentId &&
-                candidate.handling === "opened-uncertain",
-            ),
-          });
-        } else {
-          assertResolutionClosureReplayContract({
-            assignmentExists: assigned !== undefined,
-            assignmentBindsRun: assigned?.record.runId === runId,
-            assignmentIsCurrentOrAtomicallyClosed:
-              currentAssignmentId === assignmentId || closesEarlierInEnvelope,
-            conflictOpen: fact.cause === "dispatch-conflict",
-            resolutionKind: fact.resolution.kind,
-          });
-          const nextState = resolutionTargetState(fact.resolution.kind);
-          assertResolutionCloseAtomicReplayContract({
-            cause: fact.cause,
-            kind: fact.resolution.kind,
-            existingOpenMatches:
-              existing?.openFactDigest === fact.openFactDigest &&
-              existing.resolution === undefined,
-            hasAtomicTargetState:
-              current !== undefined &&
-              envelopeHasRunState(
-                envelope,
-                this.#conversationId,
-                runId,
-                nextState,
-                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
-                assignmentId,
-              ),
-            allCapabilitiesRevoked:
-              assigned !== undefined &&
-              envelopeRevokesCapabilities(
-                envelope,
-                this.#conversationId,
-                state.revokedCapabilities,
-                assignmentId,
-                assigned.capIds,
-                state.ticketIdsByAssignment.get(assignmentId) ?? [],
-                state.revokedTickets,
-              ),
-            hasRequiredCompanion:
-              (fact.resolution.kind !== "proven-not-started-redispatched" ||
-                envelopeHasRunRecord(
-                  envelope,
-                  this.#conversationId,
-                  (candidate) =>
-                    candidate.t === "assignment-superseded" &&
-                    candidate.assignmentId === assignmentId,
-                )) &&
-              (!fact.resolution.kind.startsWith("user-") ||
-                envelopeHasSuccessfulUncertainControl(
-                  envelope,
-                  nextState,
-                  fact.resolution.factDigest,
-                )),
-          });
-          if (fact.resolution.kind.startsWith("user-") && assigned) {
-            await verify(() => { this.#assertResourceTerminalRecords(
-              assigned.record,
-              "reclaim",
-              envelope.entries,
-            ); });
-          }
-        }
-        state.resolutionsByRun.set(runId, fact);
-        if (fact.resolution) {
-          state.assignmentByRun.delete(runId);
-          state.closedAssignments.add(assignmentId);
-          state.openConflictAssignments.delete(assignmentId);
-        }
-        return state;
-      }
-      case "capability-revoked": {
-        const assignmentId = body.assignmentId;
-        const capId = body.capId;
-        const assigned = state.assignedById.get(assignmentId);
-        const key = `${assignmentId}\0${capId}`;
-        assertCapabilityRevocationReplayContract({
-          assignmentExists: assigned !== undefined,
-          capabilityBelongsToAssignment: assigned?.capIds.has(capId) ?? false,
-          alreadyRevoked: state.revokedCapabilities.has(key),
-        });
-        state.revokedCapabilities.add(key);
-        return state;
-      }
-      case "ticket-issued": {
-        const assigned = state.assignedById.get(body.ticket.assignmentId);
-        const admitted = assigned
-          ? state.admittedByRun.get(assigned.record.runId)
-          : undefined;
-        await applyConversationTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          conversationId: this.#conversationId,
-          assigned: assigned?.record,
-          assignmentIsCurrent:
-            assigned !== undefined &&
-            state.assignmentByRun.get(assigned.record.runId) ===
-              assigned.record.assignmentId,
-          assignmentAcknowledged: assigned?.acked ?? false,
-          assignmentClosed: state.closedAssignments.has(
-            body.ticket.assignmentId,
-          ),
-          assignmentActive:
-            assigned !== undefined &&
-            (state.stateByRun.get(assigned.record.runId)?.state ===
-              "dispatched" ||
-              state.stateByRun.get(assigned.record.runId)?.state ===
-                "running") &&
-            !state.cancelFences.has(body.ticket.assignmentId),
-          originalSurfacePrincipal: admitted?.ingress.surfacePrincipal,
-          hasAtomicReplacementRevocation:
-            body.replacesTicketId === undefined ||
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "ticket-revoked" &&
-                candidate.ticketId === body.replacesTicketId,
-            ),
-        });
-        return state;
-      }
-      case "ticket-revoked":
-        await applyConversationTicketRecord({
-          state,
-          record: body,
-          verifier: this.#verifier,
-          envelopeAt: envelope.at,
-          conversationId: this.#conversationId,
-          assignmentIsCurrent: false,
-          assignmentAcknowledged: false,
-          assignmentClosed: false,
-          assignmentActive: false,
-        });
-        return state;
-      case "ticket-sync-frontier":
-        applyConversationTicketSyncFrontier(
-          state,
-          body.expiresThrough,
-          envelope.at,
-        );
-        return state;
-      case "state": {
-        const runId = body.runId;
-        const admitted = state.admittedByRun.get(runId);
-        if (!admitted) {
-          throw corruptRunJournal("Submission guard state has no admitted run");
-        }
-        const current = state.stateByRun.get(runId);
-        const next = body.state;
-        const assignmentId = body.assignmentId;
-        const assigned = assignmentId
-          ? state.assignedById.get(assignmentId)
-          : undefined;
-        const mappedAssignmentId = state.assignmentByRun.get(runId);
-        const closedEarlierInEnvelope =
-          assignmentId !== undefined &&
-          mappedAssignmentId === undefined &&
-          state.closedAssignments.has(assignmentId) &&
-          envelopeClosesAssignment(
-            envelope,
-            this.#conversationId,
-            runId,
-            assignmentId,
-          );
-        assertStateReplayContract({
-          currentState: current?.state,
-          currentRevision: current?.statusRevision,
-          nextState: next,
-          nextRevision: body.statusRevision,
-          assignmentId,
-          assignmentBindingValid:
-            assigned?.record.runId === runId &&
-            (mappedAssignmentId === assignmentId || closedEarlierInEnvelope),
-          unassignedBindingValid: mappedAssignmentId === undefined,
-          hasAtomicAssignment:
-            current?.state !== "queued" ||
-            next !== "dispatched" ||
-            envelopeHasRunRecord(
-              envelope,
-              this.#conversationId,
-              (candidate) =>
-                candidate.t === "assigned" &&
-                candidate.runId === runId &&
-                candidate.assignmentId === assignmentId,
-            ),
-        });
-        if (
-          current?.state === "queued" &&
-          (next === "cancelled" || next === "failed" || next === "expired")
-        ) {
-          try {
-            assertQueuedTerminalDequeue(
-              envelope.entries,
-              {
-                kind: "run",
-                id: runId,
-                attempt: nextConversationAssignmentAttempt(state, runId),
-              },
-              next,
-            );
-          } catch (error) {
-            throw corruptRunJournal(
-              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
-            );
-          }
-        }
-        assertStateAtomicReplayContract({
-          currentState: current?.state,
-          nextState: next,
-          hasAtomicCancelFence: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "cancel-fence" &&
-              candidate.assignmentId === assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
-          ),
-          hasAtomicOpenResolution: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "resolution" &&
-              candidate.runId === runId &&
-              candidate.fact.subject.assignmentId === assignmentId &&
-              candidate.fact.resolution === undefined,
-          ),
-          hasAtomicSupersede: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "assignment-superseded" &&
-              candidate.assignmentId === assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
-          ),
-          hasAtomicTermination: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              (candidate.t === "cancel-proof-accepted" ||
-                candidate.t === "assignment-superseded") &&
-              candidate.assignmentId === assignmentId &&
-              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
-          ),
-          hasAtomicResolutionClose: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "resolution" &&
-              candidate.runId === runId &&
-              candidate.fact.subject.assignmentId === assignmentId &&
-              candidate.fact.resolution !== undefined,
-          ),
-          hasAtomicCommit: envelopeHasRunRecord(
-            envelope,
-            this.#conversationId,
-            (candidate) =>
-              candidate.t === "committed" &&
-              candidate.runId === runId &&
-              candidate.assignmentId === assignmentId,
-          ),
-        });
-        if (next === "failed" && assigned) {
-          if (body.usageFinal) {
-            const usageFinal = body.usageFinal;
-            await verify(() => { this.#assertResourceUsageFinal(assigned.record, usageFinal); });
-          }
-          await verify(() => { this.#assertResourceTerminalRecords(
-            assigned.record,
-            body.usageFinal ? "settle-release" : "reclaim",
-            envelope.entries,
-          ); });
-        }
-        const nextActiveRunId = nextActiveRunIdForReplay({
-          activeRunId: state.activeRunId,
-          runId,
-          currentState: current?.state,
-          nextState: next,
-        });
-        if (current?.state === "queued") {
-          removeQueuedRun(state, admitted.queuedPosition, runId);
-        }
-        if (next === "queued") {
-          addQueuedRun(state, admitted.queuedPosition, runId);
-        }
-        state.activeRunId = nextActiveRunId;
-        state.stateByRun.set(runId, {
-          state: next,
-          statusRevision: body.statusRevision,
-        });
-        if (next === "running" && assignmentId !== undefined) {
-          state.durableStartedAssignments.add(assignmentId);
-        }
-        return state;
-      }
-      case "committed": {
-        const runId = body.runId;
-        const assignmentId = body.assignmentId;
-        const assigned = state.assignedById.get(assignmentId);
-        const current = state.stateByRun.get(runId);
-        assertCommittedReplayContract({
-          assignmentExists: assigned !== undefined,
-          assignmentBindsRun: assigned?.record.runId === runId,
-          assignmentIsCurrent: state.assignmentByRun.get(runId) === assignmentId,
-          currentState: current?.state,
-          alreadyCommitted: state.committedByAssignment.has(assignmentId),
-          conflictOpen: state.openConflictAssignments.has(assignmentId),
-          commitRevisionMatchesAssignedBase:
-            assigned !== undefined &&
-            body.commitRevision === assigned.record.baseRevision + 1,
-          hasAtomicCommittedState:
-            current !== undefined &&
-            envelopeHasRunState(
-              envelope,
-              this.#conversationId,
-              runId,
-              "committed",
-              current.statusRevision + 1,
-              assignmentId,
-            ),
-          allCapabilitiesRevoked:
-            assigned !== undefined &&
-            envelopeRevokesCapabilities(
-              envelope,
-              this.#conversationId,
-              state.revokedCapabilities,
-              assignmentId,
-              assigned.capIds,
-              state.ticketIdsByAssignment.get(assignmentId) ?? [],
-              state.revokedTickets,
-            ),
-        });
-        if (!assigned) {
-          throw corruptRunJournal("Submission guard commit has no assignment");
-        }
-        await verify(() => { this.#assertResourceTerminalRecords(
-          assigned.record,
-          "settle-release",
-          envelope.entries,
-        ); });
-        state.committedByAssignment.set(assignmentId, {
-          bundle: body.bundle,
-          commitRevision: body.commitRevision,
-          sidecars: submissionCommitSidecars(
-            envelope,
-            this.#conversationId,
-            {
-              t: "committed",
-              runId,
-              assignmentId,
-              bundle: body.bundle,
-              commitRevision: body.commitRevision,
-            },
-          ),
-        });
-        return state;
-      }
-      case "bundle-ack-observed": {
-        const committed = state.committedByAssignment.get(body.assignmentId);
-        if (
-          !committed ||
-          state.bundleAcknowledgements.has(body.assignmentId) ||
-          !bundleAcknowledgementBindsCommitted({
-            observedBundleRef: body.bundleRef,
-            observedCommitRevision: body.commitRevision,
-            expectedBundleRef: committed.bundle.ref,
-            expectedCommitRevision: committed.commitRevision,
-          })
-        ) {
-          throw corruptRunJournal(
-            "Submission guard bundle acknowledgement is invalid or duplicated",
-          );
-        }
-        state.bundleAcknowledgements.set(body.assignmentId, body);
-        return state;
-      }
-      default:
-        return state;
-    }
-  };
+    checks?: Array<() => void>): Promise<SubmissionGuardProjection> =>
+    reduceConversationSubmissionGuard({ conversationId: this.#conversationId, verifier: this.#verifier,
+      legacyAbortTickets: this.#legacyAbortTickets,
+      assertResourceUsageFinal: (assigned, usage) => this.#assertResourceUsageFinal(assigned, usage),
+      assertResourceTerminalRecords: (assigned, mode, records) => this.#assertResourceTerminalRecords(assigned, mode, records),
+    }, state, record, envelope, checks);
 
   async #loadSubmissionGuard(
     context: AuthorityCallContext,
     identity: AssignmentSubmissionIdentity,
   ): Promise<SubmissionGuardProjection> {
     this.#assertSubmissionContextIdentity(context, identity);
-    return this.#operations.run(async () => {
-      await this.#restoreProjection("submission");
-      const cached = this.#submissionGuardProjection;
-      const replay = async () => {
-        try {
-          return await this.#log.transactProjection<
-            SubmissionGuardProjection,
-            ConversationCommitLogRecord,
-            void
-          >(
-            cached?.state ?? emptySubmissionGuardProjection(),
-            this.#reduceSubmissionGuard,
-            () => ({ kind: "return", value: undefined }),
-            {
-              stream: runStream(this.#conversationId),
-              ...(cached ? { cursor: cached.cursor } : {}),
-            },
-          );
-        } catch (error) {
-          this.#submissionGuardProjection = undefined;
-          throw error;
-        }
-      };
-      const transaction = await (
-        this.#resources ? this.#resources.coordinate(replay, { readOnly: true }) : replay()
-      );
-      this.#submissionGuardProjection = {
-        state: transaction.state,
-        cursor: transaction.cursor,
-      };
-      this.#saveProjection("submission");
+    {
+      const snapshot = await readConversationSubmissionState(this.#log, this.#artifacts, this.#verifier,
+        this.#conversationId, { assignments: [identity.assignmentId] }, this.#legacyAbortTickets);
+      const transaction = { state: snapshot.value.state };
       if (context.principal.kind !== "assignment") return transaction.state;
       const capability = context.principal.capability;
       const assigned = transaction.state.assignedById.get(identity.assignmentId);
@@ -8766,7 +6485,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         deadlineAt: context.deadlineAt,
       }));
       return transaction.state;
-    });
+    }
   }
 
   #hasCurrentSubmissionAuthorityEpoch(context: AuthorityCallContext): boolean {
@@ -8852,8 +6571,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       now: this.#clock(),
       deadlineAt: context.deadlineAt,
     });
-    if (assigned) {
-      assertCapabilityMatchesAssignedEnvelope(capability, assigned.envelope);
+    if (assigned?.envelope) {
+      assertCapabilityMatchesAssignedEnvelope(capability, requireAssignedEnvelope(assigned));
     }
   }
 
@@ -8945,7 +6664,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
    * 控制适配在同一串行责任内临时接管运行投影，验证后归还精确游标。
    * 没有第二缓存保留同一可变对象；只隔离实际访问的值，失败保留已验前缀。
    */
-  async #withRunProjection<Value>(operation: (
+  async #withRunProjectionLegacy<Value>(operation: (
     basis: { readonly state: RunProjection; readonly cursor: ProjectionCursor; readonly createState: () => RunProjection } | undefined,
     publish: (state: RunProjection, cursor: ProjectionCursor) => void,
   ) => Promise<Value>): Promise<Value> {
@@ -8966,7 +6685,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     });
   }
 
-  async #transact<Value>(
+  async #transactLegacy<Value>(
     decide: (
       state: RunProjection,
       authorityPrefix: ProjectionTransactionContext,
@@ -8995,6 +6714,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                   deviceId: this.#currentAuthority.deviceId,
                   ownerEpoch: this.#ownerEpoch,
                 },
+                await conversationAnchorAtPrefix(this.#log, context),
               );
             }
             const decision = await decide(state, context);
@@ -9032,6 +6752,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
                   ...new Set([
                     ...readProjectionIds,
                     CONVERSATION_TRANSFER_PROJECTION_ID,
+                    ...conversationAnchorProjectionIds(this.#log),
                   ]),
                 ]
               : readProjectionIds,
@@ -9104,7 +6825,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     if (!assignmentId) return [];
     const assigned = state.assignedById.get(assignmentId);
     if (!assigned) throw corruptRunJournal("Resource terminal has no durable assignment");
-    const lease = assigned.envelope.resourceLease;
+    const lease = requireAssignedEnvelope(assigned).resourceLease;
     if (!requiresFormalResourceCoordination(lease)) return [];
     if (!this.#resources) {
       throw corruptRunJournal("Governed assignment has no resource coordinator");
@@ -9194,179 +6915,89 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
   }
 
+  /** Prepare only selected immutable effects outside the journal/writer queues.
+   * The same-head directory check protects the decision. The original reducer
+   * validates the actual new envelope before its WAL commit. */
+  async #effectTransaction<State extends object, Body, Value>(
+    selection: ConversationEffectSelection, create: () => State,
+    reduce: (state: State, record: LogicalRecord<Body>, envelope: ConversationFactGroup<Body>) => State | Promise<State>,
+    decide: (state: State, context: ProjectionTransactionContext) => ProjectionTransactionDecision<Body, Value> | Promise<ProjectionTransactionDecision<Body, Value>>,
+  ) {
+    const abort = currentMaintenanceAbortSignal();
+    let retryDeadline: number | undefined;
+    for (;;) {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
+      try {
+        const prepared = await prepareConversationEffects(this.#log, this.#artifacts, this.#conversationId, selection);
+        let initial = create();
+        for (const envelope of prepared.groups) for (const record of envelope.entries) {
+          if (abort.aborted) throw new StorageMaintenanceCancelledError();
+          if (prepared.includes(record.stream, record.body)) initial = await reduce(initial, record as LogicalRecord<Body>, envelope as ConversationFactGroup<Body>);
+        }
+        return await this.#operations.run(async () => {
+          let candidateLsn: number | undefined;
+          return this.#log.transactProjection<State, Body, Value>(initial,
+            (state, record, envelope) => {
+              if (envelope.lsn !== candidateLsn) return state;
+              if (!prepared.includes(record.stream, record.body)) throw corruptRunJournal('Effect decision changed its prepared subject');
+              return reduce(state, record, envelope);
+            },
+            async (state, context) => {
+              if (await conversationRecoveryVersion(context.readProjection(CONVERSATION_RECOVERY_PROJECTION_ID), this.#conversationId) !== prepared.version) {
+                throw new ConversationWorkingSetChanged();
+              }
+              candidateLsn = context.nextLsn;
+              return decide(state, context);
+            }, { cursor: prepared.cursor, stream: selection.kind === 'publish' ? 'publish' : 'final-outbox',
+              readProjectionIds: [CONVERSATION_RECOVERY_PROJECTION_ID],
+              createState: () => { candidateLsn = undefined; return createConversationProjectionDraft(initial).state; } });
+        });
+      } catch (error) {
+        const delay = error instanceof ConversationWorkingSetChanged ? 0 : maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        retryDeadline ??= performance.now() + 5_000;
+        if (performance.now() >= retryDeadline) throw error;
+        if (delay) await waitForMaintenanceRetry(Math.min(delay, retryDeadline - performance.now()));
+        else await new Promise<void>(setImmediate);
+      }
+    }
+  }
+
   async #appendPublishProgress(progress: Extract<PublishRecord, { t: "publish-progress" }>) {
-    await this.#operations.run(async () => {
-      try {
-        await this.#restoreProjection("publish");
-        const cached = this.#publishProjection;
-        const transaction = await this.#log.transactProjection<
-          PublishProjection,
-          PublishRecord,
-          void
-        >(
-          cached?.state ?? emptyPublishProjection(),
-          (state, record, envelope) =>
-            reducePublishRecord(state, record, envelope, this.#artifacts),
-          (state) => {
-            const key = `${progress.assignmentId}\0${progress.domain}`;
-            const current = state.progress.get(key);
-            if (
-              current &&
-              (current.upToSeq > progress.upToSeq ||
-                current.state === "settled" ||
-                (current.upToSeq === progress.upToSeq && current.state === progress.state))
-            ) {
-              return { kind: "return", value: undefined };
-            }
-            return {
-              kind: "append",
-              entries: [{ stream: "publish", body: progress }],
-              value: undefined,
-            };
-          },
-          {
-            stream: "publish",
-            ...(cached ? { cursor: cached.cursor } : {}),
-          },
-        );
-        this.#publishProjection = {
-          state: transaction.state,
-          cursor: transaction.cursor,
-        };
-        this.#saveProjection("publish");
-      } catch (error) {
-        this.#publishProjection = undefined;
-        throw error;
-      }
-    });
+    await this.#effectTransaction({ kind: 'publish', assignments: [progress.assignmentId] }, emptyPublishProjection,
+      (state, record: LogicalRecord<PublishRecord>, envelope) => reducePublishRecord(state, record, envelope, this.#artifacts),
+      state => {
+        const current = state.progress.get(progress.assignmentId + '\0' + progress.domain);
+        if (state.completedAssignments.has(progress.assignmentId) || current &&
+            (current.upToSeq > progress.upToSeq || current.state === 'settled' ||
+            current.upToSeq === progress.upToSeq && current.state === progress.state)) return { kind: 'return', value: undefined };
+        return { kind: 'append', entries: [{ stream: 'publish', body: progress }], value: undefined };
+      });
   }
 
-  async #selectPublish<Value>(select: (state: PublishProjection) => Value): Promise<Value> {
-    return this.#operations.run(async () => {
-      try {
-        await this.#restoreProjection("publish");
-        const cached = this.#publishProjection;
-        const transaction = await this.#log.readProjection<
-          PublishProjection,
-          PublishRecord
-        >(
-          cached?.state ?? emptyPublishProjection(),
-          (state, record, envelope) =>
-            reducePublishRecord(state, record, envelope, this.#artifacts),
-          {
-            stream: "publish",
-            ...(cached ? { cursor: cached.cursor } : {}),
-          },
-        );
-        this.#publishProjection = {
-          state: transaction.state,
-          cursor: transaction.cursor,
-        };
-        this.#saveProjection("publish");
-        return select(transaction.state);
-      } catch (error) {
-        this.#publishProjection = undefined;
-        throw error;
-      }
-    });
+  async #selectPublish<Value>(select: (state: PublishProjection) => Value, assignments?: readonly string[]): Promise<Value> {
+    return (await this.#effectTransaction({ kind: 'publish', assignments }, emptyPublishProjection,
+      (state, record: LogicalRecord<PublishRecord>, envelope) => reducePublishRecord(state, record, envelope, this.#artifacts),
+      state => ({ kind: 'return', value: select(state) }))).value;
   }
 
-  async #selectFinal<Value>(select: (state: FinalOutboxProjection) => Value): Promise<Value> {
-    return this.#operations.run(async () => {
-      try {
-        await this.#restoreProjection("final");
-        const cached = this.#finalProjection;
-        const transaction = await this.#log.readProjection<
-          FinalOutboxProjection,
-          FinalOutboxRecord
-        >(
-          cached?.state ?? emptyFinalProjection(),
-          async (projection, record, envelope) => {
-            await applyFinalRecord(
-              projection,
-              record.body,
-              envelope.at,
-              envelope,
-              this.#artifacts,
-            );
-            return projection;
-          },
-          {
-            stream: "final-outbox",
-            ...(cached ? { cursor: cached.cursor } : {}),
-          },
-        );
-        this.#finalProjection = {
-          state: transaction.state,
-          cursor: transaction.cursor,
-        };
-        this.#saveProjection("final");
-        return select(transaction.state);
-      } catch (error) {
-        this.#finalProjection = undefined;
-        throw error;
-      }
-    });
+  async #selectFinal<Value>(select: (state: FinalOutboxProjection) => Value, publishedBefore?: number): Promise<Value> {
+    return (await this.#effectTransaction({ kind: 'final', publishedBefore }, emptyFinalProjection,
+      async (state, record: LogicalRecord<FinalOutboxRecord>, envelope) => {
+        await applyFinalRecord(state, record.body, envelope.at, envelope, this.#artifacts); return state;
+      }, state => ({ kind: 'return', value: select(state) }))).value;
   }
 
-  async #transitionFinal(
-    frame: FinalFrame,
-    expectedState: "pending" | "published",
-    state: "published" | "expired",
-    notAfter?: number,
-  ): Promise<boolean> {
-    const key = finalKey(frame);
-    return this.#operations.run(async () => {
-      try {
-        await this.#restoreProjection("final");
-        const cached = this.#finalProjection;
-        const result = await this.#log.transactProjection<
-          FinalOutboxProjection,
-          FinalOutboxRecord,
-          boolean
-        >(
-          cached?.state ?? emptyFinalProjection(),
-          async (projection, record, envelope) => {
-            await applyFinalRecord(
-              projection,
-              record.body,
-              envelope.at,
-              envelope,
-              this.#artifacts,
-            );
-            return projection;
-          },
-          (projection) => {
-            const current = projection.entries.get(key);
-            if (
-              !current ||
-              current.record.state !== expectedState ||
-              current.record.digest !== frame.digest ||
-              (notAfter !== undefined &&
-                canonicalTime(current.at, "Final outbox record time") > notAfter)
-            ) {
-              return { kind: "return", value: false };
-            }
-            return {
-              kind: "append",
-              entries: [
-                { stream: "final-outbox", body: { ...current.record, state } },
-              ],
-              value: true,
-            };
-          },
-          {
-            stream: "final-outbox",
-            ...(cached ? { cursor: cached.cursor } : {}),
-          },
-        );
-        this.#finalProjection = { state: result.state, cursor: result.cursor }; this.#saveProjection("final");
-        return result.value;
-      } catch (error) {
-        this.#finalProjection = undefined;
-        throw error;
-      }
-    });
+  async #transitionFinal(frame: FinalFrame, expectedState: 'pending' | 'published', state: 'published' | 'expired', notAfter?: number): Promise<boolean> {
+    return (await this.#effectTransaction({ kind: 'final', frames: [frame] }, emptyFinalProjection,
+      async (projection, record: LogicalRecord<FinalOutboxRecord>, envelope) => {
+        await applyFinalRecord(projection, record.body, envelope.at, envelope, this.#artifacts); return projection;
+      }, projection => {
+        const current = projection.entries.get(finalKey(frame));
+        if (!current || current.record.state !== expectedState || current.record.digest !== frame.digest ||
+            notAfter !== undefined && canonicalTime(current.at, 'Final outbox record time') > notAfter) return { kind: 'return', value: false };
+        return { kind: 'append', entries: [{ stream: 'final-outbox', body: { ...current.record, state } }], value: true };
+      })).value;
   }
 }
 
@@ -9742,7 +7373,7 @@ function compactTerminalRunInput(state: RunProjection, runId: string): void {
 function compactLegacyRunProjection(source: RunProjection): RunProjection {
   const state = { ...source, appendedInputKeysByRun: new Map<string, Set<string>>() };
   for (const [id, assigned] of state.assignedById) {
-    state.assignedById.set(id, { ...assigned, envelope: retainedConversationEnvelope(assigned.envelope) });
+    state.assignedById.set(id, { ...assigned, envelope: retainedConversationEnvelope(requireAssignedEnvelope(assigned)) });
   }
   for (const [id, admitted] of state.admittedByRun) {
     const { input: _input, ...record } = admitted.record as Extract<ConversationRunJournalRecord, { t: "admitted" }>;
@@ -9805,6 +7436,7 @@ function emptyProjection(conversationId: string): RunProjection {
     runByIngress: new Map(),
     assignedById: new Map(),
     assignmentByRun: new Map(),
+    assignmentAttemptByRun: new Map(),
     stateByRun: new Map(),
     queuedRunByPosition: new Map(),
     queuedPositionHeap: [],
@@ -9880,7 +7512,7 @@ function applyProjectedSessionMutation(
   }
 }
 
-function emptySubmissionGuardProjection(): SubmissionGuardProjection {
+export function emptySubmissionGuardProjection(): SubmissionGuardProjection {
   return {
     admittedByRun: new Map(),
     runByIngress: new Map(),
@@ -9889,6 +7521,7 @@ function emptySubmissionGuardProjection(): SubmissionGuardProjection {
     queuedPositionHeapIndex: new Map(),
     assignedById: new Map(),
     assignmentByRun: new Map(),
+    assignmentAttemptByRun: new Map(),
     stateByRun: new Map(),
     conflictAssignments: new Set(),
     openConflictAssignments: new Set(),
@@ -10286,8 +7919,8 @@ function createOpenResolutionFact(
   const subject = {
     execution: "conversation" as const,
     runId: assigned.record.runId,
-    conversationId: assigned.envelope.work.conversationId,
-    ownerEpoch: assigned.envelope.work.ownerEpoch,
+    conversationId: requireAssignedEnvelope(assigned).work.conversationId,
+    ownerEpoch: requireAssignedEnvelope(assigned).work.ownerEpoch,
     assignmentId: assigned.record.assignmentId,
   };
   const openFactDigest = protocolDigest("UncertainOpenFact", 1, {
@@ -10318,11 +7951,11 @@ function closeResolution(
   );
 }
 
-function dispatchConflictKey(proof: DispatchConflictProof): string {
+export function dispatchConflictKey(proof: DispatchConflictProof): string {
   return `${proof.assignmentId}\0${proof.conflictingActivationDigest}`;
 }
 
-function rejectedNotStartedKey(
+export function rejectedNotStartedKey(
   assignmentId: string,
   kind: AssignmentTerminationProofKind,
 ): string {
@@ -10362,6 +7995,7 @@ function prepareRunQueuedTerminal(
 
 function nextConversationAssignmentAttempt(
   state: {
+    readonly assignmentAttemptByRun?: ReadonlyMap<string, number>;
     readonly assignedById: ReadonlyMap<
       string,
       { readonly record: { readonly runId: string; readonly reservation: { readonly attempt: number } } }
@@ -10369,7 +8003,7 @@ function nextConversationAssignmentAttempt(
   },
   runId: string,
 ): number {
-  let latest = 0;
+  let latest = state.assignmentAttemptByRun?.get(runId) ?? 0;
   for (const assigned of state.assignedById.values()) {
     if (assigned.record.runId === runId) {
       latest = Math.max(latest, assigned.record.reservation.attempt);
@@ -10453,7 +8087,7 @@ function worksceneSessionMetaEntries(
 }
 
 function envelopeContainsSessionActivity(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   meta: Extract<ConversationRunJournalRecord, { t: "session-meta" }>,
 ): boolean {
@@ -10576,7 +8210,7 @@ export {
 } from "./conversation-run-contracts.js";
 
 function envelopeHasRunRecord(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   predicate: (
     body: Exclude<ConversationRunJournalRecord, SessionInternalRecord>,
@@ -10597,7 +8231,7 @@ function envelopeHasRunRecord(
 }
 
 function conversationResolutionFactsInEnvelope(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   runId: string,
 ): ConversationUncertainResolutionFact[] {
@@ -10613,7 +8247,7 @@ function conversationResolutionFactsInEnvelope(
 
 function conversationStatusNoticesForCommit(
   state: RunProjection,
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+  envelope: ConversationFactGroup<unknown>,
   conversationId: string,
   ownerEpoch: number,
 ): ConversationStatusNotice[] {
@@ -10639,7 +8273,7 @@ function conversationStatusNoticesForCommit(
 }
 
 function envelopeHasRunState(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   runId: string,
   state: ConversationRunState,
@@ -10659,7 +8293,7 @@ function envelopeHasRunState(
 }
 
 function envelopeClosesAssignment(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   runId: string,
   assignmentId: string,
@@ -10678,7 +8312,7 @@ function envelopeClosesAssignment(
 }
 
 function envelopeHasResolution(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   runId: string,
   openFactDigest: string,
@@ -10696,7 +8330,7 @@ function envelopeHasResolution(
 }
 
 function envelopeRevokesRemainingCapabilities(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   state: RunProjection,
   assigned: AssignedProjection,
@@ -10713,7 +8347,7 @@ function envelopeRevokesRemainingCapabilities(
 }
 
 function envelopeRevokesCapabilities(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   revokedCapabilities: ReadonlySet<string>,
   assignmentId: string,
@@ -10751,9 +8385,10 @@ function envelopeRevokesCapabilities(
 }
 
 function envelopeHasSuccessfulUncertainControl(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   state: ConversationRunState,
   factDigest: string,
+  authorityRevision: number,
 ): boolean {
   return envelope.entries.some((entry) => {
     if (
@@ -10770,7 +8405,7 @@ function envelopeHasSuccessfulUncertainControl(
     };
     if (
       applied.t !== "applied" ||
-      applied.authorityRevision !== envelope.lsn ||
+      applied.authorityRevision !== authorityRevision ||
       typeof applied.result !== "object" ||
       applied.result === null
     ) {
@@ -10922,7 +8557,7 @@ function bundleClosureReadError(error: unknown, message: string): Error {
 }
 
 function envelopeContainsCommit(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
 ): boolean {
@@ -10938,30 +8573,11 @@ function envelopeContainsCommit(
   );
 }
 
-function mutationNeedsExternalPublish(
-  record: MutationBatch["records"][number],
-): boolean {
-  return record.domain === "global" && record.mutation.kind !== "delivery-enqueue";
-}
-
 function publishDecisionRequired(
   records: MutationBatch["records"],
   _outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"],
 ): boolean {
   return records.length > 0;
-}
-
-function domainPublishDecisionRequired(
-  records: MutationBatch["records"],
-  outcomes: Extract<PublishRecord, { t: "publish-decision" }>["outcomes"],
-  domain: "session" | "global",
-): boolean {
-  return records.some(
-    (record, index) =>
-      record.domain === domain &&
-      (mutationNeedsExternalPublish(record) ||
-        outcomes[index]?.outcome.t === "conflicted"),
-  );
 }
 
 interface CompiledConversationDeliveryContents {
@@ -11040,7 +8656,7 @@ function transcriptFinalAssistantText(record: TranscriptRunRecord): string {
 }
 
 function envelopeHasConversationCommitSidecars(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
   bundle: ReturnType<typeof validateConversationSealedBundle>,
@@ -11158,7 +8774,7 @@ function applyCommittedSessionMutations(state: RunProjection, records: readonly 
 }
 
 function submissionCommitSidecars(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>,
+  envelope: ConversationFactGroup,
   conversationId: string,
   committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
 ): SubmissionCommitSidecars {
@@ -11332,8 +8948,8 @@ interface CommittedBundleBinding {
   readonly closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
 }
 
-async function loadCommittedBundleBinding(
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+export async function loadCommittedBundleBinding(
+  envelope: ConversationFactGroup<unknown>,
   artifacts: ArtifactStore,
   matches: (
     committed: Extract<ConversationRunJournalRecord, { t: "committed" }>,
@@ -11408,7 +9024,7 @@ function isStoredReference<T>(value: Stored<T>): value is { readonly ref: Artifa
   );
 }
 
-function assertAssignedMatchesDispatch(
+export function assertAssignedMatchesDispatch(
   assigned: Extract<ConversationRunJournalRecord, { t: "assigned" }>,
   dispatch: PendingConversationDispatch["envelope"],
   ingress: IngressContext,
@@ -11629,7 +9245,7 @@ function emptyFinalProjection(): FinalOutboxProjection {
 async function reducePublishRecord(
   state: PublishProjection,
   record: LogicalRecord<PublishRecord>,
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+  envelope: ConversationFactGroup<unknown>,
   artifacts: ArtifactStore,
 ): Promise<PublishProjection> {
   if (record.body.t === "publish-decision") {
@@ -11662,7 +9278,7 @@ async function reducePublishRecord(
 function reducePublishBody(
   state: PublishProjection,
   raw: PublishRecord,
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+  envelope: ConversationFactGroup<unknown>,
 ): void {
   const body = snapshot(raw, "Publish record");
   assertPlainRecord(body, "Publish record");
@@ -11728,27 +9344,9 @@ function reducePublishBody(
       state.conflictsByAssignment.set(body.assignmentId, conflicts);
     }
     for (const domain of ["session", "global"] as const) {
-      const domainRecords = batch.records.filter((record, index) =>
-        record.domain === domain &&
-        (mutationNeedsExternalPublish(record) ||
-          body.outcomes[index]?.outcome.t === "conflicted"),
-      );
-      if (domainRecords.length === 0) continue;
-      const grantedSeqs = body.outcomes
-        .filter(
-          (item) =>
-            item.outcome.t === "granted" &&
-            batch.records[item.seq - 1]?.domain === domain &&
-            mutationNeedsExternalPublish(batch.records[item.seq - 1]!),
-        )
-        .map((item) => item.seq);
-      state.domainPlans.set(`${body.assignmentId}\0${domain}`, {
-        grantedSeqs,
-        grantedIndexBySeq: new Map(
-          grantedSeqs.map((seq, index) => [seq, index]),
-        ),
-        terminalSeq:
-          grantedSeqs.at(-1) ?? domainRecords.at(-1)!.seq,
+      const plan = publishDomainSequence(batch.records, body.outcomes, domain);
+      if (plan) state.domainPlans.set(body.assignmentId + '\0' + domain, {
+        ...plan, grantedIndexBySeq: new Map(plan.grantedSeqs.map((seq, index) => [seq, index])),
       });
     }
     const conversationId = state.conversationByAssignment.get(body.assignmentId);
@@ -11797,16 +9395,8 @@ function reducePublishBody(
     ? (plan.grantedIndexBySeq.get(current.upToSeq) ?? -1) + 1
     : 0;
   const nextGrantedSeq = plan.grantedSeqs[nextGrantedIndex];
-  const validProgress =
-    (body.upToSeq === 0 && body.state === "pending" && !current) ||
-    (current?.state === "pending" &&
-      nextGrantedSeq !== undefined &&
-      body.upToSeq === nextGrantedSeq &&
-      body.state === (body.upToSeq === plan.terminalSeq ? "settled" : "pending")) ||
-    (current?.state === "pending" &&
-      plan.grantedSeqs.length === 0 &&
-      body.upToSeq === plan.terminalSeq &&
-      body.state === "settled");
+  const validProgress = publishProgressFollows({ current, next: body, nextGrantedSeq,
+    terminalSeq: plan.terminalSeq, noGranted: plan.grantedSeqs.length === 0 });
   if (!validProgress) {
     throw corruptRunJournal("Publish progress skips or misstates a decided mutation");
   }
@@ -11938,7 +9528,7 @@ async function applyFinalRecord(
   projection: FinalOutboxProjection,
   raw: FinalOutboxRecord,
   at: IsoTime,
-  envelope: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
+  envelope: ConversationFactGroup<unknown>,
   artifacts: ArtifactStore,
 ): Promise<void> {
   const body = validateFinalOutboxRecord(snapshot(raw, "Final outbox record"));
@@ -12188,32 +9778,19 @@ export async function discoverConversationRecoveryCandidates(
   return recoveryCandidatesOf(state, artifacts);
 }
 
-// 发现折叠覆盖全部历史；检查点让每次启动只续算其后的尾部，不再为得出“无待恢复”读出整份日志。
-const RECOVERY_DISCOVERY_CHECKPOINT = projectionCheckpointKey(
-  "conversation-recovery-discovery", 1, foldRecoveryDiscovery, emptyRecoveryDiscovery,
-);
-
-/** 直接在权威日志上发现待恢复会话：从与已核验前缀一致的检查点续算尾部，结果与整份快照折叠相同。 */
+/** Compatibility query enumerates only current recovery obligations. Production
+ * workers consume conversationRecoveryPage instead of a global historical set. */
 export async function discoverConversationRecoveryCandidatesFromLog(
-  log: AuthorityCommitLog,
-  artifacts: ArtifactStore,
+  log: AuthorityCommitLog, artifacts: ArtifactStore,
 ): Promise<Set<string>> {
-  const restored = await log.loadProjectionCheckpoint?.<ConversationRecoveryDiscoveryState>(RECOVERY_DISCOVERY_CHECKPOINT);
-  const initial = restored?.state ?? emptyRecoveryDiscovery();
-  const projected = await log.readProjection<ConversationRecoveryDiscoveryState, unknown>(
-    initial,
-    // 首次写入前复制：日志在背压下重试时从未改动的起点重新归约。
-    (state, record) => {
-      const next = state === initial ? structuredClone(state) : state;
-      foldRecoveryDiscovery(next, record);
-      return next;
-    },
-    restored ? { cursor: restored.cursor } : {},
-  );
-  if (projected.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
-    void log.saveProjectionCheckpoint?.(RECOVERY_DISCOVERY_CHECKPOINT, projected.cursor, projected.state);
-  }
-  return recoveryCandidatesOf(projected.state, artifacts);
+  const result = new Set<string>();
+  let after: string | undefined;
+  do {
+    const page = await conversationRecoveryPage(log, artifacts, after);
+    for (const id of page.conversationIds) result.add(id);
+    after = page.after;
+  } while (after);
+  return result;
 }
 
 async function recoveryCandidatesOf(
@@ -12270,4 +9847,2587 @@ async function recoveryCandidatesOf(
     }
   }
   return result;
+}
+
+export interface ConversationSubmissionGuardContext {
+  readonly conversationId: string;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
+  readonly assertResourceUsageFinal: (assigned: { assignmentId: string; executorId: string; reservation: { reservationId: string } }, usage: { reportDigest: string; upToUsageSeq: number }) => void;
+  readonly assertResourceTerminalRecords: (assigned: { assignmentId: string; reservation: { reservationId: string } }, mode: 'settle-release' | 'release' | 'reclaim', records: readonly LogicalRecord<unknown>[]) => void;
+}
+
+export type ConversationFactGroup<Body = ConversationCommitLogRecord> = { readonly entries: readonly LogicalRecord<Body>[]; readonly at: string };
+type ConversationDomainSource = { readonly kind: 'local'; readonly envelope: CommitEnvelope<ConversationCommitLogRecord>; readonly context: ConversationSubmissionGuardContext }
+  | { readonly kind: 'imported'; readonly group: AuthenticatedConversationFacts };
+export async function reduceConversationSubmissionGuard(context: ConversationSubmissionGuardContext, state: SubmissionGuardProjection,
+  record: LogicalRecord<ConversationCommitLogRecord>, envelope: CommitEnvelope<ConversationCommitLogRecord>, checks?: Array<() => void>) {
+  return reduceConversationDomainGuard(context, state, record, { kind: 'local', envelope, context }, checks);
+}
+/** Only the authenticated base reader can produce this source capability.
+ * Domain transitions are shared; source effects belong to its frozen authority.
+ * No imported group is presented as a target WAL envelope or activation. */
+export async function reduceImportedConversationGuard(context: Pick<ConversationSubmissionGuardContext, 'conversationId' | 'verifier'>,
+  state: SubmissionGuardProjection, record: LogicalRecord<ConversationCommitLogRecord>, group: AuthenticatedConversationFacts) {
+  if (!isAuthenticatedConversationFacts(group) || group.source.manifest.conversationId !== context.conversationId || !group.entries.includes(record)) {
+    throw corruptRunJournal('Imported conversation facts lack verified source provenance');
+  }
+  return reduceConversationDomainGuard(context, state, record, { kind: 'imported', group });
+}
+async function reduceConversationDomainGuard(context: Pick<ConversationSubmissionGuardContext, 'conversationId' | 'verifier' | 'legacyAbortTickets'>,
+  state: SubmissionGuardProjection, record: LogicalRecord<ConversationCommitLogRecord>, source: ConversationDomainSource, checks?: Array<() => void>): Promise<SubmissionGuardProjection> {
+  const envelope = (source.kind === 'local' ? source.envelope : source.group) as ConversationFactGroup;
+  const sourceLsn = source.kind === 'local' ? source.envelope.lsn : source.group.sourceLsn;
+  const assertSourceAssignment = (id: string) => {
+    const assigned = state.assignedById.get(id);
+    if (!assigned || source.kind !== 'imported') throw corruptRunJournal('Imported source assignment is missing');
+    source.group.assertAssignment(assigned.record);
+  };
+  const assertUsage: ConversationSubmissionGuardContext['assertResourceUsageFinal'] = (assigned, usage) => {
+    if (source.kind === 'local') source.context.assertResourceUsageFinal(assigned, usage);
+    else assertSourceAssignment(assigned.assignmentId);
+  };
+  const assertTerminal: ConversationSubmissionGuardContext['assertResourceTerminalRecords'] = (assigned, mode, records) => {
+    if (source.kind === 'local') source.context.assertResourceTerminalRecords(assigned, mode, records);
+    else assertSourceAssignment(assigned.assignmentId);
+  };
+    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
+    const legacyTickets = checks && context.legacyAbortTickets ? {
+      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
+        checks.push(() => { try { context.legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
+      },
+    } : context.legacyAbortTickets;
+
+    if (record.stream !== runStream(context.conversationId)) {
+      throw corruptRunJournal("Submission guard projection received a different stream");
+    }
+    const uncheckedBody = record.body as unknown;
+    assertPlainRecord(uncheckedBody, "Submission guard record");
+    if ("kind" in uncheckedBody) {
+      assertConversationRunInternalRecord(uncheckedBody);
+      return state;
+    }
+    const body = await verifyProtocolStep(() => { assertConversationRunRecord(uncheckedBody, context.verifier); return uncheckedBody; });
+    switch (body.t) {
+      case "session-lifecycle":
+        return state;
+      case "admitted": {
+        assertAdmissionReplayContract({
+          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
+          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
+          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
+          hasAtomicQueuedState: envelopeHasRunState(
+            envelope,
+            context.conversationId,
+            body.runId,
+            "queued",
+            1,
+            undefined,
+          ),
+        });
+        state.admittedByRun.set(body.runId, {
+          ingressKey: body.ingressKey,
+          queuedPosition: body.queuedPosition,
+          ingress: body.ingress,
+        });
+        state.runByIngress.set(body.ingressKey, body.runId);
+        return state;
+      }
+      case "assigned": {
+        const capIds = new Set(body.capIds);
+        const runId = body.runId;
+        const assignmentId = body.assignmentId;
+        const admitted = state.admittedByRun.get(runId);
+        const current = state.stateByRun.get(runId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByRun.has(runId),
+          assignmentAlreadyKnown: state.assignedById.has(assignmentId),
+          isEarliestQueuedRun:
+            admitted !== undefined &&
+            state.queuedPositionHeap[0] === admitted.queuedPosition,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              runId,
+              "dispatched",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+        });
+        if (!admitted) {
+          throw corruptRunJournal("Run assignment is not the earliest admitted run");
+        }
+        state.assignedById.set(assignmentId, {
+          record: body,
+          ...(source.kind === 'local' ? { commit: { lsn: source.envelope.lsn, envelopeDigest: source.envelope.envelopeDigest, at: source.envelope.at } }
+            : { origin: source.group.location(source.group.entries.indexOf(record)) }),
+          capIds,
+          acked: false,
+        });
+        state.assignmentByRun.set(runId, assignmentId);
+        state.assignmentAttemptByRun?.set(runId, Math.max(state.assignmentAttemptByRun.get(runId) ?? 0, body.reservation.attempt));
+        return state;
+      }
+      case "dispatch-acked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
+        }
+        assigned.acked = true;
+        return state;
+      }
+      case "dispatch-conflict": {
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            proof.assignmentId === assignmentId &&
+            proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.closedAssignments.has(assignmentId),
+          assignmentClosed: state.closedAssignments.has(assignmentId),
+          conflictAlreadySeen: state.conflictAssignments.has(assignmentId),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
+        }
+        const expectedActivationDigest = source.kind === 'local' ? (() => {
+        const expectedActivation = buildConversationActivationPayloadFromBinding({
+          binding: {
+            runId: assigned.record.runId,
+            conversationId: context.conversationId,
+            ownerEpoch: assigned.record.ownerEpoch,
+            assignmentId: assigned.record.assignmentId,
+            executorId: assigned.record.executorId,
+            dispatchRef: assigned.record.dispatchRef,
+            manifestDigest: assigned.record.manifestDigest,
+            permissionLeaseDigest: assigned.record.permissionLeaseDigest,
+            capIds: assigned.record.capIds,
+            reservation: assigned.record.reservation,
+          },
+          commit: {
+            lsn: requireLocalAssignedCommit(assigned).lsn,
+            envelopeDigest: requireLocalAssignedCommit(assigned).envelopeDigest,
+          },
+          issuedAt: requireLocalAssignedCommit(assigned).at,
+        });
+        return assignmentActivationDigest(expectedActivation);
+
+        })() : undefined;
+        const acceptedMatches =
+          canonicalize(proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          (expectedActivationDigest === undefined || proof.acceptedActivationDigest === expectedActivationDigest);
+        const conflictingMatches =
+          canonicalize(proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          (expectedActivationDigest === undefined || proof.conflictingActivationDigest === expectedActivationDigest);
+        const atomicHandling =
+          body.handling === "acked-original"
+            ? envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "dispatch-acked" &&
+                  candidate.assignmentId === assignmentId,
+              )
+            : envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === assignmentId &&
+                  candidate.fact.cause === "dispatch-conflict" &&
+                  candidate.fact.resolution === undefined,
+              ) &&
+              envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "cancel-fence" &&
+                  candidate.assignmentId === assignmentId,
+              ) &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                assignmentId,
+              ) &&
+              envelopeRevokesCapabilities(
+                envelope,
+                context.conversationId,
+                state.revokedCapabilities,
+                assignmentId,
+                assigned.capIds,
+                state.ticketIdsByAssignment.get(assignmentId) ?? [],
+                state.revokedTickets,
+              );
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling,
+        });
+        state.conflictAssignments.add(assignmentId);
+        if (body.handling === "opened-uncertain") {
+          state.openConflictAssignments.add(assignmentId);
+        }
+        return state;
+      }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: sourceLsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          observationAlreadyExists: state.supersedeStartedAssignments.has(
+            body.assignmentId,
+          ),
+        });
+        state.supersedeStartedAssignments.add(body.assignmentId);
+        state.durableStartedAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const opensConflict = envelopeHasRunRecord(
+          envelope,
+          context.conversationId,
+          (candidate) =>
+            candidate.t === "dispatch-conflict" &&
+            candidate.assignmentId === body.assignmentId &&
+            candidate.handling === "opened-uncertain",
+        );
+        assertCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: sourceLsn,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              opensConflict ? "uncertain" : "cancel-requested",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "cancel-proof-accepted": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: state.durableStartedAssignments.has(body.assignmentId),
+          proofDecision: proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              context.conversationId,
+              state.revokedCapabilities,
+              body.assignmentId,
+              assigned.capIds,
+              state.ticketIdsByAssignment.get(body.assignmentId) ?? [],
+              state.revokedTickets,
+            ),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Submission guard cancellation has no assignment");
+        }
+        await verify(() => { assertUsage(assigned.record, proof.usageFinal); });
+        await verify(() => { assertTerminal(
+          assigned.record,
+          proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        ); });
+        state.acceptedCancellations.add(body.assignmentId);
+        return state;
+      }
+      case "assignment-superseded": {
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === assignmentId,
+          assignmentAlreadyClosed: state.closedAssignments.has(assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: state.durableStartedAssignments.has(assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          proofKind: kind,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              current.state === "cancel-requested" ? "cancelled" : "queued",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              context.conversationId,
+              state.revokedCapabilities,
+              assignmentId,
+              assigned.capIds,
+              state.ticketIdsByAssignment.get(assignmentId) ?? [],
+              state.revokedTickets,
+            ),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            envelopeHasResolution(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.cause === "dispatch-conflict" &&
+            open.resolution === undefined,
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict-contained" &&
+                candidate.assignmentId === assignmentId &&
+                candidate.openFactDigest === open.openFactDigest &&
+                sameTerminationProof(candidate.proof, proof),
+            ),
+        });
+        if (!assigned) throw corruptRunJournal("Submission guard supersede has no assignment");
+        await verify(() => { assertTerminal(
+          assigned.record,
+          "release",
+          envelope.entries,
+        ); });
+        state.assignmentByRun.delete(assigned.record.runId);
+        state.closedAssignments.add(assignmentId);
+        state.openConflictAssignments.delete(assignmentId);
+        return state;
+      }
+      case "resolution": {
+        const fact = body.fact as ConversationUncertainResolutionFact;
+        const runId = body.runId;
+        const assignmentId = fact.subject.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        assertConversationResolutionBinding({
+          execution: body.fact.subject.execution,
+          conversationId:
+            body.fact.subject.execution === "conversation"
+              ? body.fact.subject.conversationId
+              : undefined,
+          subjectRunId:
+            body.fact.subject.execution === "conversation"
+              ? body.fact.subject.runId
+              : undefined,
+          recordRunId: body.runId,
+          authorityConversationId: context.conversationId,
+          subjectOwnerEpoch:
+            fact.subject.execution === "conversation"
+              ? fact.subject.ownerEpoch
+              : undefined,
+          authorityOwnerEpoch: assigned?.record.ownerEpoch,
+        });
+        const currentAssignmentId = state.assignmentByRun.get(runId);
+        const closesEarlierInEnvelope =
+          currentAssignmentId === undefined &&
+          state.closedAssignments.has(assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            context.conversationId,
+            runId,
+            assignmentId,
+          );
+        const current = state.stateByRun.get(runId);
+        const existing = state.resolutionsByRun.get(runId);
+        if (!fact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.runId === runId,
+            assignmentIsCurrent: currentAssignmentId === assignmentId,
+            currentState: current?.state,
+            alreadyOpen: isOpenResolutionFact(existing),
+            cause: fact.cause,
+            hasAtomicUncertainState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                runId,
+                "uncertain",
+                current.statusRevision + 1,
+                assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict" &&
+                candidate.assignmentId === assignmentId &&
+                candidate.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned?.record.runId === runId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              currentAssignmentId === assignmentId || closesEarlierInEnvelope,
+            conflictOpen: fact.cause === "dispatch-conflict",
+            resolutionKind: fact.resolution.kind,
+          });
+          const nextState = resolutionTargetState(fact.resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: fact.cause,
+            kind: fact.resolution.kind,
+            existingOpenMatches:
+              existing?.openFactDigest === fact.openFactDigest &&
+              existing.resolution === undefined,
+            hasAtomicTargetState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                runId,
+                nextState,
+                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
+                assignmentId,
+              ),
+            allCapabilitiesRevoked:
+              assigned !== undefined &&
+              envelopeRevokesCapabilities(
+                envelope,
+                context.conversationId,
+                state.revokedCapabilities,
+                assignmentId,
+                assigned.capIds,
+                state.ticketIdsByAssignment.get(assignmentId) ?? [],
+                state.revokedTickets,
+              ),
+            hasRequiredCompanion:
+              (fact.resolution.kind !== "proven-not-started-redispatched" ||
+                envelopeHasRunRecord(
+                  envelope,
+                  context.conversationId,
+                  (candidate) =>
+                    candidate.t === "assignment-superseded" &&
+                    candidate.assignmentId === assignmentId,
+                )) &&
+              (!fact.resolution.kind.startsWith("user-") ||
+                envelopeHasSuccessfulUncertainControl(
+                  envelope,
+                  nextState,
+                  fact.resolution.factDigest,
+                  sourceLsn,
+                )),
+          });
+          if (fact.resolution.kind.startsWith("user-") && assigned) {
+            await verify(() => { assertTerminal(
+              assigned.record,
+              "reclaim",
+              envelope.entries,
+            ); });
+          }
+        }
+        state.resolutionsByRun.set(runId, fact);
+        if (fact.resolution) {
+          state.assignmentByRun.delete(runId);
+          state.closedAssignments.add(assignmentId);
+          state.openConflictAssignments.delete(assignmentId);
+        }
+        return state;
+      }
+      case "capability-revoked": {
+        const assignmentId = body.assignmentId;
+        const capId = body.capId;
+        const assigned = state.assignedById.get(assignmentId);
+        const key = `${assignmentId}\0${capId}`;
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment: assigned?.capIds.has(capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        await applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: context.verifier,
+          envelopeAt: envelope.at,
+          conversationId: context.conversationId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.stateByRun.get(assigned.record.runId)?.state ===
+              "dispatched" ||
+              state.stateByRun.get(assigned.record.runId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: admitted?.ingress.surfacePrincipal,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        await applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: context.verifier,
+          envelopeAt: envelope.at,
+          conversationId: context.conversationId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyConversationTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
+      case "state": {
+        const runId = body.runId;
+        const admitted = state.admittedByRun.get(runId);
+        if (!admitted) {
+          throw corruptRunJournal("Submission guard state has no admitted run");
+        }
+        const current = state.stateByRun.get(runId);
+        const next = body.state;
+        const assignmentId = body.assignmentId;
+        const assigned = assignmentId
+          ? state.assignedById.get(assignmentId)
+          : undefined;
+        const mappedAssignmentId = state.assignmentByRun.get(runId);
+        const closedEarlierInEnvelope =
+          assignmentId !== undefined &&
+          mappedAssignmentId === undefined &&
+          state.closedAssignments.has(assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            context.conversationId,
+            runId,
+            assignmentId,
+          );
+        assertStateReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          nextState: next,
+          nextRevision: body.statusRevision,
+          assignmentId,
+          assignmentBindingValid:
+            assigned?.record.runId === runId &&
+            (mappedAssignmentId === assignmentId || closedEarlierInEnvelope),
+          unassignedBindingValid: mappedAssignmentId === undefined,
+          hasAtomicAssignment:
+            current?.state !== "queued" ||
+            next !== "dispatched" ||
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "assigned" &&
+                candidate.runId === runId &&
+                candidate.assignmentId === assignmentId,
+            ),
+        });
+        if (
+          source.kind === 'local' &&
+          current?.state === "queued" &&
+          (next === "cancelled" || next === "failed" || next === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "run",
+                id: runId,
+                attempt: nextConversationAssignmentAttempt(state, runId),
+              },
+              next,
+            );
+          } catch (error) {
+            throw corruptRunJournal(
+              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
+            );
+          }
+        }
+        assertStateAtomicReplayContract({
+          currentState: current?.state,
+          nextState: next,
+          hasAtomicCancelFence: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "cancel-fence" &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicOpenResolution: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === runId &&
+              candidate.fact.subject.assignmentId === assignmentId &&
+              candidate.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "assignment-superseded" &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicTermination: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              (candidate.t === "cancel-proof-accepted" ||
+                candidate.t === "assignment-superseded") &&
+              candidate.assignmentId === assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId === runId,
+          ),
+          hasAtomicResolutionClose: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === runId &&
+              candidate.fact.subject.assignmentId === assignmentId &&
+              candidate.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "committed" &&
+              candidate.runId === runId &&
+              candidate.assignmentId === assignmentId,
+          ),
+        });
+        if (next === "failed" && assigned) {
+          if (body.usageFinal) {
+            const usageFinal = body.usageFinal;
+            await verify(() => { assertUsage(assigned.record, usageFinal); });
+          }
+          await verify(() => { assertTerminal(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          ); });
+        }
+        const nextActiveRunId = nextActiveRunIdForReplay({
+          activeRunId: state.activeRunId,
+          runId,
+          currentState: current?.state,
+          nextState: next,
+        });
+        if (current?.state === "queued") {
+          removeQueuedRun(state, admitted.queuedPosition, runId);
+        }
+        if (next === "queued") {
+          addQueuedRun(state, admitted.queuedPosition, runId);
+        }
+        state.activeRunId = nextActiveRunId;
+        state.stateByRun.set(runId, {
+          state: next,
+          statusRevision: body.statusRevision,
+        });
+        if (next === "running" && assignmentId !== undefined) {
+          state.durableStartedAssignments.add(assignmentId);
+        }
+        return state;
+      }
+      case "committed": {
+        const runId = body.runId;
+        const assignmentId = body.assignmentId;
+        const assigned = state.assignedById.get(assignmentId);
+        const current = state.stateByRun.get(runId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.runId === runId,
+          assignmentIsCurrent: state.assignmentByRun.get(runId) === assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committedByAssignment.has(assignmentId),
+          conflictOpen: state.openConflictAssignments.has(assignmentId),
+          commitRevisionMatchesAssignedBase:
+            assigned !== undefined &&
+            body.commitRevision === assigned.record.baseRevision + 1,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              runId,
+              "committed",
+              current.statusRevision + 1,
+              assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesCapabilities(
+              envelope,
+              context.conversationId,
+              state.revokedCapabilities,
+              assignmentId,
+              assigned.capIds,
+              state.ticketIdsByAssignment.get(assignmentId) ?? [],
+              state.revokedTickets,
+            ),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Submission guard commit has no assignment");
+        }
+        await verify(() => { assertTerminal(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        ); });
+        state.committedByAssignment.set(assignmentId, {
+          bundle: body.bundle,
+          commitRevision: body.commitRevision,
+          sidecars: submissionCommitSidecars(
+            envelope,
+            context.conversationId,
+            {
+              t: "committed",
+              runId,
+              assignmentId,
+              bundle: body.bundle,
+              commitRevision: body.commitRevision,
+            },
+          ),
+        });
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.commitRevision,
+            expectedBundleRef: committed.bundle.ref,
+            expectedCommitRevision: committed.commitRevision,
+          })
+        ) {
+          throw corruptRunJournal(
+            "Submission guard bundle acknowledgement is invalid or duplicated",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
+        return state;
+      }
+      default:
+        return state;
+    }
+  }
+
+export { emptyProjection as emptyConversationRunProjection };
+
+function requireAssignedEnvelope(assigned: AssignedProjection): RetainedConversationEnvelope {
+  if (!assigned.envelope) throw corruptRunJournal("Active assignment envelope was not prepared");
+  return assigned.envelope;
+}
+function admittedInputMatches(entry: AdmittedProjection, input: UserTurnInput): boolean {
+  if (entry.inputRef && !entry.inputDigest) {
+    const bytes = Buffer.from(canonicalize(input), "utf8");
+    return bytes.byteLength === entry.inputRef.bytes && byteDigest(bytes) === entry.inputRef.digest;
+  }
+  return admittedInputDigest(entry) === protocolDigest("ConversationAdmittedInput", 1, input);
+}
+
+/** The same containment checks protect live candidates and indexed recovery. */
+export function reduceConversationContainment(
+  state: RunProjection,
+  body: Extract<ConversationRunJournalRecord, { t: 'dispatch-conflict-contained' | 'cancel-contained' | 'not-started-rejected' }>,
+  envelope: ConversationFactGroup,
+  conversationId: string,
+  legacyTickets?: ConversationAbortTicketAuthorizer,
+): RunProjection {
+  switch (body.t) {
+      case "dispatch-conflict-contained": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        const conflict = state.conflictByAssignment.get(body.assignmentId);
+        const cancelProof = "cause" in proof ? proof : undefined;
+        const supersedeProof =
+          "decision" in proof && proof.decision === "not-started-fenced"
+            ? proof
+            : undefined;
+        const terminatesForRedispatch =
+          cancelProof?.decision === "not-started" || supersedeProof !== undefined;
+        if (
+          !assigned ||
+          current?.state !== "uncertain" ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !open ||
+          open.resolution !== undefined ||
+          open.cause !== "dispatch-conflict" ||
+          open.openFactDigest !== body.openFactDigest ||
+          state.containedFacts.has(body.openFactDigest) ||
+          !conflict ||
+          (!cancelProof && !supersedeProof) ||
+          !proofBindsConversationSource(
+            state,
+            assigned,
+            proof,
+            conversationId,
+            legacyTickets,
+          ) ||
+          (terminatesForRedispatch &&
+            (!envelopeHasResolution(
+              envelope,
+              conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ) ||
+              !envelopeHasRunState(
+                envelope,
+                conversationId,
+                assigned.record.runId,
+                "queued",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) ||
+              !envelopeHasRunRecord(
+                envelope,
+                conversationId,
+                (candidate) =>
+                  candidate.t === "assignment-superseded" &&
+                  candidate.assignmentId === body.assignmentId &&
+                  sameTerminationProof(
+                    candidate.proof,
+                    proof as AssignmentTerminationProof,
+                  ),
+              ))) ||
+          proof.lastRecordSeq <= conflict.proof.receivedRecordSeq
+        ) {
+          throw corruptRunJournal("Dispatch conflict containment is invalid or duplicated");
+        }
+        state.containedFacts.add(body.openFactDigest);
+        state.containmentByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "cancel-contained": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        if (
+          !assigned ||
+          current?.state !== "uncertain" ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !open ||
+          open.resolution !== undefined ||
+          open.cause === "dispatch-conflict" ||
+          open.openFactDigest !== body.openFactDigest ||
+          state.containedFacts.has(body.openFactDigest) ||
+          proof.decision !== "halted" ||
+          !proofBindsConversationSource(
+            state,
+            assigned,
+            proof,
+            conversationId,
+            legacyTickets,
+          )
+        ) {
+          throw corruptRunJournal("Cancellation containment is invalid or duplicated");
+        }
+        state.containedFacts.add(body.openFactDigest);
+        state.containmentByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "not-started-rejected": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        const contradictory =
+          hasDurableStartedObservation(state, body.assignmentId) ||
+          (kind === "dispatch-rejection" && open?.cause === "dispatch-conflict");
+        const proofBindsSource =
+          assigned !== undefined &&
+          proofBindsConversationSource(
+            state,
+            assigned,
+            proof,
+            conversationId,
+            legacyTickets,
+          );
+        const rejectionKey = rejectedNotStartedKey(body.assignmentId, kind);
+        if (
+          !assigned ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          !proofBindsSource ||
+          !contradictory ||
+          (current?.state !== "uncertain" &&
+            (!current ||
+              !envelopeHasRunRecord(
+                envelope,
+                conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === body.assignmentId &&
+                  candidate.fact.cause ===
+                    (kind === "cancel" ? "cancel-unproven" : "ledger-unknown") &&
+                  candidate.fact.resolution === undefined,
+              ) ||
+              !envelopeHasRunState(
+                envelope,
+                conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) ||
+              !envelopeRevokesRemainingCapabilities(
+                envelope,
+                conversationId,
+                state,
+                assigned,
+              ))) ||
+          state.rejectedNotStarted.has(rejectionKey)
+        ) {
+          throw corruptRunJournal(
+            "Rejected not-started proof is invalid or duplicated",
+          );
+        }
+        state.rejectedNotStarted.set(rejectionKey, body);
+        return state;
+      }
+  }
+}
+
+export interface ConversationRunReductionContext extends ConversationSubmissionGuardContext {
+  readonly artifacts: ArtifactStore;
+  readonly resources?: Pick<AssignmentResourceCoordinator, 'assertActivationRecords'>;
+  readonly delivery?: Pick<ConversationDeliveryParticipant, 'assertConversationCommit' | 'assertConversationStatuses'>;
+  readonly currentAuthority?: ConversationRunJournalOptions['currentAuthority'];
+}
+/** One canonical semantic reducer for live writes and indexed recovery. */
+export async function reduceConversationRunState(context: ConversationRunReductionContext, state: RunProjection,
+  record: LogicalRecord<unknown>, rawEnvelope: CommitEnvelope<unknown>, checks?: Array<() => void>): Promise<RunProjection> {
+    const verify = async (check: () => void) => { if (checks) checks.push(check); else await verifyProtocolStep(check); };
+    const legacyTickets = checks && context.legacyAbortTickets ? {
+      authorize: (input: Parameters<ConversationAbortTicketAuthorizer["authorize"]>[0]) => {
+        checks.push(() => { try { context.legacyAbortTickets!.authorize(input); } catch { throw corruptRunJournal("Legacy abort ticket authorization failed"); } });
+      },
+    } : context.legacyAbortTickets;
+
+    if (record.stream !== runStream(context.conversationId)) {
+      return state;
+    }
+    const envelope = rawEnvelope as import("@zhixing/core/contracts").CommitEnvelope<ConversationCommitLogRecord>;
+    const body = snapshot(
+      record.body as ConversationRunJournalRecord | ConversationRunInternalRecord,
+      "Run journal record",
+    );
+    if ("kind" in body) {
+      assertConversationRunInternalRecord(body);
+      if (body.kind === "conversation-commit-projection") {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          committed.runId !== body.runId ||
+          committed.commitRevision !== body.commitRevision ||
+          state.projectedByAssignment.has(body.assignmentId)
+        ) {
+          throw corruptRunJournal("Projection progress does not name one unprojected commit");
+        }
+        const bytes = await context.artifacts.get(committed.bundle.ref);
+        const bundle = validateConversationSealedBundle(
+          JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
+        );
+        if (bundle.digest !== body.digest) {
+          throw corruptRunJournal("Projection progress digest does not match its bundle");
+        }
+        state.projectedByAssignment.set(body.assignmentId, body);
+        state.pendingCommitProjections.delete(body.assignmentId);
+        return state;
+      }
+      if (body.kind === "conversation-lifecycle-projection") {
+        const pending = state.pendingLifecycleProjections.get(body.domainRevision);
+        if (
+          !pending ||
+          pending.mutation !== body.mutation ||
+          pending.requestId !== body.requestId ||
+          state.projectedLifecycleRevisions.has(body.domainRevision)
+        ) {
+          throw corruptRunJournal(
+            "Lifecycle projection progress does not name one pending lifecycle fact",
+          );
+        }
+        state.projectedLifecycleRevisions.add(body.domainRevision);
+        state.pendingLifecycleProjections.delete(body.domainRevision);
+        return state;
+      }
+      if (body.kind === "session-activity") {
+        throw corruptRunJournal(
+          "Session activity record was written to the run stream",
+        );
+      }
+      if (body.kind !== "content-asset-index") {
+        return state;
+      }
+      const committed = state.commits.at(-1);
+      if (
+        !committed ||
+        state.contentByRevision.has(committed.commitRevision) ||
+        !envelopeContainsCommit(envelope, context.conversationId, committed)
+      ) {
+        throw corruptRunJournal("Content index has no unique committed run");
+      }
+      const bundleBytes = await context.artifacts.get(committed.bundle.ref);
+      const bundle = validateConversationSealedBundle(
+        JSON.parse(Buffer.from(bundleBytes).toString("utf8")) as SealedBundle,
+      );
+      if (canonicalize(body.entries) !== canonicalize(bundle.body.contentAssets)) {
+        throw corruptRunJournal("Content index does not match its committed bundle");
+      }
+      state.contentByRevision.set(
+        committed.commitRevision,
+        snapshot(body.entries, "Content asset index"),
+      );
+      return state;
+    }
+    await verifyProtocolStep(() => assertConversationRunRecord(body, context.verifier));
+    switch (body.t) {
+      case "session-meta": return reduceConversationSessionFact(context, state, body, envelope, envelope.lsn);
+      case "session-control": return reduceConversationSessionFact(context, state, body, envelope, envelope.lsn);
+      case "session-lifecycle": return reduceConversationSessionFact(context, state, body, envelope, envelope.lsn);
+      case "run-input-opened": {
+        if (state.assignmentByRun.get(body.runId) !== body.assignmentId || state.closedInputAssignments.has(body.assignmentId) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid input opening");
+        state.openInputAssignments.set(body.runId, body.assignmentId);
+        return state;
+      }
+      case "run-input-closed": {
+        if (state.openInputAssignments.get(body.runId) !== body.assignmentId) throw corruptRunJournal("Invalid input closing");
+        state.openInputAssignments.delete(body.runId);
+        state.closedInputAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "run-input-appended": {
+        if (!state.openInputAssignments.has(body.runId) || state.runByIngress.has(body.ingressKey) || state.stateByRun.get(body.runId)?.state !== "running") throw corruptRunJournal("Invalid appended input");
+        const input = validateNonEmptyUserTurnInput(await loadStored(body.input, context.artifacts));
+        state.appendedInputs.set(body.ingressKey, { record: body, input, lsn: envelope.lsn });
+        state.runByIngress.set(body.ingressKey, body.runId);
+        return state;
+      }
+      case "run-input-consumed": {
+        const key = `${body.assignmentId}/${body.boundary}`;
+        const prior = [...state.inputConsumptions.values()].filter((value) => value.assignmentId === body.assignmentId);
+        if (state.openInputAssignments.get(body.runId) !== body.assignmentId || state.inputConsumptions.has(key) ||
+            prior.some((value) => value.boundary >= body.boundary) ||
+            body.ingressKeys.some((id) => state.appendedInputs.get(id)?.record.runId !== body.runId || prior.some((value) => value.ingressKeys.includes(id)))) throw corruptRunJournal("Invalid input consumption");
+        state.inputConsumptions.set(key, body);
+        return state;
+      }
+      case "admitted": {
+        if (state.deleted) {
+          throw corruptRunJournal("Deleted conversation contains a later admitted run");
+        }
+        assertAdmissionReplayContract({
+          runAlreadyAdmitted: state.admittedByRun.has(body.runId),
+          ingressAlreadyAdmitted: state.runByIngress.has(body.ingressKey),
+          queuedPositionAlreadyUsed: state.queuedRunByPosition.has(body.queuedPosition),
+          hasAtomicQueuedState: envelopeHasRunState(
+            envelope,
+            context.conversationId,
+            body.runId,
+            "queued",
+            1,
+            undefined,
+          ),
+        });
+        const input = await loadStored(body.input, context.artifacts);
+        try {
+          validateNonEmptyUserTurnInput(input);
+        } catch {
+          throw corruptRunJournal("Run journal contains invalid user input");
+        }
+        state.admittedByRun.set(body.runId, { record: body, input, lsn: envelope.lsn, domainRevision: state.domainRevision });
+        state.runByIngress.set(body.ingressKey, body.runId);
+        return state;
+      }
+      case "assigned": {
+        const admitted = state.admittedByRun.get(body.runId);
+        const current = state.stateByRun.get(body.runId);
+        assertAssignmentReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          runAlreadyAssigned: state.assignmentByRun.has(body.runId),
+          assignmentAlreadyKnown: state.assignedById.has(body.assignmentId),
+          isEarliestQueuedRun:
+            admitted !== undefined &&
+            state.queuedPositionHeap[0] === admitted.record.queuedPosition,
+          hasAtomicDispatchedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              body.runId,
+              "dispatched",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (!admitted) {
+          throw corruptRunJournal("Run assignment is not the earliest admitted run");
+        }
+        const bytes = await context.artifacts.get(body.dispatchRef);
+        const dispatch = await verifyProtocolStep(() => validateConversationEnvelope(
+          JSON.parse(Buffer.from(bytes).toString("utf8")) as PendingConversationDispatch["envelope"],
+          context.verifier,
+        ));
+        await resolveDispatchArtifactClosure(dispatch, context.artifacts);
+        assertAssignedMatchesDispatch(
+          body,
+          dispatch,
+          admitted.record.ingress,
+          context.conversationId,
+        );
+        if (requiresFormalResourceCoordination(dispatch.resourceLease)) {
+          if (!context.resources) {
+            throw corruptRunJournal("Anchor assignment has no resource coordinator");
+          }
+          await verify(() => { context.resources!.assertActivationRecords({
+            lease: dispatch.resourceLease,
+            records: envelope.entries,
+            acceptedAt: envelope.at,
+          }); });
+        }
+        state.assignedById.set(body.assignmentId, {
+          record: body,
+          envelope: dispatch,
+          commit: {
+            lsn: envelope.lsn,
+            envelopeDigest: envelope.envelopeDigest,
+            at: envelope.at,
+          },
+          acked: false,
+        });
+        state.assignmentByRun.set(body.runId, body.assignmentId);
+        state.assignmentAttemptByRun?.set(body.runId, Math.max(state.assignmentAttemptByRun.get(body.runId) ?? 0, body.reservation.attempt));
+        state.recoveryAssignments.add(body.assignmentId);
+        state.mirrorStateByAssignment.set(body.assignmentId, {
+          ordinal: 0,
+          mirrorDigest: interactionMirrorSeed(body.assignmentId),
+          mirroredUpTo: 0,
+          requestIds: new Set(),
+        });
+        return state;
+      }
+      case "dispatch-acked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertDispatchAcknowledgementReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Dispatch acknowledgement is missing or duplicated");
+        }
+        assigned.acked = true;
+        return state;
+      }
+      case "supersede-requested": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeRequestReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          requestAlreadyExists: state.supersedeRequests.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+        });
+        state.supersedeRequests.set(body.assignmentId, body);
+        return state;
+      }
+      case "supersede-started-observed": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertSupersedeStartedObservationReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          observationAlreadyExists: state.supersedeStartedObservations.has(
+            body.assignmentId,
+          ),
+        });
+        state.supersedeStartedObservations.set(body.assignmentId, body);
+        return state;
+      }
+      case "dispatch-conflict": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const key = dispatchConflictKey(proof);
+        assertDispatchConflictReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          proofBindsAssignment:
+            assigned !== undefined &&
+            proof.assignmentId === body.assignmentId &&
+            proof.executorId === assigned.record.executorId,
+          handling: body.handling,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentSuperseded: state.superseded.has(body.assignmentId),
+          assignmentClosed: state.closedAssignments.has(body.assignmentId),
+          conflictAlreadySeen: state.conflictByAssignment.has(body.assignmentId),
+        });
+        if (!assigned || !current || state.conflicts.has(key)) {
+          throw corruptRunJournal("Dispatch conflict record is invalid or duplicated");
+        }
+        const expectedActivation = buildConversationActivationPayload({
+          envelope: requireAssignedEnvelope(assigned),
+          dispatchRef: assigned.record.dispatchRef,
+          commit: {
+            lsn: requireLocalAssignedCommit(assigned).lsn,
+            envelopeDigest: requireLocalAssignedCommit(assigned).envelopeDigest,
+          },
+          issuedAt: requireLocalAssignedCommit(assigned).at,
+        });
+        const expectedActivationDigest = assignmentActivationDigest(expectedActivation);
+        const acceptedMatches =
+          canonicalize(proof.acceptedDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.acceptedActivationDigest === expectedActivationDigest;
+        const conflictingMatches =
+          canonicalize(proof.conflictingDispatchRef) ===
+            canonicalize(assigned.record.dispatchRef) &&
+          proof.conflictingActivationDigest === expectedActivationDigest;
+        const atomicHandling =
+          body.handling === "acked-original"
+            ? envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "dispatch-acked" &&
+                  candidate.assignmentId === body.assignmentId,
+              )
+            : envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "resolution" &&
+                  candidate.runId === assigned.record.runId &&
+                  candidate.fact.subject.execution === "conversation" &&
+                  candidate.fact.subject.assignmentId === body.assignmentId &&
+                  candidate.fact.cause === "dispatch-conflict" &&
+                  candidate.fact.resolution === undefined,
+              ) &&
+              envelopeHasRunRecord(
+                envelope,
+                context.conversationId,
+                (candidate) =>
+                  candidate.t === "cancel-fence" &&
+                  candidate.assignmentId === body.assignmentId,
+              ) &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                assigned.record.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                body.assignmentId,
+              ) &&
+              envelopeRevokesRemainingCapabilities(
+                envelope,
+                context.conversationId,
+                state,
+                assigned,
+              );
+        assertDispatchConflictHandlingReplayContract({
+          handling: body.handling,
+          acceptedMatches,
+          conflictingMatches,
+          atomicHandling,
+        });
+        state.conflicts.set(key, body);
+        state.conflictByAssignment.set(body.assignmentId, body);
+        return state;
+      }
+      case "dispatch-conflict-contained": return reduceConversationContainment(state, body, envelope, context.conversationId, legacyTickets);
+      case "cancel-contained": return reduceConversationContainment(state, body, envelope, context.conversationId, legacyTickets);
+      case "cancel-proof-accepted": {
+        const proof = body.proof;
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        assertCancelProofAcceptedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          acceptanceAlreadyExists: state.acceptedCancellations.has(body.assignmentId),
+          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
+          proofDecision: proof.decision,
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          hasAtomicCancelledState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              "cancelled",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              context.conversationId,
+              state,
+              assigned,
+            ),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Accepted cancellation has no durable assignment");
+        }
+        await verify(() => { context.assertResourceUsageFinal(assigned.record, proof.usageFinal); });
+        await verify(() => { context.assertResourceTerminalRecords(
+          assigned.record,
+          proof.decision === "not-started" ? "release" : "settle-release",
+          envelope.entries,
+        ); });
+        state.acceptedCancellations.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        return state;
+      }
+      case "not-started-rejected": return reduceConversationContainment(state, body, envelope, context.conversationId, legacyTickets);
+      case "assignment-superseded": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const proof = body.proof;
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const kind = assignmentTerminationProofKind(proof);
+        const open = assigned
+          ? state.resolutionsByRun.get(assigned.record.runId)
+          : undefined;
+        assertAssignmentSupersededReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          assignmentAlreadyClosed: state.superseded.has(body.assignmentId),
+          currentState: current?.state,
+          durableStartedObserved: hasDurableStartedObservation(state, body.assignmentId),
+          proofBindsDurableSource:
+            assigned !== undefined &&
+            proofBindsConversationSource(
+              state,
+              assigned,
+              proof,
+              context.conversationId,
+              legacyTickets,
+            ),
+          proofKind: kind,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              current.state === "cancel-requested" ? "cancelled" : "queued",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              context.conversationId,
+              state,
+              assigned,
+            ),
+          hasAtomicResolutionClose:
+            assigned !== undefined &&
+            open !== undefined &&
+            envelopeHasResolution(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              open.openFactDigest,
+              true,
+            ),
+          conflictOpen:
+            open !== undefined &&
+            open.cause === "dispatch-conflict" &&
+            open.resolution === undefined,
+          hasAtomicConflictContainment:
+            open !== undefined &&
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict-contained" &&
+                candidate.assignmentId === body.assignmentId &&
+                candidate.openFactDigest === open.openFactDigest &&
+                sameTerminationProof(candidate.proof, proof),
+            ),
+        });
+        if (!assigned) {
+          throw corruptRunJournal("Assignment supersede fact is invalid or duplicated");
+        }
+        await verify(() => { context.assertResourceTerminalRecords(
+          assigned.record,
+          "release",
+          envelope.entries,
+        ); });
+        state.superseded.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        if (state.assignmentByRun.get(assigned.record.runId) === body.assignmentId) {
+          state.assignmentByRun.delete(assigned.record.runId);
+        }
+        state.closedAssignments.add(body.assignmentId);
+        return state;
+      }
+      case "cancel-fence": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const opensConflict = envelopeHasRunRecord(
+          envelope,
+          context.conversationId,
+          (candidate) =>
+            candidate.t === "dispatch-conflict" &&
+            candidate.assignmentId === body.assignmentId &&
+            candidate.handling === "opened-uncertain",
+        );
+        const targetState = opensConflict ? "uncertain" : "cancel-requested";
+        assertCancelFenceReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) === body.assignmentId,
+          currentState: current?.state,
+          fenceAlreadyExists: state.cancelFences.has(body.assignmentId),
+          fenceSeq: body.fenceSeq,
+          envelopeLsn: envelope.lsn,
+          hasAtomicTargetState:
+            assigned !== undefined &&
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              assigned.record.runId,
+              targetState,
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal("Cancel fence is invalid or duplicated");
+        }
+        state.cancelOrigins.set(
+          body.assignmentId,
+          current.state as "dispatched" | "running",
+        );
+        state.cancelFences.set(body.assignmentId, body);
+        return state;
+      }
+      case "capability-revoked": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const key = `${body.assignmentId}\0${body.capId}`;
+        assertCapabilityRevocationReplayContract({
+          assignmentExists: assigned !== undefined,
+          capabilityBelongsToAssignment: assigned?.record.capIds.includes(body.capId) ?? false,
+          alreadyRevoked: state.revokedCapabilities.has(key),
+        });
+        state.revokedCapabilities.add(key);
+        return state;
+      }
+      case "ticket-issued": {
+        const assigned = state.assignedById.get(body.ticket.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        await applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: context.verifier,
+          envelopeAt: envelope.at,
+          conversationId: context.conversationId,
+          assigned: assigned?.record,
+          assignmentIsCurrent:
+            assigned !== undefined &&
+            state.assignmentByRun.get(assigned.record.runId) ===
+              assigned.record.assignmentId,
+          assignmentAcknowledged: assigned?.acked ?? false,
+          assignmentClosed: state.closedAssignments.has(
+            body.ticket.assignmentId,
+          ),
+          assignmentActive:
+            assigned !== undefined &&
+            (state.stateByRun.get(assigned.record.runId)?.state ===
+              "dispatched" ||
+              state.stateByRun.get(assigned.record.runId)?.state ===
+                "running") &&
+            !state.cancelFences.has(body.ticket.assignmentId),
+          originalSurfacePrincipal: admitted?.record.ingress.surfacePrincipal,
+          hasAtomicReplacementRevocation:
+            body.replacesTicketId === undefined ||
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "ticket-revoked" &&
+                candidate.ticketId === body.replacesTicketId,
+            ),
+        });
+        return state;
+      }
+      case "ticket-revoked":
+        await applyConversationTicketRecord({
+          state,
+          record: body,
+          verifier: context.verifier,
+          envelopeAt: envelope.at,
+          conversationId: context.conversationId,
+          assignmentIsCurrent: false,
+          assignmentAcknowledged: false,
+          assignmentClosed: false,
+          assignmentActive: false,
+        });
+        return state;
+      case "ticket-sync-frontier":
+        applyConversationTicketSyncFrontier(
+          state,
+          body.expiresThrough,
+          envelope.at,
+        );
+        return state;
+      case "interaction-mirror": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const batch = body.batch;
+        const batchDigest = interactionMirrorBatchDigest(batch);
+        if (
+          !assigned ||
+          batch.assignmentId !== body.assignmentId ||
+          batch.executorId !== assigned.record.executorId ||
+          state.assignmentByRun.get(assigned.record.runId) !== body.assignmentId ||
+          state.closedAssignments.has(body.assignmentId) ||
+          state.mirrorBatches.has(batchDigest)
+        ) {
+          throw corruptRunJournal("Interaction mirror has no assignment");
+        }
+        const mirrorState = state.mirrorStateByAssignment.get(body.assignmentId);
+        if (!mirrorState || batch.entries.length === 0) {
+          throw corruptRunJournal("Interaction mirror has no durable entries");
+        }
+        const current = state.stateByRun.get(assigned.record.runId)?.state;
+        if (
+          current !== "dispatched" &&
+          current !== "running" &&
+          !(
+            (current === "cancel-requested" || current === "uncertain") &&
+            state.cancelFences.has(body.assignmentId)
+          )
+        ) {
+          throw corruptRunJournal("Interaction mirror is outside its authorized state");
+        }
+        if (
+          batch.previousDigest !== mirrorState.mirrorDigest ||
+          batch.entries[0]!.ordinal !== mirrorState.ordinal + 1
+        ) {
+          throw corruptRunJournal("Interaction mirror does not continue its audit prefix");
+        }
+        let lastSeq = mirrorState.mirroredUpTo;
+        let lastOrdinal = mirrorState.ordinal;
+        const batchRequestIds = new Set<string>();
+        for (const rawEntry of batch.entries) {
+          const entry = validateConversationInteractionMirrorEntry(rawEntry);
+          if (
+            entry.ordinal !== lastOrdinal + 1 ||
+            entry.seq <= lastSeq ||
+            mirrorState.requestIds.has(entry.requestId) ||
+            batchRequestIds.has(entry.requestId)
+          ) {
+            throw corruptRunJournal(
+              "Interaction mirror sequence or request identity is invalid",
+            );
+          }
+          lastSeq = entry.seq;
+          lastOrdinal = entry.ordinal;
+          batchRequestIds.add(entry.requestId);
+        }
+        mirrorState.ordinal = lastOrdinal;
+        mirrorState.mirrorDigest = batch.mirrorDigest;
+        mirrorState.mirroredUpTo = lastSeq;
+        for (const requestId of batchRequestIds) mirrorState.requestIds.add(requestId);
+        state.mirrorBatches.set(batchDigest, body);
+        return state;
+      }
+      case "channel-challenge-prepared": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const admitted = assigned
+          ? state.admittedByRun.get(assigned.record.runId)
+          : undefined;
+        if (
+          !assigned ||
+          !admitted ||
+          admitted.record.ingress.kind !== "channel" ||
+          body.ref.conversationId !== context.conversationId ||
+          body.ref.runId !== assigned.record.runId ||
+          body.ref.ownerEpoch !== assigned.record.ownerEpoch ||
+          canonicalize(body.responder) !==
+            canonicalize(admitted.record.ingress.responder) ||
+          canonicalize(body.token.route) !==
+            canonicalize(admitted.record.ingress.replyTarget)
+        ) {
+          throw corruptRunJournal(
+            "Conversation channel challenge does not bind its assignment ingress",
+          );
+        }
+        try {
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            context.verifier,
+          ));
+        } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      }
+      case "channel-challenge-delivered":
+      case "channel-challenge-closed":
+        try {
+          state.channelInteractions = await verifyProtocolStep(() => advanceChannelInteractionJournal(
+            state.channelInteractions,
+            body,
+            context.verifier,
+          ));
+        } catch (error) {
+    rethrowUnloadedProtocolIdentity(error);
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return state;
+      case "state": {
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) {
+          throw corruptRunJournal("Run state has no admitted run");
+        }
+        try {
+          context.delivery?.assertConversationStatuses(
+            // Preparation and replay both compare the complete transaction's
+            // status obligations, including batches with non-notifying states.
+            conversationStatusDeliveryInputs(
+              context.conversationId, state, envelope.entries, envelope.at,
+            ),
+            envelope,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error
+              ? `Conversation status delivery is invalid: ${error.message}`
+              : "Conversation status delivery is invalid",
+          );
+        }
+        const current = state.stateByRun.get(body.runId);
+        const mappedAssignmentId = state.assignmentByRun.get(body.runId);
+        const closedEarlierInEnvelope =
+          body.assignmentId !== undefined &&
+          mappedAssignmentId === undefined &&
+          state.closedAssignments.has(body.assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            context.conversationId,
+            body.runId,
+            body.assignmentId,
+          );
+        assertStateReplayContract({
+          currentState: current?.state,
+          currentRevision: current?.statusRevision,
+          nextState: body.state,
+          nextRevision: body.statusRevision,
+          assignmentId: body.assignmentId,
+          assignmentBindingValid:
+            mappedAssignmentId === body.assignmentId || closedEarlierInEnvelope,
+          unassignedBindingValid: mappedAssignmentId === undefined,
+          hasAtomicAssignment:
+            current?.state !== "queued" ||
+            body.state !== "dispatched" ||
+            envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "assigned" &&
+                candidate.runId === body.runId &&
+                candidate.assignmentId === body.assignmentId,
+            ),
+        });
+        if (
+          current?.state === "queued" &&
+          (body.state === "cancelled" || body.state === "failed" || body.state === "expired")
+        ) {
+          try {
+            assertQueuedTerminalDequeue(
+              envelope.entries,
+              {
+                kind: "run",
+                id: body.runId,
+                attempt: nextConversationAssignmentAttempt(state, body.runId),
+              },
+              body.state,
+            );
+          } catch (error) {
+            throw corruptRunJournal(
+              error instanceof Error ? error.message : "Queued run resource dequeue is invalid",
+            );
+          }
+        }
+        const committed = state.commits.at(-1);
+        assertStateAtomicReplayContract({
+          currentState: current?.state,
+          nextState: body.state,
+          hasAtomicCancelFence: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "cancel-fence" &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicOpenResolution: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === body.runId &&
+              candidate.fact.subject.assignmentId === body.assignmentId &&
+              candidate.fact.resolution === undefined,
+          ),
+          hasAtomicSupersede: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "assignment-superseded" &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicTermination: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              (candidate.t === "cancel-proof-accepted" ||
+                candidate.t === "assignment-superseded") &&
+              candidate.assignmentId === body.assignmentId &&
+              state.assignedById.get(candidate.assignmentId)?.record.runId ===
+                body.runId,
+          ),
+          hasAtomicResolutionClose: envelopeHasRunRecord(
+            envelope,
+            context.conversationId,
+            (candidate) =>
+              candidate.t === "resolution" &&
+              candidate.runId === body.runId &&
+              candidate.fact.subject.assignmentId === body.assignmentId &&
+              candidate.fact.resolution !== undefined,
+          ),
+          hasAtomicCommit:
+            committed !== undefined &&
+            committed.runId === body.runId &&
+            committed.assignmentId === body.assignmentId &&
+            envelopeContainsCommit(envelope, context.conversationId, committed),
+        });
+        if (
+          body.state === "failed" &&
+          body.assignmentId !== undefined &&
+          !envelopeRevokesRemainingCapabilities(
+            envelope,
+            context.conversationId,
+            state,
+            state.assignedById.get(body.assignmentId)!,
+          )
+        ) {
+          throw corruptRunJournal("Assigned failure is not atomic with capability revocation");
+        }
+        if (body.state === "failed" && body.assignmentId !== undefined) {
+          const assigned = state.assignedById.get(body.assignmentId);
+          if (!assigned) throw corruptRunJournal("Assigned failure has no assignment");
+          if (body.usageFinal) {
+            const usageFinal = body.usageFinal;
+            await verify(() => { context.assertResourceUsageFinal(assigned.record, usageFinal); });
+          }
+          await verify(() => { context.assertResourceTerminalRecords(
+            assigned.record,
+            body.usageFinal ? "settle-release" : "reclaim",
+            envelope.entries,
+          ); });
+        }
+        if (body.state === "uncertain" && current?.state !== "uncertain") {
+          const assignmentId = state.assignmentByRun.get(body.runId);
+          if (
+            !assignmentId ||
+            (current?.state !== "dispatched" &&
+              current?.state !== "running" &&
+              current?.state !== "cancel-requested")
+          ) {
+            throw corruptRunJournal("Uncertain state has no durable active origin");
+          }
+          state.uncertainOrigins.set(assignmentId, current.state);
+        }
+        const nextActiveRunId = nextActiveRunIdForReplay({
+          activeRunId: state.activeRunId,
+          runId: body.runId,
+          currentState: current?.state,
+          nextState: body.state,
+        });
+        if (current?.state === "queued") {
+          removeQueuedRun(state, admitted.record.queuedPosition, body.runId);
+        }
+        if (body.state === "queued") {
+          addQueuedRun(state, admitted.record.queuedPosition, body.runId);
+        }
+        state.activeRunId = nextActiveRunId;
+        state.stateByRun.set(body.runId, {
+          state: body.state,
+          statusRevision: body.statusRevision,
+        });
+        if (body.state === "failed" && body.assignmentId !== undefined) {
+          state.assignmentByRun.delete(body.runId);
+          state.closedAssignments.add(body.assignmentId);
+        }
+        if (
+          body.assignmentId !== undefined &&
+          (body.state === "queued" ||
+            body.state === "cancelled" ||
+            body.state === "failed" ||
+            body.state === "expired")
+        ) {
+          state.recoveryAssignments.delete(body.assignmentId);
+        }
+        const history = state.statusHistoryByRun.get(body.runId) ?? [];
+        if ((history.at(-1)?.statusRevision ?? 0) + 1 !== body.statusRevision) {
+          throw corruptRunJournal("Run status history index is not contiguous");
+        }
+        history.push(projectStatusEntry(body, envelope.at, current?.state,
+          conversationResolutionFactsInEnvelope(envelope, context.conversationId, body.runId)));
+        state.statusHistoryByRun.set(body.runId, history);
+        return state;
+      }
+      case "resolution": {
+        const fact = snapshot(body.fact, "Uncertain resolution fact");
+        const conversationFact = fact as ConversationUncertainResolutionFact;
+        const assigned = state.assignedById.get(conversationFact.subject.assignmentId);
+        // Subject identity self-consistency (openFactDigest over subject/openedAt/cause)
+        // is enforced by the shared record validator; this predicate binds the subject
+        // to the durable authority (conversation, run, owner epoch).
+        assertConversationResolutionBinding({
+          execution: fact.subject.execution,
+          conversationId:
+            fact.subject.execution === "conversation"
+              ? fact.subject.conversationId
+              : undefined,
+          subjectRunId:
+            fact.subject.execution === "conversation" ? fact.subject.runId : undefined,
+          recordRunId: body.runId,
+          authorityConversationId: context.conversationId,
+          subjectOwnerEpoch:
+            fact.subject.execution === "conversation"
+              ? fact.subject.ownerEpoch
+              : undefined,
+          authorityOwnerEpoch: assigned?.record.ownerEpoch,
+        });
+        const currentAssignmentId = state.assignmentByRun.get(body.runId);
+        const closesEarlierInEnvelope =
+          currentAssignmentId === undefined &&
+          state.closedAssignments.has(conversationFact.subject.assignmentId) &&
+          envelopeClosesAssignment(
+            envelope,
+            context.conversationId,
+            body.runId,
+            conversationFact.subject.assignmentId,
+          );
+        if (!assigned) {
+          throw corruptRunJournal("Uncertain resolution fact has no durable assignment");
+        }
+        const existing = state.resolutionsByRun.get(body.runId);
+        const current = state.stateByRun.get(body.runId);
+        if (!conversationFact.resolution) {
+          assertResolutionOpenReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned.record.runId === body.runId,
+            assignmentIsCurrent:
+              currentAssignmentId === conversationFact.subject.assignmentId,
+            currentState: current?.state,
+            alreadyOpen: isOpenResolutionFact(existing),
+            cause: conversationFact.cause,
+            hasAtomicUncertainState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                body.runId,
+                "uncertain",
+                current.statusRevision + 1,
+                conversationFact.subject.assignmentId,
+              ),
+            hasAtomicDispatchConflict: envelopeHasRunRecord(
+              envelope,
+              context.conversationId,
+              (candidate) =>
+                candidate.t === "dispatch-conflict" &&
+                candidate.assignmentId === conversationFact.subject.assignmentId &&
+                candidate.handling === "opened-uncertain",
+            ),
+          });
+        } else {
+          assertResolutionClosureReplayContract({
+            assignmentExists: assigned !== undefined,
+            assignmentBindsRun: assigned.record.runId === body.runId,
+            assignmentIsCurrentOrAtomicallyClosed:
+              currentAssignmentId === conversationFact.subject.assignmentId ||
+              closesEarlierInEnvelope,
+            conflictOpen: conversationFact.cause === "dispatch-conflict",
+            resolutionKind: conversationFact.resolution.kind,
+          });
+          const nextState = resolutionTargetState(conversationFact.resolution.kind);
+          assertResolutionCloseAtomicReplayContract({
+            cause: conversationFact.cause,
+            kind: conversationFact.resolution.kind,
+            existingOpenMatches:
+              existing?.openFactDigest === conversationFact.openFactDigest &&
+              existing.resolution === undefined,
+            hasAtomicTargetState:
+              current !== undefined &&
+              envelopeHasRunState(
+                envelope,
+                context.conversationId,
+                body.runId,
+                nextState,
+                current.statusRevision + (current.state === "uncertain" ? 1 : 0),
+                conversationFact.subject.assignmentId,
+              ),
+            allCapabilitiesRevoked: envelopeRevokesRemainingCapabilities(
+              envelope,
+              context.conversationId,
+              state,
+              assigned,
+            ),
+            hasRequiredCompanion:
+              (conversationFact.resolution.kind !==
+                "proven-not-started-redispatched" ||
+                envelopeHasRunRecord(
+                  envelope,
+                  context.conversationId,
+                  (candidate) =>
+                    candidate.t === "assignment-superseded" &&
+                    candidate.assignmentId === conversationFact.subject.assignmentId,
+                )) &&
+              (!conversationFact.resolution.kind.startsWith("user-") ||
+                envelopeHasSuccessfulUncertainControl(
+                  envelope,
+                  nextState,
+                  conversationFact.resolution.factDigest,
+                  envelope.lsn,
+                )),
+          });
+          if (conversationFact.resolution.kind.startsWith("user-")) {
+            await verify(() => { context.assertResourceTerminalRecords(
+              assigned.record,
+              "reclaim",
+              envelope.entries,
+            ); });
+          }
+        }
+        state.resolutionsByRun.set(body.runId, conversationFact);
+        if (conversationFact.resolution) {
+          state.closedAssignments.add(conversationFact.subject.assignmentId);
+          if (state.assignmentByRun.get(body.runId) === conversationFact.subject.assignmentId) {
+            state.assignmentByRun.delete(body.runId);
+          }
+        }
+        return state;
+      }
+      case "advancement-event": return reduceConversationSessionFact(context, state, body, envelope, envelope.lsn);
+      case "committed": {
+        const assigned = state.assignedById.get(body.assignmentId);
+        const current = assigned
+          ? state.stateByRun.get(assigned.record.runId)
+          : undefined;
+        const openResolution = state.resolutionsByRun.get(body.runId);
+        assertCommittedReplayContract({
+          assignmentExists: assigned !== undefined,
+          assignmentBindsRun: assigned?.record.runId === body.runId,
+          assignmentIsCurrent: state.assignmentByRun.get(body.runId) === body.assignmentId,
+          currentState: current?.state,
+          alreadyCommitted: state.committedByAssignment.has(body.assignmentId),
+          conflictOpen:
+            openResolution?.cause === "dispatch-conflict" && !openResolution.resolution,
+          commitRevisionMatchesAssignedBase:
+            assigned !== undefined &&
+            body.commitRevision === assigned.record.baseRevision + 1,
+          hasAtomicCommittedState:
+            current !== undefined &&
+            envelopeHasRunState(
+              envelope,
+              context.conversationId,
+              body.runId,
+              "committed",
+              current.statusRevision + 1,
+              body.assignmentId,
+            ),
+          allCapabilitiesRevoked:
+            assigned !== undefined &&
+            envelopeRevokesRemainingCapabilities(
+              envelope,
+              context.conversationId,
+              state,
+              assigned,
+            ),
+        });
+        if (!assigned || !current) {
+          throw corruptRunJournal(
+            "Committed run does not match a complete unique assignment closure",
+          );
+        }
+        const previous = state.commits.at(-1);
+        if (
+          previous &&
+          body.commitRevision !== previous.commitRevision + 1
+        ) {
+          throw corruptRunJournal("Committed run revision is not contiguous");
+        }
+        const bytes = await context.artifacts.get(body.bundle.ref);
+        const bundle = validateConversationSealedBundle(
+          JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
+        );
+        assertHistoricalBundleFence({
+          assignedExecutorId: assigned.record.executorId,
+          assignedOwnerEpoch: assigned.record.ownerEpoch,
+          assignedBaseRevision: assigned.record.baseRevision,
+          bundleExecutorId: bundle.executorId,
+          bundleOwnerEpoch: bundle.body.ownerEpoch,
+          bundleBaseRevision: bundle.body.baseRevision,
+          conflictOpen:
+            openResolution?.cause === "dispatch-conflict" &&
+            openResolution.resolution === undefined,
+        });
+        if (
+          canonicalize(sealedBundleArtifact(bundle).ref) !== canonicalize(body.bundle.ref) ||
+          bundle.assignmentId !== body.assignmentId ||
+          bundle.body.runId !== body.runId ||
+          bundle.body.conversationId !== context.conversationId ||
+          bundle.body.baseRevision + 1 !== body.commitRevision
+        ) {
+          throw corruptRunJournal("Committed bundle does not bind its run journal fact");
+        }
+        await verify(() => { context.assertResourceUsageFinal(assigned.record, bundle.usageFinal); });
+        await verify(() => { context.assertResourceTerminalRecords(
+          assigned.record,
+          "settle-release",
+          envelope.entries,
+        ); });
+        const admitted = state.admittedByRun.get(body.runId);
+        if (!admitted) throw corruptRunJournal("Committed run has no durable ingress");
+        let closure: ValidatedConversationBundleClosure | ValidatedConversationReplayClosure;
+        try {
+          if (state.openInputAssignments.get(body.runId) === body.assignmentId) throw Error('Run input must close before commit');
+          closure = admitted.record.ingress.kind !== 'channel' && !admitted.record.ingress.turnOrigin?.worksceneContinuation
+            ? await validateConversationBundleClosure(bundle, context.artifacts, expectedRunInputMessages(state, body.runId, body.assignmentId))
+            : await validateConversationBundleClosure(bundle, context.artifacts);
+          validateWorksceneContinuationCommit('metadata' in closure ? closure.metadata : closure.runRecord, requireAssignedEnvelope(assigned).work);
+          if (!('metadata' in closure)) assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
+        } catch (error) {
+          if (isOperationalArtifactFailure(error)) throw error;
+          throw corruptRunJournal(
+            error instanceof Error
+              ? `Committed bundle closure is invalid: ${error.message}`
+              : "Committed bundle closure is invalid",
+          );
+        }
+        if (
+          !envelopeHasConversationCommitSidecars(
+            envelope,
+            context.conversationId,
+            body,
+            bundle,
+            closure.batch,
+          )
+        ) {
+          throw corruptRunJournal(
+            "Committed run is missing its content, publish, or final sidecars",
+          );
+        }
+        const committedMetadata = 'metadata' in closure ? closure.metadata : closure.runRecord;
+        try {
+          context.delivery?.assertConversationCommit(
+            {
+              at: envelope.at,
+              conversationId: context.conversationId,
+              runId: body.runId,
+              assignmentId: body.assignmentId,
+              commitRevision: body.commitRevision,
+              conversationLifecycleSource: {
+                owner: "conversation",
+                id: `${context.conversationId}:${body.runId}`,
+                revision: String(body.commitRevision),
+              },
+              assignmentLifecycleSource: {
+                owner: "assignment",
+                id: `${assigned.record.executorId === context.currentAuthority?.executorId ? "local" : "relay"}:${body.assignmentId}`,
+                revision: assigned.record.dispatchDigest,
+              },
+              ingress: admitted.record.ingress,
+              runRecord: committedMetadata,
+              ...(closure.batch ? { mutationBatch: closure.batch } : {}),
+            },
+            envelope,
+          );
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error
+              ? `Committed delivery companions are invalid: ${error.message}`
+              : "Committed delivery companions are invalid",
+          );
+        }
+        const expectedSummary = conversationCommitSummary(committedMetadata);
+        const { controlRecovery: _recovery, ...legacySummary } = expectedSummary;
+        if (body.readSummary && canonicalize(body.readSummary) !== canonicalize(body.readSummary.controlRecovery === undefined ? legacySummary : expectedSummary)) {
+          throw corruptRunJournal('Committed read summary does not match its authoritative record');
+        }
+        state.committedByAssignment.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.add(body.assignmentId);
+        state.commits.push(body);
+        state.assignmentByCommitRevision.set(body.commitRevision, body.assignmentId);
+        state.pendingCommitProjections.set(body.assignmentId, body);
+        if (!('metadata' in closure) && (closure.runRecord.postTurnControl || state.admittedByRun.get(closure.runRecord.runId)?.record.ingress.turnOrigin?.worksceneContinuation)) {
+          const advancementSessionId = state.activeAdvancementSessionId ?? [...state.advancementSessions.values()].find((session) => session.status === "active")?.id;
+          state.worksceneControls.set(closure.runRecord.runId, {
+            record: snapshot(closure.runRecord, "Committed workscene control"),
+            ...(advancementSessionId ? { advancementSessionId } : {}),
+          });
+        }
+        applyCommittedSessionMutations(state, closure.batch?.records ?? []);
+        state.lastActiveAt = envelope.at;
+        return state;
+      }
+      case "bundle-ack-observed": {
+        const committed = state.committedByAssignment.get(body.assignmentId);
+        if (
+          !committed ||
+          state.bundleAcknowledgements.has(body.assignmentId) ||
+          !bundleAcknowledgementBindsCommitted({
+            observedBundleRef: body.bundleRef,
+            observedCommitRevision: body.commitRevision,
+            expectedBundleRef: committed.bundle.ref,
+            expectedCommitRevision: committed.commitRevision,
+          })
+        ) {
+          throw corruptRunJournal(
+            "Bundle acknowledgement observation does not bind one committed conversation bundle",
+          );
+        }
+        state.bundleAcknowledgements.set(body.assignmentId, body);
+        state.recoveryAssignments.delete(body.assignmentId);
+        state.bundleAcknowledgementOutbox.delete(body.assignmentId);
+        return state;
+      }
+    }
+
+}
+
+function requireLocalAssignedCommit(assigned: { readonly commit?: { readonly lsn: number; readonly envelopeDigest: string; readonly at: string } }) {
+  if (!assigned.commit) throw corruptRunJournal('Imported historical assignment cannot obtain a local activation');
+  return assigned.commit;
+}
+
+export async function reduceConversationSessionFact(context: Pick<ConversationRunReductionContext, 'conversationId' | 'artifacts' | 'verifier'>,
+  state: RunProjection, body: Extract<ConversationRunJournalRecord, {t:'session-meta'|'session-control'|'session-lifecycle'|'advancement-event'}>,
+  envelope: ConversationFactGroup, sourceLsn: number): Promise<RunProjection> {
+  switch(body.t) {
+      case "session-meta": {
+        assertWorksceneIdentity(context.conversationId, body.sceneId);
+        const current = state.sessionMeta;
+        if (
+          body.domainRevision !== state.domainRevision + 1 ||
+          state.sessionMetaByRequest.has(body.requestId) ||
+          (body.operation === "create" && current !== undefined) ||
+          (body.operation !== "create" &&
+            (!current || current.sceneId !== body.sceneId)) ||
+          (body.operation !== "delete" && state.deleted) ||
+          (current !== undefined &&
+            Date.parse(body.lastActiveAt) < Date.parse(current.lastActiveAt))
+        ) {
+          throw corruptRunJournal(
+            "Session metadata transition is not the unique next owner mutation",
+          );
+        }
+        if (
+          !envelopeContainsSessionActivity(
+            envelope,
+            context.conversationId,
+            body,
+          )
+        ) {
+          throw corruptRunJournal(
+            "Session metadata transition lacks its atomic activity fact",
+          );
+        }
+        state.domainRevision = body.domainRevision;
+        state.sessionMeta = body;
+        state.sessionMetaByRequest.set(body.requestId, body);
+        if (body.operation === "delete") {
+          state.deleted = true;
+          state.pendingLifecycleProjections.set(body.domainRevision, {
+            mutation: "delete",
+            domainRevision: body.domainRevision,
+            requestId: body.requestId,
+          });
+        }
+        return state;
+      }
+      case "session-control": {
+        const digest = protocolDigest("SessionControlMutation", 1, body.mutation);
+        const existing = state.sessionMutationDigests.get(body.requestId);
+        if (existing !== undefined) {
+          if (existing.digest !== digest || existing.domainRevision !== body.domainRevision) {
+            throw corruptRunJournal(
+              "Session mutation request is already bound to another payload",
+            );
+          }
+          return state;
+        }
+        if (body.domainRevision !== state.domainRevision + 1 || state.deleted) {
+          throw corruptRunJournal("Session mutation revision or terminal state is invalid");
+        }
+        state.domainRevision = body.domainRevision;
+        state.sessionMutationDigests.set(body.requestId, {
+          digest,
+          domainRevision: body.domainRevision,
+        });
+        if (body.mutation.kind === 'task-list-op') state.taskListRequestIds.add(body.requestId);
+        applyProjectedSessionMutation(state, body.mutation);
+        state.lastActiveAt = envelope.at;
+        return state;
+      }
+      case "session-lifecycle": {
+        if (
+          body.domainRevision !== state.domainRevision + 1 ||
+          state.deleted ||
+          state.lifecycleByRequest.has(body.requestId)
+        ) {
+          throw corruptRunJournal("Session lifecycle revision or terminal state is invalid");
+        }
+        state.domainRevision = body.domainRevision;
+        state.lifecycleByRequest.set(body.requestId, body);
+        state.pendingLifecycleProjections.set(body.domainRevision, body);
+        if (body.mutation === "clear") {
+          state.clearedThroughLsn = sourceLsn;
+          state.clearedThroughRevision = body.domainRevision;
+          state.taskList = { items: [] };
+          state.segments.length = 0;
+        } else {
+          state.deleted = true;
+        }
+        state.lastActiveAt = envelope.at;
+        return state;
+      }
+      case "advancement-event": {
+        const rawEvent = await loadStored(body.event, context.artifacts);
+        const event = await verifyProtocolStep(() => {
+          if (!isAdvancementControlEvent(rawEvent, context.verifier)) throw corruptRunJournal("Run journal contains an invalid advancement event");
+          return rawEvent;
+        });
+        try {
+          assertAdvancementEventBatchLegal(state.advancementSessions, [event]);
+        } catch (error) {
+          throw corruptRunJournal(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        const existingWrite = state.advancementWrites.get(body.requestId);
+        if (existingWrite) {
+          if (
+            existingWrite.domainRevision !== body.domainRevision ||
+            existingWrite.eventsDigest !== body.eventsDigest
+          ) {
+            throw corruptRunJournal(
+              "Advancement write identity has conflicting durable payloads",
+            );
+          }
+        } else {
+          if (body.domainRevision <= state.domainRevision) {
+            throw corruptRunJournal(
+              "Advancement event domain revision is not monotonic",
+            );
+          }
+          state.advancementWrites.set(body.requestId, {
+            domainRevision: body.domainRevision,
+            eventsDigest: body.eventsDigest,
+          });
+          state.domainRevision = body.domainRevision;
+        }
+        if (event.type === "submission_settled") {
+          if (event.conversationId !== context.conversationId || body.requestId !== advancementSubmissionRequestId(context.conversationId, event.receipt.identity.surfacePrincipal, event.receipt.identity.submissionId)) throw corruptRunJournal("Advancement submission identity mismatch");
+          const write = state.advancementWrites.get(body.requestId)!;
+          if (write.receipt && canonicalize(write.receipt) !== canonicalize(event.receipt)) throw corruptRunJournal("Conflicting advancement receipt");
+          state.advancementWrites.set(body.requestId, { ...write, receipt: structuredClone(event.receipt) });
+        }
+        applyAdvancementEvent(state.advancementSessions, event);
+        state.activeAdvancementSessionId = [...state.advancementSessions.values()].find(session => session.status === "active")?.id;
+        return state;
+      }
+  }
+}
+/** Imported commits reuse the conversation body/closure contract. Frozen source
+ * resource settlement and delivery companions are not target-side effects. */
+export async function validateImportedConversationCommit(context: Pick<ConversationRunReductionContext, 'conversationId'|'artifacts'|'verifier'>,
+  state: RunProjection, body: Extract<ConversationRunJournalRecord,{t:'committed'}>, group: AuthenticatedConversationFacts): Promise<void> {
+  if (!isAuthenticatedConversationFacts(group) || group.source.manifest.conversationId !== context.conversationId) throw corruptRunJournal('Imported commit has no authenticated conversation scope');
+  const assigned = state.assignedById.get(body.assignmentId);
+  if (!assigned || assigned.record.runId !== body.runId) throw corruptRunJournal('Imported commit has no matching assignment');
+  group.assertAssignment(assigned.record);
+  const binding = await loadCommittedBundleBinding(group, context.artifacts, candidate => candidate.assignmentId === body.assignmentId);
+  const bundle = binding.bundle, open = state.resolutionsByRun.get(body.runId);
+  assertHistoricalBundleFence({ assignedExecutorId: assigned.record.executorId, assignedOwnerEpoch: assigned.record.ownerEpoch,
+    assignedBaseRevision: assigned.record.baseRevision, bundleExecutorId: bundle.executorId, bundleOwnerEpoch: bundle.body.ownerEpoch,
+    bundleBaseRevision: bundle.body.baseRevision, conflictOpen: open?.cause === 'dispatch-conflict' && open.resolution === undefined });
+  if (bundle.body.conversationId !== context.conversationId || bundle.body.runId !== body.runId || bundle.body.baseRevision + 1 !== body.commitRevision) throw corruptRunJournal('Imported bundle does not bind its conversation revision');
+  const admitted = state.admittedByRun.get(body.runId);
+  if (!admitted || state.openInputAssignments.get(body.runId) === body.assignmentId) throw corruptRunJournal('Imported committed input is missing or still open');
+  const closure = admitted.record.ingress.kind !== 'channel' && !admitted.record.ingress.turnOrigin?.worksceneContinuation
+    ? await validateConversationBundleClosure(bundle, context.artifacts, expectedRunInputMessages(state, body.runId, body.assignmentId))
+    : await validateConversationBundleClosure(bundle, context.artifacts);
+  validateWorksceneContinuationCommit('metadata' in closure ? closure.metadata : closure.runRecord, requireAssignedEnvelope(assigned).work);
+  if (!('metadata' in closure)) assertRunInputCommit(state, body.runId, body.assignmentId, closure.runRecord.messages);
+  if (!envelopeHasConversationCommitSidecars(group as ConversationFactGroup, context.conversationId, body, bundle, closure.batch)) throw corruptRunJournal('Imported commit has incomplete conversation sidecars');
+  applyCommittedSessionMutations(state, closure.batch?.records ?? []);
 }

@@ -9,7 +9,7 @@ import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
 import { RecoveryRoot } from "../recovery-root.js";
 import { applyTrustEvent, buildHomeTrustRecord, createDomainResetEvent, createRecoveryRootEvent,
   createSignedTrustEvent, createTrustGenesisEvent, initializeTrustChain, replayTrustChain, type TrustProjection } from "../trust-chain.js";
-import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord, readTrustIdentity } from "../trust-current-index.js";
+import { currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord, readTrustIdentity, readAnchorTenureAt, readCurrentAnchorTenure } from "../trust-current-index.js";
 
 const logs: FileAuthorityCommitLog[] = [];
 afterEach(async () => { await Promise.all(logs.splice(0).map(log => log.stopStorageMaintenance())); });
@@ -26,13 +26,13 @@ async function fixture() {
   const issuer = await device("issuer");
   const genesis = createTrustGenesisEvent({ homeId: "b2-home", issuer: issuer.identity, signer: issuer.key, at });
   let state: TrustProjection = initializeTrustChain(genesis);
-  async function append(event: HomeTrustEvent, next: TrustProjection) {
+  async function append(event: HomeTrustEvent, next: TrustProjection, signer = issuer.key) {
     const result = await log.append([{ stream: "trust", body: { t: "home-trust-event", event } },
-      { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(next, issuer.key) } }]);
+      { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(next, signer) } }]);
     state = next; return result;
   }
   await append(genesis, state);
-  return { log, issuer, genesis, get state() { return state; }, append,
+  return { log, root, issuer, genesis, get state() { return state; }, append,
     async event(body: HomeTrustEventBody) {
       const event = createSignedTrustEvent({ current: state, body, at, signer: issuer.key });
       return append(event, applyTrustEvent(state, event));
@@ -76,6 +76,7 @@ it("represents reset without rewriting every historical member and re-enrolls by
     { stream: "trust", body: { t: "home-trust-event", event: nextRoot } },
     { stream: "trust", body: { t: "home-trust-record", record: buildHomeTrustRecord(nextState, f.issuer.key) } }]);
   expect((await f.read())?.members).toHaveLength(1);
+  expect((await f.read())?.anchorEpoch).toBe(1);
   const reenroll = createSignedTrustEvent({ current: nextState, body: { t: "reenroll", deviceId: peer.key.deviceId }, signer: f.issuer.key, at });
   await f.append(reenroll, applyTrustEvent(nextState, reenroll));
   expect((await f.read())?.members.map(member => member.device.deviceId).sort()).toEqual([f.issuer.key.deviceId, peer.key.deviceId].sort());
@@ -129,3 +130,36 @@ it("matches a full chain replay at every step and reads the latest signed record
 function genesisOf(f: Awaited<ReturnType<typeof fixture>>): HomeTrustEvent {
   return f.genesis;
 }
+
+it('derives distinct A to B to A tenures, historical bases and disaster succession across restart', async () => {
+  const f = await fixture(), b = await device('next-anchor');
+  await f.event({ t: 'enroll', device: b.identity, roles: ['anchor', 'executor'] });
+  const original = await f.log.checkpoint();
+  const move = async (to: typeof b, from: DeviceKey, recovery?: RecoveryRoot) => {
+    const event = createSignedTrustEvent({ current: f.state, at, signer: recovery ?? from,
+      body: { t: 'issuer-transition', nextTrustEpoch: f.state.trustEpoch + 1,
+        fromIssuerKeyId: f.state.issuer.issuerKeyId, toIssuerKeyId: to.key.deviceId, toDeviceId: to.key.deviceId,
+        ...(recovery ? { reason: 'disaster-recovery', signedBy: 'recovery-root' } as const : { reason: 'migration', signedBy: 'issuer' } as const) } });
+    await f.append(event, applyTrustEvent(f.state, event), to.key);
+  };
+  await move(b, f.issuer.key);
+  const second = await f.log.checkpoint();
+  expect((await f.read())?.anchorEpoch).toBe(2);
+  await move(f.issuer, b.key);
+  expect((await f.read())?.anchorEpoch).toBe(3);
+  const recovery = RecoveryRoot.generate();
+  const establish = createRecoveryRootEvent({ current: f.state, op: 'establish', candidate: recovery, outerSigner: f.issuer.key, at });
+  await f.append(establish, applyTrustEvent(f.state, establish));
+  await move(b, f.issuer.key, recovery);
+  expect((await f.read())?.anchorEpoch).toBe(4);
+  await f.log.stopStorageMaintenance();
+  const restarted = new FileAuthorityCommitLog(path.join(f.root, 'authority'), new FileArtifactStore(path.join(f.root, 'artifacts')),
+    { integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 83)) });
+  logs.push(restarted); currentTrustIndex(restarted);
+  await restarted.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async view => {
+    expect(await readAnchorTenureAt(view, original)).toMatchObject({ anchorEpoch: 1, deviceId: f.issuer.key.deviceId });
+    expect(await readAnchorTenureAt(view, second)).toMatchObject({ anchorEpoch: 2, deviceId: b.key.deviceId });
+    expect(await readCurrentAnchorTenure(view)).toMatchObject({ anchorEpoch: 4, deviceId: b.key.deviceId });
+    return { kind: 'return', value: undefined };
+  });
+}, 30_000);

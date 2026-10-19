@@ -12,6 +12,7 @@ import {
   validateAnchorTransferResult,
   type ProtocolSignatureVerifier,
 } from "@zhixing/core/protocol";
+import type { CurrentTrustProjection } from "@zhixing/mesh/trust-chain";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { currentMaintenanceAbortSignal } from "@zhixing/core/resources";
@@ -47,7 +48,7 @@ export const PLANNED_ANCHOR_TRANSFER_ASSEMBLY_DESCRIPTOR = Object.freeze({
   ]),
   sourcePhases: Object.freeze(["probe", "read-range"]),
   order: Object.freeze(["ready", "prepare", "freeze", "import", "commit"]),
-  trustReconciliation: "single-planned-issuer-transition",
+  trustReconciliation: "verified-contiguous-trust-prefix",
   readinessReservation: "target-lifecycle",
 });
 
@@ -64,9 +65,10 @@ interface SummaryRequest {
 }
 
 interface TrustReconciliationRequest {
-  readonly v: 1;
+  readonly v: 1 | 2;
   readonly homeId: string;
   readonly chainHead: HomeTrustRecord["chainHead"];
+  readonly through?: HomeTrustRecord["chainHead"];
 }
 
 interface TrustReconciliationResult {
@@ -315,7 +317,7 @@ export function registerPlannedAnchorTransferSourceMeshService(
   });
 }
 
-/** Replays only the single planned issuer transition missed by an authenticated peer. */
+/** Existing authenticated reconciliation route; v2 carries bounded contiguous pages. */
 export function registerPlannedAnchorTrustReconciliationService(
   registry: MeshServiceRegistry,
   options: {
@@ -329,6 +331,7 @@ export function registerPlannedAnchorTrustReconciliationService(
     authorize: (connection) => options.authorizePeer(connection.peer.deviceId),
     handler: async (payload) => {
       const request = trustReconciliationRequest(decode(payload));
+      if (request.v === 2) return encode({ v: 2, ...await options.store.trustReconciliationPage(request) });
       const events = await options.store.loadTrustEvents();
       const record = await options.store.loadTrustRecord();
       if (!record || record.homeId !== request.homeId) {
@@ -358,42 +361,68 @@ export function registerPlannedAnchorTrustReconciliationService(
   });
 }
 
-export async function reconcilePlannedAnchorTrustFromPeer(
+type TrustPage = Awaited<ReturnType<FileMeshBootstrapStore['trustReconciliationPage']>>;
+const trustCatchUps = new WeakMap<FileMeshBootstrapStore, Promise<CurrentTrustProjection>>();
+
+export function reconcilePlannedAnchorTrustFromPeer(
   client: MeshServiceClient,
-  options: {
-    readonly store: FileMeshBootstrapStore;
-    readonly localDeviceId: string;
-  },
-): Promise<HomeTrustRecord> {
-  const local = await options.store.loadTrustRecord();
-  if (!local) throw new Error("Local trust record is unavailable");
-  const result = trustReconciliationResult(decode(await client.request(
-    PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE,
-    encode({
-      v: 1,
-      homeId: local.homeId,
-      chainHead: local.chainHead,
-    } satisfies TrustReconciliationRequest),
-    currentMaintenanceAbortSignal(),
-  )));
-  if (result.record.homeId !== local.homeId) {
-    throw new Error("Planned anchor trust reconciliation returned another home");
+  options: { readonly store: FileMeshBootstrapStore; readonly localDeviceId: string },
+): Promise<CurrentTrustProjection> {
+  const pending = trustCatchUps.get(options.store);
+  if (pending) return pending;
+  const work = reconcileTrustFromPeer(client, options);
+  trustCatchUps.set(options.store, work);
+  void work.finally(() => { if (trustCatchUps.get(options.store) === work) trustCatchUps.delete(options.store); }).catch(() => {});
+  return work;
+}
+
+async function reconcileTrustFromPeer(client: MeshServiceClient,
+  options: { readonly store: FileMeshBootstrapStore; readonly localDeviceId: string }): Promise<CurrentTrustProjection> {
+  for (;;) {
+    currentMaintenanceAbortSignal().throwIfAborted();
+    const local = await options.store.trustReconciliationProgress();
+    if (!local?.complete) throw new Error('Local complete trust prefix is unavailable');
+    let cursor = local.chainHead;
+    let through: HomeTrustRecord['chainHead'] | undefined;
+    let bytes = 0;
+    const events: HomeTrustEvent[] = [];
+    for (;;) {
+      const page = trustReconciliationPage(decode(await client.request(
+        PLANNED_ANCHOR_TRUST_RECONCILIATION_SERVICE,
+        encode({ v: 2, homeId: local.homeId, chainHead: cursor, ...(through ? { through } : {}) }),
+        currentMaintenanceAbortSignal(),
+      )));
+      if (through && canonicalize(page.target) !== canonicalize(through)) throw new TypeError('Trust reconciliation changed its signed target');
+      if (page.target.seq < cursor.seq) {
+        if (through || page.events.length || page.record) throw new TypeError('Trust reconciliation regressed within a group');
+        return requireCurrentTrust(options.store);
+      }
+      through = page.target;
+      for (const event of page.events) {
+        if (event.homeId !== local.homeId || event.seq !== cursor.seq + 1 || event.prevEventDigest !== cursor.eventDigest)
+          throw new TypeError('Trust reconciliation skips or conflicts with an event');
+        cursor = { seq: event.seq, eventDigest: protocolEventDigest(event) };
+        bytes += Buffer.byteLength(canonicalize(event));
+        if (bytes > 16 * 1024 * 1024) throw new TypeError('Trust reconciliation exceeds the native frame bound');
+        events.push(event);
+      }
+      if (cursor.seq > through.seq || page.done !== (canonicalize(cursor) === canonicalize(through)) || (!page.done && !page.events.length))
+        throw new TypeError('Trust reconciliation page makes no contiguous progress');
+      if (!page.done) { if (page.record) throw new TypeError('Trust record arrived before its chain'); continue; }
+      if (events.length) {
+        if (!page.record) throw new TypeError('Trust reconciliation has no closing signed record');
+        await options.store.reconcileTrustPage({ homeId: local.homeId, previous: local.chainHead, events, record: page.record });
+      }
+      if (page.latest.seq === cursor.seq) return requireCurrentTrust(options.store);
+      break;
+    }
   }
-  if (result.record.chainHead.seq < local.chainHead.seq) return local;
-  if (
-    result.record.chainHead.seq === local.chainHead.seq &&
-    result.record.chainHead.eventDigest !== local.chainHead.eventDigest
-  ) {
-    throw new Error("Planned anchor trust reconciliation returned a conflicting chain head");
-  }
-  await options.store.reconcileTrustSuffix({
-    events: result.events,
-    record: result.record,
-    localDeviceId: options.localDeviceId,
-  });
-  const reconciled = await options.store.loadTrustRecord();
-  if (!reconciled) throw new Error("Reconciled planned anchor trust record is unavailable");
-  return reconciled;
+}
+
+async function requireCurrentTrust(store: FileMeshBootstrapStore): Promise<CurrentTrustProjection> {
+  const current = await store.loadCurrentTrust();
+  if (!current) throw new Error('Reconciled trust is unavailable');
+  return current;
 }
 
 function readyRequest(input: unknown): ReadyRequest {
@@ -450,50 +479,36 @@ function summaryRequest(input: unknown): SummaryRequest {
   return value as unknown as SummaryRequest;
 }
 
+function trustHead(value: unknown): asserts value is HomeTrustRecord['chainHead'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Invalid trust chain head');
+  const head = value as Record<string, unknown>;
+  if (canonicalize(Object.keys(head).sort()) !== canonicalize(['eventDigest', 'seq']) ||
+      !Number.isSafeInteger(head.seq) || (head.seq as number) < 1 || typeof head.eventDigest !== 'string')
+    throw new TypeError('Invalid trust chain head');
+}
+
 function trustReconciliationRequest(input: unknown): TrustReconciliationRequest {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("Planned anchor trust reconciliation request must be an object");
-  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError('Invalid trust reconciliation request');
   const value = input as Record<string, unknown>;
-  if (
-    canonicalize(Object.keys(value).sort()) !== canonicalize(["chainHead", "homeId", "v"]) ||
-    value.v !== 1 ||
-    typeof value.homeId !== "string" ||
-    value.chainHead === null ||
-    typeof value.chainHead !== "object" ||
-    Array.isArray(value.chainHead)
-  ) {
-    throw new TypeError("Planned anchor trust reconciliation request fields are invalid");
-  }
-  const chainHead = value.chainHead as Record<string, unknown>;
-  if (
-    canonicalize(Object.keys(chainHead).sort()) !== canonicalize(["eventDigest", "seq"]) ||
-    !Number.isSafeInteger(chainHead.seq) ||
-    (chainHead.seq as number) < 0 ||
-    typeof chainHead.eventDigest !== "string"
-  ) {
-    throw new TypeError("Planned anchor trust reconciliation chain head is invalid");
-  }
+  const keys = ['chainHead', 'homeId', 'v', ...(value.through !== undefined ? ['through'] : [])].sort();
+  if (canonicalize(Object.keys(value).sort()) !== canonicalize(keys) || (value.v !== 1 && value.v !== 2) ||
+      typeof value.homeId !== 'string' || (value.v === 1 && value.through !== undefined)) throw new TypeError('Invalid trust reconciliation request fields');
+  trustHead(value.chainHead);
+  if (value.through !== undefined) trustHead(value.through);
   return value as unknown as TrustReconciliationRequest;
 }
 
-function trustReconciliationResult(input: unknown): TrustReconciliationResult {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("Planned anchor trust reconciliation result must be an object");
-  }
+function trustReconciliationPage(input: unknown): TrustPage {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new TypeError('Invalid trust reconciliation response');
   const value = input as Record<string, unknown>;
-  if (
-    canonicalize(Object.keys(value).sort()) !== canonicalize(["events", "record", "v"]) ||
-    value.v !== 1 ||
-    !Array.isArray(value.events) ||
-    value.events.length > 1 ||
-    value.record === null ||
-    typeof value.record !== "object" ||
-    Array.isArray(value.record)
-  ) {
-    throw new TypeError("Planned anchor trust reconciliation result fields are invalid");
-  }
-  return value as unknown as TrustReconciliationResult;
+  const keys = ['done', 'events', 'latest', 'target', 'v', ...(value.record !== undefined ? ['record'] : [])].sort();
+  if (canonicalize(Object.keys(value).sort()) !== canonicalize(keys) || value.v !== 2 || typeof value.done !== 'boolean' ||
+      !Array.isArray(value.events) || value.events.length > 16 ||
+      (value.record !== undefined && (!value.record || typeof value.record !== 'object' || Array.isArray(value.record))))
+    throw new TypeError('Invalid trust reconciliation response fields');
+  trustHead(value.target); trustHead(value.latest);
+  if (value.latest.seq < value.target.seq) throw new TypeError('Trust reconciliation target exceeds current head');
+  return value as unknown as TrustPage;
 }
 
 function protocolEventDigest(event: HomeTrustEvent): string {

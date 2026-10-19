@@ -20,7 +20,7 @@ import type {
   WindowCompactInstruction,
   WireContractV1,
 } from "./foundation.js";
-import type { WireSchemaV1 } from "../types/distributed.js";
+import type { WireSchemaV1, WireSchemaIdentity } from "../types/distributed.js";
 import type {
   AssignmentResourceLease,
   AuthorityCapability,
@@ -359,7 +359,9 @@ type DispatchWork<E extends ExecutionKind> = E extends "conversation"
   ? ConversationDispatch
   : JobDispatch;
 
-type DispatchEnvelopeFor<E extends ExecutionKind> = WireContractV1 & {
+type DispatchEnvelopeFor<E extends ExecutionKind> = {
+  v: E extends 'conversation' ? 1 | 2 : 1;
+  anchorEpoch?: E extends 'conversation' ? number : never;
   execution: E;
   assignmentId: string;
   executorId: string;
@@ -374,7 +376,7 @@ type DispatchEnvelopeFor<E extends ExecutionKind> = WireContractV1 & {
   work: DispatchWork<E>;
 };
 
-export type DispatchEnvelope = WireSchemaV1<"DispatchEnvelope"> & {
+export type DispatchEnvelope = WireSchemaIdentity<"DispatchEnvelope"> & {
   [E in ExecutionKind]: DispatchEnvelopeFor<E>;
 }[ExecutionKind];
 
@@ -603,7 +605,9 @@ export interface StreamAck extends WireSchemaV1<"StreamAck"> {
   ackSeq: number;
 }
 
-export interface EvidenceRequest extends WireSchemaV1<"EvidenceRequest"> {
+export interface EvidenceRequest extends WireSchemaIdentity<"EvidenceRequest"> {
+  v: 1 | 2;
+  anchorEpoch?: number;
   requestId: string;
   reviewId: string;
   runId: string;

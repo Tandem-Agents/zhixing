@@ -1383,6 +1383,7 @@ function dispatchControlPreflight(
       ),
     },
     expectedOwnerDeviceId: binding.ownerDeviceId,
+    ...(binding.anchorEpoch === undefined ? {} : { anchorEpoch: binding.anchorEpoch }),
   };
 }
 
@@ -1398,6 +1399,8 @@ function executorRequestPreflight(request: ExecutorRequest): ExecutorControlPref
         activationDigest: request.activationDigest,
       },
       expectedOwnerDeviceId: request.expectedOwnerDeviceId,
+      ...(request.context.principal.kind === 'owner-control' && request.context.principal.grant.anchorEpoch !== undefined
+        ? { anchorEpoch: request.context.principal.grant.anchorEpoch } : {}),
     };
   }
   if (request.method === "cancel" || request.method === "supersede") {

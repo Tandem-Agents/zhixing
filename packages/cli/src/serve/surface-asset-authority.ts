@@ -3,6 +3,8 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import {
   FileArtifactStore,
+  createDurableProjectionOverlay,
+  type ProjectionTransactionContext,
   ArtifactLifecycleIndex,
   AuthorityStorageError,
   DurableProjectionStorageError,
@@ -43,6 +45,11 @@ import {
 } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
+
+import { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext,
+  registerConversationTransferProjection, resolveCurrentConversationAuthorityAt, CONVERSATION_TRANSFER_PROJECTION_ID,
+  type ConversationBaseBinding } from '@zhixing/owner-kernel/conversation-transfer';
+import { conversationAnchorAtPrefix, conversationAnchorProjectionIds } from '@zhixing/owner-kernel/conversation-owner-authority';
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SURFACE_ASSET_PROJECTION_ID = "surface-asset-grants";
@@ -120,6 +127,7 @@ function buildSurfaceAssetAuthority(
     options.artifacts,
     options.anchorEpoch,
     lifecycle,
+    options.verifier,
   );
   const coordinatorOptions: SurfaceAssetCoordinatorOptions = {
     artifacts: options.artifacts,
@@ -160,8 +168,9 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     artifacts: FileArtifactStore,
     private readonly anchorEpoch: number,
     private readonly lifecycle: ArtifactLifecycleIndex,
+    verifier: ProtocolSignatureVerifier,
   ) {
-    this.#grantIndex = registerSurfaceAssetProjection(log, artifacts);
+    this.#grantIndex = registerSurfaceAssetProjection(log, artifacts, verifier);
   }
 
   synchronize(): Promise<void> {
@@ -365,11 +374,7 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
       SURFACE_ASSET_PROJECTION_ID,
       async (current, context) => {
         if (
-          !(await authorizeSurfaceScope(
-            current,
-            record.grant.scope,
-            this.anchorEpoch,
-          ))
+          (await this.#scopeGeneration(current, context, record.grant.scope)) === undefined
         ) {
           return {
             kind: "return",
@@ -393,7 +398,7 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
           entries,
           value: { accepted: true, durableTime },
         };
-      },
+      }, { readProjectionIds: this.#scopeProjections() },
     );
     return transaction.value;
   }
@@ -411,56 +416,51 @@ class SurfaceAssetProjection implements SurfaceAssetGrantLedger {
     }
   }
 
-  async #canDownload(
-    scope: SurfaceAssetScope,
-    refs: readonly ArtifactRef[],
-  ): Promise<boolean> {
-    const generation = await surfaceScopeGeneration(
-      this.#grantIndex,
-      scope,
-      this.anchorEpoch,
-    );
-    if (generation === undefined) return false;
-    const scopeKey = visibilityScopeKey(scope);
-    for (const ref of refs) {
-      const value = await this.#grantIndex.get(
-        surfaceVisibleKey(scopeKey, generation, ref.digest),
-      );
-      if (value === undefined) return false;
-      const visible = storedVisibleArtifact(
-        value,
-        scopeKey,
-        generation,
-        ref.digest,
-      );
-      if (visible.digest !== ref.digest || visible.bytes !== ref.bytes) {
-        return false;
-      }
-    }
-    return true;
+  #scopeProjections(): readonly string[] {
+    return [CONVERSATION_TRANSFER_PROJECTION_ID, ...conversationAnchorProjectionIds(this.log)];
   }
 
-  async authorize(
-    scope: SurfaceAssetScope,
-    anchorEpoch: number,
-  ): Promise<boolean> {
+  async #scopeGeneration(current: DurableProjectionReadContext, context: ProjectionTransactionContext, scope: SurfaceAssetScope): Promise<string | undefined> {
+    let ownerEpoch = this.anchorEpoch;
+    if (scope.domain === 'conversation' && await current.get(conversationBaseKey(scope.conversationId))) {
+      const tenure = await conversationAnchorAtPrefix(this.log, context);
+      if (!tenure || tenure.anchorEpoch !== this.anchorEpoch) return undefined;
+      const owner = await resolveCurrentConversationAuthorityAt(context.readProjection(CONVERSATION_TRANSFER_PROJECTION_ID), scope.conversationId,
+        { deviceId: tenure.deviceId, ownerEpoch: this.anchorEpoch }, tenure);
+      if (owner.state !== 'current') return undefined;
+      ownerEpoch = owner.ownerEpoch;
+    }
+    return surfaceScopeGeneration(current, scope, this.anchorEpoch, ownerEpoch);
+  }
+
+  async #canDownload(scope: SurfaceAssetScope, refs: readonly ArtifactRef[]): Promise<boolean> {
+    return (await this.log.transactDurableProjection(SURFACE_ASSET_PROJECTION_ID, async (current, context) => {
+      const generation = await this.#scopeGeneration(current, context, scope);
+      if (generation === undefined) return { kind: 'return', value: false };
+      const scopeKey = visibilityScopeKey(scope);
+      const binding = scope.domain === 'conversation' ? await current.get(conversationBaseKey(scope.conversationId)) as unknown as ConversationBaseBinding | undefined : undefined;
+      for (const ref of refs) {
+        const value = await current.get(surfaceVisibleKey(scopeKey, generation, ref.digest));
+        const visible = value === undefined && binding
+          ? await (await openConversationBase(this.log, binding)).read(view => view.get('source/visible-asset/' + ref.digest)) as unknown as ArtifactRef | undefined
+          : value === undefined ? undefined : storedVisibleArtifact(value, scopeKey, generation, ref.digest);
+        if (!visible || visible.digest !== ref.digest || visible.bytes !== ref.bytes) return { kind: 'return', value: false };
+      }
+      return { kind: 'return', value: true };
+    }, { readProjectionIds: this.#scopeProjections() })).value;
+  }
+
+  async authorize(scope: SurfaceAssetScope, anchorEpoch: number): Promise<boolean> {
     if (anchorEpoch !== this.anchorEpoch) return false;
-    try {
-      return await authorizeSurfaceScope(
-        this.#grantIndex,
-        scope,
-        this.anchorEpoch,
-      );
-    } catch (error) {
+    const read = async () => (await this.log.transactDurableProjection(SURFACE_ASSET_PROJECTION_ID,
+      async (current, context) => ({ kind: 'return', value: (await this.#scopeGeneration(current, context, scope)) !== undefined }),
+      { readProjectionIds: this.#scopeProjections() })).value;
+    try { return await read(); } catch (error) {
       if (!(error instanceof SurfaceAssetProjectionValueError)) throw error;
-      await this.#grantIndex.rebuild();
-      return authorizeSurfaceScope(
-        this.#grantIndex,
-        scope,
-        this.anchorEpoch,
-      );
+      await this.#grantIndex.rebuild(); return read();
     }
   }
+
 }
 
 const SURFACE_GRANT_TIME_KEY = "meta/durable-time";
@@ -494,26 +494,18 @@ interface SurfaceVisibleProjection {
   readonly ref: ArtifactRef;
 }
 
-async function authorizeSurfaceScope(
-  current: DurableProjectionReadContext,
-  scope: SurfaceAssetScope,
-  anchorEpoch: number,
-): Promise<boolean> {
-  return (await surfaceScopeGeneration(current, scope, anchorEpoch)) !==
-    undefined;
-}
-
 async function surfaceScopeGeneration(
   current: DurableProjectionReadContext,
   scope: SurfaceAssetScope,
   anchorEpoch: number,
+  ownerEpoch = anchorEpoch,
 ): Promise<string | undefined> {
   if (scope.domain === "global") {
     return scope.anchorEpoch === anchorEpoch
       ? `global:${scope.anchorEpoch}`
       : undefined;
   }
-  if (scope.ownerEpoch !== anchorEpoch) return undefined;
+  if (scope.ownerEpoch !== ownerEpoch) return undefined;
   const value = await current.get(
     `${SURFACE_CONVERSATION_PREFIX}${
       encodeProjectionKey(scope.conversationId)
@@ -1280,17 +1272,28 @@ function createGrantId(at: string): string {
   return `grt-${encoded}`;
 }
 
-export function registerSurfaceAssetProjection(log: FileAuthorityCommitLog, artifacts: FileArtifactStore) {
+export function registerSurfaceAssetProjection(log: FileAuthorityCommitLog, artifacts: FileArtifactStore, verifier: ProtocolSignatureVerifier) {
+  registerConversationBaseContext(log, artifacts, verifier);
+  registerConversationTransferProjection(log, verifier);
   return log.durableProjection({
-      projectionId: SURFACE_ASSET_PROJECTION_ID,
-      inputs: { streams: ["control"], families: ["run:"] },
-      reducerVersion: 7,
-      reduce: (envelope, current, source) =>
-        reduceSurfaceAssetIndex(
-          envelope,
-          current,
-          source,
-          artifacts,
-        ),
-    });
+    projectionId: SURFACE_ASSET_PROJECTION_ID,
+    inputs: { streams: ['control'], families: ['run:', 'transfer:'] },
+    reducerVersion: 8,
+    reduce: async (envelope, current, source) => {
+      const seeds = new Map<string, JsonValue | undefined>();
+      await foldConversationBaseBindings(log, envelope.entries, current, seeds, source);
+      for (const entry of envelope.entries) {
+        const body = entry.body as { t?: string; conversationId?: string };
+        if (entry.stream.startsWith('transfer:xfer-') && body.t === 'conversation-transfer-committed-base' && body.conversationId) {
+          // Adoption creates a target-domain surface identity. Historical source
+          // grants and effects stay in the source; visible asset refs are exact
+          // reads from the authenticated immutable base.
+          seeds.set(surfaceConversationKey(body.conversationId), projectionValue({ conversationId: body.conversationId,
+            state: 'active', generation: projectionGeneration(source.checkpoint) } satisfies SurfaceConversationProjection));
+        }
+      }
+      const mutations = await reduceSurfaceAssetIndex(envelope, createDurableProjectionOverlay(current, seeds), source, artifacts);
+      return [...seeds].map(([key, value]): DurableProjectionMutation => value === undefined ? { kind: 'tombstone', key } : { kind: 'put', key, value }).concat(mutations);
+    },
+  });
 }

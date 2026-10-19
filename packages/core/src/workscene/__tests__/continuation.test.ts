@@ -86,9 +86,24 @@ function fixture(sources: WorksceneContinuationSource[]) {
   const claims = new Map<string, "open" | "closed">();
   const port: WorksceneContinuationPort = {
     canRunIsolatedMain: () => true,
-    read: vi.fn(async (id) =>
-      sources.filter((source) => source.conversationId === id),
-    ),
+    read: vi.fn(async (id, query) => {
+      if (query && ('root' in query || 'rootMember' in query)) return sources.filter(source => {
+        const root = 'root' in query ? query.root : query.rootMember;
+        if ('root' in query ? !['queued', 'dispatched', 'running', 'cancel-requested', 'uncertain'].includes(source.state) : source.conversationId !== id) return false;
+        let parent = source.origin?.worksceneContinuation;
+        const seen = new Set<string>();
+        while (parent) {
+          const key = `${parent.conversationId}/${parent.runId}`;
+          if (seen.has(key)) return false; seen.add(key);
+          if (parent.conversationId === root.conversationId && parent.runId === root.runId) return true;
+          parent = sources.find(value => value.conversationId === parent!.conversationId && value.runId === parent!.runId)?.origin?.worksceneContinuation;
+        }
+        return false;
+      });
+      return sources.filter(source => source.conversationId === id && (!query || ('runId' in query
+        ? source.runId === query.runId
+        : source.origin?.worksceneContinuation?.conversationId === query.parent.conversationId && source.origin.worksceneContinuation.runId === query.parent.runId)));
+    }),
     inspect: vi.fn(
       async (id, turn) => claims.get(`${id}/${turn}`) ?? "missing",
     ),

@@ -183,7 +183,7 @@ export function registerConversationTransferMeshService(
     readonly verifier: ProtocolSignatureVerifier;
     readonly clientFor: (deviceId: string) => MeshServiceClient;
     readonly authorizePeer: (deviceId: string) => boolean;
-    readonly afterCommit?: (input: Awaited<ReturnType<ConversationTransferTarget["committedBase"]>>) => Promise<void>;
+    readonly afterCommit?: (input: Awaited<ReturnType<ConversationTransferTarget["committedBaseSource"]>>) => Promise<void>;
     readonly onBackgroundError?: (error: Error) => void;
   },
 ): () => void {
@@ -269,7 +269,7 @@ export function registerConversationTransferMeshService(
           }
           const committed = await options.target.commit(command.transferId);
           if (options.afterCommit) {
-            void options.target.committedBase(command.transferId)
+            void options.target.committedBaseSource(command.transferId)
               .then((base) => options.afterCommit!(base))
               .catch((error: unknown) =>
                 options.onBackgroundError?.(

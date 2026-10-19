@@ -24,7 +24,7 @@ import {
 } from "@zhixing/core/advancement";
 import {
   canonicalize, createMutationBatch, createConversationSealedBundle, sealedBundleArtifact,
-  createSignedEvidenceRequest,
+  createSignedEvidenceRequest, createSignedTrustRuleSnapshot,
   protocolDigest,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
@@ -43,9 +43,11 @@ import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
 } from "./durable-io-test-support.js";
+import { importAuthenticatedBase, installVerifiedAnchorTenure } from "./imported-base-fixture.js";
 
 const NOW = "2026-08-02T00:00:00.000Z";
 const EXPIRY = "2026-08-02T01:00:00.000Z";
+const CONTROL_EXPIRY = "2026-08-02T00:00:30.000Z";
 
 const signer: ProtocolSigner = {
   sign(schemaId, version, payload): Signature {
@@ -63,7 +65,7 @@ const verifier: ProtocolSignatureVerifier = {
   },
 };
 
-async function createHarness(conversationId = "conv-1") {
+async function createHarness(conversationId = "conv-1", ownerEpoch = 1, journalVerifier = verifier) {
   const root = await createTempDir("session-state-adapter");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
@@ -75,11 +77,11 @@ async function createHarness(conversationId = "conv-1") {
   const makeJournal = () =>
     new ConversationRunJournal({
       conversationId,
-      ownerEpoch: 1,
+      ownerEpoch,
       log,
       artifacts,
       signer,
-      verifier,
+      verifier: journalVerifier,
       submission: {
         authenticate() {},
         authorize() {},
@@ -634,6 +636,69 @@ describe("ConversationSessionStateAdapter advancement", { timeout: DURABLE_IO_TE
 });
 
 
+async function seedCommittedSessionMutations(h: Awaited<ReturnType<typeof createHarness>>) {
+  const firstTasks = { items: [{ id: 'staged', content: 'staged task', status: 'pending' as const }] };
+  const batch = createMutationBatch('commit-assignment', [
+    { v: 1, t: 'staged-mutation', seq: 1, domain: 'session', requestId: 'commit-first', mutation: { kind: 'task-list-op', op: { op: 'set', state: firstTasks } } },
+    { v: 1, t: 'staged-mutation', seq: 2, domain: 'session', requestId: 'commit-rename', mutation: { kind: 'task-list-op', op: { op: 'set', state: { items: [] } } } },
+  ]);
+  const ingress = { kind: 'first-party' as const, surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'committed-input', receivedAt: NOW };
+  await h.journal.admit({
+    ingressKey: 'committed-input', runId: 'committed-run', queuedPosition: 0,
+    userInput: task('session mutation'), invocation: { kind: 'agent', source: 'interactive' }, ingress,
+  });
+  const windowRef = await h.artifacts.put(Buffer.from(canonicalize([{ role: 'user', content: [{ type: 'text', text: 'session mutation' }] }])));
+  const trust = createSignedTrustRuleSnapshot({ snapshotVersion: 1, rules: [], generatedAt: NOW }, signer);
+  const manifestBody = { v: 1 as const, baseRef: { execution: 'conversation' as const, conversationId: 'conv-1', baseRevision: 0 },
+    requires: { runtimeConfigRev: 1, modelProfileRev: 1, policyRev: 1, skillsRev: 1, rubricsRev: 1, promptAssetsRev: 1, permissionSnapshotVersion: 1 },
+    protocolVersion: '1', tools: [], mcpServers: [], environment: {}, credentialBindings: [] };
+  const controlBody = { v: 1 as const, controlLeaseId: 'control-1', assignmentId: 'commit-assignment',
+    authority: { execution: 'conversation' as const, conversationId: 'conv-1', ownerEpoch: 1 }, renewalSeq: 1, issuedAt: NOW, expiry: CONTROL_EXPIRY };
+  const permissionBody = { v: 1 as const, snapshotVersion: 1, snapshotDigest: trust.digest,
+    binding: { execution: 'conversation' as const, runId: 'committed-run', conversationId: 'conv-1', ownerEpoch: 1 },
+    assignmentId: 'commit-assignment', executorId: 'executor-test', controlLeaseId: 'control-1', issuedAt: NOW, expiry: CONTROL_EXPIRY };
+  const capabilityBody = { v: 1 as const, capId: 'capability-1', executorId: 'executor-test',
+    scope: { execution: 'conversation' as const, conversationId: 'conv-1' }, ownerEpoch: 1,
+    methods: ['submission.submitBundle'] as const, resources: ['conversation:conv-1'] as const,
+    assignmentId: 'commit-assignment', issuedAt: NOW, expiry: CONTROL_EXPIRY };
+  const resourceBody = { v: 1 as const, reservationId: 'reservation-1', admissionClass: 'interactive' as const,
+    workload: { kind: 'run' as const, id: 'committed-run', attempt: 1 },
+    scopeBinding: { kind: 'conversation' as const, conversationId: 'conv-1', ownerEpoch: 1 },
+    audience: { executorId: 'executor-test' }, budget: { maxCalls: 10, maxTokens: 10_000 },
+    domain: { kind: 'local' as const, localDomainId: 'local:device-1', localGovernorEpoch: 1 },
+    activation: { kind: 'assignment' as const, assignmentId: 'commit-assignment' }, issuedAt: NOW, expiry: CONTROL_EXPIRY };
+  const resourceWithDigest = { ...resourceBody, digest: protocolDigest('ResourceLease', 1, resourceBody) };
+  const unsigned = { v: 1, execution: 'conversation', assignmentId: 'commit-assignment', executorId: 'executor-test',
+    manifest: { ...manifestBody, digest: protocolDigest('ExecutionManifest', 1, manifestBody) },
+    controlLease: { ...controlBody, signature: signer.sign('ControlLease', 1, controlBody) },
+    permissionLease: { ...permissionBody, signature: signer.sign('PermissionSnapshotLease', 1, permissionBody) },
+    capabilities: [{ ...capabilityBody, signature: signer.sign('AuthorityCapability', 1, capabilityBody) }],
+    resourceLease: { ...resourceWithDigest, signature: signer.sign('ResourceLease', 1, resourceWithDigest) },
+    dependencyArtifacts: [], issuedAt: NOW,
+    work: { t: 'conversation', runId: 'committed-run', conversationId: 'conv-1', ownerEpoch: 1, baseRevision: 0,
+      ingress, contentAssets: [], windowInput: { t: 'full', windowEpoch: 1, messages: { ref: windowRef } }, controlContext: [] } };
+  const dispatch = await h.journal.assign(unsigned as never);
+  const ref = await h.artifacts.put(Buffer.from(canonicalize(batch)));
+  const bundle = createConversationSealedBundle({
+    assignmentId: 'commit-assignment', executorId: 'executor-test',
+    streamFinal: { finalSeq: 1, streamDigest: 'sha256:' + '0'.repeat(64) },
+    usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+    usageFinal: { reportDigest: 'sha256:' + '0'.repeat(64), upToUsageSeq: 0 }, dependencyArtifacts: [],
+    body: { t: 'conversation', runId: 'committed-run', conversationId: 'conv-1', ownerEpoch: 1, baseRevision: 0,
+      runRecord: { type: 'run', runId: 'committed-run', runIndex: 1, timestamp: NOW, messages: [{ role: 'user', content: [{ type: 'text', text: 'session mutation' }] }] },
+      contentAssets: [], mutationBatch: { ref, sessionCount: 2, globalCount: 0 } },
+  });
+  await h.artifacts.put(sealedBundleArtifact(bundle).bytes);
+  const outcome = await h.journal.submitBundle(bundle, {
+    principal: { kind: 'assignment', capability: dispatch.envelope.capabilities[0]! },
+    requestId: 'commit-session-mutations', deadlineAt: CONTROL_EXPIRY,
+  });
+  if (!outcome.committed) throw new Error(`Seed commit rejected: ${outcome.error.message}`);
+  await h.journal.observeBundleAcknowledgement('commit-assignment', { v: 1, assignmentId: 'commit-assignment', phase: 'acked', lastSeq: 4,
+    sealedBundleRef: sealedBundleArtifact(bundle).ref, acknowledgedCommitRevision: outcome.commitRevision });
+  return { firstTasks, batch };
+}
+
 it('directory advancement reads skip historical execution artifacts and load external events outside exclusions', async () => {
   const h = await createHarness();
   await h.journal.admit({ ingressKey: 'old-input', runId: 'old-run', queuedPosition: 0,
@@ -660,10 +725,19 @@ it('directory advancement reads skip historical execution artifacts and load ext
 
 it('advancement reads combine verified imported authority with the local tail', async () => {
   const source = await createHarness(); await source.write([createdEvent()]);
-  const sourceSnapshot = await source.log.readSnapshot<unknown>();
-  const target = await createHarness(), local = await target.log.readSnapshot<unknown>();
-  await target.journal.primeRecoverySnapshot({ commits: sourceSnapshot.commits, cursor: local.cursor });
-  await target.journal.primeImportedReadBase(sourceSnapshot.commits.flatMap(envelope => envelope.entries.map(record => ({ ...record, lsn: envelope.lsn, at: envelope.at }))) as any);
+  await source.journal.admit({ runId: 'identity-run', ingressKey: 'identity-run', queuedPosition: 0,
+    userInput: task('identity'), invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'identity-run', receivedAt: NOW } });
+  await source.journal.cancelRun({ runId: 'identity-run', requestId: 'cancel-identity' });
+  const target = await createHarness('conv-1', 2);
+  const tenure = await installVerifiedAnchorTenure(target.log, NOW);
+  const publication = await importAuthenticatedBase({
+    sourceLog: source.log, sourceArtifacts: source.artifacts,
+    targetLog: target.log, targetArtifacts: target.artifacts,
+    conversationId: 'conv-1', sourceOwnerEpoch: 1, verifier, signer, sourceJournal: source.journal,
+    sourceDeviceId: tenure.memberDeviceId, targetDeviceId: tenure.anchorDeviceId,
+  });
+  await target.journal.installImportedBase(publication.source);
   expect((await target.journal.advancementSessions())[0]?.status).toBe('awaiting-rubric-confirmation');
   await target.journal.applyAdvancementEvents({ requestId: 'local-confirm', events: [confirmedEvent()] });
   expect((await target.journal.advancementSessions())[0]?.status).toBe('active');
@@ -685,38 +759,32 @@ it('advancement reads preserve the shared session revision guard', async () => {
   const h = await createHarness(); await h.write([createdEvent()]);
   await h.log.append([{ stream: 'run:conv-1', body: { t: 'session-control', requestId: 'rename', domainRevision: 2, mutation: { kind: 'session-meta', patch: { name: 'renamed' } } } }]);
   const entry = (await h.log.readStream('run:conv-1')).find(entry => (entry.body as any).t === 'advancement-event')!;
-  await h.log.append([{ stream: 'run:conv-1', body: { ...(entry.body as any), requestId: 'conflicting-new-write', domainRevision: 2, event: confirmedEvent() } }]);
-  await expect(h.makeJournal().advancementSessions()).rejects.toThrow('Advancement event domain revision is not monotonic');
+  const before = await h.log.readSnapshot();
+  await expect(h.log.append([{ stream: 'run:conv-1', body: { ...(entry.body as any), requestId: 'conflicting-new-write', domainRevision: 2, event: confirmedEvent() } }]))
+    .rejects.toThrow('Advancement event domain revision is not monotonic');
+  const after = await h.log.readSnapshot();
+  expect(after.cursor).toEqual(before.cursor);
+  expect((await h.makeJournal().advancementSessions())[0]?.id).toBe('session-1');
+  await h.write([confirmedEvent()]);
+  expect((await h.makeJournal().advancementSessions())[0]?.status).toBe('active');
 });
 
 
 it.each(['cold', 'warm', 'imported'] as const)('session read includes committed session mutations: %s', async mode => {
   const source = await createHarness(); await source.write([createdEvent()]);
   const reader = source.makeJournal(); if (mode === 'warm') await reader.advancementSessions();
-  const firstTasks = {items:[{id:'staged',content:'staged task',status:'pending' as const}]};
-  const batch = createMutationBatch('commit-assignment', [
-    { v:1, t:'staged-mutation', seq:1, domain:'session', requestId:'commit-first', mutation:{kind:'task-list-op',op:{op:'set',state:firstTasks}}},
-    { v:1, t:'staged-mutation', seq:2, domain:'session', requestId:'commit-rename', mutation:{kind:'task-list-op',op:{op:'set',state:{items:[]}}}},
-  ]);
-  const ref = await source.artifacts.put(Buffer.from(canonicalize(batch)));
-  const bundle = createConversationSealedBundle({ assignmentId:'commit-assignment', executorId:'executor-test',
-    streamFinal:{finalSeq:1,streamDigest:'sha256:'+'0'.repeat(64)},usage:{inputTokens:0,outputTokens:0,toolCalls:0},usageFinal:{reportDigest:'sha256:'+'0'.repeat(64),upToUsageSeq:0},dependencyArtifacts:[],
-    body:{t:'conversation',runId:'committed-run',conversationId:'conv-1',ownerEpoch:1,baseRevision:0,
-      runRecord:{type:'run',runId:'committed-run',runIndex:1,timestamp:NOW,messages:[{role:'user',content:[{type:'text',text:'session mutation'}]}]},
-      contentAssets:[],mutationBatch:{ref,sessionCount:2,globalCount:0}}});
-  const dummy = await source.artifacts.put(sealedBundleArtifact(bundle).bytes);
-  await source.log.append([
-    {stream:'run:conv-1',body:{t:'committed',runId:'committed-run',assignmentId:'commit-assignment',commitRevision:1,bundle:{ref:dummy}}},
-    {stream:'run:conv-1',body:{kind:'content-asset-index',entries:[]}},
-    {stream:'final-outbox',body:{t:'final',conversationId:'conv-1',runId:'committed-run',commitRevision:1,digest:dummy.digest,state:'pending'}},
-    {stream:'publish',body:{t:'publish-decision',assignmentId:'commit-assignment',batch:{ref},sessionCount:2,globalCount:0,outcomes:[{seq:1,outcome:{t:'granted',targetRevision:2}},{seq:2,outcome:{t:'granted',targetRevision:3}}]}},
-    {stream:'publish',body:{t:'publish-progress',assignmentId:'commit-assignment',domain:'session',state:'pending',upToSeq:0}},
-  ]);
+  const { firstTasks } = await seedCommittedSessionMutations(source);
   const later = {stream:'run:conv-1',body:{t:'session-control',requestId:'after-commit',domainRevision:4,mutation:{kind:'session-meta',patch:{name:'later name'}}}};
   if (mode === 'imported') {
-    const target = await createHarness(); await target.artifacts.put(Buffer.from(canonicalize(batch)));
-    const snapshot = await source.log.readSnapshot<unknown>();
-    await target.journal.primeImportedReadBase(snapshot.commits.flatMap(e => e.entries.map(r => ({...r,lsn:e.lsn,at:e.at}))) as any);
+    const target = await createHarness('conv-1', 2);
+    const tenure = await installVerifiedAnchorTenure(target.log, NOW);
+    const publication = await importAuthenticatedBase({
+      sourceLog: source.log, sourceArtifacts: source.artifacts,
+      targetLog: target.log, targetArtifacts: target.artifacts,
+      conversationId: 'conv-1', sourceOwnerEpoch: 1, verifier, signer, sourceJournal: source.journal,
+      sourceDeviceId: tenure.memberDeviceId, targetDeviceId: tenure.anchorDeviceId,
+    });
+    await target.journal.installImportedBase(publication.source);
     await target.log.append([later]);
     expect(await target.journal.taskListBeforeMutation('commit-rename')).toEqual(firstTasks);
     expect(await target.journal.taskListBeforeMutation('commit-first')).toEqual({items:[]});
@@ -784,8 +852,9 @@ it('session batch read crosses 64 frames and discards failed partial state', asy
     return read(points);
   });
   try {
-    await expect(reader.taskList()).rejects.toThrow('second batch unavailable');
     expect((await reader.taskList()).items[0]?.id).toBe('item-66');
+    expect(failed).toBe(false);
+    await expect(reader.taskListBeforeMutation('batch-66')).rejects.toThrow('second batch unavailable');
     expect((await reader.taskListBeforeMutation('batch-66'))?.items[0]?.id).toBe('item-65');
     expect((await reader.taskList()).items[0]?.id).toBe('item-66');
     expect(spy.mock.calls.some(([points])=>points.length===64)).toBe(true);

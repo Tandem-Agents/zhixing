@@ -30,6 +30,7 @@ export async function routeAddressedConversationCommunication(input: {
     if (!input.local) throw new Error("目标本机对话不可用");
     const authority = await input.local.owner.currentAuthority(request.conversationId);
     if (authority.state === "frozen" || authority.state === "importing") throw new Error("目标对话正在接管中，请稍后重试");
+    if (authority.state === 'fenced' && authority.deviceId === input.deviceId) return anchor().invoke(source, request);
     return (authority.deviceId === device ? input.local.communication : input.remote(authority.deviceId)).invoke(source, request);
   }
   if (!input.anchor) return anchor().invoke(source, request);

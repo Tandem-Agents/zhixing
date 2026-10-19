@@ -2010,18 +2010,10 @@ export class ConversationController<Outcome = TurnOutcome> {
   /** 无本地 waiter 时也从当前对话权威事实定位运行；不依赖是否见过实时帧。 */
   async abortBackgroundTask(): Promise<boolean> {
     const conversationId = this.active.conversationId;
-    const runId = await this.consumeHistory(conversationId, { limit: 1 }, page => {
-      if (this.active.conversationId !== conversationId) return undefined;
-      const runs = new Map((page.interruptibleRuns ?? (page.inputsOutsideHistory ?? [])
-        .filter(input => input.message.inputIdentity?.source.kind === "conversation" &&
-          ["queued", "dispatched", "running", "cancel-requested"].includes(input.state))
-        ).map(input => [input.runId, input.state]));
-      const current = [...runs].filter(([, state]) => state !== "queued");
-      const candidates = current.length ? current : [...runs];
-      if (candidates.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");
-      return candidates[0]?.[0];
-    });
+    const { targets } = await this.opts.conversation.controlTargets(conversationId);
     if (this.active.conversationId !== conversationId) return false;
+    if (targets.length > 1) throw new Error("当前对话有多个待处理运行，无法确定停止目标；未取消任何运行。");
+    const runId = targets[0]?.runId;
     if (runId) {
       await this.opts.conversation.abort(conversationId, `cancel:${generateTurnId()}`, runId);
       return true;

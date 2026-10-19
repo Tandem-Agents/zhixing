@@ -27,6 +27,10 @@ export interface ConversationContextPage {
   readonly turnCount: number;
   readonly preparing?: { readonly bytes: number; readonly total: number };
 }
+/** Current control identities only; no transcript or input body is loaded. */
+export interface ConversationControlTargets {
+  readonly targets: readonly { readonly runId: string; readonly state: 'queued' | 'dispatched' | 'running' | 'cancel-requested' }[];
+}
 /** Coordinates in an immutable committed body; no presentation tokens cross
  * this boundary. Offsets count source UTF-16 code units, never screen rows. */
 export interface ConversationBodyCursor {
@@ -125,8 +129,9 @@ export interface ConversationInputPage {
 }
 export type ConversationRecoveryRequest =
   | { readonly mode: 'context'; readonly conversationId: string }
+  | { readonly mode: 'control-targets'; readonly conversationId: string }
   | { readonly mode: 'body-page'; readonly conversationId: string; readonly includeInputs?: true; readonly cursor?: ConversationBodyCursor; readonly direction?: 'forward' | 'reverse'; readonly runId?: string }
   | { readonly mode: 'completion'; readonly conversationId: string; readonly runId: string; readonly ownerEpoch?: number }
   | { readonly mode: 'control-page'; readonly conversationId: string; readonly cursor?: ConversationControlCursor; readonly historyRunIds?: readonly string[]; readonly historyThroughInputLsn?: number }
   | { readonly mode: 'input-page'; readonly conversationId: string; readonly runId: string; readonly cursor?: ConversationInputCursor };
-export type ConversationRecoveryPage = ConversationControlPage | ConversationInputPage | ConversationCompletionPage | ConversationBodyPage | ConversationContextPage;
+export type ConversationRecoveryPage = ConversationControlPage | ConversationInputPage | ConversationCompletionPage | ConversationBodyPage | ConversationContextPage | ConversationControlTargets;

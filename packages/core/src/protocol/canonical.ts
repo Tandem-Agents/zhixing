@@ -79,6 +79,14 @@ export function createByteDigestAccumulator(): ByteDigestAccumulator {
   };
 }
 
+/** Canonical fragments may be supplied incrementally without retaining them. */
+export function createProtocolDigestAccumulator(schemaId: string, version: number): ByteDigestAccumulator {
+  assertSchema(schemaId, version);
+  const accumulator = createByteDigestAccumulator();
+  accumulator.update(Buffer.from(`zhixing:${schemaId}:v${version}\0`, 'utf8'));
+  return accumulator;
+}
+
 function assertSchema(schemaId: string, version: number): void {
   if (!/^[A-Za-z][A-Za-z0-9]*$/u.test(schemaId)) {
     throw new TypeError(`Invalid protocol schema id: ${schemaId}`);

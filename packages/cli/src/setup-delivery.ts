@@ -12,6 +12,7 @@
 
 import { type RuntimeExecutionProfile, createEventBus } from "@zhixing/core";
 import { artifactReadCapacity, projectionReadCapacity } from "./serve/artifact-read-capacity.js";
+import { createConversationAuthorityVerifier, type ConversationAuthorityVerifier } from './serve/conversation-authority-verifier.js';
 import { type PermissionRule } from "@zhixing/core/security";
 import {
   AuthorityDeliveryPipeline,
@@ -246,6 +247,7 @@ export function createPlannedAnchorReadinessCoordinator(
 }
 
 export interface AuthorityRuntimeStack {
+  readonly conversationAuthority: ConversationAuthorityVerifier;
   readonly anchorEpoch: number;
   readonly localDomainId: string;
   readonly localOwnerEpoch: number;
@@ -759,6 +761,29 @@ export async function setupAuthorityRuntime(
     const localOwnerEpoch = 1;
     const localGovernorEpoch = 1;
     const localDomainId = `local:${key.deviceId}`;
+    const conversationSigningSchemas = new Set(['AuthorityCapability', 'ControlLease', 'OwnerControlGrant', 'DispatchEnvelope', 'EvidenceRequest']);
+    const runtimeSigner: ProtocolSigner = {
+      sign(schemaId, version, payload) {
+        if (version === 2 && conversationSigningSchemas.has(schemaId)) {
+          const tenure = (payload as { anchorEpoch?: number }).anchorEpoch;
+          const current = sources.knownAnchorTenure();
+          if (!anchorEnabled || tenure !== anchorEpoch || sources.knowsTrustDomain() &&
+              (!current || current.anchorEpoch !== tenure || current.deviceId !== key.deviceId)) {
+            throw new TypeError('Cannot sign conversation authority outside the current anchor tenure');
+          }
+        }
+        return key.sign(schemaId, version, payload);
+      },
+    };
+    const conversationAuthority = createConversationAuthorityVerifier({ sources, deviceId: key.deviceId, localOwnerEpoch, executorLog,
+      standaloneAnchorEpoch: () => anchorEnabled ? anchorEpoch : undefined });
+    if (anchorEnabled) {
+      const current = await sources.currentAnchorAuthorization(key.deviceId);
+      if ((installedAuthorityGeneration && !current.tenure) || current.tenure?.deviceId === key.deviceId &&
+          current.tenure.anchorEpoch !== anchorEpoch) {
+        throw new Error('Anchor runtime generation does not match the verified trust tenure');
+      }
+    }
     const executorResourceGovernor = executorLog
       ? new executorRuntime!.ExecutorResourceGovernor({
           log: executorLog,
@@ -1831,6 +1856,10 @@ export async function setupAuthorityRuntime(
       if (!authorityLog || !ownerRuntime || !anchorEnabled || !routedGlobalState) {
         throw new Error("Installed authority generation requires the anchor runtime");
       }
+      const currentTenure = (await sources.currentAnchorAuthorization(key.deviceId)).tenure;
+      if (!currentTenure || currentTenure.anchorEpoch !== generation.anchorEpoch || currentTenure.deviceId !== key.deviceId) {
+        throw new Error('Installed authority generation does not match the verified trust tenure');
+      }
       if (
         installedAuthorityGeneration &&
         canonicalize(installedAuthorityGeneration) === canonicalize(generation)
@@ -1979,6 +2008,7 @@ export async function setupAuthorityRuntime(
       get anchorEpoch() {
         return anchorEpoch;
       },
+      conversationAuthority,
       localDomainId,
       localOwnerEpoch,
       localGovernorEpoch,
@@ -1987,7 +2017,7 @@ export async function setupAuthorityRuntime(
       identity,
       executorId,
       localExecutorEnabled,
-      signer: key,
+      signer: runtimeSigner,
       verifier,
       get authority() {
         if (!authority) throw new Error("Anchor authority role is not enabled");

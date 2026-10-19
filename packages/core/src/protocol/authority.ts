@@ -16,6 +16,7 @@ import type {
 import { canonicalize, protocolDigest } from "./canonical.js";
 import type { ProtocolSignatureVerifier } from "./signature.js";
 import { assertProtocolIdentifier } from "./validation.js";
+import { assertOwnerTenureVersion } from './owner-tenure.js';
 
 type AnyPermissionSnapshotLease =
   | PermissionSnapshotLease<"conversation">
@@ -281,6 +282,7 @@ export function validateAuthorityCapability(
       "issuedAt",
       "methods",
       epochKey,
+      ...(capability.v === 2 && capability.scope.execution === 'conversation' ? ['anchorEpoch'] : []),
       "resources",
       "scope",
       "signature",
@@ -295,7 +297,8 @@ export function validateAuthorityCapability(
       : ["execution", "taskId"],
     "Authority capability scope",
   );
-  assertVersion(capability.v, "Authority capability");
+  if (capability.scope.execution === 'conversation') assertOwnerTenureVersion(capability, 'Authority capability');
+  else assertVersion(capability.v, 'Authority capability');
   assertIdentifier(capability.capId, "Authority capability capId");
   assertIdentifier(capability.executorId, "Authority capability executorId");
   assertIdentifier(capability.assignmentId, "Authority capability assignmentId");
@@ -317,7 +320,7 @@ export function validateAuthorityCapability(
   for (const resource of capability.resources) validateResourceSelector(resource);
   assertSignature(capability.signature, "Authority capability signature");
   const { signature, ...payload } = capability;
-  verifier.verify("AuthorityCapability", 1, payload, signature);
+  verifier.verify("AuthorityCapability", capability.v, payload, signature);
   return capability;
 }
 
@@ -405,6 +408,7 @@ export function validateControlLease(
     [
       "assignmentId",
       "authority",
+      ...(lease.v === 2 ? ['anchorEpoch'] : []),
       "controlLeaseId",
       "expiry",
       "issuedAt",
@@ -414,7 +418,8 @@ export function validateControlLease(
     ],
     "Control lease",
   );
-  assertVersion(lease.v, "Control lease");
+  assertOwnerTenureVersion(lease, 'Control lease');
+  if (lease.v === 2 && lease.authority.execution !== 'conversation') throw new TypeError('Control tenure version requires a conversation authority');
   assertAuthorityEpochRef(lease.authority, "Control lease authority");
   assertIdentifier(lease.controlLeaseId, "Control lease id");
   assertIdentifier(lease.assignmentId, "Control lease assignmentId");
@@ -428,13 +433,13 @@ export function validateControlLease(
   }
   assertSignature(lease.signature, "Control lease signature");
   const { signature, ...payload } = lease;
-  verifier.verify("ControlLease", 1, payload, signature);
+  verifier.verify("ControlLease", lease.v, payload, signature);
   return lease;
 }
 
 export function controlLeaseIdentityDigest(lease: ControlLease): string {
   const { signature: _, ...payload } = lease;
-  return protocolDigest("ControlLease", 1, payload);
+  return protocolDigest("ControlLease", lease.v, payload);
 }
 
 export function ownerControlRequestDigest(input: {
@@ -515,6 +520,7 @@ export function validateOwnerControlGrant(
     [
       "assignmentId",
       "callerDeviceId",
+      ...(grant.v === 2 ? ['anchorEpoch'] : []),
       "controlLease",
       "expiry",
       "issuedAt",
@@ -527,7 +533,8 @@ export function validateOwnerControlGrant(
     ],
     "Owner control grant",
   );
-  assertVersion(grant.v, "Owner control grant");
+  assertOwnerTenureVersion(grant, 'Owner control grant');
+  if (grant.v === 2 && grant.scope.execution !== 'conversation') throw new TypeError('Owner control tenure version requires a conversation authority');
   if (grant.scope.execution === "conversation") {
     assertExactKeys(
       grant.scope,
@@ -560,6 +567,7 @@ export function validateOwnerControlGrant(
   assertCanonicalInterval(grant.issuedAt, grant.expiry, "Owner control grant");
   const controlLease = validateControlLease(grant.controlLease, verifier);
   if (
+    controlLease.anchorEpoch !== grant.anchorEpoch ||
     controlLease.assignmentId !== grant.assignmentId ||
     canonicalize(controlLease.authority) !== canonicalize(grant.scope) ||
     controlLease.signature.keyId !== grant.callerDeviceId ||
@@ -575,7 +583,7 @@ export function validateOwnerControlGrant(
     throw new TypeError("Owner control grant signer does not match its caller device");
   }
   const { signature, ...payload } = grant;
-  verifier.verify("OwnerControlGrant", 1, payload, signature);
+  verifier.verify("OwnerControlGrant", grant.v, payload, signature);
   return grant;
 }
 

@@ -1,12 +1,14 @@
 import { userMessageFromTurnInput } from '@zhixing/core';
 import type { ConversationMessageStatus } from '@zhixing/core/conversation/application';
-import type { ArtifactStore, AuthorityCommitLog, DurableLogCheckpoint } from '@zhixing/core/authority';
+import type { ArtifactStore, AuthorityCommitLog, DurableLogCheckpoint, DurableProjectionReadContext } from '@zhixing/core/authority';
 import type { ConversationRunState, UserTurnInput } from '@zhixing/core/contracts';
 import { validateNonEmptyUserTurnInput } from '@zhixing/core/protocol';
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs,
   StorageMaintenanceCancelledError, waitForMaintenanceRetry } from '@zhixing/core/resources';
 import { consumedInitialRuns, projectInputDelivery, isMessageDeliveryFact, type MessageDeliveryRecord } from './conversation-message-delivery.js';
-import type { ConversationReadIndex, InputPointer } from './conversation-read-index.js';
+import type { ConversationReadIndex, InputPointer, TimelinePointer } from './conversation-read-index.js';
+import type { ConversationBaseSource } from './conversation-base-source.js';
+import { readConversationRunViewMetadata } from './conversation-run-state-view.js';
 
 type LocatedInput = { pointer: InputPointer; initial: boolean; identity?: NonNullable<ConversationMessageStatus['message']['inputIdentity']> };
 function emptyFacts() {
@@ -16,6 +18,7 @@ function emptyFacts() {
     uncertainOrigins: new Map<string, ConversationRunState>(), supersedeStartedObservations: new Set<string>(),
     committedByAssignment: new Set<string>(), openInputAssignments: new Map<string, string>(),
     closedInputAssignments: new Set<string>(), consumed: new Set<string>(), inputs: new Map<string, LocatedInput>(),
+    initialConsumed: new Set<string>(),
     deleted: false, localClear: 0, baseClear: 0, baseHidden: false,
   };
 }
@@ -26,6 +29,10 @@ type Facts = ReturnType<typeof emptyFacts>;
 export class ConversationMessageInputReader {
   #generation = 0;
   #base = emptyFacts();
+  #baseSource: ConversationBaseSource | undefined;
+  #baseView: DurableProjectionReadContext | undefined;
+  #baseDirectoryView: DurableProjectionReadContext | undefined;
+  #baseFacts: Facts | undefined;
   #cache: { state: Facts; cursor: DurableLogCheckpoint } | undefined;
   constructor(readonly log: AuthorityCommitLog, readonly directory: ConversationReadIndex,
     readonly artifacts: ArtifactStore, readonly conversationId: string) {}
@@ -35,7 +42,78 @@ export class ConversationMessageInputReader {
     for (const [item, record] of records.entries()) if (record.stream === 'run:' + this.conversationId && isMessageDeliveryFact(record.body)) {
       this.#fold(state, record.body, record.lsn, item);
     }
+    this.#baseSource = undefined; this.#baseView = undefined; this.#baseDirectoryView = undefined; this.#baseFacts = undefined;
     this.#base = state; this.#generation++; this.#cache = undefined;
+  }
+
+  installBaseView(source: ConversationBaseSource): void {
+    this.#baseSource = source;
+    this.#baseView = {
+      get: key => source.read(view => view.get(key)),
+      scan: (range, limit) => source.read(view => view.scan(range, limit)),
+    };
+    this.#baseDirectoryView = {
+      get: key => source.read(view => view.get('directory/' + key)),
+      scan: async (range, limit) => {
+        const prefix = 'directory/';
+        const query = { ...(range.gte ? { gte: prefix + range.gte } : {}), ...(range.gt ? { gt: prefix + range.gt } : {}), ...(range.lt ? { lt: prefix + range.lt } : {}) };
+        const page = await source.read(view => view.scan(query, limit));
+        return { entries: page.entries.map(entry => ({ key: entry.key.slice(prefix.length), value: entry.value })),
+          ...(page.continuation ? { continuation: page.continuation.slice(prefix.length) } : {}) };
+      },
+    };
+    this.#baseFacts = undefined;
+    this.#base = emptyFacts();
+    this.#generation++; this.#cache = undefined;
+  }
+
+  async #loadBaseFacts(): Promise<Facts> {
+    if (this.#baseFacts) return this.#baseFacts;
+    const view = this.#baseView;
+    if (!view) return this.#base;
+    const id = this.conversationId, p = JSON.stringify(id) + ':timeline:';
+    // The legacy outside-history view still folds its message facts (package
+    // 1b owns its bounded replacement). Preserve complete paging here. Exact
+    // messageStatus uses the separate identity lookup and never takes this path.
+    const pointers: InputPointer[] = [];
+    let after: string | undefined;
+    do {
+      if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
+      const page = await this.#baseDirectoryView!.scan({ ...(after ? { gt: after } : { gte: p }), lt: p + '\uffff' }, 64);
+      for (const entry of page.entries) {
+        const value = entry.value as unknown as TimelinePointer;
+        if (value.kind === 'input') pointers.push(value.input);
+      }
+      after = page.continuation ? page.entries.at(-1)!.key : undefined;
+      if (after) await new Promise<void>(setImmediate);
+    } while (after);
+    const runs = [...new Set(pointers.map(pointer => pointer.runId))];
+    const selected = await readConversationRunViewMetadata(view, id, { current: true, runs });
+    const state = selected.state, facts = emptyFacts();
+    for (const [assignmentId, assigned] of state.assignedById) facts.assignedById.set(assignmentId, { record: { runId: assigned.record.runId } });
+    for (const [runId, value] of state.assignmentByRun) facts.assignmentByRun.set(runId, value);
+    for (const [runId, value] of state.stateByRun) facts.stateByRun.set(runId, value);
+    for (const [assignmentId, value] of state.cancelOrigins) facts.cancelOrigins.set(assignmentId, value);
+    for (const [assignmentId, value] of state.uncertainOrigins) facts.uncertainOrigins.set(assignmentId, value);
+    for (const assignmentId of state.supersedeStartedObservations.keys()) facts.supersedeStartedObservations.add(assignmentId);
+    for (const assignmentId of state.committedByAssignment.keys()) facts.committedByAssignment.add(assignmentId);
+    for (const [runId, value] of state.openInputAssignments) facts.openInputAssignments.set(runId, value);
+    for (const assignmentId of state.closedInputAssignments) facts.closedInputAssignments.add(assignmentId);
+    facts.deleted = state.deleted;
+    facts.baseClear = state.clearedThroughLsn;
+    facts.baseHidden = false;
+    const first = new Map<string, number>();
+    for (const pointer of pointers) if (!first.has(pointer.runId) || pointer.position < first.get(pointer.runId)!) first.set(pointer.runId, pointer.position);
+    for (const pointer of pointers) {
+      const initial = pointer.initial ?? first.get(pointer.runId) === pointer.position;
+      facts.inputs.set(pointer.inputKey, { initial, pointer, ...(pointer.identity ? { identity: pointer.identity } : {}) });
+      const consumedKey = JSON.stringify(id) + (initial ? ':initial-consumed:' + JSON.stringify(pointer.runId) : ':input-consumed:' + JSON.stringify(pointer.inputKey));
+      if (await this.#baseDirectoryView!.get(consumedKey) === true) {
+        if (initial) facts.initialConsumed.add(pointer.runId); else facts.consumed.add(pointer.inputKey);
+      }
+    }
+    this.#baseFacts = facts;
+    return facts;
   }
 
   #fold(state: Facts, body: MessageDeliveryRecord, lsn: number, item: number, checkpoint?: DurableLogCheckpoint): void {
@@ -92,7 +170,9 @@ export class ConversationMessageInputReader {
       if (cached.cursor.logId !== head.logId || cached.cursor.lsn > head.lsn) throw Error('Message input source prefix changed');
       if (cached.cursor.lsn) await this.log.readEnvelopeAt(cached.cursor);
     }
-    let state = structuredClone(cached?.state ?? this.#base), after = cached?.cursor.lsn ?? 0;
+    const base = cached ? cached.state : this.#baseSource ? await this.#loadBaseFacts() : this.#base;
+    if (generation !== this.#generation) return;
+    let state = structuredClone(base), after = cached?.cursor.lsn ?? 0;
     for (;;) {
       if (signal.aborted) throw new StorageMaintenanceCancelledError();
       const page = await this.directory.messagePage(this.conversationId, after);
@@ -130,7 +210,8 @@ export class ConversationMessageInputReader {
         const result = await (async () => {
           const generation = this.#generation, prepared = await this.#prepare(signal);
           if (!prepared || generation !== this.#generation) return;
-          const { state, cursor: head } = prepared, consumed = consumedInitialRuns(state);
+          const { state, cursor: head } = prepared, consumed = new Set(consumedInitialRuns(state));
+          for (const run of state.initialConsumed) consumed.add(run);
           const located = [...state.inputs.values()].sort((a, b) => a.pointer.position - b.pointer.position);
           const candidates = located.filter(input => messageId !== undefined ? input.identity?.id === messageId :
             !state.deleted && (input.pointer.checkpoint ? input.pointer.lsn > state.localClear : !state.baseHidden && input.pointer.lsn > state.baseClear))
@@ -186,6 +267,33 @@ export class ConversationMessageInputReader {
     }
   }
 
-  async messageStatus(id: string): Promise<ConversationMessageStatus | undefined> { return (await this.#read(id)).inputs[0]; }
+  async messageStatus(id: string): Promise<ConversationMessageStatus | undefined> {
+    const signal = currentMaintenanceAbortSignal(); let deadline: number | undefined;
+    for (;;) {
+      if (signal.aborted) throw new StorageMaintenanceCancelledError();
+      try {
+        const generation = this.#generation, selected = await this.directory.messageMetadata(this.conversationId, id);
+        if (!selected.value) return undefined;
+        const { pointer, status, consumed, closed } = selected.value;
+        const located = (await this.directory.inputsAt(this.conversationId, [pointer]))[0];
+        if (!located) throw Error('Message input locator is missing');
+        const { input } = located;
+        const decoded = input && typeof input === 'object' && 'ref' in input
+          ? JSON.parse(Buffer.from(await this.artifacts.get(input.ref)).toString('utf8')) as UserTurnInput : input;
+        const userInput = validateNonEmptyUserTurnInput(decoded);
+        if (signal.aborted) throw new StorageMaintenanceCancelledError();
+        if (generation !== this.#generation) continue;
+        return { runId: pointer.runId, state: status.state, consumed,
+          disposition: consumed ? 'consumed' : closed || ['committed', 'failed', 'cancelled'].includes(status.state) ? 'stopped' : 'pending',
+          message: { ...userMessageFromTurnInput(userInput), inputIdentity: structuredClone(pointer.identity) } };
+      } catch (error) {
+        const delay = maintenanceRetryDelayMs(error);
+        if (delay === undefined || isHoldingMaintenanceExclusion() || signal.aborted) throw error;
+        deadline ??= performance.now() + 5000;
+        if (performance.now() >= deadline) throw error;
+        await waitForMaintenanceRetry(Math.min(delay, 250));
+      }
+    }
+  }
   messageInputsOutsideHistory() { return this.#read(); }
 }

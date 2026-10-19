@@ -140,6 +140,7 @@ function makeFakes() {
     unsubscribe: vi.fn(async () => {}),
     abort: vi.fn(async () => {}),
     history: vi.fn(async () => ({ runs: [], hasMore: false })),
+    controlTargets: vi.fn(async () => ({ targets: [] } as import("@zhixing/core/contracts").ConversationControlTargets)),
     statusHistory: vi.fn(async () => ({ notices: [], next: [] })),
     resolveUncertain: vi.fn(async () => ({ state: "cancelled" })),
   };
@@ -1660,40 +1661,26 @@ describe("ConversationController", () => {
     } finally { controller.dispose(); }
   });
 
-  it("finishes history consumption before sending the subsequent background abort", async () => {
+  it("uses a current control query and never opens historical bodies before a background abort", async () => {
     const f = makeFakes();
-    let consuming = false;
-    const consumeHistory = vi.fn(async (_id: string, _options: unknown, consume: (page: unknown) => Promise<unknown>) => {
-      consuming = true;
-      try {
-        return await consume({ runs: [], hasMore: false, get inputsOutsideHistory() {
-          if (!consuming) throw Error('history result accessed after consumption');
-          return [{ runId: 'remote-running', state: 'running', message: {
-            role: 'user', content: [{ type: 'text', text: 'large original'.repeat(1024) }],
-            inputIdentity: { id: 'input', source: { kind: 'conversation', conversationId: 'conv-1' } },
-          } }];
-        } });
-      } finally { consuming = false; }
-    });
-    Object.assign(f.conversation, { consumeHistory });
-    f.conversation.abort.mockImplementation(async () => { expect(consuming).toBe(false); });
+    f.conversation.history.mockRejectedValue(Error('History must not enter the control path'));
+    f.conversation.controlTargets.mockResolvedValue({ targets: [{ runId: 'remote-running', state: 'running' }] });
     const { controller } = makeController(f);
     try {
       expect(await controller.abortBackgroundTask()).toBe(true);
-      expect(consumeHistory).toHaveBeenCalledOnce(); expect(f.conversation.history).not.toHaveBeenCalled();
+      expect(f.conversation.controlTargets).toHaveBeenCalledExactlyOnceWith('conv-1');
+      expect(f.conversation.history).not.toHaveBeenCalled();
       expect(f.conversation.abort).toHaveBeenCalledWith('conv-1', expect.stringMatching(/^cancel:/), 'remote-running');
     } finally { controller.dispose(); }
   });
 
   it('uses complete owner control targets when the bounded display page omits an active remote run', async () => {
     const f = makeFakes(), { controller } = makeController(f);
-    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [],
-      inputsOutsideHistoryTruncated: true, interruptibleRuns: [{ runId: 'outside-display', state: 'running' }] } as never);
+    f.conversation.controlTargets.mockResolvedValue({ targets: [{ runId: 'outside-display', state: 'running' }] });
     try {
       expect(await controller.abortBackgroundTask()).toBe(true);
       expect(f.conversation.abort).toHaveBeenCalledWith('conv-1', expect.stringMatching(/^cancel:/), 'outside-display');
-      f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [],
-        interruptibleRuns: [{ runId: 'one', state: 'queued' }, { runId: 'two', state: 'queued' }] } as never);
+      f.conversation.controlTargets.mockResolvedValue({ targets: [{ runId: 'one', state: 'queued' }, { runId: 'two', state: 'queued' }] });
       await expect(controller.abortBackgroundTask()).rejects.toThrow('多个待处理运行');
       expect(f.conversation.abort).toHaveBeenCalledOnce();
     } finally { controller.dispose(); }

@@ -82,7 +82,12 @@ import {
 import {
   anchorConversationOwnerRuntime,
 } from "../conversation-owner-runtime.js";
-import { fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
+import { FileMeshBootstrapStore } from "../mesh-bootstrap-store.js";
+import { registerConversationReadProjection } from "../../../../owner-kernel/src/conversation-read-index.js";
+import { stagingArea } from "../../../../owner-kernel/src/__tests__/imported-base-fixture.js";
+import { ConversationTransferTarget, selectConversationAuthorityRecords, loadCommittedConversationBase } from "@zhixing/owner-kernel/conversation-transfer";
+import { canonicalize, prepareConversationTransferManifest, createSignedSourceFreezeProof } from "@zhixing/core/protocol";
+import { createLocalOwnerAssemblyFixture, fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
 import {
   createConversationAssignmentArtifactAuthorityIndex,
   createConversationExecutorHostBoundary,
@@ -1394,7 +1399,7 @@ describe("ConversationProtocolRuntime", () => {
       await vi.waitFor(async () => {
         await f.protocol.recoverConversation(supportId); await f.protocol.recoverConversation(scene);
         expect(f.executions).toEqual([scene, supportId, scene]);
-        expect((await f.protocol.worksceneContinuationSources(scene)).at(-1)?.state).toBe("committed");
+        expect((await f.historySources(scene)).at(-1)?.state).toBe("committed");
       }, { timeout: TEST_DURABLE_IO_TIMEOUT_MS, interval: 500 });
     } finally {
       broker.cancelAll("session-end"); bridge.dispose();
@@ -1406,10 +1411,10 @@ describe("ConversationProtocolRuntime", () => {
     const scene = "ws:reports:primary";
     const f = await worksceneContinuationHarness(undefined, { initialConversationId: scene, firstControl: { intent: { kind: "exit", handoff: { goal: "交付报告", constraints: [], completed: [], remaining: ["接入资料"] } } }, canRunIsolatedMain: false });
     await f.start();
-    await vi.waitFor(async () => { await f.protocol.recoverConversation(scene); expect(f.executions).toEqual([scene, scene]); expect((await f.protocol.worksceneContinuationSources(scene)).at(-1)?.state).toBe("committed"); }, { timeout: 15000, interval: 100 });
+    await vi.waitFor(async () => { await f.protocol.recoverConversation(scene); expect(f.executions).toEqual([scene, scene]); expect((await f.historySources(scene)).at(-1)?.state).toBe("committed"); }, { timeout: 15000, interval: 100 });
     await f.application.recover(scene); await f.protocol.recoverConversation(scene);
     expect(f.executions).toEqual([scene, scene]);
-    const runs = await f.protocol.worksceneContinuationSources(scene);
+    const runs = await f.historySources(scene);
     expect(runs.filter((run) => run.origin?.worksceneContinuation?.kind === "result")).toHaveLength(1);
     await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll();
   }, TEST_DURABLE_IO_TIMEOUT_MS);
@@ -1419,21 +1424,21 @@ describe("ConversationProtocolRuntime", () => {
     const prepare = f.prepare!;
     try {
       await f.start();
-      const original = (await f.protocol.worksceneContinuationSources("bound-main"))[0]!;
+      const original = (await f.historySources("bound-main"))[0]!;
       expect(original.environment).toEqual(f.environment);
       f.protocol.releaseConversation("bound-main");
-      expect((await f.protocol.worksceneContinuationSources("bound-main"))[0]!.environment).toEqual(f.environment);
+      expect((await f.historySources("bound-main"))[0]!.environment).toEqual(f.environment);
       await vi.waitFor(async () => {
         await f.protocol.recoverConversation("bound-main");
         const helper = f.executions.find(id => id.startsWith("workscene-support-"));
         if (helper) await f.protocol.recoverConversation(helper);
-        expect((await f.protocol.worksceneContinuationSources("bound-main")).at(-1)?.origin?.worksceneContinuation?.kind).toBe("result");
-        expect((await f.protocol.worksceneContinuationSources("bound-main")).at(-1)?.state).toBe("committed");
+        expect((await f.historySources("bound-main")).at(-1)?.origin?.worksceneContinuation?.kind).toBe("result");
+        expect((await f.historySources("bound-main")).at(-1)?.state).toBe("committed");
       }, { timeout: 30000, interval: 500 });
       const helper = f.executions[1]!;
       expect(f.executions).toEqual(["bound-main", helper, "bound-main"]);
-      expect((await f.protocol.worksceneContinuationSources(helper))[0]?.environment).toBeUndefined();
-      const returned = (await f.protocol.worksceneContinuationSources("bound-main")).at(-1)!;
+      expect((await f.historySources(helper))[0]?.environment).toBeUndefined();
+      const returned = (await f.historySources("bound-main")).at(-1)!;
       expect(returned.environment).toEqual(f.environment);
       const assignments = await Promise.all(prepare.mock.results.map(result => result.value));
       expect(assignments.map(a => a.environment.workspace?.bindingRef)).toEqual([f.environment!.workspace.bindingRef, undefined, f.environment!.workspace.bindingRef]);
@@ -1448,10 +1453,10 @@ describe("ConversationProtocolRuntime", () => {
   it("workscene continuation survives projection eviction and preserves one admission/result chain", async () => {
     const f = await worksceneContinuationHarness();
     await f.start();
-    const source = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    const source = (await f.historySources("main-handoff"))[0]!;
     expect(source.control?.intent.handoff?.goal).toBe("交付报告");
     f.protocol.releaseConversation("main-handoff");
-    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.control).toEqual(source.control);
+    expect((await f.historySources("main-handoff"))[0]?.control).toEqual(source.control);
     await vi.waitFor(async () => {
       await f.protocol.recoverConversation("main-handoff");
       await f.protocol.recoverConversation("ws:reports:primary");
@@ -1461,7 +1466,7 @@ describe("ConversationProtocolRuntime", () => {
     await f.application.recover("main-handoff");
     await f.application.recover("ws:reports:primary");
     expect(f.executions).toHaveLength(3);
-    const returns = (await f.protocol.worksceneContinuationSources("main-handoff")).filter((item) => item.origin?.worksceneContinuation?.kind === "result");
+    const returns = (await f.historySources("main-handoff")).filter((item) => item.origin?.worksceneContinuation?.kind === "result");
     expect(returns).toHaveLength(1);
     expect(returns[0]?.state).toBe("committed");
   }, TEST_DURABLE_IO_TIMEOUT_MS);
@@ -1469,12 +1474,12 @@ describe("ConversationProtocolRuntime", () => {
   it("workscene continuation obeys an empty durable batch cancel after source commit", async () => {
     const f = await worksceneContinuationHarness();
     await f.start();
-    const before = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    const before = (await f.historySources("main-handoff"))[0]!;
     expect(before.current).toBe(true);
     const cancelled = await f.protocol.cancel({ conversationId: "main-handoff", requestId: "cancel-handoff", principal: { surfacePrincipal: "rpc:owner", deviceId: f.authority.deviceId, connectionId: "test" } });
     expect(cancelled.dispositions).toEqual([]);
     f.protocol.releaseConversation("main-handoff");
-    const after = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    const after = (await f.historySources("main-handoff"))[0]!;
     expect(after.current).toBe(false);
     await f.application.recover("main-handoff");
     expect(await f.manager.findDurableRunByIngress("ws:reports:primary", `handoff:${protocolDigest("WorksceneContinuation", 1, { conversationId: before.conversationId, runId: before.runId })}`, "interactive")).toBeUndefined();
@@ -1485,12 +1490,12 @@ describe("ConversationProtocolRuntime", () => {
     const f = await worksceneContinuationHarness();
     await f.start();
     await f.application.recover("main-handoff");
-    const child = (await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]!;
+    const child = (await f.historySources("ws:reports:primary"))[0]!;
     expect(child.state).toBe("queued");
     await f.protocol.admit({ conversationId: "main-handoff", input: text, invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "new-user-intent" } }, surfacePrincipal: "rpc:owner" });
     await f.application.recover("main-handoff");
     f.protocol.releaseConversation("main-handoff");
-    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("queued");
+    expect((await f.historySources("ws:reports:primary"))[0]?.state).toBe("queued");
     expect(await f.protocol.isWorksceneContinuationCurrent({ conversationId: child.conversationId, runId: child.runId })).toBe(true);
     expect(f.executions).toEqual(["main-handoff"]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
@@ -1501,8 +1506,8 @@ describe("ConversationProtocolRuntime", () => {
     await f.application.recover("main-handoff");
     await f.protocol.writeSession({ conversationId: "main-handoff", requestId: `stop:${kind}`, mutation: kind === "conversation-clear" ? { kind: "window-op", op: "clear" } : { kind }, principal: f.protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "lifecycle-handoff" }), conversationExists: async () => true });
     await f.application.recover("main-handoff");
-    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.current).toBe(false);
-    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect((await f.historySources("main-handoff"))[0]?.current).toBe(false);
+    expect((await f.historySources("ws:reports:primary"))[0]?.state).toBe("cancelled");
     expect(f.executions).toEqual(["main-handoff"]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
@@ -1513,21 +1518,21 @@ describe("ConversationProtocolRuntime", () => {
     const target = "ws:reports:primary";
     await f.protocol.admit({ conversationId: target, input: "报告需要包含来源", invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "target-new-intent" } }, surfacePrincipal: "rpc:owner" });
     await f.application.recover(target);
-    expect((await f.protocol.worksceneContinuationSources(target))[0]?.state).toBe("queued");
+    expect((await f.historySources(target))[0]?.state).toBe("queued");
     expect(f.executions).toEqual(["main-handoff"]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("workscene continuation precisely stops a committed source and replays the stop without reviving descendants", async () => {
     const f = await worksceneContinuationHarness();
     await f.start();
     await f.application.recover("main-handoff");
-    const source = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!;
+    const source = (await f.historySources("main-handoff"))[0]!;
     const request = { conversationId: source.conversationId, runId: source.runId, requestId: "stop-original", principal: f.protocol.controlPrincipal({ surfacePrincipal: "rpc:owner", connectionId: "stop-source" }) };
     await f.protocol.cancel(request);
     f.protocol.releaseConversation(source.conversationId);
     await f.protocol.cancel(request);
-    expect((await f.protocol.worksceneContinuationSources(source.conversationId))[0]).toMatchObject({ state: "committed", current: false });
+    expect((await f.historySources(source.conversationId))[0]).toMatchObject({ state: "committed", current: false });
     await f.application.recover(source.conversationId);
-    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect((await f.historySources("ws:reports:primary"))[0]?.state).toBe("cancelled");
     expect(f.executions).toEqual(["main-handoff"]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("workscene continuation commits a targeted stop before a new handoff in the same turn and replays both", async () => {
@@ -1543,10 +1548,10 @@ describe("ConversationProtocolRuntime", () => {
     await f.application.recover("main-handoff");
     f.protocol.releaseConversation("main-handoff");
     await f.application.recover("main-handoff");
-    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
-    expect((await f.protocol.worksceneContinuationSources("ws:reports:primary"))[0]?.state).toBe("cancelled");
-    expect(await f.protocol.worksceneContinuationSources("ws:replacement:primary")).toHaveLength(1);
-    expect((await f.protocol.worksceneContinuationSources("ws:replacement:primary"))[0]?.state).toBe("queued");
+    expect((await f.historySources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
+    expect((await f.historySources("ws:reports:primary"))[0]?.state).toBe("cancelled");
+    expect(await f.historySources("ws:replacement:primary")).toHaveLength(1);
+    expect((await f.historySources("ws:replacement:primary"))[0]?.state).toBe("queued");
     expect(f.executions).toEqual(["main-handoff", "main-handoff"]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
   it("workscene continuation consumes the issued root stop after returning and redelegating, including durable reload", async () => {
@@ -1561,16 +1566,16 @@ describe("ConversationProtocolRuntime", () => {
       return undefined;
     });
     await f.start();
-    rootRunId = (await f.protocol.worksceneContinuationSources("main-handoff"))[0]!.runId;
+    rootRunId = (await f.historySources("main-handoff"))[0]!.runId;
     await vi.waitFor(async () => {
       for (const id of ["main-handoff", "ws:reports:primary", "ws:second:primary"]) await f.protocol.recoverConversation(id);
       expect(f.executions).toEqual(["main-handoff", "ws:reports:primary", "main-handoff", "ws:second:primary"]);
-      expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]?.current).toBe(false);
+      expect((await f.historySources("main-handoff"))[0]?.current).toBe(false);
     }, { timeout: TEST_DURABLE_IO_TIMEOUT_MS, interval: 100 });
     for (const id of ["main-handoff", "ws:reports:primary", "ws:second:primary"]) f.protocol.releaseConversation(id);
     await f.application.stop({ conversationId: "ws:second:primary", target: { conversationId: "main-handoff", runId: rootRunId }, requestId: "repeat-root-stop" });
     await f.protocol.recover();
-    expect((await f.protocol.worksceneContinuationSources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
+    expect((await f.historySources("main-handoff"))[0]).toMatchObject({ state: "committed", current: false });
     expect(await f.application.tasks("ws:second:primary")).toEqual([]);
     expect(f.executions).toHaveLength(4);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
@@ -3804,30 +3809,8 @@ describe("ConversationProtocolRuntime", () => {
     }]);
     expect(snapshotRead).not.toHaveBeenCalled();
     expect(history.notices.some((notice) => notice.state === "cancelled")).toBe(true);
-    // The adopted prefix belongs to the source. A target-local status snapshot
-    // must not erase it, with either an empty or later target WAL cursor.
-    const target = await setupAuthorityRuntime({ zhixingHome: await createTempDir("status-import-target"), secretStore: new MemorySecretStore() });
-    const transferred = createProtocol({ authority: target, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
-    const records = (await authority.authorityLog.readAll())
-      .filter(commit => commit.entries.some(entry => entry.stream === "run:conversation-cancel"))
-      .flatMap(commit => commit.entries.map(entry => ({ ...entry, lsn: commit.lsn, at: commit.at })));
-    expect(records.length).toBeGreaterThan(0);
-    const baseRef = await target.artifacts.put(Buffer.from(JSON.stringify(records)));
-    const token = await transferred.prepareCommittedConversationTransfer({
-      manifest: { v: 1, requestId: "status-import", transferId: "status-import", sourceDeviceId: authority.deviceId,
-        targetDeviceId: target.deviceId, conversationId: "conversation-cancel", sourceOwnerEpoch: authority.anchorEpoch,
-        nextOwnerEpoch: authority.anchorEpoch + 1, lastLsn: records.at(-1)!.lsn, streams: [], contentAssets: [],
-        authorityBase: { checkpoint: { logId: "source", lsn: records.at(-1)!.lsn, frameEndOffset: 0, prefixDigest: baseRef.digest },
-          records: baseRef, sessionState: baseRef, reducerVersion: "1" } }, records,
-    });
-    token.publish();
-    for (const appendTargetTail of [false, true]) {
-      if (appendTargetTail) await transferred.ensureSession("conversation-status-other");
-      const importedHistory = await transferred.statusHistory([{ conversationId: "conversation-cancel", runId: admitted.runId, afterStatusRevision: 0 }]);
-      expect(importedHistory.notices.some(notice => notice.state === "cancelled")).toBe(true);
-      expect((await transferred.sessionAuthorityState("conversation-cancel")).hasDurableIdentity).toBe(true);
-    }
-
+    // Authenticated imported-prefix status/tail coverage lives in
+    // owner-kernel conversation-base-integration.test.ts, using production transfer.
     expect(history.next).toEqual([{
       conversationId: "conversation-cancel",
       runId: admitted.runId,
@@ -5376,6 +5359,183 @@ describe("ConversationProtocolRuntime", () => {
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 });
 
+it('retains cancelled-child advancement cleanup only until the durable session cancellation', async () => {
+  const control: PostTurnControlOutcome = { intent: { kind: 'enter', sceneId: 'reports', handoff: { goal: 'report', constraints: [], completed: [], remaining: ['finish'] } } };
+  const f = await worksceneContinuationHarness(undefined, { initialConversationId: 'main-handoff', firstControl: control, withAdvancement: true });
+  onTestFinished(async () => { await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll(); });
+  await f.start(); await f.application.recover('main-handoff');
+  const child = (await f.protocol.worksceneContinuationSources('ws:reports:primary'))[0]!;
+  await f.protocol.cancel({ conversationId: child.conversationId, runId: child.runId, requestId: 'cancel-entrusted-child',
+    principal: f.protocol.controlPrincipal({ surfacePrincipal: child.surfacePrincipal, connectionId: 'cancel-child' }) });
+  f.protocol.releaseConversation(child.conversationId);
+  const directory = registerConversationReadProjection(f.authority.authorityLog, f.authority.artifacts, f.authority.verifier);
+  expect(await directory.get(JSON.stringify(child.conversationId) + ':continuation-advancement:' + JSON.stringify(child.runId)))
+    .toEqual({ conversationId: 'main-handoff', sessionId: 'adv-continuation' });
+  expect((await f.protocol.worksceneContinuationSources(child.conversationId))[0]?.state).toBe('cancelled');
+  await f.application.recover(child.conversationId);
+  expect(f.cancelAdvancement).toHaveBeenCalledOnce();
+  expect(f.cancelAdvancement).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'main-handoff', advancementSessionId: 'adv-continuation' }));
+  expect(await f.protocol.worksceneContinuationSources(child.conversationId)).toEqual([]);
+  f.protocol.releaseConversation(child.conversationId); await f.application.recover(child.conversationId);
+  expect(f.cancelAdvancement).toHaveBeenCalledOnce();
+}, 120_000);
+
+it.each([4, 16])('retires precisely stopped committed delegation history at scale %i', async size => {
+  const handoff: PostTurnControlOutcome = { intent: { kind: 'enter', sceneId: 'reports', handoff: { goal: 'report', constraints: [], completed: [], remaining: ['finish'] } } };
+  const f = await worksceneContinuationHarness(() => handoff);
+  onTestFinished(async () => { await f.protocol.stopRecoveryLoop(); await f.manager.disposeAll(); });
+  for (let i = 0; i < size; i++) {
+    if (!i) await f.start();
+    else {
+      const managed = await f.manager.getOrCreate('main-handoff');
+      expectSettled(await projectSessionTurn({ manager: f.manager, managed, text: 'next task', turnId: `task-${i}`,
+        runOptions: { source: 'interactive', surfacePrincipal: 'rpc:owner', turnContext: { turnId: `task-${i}` } }, notify: () => {} }));
+    }
+    await f.application.recover('main-handoff');
+    const source = (await f.protocol.worksceneContinuationSources('main-handoff')).at(-1)!;
+    await f.protocol.cancel({ conversationId: source.conversationId, runId: source.runId, requestId: `precise-${i}`,
+      principal: f.protocol.controlPrincipal({ surfacePrincipal: 'rpc:owner', connectionId: 'scale-stop' }) });
+    await f.application.recover('main-handoff');
+    expect((await f.protocol.worksceneContinuationSources(source.conversationId, { runId: source.runId }))[0]).toMatchObject({ state: 'committed', current: false });
+  }
+  f.protocol.releaseConversation('main-handoff'); f.protocol.releaseConversation('ws:reports:primary');
+  const directory = registerConversationReadProjection(f.authority.authorityLog, f.authority.artifacts, f.authority.verifier);
+  const scan = directory.scan.bind(directory); let rows = 0;
+  const probe = vi.spyOn(directory, 'scan').mockImplementation(async (...args) => { const page = await scan(...args); rows += page.entries.length; return page; });
+  try {
+    expect(await f.protocol.worksceneContinuationSources('main-handoff')).toEqual([]);
+    expect(await f.protocol.worksceneContinuationSources('ws:reports:primary')).toEqual([]);
+    expect(await f.application.tasks('main-handoff')).toEqual([]);
+    expect(rows).toBe(0);
+    console.log('PRECISE_STOP_HISTORY', JSON.stringify({ size, rows }));
+  } finally { probe.mockRestore(); }
+}, 180_000);
+
+it.each(['current', 'legacy'] as const)('continues a truly metered local conversation after %s adoption and cold restart', async format => {
+  let executions = 0;
+  const run: SessionRuntime['run'] = async function* (messages, options) {
+    executions++;
+    const meter = options?.modelCallResourceMeter;
+    if (!meter) throw Error('Missing real resource meter');
+    const usage = await meter.reserve({ callIndex: 1, tokenUpperBound: 8 });
+    await meter.consume({ usageId: usage.usageId, tokens: 4 });
+    const assistant: Message = { role: 'assistant', content: [{ type: 'text', text: `metered-${executions}` }] };
+    yield { type: 'text_delta', text: `metered-${executions}` };
+    return { agentResult: { reason: 'completed', message: assistant, usage: { inputTokens: 2, outputTokens: 2 } },
+      runRecord: { timestamp: new Date().toISOString(), messages: [messages.at(-1)!, assistant], usage: { inputTokens: 2, outputTokens: 2 } },
+      newMessages: [assistant], durationMs: 1 };
+  };
+  const f = await createLocalOwnerAssemblyFixture({ profile: 'anchor-executor', run });
+  onTestFinished(async () => { await f.assembly.close(); await f.authority.startupCleanup.run(); });
+  await f.assembly.start();
+  const conversationId = await f.port.createConversation();
+  expectSettled(await f.runTurn({ conversationId, text: 'before adoption', turnId: 'local-consume' }));
+  const sourceLog = f.authority.executorLog, source = f.assembly.transferSource();
+  const consumes = (await sourceLog.readAll()).flatMap(c => c.entries).filter(e => e.stream === 'governor' && (e.body as { t?: string }).t === 'consume');
+  expect(consumes).toHaveLength(1); expect(consumes[0]!.body).toMatchObject({ tokens: 4 });
+  const store = await FileMeshBootstrapStore.open(f.home, f.authority.identityKey, { secretStore: f.secretStore });
+  await store.initializeLocalHome({ key: f.authority.identityKey, identity: f.authority.identity, roles: ['anchor', 'executor'], at: new Date().toISOString(), homeId: `metered-${format}` });
+  await store.loadCurrentTrust();
+  const transferId = 'xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const request = { requestId: 'adopt-metered', transferId, targetDeviceId: f.authority.deviceId, conversationId, sourceOwnerEpoch: 1 };
+  const context = { principal: { kind: 'host' as const, component: 'legacy-export-fixture' }, requestId: 'snapshot', deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+  const snapshot = { meta: await f.port.sessionState.readSessionMeta(conversationId, context),
+    taskList: await f.port.sessionState.readTaskList(conversationId, context),
+    transcript: (await f.port.sessionState.readTranscriptTail(conversationId, context)).records,
+    advancement: await f.port.sessionState.readAdvancementState(conversationId, context) };
+  console.log('METERED_ADOPTION_PHASE', format, 'source prepare');
+  await source.prepare(request);
+  if (format === 'legacy') {
+    // Historical serializer, before signing: domain facts retain their real
+    // source LSN/time, but this format never carried native envelope provenance.
+    const checkpoint = await sourceLog.checkpoint();
+    const selected = await selectConversationAuthorityRecords(await sourceLog.readAll(), conversationId, f.authority.artifacts, f.authority.verifier);
+    const records = selected.records.map(({ sourceItem: _item, sourceEnvelopeDigest: _digest, ...record }) => record);
+    const recordsRef = await f.authority.artifacts.put(Buffer.from(canonicalize(records)));
+    const sessionState = await f.authority.artifacts.put(Buffer.from(canonicalize(snapshot)));
+    const streams = [...new Set(records.map(record => record.stream))].sort((a,b) => a.localeCompare(b)).map(stream => {
+      const selected = records.filter(record => record.stream === stream);
+      return { stream, firstLsn: selected[0]!.lsn, lastLsn: selected.at(-1)!.lsn, recordCount: selected.length,
+        digest: protocolDigest('ConversationTransferLogicalStream', 1, { stream, records: selected }) };
+    });
+    const manifest = prepareConversationTransferManifest({ v: 1, ...request, sourceDeviceId: f.authority.deviceId, nextOwnerEpoch: 2,
+      lastLsn: checkpoint.lsn, authorityBase: { checkpoint, records: recordsRef, sessionState, reducerVersion: 'conversation-session-state-v1' }, streams, contentAssets: selected.references });
+    const manifestRef = await f.authority.artifacts.put(manifest.bytes);
+    const proof = createSignedSourceFreezeProof({ v: 1, transferId, scope: 'conversation', subject: conversationId,
+      sourceEpoch: 1, checkpointDigest: manifestRef.digest, lastLsn: checkpoint.lsn }, f.authority.signer);
+    await sourceLog.append([{ stream: `transfer:${transferId}`, body: { v: 1, t: 'frozen', transferId, manifest: manifestRef, proof } }]);
+  }
+  console.log('METERED_ADOPTION_PHASE', format, 'source freeze');
+  const frozen = await source.freeze(transferId);
+  const target = new ConversationTransferTarget({ deviceId: f.authority.deviceId, log: f.authority.authorityLog, artifacts: f.authority.artifacts,
+    staging: stagingArea(), signer: f.authority.signer, verifier: f.authority.verifier, isActiveSource: id => id === f.authority.deviceId,
+    acceptsSourceConversationId: (device, id) => device === f.authority.deviceId && id === conversationId,
+    conversationExists: () => false, sourceOwnerEpoch: () => 1, reducerVersion: 'conversation-session-state-v1' });
+  await target.prepare({ v: 1, t: 'prepared', ...request, sourceDeviceId: f.authority.deviceId, nextOwnerEpoch: 2 });
+  console.log('METERED_ADOPTION_PHASE', format, 'target import');
+  await target.import({ transferId, manifestRef: frozen.manifestRef, proof: frozen.proof, source: source.readPort });
+  const originalTransaction = f.authority.authorityLog.transactProjection.bind(f.authority.authorityLog);
+  const legacyWriter = format === 'legacy' ? vi.spyOn(f.authority.authorityLog, 'transactProjection').mockImplementation(async (...args: any[]) => {
+    const decide = args[2];
+    args[2] = async (...input: any[]) => {
+      const result = await decide(...input);
+      if (result.kind !== 'append') return result;
+      return { ...result, entries: result.entries.map((entry: any) => {
+        if (entry.body.t !== 'conversation-transfer-committed-base') return entry;
+        const { ownerBasis: _basis, ...body } = entry.body; return { ...entry, body: { ...body, v: 1 } };
+      }) };
+    };
+    return (originalTransaction as any)(...args);
+  }) : undefined;
+  console.log('METERED_ADOPTION_PHASE', format, 'target commit');
+  let committed;
+  try { committed = await target.commit(transferId); } finally { legacyWriter?.mockRestore(); }
+  console.log('METERED_ADOPTION_PHASE', format, 'source accept');
+  await source.acceptCommit({ manifest: frozen.manifest, commit: committed.commit });
+  expect((await f.authority.authorityLog.readAll()).flatMap(c => c.entries).some(e => e.stream === 'governor' && (e.body as { t?: string }).t === 'consume')).toBe(false);
+  console.log('METERED_ADOPTION_PHASE', format, 'source close');
+  await f.assembly.close(); await store.stopStorageMaintenance(); await f.authority.startupCleanup.run();
+
+  console.log('METERED_ADOPTION_PHASE', format, 'target restart');
+  const authority = await setupAuthorityRuntime({ zhixingHome: f.home, secretStore: f.secretStore });
+  let manager!: ConversationManager;
+  const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+  const factory: RuntimeFactory = { create: async id => ({ ...TEST_RUNTIME_AUTHORITY_FACTS, sessionId: id, run, abort: () => false, async dispose() {} }) };
+  manager = new ConversationManager(factory, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {},
+    appendCommittedRun: async (_id, record) => ({ runIndex: record.runIndex, shardId: 'owner-log', appended: true }) });
+  onTestFinished(async () => { await protocol.stopRecoveryLoop(); await manager.disposeAll(); });
+  console.log('METERED_ADOPTION_PHASE', format, 'target base');
+  const restored = await loadCommittedConversationBase(authority.authorityLog, authority.artifacts, authority.verifier, transferId);
+  await protocol.installCommittedConversationTransfer(restored);
+  const asset = await authority.artifacts.put(Buffer.from('target upload'));
+  const grant = { kind: 'asset-upload' as const, scope: { domain: 'conversation' as const, conversationId, ownerEpoch: 2 },
+    surfacePrincipal: 'surface:local:first-party', requestId: 'adopted-surface-upload', assets: [asset],
+    payloadDigest: protocolDigest('AdoptedUploadFixture', 1, asset) };
+  await expect(authority.surfaceAssets.issue({ ...grant, scope: { ...grant.scope, ownerEpoch: 1 } })).rejects.toThrow();
+  expect((await authority.surfaceAssets.issue(grant)).scope).toEqual(grant.scope);
+
+  const managed = await manager.getOrCreate(conversationId);
+  console.log('METERED_ADOPTION_PHASE', format, 'target execute');
+  expectSettled(await projectSessionTurn({ manager, managed, text: 'after adoption', turnId: 'target-consume',
+    runOptions: { source: 'interactive', surfacePrincipal: 'surface:local:first-party', turnContext: { turnId: 'target-consume' } }, notify: () => {} }));
+  expectSettled(await projectSessionTurn({ manager, managed, text: 'after adoption', turnId: 'target-consume',
+    runOptions: { source: 'interactive', surfacePrincipal: 'surface:local:first-party', turnContext: { turnId: 'target-consume' } }, notify: () => {} }));
+  expect(executions).toBe(2); // Exact duplicate ingress never executes or consumes twice.
+  const local = fixtureLocalOwnerRuntime(authority);
+  const oldOwner = new ConversationRunJournal({ conversationId, ownerEpoch: 1, log: authority.executorLog, artifacts: authority.artifacts,
+    signer: authority.signer, verifier: authority.verifier, resources: local.resources,
+    currentAuthority: { deviceId: authority.deviceId, executorId: authority.executorId },
+    submission: { authenticate() {}, authorize() {} },
+    authority: { decideAtPrefix() { throw Error('Fenced source cannot commit'); } }, projection: { async project() {} } });
+  await expect(oldOwner.admit({ runId: 'stale-source', ingressKey: 'stale-source', queuedPosition: 1,
+    userInput: userTurnInputFromText('stale source'), invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'surface:local:first-party', deviceId: authority.deviceId, ingressId: 'stale-source', receivedAt: new Date().toISOString() } })).rejects.toThrow();
+  const tail = await protocol.sessionState.readTranscriptTail(conversationId, context);
+  expect(tail.records).toHaveLength(2);
+  const after = (await authority.executorLog.readAll()).flatMap(c => c.entries).filter(e => e.stream === 'governor' && (e.body as { t?: string }).t === 'consume');
+  expect(after).toHaveLength(2);
+}, 120_000);
+
 function mutationPublisher(label: string): ConversationMutationPublisher {
   return {
     readProjectionIds: [label],
@@ -5389,6 +5549,7 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
   firstControl: PostTurnControlOutcome;
   canRunIsolatedMain?: boolean;
   withWorkspace?: boolean;
+  withAdvancement?: boolean;
   beforeRun?: (conversationId: string, origin: import("@zhixing/core").TurnOrigin | undefined) => Promise<void>;
 }) {
   const home = await createTempDir("workscene-continuation");
@@ -5439,9 +5600,42 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
       return { kind: "entered", conversationId, scene: { sceneId: command.sceneId, name: command.sceneId, revision: 1 } };
     },
   };
-  application = new WorksceneContinuationApplication(createWorksceneContinuationPort({ manager, protocol, workscene, canRunIsolatedMain: probe?.canRunIsolatedMain ?? true, advancement: { queryActiveState: async () => null, cancelSession: vi.fn() } }));
-  return { authority, protocol, manager, application, executions, environment, prepare, start: async () => {
+  const advanceContext = () => ({ principal: { kind: 'host' as const, component: 'continuation-advancement-fixture' }, requestId: 'advance-read', deadlineAt: new Date(Date.now() + 60_000).toISOString() });
+  const cancelAdvancement = vi.fn(async ({ conversationId, advancementSessionId: sessionId }: { conversationId: string; advancementSessionId: string }) => {
+    await protocol.sessionState.mutate(conversationId, { kind: 'advancement-event', events: [{ type: 'cancelled', sessionId, timestamp: new Date().toISOString() }] },
+      { principal: { kind: 'host', component: 'continuation-advancement-fixture' }, requestId: 'cancel-advancement', deadlineAt: new Date(Date.now() + 60_000).toISOString() });
+    return (await protocol.sessionState.readAdvancementState(conversationId, advanceContext()))!;
+  });
+  application = new WorksceneContinuationApplication(createWorksceneContinuationPort({ manager, protocol, workscene, canRunIsolatedMain: probe?.canRunIsolatedMain ?? true,
+    advancement: { queryActiveState: async id => {
+      if (!probe?.withAdvancement) return null;
+      const state = await protocol.sessionState.readAdvancementState(id, advanceContext());
+      return state?.status === 'active' ? { advancementSessionId: state.id, status: state.status } : null;
+    }, cancelSession: probe?.withAdvancement ? cancelAdvancement : vi.fn() } }));
+  // Assertions inspect named historical runs explicitly. Production discovery
+  // now returns only unconsumed obligations and must not retain these rows.
+  const historySources = async (id: string) => {
+    const runs = (await authority.authorityLog.readStream(`run:${id}`)).flatMap(({ body }) => {
+      const record = body as { t?: string; runId?: string };
+      return record.t === 'admitted' && record.runId ? [record.runId] : [];
+    });
+    return (await Promise.all(runs.map(runId => protocol.worksceneContinuationSources(id, { runId })))).flat();
+  };
+  return { authority, protocol, manager, application, executions, environment, prepare, historySources, cancelAdvancement, start: async () => {
     const managed = await getOrCreateActiveConversation(authority, manager, probe?.initialConversationId ?? "main-handoff");
+    if (probe?.withAdvancement) {
+      const timestamp = new Date().toISOString(), input = userTurnInputFromText('report');
+      const evidence = [{ id: 'evidence', kind: 'test-result' as const, description: 'verified', required: true }];
+      await protocol.sessionState.mutate('main-handoff', { kind: 'advancement-event', events: [
+        { type: 'session_created', timestamp, sessionId: 'adv-continuation', conversationId: 'main-handoff', originalUserTask: input,
+          pendingRubricDraft: { draftId: 'draft-continuation', originalTurnId: 'original-task', source: 'generated', candidateRubricIds: [], title: 'report', description: 'finish',
+            content: { passCriteria: ['verified'], evidenceRequirements: evidence, failureHandling: [] }, createdAt: timestamp } },
+        { type: 'rubric_confirmed', timestamp, sessionId: 'adv-continuation', confirmedRubric: { source: { kind: 'library', rubricId: 'fixture-rubric', rubricVersion: 'v1' }, title: 'report', description: 'finish',
+          content: { passCriteria: [{ id: 'criterion', text: 'verified' }], evidenceRequirements: evidence, failureHandling: [] }, confirmedAt: timestamp, confirmedBy: 'user' },
+          admissionIntent: { turnId: 'original-task', surfacePrincipal: 'rpc:owner', turnOrigin: { channel: 'rpc', triggeredBy: 'rpc:owner' }, inputDigest: protocolDigest('AdvancementOriginalTaskInput', 1, input) } },
+      ] }, { principal: { kind: 'host', component: 'continuation-advancement-fixture' }, requestId: 'activate-advancement', deadlineAt: new Date(Date.now() + 60_000).toISOString() });
+    }
+
     expectSettled(await projectSessionTurn({ manager, managed, ...(environment ? { environment } : {}), text: "报告整理", turnId: "handoff-start", runOptions: { source: "interactive", surfacePrincipal: "rpc:owner", turnContext: { turnId: "handoff-start", ...(probe ? { turnOrigin: { channel: "rpc", triggeredBy: "rpc:owner" } } : {}) } }, notify: () => {} }));
   } };
 }

@@ -193,6 +193,8 @@ function renderStartupFailure(
   if (result.kind === "schema-error") {
     writer.line(chalk.red(`[配置错误] ${result.message}`));
     writer.line(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
+  } else if (result.kind === "read-unavailable") {
+    writer.line(chalk.yellow(result.message));
   } else if (result.kind === "secret-store-error") {
     writer.line(chalk.red(`[秘密存储不可用] ${result.message}`));
     writer.line(chalk.dim(`设备本地目录：${result.filePath}`));

@@ -14,6 +14,7 @@ import type {
   StorageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
+import { ConversationRunJournal } from '../conversation-assignment.js';
 import { describe, expect, it } from "vitest";
 import {
   CONVERSATION_TRANSFER_PROJECTION_ID,
@@ -26,9 +27,14 @@ import {
   type ConversationTransferSourceOptions,
 } from "../conversation-transfer.js";
 import {
+  conversationAnchorAtPrefix,
+  conversationAnchorProjectionIds,
+} from "../conversation-owner-authority.js";
+import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
 } from "./durable-io-test-support.js";
+import { installVerifiedAnchorTenure } from "./imported-base-fixture.js";
 
 const TRANSFER_ID = "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const CONVERSATION = "local-12345678-01K1ZZZZZZ0000000000000000";
@@ -185,7 +191,6 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
   });
 
   it("imports all declared bytes idempotently and rejects corrupt or stale preparations", async () => {
-    const source = await sourceHarness();
     const targetRoot = await createTempDir("conversation-transfer-target");
     const targetArtifacts = new FileArtifactStore(path.join(targetRoot, "artifacts"), {
       lockWaitMs: 2_000,
@@ -195,16 +200,16 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       targetArtifacts,
       { clock: () => NOW, lockWaitMs: 2_000 },
     ));
-    await source.log.append([
-      { stream: `run:${CONVERSATION}`, body: { t: "identity", conversationId: CONVERSATION } },
-      { stream: `intent:${CONVERSATION}`, body: { t: "intent", conversationId: CONVERSATION } },
-    ]);
-    const prepared = prepareRecord();
+    const tenure = await installVerifiedAnchorTenure(targetLog, NOW);
+    const targetDeviceId = tenure.anchorDeviceId;
+    const source = await sourceHarness({ validDomain: true, targetDeviceId });
+    await source.seed();
+    const prepared = prepareRecord(targetDeviceId);
     await source.source.prepare(prepared);
     const frozen = await source.source.freeze(TRANSFER_ID);
     const targetStaging = memoryStagingArea();
     const target = new ConversationTransferTarget({
-      deviceId: "device-target",
+      deviceId: targetDeviceId,
       log: targetLog,
       artifacts: targetArtifacts,
       staging: targetStaging.port,
@@ -217,7 +222,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       sourceOwnerEpoch: () => 4,
       reducerVersion: "session-state-v1",
     });
-    await target.prepare(preparedRecord());
+    await target.prepare(preparedRecord(targetDeviceId));
     const imported = await target.import({
       transferId: TRANSFER_ID,
       manifestRef: frozen.manifestRef,
@@ -258,13 +263,16 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
     await expect(
       targetLog.transactDurableProjection(
         CONVERSATION_TRANSFER_PROJECTION_ID,
-        async (projection) => {
-          await assertConversationTransferWriteAuthority(projection, CONVERSATION, {
-            deviceId: "device-target",
-            ownerEpoch: 5,
-          });
+        async (projection, context) => {
+          await assertConversationTransferWriteAuthority(
+            projection,
+            CONVERSATION,
+            { deviceId: targetDeviceId, ownerEpoch: 5 },
+            await conversationAnchorAtPrefix(targetLog, context),
+          );
           return { kind: "return", value: true };
         },
+        { readProjectionIds: conversationAnchorProjectionIds(targetLog) },
       ),
     ).resolves.toMatchObject({ value: true });
     await expect(target.committedBase(TRANSFER_ID)).resolves.toMatchObject({
@@ -297,7 +305,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
 
   it("cleans only transfer-private staging and preserves promoted shared digests", async () => {
     const maintenance = recordingGovernor();
-    const source = await sourceHarness({ storageMaintenance: maintenance.port });
+    const source = await sourceHarness({ storageMaintenance: maintenance.port, validDomain: true });
     const targetRoot = await createTempDir("conversation-transfer-private-staging");
     const targetArtifacts = new FileArtifactStore(path.join(targetRoot, "artifacts"), {
       lockWaitMs: 2_000,
@@ -309,12 +317,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
     ));
     const staging = memoryStagingArea();
     const shared = await source.artifacts.put(Buffer.from("shared-attachment", "utf8"));
-    await source.log.append([
-      {
-        stream: `run:${CONVERSATION}`,
-        body: { t: "identity", conversationId: CONVERSATION, attachment: shared },
-      },
-    ]);
+    await source.seed(shared);
     await source.source.prepare(prepareRecord());
     const frozen = await source.source.freeze(TRANSFER_ID);
     await targetArtifacts.putVerifiedStream(
@@ -438,10 +441,13 @@ function memoryStagingArea(): {
 }
 
 async function sourceHarness(options: {
+  readonly validDomain?: boolean;
+  readonly targetDeviceId?: string;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly conversationState?: ConversationTransferSourceOptions["conversationState"];
   readonly settleConversation?: ConversationTransferSourceOptions["settleConversation"];
 } = {}) {
+  const targetDeviceId = options.targetDeviceId ?? "device-target";
   const root = await createTempDir("conversation-transfer-source");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
@@ -451,6 +457,18 @@ async function sourceHarness(options: {
     lockWaitMs: 2_000,
   }));
   const settled: string[] = [];
+  const journal = options.validDomain ? new ConversationRunJournal({ conversationId: CONVERSATION, ownerEpoch: 4, log, artifacts,
+    signer, verifier, currentAuthority: { deviceId: 'device-source', executorId: 'fixture-executor' },
+    submission: { authenticate() {}, authorize() {} }, authority: { decideAtPrefix: () => ({ committed: true, commitRevision: 1 }) },
+    projection: { async project() {} }, clock: () => NOW }) : undefined;
+  const seed = async (attachment?: ArtifactRef) => {
+    if (!journal) throw Error('Domain seed needs a real journal');
+    await journal.admit({ runId: 'seed', ingressKey: 'seed', queuedPosition: 0,
+      userInput: { parts: [{ type: 'text', text: 'source input' }] }, invocation: { kind: 'agent', source: 'interactive' },
+      ...(attachment ? { attachments: [{ ...attachment, kind: 'file' }] } : {}),
+      ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device-source', ingressId: 'seed', receivedAt: NOW } });
+    await journal.cancelRun({ runId: 'seed', requestId: 'cancel-seed' });
+  };
   const source = new ConversationTransferSource({
     deviceId: "device-source",
     log,
@@ -458,7 +476,7 @@ async function sourceHarness(options: {
     signer,
     verifier,
     acceptsConversationId: (conversationId) => conversationId === CONVERSATION,
-    isCurrentAnchor: (deviceId) => deviceId === "device-target",
+    isCurrentAnchor: (deviceId) => deviceId === targetDeviceId,
     storageMaintenance: options.storageMaintenance,
     conversationState: options.conversationState ?? (async (conversationId) => ({
       exists: conversationId === CONVERSATION,
@@ -470,11 +488,12 @@ async function sourceHarness(options: {
     }),
     snapshotSessionState: async () => ({
       reducerVersion: "session-state-v1",
-      value: { conversationId: CONVERSATION, revision: 3 },
+      value: journal ? JSON.parse(JSON.stringify({ meta: await journal.sessionMeta(), taskList: await journal.taskList(),
+        transcript: (await journal.transcriptTail()).records, advancement: null })) : { conversationId: CONVERSATION, revision: 3 },
     }),
     clock: () => NOW,
   });
-  return { artifacts, log, settled, source };
+  return { artifacts, log, settled, source, seed };
 }
 
 function recordingGovernor(): {
@@ -510,24 +529,24 @@ function recordingGovernor(): {
   };
 }
 
-function prepareRecord() {
+function prepareRecord(targetDeviceId = "device-target") {
   return {
     requestId: "request-1",
     transferId: TRANSFER_ID,
-    targetDeviceId: "device-target",
+    targetDeviceId,
     conversationId: CONVERSATION,
     sourceOwnerEpoch: 4,
   };
 }
 
-function preparedRecord(): Extract<TransferRecord, { t: "prepared" }> {
+function preparedRecord(targetDeviceId = "device-target"): Extract<TransferRecord, { t: "prepared" }> {
   return {
     v: 1,
     t: "prepared",
     requestId: "request-1",
     transferId: TRANSFER_ID,
     sourceDeviceId: "device-source",
-    targetDeviceId: "device-target",
+    targetDeviceId,
     conversationId: CONVERSATION,
     sourceOwnerEpoch: 4,
     nextOwnerEpoch: 5,

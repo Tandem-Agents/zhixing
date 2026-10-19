@@ -1,5 +1,3 @@
-import { verifyProtocolStep } from "@zhixing/core/protocol";
-import { projectionCheckpointKey } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
   CommitEnvelope,
@@ -18,9 +16,12 @@ import type {
   DurableProjectionMutation,
   DurableProjectionReadContext,
   IdentifiedPhysicalStepRunner,
+  DurableProjectionSource, VerifiedAnchorTenure,
 } from "@zhixing/core/authority";
 import {
   validateAdmittedControlEnvelope,
+  resolveDispatchArtifactClosure,
+  resolveSealedBundleArtifactClosure,
 } from "@zhixing/core/authority";
 import {
   runStorageMaintenanceStep,
@@ -41,17 +42,29 @@ import {
   validateConversationTransferCommit,
   validateSourceFreezeProof,
   validateConversationTransferManifest,
+  validateConversationEnvelope,
   type ConversationTransferState,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
+import { ConversationBaseSource, type ConversationBaseManifest } from "./conversation-base-source.js";
+import { registerConversationBaseContext } from "./conversation-base-registry.js";
+import { isLocalConversationId } from '@zhixing/core/conversation';
+export { isConversationSourceEvidenceError } from './conversation-base-source.js';
+export { foldConversationBaseBindings, conversationBaseKey, openConversationBase, registerConversationBaseContext } from './conversation-base-registry.js';
+export type { ConversationBaseBinding } from './conversation-base-registry.js';
+import { conversationAnchorAtPrefix, conversationAnchorAtSource, conversationAnchorProjectionIds, conversationOwnerBasis,
+  adoptedConversationOwner, type ConversationOwnerBasis } from './conversation-owner-authority.js';
+export { registerConversationAnchorTenure, conversationAnchorAtPrefix, conversationAnchorProjectionIds } from './conversation-owner-authority.js';
+export type { ConversationAnchorTenurePort } from './conversation-owner-authority.js';
 
 export const CONVERSATION_TRANSFER_PROJECTION_ID =
   "conversation-transfer-current-v1";
-const TRANSFER_PROJECTION_REDUCER_VERSION = 1;
+const TRANSFER_PROJECTION_REDUCER_VERSION = 3;
 
 interface ConversationTransferCommittedBaseRecord {
-  readonly v: 1;
+  readonly v: 1 | 2;
+  readonly ownerBasis?: ConversationOwnerBasis;
   readonly t: "conversation-transfer-committed-base";
   readonly transferId: string;
   readonly conversationId: string;
@@ -84,6 +97,7 @@ export interface CurrentConversationAuthority {
   readonly deviceId: string;
   readonly ownerEpoch: number;
   readonly transferId?: string;
+  readonly anchorEpoch?: number;
   readonly state: "current" | "frozen" | "importing" | "fenced";
 }
 
@@ -227,6 +241,7 @@ export class ConversationTransferSource {
       snapshot.filter((envelope) => envelope.lsn <= checkpoint.lsn),
       identity.conversationId,
       this.#options.artifacts,
+      this.#options.verifier,
     );
     const authorityBytes = Buffer.from(canonicalize(selected.records), "utf8");
     const recordsRef = await putTransferArtifact(
@@ -492,13 +507,13 @@ export class ConversationTransferSource {
 export function registerConversationTransferProjection(
   log: AuthorityCommitLog,
   verifier: ProtocolSignatureVerifier,
-): void {
-  log.durableProjection<ConversationTransferLogRecord>({
+) {
+  return log.durableProjection<ConversationTransferLogRecord>({
     projectionId: CONVERSATION_TRANSFER_PROJECTION_ID,
     inputs: { families: ["transfer:"] },
     reducerVersion: TRANSFER_PROJECTION_REDUCER_VERSION,
-    reduce: async (envelope, current) =>
-      reduceConversationTransferProjection(envelope, current, verifier),
+    reduce: async (envelope, current, source) =>
+      reduceConversationTransferProjection(envelope, current, verifier, log, source),
   });
 }
 
@@ -506,9 +521,12 @@ export async function resolveCurrentConversationAuthorityAt(
   projection: DurableProjectionReadContext,
   conversationId: string,
   fallback: { readonly deviceId: string; readonly ownerEpoch: number },
+  anchor?: VerifiedAnchorTenure,
 ): Promise<CurrentConversationAuthority> {
   const state = await projectedConversationTransferState(projection, conversationId);
   if (!state || state.phase === "aborted") {
+    if (anchor && !isLocalConversationId(conversationId)) return { deviceId: anchor.deviceId, ownerEpoch: anchor.anchorEpoch,
+      anchorEpoch: anchor.anchorEpoch, state: fallback.deviceId === anchor.deviceId ? 'current' : 'fenced' };
     return { ...fallback, state: "current" };
   }
   if (state.phase === "prepared" || state.phase === "frozen") {
@@ -527,12 +545,20 @@ export async function resolveCurrentConversationAuthorityAt(
       state: "importing",
     };
   }
+  const basis = await projection.get(`owner-base:${conversationId}`) as unknown as ConversationOwnerBasis | undefined;
+  if (!anchor || !basis) return {
+    deviceId: anchor?.deviceId ?? state.identity.targetDeviceId,
+    ownerEpoch: state.identity.nextOwnerEpoch, transferId: state.identity.transferId,
+    // A source routing hint is not fresh write authority. Missing legacy
+    // basis must never promote the historical target to current ownership.
+    state: 'fenced',
+  };
+  const owner = adoptedConversationOwner(basis, anchor);
   return {
-    deviceId: state.identity.targetDeviceId,
-    ownerEpoch: state.identity.nextOwnerEpoch,
+    ...owner,
     transferId: state.identity.transferId,
     state:
-      fallback.deviceId === state.identity.targetDeviceId ? "current" : "fenced",
+      fallback.deviceId === owner.deviceId ? "current" : "fenced",
   };
 }
 
@@ -545,14 +571,15 @@ export async function resolveCurrentConversationAuthority(
   registerConversationTransferProjection(log, verifier);
   const transaction = await log.transactDurableProjection<TransferRecord, CurrentConversationAuthority>(
     CONVERSATION_TRANSFER_PROJECTION_ID,
-    async (projection) => ({
+    async (projection, context) => ({
       kind: "return",
       value: await resolveCurrentConversationAuthorityAt(
         projection,
         conversationId,
         fallback,
+        await conversationAnchorAtPrefix(log, context),
       ),
-    }),
+    }), { readProjectionIds: conversationAnchorProjectionIds(log) },
   );
   return transaction.value;
 }
@@ -561,11 +588,13 @@ export async function assertConversationTransferWriteAuthority(
   projection: DurableProjectionReadContext,
   conversationId: string,
   actor: { readonly deviceId: string; readonly ownerEpoch: number },
+  anchor?: VerifiedAnchorTenure,
 ): Promise<void> {
   const resolved = await resolveCurrentConversationAuthorityAt(
     projection,
     conversationId,
     actor,
+    anchor,
   );
   if (
     resolved.state !== "current" ||
@@ -574,6 +603,35 @@ export async function assertConversationTransferWriteAuthority(
   ) {
     throw new Error("Conversation is not writable on this device");
   }
+}
+
+/** Local-domain authorization stays bound to its own durable transfer fence. */
+export async function localConversationAuthorityAt(view: DurableProjectionReadContext, conversationId: string,
+  deviceId: string, ownerEpoch: number): Promise<boolean> {
+  const state = await projectedConversationTransferState(view, conversationId);
+  return !state || state.phase === 'aborted' && state.identity.sourceDeviceId === deviceId && state.identity.sourceOwnerEpoch === ownerEpoch;
+}
+
+/** Both precommit publication and committed restoration use the same verified
+ * owner source. A historical manifest is not a current-device assertion. */
+export async function resolveConversationPublicationOwner(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier,
+  manifest: ConversationBaseManifest, manifestRef: ArtifactRef, deviceId: string): Promise<CurrentConversationAuthority> {
+  registerConversationTransferProjection(log, verifier);
+  return (await log.transactDurableProjection<never, CurrentConversationAuthority>(CONVERSATION_TRANSFER_PROJECTION_ID, async (view, context) => {
+    const state = await view.get(`transfer:${manifest.transferId}`) as unknown as ConversationTransferState | undefined;
+    if (!state || !['frozen', 'imported', 'committed', 'tombstoned'].includes(state.phase) || !state.manifest || !sameRef(state.manifest, manifestRef)) throw new TypeError('Conversation publication has no durable transfer identity');
+    for (const key of ['requestId', 'transferId', 'conversationId', 'sourceDeviceId', 'targetDeviceId', 'sourceOwnerEpoch', 'nextOwnerEpoch'] as const) {
+      if (state.identity[key] !== manifest[key]) throw new TypeError('Conversation publication identity differs from its source');
+    }
+    const anchor = await conversationAnchorAtPrefix(log, context);
+    if (!anchor) throw new TypeError('Conversation publication requires a verified anchor tenure');
+    const owner = state.phase === 'committed' || state.phase === 'tombstoned'
+      ? await resolveCurrentConversationAuthorityAt(view, manifest.conversationId, { deviceId, ownerEpoch: manifest.nextOwnerEpoch }, anchor)
+      : { deviceId: conversationOwnerBasis(anchor, manifest.targetDeviceId, manifest.nextOwnerEpoch).deviceId,
+          ownerEpoch: manifest.nextOwnerEpoch, anchorEpoch: anchor.anchorEpoch, state: 'current' as const };
+    if (owner.deviceId !== deviceId || owner.state !== 'current') throw new TypeError('Conversation publication does not belong to the current owner');
+    return { kind: 'return', value: owner };
+  }, { readProjectionIds: conversationAnchorProjectionIds(log) })).value;
 }
 
 export async function appendConversationTransferRecord(
@@ -591,7 +649,7 @@ export async function appendConversationTransferRecord(
   >(
     undefined,
     (state, logical) =>
-      logical.stream.startsWith("transfer:")
+      logical.stream.startsWith("transfer:xfer-")
         ? reduceConversationTransferLogRecord(state, logical.body, verifier)
         : state,
     (state) => {
@@ -635,9 +693,12 @@ async function appendConversationTransferCommitAndBase(
       logical.stream === `transfer:${record.transferId}`
         ? reduceConversationTransferLogRecord(state, logical.body, verifier)
         : state,
-    (state) => {
+    async (state, context) => {
       const next = reduceConversationTransfer(state, record, verifier);
       if (next === state) return { kind: "return", value: state! };
+      const tenure = await conversationAnchorAtPrefix(log, context);
+      if (!tenure) throw new TypeError('Conversation adoption requires a verified anchor tenure');
+      const ownerBasis = conversationOwnerBasis(tenure, manifest.targetDeviceId, manifest.nextOwnerEpoch);
       return {
         kind: "append",
         entries: [
@@ -645,7 +706,8 @@ async function appendConversationTransferCommitAndBase(
           {
             stream: `transfer:${record.transferId}`,
             body: {
-              v: 1,
+              v: 2,
+              ownerBasis,
               t: "conversation-transfer-committed-base",
               transferId: record.transferId,
               conversationId: manifest.conversationId,
@@ -661,6 +723,7 @@ async function appendConversationTransferCommitAndBase(
     {
       stream: `transfer:${record.transferId}`,
       candidateReferences,
+      readProjectionIds: conversationAnchorProjectionIds(log),
     },
   );
   return transaction.value;
@@ -671,81 +734,66 @@ export async function readConversationTransferState(
   transferId: string,
   verifier: ProtocolSignatureVerifier,
 ): Promise<ConversationTransferState | undefined> {
-  return log.rebuildProjection<
-    ConversationTransferState | undefined,
-    ConversationTransferLogRecord
-  >(
-    undefined,
-    (state, logical) =>
-      verifyProtocolStep(() => reduceConversationTransferLogRecord(state, logical.body, verifier)),
-    { stream: `transfer:${transferId}` },
-  );
+  return await registerConversationTransferProjection(log, verifier).get(`transfer:${transferId}`) as unknown as ConversationTransferState | undefined;
 }
 
 async function readConversationTransferCommittedBaseRecord(
   log: AuthorityCommitLog,
   transferId: string,
+  verifier: ProtocolSignatureVerifier,
 ): Promise<ConversationTransferCommittedBaseRecord | undefined> {
-  return log.rebuildProjection<
-    ConversationTransferCommittedBaseRecord | undefined,
-    ConversationTransferLogRecord
-  >(
-    undefined,
-    (current, logical) => {
-      if (!isConversationTransferCommittedBase(logical.body)) return current;
-      if (
-        current &&
-        canonicalize(current) !== canonicalize(logical.body)
-      ) {
-        throw new Error("Conversation transfer committed base is not immutable");
+  return await registerConversationTransferProjection(log, verifier).get(`base:${transferId}`) as unknown as ConversationTransferCommittedBaseRecord | undefined;
+}
+
+/** Owner identity remains available independently of the imported CAS bodies. */
+export async function readCommittedConversationTransferHeader(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier, transferId: string) {
+  registerConversationTransferProjection(log, verifier);
+  return (await log.transactDurableProjection<never, { state: ConversationTransferState; base: ConversationTransferCommittedBaseRecord }>(
+    CONVERSATION_TRANSFER_PROJECTION_ID, async view => {
+      const state = await view.get(`transfer:${transferId}`) as unknown as ConversationTransferState | undefined;
+      const base = await view.get(`base:${transferId}`) as unknown as ConversationTransferCommittedBaseRecord | undefined;
+      if (!state || !['committed', 'tombstoned'].includes(state.phase) || !state.commit || !state.manifest || !state.proof ||
+          !base || base.conversationId !== state.identity.conversationId || !sameRef(base.manifest, state.manifest)) {
+        throw new TypeError('Conversation transfer has no committed atomic source binding');
       }
-      return logical.body;
-    },
-    { stream: `transfer:${transferId}` },
-  );
+      return { kind: 'return', value: { state, base } };
+    })).value;
+}
+
+export async function loadCommittedConversationBase(log: AuthorityCommitLog, artifacts: ArtifactStore,
+  verifier: ProtocolSignatureVerifier, transferId: string): Promise<ConversationTransferPublication> {
+  const { state, base } = await readCommittedConversationTransferHeader(log, verifier, transferId);
+  registerConversationBaseContext(log, artifacts, verifier);
+  const source = await ConversationBaseSource.open({ log, artifacts, verifier, state, ownerCheckpoint: await log.checkpoint() });
+  if (!source.ready) await source.prepare();
+  const manifest = source.manifest;
+  if (!sameRef(base.records, manifest.authorityBase.records) || !sameRef(base.sessionState, manifest.authorityBase.sessionState)) {
+    throw new TypeError('Committed conversation authority base does not match its manifest');
+  }
+  return { state, manifest, source };
 }
 
 /**
- * 全部会话转移的当前状态。结果随检查点保存：重启后只续读其后的尾部，不为枚举转移流解析整份
- * 历史；没有检查点时完整读取一次。
+ * 明确请求全部转移时分页读取其当前行，不重放WAL或另存全集合检查点。
  */
-export async function listConversationTransferStates(
-  log: AuthorityCommitLog,
-  verifier: ProtocolSignatureVerifier,
-): Promise<readonly ConversationTransferState[]> {
-  const restored = await log.loadProjectionCheckpoint?.<ReadonlyMap<string, ConversationTransferState>>(TRANSFER_STATES_CHECKPOINT);
-  const initial: ReadonlyMap<string, ConversationTransferState> = restored?.state instanceof Map ? restored.state : new Map();
-  const read = await log.readProjection<ReadonlyMap<string, ConversationTransferState>, ConversationTransferLogRecord>(
-    initial,
-    async (current, entry) => {
-      if (!entry.stream.startsWith("transfer:")) return current;
-      if (isConversationTransferCommittedBase(entry.body)) return current;
-      // 日志内部重试时从未改动的起点重新归约。
-      const next = current === initial ? new Map(current) : current as Map<string, ConversationTransferState>;
-      const transferId = entry.body.transferId;
-      const previous = next.get(transferId);
-      next.set(transferId, await verifyProtocolStep(() => reduceConversationTransfer(previous, entry.body, verifier)));
-      return next;
-    },
-    restored ? { cursor: restored.cursor } : {},
-  );
-  if (read.cursor.lsn > (restored?.cursor.lsn ?? 0)) {
-    await log.saveProjectionCheckpoint?.(TRANSFER_STATES_CHECKPOINT, read.cursor, read.state);
-  }
-  return [...read.state.values()].sort((left, right) =>
-    left.identity.transferId.localeCompare(right.identity.transferId)
-  );
+export async function listConversationTransferStates(log: AuthorityCommitLog, verifier: ProtocolSignatureVerifier): Promise<readonly ConversationTransferState[]> {
+  const index = registerConversationTransferProjection(log, verifier), states: ConversationTransferState[] = [];
+  let after: string | undefined;
+  do {
+    const page = await index.scan({ ...(after ? { gt: after } : { gte: 'transfer:' }), lt: 'transfer:\uffff' }, 64);
+    for (const entry of page.entries) states.push(entry.value as unknown as ConversationTransferState);
+    after = page.continuation ? page.entries.at(-1)!.key : undefined;
+  } while (after);
+  return states.sort((a, b) => a.identity.transferId.localeCompare(b.identity.transferId));
 }
-
-const TRANSFER_STATES_CHECKPOINT = projectionCheckpointKey(
-  "conversation-transfer-states", 1, reduceConversationTransfer, isConversationTransferCommittedBase,
-);
 
 export interface ConversationTransferAuthorityRecord {
   readonly lsn: number;
   readonly at: string;
   readonly stream: string;
   readonly body: JsonValue;
+  readonly sourceEnvelopeDigest?: string;
+  readonly sourceItem?: number;
 }
 
 interface SelectedConversationRecords {
@@ -758,6 +806,7 @@ export async function selectConversationAuthorityRecords(
   commits: readonly CommitEnvelope<unknown>[],
   conversationId: string,
   artifacts: ArtifactStore,
+  verifier: ProtocolSignatureVerifier,
 ): Promise<SelectedConversationRecords> {
   const assignmentIds = new Set<string>();
   const controlRequestIds = new Set<string>();
@@ -775,15 +824,10 @@ export async function selectConversationAuthorityRecords(
       }
     }
   }
-  const records: Array<{
-    lsn: number;
-    at: string;
-    stream: string;
-    body: JsonValue;
-  }> = [];
+  const records: ConversationTransferAuthorityRecord[] = [];
   const references: ArtifactRef[] = [];
   for (const envelope of commits) {
-    for (const entry of envelope.entries) {
+    for (const [sourceItem, entry] of envelope.entries.entries()) {
       const include =
         isDirectConversationStream(entry.stream, conversationId) ||
         (entry.stream === "control" &&
@@ -795,13 +839,24 @@ export async function selectConversationAuthorityRecords(
       if (!include) continue;
       const body = cloneJson(entry.body, "Conversation transfer record body");
       collectArtifactRefs(body, references);
+      if (entry.stream === `run:${conversationId}` && body && typeof body === 'object' && !Array.isArray(body)) {
+        const fact = body as Record<string, unknown>;
+        if (fact.t === 'assigned' && fact.dispatchRef) {
+          const dispatch = validateConversationEnvelope(JSON.parse(Buffer.from(await artifacts.get(fact.dispatchRef as ArtifactRef)).toString('utf8')), verifier);
+          references.push(...(await resolveDispatchArtifactClosure(dispatch, artifacts)).transfer);
+        } else if (fact.t === 'committed' && fact.bundle) {
+          const bundle = JSON.parse(Buffer.from(await artifacts.get((fact.bundle as { ref: ArtifactRef }).ref)).toString('utf8'));
+          references.push(...(await resolveSealedBundleArtifactClosure(bundle, artifacts)).transfer);
+        }
+      }
       if (entry.stream === "control") {
         collectArtifactRefs(
           await materializeTransferControlRecord(entry.body, artifacts),
           references,
         );
       }
-      records.push({ lsn: envelope.lsn, at: envelope.at, stream: entry.stream, body });
+      records.push({ lsn: envelope.lsn, at: envelope.at, stream: entry.stream, body,
+        sourceEnvelopeDigest: envelope.envelopeDigest, sourceItem });
     }
   }
   if (!records.some((record) => record.stream === `run:${conversationId}`)) {
@@ -837,6 +892,8 @@ async function reduceConversationTransferProjection(
   envelope: CommitEnvelope<ConversationTransferLogRecord>,
   current: DurableProjectionReadContext,
   verifier: ProtocolSignatureVerifier,
+  log: AuthorityCommitLog,
+  source: DurableProjectionSource,
 ): Promise<readonly DurableProjectionMutation[]> {
   const overlay = new Map<string, ConversationTransferState>();
   const mutations: DurableProjectionMutation[] = [];
@@ -848,8 +905,32 @@ async function reduceConversationTransferProjection(
       : (value as unknown as ConversationTransferState);
   };
   for (const entry of envelope.entries) {
-    if (!entry.stream.startsWith("transfer:")) continue;
-    if (isConversationTransferCommittedBase(entry.body)) continue;
+    if (!entry.stream.startsWith("transfer:xfer-")) continue;
+    if (!entry.body || typeof entry.body.transferId !== 'string' || entry.stream !== `transfer:${entry.body.transferId}`) throw new TypeError('Conversation transfer record belongs to another stream');
+    if (isConversationTransferCommittedBase(entry.body)) {
+      const body = entry.body, state = await getState('transfer:' + body.transferId), key = 'base:' + body.transferId;
+      const keys = body.v === 1 ? ['v', 't', 'transferId', 'conversationId', 'manifest', 'records', 'sessionState']
+        : body.v === 2 ? ['v', 't', 'transferId', 'conversationId', 'manifest', 'records', 'sessionState', 'ownerBasis'] : [];
+      if (!keys.length || canonicalize(Object.keys(body).sort()) !== canonicalize(keys.sort()) || envelope.entries.some(value => value.stream === 'trust')) {
+        throw new TypeError('Conversation owner basis requires its own atomic transfer publication');
+      }
+      if (!state?.commit || state.phase !== 'committed' || body.conversationId !== state.identity.conversationId ||
+          !state.manifest || !sameRef(body.manifest, state.manifest) ||
+          !envelope.entries.some(value => value.stream === entry.stream && value.body.t === 'committed' && value.body.transferId === body.transferId)) {
+        throw new TypeError('Conversation committed base is not atomic with its owner commit');
+      }
+      const prior = await current.get(key);
+      if (prior !== undefined && canonicalize(prior) !== canonicalize(body)) throw new TypeError('Conversation committed base changed');
+      mutations.push({ kind: 'put', key, value: body as unknown as JsonValue });
+      const tenure = await conversationAnchorAtSource(log, source);
+      if (!tenure && source.candidate) throw new TypeError('Conversation owner basis has no verified anchor tenure');
+      if (tenure) {
+        const basis = conversationOwnerBasis(tenure, state.identity.targetDeviceId, state.identity.nextOwnerEpoch);
+        if (body.v === 2 && canonicalize(body.ownerBasis) !== canonicalize(basis) || body.v === 1 && body.ownerBasis !== undefined) throw new TypeError('Conversation owner basis does not match its committed trust prefix');
+        mutations.push({ kind: 'put', key: `owner-base:${body.conversationId}`, value: basis as unknown as JsonValue });
+      }
+      continue;
+    }
     const transferKey = `transfer:${entry.body.transferId}`;
     const previous = await getState(transferKey);
     const next = reduceConversationTransfer(previous, entry.body, verifier);
@@ -1120,7 +1201,7 @@ export interface ConversationTransferTargetOptions {
   readonly abortSignal?: () => AbortSignal;
   readonly reducerVersion: string;
   readonly preparePublication?: (
-    input: ConversationTransferCommittedBase,
+    input: ConversationTransferPublication,
   ) => Promise<{ readonly publish: () => void }>;
 }
 
@@ -1136,13 +1217,23 @@ export interface ConversationTransferCommittedBase {
   readonly sessionState: JsonValue;
 }
 
+/** Prepared immutable import view. The source reads only bounded referenced
+ * regions; the full authority record array never becomes a publication value. */
+export interface ConversationTransferPublication {
+  readonly state: ConversationTransferState;
+  readonly manifest: ConversationBaseManifest;
+  readonly source: ConversationBaseSource;
+}
+
 export class ConversationTransferTarget {
   readonly #options: ConversationTransferTargetOptions;
   readonly #publicationTokens = new Map<string, { readonly publish: () => void }>();
+  readonly #sources = new Map<string, ConversationBaseSource>();
 
   constructor(options: ConversationTransferTargetOptions) {
     this.#options = options;
     registerConversationTransferProjection(options.log, options.verifier);
+    registerConversationBaseContext(options.log, options.artifacts, options.verifier);
   }
 
   state(transferId: string): Promise<ConversationTransferState | undefined> {
@@ -1163,6 +1254,7 @@ export class ConversationTransferTarget {
     const committedBase = await readConversationTransferCommittedBaseRecord(
       this.#options.log,
       transferId,
+      this.#options.verifier,
     );
     if (
       !committedBase ||
@@ -1179,6 +1271,33 @@ export class ConversationTransferTarget {
       throw new Error("Committed conversation authority base does not match its manifest");
     }
     return loadCommittedBase(this.#options.artifacts, state, manifest);
+  }
+
+  /** Recovery/publication view for the committed owner switch. Only the
+   * authenticated source header and bounded derived pages are loaded. */
+  async committedBaseSource(transferId: string): Promise<ConversationTransferPublication> {
+    return loadCommittedConversationBase(this.#options.log, this.#options.artifacts, this.#options.verifier, transferId);
+  }
+
+  async #openSource(state: ConversationTransferState): Promise<ConversationBaseSource> {
+    const transferId = state.identity.transferId;
+    const existing = this.#sources.get(transferId);
+    if (existing) {
+      if (canonicalize(existing.state.identity) !== canonicalize(state.identity) || !state.manifest || !sameRef(existing.manifestRef, state.manifest)) throw new TypeError('Conversation source cache generation changed');
+      if (!existing.ready) await existing.prepare();
+      return existing;
+    }
+    if (!state.manifest || !state.proof) throw new TypeError("Conversation transfer source is not authenticated");
+    const source = await ConversationBaseSource.open({
+      log: this.#options.log,
+      artifacts: this.#options.artifacts,
+      verifier: this.#options.verifier,
+      state,
+      ownerCheckpoint: await this.#options.log.checkpoint(),
+    });
+    if (!source.ready) await source.prepare();
+    this.#sources.set(transferId, source);
+    return source;
   }
 
   async prepare(input: Extract<TransferRecord, { t: "prepared" }>): Promise<ConversationTransferState> {
@@ -1260,6 +1379,9 @@ export class ConversationTransferTarget {
     }
     const manifest = await loadManifest(staging.artifacts, input.manifestRef);
     assertManifestIdentity(manifest, state);
+    if (manifest.authorityBase.reducerVersion !== this.#options.reducerVersion) {
+      throw new Error("Conversation transfer reducer version is incompatible");
+    }
     for (const ref of [
       manifest.authorityBase.records,
       manifest.authorityBase.sessionState,
@@ -1277,11 +1399,6 @@ export class ConversationTransferTarget {
         );
       }
     }
-    await verifyImportedAuthorityBase(
-      staging.artifacts,
-      manifest,
-      this.#options.reducerVersion,
-    );
     await promoteTransferClosure(
       state.identity.transferId,
       [
@@ -1293,6 +1410,21 @@ export class ConversationTransferTarget {
       staging.artifacts,
       this.#options,
     );
+    const provisional = {
+      ...state,
+      phase: "frozen" as const,
+      manifest: input.manifestRef,
+      proof,
+    } as ConversationTransferState;
+    const source = await ConversationBaseSource.open({
+      log: this.#options.log,
+      artifacts: this.#options.artifacts,
+      verifier: this.#options.verifier,
+      state: provisional,
+      ownerCheckpoint: await this.#options.log.checkpoint(),
+    });
+    if (!source.ready) await source.prepare();
+    this.#sources.set(state.identity.transferId, source);
     if (state.phase === "prepared") {
       await appendConversationTransferRecord(
         this.#options.log,
@@ -1327,11 +1459,10 @@ export class ConversationTransferTarget {
       this.#options.verifier,
     );
     if (this.#options.preparePublication) {
+      if (!source) throw new TypeError("Conversation transfer publication requires artifact-derived pages");
       this.#publicationTokens.set(
         state.identity.transferId,
-        await this.#options.preparePublication(
-          await loadCommittedBase(staging.artifacts, preview, manifest),
-        ),
+        await this.#options.preparePublication({ state: preview, manifest, source }),
       );
     }
     const final = await appendConversationTransferRecord(
@@ -1400,9 +1531,7 @@ export class ConversationTransferTarget {
     if (!this.#publicationTokens.has(transferId) && this.#options.preparePublication) {
       this.#publicationTokens.set(
         transferId,
-        await this.#options.preparePublication(
-          await loadCommittedBase(this.#options.artifacts, current, manifest),
-        ),
+        await this.#options.preparePublication({ state: current, manifest, source: await this.#openSource(current) }),
       );
     }
     const state = await appendConversationTransferCommitAndBase(
@@ -1431,9 +1560,11 @@ export class ConversationTransferTarget {
     if (!this.#options.preparePublication) return;
     let token = this.#publicationTokens.get(state.identity.transferId);
     if (!token) {
-      token = await this.#options.preparePublication(
-        await loadCommittedBase(this.#options.artifacts, state, manifest),
-      );
+      token = await this.#options.preparePublication({
+        state,
+        manifest,
+        source: await this.#openSource(state),
+      });
       this.#publicationTokens.set(state.identity.transferId, token);
     }
     token.publish();
@@ -1660,43 +1791,4 @@ function assertManifestIdentity(
   ) {
     throw new TypeError("Conversation transfer manifest does not bind target preparation");
   }
-}
-
-async function verifyImportedAuthorityBase(
-  artifacts: ConversationTransferStagingArtifacts,
-  manifest: ConversationTransferManifest,
-  reducerVersion: string,
-): Promise<void> {
-  if (manifest.authorityBase.reducerVersion !== reducerVersion) {
-    throw new Error("Conversation transfer reducer version is incompatible");
-  }
-  const raw = JSON.parse(
-    Buffer.from(await artifacts.get(manifest.authorityBase.records)).toString("utf8"),
-  ) as unknown;
-  if (!Array.isArray(raw)) throw new Error("Conversation transfer record base is invalid");
-  const grouped = new Map<string, unknown[]>();
-  for (const item of raw) {
-    if (!isPlainRecord(item) || typeof item.stream !== "string" || !Number.isSafeInteger(item.lsn)) {
-      throw new Error("Conversation transfer record base entry is invalid");
-    }
-    const values = grouped.get(item.stream) ?? [];
-    values.push(item);
-    grouped.set(item.stream, values);
-  }
-  for (const range of manifest.streams) {
-    const records = grouped.get(range.stream) ?? [];
-    if (
-      records.length !== range.recordCount ||
-      protocolDigest("ConversationTransferLogicalStream", 1, {
-        stream: range.stream,
-        records,
-      }) !== range.digest
-    ) {
-      throw new Error("Conversation transfer logical stream digest mismatch");
-    }
-  }
-  if (grouped.size !== manifest.streams.length) {
-    throw new Error("Conversation transfer record base has an unlisted stream");
-  }
-  await artifacts.get(manifest.authorityBase.sessionState);
 }

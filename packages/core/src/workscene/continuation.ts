@@ -18,6 +18,8 @@ export interface WorksceneContinuationSource {
   readonly runId: string;
   readonly ingressId: string;
   readonly current: boolean;
+  /** Verified current obligation, including outstanding delegated descendants. */
+  readonly pending?: boolean;
   readonly state:
     | "committed"
     | "failed"
@@ -37,11 +39,17 @@ export interface WorksceneContinuationSource {
   readonly advancementSessionId?: string;
 }
 
+export type WorksceneContinuationQuery =
+  | { readonly runId: string }
+  | { readonly parent: { readonly conversationId: string; readonly runId: string } }
+  | { readonly root: { readonly conversationId: string; readonly runId: string } }
+  | { readonly rootMember: { readonly conversationId: string; readonly runId: string } };
+
 export interface WorksceneContinuationPort {
   pendingMcpStatus?(candidate: McpSetupCandidate, scope: import("../mcp-management/application.js").McpConnectionScope): Promise<"needs-credentials" | "pending">;
   canRunIsolatedMain?(): boolean;
   connectMcp?(candidate: McpSetupCandidate, source: { conversationId: string; runId: string }, scope: import("../mcp-management/application.js").McpConnectionScope): Promise<McpConnectionResult>;
-  read(conversationId: string): Promise<readonly WorksceneContinuationSource[]>;
+  read(conversationId: string, query?: WorksceneContinuationQuery): Promise<readonly WorksceneContinuationSource[]>;
   inspect(
     conversationId: string,
     turnId: string,
@@ -156,9 +164,9 @@ export class WorksceneContinuationApplication {
   } | undefined> {
     const reference = origin?.worksceneContinuation;
     if (!reference || !await isWorksceneContinuationCurrent(this.port.read, reference)) return;
-    const parent = (await this.port.read(reference.conversationId)).find((run) => run.runId === reference.runId);
+    const parent = (await this.port.read(reference.conversationId, { runId: reference.runId })).find((run) => run.runId === reference.runId);
     if (!parent) return;
-    const child = (await this.port.read(conversationId)).find((run) =>
+    const child = (await this.port.read(conversationId, { parent: reference })).find((run) =>
       run.current && ["queued", "dispatched", "running", "uncertain"].includes(run.state) &&
       run.surfacePrincipal === parent.surfacePrincipal &&
       protocolDigest("WorksceneOrigin", 1, run.origin?.worksceneContinuation ?? null) === protocolDigest("WorksceneOrigin", 1, reference));
@@ -185,7 +193,7 @@ export class WorksceneContinuationApplication {
         }
         if (intent?.handoff?.remaining.length) {
           const target = worksceneContinuationTarget(source);
-          if (target) for (const child of await this.port.read(target)) {
+          if (target) for (const child of await this.port.read(target, { parent: source })) {
             const parent = child.origin?.worksceneContinuation;
             if (parent?.conversationId === id && parent.runId === source.runId) await visit(child);
           }
@@ -211,6 +219,7 @@ export class WorksceneContinuationApplication {
   ): Promise<readonly WorksceneTaskReference[]> {
     const roots = new Map<string, WorksceneContinuationSource>();
     for (const source of await read(conversationId)) {
+      if (!await WorksceneContinuationApplication.isPending(read, source, new Set())) continue;
       let root = source;
       const seen = new Set<string>();
       while (root.origin?.worksceneContinuation) {
@@ -218,21 +227,18 @@ export class WorksceneContinuationApplication {
         const key = `${parent.conversationId}/${parent.runId}`;
         if (seen.has(key)) break;
         seen.add(key);
-        const found = (await read(parent.conversationId)).find(
+        const found = (await read(parent.conversationId, { runId: parent.runId })).find(
           (item) => item.runId === parent.runId,
         );
         if (!found) break;
         root = found;
       }
-      if (root.control?.intent.handoff?.remaining.length)
+      if (root.current && root.control?.intent.handoff?.remaining.length)
         roots.set(`${root.conversationId}/${root.runId}`, root);
     }
     const tasks: WorksceneTaskReference[] = [];
     for (const root of roots.values()) {
-      if (
-        await WorksceneContinuationApplication.isPending(read, root, new Set())
-      )
-        tasks.push({
+      tasks.push({
           conversationId: root.conversationId,
           runId: root.runId,
           goal: root.control!.intent.handoff!.goal,
@@ -247,7 +253,8 @@ export class WorksceneContinuationApplication {
     requestId: string;
   }): Promise<void> {
     // Resolve related lineage even after a previous stop, so retries remain idempotent.
-    const related = await this.port.read(input.conversationId);
+    const related = [...await this.port.read(input.conversationId), ...await this.port.read(input.conversationId,
+      input.conversationId === input.target.conversationId ? { runId: input.target.runId } : { rootMember: input.target })];
     let authorized =
       input.conversationId === input.target.conversationId &&
       related.some(
@@ -272,7 +279,7 @@ export class WorksceneContinuationApplication {
       input.target.runId,
       input.requestId,
     );
-    const root = (await this.port.read(input.target.conversationId)).find(
+    const root = (await this.port.read(input.target.conversationId, { runId: input.target.runId })).find(
       (item) => item.runId === input.target.runId,
     );
     if (root?.advancementSessionId)
@@ -296,6 +303,7 @@ export class WorksceneContinuationApplication {
     )
       return false;
     seen.add(key);
+    if (source.pending !== undefined) return source.pending;
     if (["queued", "dispatched", "running", "uncertain"].includes(source.state))
       return true;
     const target = worksceneContinuationTarget(source);
@@ -315,7 +323,7 @@ export class WorksceneContinuationApplication {
     );
     let found = false;
     for (const id of candidates) {
-      for (const child of await read(id)) {
+      for (const child of await read(id, { parent: source })) {
         const parent = child.origin?.worksceneContinuation;
         if (
           parent?.conversationId !== source.conversationId ||
@@ -360,6 +368,14 @@ export class WorksceneContinuationApplication {
       }
     }
     for (const source of await this.port.read(conversationId)) {
+      if (!source.current) {
+        // Only outstanding frontiers are read. Ended siblings never participate
+        // in stop/clear recovery, and each cancellation keeps its own receipt.
+        for (const child of await this.port.read(source.conversationId, { root: source })) {
+          if (['queued', 'dispatched', 'running', 'cancel-requested', 'uncertain'].includes(child.state))
+            await this.port.cancel(child.conversationId, child.ingressId);
+        }
+      }
       if (source.control?.intent.kind === "stop_task") continue;
       const handoff = source.control?.intent.handoff;
       const parent = source.origin?.worksceneContinuation;
@@ -474,7 +490,7 @@ export class WorksceneContinuationApplication {
         continue;
       }
       // Entry may await I/O. Re-read the source before creating a durable run.
-      const stillCurrent = (await this.port.read(conversationId)).some(
+      const stillCurrent = (await this.port.read(conversationId, { runId: source.runId })).some(
         (item) => item.runId === source.runId && item.current,
       );
       if (!stillCurrent) continue;
@@ -524,7 +540,7 @@ export class WorksceneContinuationApplication {
           ? { advancement: original.advancement }
           : {}),
       });
-      const afterAdmission = (await this.port.read(conversationId)).find(
+      const afterAdmission = (await this.port.read(conversationId, { runId: source.runId })).find(
         (item) => item.runId === source.runId,
       );
       if (!afterAdmission?.current) await this.port.cancel(target, turnId);
@@ -589,7 +605,7 @@ export class WorksceneContinuationApplication {
       const parent: TurnOrigin["worksceneContinuation"] =
         current.origin?.worksceneContinuation;
       if (!parent) return undefined;
-      current = (await this.port.read(parent.conversationId)).find(
+      current = (await this.port.read(parent.conversationId, { runId: parent.runId })).find(
         (item) => item.runId === parent.runId,
       );
     }
@@ -616,7 +632,7 @@ export async function isWorksceneContinuationCurrent(
     seen.add(identity);
     const runId: string = link.runId;
     const fact: WorksceneContinuationSource | undefined = (
-      await read(link.conversationId)
+      await read(link.conversationId, { runId })
     ).find((item) => item.runId === runId);
     if (
       !fact?.current ||

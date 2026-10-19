@@ -19,13 +19,61 @@ async function fixture() {
   const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, 'log'), artifacts));
   const positions: DurableLogCheckpoint[] = [];
   let base: { lsn: number; at: string; stream: string; body: unknown }[] = [];
+  const messages = new Map<string, { pointer: InputPointer; initial: boolean; inputKey: string; base?: boolean }>();
+  const statuses = new Map<string, { state: string; statusRevision: number }>();
+  const runByAssignment = new Map<string, string>();
+  const initialConsumed = new Set<string>(), consumed = new Set<string>(), closed = new Set<string>();
   const messagePage = vi.fn(async (_: string, after: number) => positions.filter(p => p.lsn > after).slice(0, 64));
   const inputAt = vi.fn(async (_: string, pointer: InputPointer) => {
     const record = pointer.checkpoint ? (await log.readEnvelopeAt(pointer.checkpoint)).entries[pointer.item]! : base[pointer.item]!;
     return { pointer, input: (record.body as ReturnType<typeof admission>).input };
   });
   const inputsAt = vi.fn(async (id: string, pointers: readonly InputPointer[]) => Promise.all(pointers.map(pointer => inputAt(id, pointer))));
-  const reader = new ConversationMessageInputReader(log, { messagePage, inputAt, inputsAt } as unknown as ConversationReadIndex, artifacts, 'c');
+  const messageMetadata = vi.fn(async (_: string, messageId: string) => {
+    const message = messages.get(messageId);
+    if (!message) return { value: undefined };
+    const status = statuses.get(message.pointer.runId);
+    if (!status) return { value: undefined };
+    return { value: { pointer: message.pointer, status: status as never,
+      consumed: message.initial ? initialConsumed.has(message.pointer.runId) : consumed.has(message.inputKey),
+      closed: closed.has(message.pointer.runId) } };
+  });
+  const reader = new ConversationMessageInputReader(log, { messagePage, inputAt, inputsAt, messageMetadata } as unknown as ConversationReadIndex, artifacts, 'c');
+  const foldMeta = (raw: unknown, item: number, checkpoint?: DurableLogCheckpoint, fromBase = false) => {
+    const body = raw as { t?: string; runId?: string; state?: string; statusRevision?: number; ingressKey?: string;
+      queuedPosition?: number; position?: number; assignmentId?: string;
+      ingress?: { ingressId?: string; turnOrigin?: { messageIdentity?: { id: string; source: unknown } } };
+      ingressKeys?: readonly string[] };
+    if (body.t === 'admitted' || body.t === 'run-input-appended') {
+      const identity = body.ingress?.turnOrigin?.messageIdentity ?? { id: body.ingress?.ingressId ?? body.ingressKey ?? 'missing', source: { kind: 'user' } };
+      const initial = body.t === 'admitted';
+      const pointer: InputPointer = { runId: body.runId!, inputKey: body.ingressKey!, position: initial ? body.queuedPosition ?? 0 : body.position ?? 0,
+        identity: identity as InputPointer['identity'], initial, item, lsn: checkpoint?.lsn ?? 0, ...(checkpoint ? { checkpoint } : {}) };
+      messages.set(identity.id, { pointer, initial, inputKey: body.ingressKey!, ...(fromBase ? { base: true } : {}) });
+      if (initial) statuses.set(body.runId!, statuses.get(body.runId!) ?? { state: 'queued', statusRevision: 0 });
+      return;
+    }
+    if (body.t === 'assigned') {
+      if (body.assignmentId && body.runId) runByAssignment.set(body.assignmentId, body.runId);
+      return;
+    }
+    if (body.t === 'supersede-started-observed') {
+      const run = body.assignmentId ? runByAssignment.get(body.assignmentId) : undefined;
+      if (run) initialConsumed.add(run);
+      return;
+    }
+    if (body.t === 'state') {
+      statuses.set(body.runId!, { state: body.state!, statusRevision: body.statusRevision ?? 0 });
+      if (['running', 'committed', 'failed', 'cancelled'].includes(body.state!)) initialConsumed.add(body.runId!);
+      return;
+    }
+    if (body.t === 'run-input-opened' || body.t === 'run-input-closed') {
+      initialConsumed.add(body.runId!);
+      if (body.t === 'run-input-closed') closed.add(body.runId!);
+      return;
+    }
+    if (body.t === 'run-input-consumed') for (const key of body.ingressKeys ?? []) consumed.add(key);
+  };
   const append = async (...bodies: unknown[]) => {
     const entries = [];
     for (const raw of bodies) {
@@ -46,10 +94,14 @@ async function fixture() {
       entries.push({ stream: 'run:c', body: stored });
     }
     await log.append(entries);
-    positions.push(await log.checkpoint());
+    const checkpoint = await log.checkpoint();
+    positions.push(checkpoint);
+    for (const [item, raw] of bodies.entries()) foldMeta(raw, item, checkpoint);
   };
   const installBase = (bodies: unknown[]) => {
+    for (const [id, message] of messages) if (message.base) messages.delete(id);
     base = bodies.map((body, item) => ({ lsn: item + 30, at: '2026-10-01T00:00:00.000Z', stream: 'run:c', body }));
+    for (const [item, raw] of bodies.entries()) foldMeta(raw, item, undefined, true);
     reader.installBase(base);
   };
   return { log, reader, append, installBase, inputAt, inputsAt, messagePage, artifacts };

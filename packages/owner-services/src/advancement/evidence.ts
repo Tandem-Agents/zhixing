@@ -34,6 +34,7 @@ const MAX_STALE_RETRIES = 2;
 
 export interface AdvancementEvidenceTarget {
   readonly ownerEpoch: number;
+  readonly anchorEpoch?: number;
   readonly executorId: string;
   readonly workspace?: {
     readonly deviceId: string;
@@ -357,7 +358,7 @@ function createEvidenceRequest(input: {
   }
   return createSignedEvidenceRequest(
     {
-      v: 1,
+      ...(input.target.anchorEpoch === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: input.target.anchorEpoch }),
       requestId: input.requestId,
       reviewId: input.reviewId,
       runId: input.runId,

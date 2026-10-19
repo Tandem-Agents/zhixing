@@ -1,3 +1,4 @@
+import { assertOwnerTenureVersion } from "./owner-tenure.js";
 import { Buffer } from "node:buffer";
 import type {
   ArtifactRef,
@@ -116,6 +117,7 @@ export interface DispatchControlBinding {
   readonly authority: AuthorityEpochRef;
   readonly ownerDeviceId: string;
   readonly controlLease: ControlLease;
+  readonly anchorEpoch?: number;
 }
 
 type UnsignedSupersedeProof = SupersedeProof extends infer Proof
@@ -273,7 +275,7 @@ export function createSignedConversationEnvelope(
   const envelope = snapshot(
     {
       ...unsigned,
-      signature: signer.sign("DispatchEnvelope", 1, unsigned),
+      signature: signer.sign("DispatchEnvelope", unsigned.v, unsigned),
     },
     "Signed dispatch envelope",
   ) as ConversationEnvelope;
@@ -300,7 +302,7 @@ export function createSignedJobEnvelope(
   const envelope = snapshot(
     {
       ...unsigned,
-      signature: signer.sign("DispatchEnvelope", 1, unsigned),
+      signature: signer.sign("DispatchEnvelope", unsigned.v, unsigned),
     },
     "Signed dispatch envelope",
   ) as JobEnvelope;
@@ -323,6 +325,8 @@ export function validateDispatchControlBinding(
 ): DispatchControlBinding {
   const envelope = snapshot(input, "Dispatch control binding") as DispatchEnvelope;
   assertObject(envelope, "Dispatch control binding");
+  if (envelope.execution === 'conversation') assertOwnerTenureVersion(envelope, 'Dispatch control binding');
+  else assertVersion(envelope.v, 'Dispatch control binding');
   assertIdentifier(envelope.assignmentId, "Dispatch assignmentId");
   assertIdentifier(envelope.executorId, "Dispatch executorId");
   assertSignature(envelope.signature, "Dispatch signature");
@@ -335,7 +339,7 @@ export function validateDispatchControlBinding(
   }
   verifier.verify(
     "DispatchEnvelope",
-    1,
+    envelope.v,
     withoutField(envelope, "signature"),
     envelope.signature,
   );
@@ -346,6 +350,7 @@ export function validateDispatchControlBinding(
       authority: controlLease.authority,
       ownerDeviceId: envelope.signature.keyId,
       controlLease,
+      ...(envelope.anchorEpoch === undefined ? {} : { anchorEpoch: envelope.anchorEpoch }),
     },
     "Dispatch control binding",
   );
@@ -364,7 +369,7 @@ export function dispatchEnvelopeArtifact(
 export function dispatchEnvelopeDigest(envelope: DispatchEnvelope): Digest {
   return protocolDigest(
     "DispatchEnvelope",
-    1,
+    envelope.v,
     withoutField(envelope, "signature"),
   );
 }
@@ -2514,6 +2519,7 @@ function assertConversationEnvelope(
     envelope,
     [
       "assignmentId",
+      ...(envelope.v === 2 ? ["anchorEpoch"] : []),
       "capabilities",
       "controlLease",
       "dependencyArtifacts",
@@ -2529,7 +2535,7 @@ function assertConversationEnvelope(
     ],
     "Dispatch envelope",
   );
-  assertVersion(envelope.v, "Dispatch envelope");
+  assertOwnerTenureVersion(envelope, "Dispatch envelope");
   if (envelope.execution !== "conversation" || envelope.work.t !== "conversation") {
     throw new TypeError("Dispatch envelope must contain conversation work");
   }
@@ -2543,6 +2549,7 @@ function assertConversationEnvelope(
     : undefined;
   const controlLease = authenticatedControl?.controlLease ??
     validateControlLease(envelope.controlLease, verifier);
+  if (controlLease.anchorEpoch !== envelope.anchorEpoch) throw new TypeError('Control lease tenure does not bind the dispatch');
   assertPermissionLease(envelope.permissionLease, verifier);
   assertCapabilities(envelope.capabilities, verifier);
   assertResourceLease(envelope.resourceLease, verifier);
@@ -2580,6 +2587,7 @@ function assertConversationEnvelope(
       capability.scope.execution !== "conversation" ||
       capability.scope.conversationId !== work.conversationId ||
       capability.ownerEpoch !== work.ownerEpoch ||
+      capability.anchorEpoch !== envelope.anchorEpoch ||
       capability.assignmentId !== envelope.assignmentId ||
       capability.executorId !== envelope.executorId
     ) {
@@ -2587,6 +2595,7 @@ function assertConversationEnvelope(
     }
   }
   const lease = envelope.resourceLease;
+  if (envelope.v === 2 && lease.domain.kind === 'anchor' && lease.domain.anchorEpoch !== envelope.anchorEpoch) throw new TypeError('Resource lease tenure does not bind the dispatch');
   if (
     lease.workload.kind !== "run" ||
     lease.workload.id !== work.runId ||

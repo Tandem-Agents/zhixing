@@ -3,6 +3,7 @@ import {
   createDurableProjectionOverlay, DurableProjectionRecordBindingError,
   type AuthorityCommitLog, type DurableLogCheckpoint, type DurableProjectionReadContext,
   type RebuildableDurableProjectionIndex,
+  type VerifiedAnchorTenure,
 } from "@zhixing/core/authority";
 import { canonicalize, protocolDigest } from "./canonical.js";
 import { applyTrustEvent, initializeTrustChain, verifyHomeTrustRecord, type TrustProjection } from "./trust-chain.js";
@@ -44,7 +45,7 @@ function readHead(value: unknown): Head | undefined {
   if (value === undefined) return;
   if (!object(value) || !object(value.genesis) || !Number.isSafeInteger(value.genesis.lsn) || !object(value.projection) || !Number.isSafeInteger(value.count) || (value.count as number) < 1 ||
       !Number.isSafeInteger(value.reset) || (value.reset as number) < 0 ||
-      typeof value.projection.homeId !== "string" || !object(value.projection.chainHead) || !object(value.projection.issuer)) throw invalid();
+      typeof value.projection.homeId !== "string" || !Number.isSafeInteger(value.projection.anchorEpoch) || (value.projection.anchorEpoch as number) < 1 || !object(value.projection.chainHead) || !object(value.projection.issuer)) throw invalid();
   if (value.record !== undefined && (!object(value.record) || !object(value.record.checkpoint) ||
       !Number.isSafeInteger(value.record.checkpoint.lsn) || (value.record.checkpoint.lsn as number) < 1 ||
       !Number.isSafeInteger(value.record.entry) || (value.record.entry as number) < 0 || typeof value.record.digest !== "string")) throw invalid();
@@ -81,7 +82,7 @@ export function decodeTrustIdentity(keyId: string, value: unknown): VerifiedTrus
 }
 
 export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurableProjectionIndex {
-  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 1, authenticated: true,
+  return log.durableProjection({ projectionId: CURRENT_TRUST_PROJECTION_ID, reducerVersion: 2, authenticated: true,
     inputs: { streams: ["trust"] },
     async reduce(envelope, current, source) {
       const changes = new Map<string, JsonValue | undefined>();
@@ -134,6 +135,14 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
           }
           write(changes, HEAD, { projection: omitMembers(next), count, reset, genesis: head.genesis,
             ...(head.recordHead ? { recordHead: head.recordHead } : {}) });
+          write(changes, 'trust/event/' + String(event.seq).padStart(16, '0'), event);
+          if (event.body.t === 'genesis' || event.body.t === 'issuer-transition') {
+            write(changes, 'trust/tenure/' + String(next.anchorEpoch).padStart(16, '0'), {
+              homeId: next.homeId, anchorEpoch: next.anchorEpoch, deviceId: next.issuer.deviceId,
+              chainHead: next.chainHead, checkpoint: source.checkpoint,
+            });
+            write(changes, 'trust/tenure-at/' + String(Number.MAX_SAFE_INTEGER - envelope.lsn).padStart(16, '0'), next.anchorEpoch);
+          }
         } else if (body.t === "home-trust-record") {
           if (!head || !object(body.record) || !Array.isArray(body.record.members)) throw new TypeError("Trust record has no valid chain");
           const record = body.record as unknown as HomeTrustRecord;
@@ -148,6 +157,8 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
           verifyHomeTrustRecord(record, { ...head.projection, members });
           write(changes, HEAD, { ...head, recordHead: head.projection.chainHead,
             record: { checkpoint: source.checkpoint, entry: position, digest: protocolDigest("HomeTrustRecord", 1, record) } });
+          write(changes, 'trust/record/' + String(record.chainHead.seq).padStart(16, '0'),
+            { checkpoint: source.checkpoint, entry: position, digest: protocolDigest('HomeTrustRecord', 1, record) });
         } else throw new TypeError("Trust stream record type is unsupported");
       }
       return [...changes].map(([key, value]) => value === undefined ? { kind: "tombstone" as const, key } : { kind: "put" as const, key, value });
@@ -156,6 +167,81 @@ export function currentTrustIndex(log: AuthorityCommitLog): RebuildableDurablePr
 }
 function omitMembers(projection: TrustProjection): Omit<TrustProjection, "members"> {
   const { members: _members, ...head } = projection; return head;
+}
+
+export type { VerifiedAnchorTenure } from '@zhixing/core/authority';
+/** A single historical point from the already verified chain, never a replay. */
+export async function readAnchorTenureAt(view: DurableProjectionReadContext, checkpoint: DurableLogCheckpoint): Promise<VerifiedAnchorTenure | undefined> {
+  const head = readHead(await view.get(HEAD));
+  if (!head || head.genesis.logId !== checkpoint.logId || head.genesis.lsn > checkpoint.lsn) return;
+  const p = 'trust/tenure-at/';
+  const page = await view.scan({ gte: p + String(Number.MAX_SAFE_INTEGER - checkpoint.lsn).padStart(16, '0'), lt: p + '\uffff' }, 1);
+  const epoch = page.entries[0]?.value;
+  if (!Number.isSafeInteger(epoch) || Number(epoch) < 1) throw invalid();
+  const tenure = await view.get('trust/tenure/' + String(epoch).padStart(16, '0')) as unknown as VerifiedAnchorTenure | undefined;
+  if (!tenure || tenure.anchorEpoch !== epoch || tenure.homeId !== head.projection.homeId || tenure.checkpoint.logId !== checkpoint.logId || tenure.checkpoint.lsn > checkpoint.lsn) throw invalid();
+  return tenure;
+}
+
+export async function readCurrentAnchorTenure(view: DurableProjectionReadContext): Promise<VerifiedAnchorTenure | undefined> {
+  const head = readHead(await view.get(HEAD));
+  if (!head) return;
+  if (!head.recordHead || canonicalize(head.recordHead) !== canonicalize(head.projection.chainHead)) throw new Error('Home trust projection record is missing or stale');
+  const tenure = await view.get('trust/tenure/' + String(head.projection.anchorEpoch).padStart(16, '0')) as unknown as VerifiedAnchorTenure | undefined;
+  if (!tenure || tenure.anchorEpoch !== head.projection.anchorEpoch || tenure.deviceId !== head.projection.issuer.deviceId) throw invalid();
+  return { ...tenure, chainHead: head.projection.chainHead };
+}
+
+export async function readCurrentTrustMember(view: DurableProjectionReadContext, deviceId: string): Promise<Member | undefined> {
+  const head = readHead(await view.get(HEAD));
+  return head ? readMember(deviceId, await view.get(memberKey(deviceId)), head.reset)?.member : undefined;
+}
+
+/** Incomplete suffixes are verified chain progress, not a ready trust view. */
+export async function readVerifiedTrustProgress(view: DurableProjectionReadContext) {
+  const head = readHead(await view.get(HEAD));
+  return head ? { homeId: head.projection.homeId, chainHead: head.projection.chainHead,
+    complete: !!head.recordHead && canonicalize(head.recordHead) === canonicalize(head.projection.chainHead),
+    ...(head.recordHead ? { completeHead: head.recordHead } : {}) } : undefined;
+}
+
+export async function readTrustReconciliationPage(view: DurableProjectionReadContext,
+  readEnvelopeAt: (checkpoint: DurableLogCheckpoint) => Promise<CommitEnvelope<JsonValue>>,
+  input: { homeId: string; chainHead: HomeTrustRecord['chainHead']; through?: HomeTrustRecord['chainHead']; needRecord?: boolean }) {
+  const head = readHead(await view.get(HEAD));
+  if (!head || head.projection.homeId !== input.homeId || !head.recordHead) throw new Error('Trust reconciliation has no complete matching home');
+  // Stop at an original signed record boundary. The receiver publishes the
+  // complete group atomically; transport pages never become partial trust.
+  const nextRecord = input.chainHead.seq < head.recordHead.seq && !input.through
+    ? (await view.scan({ gte: 'trust/record/' + String(input.chainHead.seq + 1).padStart(16, '0'),
+      lt: 'trust/record/\uffff' }, 1)).entries[0] : undefined;
+  const nextSeq = nextRecord ? Number(nextRecord.key.slice('trust/record/'.length)) : undefined;
+  const eventAt = async (seq: number) => {
+    const event = await view.get('trust/event/' + String(seq).padStart(16, '0')) as unknown as HomeTrustEvent | undefined;
+    if (!event || event.seq !== seq || event.homeId !== input.homeId) throw invalid();
+    return event;
+  };
+  const digest = (event: HomeTrustEvent) => { const { signature: _, ...body } = event; return protocolDigest('HomeTrustEvent', 1, body); };
+  const target = input.through ?? (nextSeq === undefined ? head.recordHead : {
+    seq: nextSeq, eventDigest: digest(await eventAt(nextSeq)),
+  });
+  const latest = head.recordHead;
+  if (target.seq > head.recordHead.seq || digest(await eventAt(target.seq)) !== target.eventDigest) throw new TypeError('Requested trust target is not a verified prefix');
+  if (input.chainHead.seq > target.seq) return { target, latest, events: [] as HomeTrustEvent[], done: true };
+  if (digest(await eventAt(input.chainHead.seq)) !== input.chainHead.eventDigest) throw new TypeError('Peer trust prefix conflicts with its signed history');
+  const events: HomeTrustEvent[] = [];
+  for (let seq = input.chainHead.seq + 1; seq <= target.seq && events.length < 16; seq++) events.push(await eventAt(seq));
+  const done = (events.at(-1)?.seq ?? input.chainHead.seq) === target.seq;
+  let record: HomeTrustRecord | undefined;
+  if (done && (events.length || input.needRecord)) {
+    const locator = await view.get('trust/record/' + String(target.seq).padStart(16, '0')) as unknown as RecordLocator | undefined;
+    if (!locator) throw new Error('Signed trust record for the requested prefix is unavailable');
+    const envelope = await readEnvelopeAt(locator.checkpoint), entry = envelope.entries[locator.entry];
+    if (entry?.stream !== 'trust' || !object(entry.body) || entry.body.t !== 'home-trust-record' || !object(entry.body.record) ||
+        protocolDigest('HomeTrustRecord', 1, entry.body.record) !== locator.digest) throw invalid();
+    record = entry.body.record as unknown as HomeTrustRecord;
+  }
+  return { target, latest, events, done, ...(record ? { record } : {}) };
 }
 
 /** Must run inside one selected projection read/transaction boundary. */

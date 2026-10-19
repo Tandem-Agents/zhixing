@@ -41,7 +41,8 @@ import {
   replayTrustChain,
   type TrustProjection,
   verifyHomeTrustRecord,
-  currentTrustIndex, CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord,
+  CURRENT_TRUST_PROJECTION_ID, readCurrentTrust, readCurrentTrustRecord,
+  readVerifiedTrustProgress, readTrustReconciliationPage,
   type CurrentTrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
@@ -93,6 +94,8 @@ interface PersistedTransportTrust {
   readonly v: 1;
   readonly peers: readonly TrustedMeshPeer[];
 }
+
+import { bindConversationAnchorTenure } from './conversation-anchor-tenure.js';
 
 export interface FileMeshBootstrapStoreOptions {
   readonly records?: import("@zhixing/core/logging").LogRecordPort;
@@ -163,7 +166,7 @@ export class FileMeshBootstrapStore
       { storageMaintenance: options.storageMaintenance, records: options.records, startupProofs: true },
     );
     credentialExposureIndex(this.#log);
-    currentTrustIndex(this.#log);
+    bindConversationAnchorTenure(this.#log);
     const staging = createSurfaceAssetStagingInfrastructure({
       distributedRoot,
       storageMaintenance: options.storageMaintenance,
@@ -225,6 +228,44 @@ export class FileMeshBootstrapStore
   async loadCheckpointRecords(): Promise<readonly CheckpointStreamRecord[]> {
     return (await this.#log.readStream<CheckpointStreamRecord>("checkpoint"))
       .map((record) => record.body);
+  }
+
+  async trustReconciliationProgress() {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID,
+      async view => ({ kind: 'return', value: await readVerifiedTrustProgress(view) }))).value;
+  }
+
+  async trustReconciliationPage(input: Parameters<typeof readTrustReconciliationPage>[2]) {
+    return (await this.#log.transactDurableProjection(CURRENT_TRUST_PROJECTION_ID, async (view, context) => ({
+      kind: 'return', value: await readTrustReconciliationPage(view, point => context.readEnvelopeAt!(point), input),
+    }))).value;
+  }
+
+  async reconcileTrustPage(input: { homeId: string; previous: HomeTrustRecord['chainHead']; events: readonly HomeTrustEvent[]; record: HomeTrustRecord }) {
+    // One original signed trust group, subject to the existing native WAL
+    // frame bound. Never durably expose transport pages without their record.
+    if (Buffer.byteLength(canonicalize(input)) > 16 * 1024 * 1024) throw new TypeError('Trust reconciliation group exceeds the native frame bound');
+    const result = await this.#log.transactDurableProjection<TrustStreamRecord, boolean>(CURRENT_TRUST_PROJECTION_ID, async view => {
+      const current = await readVerifiedTrustProgress(view);
+      if (!current || current.homeId !== input.homeId) throw new TypeError('Trust reconciliation page belongs to another home');
+      if (current.chainHead.seq > input.previous.seq) return { kind: 'return', value: false };
+      if (canonicalize(current.chainHead) !== canonicalize(input.previous)) throw new TypeError('Trust reconciliation page does not continue the exact prefix');
+      let previous = input.previous;
+      for (const event of input.events) {
+        if (event.homeId !== input.homeId || event.seq !== previous.seq + 1 || event.prevEventDigest !== previous.eventDigest) throw new TypeError('Trust reconciliation page skips or conflicts with an event');
+        previous = { seq: event.seq, eventDigest: homeTrustEventDigest(event) };
+      }
+      if (input.record.homeId !== input.homeId || canonicalize(input.record.chainHead) !== canonicalize(previous)) throw new TypeError('Signed trust record does not close the delivered prefix');
+      if (!input.events.length && current.complete) return { kind: 'return', value: true };
+      // The existing current-trust reducer verifies every original signature,
+      // transition, member change and final signed record before WAL commit.
+      return { kind: 'append', entries: [
+        ...input.events.map(event => ({ stream: 'trust', body: { t: 'home-trust-event' as const, event } })),
+        { stream: 'trust', body: { t: 'home-trust-record' as const, record: input.record } },
+      ], value: true };
+    });
+    if (result.commit) this.#sources?.sources.invalidateKnownTrust();
+    return result.value;
   }
 
   async loadTrustEvents(): Promise<readonly HomeTrustEvent[]> {

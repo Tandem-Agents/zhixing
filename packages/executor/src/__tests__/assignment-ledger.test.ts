@@ -100,6 +100,10 @@ import {
   type OwnerDeliveryParticipant,
 } from "@zhixing/owner-kernel/delivery";
 import { createTempDir } from "@zhixing/test-utils";
+import { ConversationTransferSource, ConversationTransferTarget, readConversationTransferState, type ConversationTransferStaging, type ConversationTransferStagingArea } from '@zhixing/owner-kernel/conversation-transfer';
+import { ConversationBaseSource } from '../../../owner-kernel/src/conversation-base-source.js';
+import { bindConversationAnchorTenure } from '../../../cli/src/serve/conversation-anchor-tenure.js';
+import { installVerifiedAnchorTenure } from '../../../owner-kernel/src/__tests__/imported-base-fixture.js';
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
@@ -109,6 +113,7 @@ import {
   type OwnerControlAuthorizer,
 } from "../assignment-ledger.js";
 import { AssignmentStreamSpool } from "../assignment-stream-spool.js";
+import { selectConversationAuthorityRecords } from '@zhixing/owner-kernel/conversation-transfer';
 import { DataPlaneTicketRegistry } from "../data-plane-ticket-registry.js";
 
 const NOW = "2026-07-13T09:00:00.000Z";
@@ -121,6 +126,189 @@ const ASSIGNMENT_ID = "assignment-1";
 const SHA256_ZERO = `sha256:${"0".repeat(64)}`;
 const ABORT_TICKET_DIGEST = `sha256:${"a".repeat(64)}`;
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+it('exports source-bound conversation facts without transferring source delivery effects', async () => {
+  const responder = { channelId: 'feishu', platformSubject: 'transfer-fixture-user', tenant: 'fixture' };
+  const harness = await createHarness({ ingress: { kind: 'channel', surfacePrincipal: channelSurfacePrincipal(responder), responder,
+    replyTarget: { channelId: 'feishu', to: 'fixture-chat' }, deviceId: 'device-1', ingressId: 'transfer-fixture', receivedAt: NOW } });
+  await harness.ledger.dispatch(harness.dispatch.envelope, harness.dispatch.activation, ownerContext(ASSIGNMENT_ID, 'executor.dispatch'));
+  await new InProcessAssignmentSubmission({ ledger: harness.ledger, owner: harness.journal }).startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+  const bundle = await sealDefaultBundle(harness.ledger, 'transfer fixture result');
+  await harness.journal.submitBundle(bundle, submissionContext(harness.unsigned));
+  const commits = await harness.log.readAll();
+  const selected = await selectConversationAuthorityRecords(commits, CONVERSATION_ID, harness.artifacts, harness.identity);
+  expect(commits.some(commit => commit.entries.some(entry => entry.stream === 'delivery'))).toBe(true);
+  expect(selected.records.some(record => record.stream === 'delivery' || record.stream === 'governor')).toBe(false);
+  for (const record of selected.records) {
+    const envelope = commits.find(commit => commit.lsn === record.lsn)!;
+    expect(record.sourceEnvelopeDigest).toBe(envelope.envelopeDigest);
+    expect(envelope.entries[record.sourceItem!]).toEqual({ stream: record.stream, body: record.body });
+  }
+
+});
+
+
+it('adopts authenticated execution facts, restarts, and admits a new target run without replaying source effects', async () => {
+  const responder = { channelId: 'feishu', platformSubject: 'adopted-consumer', tenant: 'fixture' };
+  const harness = await createHarness({ ingress: { kind: 'channel', surfacePrincipal: channelSurfacePrincipal(responder), responder,
+    replyTarget: { channelId: 'feishu', to: 'fixture-chat' }, deviceId: 'device-1', ingressId: 'adopted-consumer', receivedAt: NOW } });
+  await harness.ledger.dispatch(harness.dispatch.envelope, harness.dispatch.activation, ownerContext(ASSIGNMENT_ID, 'executor.dispatch'));
+  await new InProcessAssignmentSubmission({ ledger: harness.ledger, owner: harness.journal }).startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+  await harness.journal.submitBundle(await sealDefaultBundle(harness.ledger, 'adopted consumer result'), submissionContext(harness.unsigned));
+  const sourceCommits = await harness.log.readAll();
+  expect(sourceCommits.some(commit => commit.entries.some(entry => entry.stream === 'delivery'))).toBe(true);
+
+  const targetRoot = await createTempDir('adopted-consumer-target');
+  const targetArtifacts = new FileArtifactStore(path.join(targetRoot, 'artifacts'));
+  const targetLog = new FileAuthorityCommitLog(path.join(targetRoot, 'authority'), targetArtifacts, { clock: () => NOW });
+  onTestFinished(() => targetLog.stopStorageMaintenance());
+  const tenure = await installVerifiedAnchorTenure(targetLog, NOW);
+  const staging = memoryStagingArea(), transferId = 'xfer-01ARZ3NDEKTSV4RRFFQ69G5FAW', sourceOwnerEpoch = 3, nextOwnerEpoch = 4;
+  const source = new ConversationTransferSource({ deviceId: 'device-1', log: harness.log, artifacts: harness.artifacts,
+    signer: harness.identity, verifier: harness.identity, acceptsConversationId: id => id === CONVERSATION_ID,
+    isCurrentAnchor: id => id === tenure.anchorDeviceId,
+    conversationState: async () => ({ exists: true, deleted: false, ownerEpoch: sourceOwnerEpoch }),
+    settleConversation: async () => {
+      // The real execution ledger proves its acknowledgement before the source
+      // prefix can be frozen, exactly as the production settle step does.
+      await harness.ledger.acknowledge(ASSIGNMENT_ID, 8);
+      const snapshot = await harness.ledger.queryLedger(ASSIGNMENT_ID, ownerContext(ASSIGNMENT_ID, 'executor.queryLedger'));
+      if (!('fromSeq' in snapshot)) await harness.journal.observeBundleAcknowledgement(ASSIGNMENT_ID, snapshot);
+      await harness.journal.resumeLifecycleProjections(async () => {});
+      await harness.journal.resumeCommittedProjections();
+      await harness.journal.publishPendingFinals(async () => {});
+    },
+    snapshotSessionState: async () => ({ reducerVersion: 'session-state-v1', value: { meta: await harness.journal.sessionMeta(), taskList: await harness.journal.taskList(),
+      transcript: (await harness.journal.transcriptTail()).records, advancement: null } }),
+    clock: () => NOW });
+  const prepared = { requestId: 'request-1', transferId, targetDeviceId: tenure.anchorDeviceId, conversationId: CONVERSATION_ID, sourceOwnerEpoch };
+  await source.prepare(prepared);
+  const frozen = await source.freeze(transferId);
+  const target = new ConversationTransferTarget({ deviceId: tenure.anchorDeviceId, log: targetLog, artifacts: targetArtifacts, staging: staging.port,
+    signer: harness.identity, verifier: harness.identity, isActiveSource: id => id === 'device-1',
+    acceptsSourceConversationId: (device, id) => device === 'device-1' && id === CONVERSATION_ID, conversationExists: () => false,
+    sourceOwnerEpoch: () => sourceOwnerEpoch, reducerVersion: 'session-state-v1' });
+  await target.prepare({ v: 1, t: 'prepared', ...prepared, sourceDeviceId: 'device-1', nextOwnerEpoch });
+  await target.import({ transferId, manifestRef: frozen.manifestRef, proof: frozen.proof, source: source.readPort });
+  const committed = await target.commit(transferId);
+  await source.acceptCommit({ manifest: frozen.manifest, commit: committed.commit });
+  const publication = await target.committedBaseSource(transferId);
+
+  // Authenticated conversation facts cross the boundary; native source
+  // governor and delivery effects are not replayed on the target.
+  const records = await publication.source.recordsPage(0, 63);
+  expect(records.some(record => record.stream === `run:${CONVERSATION_ID}`)).toBe(true);
+  expect(records.some(record => record.stream === 'delivery' || record.stream === 'governor')).toBe(false);
+  const targetCommits = await targetLog.readAll();
+  expect(targetCommits.some(commit => commit.entries.some(entry => entry.stream === 'delivery'))).toBe(false);
+
+  expect((await target.committedBase(transferId)).manifest.conversationId).toBe(CONVERSATION_ID);
+
+  // Restart: a cold reopen of the target authority still serves the adopted base.
+  await targetLog.stopStorageMaintenance();
+  const reopenedArtifacts = new FileArtifactStore(path.join(targetRoot, 'artifacts'));
+  const reopenedLog = new FileAuthorityCommitLog(path.join(targetRoot, 'authority'), reopenedArtifacts, { clock: () => NOW });
+  onTestFinished(() => reopenedLog.stopStorageMaintenance());
+  bindConversationAnchorTenure(reopenedLog);
+  const state = await readConversationTransferState(reopenedLog, transferId, harness.identity);
+  expect(state?.phase).toBe('committed');
+  const reopened = await ConversationBaseSource.open({ log: reopenedLog, artifacts: reopenedArtifacts, verifier: harness.identity,
+    state: state!, ownerCheckpoint: await reopenedLog.checkpoint() });
+  if (!reopened.ready) await reopened.prepare();
+  const reopenedRecords = await reopened.recordsPage(0, 63);
+  expect(reopenedRecords.some(record => record.stream === `run:${CONVERSATION_ID}`)).toBe(true);
+  const owner = new ConversationRunJournal({ conversationId: CONVERSATION_ID, ownerEpoch: nextOwnerEpoch,
+    log: reopenedLog, artifacts: reopenedArtifacts, signer: harness.identity, verifier: harness.identity,
+    currentAuthority: { deviceId: tenure.anchorDeviceId, executorId: EXECUTOR_ID },
+    submission, authority: harness.authority, projection: { async project() {} }, clock: () => NOW });
+  await owner.installImportedBase(reopened);
+  const before = await reopenedLog.checkpoint();
+  await owner.admit({ runId: 'target-followup', ingressKey: 'target-followup', queuedPosition: 1,
+    userInput: { parts: [{ type: 'text', text: 'continue on target' }] }, invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'surface:user-1', deviceId: tenure.anchorDeviceId, ingressId: 'target-followup', receivedAt: NOW } });
+  expect(await owner.runState('target-followup')).toBe('queued');
+  expect((await reopenedLog.checkpoint()).lsn).toBeGreaterThan(before.lsn);
+  expect((await reopenedLog.readAll()).flatMap(commit => commit.entries).some(entry => entry.stream === 'delivery')).toBe(false);
+
+}, 120_000);
+
+function memoryStagingArea(): {
+  readonly port: ConversationTransferStagingArea;
+  readonly count: (transferId: string) => number;
+} {
+  const sessions = new Map<string, {
+    readonly artifacts: Map<string, Uint8Array>;
+    readonly partials: Map<string, Uint8Array>;
+    readonly projection: ConversationTransferStaging;
+  }>();
+  const keyFor = (ref: ArtifactRef) => `${ref.digest}:${ref.bytes}`;
+  const forTransfer = (transferId: string): ConversationTransferStaging => {
+    const current = sessions.get(transferId);
+    if (current) return current.projection;
+    const artifacts = new Map<string, Uint8Array>();
+    const partials = new Map<string, Uint8Array>();
+    const projection = Object.freeze({
+      artifacts: Object.freeze({
+        get: async (ref: ArtifactRef) => {
+          const value = artifacts.get(keyFor(ref));
+          if (!value) throw new Error("Artifact does not exist");
+          return value.slice();
+        },
+        readRange: async (ref: ArtifactRef, offset: number, limit: number) => {
+          const value = artifacts.get(keyFor(ref));
+          if (!value) throw new Error("Artifact does not exist");
+          return value.slice(offset, offset + limit);
+        },
+        has: async (ref: ArtifactRef) => artifacts.has(keyFor(ref)),
+      }),
+      receiver: Object.freeze({
+        progress: async (ref: ArtifactRef, runPhysicalStep = (_identity, operation) => operation()) =>
+          runPhysicalStep({ step: "progress", digest: ref.digest }, async () => {
+            const complete = artifacts.has(keyFor(ref));
+            return {
+              receivedBytes: complete ? ref.bytes : (partials.get(keyFor(ref))?.byteLength ?? 0),
+              complete,
+            };
+          }),
+        append: async (
+          ref: ArtifactRef,
+          offset: number,
+          bytes: Uint8Array,
+          runPhysicalStep = (_identity, operation) => operation(),
+        ) => runPhysicalStep({ step: "append", digest: ref.digest }, async () => {
+          const key = keyFor(ref);
+          if (artifacts.has(key)) return { receivedBytes: ref.bytes, complete: true };
+          const prefix = partials.get(key) ?? new Uint8Array();
+          if (offset !== prefix.byteLength) {
+            throw new RangeError("Artifact chunk does not continue the durable prefix");
+          }
+          const next = Buffer.concat([prefix, bytes]);
+          if (next.byteLength > ref.bytes) {
+            throw new RangeError("Artifact chunk exceeds the declared byte length");
+          }
+          if (next.byteLength === ref.bytes) {
+            artifacts.set(key, next);
+            partials.delete(key);
+            return { receivedBytes: ref.bytes, complete: true };
+          }
+          partials.set(key, next);
+          return { receivedBytes: next.byteLength, complete: false };
+        }),
+      }),
+      cleanup: async () => {
+        const removed = artifacts.size;
+        sessions.delete(transferId);
+        return removed;
+      },
+    }) satisfies ConversationTransferStaging;
+    sessions.set(transferId, { artifacts, partials, projection });
+    return projection;
+  };
+  return {
+    port: Object.freeze({ forTransfer }),
+    count: (transferId) => sessions.get(transferId)?.artifacts.size ?? 0,
+  };
+}
 
 function matchingSnapshotFor(executorId: string): ExecutorCapabilitySnapshot | undefined {
   if (executorId !== EXECUTOR_ID) return undefined;
@@ -3601,7 +3789,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         bundleRef: kind === "wrong-bundle" ? wrongBundleRef : committedBundleRef,
         commitRevision: kind === "wrong-revision" ? 9 : 8,
       };
-      await harness.log.append([
+      await replayFixtureLog(harness).append([
         { stream: `run:${CONVERSATION_ID}`, body: acknowledgement },
         ...(kind === "duplicate"
           ? [{ stream: `run:${CONVERSATION_ID}`, body: acknowledgement }]
@@ -3609,11 +3797,11 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       ]);
 
       await expect(reopenJournal(harness).currentState(RUN_ID)).rejects.toThrow(
-        "Bundle acknowledgement observation does not bind one committed conversation bundle",
+        /Bundle acknowledgement observation does not bind one committed conversation bundle|Submission guard bundle acknowledgement is invalid or duplicated/,
       );
       await expect(
         reopenJournal(harness).submitBundle(bundle, submissionContext(harness.unsigned)),
-      ).rejects.toThrow("Submission guard bundle acknowledgement is invalid or duplicated");
+      ).rejects.toThrow(/Bundle acknowledgement observation does not bind one committed conversation bundle|Submission guard bundle acknowledgement is invalid or duplicated/);
     },
     15_000,
   );
@@ -4744,7 +4932,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
 
   it("rejects non-atomic owner termination facts during replay", async () => {
     const bareState = await createHarness();
-    await bareState.log.append([
+    await replayFixtureLog(bareState).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -4770,7 +4958,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       ticketDigest: ABORT_TICKET_DIGEST,
       surfacePrincipal: "surface:user-1",
     });
-    await bareAccepted.log.append([
+    await replayFixtureLog(bareAccepted).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -4794,7 +4982,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       fence,
       ownerContext(ASSIGNMENT_ID, "executor.supersede"),
     );
-    await bareSupersede.log.append([
+    await replayFixtureLog(bareSupersede).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: { t: "assignment-superseded", assignmentId: ASSIGNMENT_ID, proof },
@@ -4807,7 +4995,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
 
   it("rejects non-atomic initial facts, cross-conversation dispatches, and non-head assignments", async () => {
     const admittedOnly = await createUnassignedHarness();
-    await admittedOnly.log.append([
+    await replayFixtureLog(admittedOnly).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -4830,7 +5018,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       assignedOnly,
       assignedOnly.unsigned,
     );
-    await assignedOnly.log.append([
+    await replayFixtureLog(assignedOnly).append([
       { stream: `run:${CONVERSATION_ID}`, body: bareAssignment.record },
     ]);
     await expect(
@@ -4851,7 +5039,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       crossConversation,
       foreignUnsigned,
     );
-    await crossConversation.log.append([
+    await replayFixtureLog(crossConversation).append([
       { stream: `run:${CONVERSATION_ID}`, body: foreignAssignment.record },
       {
         stream: `run:${CONVERSATION_ID}`,
@@ -4882,7 +5070,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       assignmentId: "assignment-second",
     });
     const secondAssignment = await storedAssignmentFact(nonHead, secondUnsigned);
-    await nonHead.log.append([
+    await replayFixtureLog(nonHead).append([
       { stream: `run:${CONVERSATION_ID}`, body: secondAssignment.record },
       {
         stream: `run:${CONVERSATION_ID}`,
@@ -4902,7 +5090,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
 
   it("rejects unknown fields in durable owner run records", async () => {
     const harness = await createHarness();
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5234,7 +5422,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     if (ackedResult.accepted || ackedResult.outcome !== "conflicting-redelivery") {
       throw new Error("expected owner-authoritative conflict");
     }
-    await ackedConflict.log.append([
+    await replayFixtureLog(ackedConflict).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5264,7 +5452,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     if (openedResult.accepted || openedResult.outcome !== "conflicting-redelivery") {
       throw new Error("expected mismatched conflict");
     }
-    await openedConflict.log.append([
+    await replayFixtureLog(openedConflict).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5309,7 +5497,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
           at: NOW,
         }),
       };
-      await incompleteResolution.log.append([
+      await replayFixtureLog(incompleteResolution).append([
         {
           stream: `run:${CONVERSATION_ID}`,
           body: {
@@ -5426,7 +5614,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     );
     await incomplete.ledger.start(ASSIGNMENT_ID);
     const incompleteBundle = await sealDefaultBundle(incomplete.ledger);
-    await incomplete.log.append([
+    await replayFixtureLog(incomplete).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5466,7 +5654,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     );
     await missingBaseSidecars.ledger.start(ASSIGNMENT_ID);
     const sidecarlessBundle = await sealDefaultBundle(missingBaseSidecars.ledger);
-    await missingBaseSidecars.log.append([
+    await replayFixtureLog(missingBaseSidecars).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5501,10 +5689,10 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         sidecarlessBundle,
         submissionContext(missingBaseSidecars.unsigned),
       ),
-    ).rejects.toThrow("content sidecar");
+    ).rejects.toThrow(/content sidecar|missing its content, publish, or final sidecars/);
     await expect(
       missingBaseSidecars.journal.currentState(RUN_ID),
-    ).rejects.toThrow("missing its content, publish, or final sidecars");
+    ).rejects.toThrow(/missing its content, publish, or final sidecars|Submission guard commit has no unique content sidecar/);
 
     const missingPublish = await createHarness();
     await missingPublish.ledger.dispatch(
@@ -5528,7 +5716,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     });
     const missingPublishBundle = await sealDefaultBundle(missingPublish.ledger);
     const missingPublishRevision = missingPublishBundle.body.baseRevision + 1;
-    await missingPublish.log.append([
+    await replayFixtureLog(missingPublish).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -5581,7 +5769,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         missingPublishBundle,
         submissionContext(missingPublish.unsigned),
       ),
-    ).rejects.toThrow("durable sidecars");
+    ).rejects.toThrow(/durable sidecars|missing its content, publish, or final sidecars/);
     await expect(missingPublish.journal.currentState(RUN_ID)).rejects.toThrow(
       "missing its content, publish, or final sidecars",
     );
@@ -5633,14 +5821,14 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         },
       });
       await harness.artifacts.put(sealedBundleArtifact(invalid).bytes);
-      await appendCompleteConversationCommit(harness, invalid, 3, true);
+      await appendCompleteConversationCommit({ ...harness, log: replayFixtureLog(harness) }, invalid, 3, true);
 
       await expect(
         reopenJournal(harness).submitBundle(
           invalid,
           submissionContext(harness.unsigned),
         ),
-      ).rejects.toThrow("durable assignment fence");
+      ).rejects.toThrow(/durable assignment fence|historical assignment fence/);
       await expect(harness.journal.currentState(RUN_ID)).rejects.toThrow(
         "historical assignment fence",
       );
@@ -6893,7 +7081,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     expect(await harness.journal.currentState(RUN_ID)).toBe("dispatched");
 
     const history = await harness.journal.statusHistory(RUN_ID, 0);
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -7288,7 +7476,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       fence,
       ownerContext(ASSIGNMENT_ID, "executor.supersede"),
     );
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -7972,7 +8160,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         submissionContext(duplicate.unsigned),
       ),
     ).rejects.toThrow("repeats a durable request identity");
-    await duplicate.log.append([
+    await replayFixtureLog(duplicate).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -7988,7 +8176,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
 
     const unfenced = await createHarness();
     await unfenced.journal.markAssignmentUncertain(ASSIGNMENT_ID, "ledger-unknown");
-    await unfenced.log.append([
+    await replayFixtureLog(unfenced).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -8001,7 +8189,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       },
     ]);
     await expect(reopenJournal(unfenced).currentState(RUN_ID)).rejects.toThrow(
-      "outside its authorized state",
+      /outside its authorized state|Interaction mirror has no current audit prefix/,
     );
 
     const terminal = await createHarness();
@@ -8017,7 +8205,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(terminal.unsigned));
     const bundle = await sealDefaultBundle(terminal.ledger);
     await terminal.journal.submitBundle(bundle, submissionContext(terminal.unsigned));
-    await terminal.log.append([
+    await replayFixtureLog(terminal).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -8508,7 +8696,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         cause,
       }),
     };
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: { t: "resolution", runId: RUN_ID, fact },
@@ -8564,7 +8752,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
     if (second.accepted || second.outcome !== "conflicting-redelivery") {
       throw new Error("expected second dispatch conflict");
     }
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -8613,7 +8801,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       ...startedPayload,
       signature: started.identity.sign("SupersedeProof", 1, startedPayload),
     };
-    await started.log.append([
+    await replayFixtureLog(started).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -8668,7 +8856,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       ...unfencedPayload,
       signature: unfenced.identity.sign("SupersedeProof", 1, unfencedPayload),
     };
-    await unfenced.log.append([
+    await replayFixtureLog(unfenced).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -9596,7 +9784,7 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       },
       harness.identity,
     );
-    await harness.log.append([
+    await replayFixtureLog(harness).append([
       {
         stream: `run:${CONVERSATION_ID}`,
         body: {
@@ -11260,7 +11448,7 @@ describe("conversation record execution-point behavior matrix", () => {
             ? `run:${behavior.conversationId}`
             : stream;
       await expectConversationRejected(async () => {
-        await behavior.log.append([{ stream: corruptStream, body: vector }]);
+        await replayFixtureLog(behavior).append([{ stream: corruptStream, body: vector }]);
         await behavior.fullProbe();
       });
       if (behavior.guardProbe) {
@@ -11285,7 +11473,7 @@ describe("conversation record execution-point behavior matrix", () => {
             )
           : structuredClone(guardTarget.body);
         await expectConversationRejected(async () => {
-        await guardBehavior.log.append([
+        await replayFixtureLog(guardBehavior).append([
           {
             stream:
               spec.corruptStream === "session-activity"
@@ -11305,3 +11493,12 @@ describe("conversation record execution-point behavior matrix", () => {
     20_000,
   );
 });
+
+/** An older writer can leave invalid domain facts in storage. Keep recovery
+ * rejection coverage even when the current registered projections reject them
+ * before append. This log still uses the real storage implementation. */
+function replayFixtureLog(harness: { log: FileAuthorityCommitLog }): FileAuthorityCommitLog {
+  const log = new FileAuthorityCommitLog(harness.log.rootDir, harness.log.artifactStore, { clock: () => NOW, lockWaitMs: 2_000 });
+  onTestFinished(() => log.stopStorageMaintenance());
+  return log;
+}

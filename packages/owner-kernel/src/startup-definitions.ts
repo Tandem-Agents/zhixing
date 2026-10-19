@@ -4,4 +4,6 @@ export { registerScheduleAuthorityProjection, SCHEDULE_AUTHORITY_PROJECTION_ID }
 export { registerJobPublishPendingProjection } from "./scheduler-job-commit.js";
 export { registerDeferredIntentProjection } from "./deferred-global-intents.js";
 export { registerConversationReadProjection } from "./conversation-read-index.js";
+export { registerConversationRecoveryProjection } from "./conversation-recovery-index.js";
+export { registerConversationRunProjection } from "./conversation-run-state-index.js";
 export { registerConversationTransferProjection } from "./conversation-transfer.js";

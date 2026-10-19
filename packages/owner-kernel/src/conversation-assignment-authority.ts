@@ -29,6 +29,7 @@ export interface ConversationAssignmentIssueInput {
   readonly executorId: string;
   readonly conversationId: string;
   readonly ownerEpoch: number;
+  readonly anchorEpoch?: number;
   readonly baseRevision: number;
   readonly attempt: number;
   readonly resourceLease: AssignmentResourceLease<"conversation">;
@@ -187,15 +188,17 @@ export class ConversationAssignmentAuthority
     };
 
     const renewalIntervalMs = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
-    const renewalSeq = Math.floor(Date.parse(issuedAt) / renewalIntervalMs);
+    const renewalWindow = Math.floor(Date.parse(issuedAt) / renewalIntervalMs);
+    // A v2 renewal in the same clock window succeeds a legacy v1 lease.
+    const renewalSeq = renewalWindow + Number(input.anchorEpoch !== undefined);
     const controlIssuedAt = new Date(
-      renewalSeq * renewalIntervalMs,
+      renewalWindow * renewalIntervalMs,
     ).toISOString();
     const controlExpiry = new Date(
-      renewalSeq * renewalIntervalMs + MAX_CONTROL_LEASE_TTL_MS,
+      renewalWindow * renewalIntervalMs + MAX_CONTROL_LEASE_TTL_MS,
     ).toISOString();
     const controlPayload = {
-      v: 1 as const,
+      ...(input.anchorEpoch === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: input.anchorEpoch }),
       controlLeaseId: `control-${input.assignmentId}`,
       assignmentId: input.assignmentId,
       authority: {
@@ -209,11 +212,11 @@ export class ConversationAssignmentAuthority
     };
     const controlLease: ControlLease = {
       ...controlPayload,
-      signature: this.#signer.sign("ControlLease", 1, controlPayload),
+      signature: this.#signer.sign("ControlLease", controlPayload.v, controlPayload),
     };
 
     const capabilityPayload = {
-      v: 1 as const,
+      ...(input.anchorEpoch === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: input.anchorEpoch }),
       capId: `cap-${input.assignmentId}`,
       executorId: input.executorId,
       scope: {
@@ -231,7 +234,7 @@ export class ConversationAssignmentAuthority
     };
     const capability: AuthorityCapability<"conversation"> = {
       ...capabilityPayload,
-      signature: this.#signer.sign("AuthorityCapability", 1, capabilityPayload),
+      signature: this.#signer.sign("AuthorityCapability", capabilityPayload.v, capabilityPayload),
     };
 
     const resourceLease = validateReservableResourceLease(
@@ -255,7 +258,7 @@ export class ConversationAssignmentAuthority
     }
 
     return {
-      v: 1,
+      ...(input.anchorEpoch === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: input.anchorEpoch }),
       execution: "conversation",
       assignmentId: input.assignmentId,
       executorId: input.executorId,

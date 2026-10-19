@@ -10,14 +10,10 @@ import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core"
 import { parseConversationId } from "@zhixing/core/conversation";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import type {
-  AuthorityLogSnapshot,
-} from "@zhixing/core/authority";
-import type {
   AuthorityCapability,
   AuthorityCallContext,
   AuthorityError,
   AssignmentActivationProof,
-  CommitEnvelope,
   ControlLease,
   ConversationStatusNotice,
   FinalFrame,
@@ -32,7 +28,6 @@ import type {
   ReservationOrigin,
   StreamFrame,
   TranscriptRunRecord,
-  ConversationTransferManifest,
 } from "@zhixing/core/contracts";
 import {
   assertPrincipalAllowsAuthorityMethod,
@@ -50,7 +45,8 @@ import {
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
-  discoverConversationRecoveryCandidatesFromLog,
+  conversationRecoveryPage,
+  conversationRecoveryPending,
   ConversationAssignmentCancelledError,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
@@ -70,8 +66,10 @@ import type {
   DeferredIntentConversationAuthority,
   DeferredIntentConversationTransaction,
 } from "@zhixing/owner-kernel/deferred-global-intents";
-import type {
-  ConversationTransferAuthorityRecord,
+import {
+  loadCommittedConversationBase, readCommittedConversationTransferHeader, isConversationSourceEvidenceError,
+  resolveCurrentConversationAuthority, resolveConversationPublicationOwner,
+  type ConversationTransferPublication,
 } from "@zhixing/owner-kernel/conversation-transfer";
 import { ConversationSessionStateAdapter } from "@zhixing/owner-kernel/session-state-adapter";
 import {
@@ -314,10 +312,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #assignmentStaging: ConversationAssignmentStagingPort | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
+  readonly #unavailableTransfers = new Map<string, { transferId: string; error: Error }>();
   readonly #adoptedConversations = new Map<string, {
     readonly transferId: string;
     readonly ownerEpoch: number;
-    readonly records: readonly ConversationTransferAuthorityRecord[];
+    readonly source?: ConversationTransferPublication["source"];
     readonly clearId?: string;
     readonly clearedThroughLsn: number;
   }>();
@@ -366,6 +365,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
   #recoveryDiscovered = false;
+  #recoveryDiscoveryAfter: string | undefined;
   #shutdownDraining = false;
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
@@ -458,6 +458,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       deviceId: authority.deviceId,
       ownerEpochFor: (assignmentId) =>
         this.#ownerEpochFor(this.#conversationForAssignment(assignmentId)),
+      anchorEpochFor: () => this.#authority.domain.kind === 'anchor' ? this.#authority.domain.anchorEpoch : undefined,
+      assertSigningAuthority: (_id, tenure) => this.#assertControlSigningTenure(tenure),
       clock: this.#clock,
       conversationIdFor: (assignmentId) =>
         this.#conversationForAssignment(assignmentId),
@@ -480,10 +482,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   /** Installs a committed immutable source prefix before exposing the adopted session. */
-  async installCommittedConversationTransfer(input: {
-    readonly manifest: ConversationTransferManifest;
-    readonly records: readonly ConversationTransferAuthorityRecord[];
-  }): Promise<void> {
+  async retainUnavailableCommittedConversationTransfer(transferId: string, error: Error): Promise<void> {
+    const { state } = await readCommittedConversationTransferHeader(this.#authority.authorityLog, this.#authority.verifier, transferId);
+    const id = state.identity.conversationId;
+    const owner = await resolveCurrentConversationAuthority(this.#authority.authorityLog, this.#authority.verifier, id,
+      { deviceId: this.#authority.deviceId, ownerEpoch: this.#authority.ownerEpoch });
+    if (owner.state !== 'current' || owner.deviceId !== this.#authority.deviceId) throw new TypeError('Unavailable transfer belongs to another current owner');
+    this.#adoptedConversations.set(id, { transferId, ownerEpoch: owner.ownerEpoch, clearedThroughLsn: 0 });
+    this.#unavailableTransfers.set(id, { transferId, error });
+    this.#journals.delete(id); this.#markRecovery(id);
+    this.#observeFailure(error, { phase: 'recovery', conversationId: id });
+  }
+
+  async installCommittedConversationTransfer(input:
+    { readonly manifest: ConversationTransferPublication["manifest"]; readonly source: ConversationTransferPublication["source"] }): Promise<void> {
     const prepared = await this.prepareCommittedConversationTransfer(input);
     prepared.publish();
   }
@@ -492,48 +504,42 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    * Performs every fallible read/reduction before the owner switch. Publishing
    * the returned token only swaps already-built in-memory views and cannot do I/O.
    */
-  async prepareCommittedConversationTransfer(input: {
-    readonly manifest: ConversationTransferManifest;
-    readonly records: readonly ConversationTransferAuthorityRecord[];
-  }): Promise<{ readonly publish: () => void }> {
-    if (input.manifest.targetDeviceId !== this.#authority.deviceId) {
-      throw new TypeError("Conversation transfer target does not match this owner");
-    }
+  async prepareCommittedConversationTransfer(input:
+    { readonly manifest: ConversationTransferPublication["manifest"]; readonly source: ConversationTransferPublication["source"] }): Promise<{ readonly publish: () => void }> {
+    const owner = await resolveConversationPublicationOwner(this.#authority.authorityLog, this.#authority.verifier,
+      input.manifest, input.source.manifestRef, this.#authority.deviceId);
     const conversationId = input.manifest.conversationId;
     const existing = this.#adoptedConversations.get(conversationId);
     if (
       existing &&
       (existing.transferId !== input.manifest.transferId ||
-        existing.ownerEpoch !== input.manifest.nextOwnerEpoch)
+        existing.ownerEpoch > owner.ownerEpoch)
     ) {
       throw new Error("Conversation already has another committed transfer generation");
     }
-    let clearId: string | undefined, clearedThroughLsn = 0;
-    for (const record of input.records) {
-      const body = record.body;
-      if (record.stream === `run:${conversationId}` && body && typeof body === 'object' && !Array.isArray(body) && body.t === 'session-lifecycle' && body.mutation === 'clear') {
-        clearId = body.requestId as string; clearedThroughLsn = record.lsn;
-      }
+    const journal = this.#createJournal(conversationId, owner.ownerEpoch);
+    {
+      const meta = await input.source.read(view => view.get('directory/' + JSON.stringify(conversationId) + ':meta')) as
+        | { readonly clearId?: string; readonly clearedLsn?: number }
+        | undefined;
+      const adopted = {
+        transferId: input.manifest.transferId,
+        ownerEpoch: owner.ownerEpoch,
+        source: input.source,
+        clearId: meta?.clearId,
+        clearedThroughLsn: meta?.clearedLsn ?? 0,
+      };
+      await journal.installImportedBase(input.source);
+      return Object.freeze({
+        publish: () => {
+          this.#unavailableTransfers.delete(conversationId);
+          this.#adoptedConversations.set(conversationId, adopted);
+          this.#journals.set(conversationId, journal);
+          this.#sessionIdentities.set(conversationId, Promise.resolve());
+          this.#markRecovery(conversationId);
+        },
+      });
     }
-    const adopted = {
-      transferId: input.manifest.transferId,
-      ownerEpoch: input.manifest.nextOwnerEpoch,
-      records: input.records.map((record) => structuredClone(record)),
-      clearId, clearedThroughLsn,
-    };
-    const journal = this.#createJournal(conversationId, adopted.ownerEpoch);
-    await journal.primeRecoverySnapshot(
-      await this.#snapshotWithImportedBase(adopted.records),
-    );
-    await journal.primeImportedReadBase(adopted.records);
-    return Object.freeze({
-      publish: () => {
-        this.#adoptedConversations.set(conversationId, adopted);
-        this.#journals.set(conversationId, journal);
-        this.#sessionIdentities.set(conversationId, Promise.resolve());
-        this.#markRecovery(conversationId);
-      },
-    });
   }
 
   assignmentIngress(assignmentId: string): IngressContext {
@@ -675,9 +681,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#recoveryGeneration += 1;
     this.#readinessRecovery = undefined;
     this.#recoveryDiscovered = false;
+    this.#recoveryDiscoveryAfter = undefined;
     this.#recoveryConversations.clear();
     this.#journals.clear();
     this.#adoptedConversations.clear();
+    this.#unavailableTransfers.clear();
     this.#sessionIdentities.clear();
     for (const assignmentId of [...this.#assignmentConversations.keys()]) {
       this.#forgetAssignment(assignmentId);
@@ -748,8 +756,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await this.#authority.controlAdmission.hasCreatedConversation(id) ||
       (await this.#storedIdentityExists?.(id)) === true;
     if (!exists || await this.#journal(id).recoveryDeleted()) throw Error('Conversation recovery owner is unavailable');
-    const base = this.#adoptedConversations.get(request.conversationId);
-    return this.#journal(request.conversationId).recoveryPage(request, base && { id: base.transferId, records: base.records, clearId: base.clearId, clearedThroughLsn: base.clearedThroughLsn });
+    return this.#journal(request.conversationId).recoveryPage(request);
   }
 
   /**
@@ -1326,11 +1333,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         executorId: targetExecutorId,
         conversationId: input.conversationId,
         ownerEpoch: this.#ownerEpochFor(input.conversationId),
+        ...(this.#authority.domain.kind === 'anchor' ? { anchorEpoch: this.#authority.domain.anchorEpoch } : {}),
         baseRevision: authority.commitRevision,
         attempt,
         resourceLease,
         ingress: executionIngress,
-        controlContext: worksceneTaskContext(await WorksceneContinuationApplication.tasks((id) => this.worksceneContinuationSources(id), input.conversationId)),
+        controlContext: worksceneTaskContext(await WorksceneContinuationApplication.tasks((id, query) => this.worksceneContinuationSources(id, query), input.conversationId)),
         contentAssets: [...appliedAdmission.attachments],
         windowInput: {
           t: "full",
@@ -2251,12 +2259,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryRunning) return this.#recoveryRunning;
     await this.recoverReadinessProjections();
     if (this.#recoveryStopped) return 0;
-    const queue = [...this.#recoveryConversations.entries()];
+    if (this.#recoveryDiscoveryAfter) {
+      const page = await conversationRecoveryPage(this.#authority.authorityLog, this.#authority.artifacts, this.#recoveryDiscoveryAfter);
+      for (const id of page.conversationIds) if (this.#acceptsConversationId(id)) this.#markRecovery(id);
+      this.#recoveryDiscoveryAfter = page.after;
+    }
+    const queue = [...this.#recoveryConversations.entries()].slice(0, 32);
     let recovered = await this.#executorDispatch.reconcileLocalReceipts();
     recovered += await this.#authority.resourceRecovery.reclaimExpired();
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
+        await this.#prepareConversationBasis(conversationId);
         const journal = this.#journal(conversationId);
         if (this.#losslessDataPlane.kind === "available") {
           count += await this.#losslessDataPlane.port.recoverConversationChannels(
@@ -2313,6 +2327,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           const [conversationId, claimedGeneration] = entry;
           try {
             recovered += await recoverConversation(conversationId);
+            if (!this.#recoveryStopped && await conversationRecoveryPending(this.#authority.authorityLog, this.#authority.artifacts, conversationId)) {
+              this.#markRecovery(conversationId);
+            }
             if (
               !this.#recoveryStopped &&
               this.#recoveryConversations.get(conversationId) === claimedGeneration
@@ -2322,6 +2339,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           } catch (error) {
             this.#observeFailure(error, { phase: "recovery", conversationId });
             // A later pass retries this conversation without blocking service readiness or peers.
+          } finally {
+            if (this.#recoveryConversations.get(conversationId) === claimedGeneration) {
+              this.#recoveryConversations.delete(conversationId);
+              this.#recoveryConversations.set(conversationId, claimedGeneration);
+            }
           }
         }
       },
@@ -2354,26 +2376,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async #prepareConversationBasis(conversationId: string): Promise<void> {
+    const unavailable = this.#unavailableTransfers.get(conversationId);
+    if (unavailable) {
+      const publication = await loadCommittedConversationBase(this.#authority.authorityLog, this.#authority.artifacts,
+        this.#authority.verifier, unavailable.transferId);
+      await this.installCommittedConversationTransfer({ manifest: publication.manifest, source: publication.source });
+    }
     const journal = this.#journal(conversationId);
     if (journal.hasRecoveredInputProjection) return;
-    const imported = this.#adoptedConversations.get(conversationId);
-    if (!imported && await journal.restoreRecoveryCheckpoint()) return;
-    const snapshots = await this.#readConversationRecoverySnapshots([conversationId]);
-    const local = partitionConversationSnapshots(snapshots).get(conversationId) ?? emptyConversationSnapshot(snapshots);
-    await journal.primeRecoverySnapshot(imported ? await this.#snapshotWithImportedBase(imported.records, local) : local);
+    await journal.restoreRecoveryCheckpoint();
   }
 
-  /** 缺少检查点时只读所需会话及其发布伴随，不复制整份权威日志。 */
-  async #readConversationRecoverySnapshots(conversationIds: readonly string[]): Promise<AuthorityLogSnapshot<unknown>> {
-    const result = await this.#authority.authorityLog.readProjection<CommitEnvelope<unknown>[], unknown>(
-      [], (commits, _record, envelope) => {
-        if (commits.at(-1)?.lsn !== envelope.lsn) commits.push(envelope);
-        return commits;
-      },
-      { streams: [...conversationIds.map(id => `run:${id}`), "publish", "final-outbox"] },
-    );
-    return { commits: result.state, cursor: result.cursor };
-  }
 
   async completeLifecycleProjections(conversationId: string): Promise<number> {
     return this.#resumeLifecycleProjections(
@@ -2675,44 +2688,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#authority.ownerEpoch;
   }
 
-  async #snapshotWithImportedBase(
-    records: readonly ConversationTransferAuthorityRecord[],
-    snapshot?: AuthorityLogSnapshot<unknown>,
-  ): Promise<AuthorityLogSnapshot<unknown>> {
-    const current = snapshot ?? await this.#authority.authorityLog.readSnapshot<unknown>();
-    const grouped = new Map<string, {
-      readonly lsn: number;
-      readonly at: string;
-      readonly entries: Array<{ stream: string; body: unknown }>;
-    }>();
-    for (const record of records) {
-      const key = `${record.lsn}\0${record.at}`;
-      const group = grouped.get(key) ?? {
-        lsn: record.lsn,
-        at: record.at,
-        entries: [],
-      };
-      group.entries.push({ stream: record.stream, body: structuredClone(record.body) });
-      grouped.set(key, group);
-    }
-    const imported = [...grouped.values()]
-      .sort((left, right) => left.lsn - right.lsn || left.at.localeCompare(right.at))
-      .map((group) => {
-        const payload = {
-          v: 1 as const,
-          lsn: group.lsn,
-          at: group.at,
-          entries: group.entries,
-        };
-        return {
-          ...payload,
-          envelopeDigest: protocolDigest("CommitEnvelope", 1, payload),
-        } satisfies CommitEnvelope<unknown>;
-      });
-    return { commits: [...imported, ...current.commits], cursor: current.cursor };
-  }
-
   #journal(conversationId: string): ConversationRunJournal {
+    const unavailable = this.#unavailableTransfers.get(conversationId);
+    if (unavailable) throw unavailable.error;
     if (!this.#acceptsConversationId(conversationId)) {
       throw new Error("Conversation identity does not belong to this owner domain");
     }
@@ -2847,7 +2825,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     return {
       contexts: createDispatchContexts({ signer: this.#authority.signer, deviceId: this.#authority.deviceId,
         clock: this.#clock, conversationIdFor: id => capture(id).conversationId,
-        ownerEpochFor: id => capture(id).authority.activation.ref.ownerEpoch }),
+        ownerEpochFor: id => capture(id).authority.activation.ref.ownerEpoch,
+        anchorEpochFor: id => capture(id).authority.capability.anchorEpoch ??
+          (capture(id).authority.activation.ref.ownerEpoch === this.#ownerEpochFor(capture(id).conversationId) && this.#authority.domain.kind === 'anchor'
+            ? this.#authority.domain.anchorEpoch : undefined),
+        assertSigningAuthority: (_id, tenure) => this.#assertControlSigningTenure(tenure) }),
       executorIdForAssignment: (id: string) => capture(id).authority.capability.executorId,
       submissionContext: (id: string): AuthorityCallContext => {
         const capability = capture(id).authority.capability;
@@ -3118,35 +3100,26 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   async #recoverReadinessProjections(): Promise<number> {
     if (this.#recoveryDiscovered) return 0;
     await this.#prepareControlBasis();
-    // 发现只续算检查点之后的尾部；没有待恢复会话（常态）时不读出整份日志快照。
+    // Read one current obligation page. Further pages belong to the recovery
+    // worker; unrelated conversations are not a service-readiness barrier.
+    const page = await conversationRecoveryPage(this.#authority.authorityLog, this.#authority.artifacts);
     const conversationIds = new Set(
-      [...await discoverConversationRecoveryCandidatesFromLog(this.#authority.authorityLog, this.#authority.artifacts)].filter((conversationId) =>
+      page.conversationIds.filter((conversationId) =>
         this.#acceptsConversationId(conversationId),
       ),
     );
     if (conversationIds.size > 0) {
-      // 恢复出的待执行输入会立即经过控制准入重放：先从与已核验前缀一致的检查点恢复控制准入
-      // 与各候选会话日志，只为恢复不了的部分读出一次整份快照补齐，不让未收尾的少量工作把
-      // 启动成本拉回与历史成正比。
-      const unrestored: string[] = [];
       for (const conversationId of conversationIds) {
         this.#markRecovery(conversationId);
-        const journal = this.#journal(conversationId);
-        const imported = this.#adoptedConversations.get(conversationId);
-        if (!imported && !journal.hasRecoveredInputProjection) await journal.restoreRecoveryCheckpoint();
-        if (imported || !journal.hasRecoveredInputProjection) unrestored.push(conversationId);
-      }
-      if (unrestored.length > 0) {
-        const snapshot = await this.#readConversationRecoverySnapshots(unrestored);
-        const conversationSnapshots = partitionConversationSnapshots(snapshot);
-        for (const conversationId of unrestored) {
-          const localSnapshot = conversationSnapshots.get(conversationId) ?? emptyConversationSnapshot(snapshot);
-          const imported = this.#adoptedConversations.get(conversationId);
-          await this.#journal(conversationId).primeRecoverySnapshot(imported
-            ? await this.#snapshotWithImportedBase(imported.records, localSnapshot) : localSnapshot);
+        try { await this.#prepareConversationBasis(conversationId); }
+        catch (error) {
+          if (!this.#adoptedConversations.has(conversationId) || !isConversationSourceEvidenceError(error)) throw error;
+          this.#observeFailure(error, { phase: 'recovery', conversationId });
+          conversationIds.delete(conversationId);
         }
       }
     }
+
     let resumed = 0;
     const queue = [...conversationIds];
     await Promise.all(
@@ -3169,6 +3142,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }),
     );
     this.#recoveryDiscovered = true;
+    this.#recoveryDiscoveryAfter = page.after;
     return resumed;
   }
 
@@ -3225,6 +3199,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   #markRecovery(conversationId: string): void {
     this.#recoveryGeneration += 1;
+    this.#recoveryConversations.delete(conversationId);
     this.#recoveryConversations.set(conversationId, this.#recoveryGeneration);
   }
 
@@ -3368,11 +3343,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     )?.descriptor;
     if (!descriptor) return undefined;
     return {
-      ownerEpoch: dispatch.envelope.work.ownerEpoch,
+      ownerEpoch: this.#ownerEpochFor(conversationId),
+      ...(this.#authority.domain.kind === 'anchor' ? { anchorEpoch: this.#authority.domain.anchorEpoch } : {}),
       executorId: dispatch.envelope.executorId,
       workspace: dispatch.envelope.manifest.environment.workspace,
       descriptor,
     };
+  }
+
+  #assertControlSigningTenure(tenure: number | undefined): void {
+    const domain = this.#authority.domain;
+    if (domain.kind === 'anchor' ? tenure !== domain.anchorEpoch : tenure !== undefined) throw new TypeError('Control signing authority is outside its current tenure');
   }
 
   #forgetAssignment(assignmentId: string): void {
@@ -3385,12 +3366,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#interactions.releaseAssignment(assignmentId);
   }
 
-  worksceneContinuationSources(conversationId: string) {
-    return this.#journal(conversationId).worksceneContinuationSources();
+  async worksceneContinuationSources(conversationId: string, query?: import("@zhixing/core/workscene/application").WorksceneContinuationQuery) {
+    if (query && 'root' in query) {
+      const frontiers = await this.#journal(conversationId).worksceneContinuationFrontiers(query.root);
+      return (await Promise.all(frontiers.map(ref => this.#journal(ref.conversationId).worksceneContinuationSources({ runId: ref.runId })))).flat();
+    }
+    return this.#journal(conversationId).worksceneContinuationSources(query);
   }
 
   async isWorksceneContinuationCurrent(source: { conversationId: string; runId: string }): Promise<boolean> {
-    return isWorksceneContinuationCurrent((id) => this.worksceneContinuationSources(id), source);
+    return isWorksceneContinuationCurrent((id, query) => this.worksceneContinuationSources(id, query), source);
   }
 
   #requiredManager(): ConversationManager {
@@ -3584,18 +3569,23 @@ function createDispatchContexts(options: {
   readonly signer: ProtocolSigner;
   readonly deviceId: string;
   readonly ownerEpochFor: (assignmentId: string) => number;
+  readonly anchorEpochFor: (assignmentId: string) => number | undefined;
+  readonly assertSigningAuthority: (assignmentId: string, tenure: number | undefined) => void;
   readonly clock: () => string;
   readonly conversationIdFor: (assignmentId: string) => string;
 }): InProcessDispatchContextFactory {
   return {
     create(assignmentId, method, request) {
       const now = Date.parse(options.clock());
-      const renewalSeq = Math.floor(now / CONTROL_RENEWAL_INTERVAL_MS);
+      const tenure = options.anchorEpochFor(assignmentId);
+      options.assertSigningAuthority(assignmentId, tenure);
+      const renewalWindow = Math.floor(now / CONTROL_RENEWAL_INTERVAL_MS);
+      const renewalSeq = renewalWindow + Number(tenure !== undefined);
       const issuedAt = new Date(
-        renewalSeq * CONTROL_RENEWAL_INTERVAL_MS,
+        renewalWindow * CONTROL_RENEWAL_INTERVAL_MS,
       ).toISOString();
       const expiry = new Date(
-        renewalSeq * CONTROL_RENEWAL_INTERVAL_MS + CONTEXT_TTL_MS,
+        renewalWindow * CONTROL_RENEWAL_INTERVAL_MS + CONTEXT_TTL_MS,
       ).toISOString();
       const scope = {
         execution: "conversation" as const,
@@ -3603,7 +3593,7 @@ function createDispatchContexts(options: {
         ownerEpoch: options.ownerEpochFor(assignmentId),
       };
       const controlPayload = {
-        v: 1 as const,
+        ...(tenure === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: tenure }),
         controlLeaseId: `control-${assignmentId}`,
         assignmentId,
         authority: scope,
@@ -3613,7 +3603,7 @@ function createDispatchContexts(options: {
       };
       const controlLease: ControlLease = {
         ...controlPayload,
-        signature: options.signer.sign("ControlLease", 1, controlPayload),
+        signature: options.signer.sign("ControlLease", controlPayload.v, controlPayload),
       };
       const requestDigest = ownerControlRequestDigest({
         method,
@@ -3623,7 +3613,7 @@ function createDispatchContexts(options: {
         body: request.body,
       });
       const payload = {
-        v: 1 as const,
+        ...(tenure === undefined ? { v: 1 as const } : { v: 2 as const, anchorEpoch: tenure }),
         assignmentId,
         scope,
         methods: [method],
@@ -3636,7 +3626,7 @@ function createDispatchContexts(options: {
       };
       const grant: OwnerControlGrant = {
         ...payload,
-        signature: options.signer.sign("OwnerControlGrant", 1, payload),
+        signature: options.signer.sign("OwnerControlGrant", payload.v, payload),
       };
       return {
         principal: { kind: "owner-control", grant },
@@ -3738,59 +3728,6 @@ function replayCommittedRun(
 }
 
 
-
-function partitionConversationSnapshots(
-  snapshot: AuthorityLogSnapshot<unknown>,
-): Map<string, AuthorityLogSnapshot<unknown>> {
-  const assignmentConversations = new Map<string, string>();
-  const commitsByConversation = new Map<string, CommitEnvelope<unknown>[]>();
-  for (const commit of snapshot.commits) {
-    const conversations = new Set<string>();
-    for (const entry of commit.entries) {
-      if (!entry.stream.startsWith("run:")) continue;
-      const conversationId = entry.stream.slice("run:".length);
-      conversations.add(conversationId);
-      if (entry.body && typeof entry.body === "object" && !Array.isArray(entry.body)) {
-        const assignmentId = (entry.body as { assignmentId?: unknown }).assignmentId;
-        if (typeof assignmentId === "string") {
-          assignmentConversations.set(assignmentId, conversationId);
-        }
-      }
-    }
-    for (const entry of commit.entries) {
-      if (!entry.body || typeof entry.body !== "object" || Array.isArray(entry.body)) {
-        continue;
-      }
-      const record = entry.body as Record<string, unknown>;
-      if (entry.stream === "publish" && typeof record.assignmentId === "string") {
-        const conversationId = assignmentConversations.get(record.assignmentId);
-        if (conversationId) conversations.add(conversationId);
-      } else if (
-        entry.stream === "final-outbox" &&
-        typeof record.conversationId === "string"
-      ) {
-        conversations.add(record.conversationId);
-      }
-    }
-    for (const conversationId of conversations) {
-      const commits = commitsByConversation.get(conversationId) ?? [];
-      commits.push(commit);
-      commitsByConversation.set(conversationId, commits);
-    }
-  }
-  return new Map(
-    [...commitsByConversation].map(([conversationId, commits]) => [
-      conversationId,
-      { commits, cursor: snapshot.cursor },
-    ]),
-  );
-}
-
-function emptyConversationSnapshot(
-  snapshot: AuthorityLogSnapshot<unknown>,
-): AuthorityLogSnapshot<unknown> {
-  return { commits: [], cursor: snapshot.cursor };
-}
 
 function requireRuntimeSecuritySnapshot(
   runtime: SessionRuntime,

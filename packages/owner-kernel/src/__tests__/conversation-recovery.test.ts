@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { AuthorityCacheIntegrity, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
-import { serialize } from 'node:v8';
 import type { ConversationControlCursor, ConversationControlPage, ConversationInputCursor, ConversationInputPage, Signature } from '@zhixing/core/contracts';
 import { protocolDigest, canonicalize, createConversationSealedBundle } from '@zhixing/core/protocol';
 import { createTempDir } from '@zhixing/test-utils';
@@ -33,63 +32,76 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
 
-it('persists short activity and migrates a verified legacy checkpoint without replaying closed input bodies', async () => {
+it('reads current interruptible identities without historical inputs or run replay, and observes cancellation', async () => {
   const h = await harness(true);
-  const saves = vi.spyOn(h.log, 'saveProjectionCheckpoint');
-  const text = 'large closed input '.repeat(10000);
-  try {
-    await admit(h.journal, text);
-    await h.journal.cancelRun({ runId: 'seed-run', requestId: 'close-large-input' });
-    const source = (await h.log.readStream<any>('run:recovery-conversation')).find(entry => entry.body.t === 'admitted')!.body;
-    await h.log.stopStorageMaintenance();
-    const saved = saves.mock.calls.find(([key]) => key.startsWith('conversation-run-projection:v2:'))!;
-    expect(saved).toBeDefined();
-    const [key, cursor, compact] = saved as [string, typeof saved[1], any];
-    expect(cursor.lsn).toBeLessThan(256);
-    expect(compact.admittedByRun.get('seed-run').input).toBeUndefined();
-    expect(compact.admittedByRun.get('seed-run').record.input).toBeUndefined();
-    const legacy = structuredClone(compact);
-    delete legacy.appendedInputKeysByRun;
-    legacy.admittedByRun.set('seed-run', { ...legacy.admittedByRun.get('seed-run'), record: source, input: { parts: [{ type: 'text', text }] } });
-    delete legacy.admittedByRun.get('seed-run').inputDigest;
-    await h.log.saveProjectionCheckpoint(key.replace(':v2:', ':v1:'), cursor, legacy);
-    await h.log.deleteProjectionCheckpoint(key);
-    const artifacts = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('closed history must not be replayed'));
-    const snapshots = vi.spyOn(h.log, 'readSnapshot').mockRejectedValue(Error('full replay must not occur'));
-    try {
-      const restored = h.journalAt();
-      expect(await restored.restoreRecoveryCheckpoint()).toBe(true);
-      expect(await restored.runState('seed-run')).toBe('cancelled');
-      await admit(restored, text);
-      const migrated = await h.log.loadProjectionCheckpoint<any>(key);
-      expect(serialize(migrated!.state).byteLength).toBeLessThan(serialize(legacy).byteLength / 4);
-      expect(artifacts).not.toHaveBeenCalled(); expect(snapshots).not.toHaveBeenCalled();
-    } finally { artifacts.mockRestore(); snapshots.mockRestore(); }
-  } finally {
-    saves.mockRestore(); await h.log.stopStorageMaintenance();
+  for (let n = 0; n < 40; n++) {
+    await h.journal.admit({ ingressKey: 'old-' + n, runId: 'old-' + n, queuedPosition: n,
+      userInput: { parts: [{ type: 'text', text: 'historical body '.repeat(100) }] }, invocation: { kind: 'agent', source: 'interactive' },
+      ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'old-' + n, receivedAt: NOW,
+        turnOrigin: { channel: 'rpc', messageIdentity: { id: 'old-' + n, source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
+    await h.journal.cancelRun({ runId: 'old-' + n, requestId: 'cancel-' + n });
   }
+  await admit(h.journal);
+  const replay = vi.spyOn(h.log, 'readProjection').mockRejectedValue(Error('Current controls must not replay a run'));
+  const bodies = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('Current controls must not read input bodies'));
+  try {
+    expect(await h.journal.recoveryPage({ mode: 'control-targets', conversationId: 'recovery-conversation' }))
+      .toEqual({ targets: [{ runId: 'seed-run', state: 'queued' }] });
+    expect(replay).not.toHaveBeenCalled(); expect(bodies).not.toHaveBeenCalled();
+  } finally { replay.mockRestore(); bodies.mockRestore(); }
+  await h.journalAt().cancelRun({ runId: 'seed-run', requestId: 'current-cancel' });
+  expect(await h.journal.recoveryPage({ mode: 'control-targets', conversationId: 'recovery-conversation' })).toEqual({ targets: [] });
+}, 30_000);
+
+it('restores keyed closed state without scalar checkpoints or closed input bodies, including stop', async () => {
+  const h = await harness(true), text = 'large closed input '.repeat(10000);
+  const saves = vi.spyOn(h.log, 'saveProjectionCheckpoint');
+  await admit(h.journal, text);
+  await h.journal.cancelRun({ runId: 'seed-run', requestId: 'close-large-input' });
+  await h.log.stopStorageMaintenance();
+  expect(saves.mock.calls.filter(([key]) => key.startsWith('conversation-'))).toEqual([]);
+  const coldLog = trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir, h.artifacts,
+    { clock: () => NOW, integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 29)) }));
+  const restored = new ConversationRunJournal({ conversationId: 'recovery-conversation', ownerEpoch: 1, log: coldLog, artifacts: h.artifacts,
+    signer, verifier, submission: { authenticate() {}, authorize() {} }, authority: { decideAtPrefix: () => ({ committed: true, commitRevision: 1 }) },
+    projection: { async project() {} }, clock: () => NOW });
+  const bodies = vi.spyOn(h.artifacts, 'get').mockRejectedValue(Error('closed input body forbidden'));
+  const scalar = vi.spyOn(coldLog, 'loadProjectionCheckpoint').mockRejectedValue(Error('scalar history forbidden'));
+  const snapshot = vi.spyOn(coldLog, 'readSnapshot').mockRejectedValue(Error('whole replay forbidden'));
+  try {
+    expect(await restored.restoreRecoveryCheckpoint()).toBe(true);
+    expect(await restored.runState('seed-run')).toBe('cancelled');
+    await admit(restored, text);
+    await coldLog.stopStorageMaintenance();
+    expect(bodies).not.toHaveBeenCalled(); expect(scalar).not.toHaveBeenCalled(); expect(snapshot).not.toHaveBeenCalled();
+  } finally { bodies.mockRestore(); scalar.mockRestore(); snapshot.mockRestore(); saves.mockRestore(); }
 }, 30000);
 
-it('discards a partially reduced private run projection after a failed read', async () => {
-  const source = await harness(); await admit(source.journal);
-  await source.journal.cancelRun({ runId: 'seed-run', requestId: 'uncommitted-cancel-fixture' });
-  const cancelled = (await source.log.readAll()).at(-1)!;
+it('discards a private indexed working set after a failed read', async () => {
   const target = await harness(); await admit(target.journal);
-  const original = target.log.readProjection.bind(target.log);
+  const original = target.log.transactDurableProjection.bind(target.log);
   let injected = false;
-  const read = vi.spyOn(target.log, 'readProjection').mockImplementation(async (initial, reduce, options) => {
-    if (!injected && options?.stream === 'run:recovery-conversation') {
-      injected = true;
-      let state = initial;
-      for (const entry of cancelled.entries) if (entry.stream === options.stream) state = await reduce(state, entry, cancelled);
-      throw new Error('private replay interrupted before publication');
-    }
-    return original(initial, reduce, options);
-  });
+  const read = vi.spyOn(target.log, 'transactDurableProjection').mockImplementation((id, decide, options) =>
+    original(id, async (current, context) => {
+      const decision = await decide(current, context);
+      // The indexed read prepares a private working set and only publishes it
+      // after the transaction. Fail after the read, before publication; the
+      // next query must rebuild from the authoritative 'queued' state.
+      if (!injected && id === 'conversation-run-state-v1') {
+        injected = true;
+        throw Error('private replay interrupted before publication');
+      }
+      return decision;
+    }, options));
   try { await expect(target.journal.runState('seed-run')).rejects.toThrow('private replay interrupted'); }
   finally { read.mockRestore(); }
   expect(injected).toBe(true);
   expect(await target.journal.runState('seed-run')).toBe('queued');
+  // A newer authoritative transition proves the failed private working set was
+  // discarded rather than reused: a stale cursor or cached view would still
+  // answer 'queued' for a run that has since been cancelled.
+  await target.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-after-private-failure' });
+  expect(await target.journal.runState('seed-run')).toBe('cancelled');
 });
 
 it('only admits the earliest unfinished input to assignment scheduling', async () => {
@@ -136,7 +148,8 @@ describe('finite owner recovery pages', () => {
     const coordinate = vi.spyOn(h.resources, 'coordinate');
     const empty = h.journalAt(); await empty.primeRecoverySnapshot(await h.log.readSnapshot());
     expect(empty.hasRecoveredInputProjection).toBe(true);
-    await h.log.append(Array.from({length: 4096}, (_, i) => ({stream: 'run:other-conversation', body: {v: 1, index: i}})));
+    // Storage-level sparse envelopes, not malformed run protocol records.
+    await readerFixtureWriter(h).append(Array.from({length: 4096}, (_, i) => ({stream: 'job:unrelated', body: {v: 1, index: i}})));
     await admit(h.journal); await h.journal.cancelRun({runId: 'seed-run', requestId: 'seed-cancel'});
     const snapshot = await h.log.readSnapshot(); coordinate.mockClear();
     const recovered = h.journalAt(); await recovered.primeRecoverySnapshot(snapshot);
@@ -373,8 +386,8 @@ it.each(['capacity-gap', 'cancelled', 'outer-exclusion'] as const)('does not ret
   const get = vi.spyOn(h.artifacts, 'get').mockRejectedValue(failure);
   try {
     await expect(kind === 'outer-exclusion'
-      ? runHoldingMaintenanceExclusion(() => reader.currentState('seed-run'))
-      : reader.currentState('seed-run')).rejects.toBe(failure);
+      ? runHoldingMaintenanceExclusion(() => reader.pendingInputs())
+      : reader.pendingInputs()).rejects.toBe(failure);
     expect(get).toHaveBeenCalledTimes(1);
   } finally { get.mockRestore(); }
 }, 20000);
@@ -387,7 +400,7 @@ it('cancels a pressured read without retrying or publishing a partial run view',
     throw new StorageMaintenanceAdmissionError({ kind: 'backpressured', blockedBy: 'probe-unavailable', retryAfterMs: 1 });
   });
   try {
-    await expect(runWithMaintenanceUrgency(() => 'foreground', abort.signal, () => reader.currentState('seed-run'))).rejects.toThrow();
+    await expect(runWithMaintenanceUrgency(() => 'foreground', abort.signal, () => reader.pendingInputs())).rejects.toThrow();
     expect(get).toHaveBeenCalledTimes(1);
   } finally { get.mockRestore(); }
   expect(await reader.currentState('seed-run')).toBe('queued');
@@ -426,9 +439,9 @@ it('reads control chunks once without rescanning the directory for every status 
 
 it('skips unrelated authority envelopes while keeping a complete bounded control cursor', async () => {
   const h = await harness(); await admit(h.journal);
-  for (let i = 0; i < 70; i++) await h.log.append([{ stream: 'run:unrelated', body: { n: i } }]);
+  for (let i = 0; i < 70; i++) await readerFixtureWriter(h).append([{ stream: 'job:unrelated', body: { n: i } }]);
   await h.journal.cancelRun({ runId: 'seed-run', requestId: 'sparse-cancel' });
-  for (let i = 0; i < 70; i++) await h.log.append([{ stream: 'run:unrelated', body: { n: i + 70 } }]);
+  for (let i = 0; i < 70; i++) await readerFixtureWriter(h).append([{ stream: 'job:unrelated', body: { n: i + 70 } }]);
   const wholeTail = vi.spyOn(h.log, 'readTail'), selected = vi.spyOn(h.log, 'readEnvelopesAt');
   try {
     const page = await h.journalAt().recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation' }) as ConversationControlPage;
@@ -487,7 +500,7 @@ async function timelineFixture() {
     body.runId = id; body.ingressKey = id; body.ingress.ingressId = id;
     body.ingress.turnOrigin.messageIdentity.id = id; body.queuedPosition = position;
     body.input = { parts: [{ type: 'text', text }] };
-    await h.log.append([{ stream: seed.stream, body }]);
+    await readerFixtureWriter(h).append([{ stream: seed.stream, body }]);
   };
   const commit = async (id: string, text: string, revision: number) => {
     const bundle = await h.artifacts.put(Buffer.from(canonicalize(createConversationSealedBundle({ assignmentId: 'assignment-' + id, executorId: 'executor-test',
@@ -498,7 +511,7 @@ async function timelineFixture() {
         { role: 'user', content: [{ type: 'text', text }] }, { role: 'assistant', content: [{ type: 'text', text: 'reply-' + id }] },
       ] }, contentAssets: [],
     } }))));
-    await h.log.append([{ stream: seed.stream, body: { t: 'committed', runId: id, assignmentId: 'assignment-' + id, bundle: { ref: bundle }, commitRevision: revision } }]);
+    await readerFixtureWriter(h).append([{ stream: seed.stream, body: { t: 'committed', runId: id, assignmentId: 'assignment-' + id, bundle: { ref: bundle }, commitRevision: revision } }]);
   };
   await add('success-2', 'success-2', 1); await commit('success-2', 'success-2', 1);
   await add('cancel-3', 'cancel-3', 2);
@@ -571,3 +584,13 @@ it('merges imported history before local records and keeps source replay stable 
   const replay = await source.journalAt().recoveryPage({ mode: 'body-page', conversationId: 'recovery-conversation', cursor: original.cursor, runId: original.runId, direction: 'forward' }) as BodyPage;
   expect(replay.fragments[0]?.text).toBe('cancel-3');
 }, 20000);
+
+/** Partial directory/timeline schemas are seeded independently of the complete
+ * execution protocol (covered by assignment-ledger.test.ts). Never use these
+ * synthetic entries as product-write or history-growth evidence. */
+const readerFixtureWriters = new WeakMap<FileAuthorityCommitLog, FileAuthorityCommitLog>();
+function readerFixtureWriter(h: { log: FileAuthorityCommitLog; artifacts: FileArtifactStore }) {
+  let writer = readerFixtureWriters.get(h.log);
+  if (!writer) { writer = trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir, h.artifacts, { clock: () => NOW })); readerFixtureWriters.set(h.log, writer); }
+  return writer;
+}

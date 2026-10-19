@@ -240,6 +240,7 @@ export class LocalConversationOwnerAssembly {
   readonly #transferSource: ConversationTransferSource;
   readonly #port: LocalConversationOwnerPort;
   readonly #closeDrainBudgetMs: number;
+  readonly #currentAnchorDeviceId: () => string | undefined;
   #state: "created" | "starting" | "ready" | "closing" | "closed" = "created";
   #started = false;
   #starting: Promise<void> | undefined;
@@ -276,6 +277,7 @@ export class LocalConversationOwnerAssembly {
     readonly processProjection: SessionProcessProjectionOwner;
   }) {
     this.#owner = input.options.owner;
+    this.#currentAnchorDeviceId = input.options.currentAnchorDeviceId;
     this.#protocol = input.protocol;
     this.#manager = input.manager;
     this.#recovery = input.recovery;
@@ -1717,13 +1719,15 @@ export class LocalConversationOwnerAssembly {
     );
   }
 
-  #currentAuthority(conversationId: string): Promise<CurrentConversationAuthority> {
-    return resolveCurrentConversationAuthority(
+  async #currentAuthority(conversationId: string): Promise<CurrentConversationAuthority> {
+    const authority = await resolveCurrentConversationAuthority(
       this.#owner.executorLog,
       this.#owner.verifier,
       conversationId,
       { deviceId: this.#owner.deviceId, ownerEpoch: this.#owner.ownerEpoch },
     );
+    const anchor = this.#currentAnchorDeviceId();
+    return authority.state === 'fenced' && anchor ? { ...authority, deviceId: anchor } : authority;
   }
 
   #requireReady(): void {

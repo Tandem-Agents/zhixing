@@ -651,6 +651,11 @@ export class RpcConversationFacade {
     return result;
   }
 
+  async controlTargets(conversationId: string): Promise<import('@zhixing/core/contracts').ConversationControlTargets> {
+    const client = await this.link.getClient();
+    return boundedControlProjection(await client.request('session.statusHistory', { mode: 'control-targets', conversationId }), 16 * 1024);
+  }
+
   async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThroughInputLsn?: number): Promise<ConversationControlPage> {
     const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}), ...(historyThroughInputLsn !== undefined ? { historyThroughInputLsn } : {}) };
     const consume = (page: ConversationControlPage): ConversationControlPage => boundedControlProjection({ ...page,

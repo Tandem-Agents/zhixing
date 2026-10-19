@@ -1,34 +1,13 @@
-import { isLocalConversationId } from "@zhixing/core/conversation";
 import type { EvidenceRequest } from "@zhixing/core/contracts";
-import { resolveCurrentConversationAuthority } from "@zhixing/owner-kernel/conversation-transfer";
+import { validateEvidenceRequest, verifyProtocolStep } from "@zhixing/core/protocol";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 
 export function createConversationEvidenceAuthorityVerifier(options: {
   readonly authority: AuthorityRuntimeStack;
-  readonly currentAnchorDeviceId: () => string;
 }): (request: EvidenceRequest) => Promise<void> {
-  return async (request) => {
-    const fallback = isLocalConversationId(request.conversationId)
-      ? {
-          deviceId: options.authority.deviceId,
-          ownerEpoch: options.authority.localOwnerEpoch,
-        }
-      : {
-          deviceId: options.currentAnchorDeviceId(),
-          ownerEpoch: options.authority.anchorEpoch,
-        };
-    const current = await resolveCurrentConversationAuthority(
-      options.authority.executorLog,
-      options.authority.verifier,
-      request.conversationId,
-      fallback,
-    );
-    if (
-      current.state !== "current" ||
-      current.deviceId !== request.signature.keyId ||
-      current.ownerEpoch !== request.ownerEpoch
-    ) {
-      throw new TypeError("Evidence request does not belong to the current conversation authority");
-    }
+  return async request => {
+    const verified = await verifyProtocolStep(() => validateEvidenceRequest(request, options.authority.verifier));
+    await options.authority.conversationAuthority.verify({ conversationId: verified.conversationId, ownerEpoch: verified.ownerEpoch,
+      anchorEpoch: verified.anchorEpoch, signerDeviceId: verified.signature.keyId });
   };
 }

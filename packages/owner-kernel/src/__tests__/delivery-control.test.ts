@@ -331,7 +331,7 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       7,
     );
     if (!resolution.accepted) throw new Error("fixture resolution was rejected");
-    await fixture.log.append([
+    await expect(fixture.log.append([
       deliveryRecord(resolution.record),
       {
         stream: "control",
@@ -346,14 +346,7 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
           authorityRevision: projection.value.context.nextLsn,
         },
       },
-    ]);
-
-    await expect(
-      application({
-        admission: new ControlAdmissionJournal(fixture.log, fixture.artifacts),
-        authority: new DeliveryAuthority({ log: fixture.log, anchorEpoch: 7 }),
-      }).execute(commandFromEnvelope(envelope)),
-    ).rejects.toThrow("does not bind its durable control request");
+    ])).rejects.toThrow("does not bind its durable control request");
   });
 
   it("rejects a stale epoch without appending a resolution fact", async () => {

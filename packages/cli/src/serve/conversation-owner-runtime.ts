@@ -29,6 +29,7 @@ import type {
   PreparedConversationAssignmentAuthority,
 } from "../setup-delivery.js";
 import type { ExecutionAssetCatalogPort } from "./execution-asset-cache.js";
+import type { ConversationAuthorityVerifier } from './conversation-authority-verifier.js';
 
 export type ConversationOwnerDomain =
   | { readonly kind: "anchor"; readonly anchorEpoch: number }
@@ -100,6 +101,7 @@ export function createConversationResourceRecoveryPort(options: {
 }
 
 export interface ConversationOwnerRuntimeStack {
+  readonly conversationAuthority: Pick<ConversationAuthorityVerifier, 'readProjectionIds' | 'prepare' | 'verify'>;
   readonly domain: ConversationOwnerDomain;
   readonly ownerEpoch: number;
   readonly deviceId: string;
@@ -168,6 +170,7 @@ export function anchorConversationOwnerRuntime(
   authority: AuthorityRuntimeStack,
 ): ConversationOwnerRuntimeStack {
   return {
+    conversationAuthority: authority.conversationAuthority,
     get domain() {
       return { kind: "anchor" as const, anchorEpoch: authority.anchorEpoch };
     },
@@ -259,6 +262,7 @@ export function anchorConversationOwnerRuntime(
 export type LocalConversationOwnerRuntimeDependencies = Pick<
   AuthorityRuntimeStack,
   | "artifacts"
+  | "conversationAuthority"
   | "deviceId"
   | "executorCapabilities"
   | "executorId"
@@ -289,6 +293,7 @@ export function localConversationOwnerRuntime(
   deps: LocalConversationOwnerRuntimeDependencies,
 ): LocalConversationOwnerRuntimeStack {
   return {
+    conversationAuthority: deps.conversationAuthority,
     domain: {
       kind: "local",
       localDomainId: deps.localDomainId,

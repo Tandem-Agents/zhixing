@@ -16,6 +16,7 @@ import type {
   RunSubmissionPort,
   EvidenceHandlerPort,
   CheckpointStreamRecord,
+  HomeTrustRecord,
 } from "@zhixing/core/contracts";
 import { createMeshRunInput, createMeshConversationCommunication, registerConversationCommunicationMesh } from "./conversation-communication-mesh.js";
 import type { ConversationCommunicationTransport } from "./conversation-tools.js";
@@ -43,6 +44,8 @@ import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import {
   ConversationTransferTarget,
   listConversationTransferStates,
+  isConversationSourceEvidenceError,
+  type ConversationTransferPublication,
   type ConversationTransferStagingArea,
 } from "@zhixing/owner-kernel/conversation-transfer";
 import type {
@@ -1018,6 +1021,12 @@ export class MeshRuntimeAssembly
       ? options.plannedAnchorIssuerKey ?? options.authority.identityKey
       : undefined;
     this.#installDeviceRemovalIssuer(options.trust, issuerKey);
+    this.#disposers.push(options.authority.conversationAuthority.installTrustCatchUp(async (peerDeviceId) => {
+      const trust = await reconcilePlannedAnchorTrustFromPeer(this.connections.client(peerDeviceId), {
+        store: options.bootstrapStore, localDeviceId: options.authority.deviceId,
+      });
+      await this.#control.reconcileTrust(trust);
+    }));
     this.#disposers.push(() => this.#disposeDeviceRemovalIssuer?.());
 
   }
@@ -1124,6 +1133,14 @@ export class MeshRuntimeAssembly
     );
   }
 
+  async #committedCurrentTrust(record: HomeTrustRecord): Promise<CurrentTrustProjection> {
+    const current = await this.options.bootstrapStore.loadCurrentTrust();
+    if (!current || current.homeId !== record.homeId ||
+        current.chainHead.seq !== record.chainHead.seq || current.chainHead.eventDigest !== record.chainHead.eventDigest)
+      throw new Error('Committed trust does not match its verified current projection');
+    return current;
+  }
+
   #installDeviceRemovalIssuer(record: CurrentTrustProjection, issuerKey: DeviceKey | undefined): void {
     const shouldOwn = record.issuer.deviceId === this.options.authority.deviceId;
     const expectedPublicKey = record.issuer.issuerPublicKey ?? record.members.find((member) =>
@@ -1150,7 +1167,7 @@ export class MeshRuntimeAssembly
       isReachable: (deviceId) => this.connections.has(deviceId),
       onGuardChanged: (deviceId, operationId) =>
         this.setDeviceRemovalGuard(deviceId, operationId),
-      onTrustCommitted: (next) => this.applyDeviceRemovalTrust(next),
+      onTrustCommitted: async (next) => this.applyDeviceRemovalTrust(await this.#committedCurrentTrust(next)),
     });
     this.#deviceRemovalAuthority = authority;
     this.#deviceRemovalIssuerKeyId = issuerKey.deviceId;
@@ -1822,7 +1839,7 @@ export class MeshRuntimeAssembly
         onSourceCommitted: (targetDeviceId) => {
           this.options.executorTopologyTrust.acceptPlannedTarget(targetDeviceId);
         },
-        onCommitted: (record) => this.#control.reconcileTrust(record),
+        onCommitted: async (record) => this.#control.reconcileTrust(await this.#committedCurrentTrust(record)),
       });
       this.#disposePlannedAnchorSource = registerPlannedAnchorTransferSourceMeshService(
         this.services,
@@ -1882,8 +1899,9 @@ export class MeshRuntimeAssembly
         }
         this.#plannedAnchorIssuerKey = issuerKey;
         this.options.bootstrapStore.bindIssuerKey(issuerKey);
-        await this.#control.reconcileTrust(record);
-        this.#installDeviceRemovalIssuer(record, issuerKey);
+        const current = await this.#committedCurrentTrust(record);
+        await this.#control.reconcileTrust(current);
+        this.#installDeviceRemovalIssuer(current, issuerKey);
         await this.#completePlannedAnchorPostInstall();
       },
     });
@@ -2160,18 +2178,22 @@ export class MeshRuntimeAssembly
     );
     for (const state of states) {
       if (state.phase !== "committed" && state.phase !== "tombstoned") continue;
-      const base = await this.#transferTarget.committedBase(state.identity.transferId);
+      let base: ConversationTransferPublication;
+      try {
+        base = await this.#transferTarget.committedBaseSource(state.identity.transferId);
+      } catch (error) {
+        if (!isConversationSourceEvidenceError(error)) throw error;
+        await this.options.protocol.retainUnavailableCommittedConversationTransfer(state.identity.transferId, error);
+        continue;
+      }
       await this.#installCommittedTransfer(base);
     }
   }
 
-  async #installCommittedTransfer(base: {
-    readonly manifest: import("@zhixing/core/contracts").ConversationTransferManifest;
-    readonly records: readonly import("@zhixing/owner-kernel/conversation-transfer").ConversationTransferAuthorityRecord[];
-  }): Promise<void> {
+  async #installCommittedTransfer(base: ConversationTransferPublication): Promise<void> {
     const protocol = this.options.protocol;
     if (!protocol) throw new Error("Conversation transfer target has no owner protocol");
-    await protocol.installCommittedConversationTransfer(base);
+    await protocol.installCommittedConversationTransfer({ manifest: base.manifest, source: base.source });
     const lifecycle = this.#postAdoptionReviewLifecycle;
     if (lifecycle.kind !== "anchor") {
       throw new TypeError("Executor-only Mesh cannot review an adopted conversation");

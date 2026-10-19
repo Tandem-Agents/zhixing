@@ -16,6 +16,7 @@ import type {
   ProtocolSigner,
 } from "./signature.js";
 import { assertProtocolIdentifier } from "./validation.js";
+import { assertOwnerTenureVersion } from './owner-tenure.js';
 
 /**
  * 取证请求与证据包整体规范 JSON 字节上限——与权威控制流内联记录同一上限，
@@ -55,7 +56,7 @@ export function createSignedEvidenceRequest(
   const payload = validateUnsignedEvidenceRequest(input, verifier);
   const request = {
     ...payload,
-    signature: signer.sign("EvidenceRequest", 1, payload),
+    signature: signer.sign("EvidenceRequest", payload.v, payload),
   };
   assertDocumentBytes(request, "Evidence request");
   return request;
@@ -72,6 +73,7 @@ export function validateEvidenceRequest(
     value,
     [
       "conversationId",
+      ...(value.v === 2 ? ['anchorEpoch'] : []),
       "executorId",
       "expiry",
       "issuedAt",
@@ -93,13 +95,13 @@ export function validateEvidenceRequest(
     unsigned as UnsignedEvidenceRequest,
     verifier,
   );
-  verifier.verify("EvidenceRequest", 1, payload, signature);
+  verifier.verify("EvidenceRequest", payload.v, payload, signature);
   return value as unknown as EvidenceRequest;
 }
 
 export function evidenceRequestDigest(request: EvidenceRequest): Digest {
   const { signature: _, ...payload } = request;
-  return protocolDigest("EvidenceRequest", 1, payload);
+  return protocolDigest("EvidenceRequest", request.v, payload);
 }
 
 export function createSignedEvidenceBundle(
@@ -154,6 +156,7 @@ function validateUnsignedEvidenceRequest(
     value,
     [
       "conversationId",
+      ...(value.v === 2 ? ['anchorEpoch'] : []),
       "executorId",
       "expiry",
       "issuedAt",
@@ -168,9 +171,7 @@ function validateUnsignedEvidenceRequest(
     ],
     "Unsigned evidence request",
   );
-  if (value.v !== 1) {
-    throw new TypeError("Evidence request version must be 1");
-  }
+  assertOwnerTenureVersion(value as { v: unknown; anchorEpoch?: unknown }, 'Evidence request');
   assertProtocolIdentifier(value.requestId, "Evidence request requestId");
   assertProtocolIdentifier(value.reviewId, "Evidence request reviewId");
   assertProtocolIdentifier(value.runId, "Evidence request runId");

@@ -43,9 +43,9 @@ const PROTOCOL_RANGE = { min: "1", max: "1" } as const;
 const RELAY_HELLO_TTL_MS = 60_000;
 
 function activeTrust(record: CurrentTrustProjection): CurrentTrustProjection {
-  const { homeId, trustEpoch, chainHead, issuer, recoveryRootPublicKey, recoveryBackupPublicKey,
+  const { homeId, trustEpoch, anchorEpoch, chainHead, issuer, recoveryRootPublicKey, recoveryBackupPublicKey,
     recoveryActivationDigest, pendingResetEvent } = record;
-  return { homeId, trustEpoch, chainHead, issuer,
+  return { homeId, trustEpoch, anchorEpoch, chainHead, issuer,
     ...(recoveryRootPublicKey === undefined ? {} : { recoveryRootPublicKey }),
     ...(recoveryBackupPublicKey === undefined ? {} : { recoveryBackupPublicKey }),
     ...(recoveryActivationDigest === undefined ? {} : { recoveryActivationDigest }),

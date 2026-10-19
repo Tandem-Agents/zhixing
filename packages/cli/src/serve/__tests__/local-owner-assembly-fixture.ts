@@ -65,6 +65,13 @@ const FIXTURE_CONFIGURATION = projectRuntimeConfiguration(
 export class FixtureSecretStore implements SecretStorePort {
   readonly #values = new Map<string, string>();
 
+  async getOrCreate(ref: SecretRef, create: () => string): Promise<string> {
+    const key = `${ref.kind}/${ref.bindingId}`;
+    let value = this.#values.get(key);
+    if (value === undefined) { value = create(); this.#values.set(key, value); }
+    return value;
+  }
+
   async put(ref: SecretRef, value: string): Promise<void> {
     this.#values.set(`${ref.kind}/${ref.bindingId}`, value);
   }
@@ -104,6 +111,7 @@ export function fixtureLocalOwnerRuntime(
   const executorResources = authority.executorResourceGovernor;
   return localConversationOwnerRuntime({
     artifacts: authority.artifacts,
+    conversationAuthority: authority.conversationAuthority,
     deviceId: authority.deviceId,
     executorCapabilities: authority.executorCapabilities,
     executorId: authority.executorId,
@@ -148,6 +156,7 @@ export interface FixtureRuntimeControl {
 
 export interface LocalOwnerAssemblyFixture {
   readonly home: string;
+  readonly secretStore: SecretStorePort;
   readonly authority: AuthorityRuntimeStack;
   readonly assembly: LocalConversationOwnerAssembly;
   readonly port: LocalConversationOwnerPort;
@@ -358,6 +367,7 @@ export async function createLocalOwnerAssemblyFixture(
   });
   return {
     home,
+    secretStore,
     authority,
     assembly,
     port,

@@ -566,7 +566,8 @@ export class ControlAdmissionJournal {
     readonly stream: string;
     readonly initial: State;
     /** Verified target prefix; control receipts keep their independent current watermark. */
-    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State };
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State;
+      readonly readProjectionIds?: readonly string[]; readonly validateAtPrefix?: (context: ProjectionTransactionContext) => Promise<void> };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -658,7 +659,8 @@ export class ControlAdmissionJournal {
     readonly stream: string;
     readonly initial: State;
     /** Verified target prefix; control receipts keep their independent current watermark. */
-    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State };
+    readonly targetBase?: { readonly state: State; readonly cursor: ProjectionCursor; readonly createState?: () => State;
+      readonly readProjectionIds?: readonly string[]; readonly validateAtPrefix?: (context: ProjectionTransactionContext) => Promise<void> };
     readonly reducer: (
       state: State,
       record: LogicalRecord<unknown>,
@@ -701,6 +703,7 @@ export class ControlAdmissionJournal {
     const initial: CombinedProjection = {
       target: targetBase?.state ?? cached?.target ?? input.initial,
     };
+    let candidateLsn: number | undefined;
     try {
       const transaction = await this.#log.transactProjection<
         CombinedProjection,
@@ -709,6 +712,7 @@ export class ControlAdmissionJournal {
       >(
         initial,
         async (state, record, commit) => {
+          if (targetBase?.validateAtPrefix && commit.lsn !== candidateLsn) return state;
           await input.observe?.(record, commit);
           if (record.stream === input.stream) {
             state.target = await input.reducer(state.target, record, commit);
@@ -716,6 +720,8 @@ export class ControlAdmissionJournal {
           return state;
         },
         async (state, authorityPrefix) => {
+          await targetBase?.validateAtPrefix?.(authorityPrefix);
+          candidateLsn = authorityPrefix.nextLsn;
           const control = await readControlIndexState(
             authorityPrefix.readProjection(CONTROL_PROJECTION_ID), input.canonicalRequestId, this.#artifacts,
           );
@@ -777,8 +783,8 @@ export class ControlAdmissionJournal {
           streams: [input.stream, ...(input.companionStreams ?? [])],
           // The combined wrapper is private. Mutable targets supply their
           // owner's draft factory; immutable targets retain the verified basis.
-          createState: () => ({ target: targetBase?.createState ? targetBase.createState() : initial.target }),
-          readProjectionIds: [...new Set([CONTROL_PROJECTION_ID, ...(input.readProjectionIds ?? [])])],
+          createState: () => { candidateLsn = undefined; return { target: targetBase?.createState ? targetBase.createState() : initial.target }; },
+          readProjectionIds: [...new Set([CONTROL_PROJECTION_ID, ...(input.readProjectionIds ?? []), ...(targetBase?.readProjectionIds ?? [])])],
           ...(targetBase ? { cursor: targetBase.cursor } : cached ? { cursor: cached.cursor } : {}),
           candidateReferences: collectArtifactRefs([
             ...input.preparedEnvelope.references,
@@ -1115,6 +1121,47 @@ async function reduceControlIndex(
   return [...mutations.values()];
 }
 
+/** Source control pairing shares the exact request/result/ingress rules. A
+ * source conversation cannot import delivery/global control authority. */
+export async function validateImportedConversationControl(input: {
+  group: import('./conversation-base-source.js').AuthenticatedConversationFacts;
+  record: LogicalRecord<unknown>; artifacts: ArtifactStore;
+  received(requestId: string): Promise<LogicalRecord<unknown> | undefined>;
+  applied(requestId: string): Promise<LogicalRecord<unknown> | undefined>;
+  ingress(key: string): Promise<LogicalRecord<unknown> | undefined>;
+}): Promise<{ requestId: string; ingressKey?: string; received: boolean; applied: boolean }> {
+  const { isAuthenticatedConversationFacts } = await import('./conversation-base-source.js');
+  if (!isAuthenticatedConversationFacts(input.group) || !input.group.entries.includes(input.record)) throw new TypeError('Imported control has no authenticated source');
+  const body = input.record.body;
+  if (!isPlainRecord(body) || (body.t !== 'received' && body.t !== 'applied') || typeof body.requestId !== 'string') throw invalidControlRecord('Invalid imported conversation control');
+  const previous = await input.received(body.requestId);
+  const received = body.t === 'received' ? input.record : previous;
+  const receivedBody = received?.body;
+  if (!isPlainRecord(receivedBody)) throw invalidControlRecord('Imported control has no received predecessor');
+  const envelope = snapshotAdmittedControlEnvelope(await loadStored(snapshotStored<AdmittedControlEnvelope>(receivedBody.envelope), input.artifacts, 'ControlEnvelope'));
+  const request = envelope.body;
+  let id = 'conversationId' in request ? request.conversationId : 'ref' in request && request.ref.execution === 'conversation' ? request.ref.conversationId : undefined;
+  if (request.t === 'session-create') {
+    // Creation acquires its conversation identity in the applied result. The
+    // received half stays pending until that exact pair is verified; frozen
+    // source validation rejects any unmatched received request.
+    if (body.t === 'applied') {
+      const result = await loadStored(snapshotStored<ControlResult>(body.result), input.artifacts, 'ControlResult');
+      id = result.status === 'ok' && result.body.t === 'session-create' ? result.body.conversationId : undefined;
+    }
+  }
+  if (!(request.t === 'session-create' && body.t === 'received') && id !== input.group.source.manifest.conversationId)
+    throw invalidControlRecord('Imported control belongs to another authority domain');
+  const key = ingressKey(envelope), priorIngress = key ? await input.ingress(key) : undefined;
+  const draft = beginProjectionDraft(emptyProjection());
+  if (priorIngress && priorIngress !== previous) await reduceControlDomain(draft, priorIngress, input.artifacts, undefined);
+  if (previous) await reduceControlDomain(draft, previous, input.artifacts, undefined);
+  const applied = previous && await input.applied(body.requestId);
+  if (applied) await reduceControlDomain(draft, applied, input.artifacts, undefined);
+  await reduceControlDomain(draft, input.record, input.artifacts, undefined);
+  return { requestId: body.requestId, ...(key ? { ingressKey: key } : {}), received: body.t === 'received', applied: body.t === 'applied' || !!applied };
+}
+
 function emptyProjection(): ControlProjection {
   return { requests: new Map(), ingresses: new Map() };
 }
@@ -1157,6 +1204,11 @@ async function reduceControlProjection(
   artifacts: ArtifactStore,
 ): Promise<ControlProjectionDraft> {
   const deliveryResolution = assertDeliveryEnvelopeCompanions(commit);
+  return reduceControlDomain(state, record, artifacts, deliveryResolution);
+}
+
+async function reduceControlDomain(state: ControlProjectionDraft, record: LogicalRecord<unknown>, artifacts: ArtifactStore,
+  deliveryResolution: ReturnType<typeof assertDeliveryEnvelopeCompanions>): Promise<ControlProjectionDraft> {
   const body = record.body;
   if (
     isPlainRecord(body) &&
@@ -1656,7 +1708,7 @@ async function prepareStored<T>(
   };
 }
 
-async function loadStored<T>(
+export async function loadStored<T>(
   stored: Stored<T>,
   artifacts: ArtifactStore,
   label: string,
@@ -2068,7 +2120,7 @@ function snapshotAuthorityEntries(
   return value as unknown as readonly LogicalRecord<unknown>[];
 }
 
-function snapshotStored<T>(value: unknown): Stored<T> {
+export function snapshotStored<T>(value: unknown): Stored<T> {
   const stored = snapshot(value, "Stored control value");
   if (isStoredReference(stored)) return stored;
   return stored as T;

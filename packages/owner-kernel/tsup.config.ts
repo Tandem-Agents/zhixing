@@ -29,6 +29,7 @@ export default defineConfig({
     "src/deferred-global-intents.ts",
     "src/channel-challenge-outbox.ts",
     "src/conversation-transfer.ts",
+    "src/conversation-owner-authority.ts",
     "src/session-state-adapter.ts",
     "src/test-support/s7-durable.ts",
   ],

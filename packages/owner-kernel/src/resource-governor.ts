@@ -1,3 +1,4 @@
+import { assertAssignmentUsageEvidence, assertAssignmentTerminalEvidence } from "./conversation-resource-witness.js";
 import { verifyProtocolStep } from "@zhixing/core/protocol";
 import { projectionCheckpointKey } from "@zhixing/core/authority";
 import type {
@@ -833,41 +834,13 @@ export class AnchorResourceGovernor
       readonly reportDigest: string;
       readonly upToUsageSeq: number;
     };
-  }): void {
+  }): void{
     const state = this.#projection?.state;
     if (!state) throw new Error("Resource governor projection is unavailable");
-    const root = state.reservations.get(input.reservationId);
-    if (!root || root.depth !== 0) {
-      throw new TypeError("Final usage has no matching resource root");
-    }
-    const lease = validateReservableResourceLease(root.lease, this.#verifier);
-    const activation = "activation" in lease ? lease.activation : undefined;
-    if (
-      activation?.kind !== "assignment" ||
-      activation.assignmentId !== input.assignmentId ||
-      lease.audience.executorId !== input.executorId
-    ) {
-      throw new TypeError("Final usage does not bind the assignment resource root");
-    }
-    const durableWatermark =
-      (state.nextUsageSeqByRoot.get(input.reservationId) ?? 1) - 1;
-    if (input.usageFinal.upToUsageSeq !== durableWatermark) {
-      throw new TypeError("Final usage watermark does not match durable usage");
-    }
-    const expectedDigest = durableWatermark === 0
-      ? protocolDigest("AssignmentUsageFinal", 1, {
-          assignmentId: input.assignmentId,
-          upToUsageSeq: 0,
-        })
-      : usageReportDigestAtWatermark(
-          state,
-          lease,
-          input.assignmentId,
-          durableWatermark,
-        );
-    if (input.usageFinal.reportDigest !== expectedDigest) {
-      throw new TypeError("Final usage report digest does not match durable usage");
-    }
+    const watermark = (state.nextUsageSeqByRoot.get(input.reservationId) ?? 1) - 1;
+    assertAssignmentUsageEvidence({ root: state.reservations.get(input.reservationId), watermark,
+      block: () => usageReportEntriesAtWatermark(state, input.reservationId, watermark),
+    }, input, this.#verifier);
   }
 
   async prepare(input: {
@@ -1039,12 +1012,7 @@ export class AnchorResourceGovernor
     readonly records: readonly LogicalRecord<unknown>[];
   }): void {
     if ("reservationId" in input) {
-      assertExactGovernorRecords(
-        input.records,
-        terminalRecords(input.reservationId, input.mode),
-        "Assignment resource terminal",
-        this.#verifier,
-      );
+      assertAssignmentTerminalEvidence(input, this.#verifier);
       return;
     }
     void input.outcome;
@@ -1849,17 +1817,12 @@ function assertUsageReportWorkload(
   }
 }
 
-function usageReportDigestAtWatermark(
-  state: GovernorProjection,
-  lease: ResourceLease,
-  assignmentId: string,
-  watermark: number,
-): string {
+function usageReportEntriesAtWatermark(state: GovernorProjection, reservationId: string, watermark: number): UsageReport["usages"] {
   const fromUsageSeq = Math.floor((watermark - 1) / 256) * 256 + 1;
   const usages = [...state.usages.entries()]
     .filter(
       ([, usage]) =>
-        usage.rootReservationId === lease.reservationId &&
+        usage.rootReservationId === reservationId &&
         usage.usageSeq >= fromUsageSeq &&
         usage.usageSeq <= watermark,
     )
@@ -1872,21 +1835,7 @@ function usageReportDigestAtWatermark(
       ...(entry.usage.calls === 0 ? {} : { calls: entry.usage.calls }),
       ...(entry.usage.costMinor === 0 ? {} : { costMinor: entry.usage.costMinor }),
     }));
-  if (
-    usages.length !== watermark - fromUsageSeq + 1 ||
-    usages.some((usage, index) => usage.usageSeq !== fromUsageSeq + index)
-  ) {
-    throw new TypeError("Final usage report range is not durably continuous");
-  }
-  return protocolDigest("UsageReport", 1, {
-    v: 1,
-    reporterId: lease.audience.executorId,
-    rootReservationId: lease.reservationId,
-    workloadRef: { kind: "assignment", assignmentId },
-    fromUsageSeq,
-    toUsageSeq: watermark,
-    usages,
-  });
+  return usages;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
