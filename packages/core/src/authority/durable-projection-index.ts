@@ -1319,6 +1319,14 @@ export class FileDurableProjectionIndex {
       this.#retirementCleanupFailure = undefined;
       throw failure.error;
     }
+    // Retired files are already durably queued and no longer publish values.
+    // Do not repeatedly reclaim them under a caller's source/owner exclusion
+    // (a single append may perform hundreds of indexed reads). The existing
+    // bounded background owner acquires the source fence for its own steps.
+    if (!options.drain && isHoldingMaintenanceExclusion()) {
+      if (this.#retirementIdentity()) this.#scheduleRetirementRetry(this.#clock() + RETIREMENT_CONTINUATION_DELAY_MS);
+      return;
+    }
     try { await this.#runMaintenanceObligation(
       "projection-compaction",
       { phase: "retirement-cleanup" },
@@ -1908,11 +1916,16 @@ export class FileDurableProjectionIndex {
           replacements.push(
             ...(await this.#writeBaseSegments([...values.values()])),
           );
-          baseRoot = await this.#deleteDirectoryDescriptor(
-            baseRoot,
-            batch.base.minKey,
-            obsoletePages,
-          );
+          // Most updates retain the range's first key. Replace its descriptor
+          // directly; deleting and reinserting it rebuilds unchanged branches
+          // and creates extra write intents, directory syncs and retirement debt.
+          if (replacements[0]?.minKey !== batch.base.minKey) {
+            baseRoot = await this.#deleteDirectoryDescriptor(
+              baseRoot,
+              batch.base.minKey,
+              obsoletePages,
+            );
+          }
           obsoleteFiles.add(batch.base.dataFile);
           obsoleteFiles.add(batch.base.offsetsFile);
         } else {
