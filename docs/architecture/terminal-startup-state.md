@@ -1,6 +1,6 @@
 # 终端启动：累计状态边界与恢复架构
 
-更新：2026-10-17。状态：**B2、B3已通过总控单元复审；C已按用户决定收窄交付，待总控独立验收。** C18/C20/G16为工程侧收口范围，C阶段G11/G17新增改造已回退并暂停；D～G在单机与跨端方向决定前全部暂停，旧任务顺序不构成继续开工授权。整个启动专项及5～7秒中位数目标尚未最终验收，旧调度副本缺少绑定退出证明时继续pending。已验收阶段成果与未验收C增量分别保留，R2不再指导已替代机制。
+更新：2026-10-19。状态：**包0及包1a已通过整轮独立审查，停在统一提交整理节点，不自动进入1b。** 当前执行顺序以[终端迁移收尾方案与执行计划](../tasks/terminal-migration-delivery-plan.md)为准。B2/B3已通过单元审查，收窄C已通过总控正确性验收，C阶段G11/G17新增改造已回退。本文继续维护累计状态机制及技术边界。整个启动专项尚未最终验收，旧调度副本缺少绑定退出证明时继续pending，R2不再指导已替代机制。
 
 本文是[启动性能专项](../tasks/terminal-startup-performance.md)的架构增补，唯一维护累计状态机制清单、目标结构和实施边界。耗时账与原始证据归[执行记录](../tasks/terminal-startup-performance-record.md)。母架构以[架构概述](../../research/design/architecture/overview.md)、[AE-001](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)和[分布式规格§4.1](../../research/design/modules/distributed-runtime/specification.md)为基础，不另造产品语义或事实权威。
 
@@ -49,9 +49,9 @@ H表示累计历史（含终态元数据），F表示本次启用功能的必要
 
 | ID/待办 | 入口、已证机制与增长源 | 目标处理 |
 |---|---|---|
-| G05 [ ] | ConversationRunJournal #restoreProjection/#saveProjection；commits数组、admittedByRun/stateByRun等随历史累积；v2只去掉正文 | 当前执行状态与终态exact索引分离；只定位当前run/assignment和必要前序事实 |
-| G06 [ ] | conversation-assignment.ts:12179 discoverConversationRecoveryCandidatesFromLog→recoveryCandidatesOf；全会话/run/publish集合checkpoint、clone和遍历 | 同一事务维护pending目录与当前fence；启动读根，worker分页领取 |
-| G07 [ ] | protocol-runtime.ts:2356–2376缺checkpoint时收集所选run及全局publish/final-outbox的全部信封 | 所选会话局部恢复；共享流按conversation分区，不能枚举其他会话终态 |
+| G05 [x] | 原审计机制：ConversationRunJournal的commits/admittedByRun/stateByRun等随历史累积，v2仅去正文 | 2026-10-19包1a独审通过：当前/指定工作集与历史exact分离，同前缀决定，保存不再整体序列化历史；不代表最终整链延迟达标 |
+| G06 [x] | 原审计机制：恢复发现保存、复制并遍历全会话/run/publish集合 | 2026-10-19包1a独审通过：同事务pending目录、当前fence、分页恢复及停止义务 |
+| G07 [x] | 原审计机制：缺checkpoint时收集所选run及全局publish/final-outbox信封 | 2026-10-19包1a独审通过：按会话、assignment/frame定位和恢复；认证导入base与本地tail同边界，新旧资料、目标续执行及当前owner直接责任随§4.9验证 |
 | G08 [ ] | owner-services/advancement/recovery-maintenance.ts:126→directory.list后逐会话恢复；Host及local owner启动调用 | 只发现有推进义务的会话，不枚举全部对话；保留原始任务接纳与副作用恢复 |
 | G09 [ ] | ConversationMessageInputReader #prepare/#read先折叠本会话全消息事实、排序inputs再截200条；控制页从0追历史 | 历史外输入和可中断运行持久定位；当前控制与历史展示分开，页上限不能掩盖全量前置 |
 | C10 [ ] | conversation/directory-reader.ts:7、repository.ts:136、N离线listPage；返回有限页但先遍历目录/meta | 本地持久活动目录/最新定位；离线不重新枚举全部历史，旧目录仅用于迁移 |
@@ -264,9 +264,9 @@ G24/G25由会话存储投影负责，保持当前预算、摘要文本与原文�
 - 旧二进制追加的新增帧严格验证后增量续接，不重读已验历史前缀。旧写者不受新入口K约束，其新增尾部如实计量，旧数据仍可读写，索引不能成为旧二进制依赖。
 - 未访问历史的篡改检测沿现有信任模型：读取时复核、后台巡检覆盖legacy；不宣称每次启动即时发现所有未读历史改动。无密钥严格只读路径不修改磁盘。
 
-## 7. 闭合任务与交付顺序
+## 7. 旧任务包与机制范围映射
 
-方案由总控与用户指定的平级架构师共同负责；工程师按闭合单元实现、自检，再交总控整轮独立验收。B2、B3已通过单元复审；C已收窄交回待验，G11/G17新增改造及D～G在方向决定前暂停，不再按原表自动推进；不恢复旧S1～S5整包。复用已有有效基线，不另设27项全面重测的开工前置任务。普通实现细节由总控和工程师处理，架构师参与实质架构问题，不逐点反复会签。
+当前执行顺序及完成门以[终端迁移收尾方案与执行计划](../tasks/terminal-migration-delivery-plan.md)为唯一入口。下表仅保留旧编号与机制范围的映射，供查阅历史产物；它不是现行调度表，不能按旧C或D～G顺序自动派工。原技术机制继续适用，具体拆分、必要依赖前移及最终验收合并均按当前计划执行。
 
 | 任务 | 范围 | 完成门 |
 |---|---|---|
