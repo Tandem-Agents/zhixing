@@ -1,5 +1,5 @@
 ﻿import type { ArtifactStore, AuthorityCommitLog, DurableProjectionReadContext, DurableProjectionSource, DurableLogCheckpoint } from '@zhixing/core/authority';
-import { assertArtifactRef, createDurableProjectionOverlay, AuthorityPreparationRequired } from '@zhixing/core/authority';
+import { assertArtifactRef, createDurableProjectionOverlay, readDurableProjectionKeys, AuthorityPreparationRequired } from '@zhixing/core/authority';
 import type { ArtifactRef, JsonValue, LogicalRecord, TransferRecord } from '@zhixing/core/contracts';
 import { canonicalize, protocolDigest, reduceConversationTransfer, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { ConversationBaseSource, isConversationSourceEvidenceError } from './conversation-base-source.js';
@@ -148,6 +148,13 @@ export async function foldConversationBaseBindings(log: AuthorityCommitLog, entr
  * a cleared queue entry or a revoked source capability. */
 export function conversationViewOverlay(current: DurableProjectionReadContext, importedView: DurableProjectionReadContext): DurableProjectionReadContext {
   return {
+    getMany: async keys => {
+      const local = await readDurableProjectionKeys(current, keys);
+      const missing = keys.filter((_, n) => local[n] === undefined);
+      const imported = await readDurableProjectionKeys(importedView, missing);
+      let cursor = 0;
+      return local.map(value => masked(value) ? undefined : value !== undefined ? value : imported[cursor++]);
+    },
     get: async key => {
       const local = await current.get(key);
       return masked(local) ? undefined : local !== undefined ? local : importedView.get(key);
@@ -183,6 +190,7 @@ export function conversationViewOverlay(current: DurableProjectionReadContext, i
 export function conversationViewForSource(current: DurableProjectionReadContext, source: ConversationBaseSource): DurableProjectionReadContext {
   return conversationViewOverlay(current, {
     get: key => source.read(view => view.get(key)),
+    getMany: keys => source.read(view => readDurableProjectionKeys(view, keys)),
     scan: (range, limit) => source.read(view => view.scan(range, limit)),
   });
 }
@@ -194,12 +202,20 @@ export async function conversationViewAt(log: AuthorityCommitLog, current: Durab
   if (await current.get(conversationBaseUnavailableKey(id))) throw conversationBaseRepairRequired(log, binding);
   const local: DurableProjectionReadContext = changes ? {
     get: key => changes.has(key) ? Promise.resolve(changes.get(key) ?? conversationBaseTombstone) : current.get(key),
+    getMany: keys => createDurableProjectionOverlay(current,
+      new Map([...changes].map(([key, value]) => [key, value ?? conversationBaseTombstone]))).getMany!(keys),
     scan: (range, limit) => createDurableProjectionOverlay(current,
       new Map([...changes].map(([key, value]) => [key, value ?? conversationBaseTombstone]))).scan(range, limit),
   } : current;
   const source = await openConversationBase(log, binding), live = currentPrefixes(id);
   return conversationViewOverlay(local, {
     get: key => live.some(prefix => key.startsWith(prefix)) ? Promise.resolve(undefined) : source.read(view => view.get(key)),
+    getMany: async keys => {
+      const selected = keys.filter(key => !live.some(prefix => key.startsWith(prefix)));
+      const values = selected.length ? await source.read(view => readDurableProjectionKeys(view, selected)) : [];
+      let cursor = 0;
+      return keys.map(key => live.some(prefix => key.startsWith(prefix)) ? undefined : values[cursor++]);
+    },
     scan: (range, limit) => live.some(prefix => (range.gt ?? range.gte ?? '').startsWith(prefix))
       ? Promise.resolve({ entries: [] }) : source.read(view => view.scan(range, limit)),
   });

@@ -32,6 +32,36 @@ async function admit(journal: ConversationRunJournal, text = 'original input') {
       turnOrigin: { channel: 'rpc', messageIdentity: { id: 'seed-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
 }
 
+it('prepares overlapping cancellations in owner order without discarding a completed working set', async () => {
+  const h = await harness(true);
+  await admit(h.journal);
+  await h.journal.admit({ ingressKey: 'next-ingress', runId: 'next-run', queuedPosition: 1,
+    userInput: { parts: [{ type: 'text', text: 'next input' }] }, invocation: { kind: 'agent', source: 'interactive' },
+    ingress: { kind: 'first-party', surfacePrincipal: 'rpc:test', deviceId: 'device:test', ingressId: 'next-ingress', receivedAt: NOW,
+      turnOrigin: { channel: 'rpc', messageIdentity: { id: 'next-message', source: { kind: 'conversation', conversationId: 'source-conversation' } } } } });
+  const original = h.log.transactDurableProjection.bind(h.log);
+  let selections = 0;
+  let second: Promise<unknown> | undefined;
+  const observe = vi.spyOn(h.log, 'transactDurableProjection').mockImplementation((async (...args: Parameters<typeof original>) => {
+    const result = await original(...args);
+    if (args[0] === 'conversation-run-state-v1' && result.value && typeof result.value === 'object' && 'metadata' in result.value) {
+      selections++;
+      // A second command arrives after the first has read its prefix, before
+      // it has returned to the journal to decide. It must wait its owner turn.
+      second ??= h.journal.cancelRun({ runId: 'next-run', requestId: 'cancel-next' });
+    }
+    return result;
+  }) as typeof original);
+  try {
+    await h.journal.cancelRun({ runId: 'seed-run', requestId: 'cancel-first' });
+    expect(second).toBeDefined();
+    await second;
+    expect(selections).toBe(2);
+  } finally { observe.mockRestore(); }
+  expect(await h.journal.runState('seed-run')).toBe('cancelled');
+  expect(await h.journal.runState('next-run')).toBe('cancelled');
+}, 30_000);
+
 it('reads current interruptible identities without historical inputs or run replay, and observes cancellation', async () => {
   const h = await harness(true);
   for (let n = 0; n < 40; n++) {

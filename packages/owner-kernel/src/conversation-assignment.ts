@@ -6249,7 +6249,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
 
   async #select<Value>(select: (state: RunProjection) => Value, scope: ConversationDecisionScope = {}): Promise<Value> {
     if (this.#readBaseGeneration !== 0) return this.#selectLegacy(select);
-    return this.#repeatWorkingSet(async () => {
+    return this.#repeatWorkingSet(() => this.#operations.run(async () => {
       const prepared = await this.#prepareWorkingSet(scope);
       const result = await this.#log.transactDurableProjection<never, Value>(CONVERSATION_RUN_STATE_PROJECTION_ID, async (_current, context) => {
         await this.#checkWorkingSet(context, prepared.version);
@@ -6257,15 +6257,18 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       });
       this.#runProjection = { state: prepared.state, cursor: result.cursor };
       return result.value;
-    });
+    }));
   }
 
   async #transact<Value>(decide: (state: RunProjection, prefix: ProjectionTransactionContext) => ProjectionTransactionDecision<unknown, Value> | Promise<ProjectionTransactionDecision<unknown, Value>>,
     candidateReferences: readonly ArtifactRef[] = [], readProjectionIds: readonly string[] = [], scope: ConversationDecisionScope = {}) {
     if (this.#readBaseGeneration !== 0) return this.#transactLegacy(decide, candidateReferences, readProjectionIds);
     return this.#repeatWorkingSet(async () => {
-      const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
       return this.#operations.run(async () => {
+        // Prepare at the front of this owner's queue. Preparing before it
+        // lets an earlier queued command invalidate the complete read set,
+        // amplifying reads/retries while a cancellation is waiting.
+        const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
         let candidateLsn: number | undefined;
         const run = () => this.#log.transactProjection<RunProjection, unknown, Value>(prepared.state,
           (state, record, envelope) => envelope.lsn === candidateLsn ? this.#reduceRunProjection(state, record, envelope) : state,
@@ -6301,8 +6304,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   ) => Promise<Value>, scope: ConversationDecisionScope = {}): Promise<Value> {
     if (this.#readBaseGeneration !== 0) return this.#withRunProjectionLegacy(operation);
     return this.#repeatWorkingSet(async () => {
-      const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
       return this.#operations.run(async () => {
+        const prepared = await this.#prepareWorkingSet({ ...scope, hydrate: true });
         const createState = () => createConversationProjectionDraft(prepared.state).state;
         return operation({ state: createState(), cursor: prepared.cursor, createState,
           readProjectionIds: [CONVERSATION_RUN_STATE_PROJECTION_ID], validateAtPrefix: context => this.#checkWorkingSet(context, prepared.version),

@@ -1,4 +1,5 @@
 import type { ArtifactStore, AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing/core/authority';
+import { createDurableProjectionOverlay, readDurableProjectionKeys } from '@zhixing/core/authority';
 import type { JsonValue, LogicalRecord, CommitEnvelope, ReservableResourceLease, UsageReport } from '@zhixing/core/contracts';
 import { canonicalize, protocolDigest, validateGovernorRecord, requiresFormalResourceCoordination, dataPlaneTicketDigest,
   type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
@@ -71,6 +72,27 @@ async function field(view: DurableProjectionReadContext, id: string, name: strin
   if (row.key !== key) throw Error('Conversation state key binding is invalid');
   return decode(row.value);
 }
+
+/** This cache belongs to one fixed read view, never to a later decision. */
+export function conversationFieldReader(view: DurableProjectionReadContext, id: string) {
+  const values = new Map<string, unknown>();
+  const preload = async (fields: readonly (readonly [string, string | number])[]) => {
+    const pending = new Map(fields.map(([name, key]) => [fieldKey(id, name, key), key]));
+    const entries = [...pending].filter(([key]) => !values.has(key));
+    for (let offset = 0; offset < entries.length; offset += 256) {
+      const batch = entries.slice(offset, offset + 256);
+      const rows = await readDurableProjectionKeys(view, batch.map(([key]) => key));
+      for (let n = 0; n < batch.length; n++) {
+        const [storageKey, key] = batch[n]!, row = rows[n] as unknown as Row | undefined;
+        if (row && row.key !== key) throw Error('Conversation state key binding is invalid');
+        values.set(storageKey, row ? decode(row.value) : undefined);
+      }
+    }
+  };
+  return { preload, async get<T = unknown>(name: string, key: string | number): Promise<T | undefined> {
+    await preload([[name, key]]); return values.get(fieldKey(id, name, key)) as T | undefined;
+  } };
+}
 const runMaps = ['admittedByRun', 'assignmentByRun', 'assignmentAttemptByRun', 'stateByRun', 'resolutionsByRun'] as const;
 const assignmentMaps = ['assignedById', 'supersedeRequests', 'cancelFences', 'committedByAssignment', 'bundleAcknowledgements'] as const;
 const assignmentSets = ['conflictAssignments', 'openConflictAssignments', 'supersedeStartedAssignments', 'acceptedCancellations', 'durableStartedAssignments', 'closedAssignments'] as const;
@@ -79,6 +101,7 @@ const assignmentSets = ['conflictAssignments', 'openConflictAssignments', 'super
  * terminated run/assignment identities are loaded only when requested. */
 async function readGuard(view: DurableProjectionReadContext, id: string, scope: ConversationRunScope) {
   const state = emptySubmissionGuardProjection();
+  const fields = conversationFieldReader(view, id);
   const root = await view.get(rootKey(id)) as unknown as Root | undefined;
   if (root && root.conversationId !== id) throw Error('Conversation state root binding is invalid');
   state.activeRunId = root?.activeRunId; state.ticketSyncFrontier = root?.ticketSyncFrontier;
@@ -95,8 +118,9 @@ async function readGuard(view: DurableProjectionReadContext, id: string, scope: 
   if (scope.current) for (const entry of await scan(view, base(id) + 'open-run/')) {
     if (typeof entry.value !== 'string') throw Error('Current run directory is invalid'); runs.add(entry.value);
   }
+  await fields.preload([...ingresses].map(key => ['runByIngress', key] as const));
   for (const ingress of ingresses) {
-    const runId = await field(view, id, 'runByIngress', ingress);
+    const runId = await fields.get('runByIngress', ingress);
     if (typeof runId === 'string') { state.runByIngress.set(ingress, runId); runs.add(runId); }
   }
   const digests = [...(scope.ticketDigests ?? []), ...(scope.ticketDigest ? [scope.ticketDigest] : [])];
@@ -104,20 +128,23 @@ async function readGuard(view: DurableProjectionReadContext, id: string, scope: 
     const ticketId = await view.get(base(id) + 'ticket-digest/' + hash(digest));
     if (typeof ticketId === 'string') tickets.add(ticketId);
   }
+  await fields.preload([...tickets].flatMap(key => ['ticketsById', 'revokedTickets', 'ticketReplacementsById'].map(name => [name, key] as const)));
   for (const ticketId of tickets) {
-    const ticket = await field(view, id, 'ticketsById', ticketId) as SubmissionGuardProjection['ticketsById'] extends Map<string, infer T> ? T | undefined : never;
+    const ticket = await fields.get('ticketsById', ticketId) as SubmissionGuardProjection['ticketsById'] extends Map<string, infer T> ? T | undefined : never;
     if (ticket) { state.ticketsById.set(ticketId, ticket); assignments.add(ticket.assignmentId); }
   }
   // Exact assignment lookups discover their run; run lookups discover the
   // current assignment. Two passes close this finite relation.
   for (let pass = 0; pass < 2; pass++) {
+    await fields.preload([...assignments].map(key => ['assignedById', key] as const));
     for (const assignmentId of assignments) {
       if (state.assignedById.has(assignmentId)) continue;
-      const assigned = await field(view, id, 'assignedById', assignmentId) as ReturnType<typeof state.assignedById.get>;
+      const assigned = await fields.get('assignedById', assignmentId) as ReturnType<typeof state.assignedById.get>;
       if (assigned) { state.assignedById.set(assignmentId, assigned); runs.add(assigned.record.runId); }
     }
+    await fields.preload([...runs].flatMap(key => runMaps.map(name => [name, key] as const)));
     for (const runId of runs) for (const name of runMaps) {
-      const value = await field(view, id, name, runId);
+      const value = await fields.get(name, runId);
       if (value !== undefined) (state[name] as Map<string, unknown>).set(runId, value);
       if (name === 'assignmentByRun' && typeof value === 'string') assignments.add(value);
       if (name === 'admittedByRun' && value) {
@@ -126,15 +153,16 @@ async function readGuard(view: DurableProjectionReadContext, id: string, scope: 
       }
     }
   }
+  await fields.preload([...assignments].flatMap(key => [...assignmentMaps, ...assignmentSets].map(name => [name, key] as const)));
   for (const assignmentId of assignments) {
     for (const name of assignmentMaps) {
-      const value = await field(view, id, name, assignmentId);
+      const value = await fields.get(name, assignmentId);
       if (value !== undefined) (state[name] as Map<string, unknown>).set(assignmentId, value);
     }
-    for (const name of assignmentSets) if (await field(view, id, name, assignmentId) === true) state[name].add(assignmentId);
+    for (const name of assignmentSets) if (await fields.get(name, assignmentId) === true) state[name].add(assignmentId);
     for (const capId of state.assignedById.get(assignmentId)?.record.capIds ?? []) {
       const key = assignmentId + '\0' + capId;
-      if (await field(view, id, 'revokedCapabilities', key) === true) state.revokedCapabilities.add(key);
+      if (await fields.get('revokedCapabilities', key) === true) state.revokedCapabilities.add(key);
     }
     const ids = new Set<string>();
     for (const entry of await scan(view, base(id) + 'ticket-pending/' + hash(assignmentId) + '/')) {
@@ -156,7 +184,7 @@ async function readGuard(view: DurableProjectionReadContext, id: string, scope: 
     for (const entry of lastExpired.entries) {
       if (typeof entry.value !== 'string') throw Error('Ticket expiry directory is invalid');
       tickets.add(entry.value);
-      const ticket = await field(view, id, 'ticketsById', entry.value) as NonNullable<ReturnType<typeof state.ticketsById.get>>;
+      const ticket = await fields.get('ticketsById', entry.value) as NonNullable<ReturnType<typeof state.ticketsById.get>>;
       const boundary = dataPlaneTicketSyncBoundary(ticket);
       if (!through || boundary > through) through = boundary;
     }
@@ -167,14 +195,15 @@ async function readGuard(view: DurableProjectionReadContext, id: string, scope: 
       after = page.continuation ? page.entries.at(-1)!.key : undefined;
     } while (after);
   }
+  await fields.preload([...tickets].flatMap(key => ['ticketsById', 'revokedTickets', 'ticketReplacementsById'].map(name => [name, key] as const)));
   for (const ticketId of tickets) {
-    const ticket = state.ticketsById.get(ticketId) ?? await field(view, id, 'ticketsById', ticketId) as ReturnType<typeof state.ticketsById.get>;
+    const ticket = state.ticketsById.get(ticketId) ?? await fields.get('ticketsById', ticketId) as ReturnType<typeof state.ticketsById.get>;
     if (ticket) {
       state.ticketsById.set(ticketId, ticket);
       const ids = state.ticketIdsByAssignment.get(ticket.assignmentId) ?? new Set<string>(); ids.add(ticketId); state.ticketIdsByAssignment.set(ticket.assignmentId, ids);
     }
-    if (await field(view, id, 'revokedTickets', ticketId) === true) state.revokedTickets.add(ticketId);
-    const replacement = await field(view, id, 'ticketReplacementsById', ticketId);
+    if (await fields.get('revokedTickets', ticketId) === true) state.revokedTickets.add(ticketId);
+    const replacement = await fields.get('ticketReplacementsById', ticketId);
     if (typeof replacement === 'string') state.ticketReplacementsById.set(ticketId, replacement);
   }
   return { state, version: root?.version ?? 0 };
@@ -228,14 +257,7 @@ function registerConversationStateProjection(log: AuthorityCommitLog, _artifacts
       const baseChanges = new Map<string, JsonValue | undefined>();
       await foldConversationBaseBindings(log, envelope.entries, current, baseChanges, source, true);
       for (const [key, value] of baseChanges) changes.set(key, value);
-      const view: DurableProjectionReadContext = {
-        get: key => changes.has(key) ? Promise.resolve(changes.get(key)) : current.get(key),
-        scan: async (range, limit) => {
-          // Use the substrate's overlay for same-envelope inserts/deletions.
-          const { createDurableProjectionOverlay } = await import('@zhixing/core/authority');
-          return createDurableProjectionOverlay(current, changes).scan(range, limit);
-        },
-      };
+      const view = createDurableProjectionOverlay(current, changes);
       const put = (key: string, value: unknown) => changes.set(key, value as JsonValue);
       const canonicalStates = new Map<string, RunProjection>();
       const conversations = new Set<string>();

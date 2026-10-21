@@ -9,7 +9,7 @@ import { CONVERSATION_RUN_STATE_PROJECTION_ID, registerConversationRunProjection
   conversationStateBase as base, conversationStateHash as hash, readConversationStateField as field, scanConversationState as scan,
   type ConversationRunScope } from './conversation-run-state-index.js';
 import { conversationViewAt, conversationBaseKey, openConversationBase, type ConversationBaseBinding } from './conversation-base-registry.js';
-import { conversationWorkingVersion } from './conversation-run-state-index.js';
+import { conversationWorkingVersion, conversationFieldReader } from './conversation-run-state-index.js';
 import type { ConversationBaseSource } from './conversation-base-source.js';
 
 export interface ConversationDecisionScope extends ConversationRunScope {
@@ -93,7 +93,10 @@ export async function readConversationExactValue<T>(log: AuthorityCommitLog, id:
 export type ConversationRunView = Awaited<ReturnType<typeof readConversationRunViewMetadata>>;
 export async function readConversationRunViewMetadata(view: import('@zhixing/core/authority').DurableProjectionReadContext, id: string, scope: ConversationDecisionScope) {
     const extra = await readConversationRunRoot(view, id);
-    const get = <T>(name: string, key: string | number) => field(view, id, 'extra-' + name, key) as Promise<T | undefined>;
+    const fields = conversationFieldReader(view, id);
+    const get = <T>(name: string, key: string | number) => fields.get<T>('extra-' + name, key);
+    const preload = (subjects: Iterable<string | number>, names: readonly string[]) =>
+      fields.preload([...subjects].flatMap(key => names.map(name => ['extra-' + name, key] as const)));
     const assignments = new Set(scope.assignments), runs = new Set(scope.runs), revisions = new Set(scope.revisions);
     const pending = async (name: string) => scope.current === false ? [] : (await scan(view, base(id) + 'pending-' + name + '/', 32)).map(entry => entry.value);
     const recover = await pending('recovery'), acknowledgements = await pending('ack'), projections = await pending('commit');
@@ -110,6 +113,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
         if (!page.continuation) break; after = page.entries.at(-1)!.key;
       }
     }
+    await preload(revisions, ['assignmentByCommitRevision']);
     for (const revision of revisions) {
       const assignment = await get<string>('assignmentByCommitRevision', revision);
       if (assignment) assignments.add(assignment);
@@ -117,6 +121,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
     const controls = new Map<string, { bundle: ArtifactRef; advancementSessionId?: string }>();
     // Workscene control records are read by exact run id from the caller's
     // bounded obligation set; the historical directory is never scanned.
+    await preload(runs, ['committedByRun']);
     for (const runId of runs) {
       const committed = await get<Extract<ConversationRunJournalRecord, { t: 'committed' }>>('committedByRun', runId);
       if (committed) { commits.set(committed.commitRevision, committed); assignments.add(committed.assignmentId); }
@@ -137,6 +142,8 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
       'ticketReplacementsById', 'revokedTickets', 'ticketSyncFrontier', 'revokedCapabilities'] as const) mutable[name] = guard.state[name];
     for (const [runId] of guard.state.admittedByRun) runs.add(runId);
     for (const assignmentId of guard.state.assignedById.keys()) assignments.add(assignmentId);
+    await preload(runs, ['admittedByRun', 'assignmentByRun', 'assignmentAttemptByRun', 'openInputAssignments',
+      'statusHistoryByRun', 'worksceneControls', 'committedByRun']);
     for (const runId of runs) {
       const admitted = await get<InputValue>('admittedByRun', runId);
       if (admitted) { state.admittedByRun.set(runId, admitted); inputRows.set(runId, admitted); }
@@ -167,6 +174,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
     }
     const assignmentFields = ['supersedeStartedObservations', 'conflictByAssignment', 'containmentByAssignment', 'acceptedCancellations',
       'superseded', 'cancelOrigins', 'uncertainOrigins', 'projectedByAssignment'] as const;
+    await preload(assignments, [...assignmentFields, 'closedAssignments', 'closedInputAssignments', 'committedByAssignment', 'mirrorStateByAssignment']);
     for (const assignmentId of assignments) {
       const assigned = guard.state.assignedById.get(assignmentId);
       if (assigned) state.assignedById.set(assignmentId, { record: assigned.record,
@@ -202,6 +210,7 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
       }
     }
     state.commits.push(...[...commits.values()].sort((a, b) => a.commitRevision - b.commitRevision));
+    await preload(scope.requests ?? [], ['sessionMetaByRequest', 'lifecycleByRequest', 'sessionMutationDigests', 'advancementWrites', 'taskListRequestIds']);
     for (const request of scope.requests ?? []) for (const name of ['sessionMetaByRequest', 'lifecycleByRequest', 'sessionMutationDigests', 'advancementWrites'] as const) {
       const value = await get(name, request); if (value !== undefined) (state[name] as Map<string, unknown>).set(request, value);
       if (name === 'sessionMutationDigests' && await get('taskListRequestIds', request)) state.taskListRequestIds.add(request);
