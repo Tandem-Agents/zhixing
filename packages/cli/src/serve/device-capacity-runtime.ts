@@ -52,12 +52,12 @@ export function createDeviceCapacityRuntime(
       const signal = AbortSignal.any([abort, stopped.signal]);
       if (signal.aborted) return { kind: "cancelled" };
       const releaseActivity = filesystem.retainActivity();
-      const started = Date.now();
+      const started = performance.now();
       let granted = false;
       try {
         await filesystem.prepare(request.maxWaitMs, signal);
         const result = await underlying.acquire(
-          { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - (Date.now() - started)) }, signal,
+          { ...request, maxWaitMs: Math.max(0, request.maxWaitMs - Math.ceil(performance.now() - started)) }, signal,
         );
         if (result.kind !== 'granted') return result;
         granted = true;
@@ -106,15 +106,21 @@ function asyncFilesystemPressure(root: string, activityDriven: boolean) {
   let sampled: { bavail: number; bsize: number } | undefined,
     sampledAt = 0;
   let flight: Promise<void> | undefined;
+  let refreshStartedAt = 0;
   let activities = 0;
   const fresh = (): boolean => !closed && sampled !== undefined && performance.now() - sampledAt < maxAgeMs;
   const schedule = (): void => {
     if (closed || timer || (activityDriven && activities === 0)) return;
-    timer = setTimeout(() => { timer = undefined; void refresh(); }, refreshMs);
+    // Cadence is measured from probe start, not completion. Otherwise a valid
+    // 200 ms sample plus the 100 ms interval necessarily exceeds the 250 ms
+    // freshness bound and repeatedly rejects zero-wait control reads.
+    timer = setTimeout(() => { timer = undefined; void refresh(); },
+      Math.max(0, refreshMs - (performance.now() - refreshStartedAt)));
     timer.unref();
   };
   const refresh = (): Promise<void> =>
     closed ? Promise.resolve() : (flight ??= (async () => {
+      refreshStartedAt = performance.now();
       let current = path.resolve(root);
       for (;;) {
         try {

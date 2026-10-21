@@ -20,6 +20,29 @@ const budget = {
   quantum: { readBytes: 1, writeBytes: 1, ioOperations: 1 },
 };
 describe("asynchronous entry capacity sampling", () => {
+  it('keeps valid slow samples fresh without adding the refresh interval to probe latency', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    let held: Awaited<ReturnType<ReturnType<typeof createRuntime>['arbiter']['acquire']>> | undefined;
+    let second: typeof held;
+    const sample = { bavail: 1024 * 1024, bsize: 4096 } as StatsFs;
+    vi.mocked(filesystem.statfs).mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(sample), 200)));
+    const runtime = createDeviceCapacityRuntime('E:/synthetic-capacity-probe', { createDirectory: false, activityDriven: true });
+    const request = { admissionId: 'slow-probe-owner', serviceClass: 'storage-foreground' as const,
+      atomic: budget, preferred: budget, maxWaitMs: 500 };
+    try {
+      const pending = runtime.arbiter.acquire(request, new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(200);
+      held = await pending;
+      expect(held.kind).toBe('granted');
+      await vi.advanceTimersByTimeAsync(251);
+      second = await runtime.arbiter.acquire({ ...request, admissionId: 'slow-probe-control', maxWaitMs: 0 }, new AbortController().signal);
+      expect(second.kind).toBe('granted');
+    } finally {
+      if (second?.kind === 'granted') second.permit.release();
+      if (held?.kind === 'granted') held.permit.release();
+      runtime.close(); vi.useRealTimers();
+    }
+  });
   it('keeps the Host default sampling across unrelated owner recovery prefixes', async () => {
     const home = await createTempDir('capacity-host-default');
     vi.mocked(filesystem.statfs).mockResolvedValue({ bavail: 1024 * 1024, bsize: 4096 } as StatsFs);
@@ -219,7 +242,9 @@ describe("asynchronous entry capacity sampling", () => {
       const resumed = await queued;
       expect(resumed.kind).toBe("granted");
       if (resumed.kind === "granted") resumed.permit.release();
-      expect(probe).toHaveBeenCalledTimes(2);
+      // The slow flight finished after its next scheduled start, so refresh
+      // resumes immediately; it never starts a concurrent probe while pending.
+      expect(probe).toHaveBeenCalledTimes(3);
     } finally {
       held.permit.release();
       abort.abort();
