@@ -63,7 +63,7 @@ export class AuthorityWorkObserver {
         if (finished) return;
         finished = true;
         if (timer) clearInterval(timer);
-        if (failure.length) {
+        if (failure.length && this.records) {
           const error = failure[0];
           emit("failed", { waitFor, sourceFrames: failureSourceFrames(error), ...(error instanceof AuthorityStorageError && error.validation ? { validation: error.validation } : {}), failure: error instanceof AuthorityStorageError && error.cause === undefined ? { category: "authority", code: error.code } : logFailureEvidence(error) }, true);
         }

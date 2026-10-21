@@ -891,6 +891,13 @@ function isSuccessfulDeliveryResolutionApplication(
   entry: LogicalRecord<unknown>,
   envelope: CommitEnvelope<unknown>,
 ): boolean {
+  // Most control records are not delivery resolutions. Classify those without
+  // constructing validation errors; a possible companion still takes every
+  // original structural, revision and result check below.
+  if (entry.stream !== "control" || !isPlainObject(entry.body) || entry.body.t !== "applied") return false;
+  const result = entry.body.result;
+  if (!isPlainObject(result) || result.status !== "ok" || !isPlainObject(result.body) ||
+      result.body.t !== "delivery-resolve" || result.body.applied !== true) return false;
   return validatesCompanion(() => {
     if (entry.stream !== "control") {
       throw new TypeError("Delivery resolution application must use the control stream");

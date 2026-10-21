@@ -12,7 +12,7 @@ import type {
   PublishRecord,
 } from "../../contracts/index.js";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DeliveryAuthority,
   assertDeliveryEnvelopeCompanions,
@@ -47,6 +47,31 @@ import { MAX_INLINE_DELIVERY_CONTENT_BYTES } from "../content-schema.js";
 const DURABLE_IO_TEST_TIMEOUT_MS = 60_000;
 
 const FIRST = "2026-07-17T02:00:00.000Z";
+
+it("classifies ordinary control records without constructing delivery validation errors", () => {
+  const BaseTypeError = TypeError;
+  let errors = 0;
+  class ObservedTypeError extends BaseTypeError {
+    constructor(...args: ConstructorParameters<typeof TypeError>) {
+      super(...args);
+      errors++;
+    }
+  }
+  vi.stubGlobal("TypeError", ObservedTypeError);
+  try {
+    expect(assertDeliveryEnvelopeCompanions({
+      v: 1, lsn: 1, at: FIRST, envelopeDigest: `sha256:${"0".repeat(64)}`,
+      entries: [
+        ...Array.from({ length: 7 }, () => ({
+          stream: "control", body: { t: "authority-time-frontier", frontier: FIRST },
+        })),
+        { stream: "control", body: { t: "applied", authorityRevision: 1, requestId: "ordinary-cancel",
+          result: { v: 1, status: "ok", body: { t: "cancel", runState: "committed" } } } },
+      ],
+    })).toBeUndefined();
+    expect(errors).toBe(0);
+  } finally { vi.unstubAllGlobals(); }
+});
 
 async function harness(maxAttempts = 3, baseRetryDelayMs = 5_000) {
   let now = FIRST;
