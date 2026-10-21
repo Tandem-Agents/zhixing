@@ -29,17 +29,27 @@ export class SessionProcessProjector {
     readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>; release: () => void }[] = [];
   readonly #pending = new Set<() => void>();
   #bytes = 0; #running = false; #closed = false; #failed = false;
-  #lastSeq = 0; #identity?: string; #latestSource?: SessionProcessSource;
+  #lastSeq = 0; #streamEpoch = 0; #identity?: string; #latestSource?: SessionProcessSource;
   #parentFinished = false; #streamFinished = false; #closing = false;
   #completionTimer?: ReturnType<typeof setTimeout>;
   #idle?: Promise<void>; #resolveIdle?: () => void;
   constructor(readonly options: SessionProcessProjectionOptions, readonly settled: () => void = () => {}) {}
+  get hasFrames(): boolean { return this.#lastSeq > 0; }
   accept(frame: StreamFrame, readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>): void | Promise<void> {
     if (this.#closed || this.#failed || this.#closing || frame.ref.execution !== 'conversation') return;
-    const identity = JSON.stringify([frame.ref.conversationId, frame.ref.runId, frame.assignmentId, frame.streamEpoch]);
+    // Raw verification owns connection epochs and canonical contiguity; a
+    // verified reconnect preserves this assignment's logical display prefix.
+    const identity = JSON.stringify([frame.ref.conversationId, frame.ref.runId, frame.assignmentId]);
     if (this.#identity && this.#identity !== identity) { this.#fail(frame, '过程来源已换代，请刷新正文。'); return; }
     this.#identity = identity;
-    if (frame.seq <= this.#lastSeq) return;
+    if (frame.streamEpoch < this.#streamEpoch) return;
+    this.#streamEpoch = frame.streamEpoch;
+    if (frame.seq <= this.#lastSeq) {
+      if (frame.seq === this.#lastSeq && this.#latestSource) {
+        this.#latestSource = { ...this.#latestSource, streamEpoch: frame.streamEpoch };
+      }
+      return;
+    }
     this.#lastSeq = frame.seq;
     this.#latestSource = processSource(frame);
     if (frame.payload.kind === 'provisional-final') {
@@ -151,10 +161,28 @@ export class SessionProcessProjector {
 /** Server-generation composition helper; a finite set of display readers,
  * not execution state. Roots only forward verified frames and parent finals. */
 export class SessionProcessProjectionOwner {
-  readonly #readers = new Map<string, { conversationId: string; runId: string; reader: SessionProcessProjector }>();
+  readonly #readers = new Map<string, { conversationId: string; runId: string; assignmentId?: string;
+    terminal: boolean; reader: SessionProcessProjector }>();
   #closed = false; #overflow = false;
   readonly #finished = new Set<string>();
   constructor(readonly options: SessionProcessProjectionOptions) {}
+  /** Only the owner's committed assignment calls this port. It is not a
+   * transport claim: frame verification alone cannot select another assignment. */
+  assignmentCommitted(source: { conversationId: string; runId: string; assignmentId: string }): void {
+    const key = JSON.stringify([source.conversationId, source.runId]);
+    if (this.#closed || this.#finished.has(key)) return;
+    const current = this.#readers.get(key);
+    if (current?.terminal || current?.assignmentId === source.assignmentId) return;
+    if (!current || !current.reader.hasFrames) {
+      if (!current && this.#readers.size >= 32) return;
+      this.#create(source.conversationId, source.runId, source.assignmentId);
+      current?.reader.dispose();
+    } else {
+      // A real prefix cannot be joined to a different assignment. Filter late
+      // old frames; the reader preserves its prefix and reports the real gap.
+      current.assignmentId = source.assignmentId;
+    }
+  }
   accept(frame: StreamFrame, readDisplay?: () => ReturnType<typeof readStreamDisplayPayload>): void | Promise<void> {
     if (this.#closed || frame.ref.execution !== 'conversation') return;
     const key = JSON.stringify([frame.ref.conversationId, frame.ref.runId]);
@@ -174,21 +202,23 @@ export class SessionProcessProjectionOwner {
       }
       entry = this.#create(frame.ref.conversationId, frame.ref.runId);
     }
+    if (entry.assignmentId && entry.assignmentId !== frame.assignmentId) return;
     return entry.reader.accept(frame, readDisplay);
   }
   finish(conversationId: string, runId: string): void {
     const identity = JSON.stringify([conversationId, runId]);
     if (this.#closed || this.#finished.has(identity)) return;
     const entry = this.#readers.get(identity) ?? (this.#readers.size < 32 ? this.#create(conversationId, runId) : undefined);
-    entry?.reader.finish();
+    if (entry) { entry.terminal = true; entry.reader.finish(); }
   }
   streamEnded(boundary: SessionProcessStreamEnd): void {
     const identity = JSON.stringify([boundary.conversationId, boundary.runId]);
     if (this.#closed || this.#finished.has(identity)) return;
     const entry = this.#readers.get(identity) ?? (this.#readers.size < 32 ? this.#create(boundary.conversationId, boundary.runId) : undefined);
+    if (entry?.assignmentId && entry.assignmentId !== boundary.assignmentId) return;
     entry?.reader.streamEnded(boundary);
   }
-  #create(conversationId: string, runId: string) {
+  #create(conversationId: string, runId: string, assignmentId?: string) {
     const identity = JSON.stringify([conversationId, runId]);
     const reader = new SessionProcessProjector(this.options, () => {
       if (this.#readers.get(identity)?.reader !== reader) return;
@@ -198,7 +228,7 @@ export class SessionProcessProjectionOwner {
         if (this.#finished.size > 128) this.#finished.delete(this.#finished.values().next().value!);
       }
     });
-    const entry = { conversationId, runId, reader }; this.#readers.set(identity, entry); return entry;
+    const entry = { conversationId, runId, assignmentId, terminal: false, reader }; this.#readers.set(identity, entry); return entry;
   }
   dispose(): void { this.#closed = true; for (const { reader } of this.#readers.values()) reader.dispose(); this.#readers.clear(); this.#finished.clear(); }
 }

@@ -1148,6 +1148,23 @@ describe("ConversationDirectoryApplicationService", () => {
     });
   });
 
+  it("reports a durable pending cancellation receipt without claiming the run has stopped", async () => {
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true, requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false, createCancellationIdentity: () => "unused",
+        cancel: async () => ({ matchedDurableRuns: 0, abortedInFlight: false,
+          cancelledPending: 0, receivedPending: true }),
+        resolveUncertain: async () => ({ state: "cancelled", factDigest: `sha256:${"b".repeat(64)}` }),
+      },
+    });
+    await expect(application.abort({ kind: "abort", conversationId: "conversation-1",
+      operationId: "cancel-pending", runId: "run-1",
+      caller: { kind: "surface", surfacePrincipal: "rpc:test", connectionId: "connection-1" } }))
+      .resolves.toEqual({ cancelled: false, feedback: { kind: "received" } });
+  });
+
   it("owns durable abort identity, cancellation terminal, and dependent settlement order", async () => {
     const steps: string[] = [];
     const cancel = vi.fn(async () => {

@@ -20,6 +20,38 @@ function frame(seq: number, payload: StreamFrame['payload']): StreamFrame {
     assignmentId: 'assignment', streamEpoch: 1, seq, payload, meta: { lineage: 'main' } });
 }
 describe('verified stream to observer projection', () => {
+  it('uses the owner-committed unstarted replacement and fences the old assignment and terminal run', async () => {
+    const s = await setup(), owner = new SessionProcessProjectionOwner({ artifacts: s.artifacts, publish: s.publish });
+    const source = { conversationId: 'c', runId: 'r', assignmentId: 'old' };
+    owner.assignmentCommitted(source);
+    owner.assignmentCommitted({ ...source, assignmentId: 'new' });
+    const first = frame(1, { kind: 'agent-yield', yield: { type: 'text_delta', text: 'answer' } });
+    await owner.accept({ ...first, assignmentId: 'old' });
+    expect(s.publish).not.toHaveBeenCalled();
+    await owner.accept({ ...first, assignmentId: 'new' });
+    owner.finish('c', 'r');
+    owner.assignmentCommitted({ ...source, assignmentId: 'third' });
+    await owner.accept({ ...first, assignmentId: 'third' });
+    owner.streamEnded({ ...source, assignmentId: 'new', finalSeq: 2 });
+    await vi.waitFor(() => expect(s.publish.mock.calls.map(call => call[2].payload.kind)).toEqual(['yield', 'closed']));
+    owner.assignmentCommitted({ ...source, assignmentId: 'third' });
+    await owner.accept({ ...first, assignmentId: 'third' });
+    expect(s.publish).toHaveBeenCalledTimes(2);
+    owner.dispose();
+  });
+  it('keeps one display prefix across verified epoch advancement and duplicate frames', async () => {
+    const s = await setup();
+    const first = frame(1, { kind: 'agent-yield', yield: { type: 'text_delta', text: 'prefix' } });
+    await s.p.accept(first);
+    await s.p.accept({ ...first, streamEpoch: 2 });
+    await s.p.accept({ ...frame(3, { kind: 'agent-yield', yield: { type: 'text_delta', text: 'tail' } }), streamEpoch: 2 });
+    await s.p.accept(frame(4, { kind: 'agent-yield', yield: { type: 'text_delta', text: 'fenced' } }));
+    s.p.streamEnded({ conversationId: 'c', runId: 'r', assignmentId: 'assignment', finalSeq: 4 });
+    s.p.finish(); await s.p.idle(); await Promise.resolve();
+    expect(s.publish.mock.calls.map(call => call[2].payload.kind)).toEqual(['yield', 'yield', 'closed']);
+    expect(s.publish.mock.calls[1]![2]).toMatchObject({ source: { streamEpoch: 2, sourceSeq: 3 },
+      payload: { delta: { text: 'tail' } } });
+  });
   it('reads the executor-owned spool through its authenticated path before ACK permits reclamation', async () => {
     const owner = await setup(), executor = await setup();
     const prepared = await prepareStreamDataPayload({ kind: 'agent-yield', yield: { type: 'assistant_message',

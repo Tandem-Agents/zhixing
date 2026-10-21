@@ -43,20 +43,21 @@ it("recovers a cold external control envelope after lookup pressure using real s
   const first=new ControlAdmissionJournal(log,artifacts);
   await expect(first.apply({source,envelope,prepare:()=>{throw Error("after receipt")}})).rejects.toThrow("after receipt");
   const cold=new ControlAdmissionJournal(log,artifacts);
-  const get=artifacts.get.bind(artifacts); let pressured=false, unlockedReads=0;
+  const get=artifacts.get.bind(artifacts); let pressured=false;
+  const snapshots=vi.spyOn(log,"readSnapshot");
   const spy=vi.spyOn(artifacts,"get").mockImplementation(async(...args)=>{
     if(!pressured&&isHoldingMaintenanceExclusion()){pressured=true;throw pressure()}
-    if(!isHoldingMaintenanceExclusion())unlockedReads++;
     return get(...args);
   });
   try {
     const result=await retryControlAdmission(()=>cold.lookup({source,envelope}),async()=>{
       expect(isHoldingMaintenanceExclusion()).toBe(false);
-      await cold.primeRecoverySnapshot(await log.readSnapshot());
+      await cold.prepareRecovery();
     });
-    expect(result.kind).toBe("received-pending"); expect(pressured).toBe(true); expect(unlockedReads).toBeGreaterThan(0);
+    expect(result.kind).toBe("received-pending"); expect(pressured).toBe(true);
+    expect(snapshots).not.toHaveBeenCalled();
     expect((await log.readStream("control")).filter(record=>(record.body as {t:string}).t==="received")).toHaveLength(1);
-  } finally {spy.mockRestore();await log.stopStorageMaintenance()}
+  } finally {spy.mockRestore();snapshots.mockRestore();await log.stopStorageMaintenance()}
 },20000);
 
 it.each(["cancel","deadline"] as const)("does not start a new attempt after recovery crosses %s",async(mode)=>{

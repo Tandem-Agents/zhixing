@@ -57,6 +57,25 @@ const hostContext: AuthorityCallContext = {
 };
 
 describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("reports expired activation candidates as recoverable without accepting a forged lease", async () => {
+    let monotonic = 0;
+    const fixture = await createHarness(() => NOW, 15 * 60_000, () => monotonic);
+    const origin = { admissionClass: "interactive", entry: "conversation-input" } as const;
+    await fixture.governor.enqueueRoot(assignmentReservationId("candidate-expired"),
+      { kind: "run", id: "candidate-run", attempt: 1 }, origin, hostContext);
+    const lease = await fixture.governor.prepareAssignmentRoot({
+      assignmentId: "candidate-expired", executorId: "executor-1",
+      workload: { kind: "run", id: "candidate-run", attempt: 1 },
+      scopeBinding: { kind: "conversation", conversationId: "conversation-1", ownerEpoch: 1 },
+      budget: { maxCalls: 1 },
+    }, origin, hostContext);
+    expect(() => fixture.governor.prepareActivation({ ...lease, budget: { maxCalls: 999 } })).toThrow();
+    monotonic = 6000;
+    expect(() => fixture.governor.prepareActivation(lease)).toThrow(expect.objectContaining({
+      name: "ResourceCandidateStaleError", reason: "expired",
+    }));
+    expect((await fixture.governor.snapshot()).queued.has(lease.reservationId)).toBe(true);
+  });
   it("tombstones a terminal workload before any late reservation can queue", async () => {
     const fixture = await createHarness();
     await fixture.governor.coordinate(async () => {

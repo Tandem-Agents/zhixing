@@ -749,6 +749,7 @@ export interface ConversationCancellationProjection {
   /** True only when the mechanism durably owns the user-visible response. */
   readonly authoritativeResponse?: boolean;
   readonly dependentLifecycleIngressId?: string;
+  readonly receivedPending?: true;
 }
 
 /** Opaque finite effect reference; only the Correctness adapter owns its target. */
@@ -987,14 +988,14 @@ export interface ConversationDeletedResult {
   readonly fact: ConversationDeletedFact;
 }
 
-export interface ConversationAbortedResult {
+export type ConversationAbortedResult = {
   readonly cancelled: true;
   readonly feedback:
     | Readonly<{ kind: "authoritative" }>
     | Readonly<{ kind: "in-flight" }>
     | Readonly<{ kind: "pending"; count: number }>
     | Readonly<{ kind: "idle" }>;
-}
+} | Readonly<{ cancelled: false; feedback: Readonly<{ kind: "received" }> }>;
 
 export interface ConversationAgentTurnAdmissionResult {
   readonly conversationId: string;
@@ -1688,6 +1689,9 @@ export class ConversationDirectoryApplicationService
       occurredAt: (this.input.clock ?? Date.now)(),
       ...(command.response ? { response: command.response } : {}),
     });
+    if (cancellation.receivedPending) {
+      return Object.freeze({ cancelled: false as const, feedback: Object.freeze({ kind: "received" as const }) });
+    }
     if (cancellation.dependentLifecycleIngressId) {
       try {
         await port.settleDependentCancellation?.({

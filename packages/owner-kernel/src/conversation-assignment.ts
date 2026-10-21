@@ -182,6 +182,7 @@ import type {
   InitialControlEnvelope,
   TrustedControlSource,
 } from "./control-admission.js";
+import { CONTROL_PROJECTION_ID, registerControlAdmissionProjection, hasPendingCancellationForRun } from "./control-admission.js";
 import {
   CONVERSATION_IDENTITY_PROJECTION_ID,
   conversationIdentityExistsAt,
@@ -1098,6 +1099,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       { delivery: options.delivery, currentAuthority: options.currentAuthority, resources: options.resources });
     this.#currentAuthority = options.currentAuthority;
     registerConversationIdentityProjection(options.log, options.artifacts);
+    registerControlAdmissionProjection(options.log, options.artifacts);
     if (options.currentAuthority) {
       registerConversationTransferProjection(options.log, options.verifier);
     }
@@ -2596,7 +2598,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       throw new Error("Dispatch artifact store returned a different reference");
     }
     const transaction = await this.#transact<AssignDecision>(
-      (state) => {
+      async (state, context) => {
         const admitted = state.admittedByRun.get(envelope.work.runId);
         if (!admitted) throw new Error("Run must be durably admitted before assignment");
         if (canonicalize(admitted.record.ingress) !== canonicalize(envelope.work.ingress)) {
@@ -2628,6 +2630,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         }
         if (state.queuedPositionHeap[0] !== admitted.record.queuedPosition) {
           throw new Error("Only the earliest queued run can be assigned");
+        }
+        if (await hasPendingCancellationForRun(context.readProjection(CONTROL_PROJECTION_ID), this.#artifacts,
+          this.#conversationId, envelope.work.runId)) {
+          throw new ConversationPendingCancellationError(envelope.work.runId);
         }
         const assigned: Extract<ConversationRunJournalRecord, { t: "assigned" }> = {
           t: "assigned",
@@ -2669,7 +2675,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           value: { assignmentId: envelope.assignmentId },
         };
       },
-      [artifact.ref, ...envelopeReferences], [], conversationDecisionScope({ unsignedEnvelope }),
+      [artifact.ref, ...envelopeReferences], [CONTROL_PROJECTION_ID], conversationDecisionScope({ unsignedEnvelope }),
     );
     const assigned = transaction.state.assignedById.get(transaction.value.assignmentId);
     if (!assigned) throw new Error("Assigned commit did not rebuild its outbox fact");
@@ -7009,6 +7015,14 @@ export class ConversationAssignmentCancelledError extends Error {
   constructor(readonly runId: string, readonly assignmentId: string) {
     super("Conversation assignment was durably cancelled before execution");
     this.name = "ConversationAssignmentCancelledError";
+  }
+}
+
+/** No dispatch decision may overtake this target's already received control. */
+export class ConversationPendingCancellationError extends Error {
+  constructor(readonly runId: string) {
+    super("Conversation dispatch is waiting for its received cancellation decision");
+    this.name = "ConversationPendingCancellationError";
   }
 }
 

@@ -37,10 +37,11 @@ import { GlobalMutationCommitCoordinator } from "@zhixing/owner-kernel/global-mu
 import { SchedulerConversationMutationPublisher } from "@zhixing/owner-kernel/scheduler-conversation-publisher";
 import {
   ConversationRunJournal,
+  ConversationPendingCancellationError,
   InProcessConversationDispatcher,
   type ConversationMutationPublisher,
 } from "@zhixing/owner-kernel/conversation-assignment";
-import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
+import { createInitialControlEnvelope, createConversationControlEnvelope } from "@zhixing/owner-kernel/control-admission";
 import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
 import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
@@ -368,6 +369,90 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("isolates a permanently failed received cancellation from another conversation's recovery", async () => {
+    const home = await createTempDir("received-cancel-isolation");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const onFailure = vi.fn();
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager,
+      interactions: new DurableConversationInteractionObserver(), onFailure });
+    manager = new ConversationManager({ create: vi.fn(async () => { throw Error("not executing queued work"); }) },
+      undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const source = { principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } };
+    for (const conversationId of ["cancel-isolation-a", "cancel-isolation-b"]) {
+      await registerActiveConversation(authority, conversationId, new Date().toISOString());
+      const admitted = await protocol.admit({ conversationId, input: "queued",
+        invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: conversationId } },
+        surfacePrincipal: "rpc:owner" });
+      const envelope = createConversationControlEnvelope({ requestId: `cancel:${conversationId}`, source,
+        body: { t: "cancel", conversationId, runId: admitted.runId, ownerEpoch: 1 } });
+      await expect(authority.controlAdmission.applyAuthority({ envelope, source, stream: `run:${conversationId}`,
+        initial: null, reducer: () => null, decide: () => { throw Error("received-only"); } }))
+        .rejects.toThrow("received-only");
+    }
+    const pending = (await authority.controlAdmission.pendingCancellations()).envelopes;
+    expect(pending).toHaveLength(2);
+    const broken = pending[0]!, healthy = pending[1]!, permanent = Error("permanent control source failure");
+    if (broken.body.t !== "cancel") throw Error("Expected the seeded single-run cancellation");
+    const brokenConversationId = broken.body.conversationId;
+    const original = ConversationRunJournal.prototype.applyControl;
+    const spy = vi.spyOn(ConversationRunJournal.prototype, "applyControl").mockImplementation(function (input) {
+      if (input.envelope.requestId === broken.requestId) return Promise.reject(permanent);
+      return original.call(this, input);
+    });
+    try {
+      await expect(protocol.recover()).resolves.toBeGreaterThanOrEqual(1);
+      const remaining = (await authority.controlAdmission.pendingCancellations()).envelopes.map(value => value.requestId);
+      expect(remaining).toContain(broken.requestId);
+      expect(remaining).not.toContain(healthy.requestId);
+      expect(onFailure.mock.calls.some(([error, context]) =>
+        context.conversationId === brokenConversationId &&
+        (error === permanent || error instanceof AggregateError && error.errors.includes(permanent)))).toBe(true);
+    } finally { spy.mockRestore(); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("recovers a received cancellation after its bounded foreground retry and a cold owner restart", async () => {
+    const home = await createTempDir("conversation-received-cancel-recovery");
+    const secretStore = new MemorySecretStore();
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    let manager!: ConversationManager;
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+    const factory = { create: vi.fn(async () => { throw Error("cancelled queued input must not execute"); }) };
+    manager = new ConversationManager(factory, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    const conversationId = "received-cancel";
+    await registerActiveConversation(authority, conversationId, new Date().toISOString());
+    const admitted = await protocol.admit({ conversationId, input: "queued",
+      invocation: { kind: "agent", source: "interactive" }, options: { source: "interactive", turnContext: { turnId: "received-cancel-input" } },
+      surfacePrincipal: "rpc:owner" });
+    const transact = authority.authorityLog.transactProjection;
+    const blocked = vi.spyOn(authority.authorityLog, "transactProjection").mockImplementation(async function (...args) {
+      if (args[3]?.streams?.includes(`run:${conversationId}`) && args[3]?.readProjectionIds?.includes("control-admission-v1")) {
+        throw new StorageMaintenanceAdmissionError({ kind: "backpressured", blockedBy: "probe-unavailable", retryAfterMs: 10 });
+      }
+      return transact.apply(this, args);
+    });
+    try {
+      expect(await protocol.cancel({ conversationId, requestId: "cancel:received", runId: admitted.runId,
+        principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } }))
+        .toEqual({ dispositions: [], receivedPending: true });
+      expect((await authority.controlAdmission.pendingCancellations()).envelopes.map(value => value.requestId)).toEqual(["cancel:received"]);
+    } finally { blocked.mockRestore(); await protocol.stopRecoveryLoop(); }
+    const coldAuthority = await setupAuthorityRuntime({ zhixingHome: home, secretStore });
+    let coldManager!: ConversationManager;
+    const cold = createProtocol({ authority: coldAuthority, manager: () => coldManager, interactions: new DurableConversationInteractionObserver() });
+    coldManager = new ConversationManager(factory, undefined, { durableTurnExecutor: cold, onTurnCommitted: () => {} });
+    try {
+      await cold.recover();
+      expect((await coldAuthority.controlAdmission.pendingCancellations()).envelopes).toEqual([]);
+      const records = (await coldAuthority.authorityLog.readAll()).flatMap(commit => commit.entries)
+        .map(entry => entry.body as { t?: string; requestId?: string; runId?: string; state?: string });
+      expect(records.filter(value => value.t === "received" && value.requestId === "cancel:received")).toHaveLength(1);
+      expect(records.filter(value => value.t === "applied" && value.requestId === "cancel:received")).toHaveLength(1);
+      expect(records.filter(value => value.t === "state" && value.runId === admitted.runId && value.state === "cancelled")).toHaveLength(1);
+      expect(factory.create).not.toHaveBeenCalled();
+    } finally { await cold.stopRecoveryLoop(); await manager.disposeAll(); await coldManager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it.each([
     { mode: "single", settleBetween: false }, { mode: "batch", settleBetween: false },
     { mode: "single", settleBetween: true }, { mode: "batch", settleBetween: true },
@@ -3236,6 +3321,56 @@ describe("ConversationProtocolRuntime", () => {
     } finally { await run.finish(); }
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
+  it("re-derives an expired resource candidate before execution without preparing a second runtime", async () => {
+    const { AnchorResourceGovernor, ResourceCandidateStaleError } = await import("@zhixing/owner-kernel/resource-governor");
+    const activate = AnchorResourceGovernor.prototype.prepareActivation;
+    let rejected = false;
+    const spy = vi.spyOn(AnchorResourceGovernor.prototype, "prepareActivation").mockImplementation(function (lease) {
+      if (!rejected) { rejected = true; throw new ResourceCandidateStaleError(lease.reservationId, "expired"); }
+      return activate.call(this, lease);
+    });
+    try {
+      const run = await startCancellableRun("absent", "expired-resource-candidate");
+      try {
+        expect(rejected).toBe(true);
+        expect(run.kernelRuns()).toBe(1);
+        await run.cancel();
+      } finally { await run.finish(); }
+    } finally { spy.mockRestore(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("does not assign when a received cancellation arrives during runtime preparation", async () => {
+    const home = await createTempDir("cancellation-dispatch-fence");
+    const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: new MemorySecretStore() });
+    const f = cancellableStreamFixture("dispatch-fence");
+    let manager!: ConversationManager, runId = "";
+    const conversationId = "dispatch-fence";
+    const source = { principal: { surfacePrincipal: "rpc:owner", deviceId: authority.deviceId, connectionId: "desktop" } };
+    const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver(),
+      localExecutor: { ...TEST_LOCAL_EXECUTOR, runtimeFactory: { create: async () => {
+        const envelope = createConversationControlEnvelope({ requestId: "cancel:dispatch-fence", source,
+          body: { t: "cancel", conversationId, runId, ownerEpoch: 1 } });
+        await expect(authority.controlAdmission.applyAuthority({ envelope, source, stream: `run:${conversationId}`,
+          initial: null, reducer: () => null, decide: () => { throw Error("received-only"); } })).rejects.toThrow("received-only");
+        return f.runtime;
+      } } } });
+    manager = new ConversationManager({ create: async () => f.runtime }, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+    await getOrCreateActiveConversation(authority, manager, conversationId);
+    const input = { conversationId, input: "queued", invocation: { kind: "agent", source: "interactive" } as const,
+      options: { source: "interactive" as const, turnContext: { turnId: "dispatch-fence-turn" } }, surfacePrincipal: "rpc:owner" };
+    runId = (await protocol.admit(input)).runId;
+    const generator = protocol.run({ ...input, messages: [], baseRevision: 0, runtime: f.runtime });
+    try {
+      await expect(generator.next()).rejects.toBeInstanceOf(ConversationPendingCancellationError);
+      expect(f.kernelRuns()).toBe(0);
+      const records = (await authority.authorityLog.readAll()).flatMap(commit => commit.entries);
+      expect(records.some(entry => (entry.body as { t?: string; runId?: string }).t === "assigned" &&
+        (entry.body as { runId?: string }).runId === runId)).toBe(false);
+      await protocol.recover();
+      expect((await authority.controlAdmission.pendingCancellations(undefined, { conversationId, runId })).envelopes).toEqual([]);
+    } finally { f.stopped.resolve(); f.tail.resolve(); await generator.return(undefined as never); await protocol.stopRecoveryLoop(); await manager.disposeAll(); }
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
   it.each(["absent", "available"] as const)("keeps recovery off a cancelled $0 run until its local execution leaves the frame", async topology => {
     const run = await startCancellableRun(topology, `cancel-recovery-interleave-${topology}`);
     const uncertain = vi.spyOn(ConversationRunJournal.prototype, "markAssignmentUncertain");
@@ -5643,3 +5778,56 @@ async function worksceneContinuationHarness(nextControl?: (tasks: readonly Works
 function secretKey(ref: SecretRef): string {
   return `${ref.kind}/${ref.bindingId}`;
 }
+
+it.each([{kind:'single',fault:'none'},{kind:'single',fault:'pressure'},{kind:'batch',fault:'permanent'}] as const)('fences page-two $kind cancellation with $fault while another conversation progresses', async ({kind,fault}) => {
+  const home = await createTempDir('controller-r4-cancel-page');
+  const secrets = new MemorySecretStore();
+  const authority = await setupAuthorityRuntime({ zhixingHome: home, secretStore: secrets });
+  let manager!: ConversationManager;
+  const factory = { create: vi.fn(async (_conversationId: string) => { throw Error('controller observed cancelled work entering runtime preparation'); }) };
+  const protocol = createProtocol({ authority, manager: () => manager, interactions: new DurableConversationInteractionObserver() });
+  manager = new ConversationManager(factory, undefined, { durableTurnExecutor: protocol, onTurnCommitted: () => {} });
+  const source = { principal: { surfacePrincipal: 'rpc:owner', deviceId: authority.deviceId, connectionId: 'desktop' } };
+  const ids = Array.from({length: 33}, (_,i) => 'controller-cancel-page-' + i).sort((a,b) =>
+    protocolDigest('PendingCancellation',1,a).localeCompare(protocolDigest('PendingCancellation',1,b)));
+  const targetRequest = ids.at(-1)!;
+  const runs = new Map<string,string>();
+  for (const conversationId of ['aa-target','zz-noise','cc-healthy']) {
+    await registerActiveConversation(authority,conversationId,new Date().toISOString());
+    const admission=await protocol.admit({conversationId,input:'queued', invocation:{kind:'agent',source:'interactive'},
+      options:{source:'interactive',turnContext:{turnId:conversationId}},surfacePrincipal:'rpc:owner'});
+    runs.set(conversationId,admission.runId);
+  }
+  for (const requestId of ids) {
+    const conversationId=requestId===targetRequest?'aa-target':'zz-noise';
+    const envelope=createConversationControlEnvelope({requestId,source,body:requestId===targetRequest&&kind==='batch'?{t:'cancel-batch',conversationId,ownerEpoch:1}:{t:'cancel',conversationId,runId:runs.get(conversationId)!,ownerEpoch:1}});
+    await expect(authority.controlAdmission.applyAuthority({envelope,source,stream:'run:'+conversationId,
+      initial:null,reducer:()=>null,decide:()=>{throw Error('leave durable received');}})).rejects.toThrow('leave durable received');
+  }
+  await protocol.stopRecoveryLoop();
+  const coldAuthority=await setupAuthorityRuntime({zhixingHome:home,secretStore:secrets});
+  let coldManager!: ConversationManager;
+  const cold=createProtocol({authority:coldAuthority,manager:()=>coldManager,interactions:new DurableConversationInteractionObserver()});
+  coldManager=new ConversationManager(factory,undefined,{durableTurnExecutor:cold,onTurnCommitted:()=>{}});
+  let available=fault==='none'; const failures=vi.fn();
+  const apply=ConversationRunJournal.prototype.applyControl;
+  const blocked=vi.spyOn(ConversationRunJournal.prototype,'applyControl').mockImplementation(function(input){
+    if(input.envelope.requestId===targetRequest&&!available) { failures(); return Promise.reject(fault==='pressure'?new StorageMaintenanceAdmissionError({kind:'backpressured',blockedBy:'readBytes',retryAfterMs:1}):Error('permanent target failure')); }
+    return apply.call(this,input);
+  });
+  try {
+    const page=await coldAuthority.controlAdmission.pendingCancellations();
+    expect(page.envelopes).toHaveLength(32);
+    expect(page.envelopes.some(e=>e.requestId===targetRequest)).toBe(false);
+    await cold.recover();
+    const remaining=(await coldAuthority.controlAdmission.pendingCancellations()).envelopes.map(e=>e.requestId);
+    const calls=factory.create.mock.calls;
+    console.log('CONTROLLER_CANCEL_PAGE',JSON.stringify({targetRequest,remaining,runtimePreparations:calls.length,firstCall:calls[0]}));
+    if(fault==='none') expect(remaining).not.toContain(targetRequest); else { expect(remaining).toContain(targetRequest); expect(failures).toHaveBeenCalled(); }
+    expect(factory.create.mock.calls.some(([id])=>id==='aa-target')).toBe(false);
+    expect(factory.create.mock.calls.some(([id])=>id==='cc-healthy')).toBe(true);
+    available=true; await cold.recover();
+    expect((await coldAuthority.controlAdmission.pendingCancellations(undefined,{conversationId:'aa-target',runId:runs.get('aa-target')!})).envelopes).toEqual([]);
+    expect(factory.create.mock.calls.some(([id])=>id==='aa-target')).toBe(false);
+  } finally {blocked.mockRestore();await cold.stopRecoveryLoop();await manager.disposeAll();await coldManager.disposeAll();}
+},120000);

@@ -586,7 +586,7 @@ class TerminalApplication {
         if (activeTurn) {
           // 停止要等 Owner 耐久裁决与执行收束；按键时先如实反馈“已请求”，
           // 运行终态到达后由实际结果覆盖，不在此声称已经停止。
-          this.#mainView = { ...this.#mainView, message: '已请求中止，正在停止当前运行…' };
+          this.#mainView = { ...this.#mainView, message: '已请求中止，正在等待处理…' };
           await this.#publish(this.#mainView);
           try { await this.#controller?.abort(); }
           catch (error) {

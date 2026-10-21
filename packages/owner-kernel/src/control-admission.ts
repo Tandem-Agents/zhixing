@@ -47,7 +47,7 @@ import {
 } from "@zhixing/core/delivery";
 
 const MAX_AUTHORITY_PROJECTION_CACHES = 8;
-const CONTROL_PROJECTION_ID = "control-admission-v1";
+export const CONTROL_PROJECTION_ID = "control-admission-v1";
 export const CONVERSATION_IDENTITY_PROJECTION_ID = "conversation-identities-v1";
 const CONVERSATION_IDENTITY_PREFIX = "identity:";
 const CONVERSATION_IDENTITY_REQUEST_PREFIX = "request:";
@@ -987,6 +987,43 @@ export class ControlAdmissionJournal {
 
   get hasRecoveredProjection(): boolean { return this.#recovered; }
 
+  /** Bounded discovery of durably received cancellations still owed by the
+   * current owner. The directory contains references, never another request. */
+  async pendingCancellations(after?: string, target?: { conversationId: string; runId: string }): Promise<{
+    envelopes: ConversationControlEnvelope[]; after?: string;
+  }> {
+    if (after !== undefined && !/^pending-cancel\/[a-f0-9]{64}$/u.test(after)) {
+      throw new TypeError("Invalid pending cancellation cursor");
+    }
+    if (target) {
+      assertIdentifier(target.conversationId, "Cancellation conversation");
+      assertIdentifier(target.runId, "Cancellation run");
+      if (after !== undefined) throw new TypeError("Target cancellation reads do not use a global cursor");
+    }
+    await this.prepareRecovery();
+    const transaction = await this.#log.transactDurableProjection<unknown, {
+      envelopes: ConversationControlEnvelope[]; after?: string;
+    }>(CONTROL_PROJECTION_ID, async current => {
+      if (target) return { kind: "return", value: { envelopes: await readTargetCancellations(current, this.#artifacts, target, 32) } };
+      const prefix = "pending-cancel/";
+      const page = await current.scan({ ...(after ? { gt: after } : { gte: prefix }), lt: prefix + "\uffff" }, 32);
+      const envelopes: ConversationControlEnvelope[] = [];
+      for (const row of page.entries) {
+        if (typeof row.value !== "string" || row.key !== pendingCancellationKey(row.value)) {
+          throw new DurableProjectionRecordBindingError("Pending cancellation directory binding is invalid");
+        }
+        const request = await readIndexedControlRequest(current, row.value, this.#artifacts);
+        if (!request || request.storedResult || !isConversationControlEnvelope(request.envelope) ||
+            !["cancel", "cancel-batch"].includes(request.envelope.body.t)) {
+          throw new DurableProjectionRecordBindingError("Pending cancellation has no matching received request");
+        }
+        envelopes.push(request.envelope);
+      }
+      return { kind: "return", value: { envelopes, ...(page.continuation ? { after: page.entries.at(-1)!.key } : {}) } };
+    });
+    return transaction.value;
+  }
+
   async #transact(
     subject: AdmittedControlEnvelope | string,
     decide: (state: ControlProjectionDraft) => ProjectionTransactionDecision<unknown, ControlTransactionValue>,
@@ -1083,6 +1120,8 @@ async function reduceControlIndex(
   artifacts: ArtifactStore,
 ): Promise<readonly DurableProjectionMutation[]> {
   const mutations = new Map<string, DurableProjectionMutation>();
+  let companionsChecked = false;
+  let deliveryResolution: ReturnType<typeof assertDeliveryEnvelopeCompanions> = undefined;
   const overlay: DurableProjectionReadContext = {
     get: async (key) => {
       const changed = mutations.get(key);
@@ -1102,7 +1141,11 @@ async function reduceControlIndex(
       subject = body.requestId;
     }
     const state = subject === undefined ? beginProjectionDraft(emptyProjection()) : await readControlIndexState(overlay, subject, artifacts);
-    await reduceControlProjection(state, record, envelope, artifacts);
+    if (!companionsChecked) {
+      deliveryResolution = assertDeliveryEnvelopeCompanions(envelope);
+      companionsChecked = true;
+    }
+    await reduceControlDomain(state, record, artifacts, deliveryResolution);
     for (const [id, request] of state.requests) {
       const key = controlRequestKey(id);
       const previous = await overlay.get(key);
@@ -1112,6 +1155,16 @@ async function reduceControlIndex(
       if (!storedEnvelope) throw new DurableProjectionRecordBindingError("Control request index lost its envelope reference");
       // 外置大输入继续保留CAS引用，不因派生索引的单值预算增加业务输入上限。
       mutations.set(key, { kind: "put", key, value: { ...request, envelope: storedEnvelope } as unknown as JsonValue });
+      if (request.envelope.body.t === "cancel" || request.envelope.body.t === "cancel-batch") {
+        const pendingKey = pendingCancellationKey(id);
+        mutations.set(pendingKey, request.storedResult
+          ? { kind: "tombstone", key: pendingKey }
+          : { kind: "put", key: pendingKey, value: id });
+        const targetKey = cancellationTargetKey(request.envelope);
+        mutations.set(targetKey, request.storedResult
+          ? { kind: "tombstone", key: targetKey }
+          : { kind: "put", key: targetKey, value: id });
+      }
     }
     for (const [ingress, request] of state.ingresses) {
       const key = controlIngressKey(ingress);
@@ -1195,16 +1248,6 @@ function getIngress(
   key: string,
 ): IngressProjection | undefined {
   return state.ingresses.get(key) ?? state.base.ingresses.get(key);
-}
-
-async function reduceControlProjection(
-  state: ControlProjectionDraft,
-  record: LogicalRecord<unknown>,
-  commit: import("@zhixing/core/contracts").CommitEnvelope<unknown>,
-  artifacts: ArtifactStore,
-): Promise<ControlProjectionDraft> {
-  const deliveryResolution = assertDeliveryEnvelopeCompanions(commit);
-  return reduceControlDomain(state, record, artifacts, deliveryResolution);
 }
 
 async function reduceControlDomain(state: ControlProjectionDraft, record: LogicalRecord<unknown>, artifacts: ArtifactStore,
@@ -2292,7 +2335,44 @@ export function registerControlAdmissionProjection(log: AuthorityCommitLog, arti
       projectionId: CONTROL_PROJECTION_ID,
       inputs: { streams: ["control"] },
       authenticated: true,
-      reducerVersion: 1,
+      reducerVersion: 3,
       reduce: (envelope, current) => reduceControlIndex(envelope, current, artifacts),
     });
+}
+
+function pendingCancellationKey(requestId: string): string {
+  return "pending-cancel/" + protocolDigest("PendingCancellation", 1, requestId).slice(7);
+}
+
+function cancellationTargetPrefix(conversationId: string, runId?: string): string {
+  return "pending-cancel-target/" + protocolDigest("PendingCancellationTarget", 1, [conversationId, runId ?? null]).slice(7) + "/";
+}
+function cancellationTargetKey(envelope: AdmittedControlEnvelope): string {
+  const body = envelope.body;
+  if (body.t !== "cancel" && body.t !== "cancel-batch") throw new TypeError("Cancellation target requires a cancellation");
+  return cancellationTargetPrefix(body.conversationId, body.t === "cancel" ? body.runId : undefined) +
+    protocolDigest("PendingCancellation", 1, envelope.requestId).slice(7);
+}
+async function readTargetCancellations(current: DurableProjectionReadContext, artifacts: ArtifactStore,
+  target: { conversationId: string; runId: string }, limit: number): Promise<ConversationControlEnvelope[]> {
+  const envelopes: ConversationControlEnvelope[] = [];
+  for (const prefix of [cancellationTargetPrefix(target.conversationId), cancellationTargetPrefix(target.conversationId, target.runId)]) {
+    if (envelopes.length === limit) break;
+    const page = await current.scan({ gte: prefix, lt: prefix + "\uffff" }, limit - envelopes.length);
+    for (const row of page.entries) {
+      if (typeof row.value !== "string") throw new DurableProjectionRecordBindingError("Invalid cancellation target reference");
+      const request = await readIndexedControlRequest(current, row.value, artifacts);
+      if (!request || request.storedResult || !isConversationControlEnvelope(request.envelope) ||
+          !["cancel", "cancel-batch"].includes(request.envelope.body.t) || row.key !== cancellationTargetKey(request.envelope)) {
+        throw new DurableProjectionRecordBindingError("Cancellation target does not bind its received request");
+      }
+      envelopes.push(request.envelope);
+    }
+  }
+  return envelopes;
+}
+/** Same-prefix dispatch fence; checks only this run and its conversation batch. */
+export async function hasPendingCancellationForRun(current: DurableProjectionReadContext, artifacts: ArtifactStore,
+  conversationId: string, runId: string): Promise<boolean> {
+  return (await readTargetCancellations(current, artifacts, { conversationId, runId }, 1)).length > 0;
 }

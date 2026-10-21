@@ -493,6 +493,7 @@ export class InboundRouter {
     });
     if (
       result.feedback.kind === "authoritative" ||
+      result.feedback.kind === "received" ||
       result.feedback.kind === "in-flight"
     ) {
       // 反馈单源:让 cleanup 路径产出

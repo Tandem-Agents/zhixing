@@ -1194,8 +1194,12 @@ export class AnchorResourceGovernor
     state = this.#projection?.state,
   ): void {
     if (!state) throw new Error("Resource governor projection is unavailable");
+    const previous = this.#candidates.get(lease.admissionClass);
     this.#pruneCandidates();
     if (state.queued.get(lease.reservationId) !== lease.admissionClass) {
+      if (previous?.lease.reservationId === lease.reservationId && previous.lease.digest === lease.digest) {
+        throw new ResourceCandidateStaleError(lease.reservationId, "dequeued");
+      }
       throw new TypeError("Resource reservation is not queued in its admission class");
     }
     const candidate = this.#candidates.get(lease.admissionClass);
@@ -1204,7 +1208,9 @@ export class AnchorResourceGovernor
       candidate.lease.reservationId !== lease.reservationId ||
       candidate.lease.digest !== lease.digest
     ) {
-      throw new TypeError("Resource activation does not match the live candidate");
+      throw new ResourceCandidateStaleError(lease.reservationId,
+        previous?.lease.digest === lease.digest && previous.expiresAt <= this.#monotonicClock()
+          ? "expired" : candidate ? "replaced" : "unavailable");
     }
   }
 
@@ -1692,6 +1698,16 @@ export class ResourceAdmissionPendingError extends Error {
   constructor(readonly reservationId: string) {
     super(`Resource reservation ${reservationId} is waiting for fair admission`);
     this.name = "ResourceAdmissionPendingError";
+  }
+}
+
+/** An authenticated lease no longer owns the ephemeral fair-admission slot.
+ * Re-derive through prepare; this does not authorize activation or extend TTL. */
+export class ResourceCandidateStaleError extends Error {
+  constructor(readonly reservationId: string,
+    readonly reason: "expired" | "dequeued" | "replaced" | "unavailable") {
+    super(`Resource activation candidate is ${reason}`);
+    this.name = "ResourceCandidateStaleError";
   }
 }
 

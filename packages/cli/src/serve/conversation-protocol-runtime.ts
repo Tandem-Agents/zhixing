@@ -48,6 +48,7 @@ import {
   conversationRecoveryPage,
   conversationRecoveryPending,
   ConversationAssignmentCancelledError,
+  ConversationPendingCancellationError,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
   type AssignmentSubmissionIdentity,
@@ -61,7 +62,7 @@ import {
 import {
   ConversationAssignmentAuthority,
 } from "@zhixing/owner-kernel/conversation-assignment-authority";
-import { assignmentReservationId } from "@zhixing/owner-kernel/resource-governor";
+import { assignmentReservationId, ResourceCandidateStaleError } from "@zhixing/owner-kernel/resource-governor";
 import type {
   DeferredIntentConversationAuthority,
   DeferredIntentConversationTransaction,
@@ -171,6 +172,7 @@ export interface ConversationProtocolRuntimeOptions {
     notice: PublishResultNotice,
   ) => void | Promise<void>;
   readonly onFirstPartyFrame?: (frame: StreamFrame, readDisplay?: () => Promise<StreamDataFramePayload>) => void | Promise<void>;
+  readonly onFirstPartyAssignment?: (source: { conversationId: string; runId: string; assignmentId: string }) => void;
   readonly onFirstPartyStreamEnd?: (source: { readonly conversationId: string; readonly runId: string; readonly assignmentId: string; readonly finalSeq: number }) => void;
   readonly createFirstPartyFinality?: (
     input: Omit<FirstPartyFinalitySessionOptions, "sources">,
@@ -345,6 +347,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     | ((notice: PublishResultNotice) => void | Promise<void>)
     | undefined;
   readonly #onFirstPartyFrame: ConversationProtocolRuntimeOptions['onFirstPartyFrame'];
+  readonly #onFirstPartyAssignment: ConversationProtocolRuntimeOptions['onFirstPartyAssignment'];
   #createFirstPartyFinality:
     | ConversationProtocolRuntimeOptions["createFirstPartyFinality"]
     | undefined;
@@ -361,6 +364,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   // 控制准入基线（检查点恢复或整份归约）只做一次：首发与恢复后的后台预备共享进行中的任务。
   #controlBasis: Promise<void> | undefined;
+  #pendingCancellationAfter: string | undefined;
   #recoveryRunning: Promise<number> | undefined;
   #readinessRecovery: Promise<number> | undefined;
   #recoveryStopped = false;
@@ -439,6 +443,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#onFinal = options.onFinal;
     this.#onPublishResult = options.onPublishResult;
     this.#onFirstPartyFrame = options.onFirstPartyFrame;
+    this.#onFirstPartyAssignment = options.onFirstPartyAssignment;
     this.#onFirstPartyStreamEnd = options.onFirstPartyStreamEnd;
     this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
@@ -918,13 +923,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     const applyLocal = (runId: string) => {
       let result = localResults.get(runId);
       if (!result) {
-        result = this.#requiredManager().applyDurableCancellation(input.conversationId, runId, input.reason);
-        // 会话运行时之外，实际执行在按 assignment 装配的本机运行时里；取消已耐久，
-        // 立即止损，不等执行器取消链完成。停止证明与结算仍走原执行器取消。
-        // 远端 assignment 在此为空操作，仍只经执行器取消链。
-        for (const [assignmentId, activeRunId] of this.#activeAssignmentClaims) {
-          if (activeRunId === runId) this.#executorDispatch.stopLocalExecution(assignmentId);
-        }
+        result = this.#stopAppliedCancellation(input.conversationId, runId, input.reason);
         localResults.set(runId, result);
       }
       return result;
@@ -946,14 +945,83 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
       }),
     };
-    return retryControlAdmission(
+    try { return await retryControlAdmission(
       () => this.#terminalOperations.run(() => {
         // The request can expire while queued behind a different owner operation.
         if (currentMaintenanceAbortSignal().aborted) throw new StorageMaintenanceCancelledError();
         return this.#withRecoveryClaim(input.conversationId, () => this.#cancelInternal(input, control, applyLocal));
       }),
       async () => {},
-    );
+    ); } catch (error) {
+      if (maintenanceRetryDelayMs(error) === undefined) throw error;
+      // This does not extend the foreground retry window or claim a stop.
+      // Only an exact durable receipt may return "received"; the existing
+      // recovery owner discovers and applies that obligation after restart.
+      const receipt = await this.#authority.controlAdmission.lookup({ source, envelope: control.envelope });
+      if (receipt.kind !== "received-pending") throw error;
+      this.#markRecovery(input.conversationId);
+      return { dispositions: [], receivedPending: true };
+    }
+  }
+
+  #stopAppliedCancellation(conversationId: string, runId: string, reason?: DurableConversationCancelInput["reason"]) {
+    const result = this.#requiredManager().applyDurableCancellation(conversationId, runId, reason);
+    for (const [assignmentId, activeRunId] of this.#activeAssignmentClaims) {
+      if (activeRunId === runId) this.#executorDispatch.stopLocalExecution(assignmentId);
+    }
+    return result;
+  }
+
+  async #recoverReceivedCancellations(): Promise<number> {
+    const page = await this.#authority.controlAdmission.pendingCancellations(this.#pendingCancellationAfter);
+    this.#pendingCancellationAfter = page.after;
+    return this.#applyReceivedCancellations(page.envelopes);
+  }
+
+  async #settleTargetCancellations(conversationId: string, runId: string): Promise<boolean> {
+    const target = { conversationId, runId };
+    const page = await this.#authority.controlAdmission.pendingCancellations(undefined, target);
+    if (page.envelopes.length === 0) return true;
+    await this.#applyReceivedCancellations(page.envelopes);
+    // One bounded page per turn. Remaining or failed requests keep only this
+    // target deferred; a later pass continues without scanning other targets.
+    const remaining = await this.#authority.controlAdmission.pendingCancellations(undefined, target);
+    if (remaining.envelopes.length === 0) return true;
+    this.#markRecovery(conversationId);
+    return false;
+  }
+
+  async #applyReceivedCancellations(envelopes: readonly import("@zhixing/owner-kernel/control-admission").ConversationControlEnvelope[]): Promise<number> {
+    let count = 0;
+    for (const envelope of envelopes) {
+      const body = envelope.body;
+      if ((body.t !== "cancel" && body.t !== "cancel-batch") || !this.#acceptsConversationId(body.conversationId)) continue;
+      if (this.#recoveryStopped) break;
+      try { await this.#terminalOperations.run(() => this.#withRecoveryClaim(body.conversationId, async () => {
+        const journal = this.#journal(body.conversationId);
+        const outcome = await this.#applyAuthorityControl(body.conversationId, journal, {
+          admission: this.#authority.controlAdmission, envelope, source: { principal: envelope.principal },
+        }, true);
+        if (outcome.kind === "rejected" || outcome.result.status !== "ok") return;
+        const applied = outcome.result.body;
+        const runs = applied.t === "cancel" && body.t === "cancel"
+          ? [{ runId: body.runId, runState: applied.runState }]
+          : applied.t === "cancel-batch" ? applied.runs : [];
+        for (const run of runs) {
+          this.#stopAppliedCancellation(body.conversationId, run.runId, { kind: "external", origin: "durable-control-recovery" });
+          this.#clearRunClaims(run.runId);
+        }
+        this.#markRecovery(body.conversationId); this.#kickDelivery();
+        if (runs.some(run => run.runState === "cancel-requested")) await this.#continueAppliedCancellations(journal);
+        count++;
+      })); } catch (error) {
+        // Preserve the exact durable obligation and report the actual failure;
+        // one unavailable conversation must not suppress the rest of this page.
+        this.#markRecovery(body.conversationId);
+        this.#observeFailure(error, { phase: "recovery", conversationId: body.conversationId });
+      }
+    }
+    return count;
   }
 
   async #cancelInternal(
@@ -985,7 +1053,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#markRecovery(input.conversationId);
     this.#kickDelivery();
     if (outcome.result.body.runState === "cancel-requested") {
-      await this.#drivePendingCancellations(journal);
+      await this.#continueAppliedCancellations(journal);
     }
     return {
       dispositions: [
@@ -1043,7 +1111,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#markRecovery(input.conversationId);
     this.#kickDelivery();
     if (outcome.result.body.runs.some((run) => run.runState === "cancel-requested")) {
-      await this.#drivePendingCancellations(journal);
+      await this.#continueAppliedCancellations(journal);
     }
     return { dispositions };
   }
@@ -1275,6 +1343,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let runFailed = false;
     let runError: unknown;
     try {
+      if (!await this.#settleTargetCancellations(input.conversationId, runId)) {
+        throw new ConversationPendingCancellationError(runId);
+      }
+      if (["cancel-requested", "cancelled"].includes(await journal.runState(runId) ?? "")) {
+        throw new ConversationAssignmentCancelledError(runId, assignmentId);
+      }
       const authority = await journal.authorityState();
       if (authority.deleted) {
         throw new Error("Conversation has been durably deleted");
@@ -1315,8 +1389,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         origin,
         resourceContext,
       );
-      const resourceLease: AssignmentResourceLease<"conversation"> =
-        await this.#authority.resources.prepareAssignmentRoot<"conversation">({
+      // Resolve unrelated context before starting the short-lived fair slot.
+      const controlContext = worksceneTaskContext(await WorksceneContinuationApplication.tasks(
+        (id, query) => this.worksceneContinuationSources(id, query), input.conversationId));
+      const prepareResourceLease = () => this.#authority.resources.prepareAssignmentRoot<"conversation">({
         assignmentId,
         executorId: targetExecutorId,
         workload: { kind: "run", id: runId, attempt },
@@ -1327,7 +1403,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         },
         budget: preparedAuthority.policy.budget,
         }, origin, resourceContext);
-      const unsigned = this.#issuer.issue({
+      const issueEnvelope = (resourceLease: AssignmentResourceLease<"conversation">) => this.#issuer.issue({
         runId,
         assignmentId,
         executorId: targetExecutorId,
@@ -1338,7 +1414,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         attempt,
         resourceLease,
         ingress: executionIngress,
-        controlContext: worksceneTaskContext(await WorksceneContinuationApplication.tasks((id, query) => this.worksceneContinuationSources(id, query), input.conversationId)),
+        controlContext,
         contentAssets: [...appliedAdmission.attachments],
         windowInput: {
           t: "full",
@@ -1348,6 +1424,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         policy: preparedAuthority.policy,
         environment: preparedAuthority.environment,
       });
+      let unsigned = issueEnvelope(await prepareResourceLease());
       await executorPlan.prepare({
         assignmentId,
         manifest: unsigned.manifest,
@@ -1355,8 +1432,28 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ? { adaptRuntime: input.adaptLocalRuntime }
           : {}),
       });
-      const dispatch = await journal.assign(unsigned);
+      let dispatch: Awaited<ReturnType<typeof journal.assign>>;
+      for (;;) {
+        try { dispatch = await journal.assign(unsigned); break; }
+        catch (error) {
+          if (!(error instanceof ResourceCandidateStaleError)) throw error;
+          if (["cancel-requested", "cancelled"].includes(await journal.runState(runId) ?? "")) {
+            throw new ConversationAssignmentCancelledError(runId, assignmentId);
+          }
+          // Runtime/environment preparation may outlive the candidate. Keep
+          // that prepared manifest, but re-enter the same fair queue and the
+          // original admission deadline before issuing another activation.
+          const next = issueEnvelope(await prepareResourceLease());
+          if (canonicalize(next.manifest) !== canonicalize(unsigned.manifest)) {
+            throw new TypeError("Renewed resource candidate changed the prepared execution manifest");
+          }
+          unsigned = next;
+        }
+      }
       executorPlan.markPromoted();
+      if (executionIngress.kind === "first-party") {
+        this.#onFirstPartyAssignment?.({ conversationId: input.conversationId, runId, assignmentId });
+      }
       this.#rememberAssignment(dispatch.envelope, dispatch.activation);
       executorPlan.bindRuntime(preparedAuthority.binding);
       const submissionContext = assignmentContext(dispatch.envelope);
@@ -1818,6 +1915,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     } catch (error) {
       runFailed = true;
       runError = error;
+      if (error instanceof ConversationPendingCancellationError) {
+        this.#markRecovery(input.conversationId);
+        throw error;
+      }
       const cancelledPreparation = (error instanceof ConversationAssignmentCancelledError &&
         error.runId === runId && error.assignmentId === assignmentId) ||
         ((error instanceof AssignmentStartCancelledError || (error instanceof DataPlaneAssignmentInactiveError &&
@@ -2265,7 +2366,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#recoveryDiscoveryAfter = page.after;
     }
     const queue = [...this.#recoveryConversations.entries()].slice(0, 32);
-    let recovered = await this.#executorDispatch.reconcileLocalReceipts();
+    // Received control obligations precede dispatch of queued inputs. The
+    // owner still commits applied before issuing any local abort signal.
+    let recovered = await this.#recoverReceivedCancellations();
+    recovered += await this.#executorDispatch.reconcileLocalReceipts();
     recovered += await this.#authority.resourceRecovery.reclaimExpired();
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
@@ -2294,7 +2398,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         count += await dispatcher.recoverCancellations();
         if (this.#recoveryStopped) return count;
         if (!this.#shutdownDraining) {
-          count += await dispatcher.dispatchPending().then((items) => items.length);
+          let ready = true;
+          for (const pending of await journal.pendingDispatches()) {
+            if (!await this.#settleTargetCancellations(conversationId, pending.envelope.work.runId)) ready = false;
+          }
+          if (ready) count += await dispatcher.dispatchPending().then((items) => items.length);
           if (this.#recoveryStopped) return count;
         }
         count += await dispatcher.recoverAssignments();
@@ -2808,6 +2916,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     });
   }
 
+  async #continueAppliedCancellations(journal: ConversationRunJournal): Promise<void> {
+    try { await this.#drivePendingCancellations(journal); }
+    catch (error) {
+      if (maintenanceRetryDelayMs(error) === undefined) throw error;
+      // Applied is already durable and local stop has been issued. Settlement
+      // pressure belongs to its retained recovery obligation, not a new user
+      // cancellation or an extension of the foreground admission deadline.
+      this.#markRecovery(journal.conversationId);
+    }
+  }
+
   #capturedAssignmentRouting() {
     // A dispatcher owns its bindings across awaits. Recovery claims prevent a newly
     // issued binding from being retired before its first lookup in this operation.
@@ -2896,6 +3015,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   async #mayScheduleInput(conversationId: string, runId: string): Promise<boolean> {
+    if (!await this.#settleTargetCancellations(conversationId, runId)) return false;
     const state = await this.#journal(conversationId).assignmentSchedulingState(runId);
     if (state.ready) return true;
     // 正常执行中的后续输入仍交给原内存队列；无人执行的待确认项只留耐久队列。

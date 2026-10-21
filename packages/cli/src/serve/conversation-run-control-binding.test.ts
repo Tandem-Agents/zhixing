@@ -17,6 +17,16 @@ const caller = Object.freeze({
 });
 
 describe("createAnchorConversationRunControlPort", () => {
+  it("preserves the received phase without inventing stopped runs", async () => {
+    const conversations = {
+      usesDurableTurnProtocol: () => true,
+      cancelDurableRuns: vi.fn(async () => ({ dispositions: [], receivedPending: true })),
+      durableControlPrincipal: (input: object) => ({ ...input, deviceId: "device-1" }),
+    } as unknown as ConversationManager;
+    await expect(createAnchorConversationRunControlPort({ conversations }).cancel({
+      conversationId: "conversation-1", operationId: "cancel-1", runId: "run-1", caller, occurredAt: 123,
+    })).resolves.toEqual({ matchedDurableRuns: 0, abortedInFlight: false, cancelledPending: 0, receivedPending: true });
+  });
   it("maps one durable cancellation and principal without owning the decision", async () => {
     const cancelDurableRuns = vi.fn(async () => ({
       dispositions: [

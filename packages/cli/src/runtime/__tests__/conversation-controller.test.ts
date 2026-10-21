@@ -646,6 +646,25 @@ describe('assignment display completion is independent from business completion'
   });
   const projection = (runId: string, seq: number, payload: unknown) => ({ version: 1,
     source: { conversationId: 'conv-1', runId, assignmentId: 'assignment-1', streamEpoch: 1, sourceSeq: seq }, payload });
+  it('keeps verified process epoch advancement separate from display lifecycle replacement', () => {
+    const f = makeFakes(), onProcess = vi.fn(), onYield = vi.fn();
+    const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, onProcess, onYield }, initial);
+    const emit = (seq: number, epoch: number, payload: unknown) => {
+      const value = projection('epoch-run', seq, payload);
+      f.emit.process({ ...value, source: { ...value.source, streamEpoch: epoch } });
+    };
+    try {
+      emit(1, 1, { kind: 'yield', delta: { type: 'text_delta', text: 'prefix' } });
+      emit(1, 2, { kind: 'yield', delta: { type: 'text_delta', text: 'prefix' } });
+      emit(4, 2, { kind: 'yield', delta: { type: 'text_delta', text: 'tail' } });
+      emit(5, 1, { kind: 'yield', delta: { type: 'text_delta', text: 'stale' } });
+      emit(4, 2, { kind: 'closed' });
+      emit(6, 3, { kind: 'yield', delta: { type: 'text_delta', text: 'after close' } });
+      expect(onProcess.mock.calls.map(call => call[0].payload.kind)).toEqual(['yield', 'yield', 'closed']);
+      expect(onYield).toHaveBeenCalledTimes(2);
+    } finally { controller.dispose(); }
+  });
   it.each(['closed', 'gap'])('accepts a same-sequence %s once after the last yield', kind => {
     const f = makeFakes(), onProcess = vi.fn(), onYield = vi.fn(), onObservedTurnComplete = vi.fn();
     const controller = new ConversationController({ conversation: f.conversation as unknown as RpcConversationFacade,
@@ -932,7 +951,7 @@ describe("ConversationController", () => {
   it.each(["conv-1", "ws:review:primary"])("stops an incoming Run from owner facts without local waiter or stream: %s", async (conversationId) => {
     const f = makeFakes();
     const controller = new ConversationController({ conversation: f.conversation as never, workscene: f.workscene as never, onYield: vi.fn() }, { ...initial, conversationId });
-    f.conversation.history.mockResolvedValue({ runs: [], hasMore: false, inputsOutsideHistory: [{ runId: "peer-run", state: "running", message: { inputIdentity: { id: "m", source: { kind: "conversation", conversationId: "a" } } } }] } as never);
+    f.conversation.controlTargets.mockResolvedValue({ targets: [{ runId: "peer-run", state: "running" }] });
     await controller.abort();
     expect(f.conversation.abort).toHaveBeenCalledWith(conversationId, expect.stringMatching(/^cancel:/), "peer-run");
     expect(f.workscene.stopTask).not.toHaveBeenCalled();

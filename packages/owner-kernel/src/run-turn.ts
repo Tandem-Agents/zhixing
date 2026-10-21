@@ -135,6 +135,8 @@ export interface DurableConversationCancellationDisposition {
 
 export interface DurableConversationCancellationResult {
   readonly dispositions: readonly DurableConversationCancellationDisposition[];
+  /** Exact control receipt is durable, but its owner decision is still owed. */
+  readonly receivedPending?: true;
 }
 
 /** Read-only durable ownership of a stable ingress identity. */

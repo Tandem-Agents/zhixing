@@ -838,6 +838,7 @@ export class LocalConversationOwnerAssembly {
         options.onRunStatus?.(notice);
       },
       onFirstPartyFrame: (frame, readDisplay) => processProjection.accept(frame, readDisplay),
+      onFirstPartyAssignment: source => processProjection.assignmentCommitted(source),
       onFirstPartyStreamEnd: source => processProjection.streamEnded(source),
       onFinal: async (frame) => {
         await verifyLocalConversationFinal(protocol, frame);

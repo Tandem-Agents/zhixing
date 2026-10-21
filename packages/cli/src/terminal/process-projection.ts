@@ -28,6 +28,7 @@ export class TerminalProcessProjection {
   #phase = ''; #notice?: string; #activityNotice?: string; #thinking = ''; #thinkingActive = false; #thinkingSealed = true;
   #thinkingId?: string; #thinkingOffset = 0;
   readonly #seq = new Map<string, number>();
+  #assignmentSource?: { assignmentId: string; epoch: number };
   readonly #tools = new Map<string, Tool>(); readonly #children = new Map<string, Child>();
   readonly #endedParents = new Set<string>(); readonly #sealedChildren = new Set<string>();
   readonly #summarizedChildren = new Set<string>();
@@ -42,6 +43,7 @@ export class TerminalProcessProjection {
     this.#startedAt = performance.now(); this.#durationMs = undefined;
     this.#scope = { ...scope }; this.#closed = false; this.#confirmed = confirmed; this.#paused = false; this.#block = 0;
     this.#phase = '正在准备'; this.#notice = undefined; this.#activityNotice = undefined; this.#thinking = ''; this.#thinkingActive = false; this.#thinkingSealed = true; this.#published = undefined;
+    this.#assignmentSource = undefined;
     this.#seq.clear(); this.#tools.clear(); this.#children.clear(); this.#endedParents.clear(); this.#sealedChildren.clear(); this.#summarizedChildren.clear(); this.#batch = []; this.#usage = {}; this.#publish();
   }
   #matches(source: Pick<SessionProcessSource, 'conversationId' | 'turnId' | 'runId'>, generation: number): boolean {
@@ -55,7 +57,13 @@ export class TerminalProcessProjection {
     if (this.#scope?.source !== 'assignment') return;
     try { validateSessionProcessProjection(value); } catch { this.pause('过程展示超出容量或不可读取'); return; }
     if (!this.#matches(value.source, generation)) return;
-    const key = JSON.stringify([value.source.assignmentId, value.source.streamEpoch]);
+    const source = value.source, previousSource = this.#assignmentSource;
+    if (previousSource && previousSource.assignmentId !== source.assignmentId) {
+      this.pause('过程来源已换代，请刷新正文。'); return;
+    }
+    if (previousSource && source.streamEpoch < previousSource.epoch) return;
+    this.#assignmentSource = { assignmentId: source.assignmentId, epoch: source.streamEpoch };
+    const key = JSON.stringify([source.assignmentId]);
     if (value.payload.kind === 'closed' || value.payload.kind === 'gap') {
       // These cite an existing canonical watermark, not another data frame.
       const previous = this.#seq.get(key);

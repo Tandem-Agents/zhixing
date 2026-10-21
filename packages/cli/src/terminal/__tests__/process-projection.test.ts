@@ -17,6 +17,17 @@ const child = { parentToolCallId: 'task', childLineage: 'main/sub-child', childA
 const request = (inputTokens: number, extra = {}) => ({ event: 'llm:request_end' as const,
   payload: { model: 'model', duration: 1, usage: { inputTokens, outputTokens: 2, ...extra }, stopReason: 'end_turn' as const } });
 describe('terminal process fold', () => {
+  it('deduplicates display sequence across epochs and accepts closure on a newer epoch', () => {
+    const s = setup('assignment');
+    const source = { conversationId: 'c', runId: 'r', assignmentId: 'a', streamEpoch: 1, sourceSeq: 1 };
+    const payload = { kind: 'yield' as const, delta: { type: 'thinking_delta' as const, thinking: 'prefix' } };
+    s.p.accept({ version: 1, source, payload }, 1);
+    s.p.accept({ version: 1, source: { ...source, streamEpoch: 2 }, payload }, 1);
+    expect(s.p.snapshot().thinking?.text).toBe('prefix');
+    s.p.accept({ version: 1, source: { ...source, streamEpoch: 3 }, payload: { kind: 'closed' } }, 1);
+    expect(s.p.closed).toBe(true);
+    expect(s.gap).not.toHaveBeenCalled();
+  });
   it.each([true, false])('retires stopping only after business completion, regardless of stream close order (%s)', confirmedFirst => {
     const s = setup('assignment');
     const source = { conversationId: 'c', runId: 'r', assignmentId: 'a', streamEpoch: 1, sourceSeq: 1, lineage: 'main' };

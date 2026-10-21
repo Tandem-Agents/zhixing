@@ -1709,11 +1709,13 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.processRuns.set(runId, process);
     }
     if (process.closed) return;
-    if (process.source.assignmentId !== source.assignmentId || process.source.streamEpoch !== source.streamEpoch) {
+    if (process.source.assignmentId !== source.assignmentId) {
       process.closed = true;
       this.opts.onProcess?.({ ...value, payload: { kind: 'gap', reason: '过程来源已换代，请刷新正文。' } });
       this.wakeRecovery(); return;
     }
+    if (source.streamEpoch < process.source.streamEpoch) return;
+    process.source = source;
     // closed intentionally reuses the last data sequence. It has its own
     // idempotence bit and must not be swallowed by ordinary data deduplication.
     if (payload.kind === 'closed' || payload.kind === 'gap') {

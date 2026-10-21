@@ -728,6 +728,7 @@ export async function createConversationServices(
       );
     },
     onFirstPartyFrame: (frame, readDisplay) => processProjection.accept(frame, readDisplay),
+    onFirstPartyAssignment: source => processProjection.assignmentCommitted(source),
     onFirstPartyStreamEnd: (source) => processProjection.streamEnded(source),
 
     projectLifecycle: async (input) => {
