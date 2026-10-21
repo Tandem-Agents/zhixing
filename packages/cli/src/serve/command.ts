@@ -16,6 +16,7 @@ import { handoffLogging } from "../logging/handoff.js";
 import { beginLogPhase, observeLogPhase } from "@zhixing/core/logging";
 import { RUNTIME_LOG_SOURCE } from "../logging/runtime-source.js";
 import { AUTHORITY_LOG_SOURCE } from "@zhixing/core/authority";
+import { currentMaintenanceAbortSignal } from '@zhixing/core/resources';
 import { createEventBus, type AgentEventMap, type TurnOrigin } from "@zhixing/core";
 import { createMcpManagementAdapter } from "../runtime/mcp-management-adapter.js";
 import { createMcpConnectionAdapter } from "../runtime/mcp-connection-adapter.js";
@@ -621,6 +622,7 @@ async function runServerProcess(
   // 执行体的持久层,与 REPL 同 scope(同 home 同目录)。task_list cache 清理
   // 经 lazy 闭包接 builtinExtraTools(声明在后,运行期调用时已就位)。
   const conversationDirectory = conversationStorage.directory;
+  await observeLogPhase(startupRecords, 'prepare-conversation-directory', () => conversationStorage.maintenance.prepareDirectory(currentMaintenanceAbortSignal()));
   const conversationIdentityLifecycle =
     createConversationIdentityLifecycleApplication({
       exists: (conversationId) => conversationDirectory.exists(conversationId),

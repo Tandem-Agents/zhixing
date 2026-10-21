@@ -3,9 +3,18 @@ import { projectHistoryTail } from "./conversation-history-projection.js";
 
 /** 排序与归档过滤仍由 storage 决定；展示方按返回顺序逐项读取。 */
 export async function listReadOnlyConversations(
-  storage: Pick<ConversationDirectoryStorage, "list">,
+  storage: Pick<ConversationDirectoryStorage, "list"> & Partial<Pick<ConversationDirectoryStorage, 'listPage'>>,
   maxConversations: number,
 ) {
+  if (storage.listPage) {
+    const records: Awaited<ReturnType<ConversationDirectoryStorage['list']>> = [];
+    let after: import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined;
+    while (records.length < maxConversations) {
+      const page = await storage.listPage({ limit: Math.min(100, maxConversations - records.length), after });
+      records.push(...page.records); if (!page.next) break; after = page.next;
+    }
+    return records;
+  }
   return (await storage.list()).slice(0, maxConversations);
 }
 

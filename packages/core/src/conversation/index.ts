@@ -17,7 +17,7 @@ export {
 } from "./types.js";
 
 export { ConversationRepository, conversationsDir } from "./repository.js";
-export { readConversationDirectoryPage } from './directory-reader.js';
+export { readConversationDirectoryPage, readConversationDirectory, prepareConversationDirectory } from './directory-reader.js';
 
 export {
   LOCAL_CONVERSATION_PREFIX,

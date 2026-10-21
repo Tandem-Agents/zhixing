@@ -836,7 +836,7 @@ class TerminalApplication {
   async #readOnlyStorage() {
     const { createReadOnlyConversationStorage } = await import('../serve/conversation-storage-infrastructure.js');
     this.#abort.signal.throwIfAborted();
-    return createReadOnlyConversationStorage(this.home);
+    return createReadOnlyConversationStorage(this.home, this.#abort.signal);
   }
 
   async #readOnly(): Promise<void> {
@@ -844,6 +844,7 @@ class TerminalApplication {
     try {
       if (this.#mainView.kind !== 'history') this.#historyReturn = this.#mainView;
       const storage = await this.#readOnlyStorage();
+      await this.#publish({ ...this.#mainView, message: '正在准备本机对话目录…' });
       const pages: Array<import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined> = [undefined];
       for (;;) {
         const result = await storage.listPage!({ limit: 24, after: pages.at(-1) });
@@ -867,7 +868,7 @@ class TerminalApplication {
         await this.#outputProjection.drain();
         await this.#display.reset(); this.#displayStart = undefined;
         this.#readOnlyNeedsReset = false;
-        this.#mainView = { kind: 'history', title: `${entry.name} · 只读`, connected: false, message: '正在读取本机历史…',
+        this.#mainView = { kind: 'history', title: `${entry.name} · 只读`, connected: false, message: this.#display.first === this.#display.last && this.#history?.hasMore ? '正在读取本机历史…' : undefined,
           choices: [{ id: 'retry', label: '重试连接' }, { id: 'history-open', label: '选择其他历史' },
             { id: 'history-close', label: '返回连接页 · Esc' }, { id: 'exit', label: '退出终端' }] };
         if (this.#display.first === this.#display.last) this.#loadOfflineHistory(); else await this.#displayPage(); return;
@@ -965,7 +966,11 @@ class TerminalApplication {
         }
       }
     }
-    if (current()) { await this.#displayPage(); await this.#publishHistoryView(); }
+    if (current()) {
+      this.#mainView = { ...this.#mainView, busy: false,
+        message: this.#display.first === this.#display.last ? '暂无已保存的内容。' : undefined };
+      await this.#displayPage(); await this.#publishHistoryView();
+    }
   }
 
   async #onlineHistoryPage(history: TerminalHistoryState): Promise<void> {

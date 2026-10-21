@@ -5,9 +5,10 @@ import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/
 import {
   ConversationRepository,
   readConversationDirectoryPage,
+  readConversationDirectory,
+  prepareConversationDirectory,
   conversationsDir,
   parseConversationId,
-  type Conversation,
   type ConversationScope,
   type SegmentMeta,
   type TaskListState,
@@ -46,6 +47,7 @@ export interface ConversationStorageInfrastructure {
   readonly taskLists: Pick<TaskListStore, "load">;
   readonly naming: NamerConversationRepo;
   readonly maintenance: Readonly<{
+    prepareDirectory(signal?: AbortSignal): Promise<void>;
     runRetentionSweep(): Promise<RetentionSweepReport>;
     isConversationDataAlive(directoryName: string): Promise<boolean>;
   }>;
@@ -169,6 +171,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   });
 
   const maintenance = Object.freeze({
+    prepareDirectory: (signal?: AbortSignal) => prepareConversationDirectory(conversationsDir({ kind: 'user' }, zhixingHome), signal),
     async runRetentionSweep() {
       return runRetentionSweep({ roots: await collectConversationRoots(zhixingHome) });
     },
@@ -204,7 +207,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
  * Conversation history projection consumed by the Surface and never creates a
  * writable repository or transcript store.
  */
-export function createReadOnlyConversationStorage(zhixingHome: string): Pick<
+export function createReadOnlyConversationStorage(zhixingHome: string, signal?: AbortSignal): Pick<
   ConversationDirectoryStorage,
   "list" | "listPage" | "readHistory"
 > & { openBodyReader(conversationId: string): TranscriptByteReader } {
@@ -217,36 +220,11 @@ export function createReadOnlyConversationStorage(zhixingHome: string): Pick<
       return new TranscriptByteReader(directory, path.join(zhixingHome, 'cache', 'transcript-read-index'));
     },
     async listPage(input: import('@zhixing/core/conversation/application').ConversationDirectoryPageRequest) {
-      const page = await readConversationDirectoryPage(root, input);
-      return { records: page.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: item.createdAt, lastActiveAt: item.lastActiveAt })), next: page.next };
+      const page = await readConversationDirectoryPage(root, input, undefined, signal);
+      return { records: page.records.map(item => ({ conversationId: item.id, name: item.name, createdAt: typeof item.createdAt === 'string' ? item.createdAt : item.lastActiveAt, lastActiveAt: item.lastActiveAt })), next: page.next };
     },
     async list() {
-      let entries: string[];
-      try {
-        entries = await fs.readdir(root);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-        throw error;
-      }
-      const conversations: Conversation[] = [];
-      for (const entry of entries) {
-        const meta = await readJson<Conversation>(path.join(root, entry, "meta.json"));
-        if (!meta || meta.archived) continue;
-        if (
-          typeof meta.id !== "string" ||
-          typeof meta.name !== "string" ||
-          typeof meta.lastActiveAt !== "string"
-        ) {
-          continue;
-        }
-        conversations.push(meta);
-      }
-      return conversations
-        .sort(
-          (a, b) =>
-            new Date(b.lastActiveAt).getTime() -
-            new Date(a.lastActiveAt).getTime(),
-        )
+      return (await readConversationDirectory(root))
         .map((conversation) => Object.freeze({
           conversationId: conversation.id,
           name: conversation.name,
@@ -298,12 +276,4 @@ async function collectConversationRoots(zhixingHome: string): Promise<string[]> 
     // A missing workscene root is a valid empty storage domain.
   }
   return roots;
-}
-
-async function readJson<T>(file: string): Promise<T | null> {
-  try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as T;
-  } catch {
-    return null;
-  }
 }

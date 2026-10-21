@@ -55,8 +55,16 @@ describe("read-only conversation query", () => {
     await fs.writeFile(file, JSON.stringify(metadata));
     const storage = createReadOnlyConversationStorage(home);
     expect((await listReadOnlyConversations(storage, 1))[0]?.conversationId).toBe("legacy");
+    expect((await listReadOnlyConversations(storage, 1))[0]?.createdAt).toBe('2026-01-02T00:00:00.000Z');
     expect((await queryReadOnlyConversationHistory(storage, "legacy", 1)).history.entries[0]?.userText).toBe("仍可浏览");
   });
+});
+
+it('uses the finite directory port for the text-mode recent list', async () => {
+  await writeConversation('recent', '最近', '2026-01-02T00:00:00.000Z', []);
+  const storage = createReadOnlyConversationStorage(home);
+  const pageOnly = { list: async () => { throw Error('All-history scan is forbidden for a recent list'); }, listPage: storage.listPage };
+  expect((await listReadOnlyConversations(pageOnly, 1)).map(item => item.conversationId)).toEqual(['recent']);
 });
 
 it("只读查询继续消费 owner 的归档过滤与 limit/before 倒读页", async () => {

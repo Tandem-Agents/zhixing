@@ -63,7 +63,7 @@ describe("conversation storage infrastructure", () => {
   it.each(['ENOENT', 'EACCES'])('classifies a read-only history directory failure without pretending unreadable data is absent (%s)', async code => {
     const root = await createTempDir('readonly-history-error');
     const failure = Object.assign(new Error('synthetic directory failure'), { code });
-    vi.spyOn(fs, 'readdir').mockRejectedValueOnce(failure);
+    vi.spyOn(fs, 'stat').mockRejectedValueOnce(failure);
     const read = createReadOnlyConversationStorage(root).list();
     if (code === 'ENOENT') expect(await read).toEqual([]);
     else await expect(read).rejects.toBe(failure);

@@ -8,7 +8,7 @@ import { terminalSelectionActions } from '../selection.js';
 // In-flight history and IPC delivery are independently controlled at real awaits.
 const source = ts.createSourceFile('application.ts', readFileSync(new URL('../application.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 const owner = source.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === 'TerminalApplication')!;
-const methods = ['#publish', '#ownsPage', '#choosePage', '#publishHistoryView'].map(name => {
+const methods = ['#publish', '#ownsPage', '#choosePage', '#publishHistoryView', '#offlineHistoryPage'].map(name => {
   const method = owner.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(source) === name);
   if (!method) throw Error(`Missing production method ${name}`);
   return method.getText(source).replace(/#/gu, '');
@@ -54,4 +54,20 @@ describe('foreground terminal page ownership', () => {
     delivery.resolve(); await pending;
     expect(views).toHaveLength(1);
   });
+});
+
+it.each([false,true])('finishes the offline history loading notice after the real reader page settles (content=%s)', async content => {
+  const {target,views}=fixture();
+  const history={conversationId:'owned-history',hasMore:true,offline:true};target.history=history;
+  target.mainView={kind:'history',title:'local',connected:false,message:'正在读取本机历史…'};
+  target.display={first:0,last:0,append:async()=>{target.display.last++;}};
+  target.displayPage=async()=>{};
+  let calls=0;
+  target.offlineReader={history,reader:{page:async()=>content&&calls++===0
+    ?{hasMore:true,fragments:[{type:'text',role:'user',text:'owned saved input',length:17,offset:0,final:true,
+      runIndex:0,message:0,block:0,cursor:{shard:'owned',from:0,run:0,message:0,block:0,offset:0}}]}
+    :{hasMore:false,fragments:[]}}};
+  await target.offlineHistoryPage(history);
+  expect(views.at(-1).message).toBe(content?undefined:'暂无已保存的内容。');
+  expect(target.mainView.busy).toBe(false);
 });
