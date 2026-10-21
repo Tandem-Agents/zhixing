@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import type {
   ArtifactRef,
@@ -267,6 +268,7 @@ interface TemporaryReconciliationSession {
  */
 export class ArtifactLifecycleIndex {
   readonly #queue = new SerialTaskQueue();
+  readonly #queueScope = new AsyncLocalStorage<{ active: boolean }>();
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
   readonly #maintenanceResourceId: string;
@@ -307,6 +309,10 @@ export class ArtifactLifecycleIndex {
       // 内部投影必须拿到同一个 governor:它的 flush/compaction/rebuild 是本索引
       // 唯一的耐久写叶,不注入就等于这些写永远不进设备容量裁决。
       storageMaintenance: options.storageMaintenance,
+      withSourceLock: (operation, abort) => this.#queueScope.getStore()?.active
+        ? operation()
+        : this.#serialize(operation, abort),
+      runDetached: (operation) => this.#queueScope.exit(operation),
       // 只包数据读取本身；投影退休清理由投影 owner 在该 permit 释放后独立准入，
       // 否则 lifecycle-reconcile 与 projection-compaction 会形成容量嵌套。
       runReadStep: (inputIdentity, operation) =>
@@ -366,7 +372,17 @@ export class ArtifactLifecycleIndex {
    */
   async maintainIdle(): Promise<void> {
     await this.synchronize();
-    await this.#queue.run(() => this.#index.flush({ compact: true }));
+    await this.#serialize(() => this.#index.flush({ compact: true }));
+  }
+
+  #serialize<T>(operation: () => Promise<T>, abort?: AbortSignal): Promise<T> {
+    return this.#queue.run(() => {
+      const scope = { active: true };
+      return this.#queueScope.run(scope, async () => {
+        try { return await operation(); }
+        finally { scope.active = false; }
+      });
+    }, abort);
   }
 
   /** 进程停机时取消生命周期、内部投影及源日志拥有的维护义务。 */
@@ -379,21 +395,21 @@ export class ArtifactLifecycleIndex {
   async #runSynchronized<T>(operation: () => Promise<T>): Promise<T> {
     await this.synchronize();
     try {
-      return await this.#queue.run(operation);
+      return await this.#serialize(operation);
     } catch (error) {
       if (!(error instanceof DurableProjectionStorageError)) throw error;
-      await this.#queue.run(async () => {
+      await this.#serialize(async () => {
         this.#retentionRebuildRequired = true;
       });
       await this.synchronize();
-      return this.#queue.run(operation);
+      return this.#serialize(operation);
     }
   }
 
   async #synchronizeBounded(
     sourceHeads: LifecycleSourceHeads,
   ): Promise<boolean> {
-    return this.#queue.run(() => this.#synchronizeBoundedLocked(sourceHeads));
+    return this.#serialize(() => this.#synchronizeBoundedLocked(sourceHeads));
   }
 
   #runLifecycleStep<T>(
@@ -484,7 +500,7 @@ export class ArtifactLifecycleIndex {
   async retainedAtCurrentHead(
     candidates: readonly ArtifactRef[],
   ): Promise<ArtifactRetentionSnapshot> {
-    return this.#queue.run(async () => {
+    return this.#serialize(async () => {
       try {
         const sources = await this.#initialize();
         const checkpoints = this.#index.checkpoints();
@@ -516,7 +532,7 @@ export class ArtifactLifecycleIndex {
 
   async checkpointRetentionSnapshot(): Promise<ArtifactCheckpointRetentionSnapshot> {
     await this.synchronize();
-    return this.#queue.run(async () => ({
+    return this.#serialize(async () => ({
       sourceHeads: cloneSourceHeads(this.#index.checkpoints()),
     }));
   }
@@ -525,7 +541,7 @@ export class ArtifactLifecycleIndex {
     snapshot: ArtifactCheckpointRetentionSnapshot,
     candidates: readonly ArtifactRef[],
   ): Promise<ArtifactRetentionSnapshot> {
-    return this.#queue.run(async () => {
+    return this.#serialize(async () => {
       try {
         if (!sameSourceHeads(this.#index.checkpoints(), snapshot.sourceHeads)) {
           return { status: "deferred" };
@@ -2283,7 +2299,7 @@ export class ArtifactLifecycleIndex {
   async #commit(
     buffer: MutationBuffer,
     checkpoints: DurableProjectionCheckpoints,
-    compact = true,
+    compact = false,
     replayedSourceRecords = 0,
   ): Promise<void> {
     if (buffer.size === 0) return;

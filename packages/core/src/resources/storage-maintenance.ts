@@ -254,6 +254,11 @@ export class StorageMaintenanceTaskRunner {
 
   constructor(private readonly governor?: StorageMaintenanceGovernorPort) {}
 
+  hasPending(workKey: Digest): boolean {
+    const task = this.#tasks.get(workKey);
+    return task !== undefined && !task.settled;
+  }
+
   run<T>(
     request: StorageMaintenanceObligationRequest,
     waiterAbort: AbortSignal,

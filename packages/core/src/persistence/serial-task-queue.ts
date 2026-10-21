@@ -11,14 +11,30 @@ import { runHoldingMaintenanceExclusion } from "../resources/maintenance-context
 export class SerialTaskQueue {
   #tail: Promise<void> = Promise.resolve();
 
-  async run<T>(task: () => Promise<T>): Promise<T> {
+  async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const predecessor = this.#tail;
     let release!: () => void;
     this.#tail = new Promise<void>((resolve) => {
       release = resolve;
     });
 
-    await predecessor;
+    if (signal) {
+      let abort!: () => void;
+      try {
+        await Promise.race([predecessor, new Promise<never>((_, reject) => {
+          abort = () => reject(signal.reason ?? new DOMException("Queue wait cancelled", "AbortError"));
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        })]);
+        signal.throwIfAborted();
+      } catch (error) {
+        // Leave a cancelled placeholder behind the predecessor. Releasing it
+        // immediately would let a later operation overtake the current owner.
+        void predecessor.then(release, release);
+        throw error;
+      } finally { signal.removeEventListener("abort", abort); }
+    } else await predecessor;
     try {
       return await runHoldingMaintenanceExclusion(task);
     } finally {

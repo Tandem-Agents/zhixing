@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createDurableProjectionOverlay, type DurableProjectionReadContext } from "../durable-projection-index.js";
 import type { JsonValue } from "../../contracts/index.js";
 
@@ -13,6 +13,18 @@ function source(): DurableProjectionReadContext {
     },
   };
 }
+
+it('keeps candidate masks and duplicate-key order when batching physical reads', async () => {
+  const getMany = vi.fn(async (keys: readonly string[]) => keys.map(key => key === 'd' ? 'base-d' : undefined));
+  const overlay = createDurableProjectionOverlay({ ...source(), getMany },
+    new Map<string, JsonValue | undefined>([['a', 'candidate-a'], ['c', undefined], ['z', 'candidate-z']]));
+  expect(await overlay.getMany!(['a', 'c', 'd', 'd', 'missing', 'z']))
+    .toEqual(['candidate-a', undefined, 'base-d', 'base-d', undefined, 'candidate-z']);
+  expect(getMany).toHaveBeenCalledTimes(1);
+  expect(getMany).toHaveBeenCalledWith(['d', 'd', 'missing']);
+  await expect(overlay.getMany!(Array(257).fill('a'))).rejects.toThrow();
+  expect(getMany).toHaveBeenCalledTimes(1);
+});
 
 it("merges candidate inserts, replacements and deletions across finite pages without gaps", async () => {
   const overlay = createDurableProjectionOverlay(source(), new Map<string, JsonValue | undefined>([

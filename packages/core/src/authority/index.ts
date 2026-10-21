@@ -59,6 +59,7 @@ export {
   bindDurableProjectionMutations,
   createBoundDurableProjectionReadContext,
   createDurableProjectionOverlay,
+  readDurableProjectionKeys,
   durableProjectionDirectoryName,
   durableProjectionVersionDirectoryName,
   durableProjectionReadBudget,

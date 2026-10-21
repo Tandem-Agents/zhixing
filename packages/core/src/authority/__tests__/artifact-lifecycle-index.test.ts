@@ -131,6 +131,7 @@ async function replaceLifecycleProjectionValue(
   );
   index.publish(prepared, index.checkpoints());
   await index.flush();
+  await index.stopStorageMaintenance();
 }
 
 class MemoryTemporaryPresenceStore
@@ -998,15 +999,22 @@ describe("ArtifactLifecycleIndex", () => {
         new ArtifactLifecycleIndex({
           rootDir: derivedRoot,
           logs: [log],
+          ownsSourceLogs: false,
           artifacts,
           temporaryArtifacts,
           temporaryPresence: temporaryPresence(root),
           receiver,
         });
+      const withIndex = async <T>(operation: (index: ArtifactLifecycleIndex) => Promise<T>) => {
+        const index = createIndex();
+        try { return await operation(index); }
+        finally { await index.stopStorageMaintenance(); }
+      };
       const scopeIdentity = canonicalize(grant.scope);
       const lifecycle = createIndex();
       await lifecycle.recordTemporaryPresence(ref, scopeIdentity);
       await lifecycle.settleTemporaryPresence(ref, scopeIdentity, true);
+      await lifecycle.stopStorageMaintenance();
       const hex = ref.digest.slice("sha256:".length);
       const wrongDigest = `sha256:${"f".repeat(64)}` as Digest;
       const dueKey = `temporary/due/${grant.expiry}/${hex}`;
@@ -1017,7 +1025,7 @@ describe("ArtifactLifecycleIndex", () => {
         { key: dueKey, digest: wrongDigest },
       );
       await expect(
-        createIndex().temporaryBefore("2026-07-25T02:00:00.000Z", 8),
+        withIndex(index => index.temporaryBefore("2026-07-25T02:00:00.000Z", 8)),
       ).resolves.toEqual([{ ref, eligibleAt: grant.expiry }]);
 
       const adoptionKey = `adoption-pending/${hex}`;
@@ -1031,7 +1039,7 @@ describe("ArtifactLifecycleIndex", () => {
           adopted: true,
         },
       );
-      await expect(createIndex().synchronize()).resolves.toBeUndefined();
+      await expect(withIndex(index => index.synchronize())).resolves.toBeUndefined();
 
       await log.append([
         {
@@ -1051,7 +1059,7 @@ describe("ArtifactLifecycleIndex", () => {
         uploadKey,
         { key: uploadKey, grantId: otherGrant.grantId },
       );
-      await expect(createIndex().synchronize()).resolves.toBeUndefined();
+      await expect(withIndex(index => index.synchronize())).resolves.toBeUndefined();
       const cleanupKey = `temporary/cleanup/${hex}`;
       await replaceLifecycleProjectionValue(
         derivedRoot,
@@ -1059,7 +1067,7 @@ describe("ArtifactLifecycleIndex", () => {
         cleanupKey,
         { key: cleanupKey, digest: wrongDigest },
       );
-      await expect(createIndex().adoptedTemporary(8)).resolves.toEqual([ref]);
+      await expect(withIndex(index => index.adoptedTemporary(8))).resolves.toEqual([ref]);
 
       current = "2026-07-25T00:30:00.000Z";
       await log.append([
@@ -1068,10 +1076,10 @@ describe("ArtifactLifecycleIndex", () => {
           body: { t: "session-lifecycle", mutation: "delete" },
         },
       ]);
-      const [release] = await createIndex().releasedBefore(
+      const [release] = await withIndex(index => index.releasedBefore(
         "2026-07-25T02:00:00.000Z",
         8,
-      );
+      ));
       expect(release).toBeDefined();
       const releaseKey = `release/${release!.releasedAt}/${hex}/${
         release!.releaseId.slice("sha256:".length)
@@ -1083,7 +1091,7 @@ describe("ArtifactLifecycleIndex", () => {
         { key: releaseKey, digest: wrongDigest },
       );
       await expect(
-        createIndex().releasedBefore("2026-07-25T02:00:00.000Z", 8),
+        withIndex(index => index.releasedBefore("2026-07-25T02:00:00.000Z", 8)),
       ).resolves.toEqual([release]);
     },
     DURABLE_IO_TEST_TIMEOUT_MS,

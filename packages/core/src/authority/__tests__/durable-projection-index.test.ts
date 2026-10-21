@@ -1,5 +1,6 @@
 import { open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { CommitEnvelope, JsonValue } from "../../contracts/index.js";
@@ -7,7 +8,7 @@ import {
   createDefaultDeviceCapacityPolicy,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
-  StorageMaintenanceTaskRunner,
+  StorageMaintenanceTaskRunner, runHoldingMaintenanceExclusion, isHoldingMaintenanceExclusion,
   storageMaintenanceWorkKey,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
@@ -109,6 +110,7 @@ interface TestSegmentDescriptor {
 interface TestDirectoryPointer {
   readonly id: string;
   readonly height: number;
+  readonly count: number;
 }
 
 async function readProjectionManifest(rootDir: string): Promise<{
@@ -755,10 +757,11 @@ describe("FileDurableProjectionIndex", () => {
         }),
       });
       let compactionAdmissions = 0;
+      let interruptCompaction = false;
       const interrupted: StorageMaintenanceGovernorPort = {
         acquire: (request, abort) => {
           if (
-            request.kind === "projection-compaction" &&
+            interruptCompaction && request.kind === "projection-compaction" &&
             ++compactionAdmissions === 2
           ) {
             return Promise.resolve({
@@ -776,32 +779,40 @@ describe("FileDurableProjectionIndex", () => {
           rootDir: root,
           projectionId: "test.resume-compaction",
           reducerVersion: 1,
+          allowSegmentReclamation: false,
           overlayEntries: 2_048,
           overlayBytes: 4 * 1024 * 1024,
           storageMaintenance,
         });
       const index = createIndex(interrupted);
       await index.initialize({ source: checkpoint(0) });
-      const entries = Array.from({ length: 1_024 }, (_, value) => ({
+      const entries = Array.from({ length: 10_240 }, (_, value) => ({
         kind: "put" as const,
-        key: `key-${value.toString().padStart(4, "0")}`,
+        key: `key-${value.toString().padStart(5, "0")}`,
         value,
       }));
-      for (let page = 0; page < 4; page += 1) {
+      for (let page = 0; page < 20; page += 1) {
         const prepared = await index.prepare(
-          entries.slice(page * 205, (page + 1) * 205),
+          entries.slice(page * 512, (page + 1) * 512),
         );
         index.publish(prepared, { source: checkpoint(page + 1) });
         await index.flush();
       }
-      const prepared = await index.prepare(entries.slice(820));
-      index.publish(prepared, { source: checkpoint(5) });
+      expect((await readProjectionManifest(root)).baseRoot?.count).toBeGreaterThanOrEqual(16);
+      for (let page = 0; page < 5; page++) {
+        index.publish(await index.prepare(Array.from({ length: 20 }, (_, group) => ({
+          kind: "put" as const, key: `key-${String(group * 512).padStart(5, "0")}`, value: group * 512,
+        }))), { source: checkpoint(21 + page) });
+        await index.flush({ compact: false });
+      }
+      interruptCompaction = true;
       await expect(index.flush()).rejects.toThrow("backpressured");
 
       const interruptedManifest = await readProjectionManifest(root);
       expect(interruptedManifest.compaction?.afterKey).toBeDefined();
       expect(interruptedManifest.deltaSegments).toHaveLength(5);
-      await expect(index.get("key-1023")).resolves.toBe(1_023);
+      await expect(index.get("key-10239")).resolves.toBe(10_239);
+      await index.stopStorageMaintenance();
 
       const resumed = createIndex(governor);
       await resumed.initialize({ source: checkpoint(0) });
@@ -809,8 +820,9 @@ describe("FileDurableProjectionIndex", () => {
       const completed = await readProjectionManifest(root);
       expect(completed.compaction).toBeUndefined();
       expect(completed.deltaSegments).toHaveLength(0);
-      await expect(resumed.get("key-0000")).resolves.toBe(0);
-      await expect(resumed.get("key-1023")).resolves.toBe(1_023);
+      await expect(resumed.get("key-00000")).resolves.toBe(0);
+      await expect(resumed.get("key-10239")).resolves.toBe(10_239);
+      await resumed.stopStorageMaintenance();
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );
@@ -1422,3 +1434,20 @@ describe("FileDurableProjectionIndex", () => {
     } finally { await restored.stopStorageMaintenance(); }
   } finally { await index.stopStorageMaintenance(); }
 });
+
+it('coalesces retirement wakeups while a recovery owner holds the source fence', async () => {
+  const root=await createTempDir('retirement-recovery-wakeup'), source=new SerialTaskQueue();
+  const index=new FileDurableProjectionIndex({rootDir:root,projectionId:'retirement-wakeup',reducerVersion:1,
+    withSourceLock:operation=>isHoldingMaintenanceExclusion()?operation():source.run(()=>runHoldingMaintenanceExclusion(operation))});
+  await index.initialize({source:checkpoint(0)});
+  index.publish(await index.prepare([{kind:'put',key:'retired',value:'old'}]),{source:checkpoint(1)});await index.flush({compact:false});
+  await index.reset({source:checkpoint(0)});
+  const key=storageMaintenanceWorkKey('projection-compaction',`retirement-wakeup:${root}`,{phase:'retirement-cleanup'});
+  const run=vi.spyOn(StorageMaintenanceTaskRunner.prototype,'run');
+  try {
+    await source.run(()=>runHoldingMaintenanceExclusion(async()=>{
+      for(let n=0;n<40;n++){expect(await index.get('absent')).toBeUndefined();await new Promise(resolve=>setTimeout(resolve,3));}
+      expect(run.mock.calls.filter(([request])=>request.workKey===key).length).toBe(1);
+    }));
+  } finally {run.mockRestore();await index.stopStorageMaintenance();}
+},10000);

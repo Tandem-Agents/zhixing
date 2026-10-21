@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   open,
   rename,
@@ -30,6 +31,7 @@ import {
   storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
+  StorageMaintenanceCancelledError,
   waitForMaintenanceRetry,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
@@ -54,6 +56,7 @@ const DEFAULT_OVERLAY_BYTES = 1024 * 1024;
 const PROJECTION_ADMISSION_DEADLINE_MS = 5_000;
 const MAX_DELTA_SEGMENTS = 4;
 const BASE_SEGMENT_ENTRIES = 512;
+const SEGMENT_OFFSET_BATCH_BYTES = BASE_SEGMENT_ENTRIES * 8;
 const BASE_SEGMENT_BYTES = 1024 * 1024;
 const MAX_SCAN_LIMIT = 256;
 const MAX_READ_VIEWS = 16;
@@ -115,11 +118,25 @@ export interface RebuildableDurableProjectionIndex
 
 export interface DurableProjectionReadContext {
   get(key: string): Promise<JsonValue | undefined>;
+  /** Same verified view, in input order; at most 256 keys including duplicates. */
+  getMany?(keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]>;
   scan(
     range: DurableProjectionScanRange,
     limit: number,
     continuation?: string,
   ): Promise<DurableProjectionScanPage>;
+}
+
+/** Preserve the existing batch read bound through scoped/legacy read views. */
+export async function readDurableProjectionKeys(
+  current: DurableProjectionReadContext, keys: readonly string[],
+): Promise<readonly (JsonValue | undefined)[]> {
+  const selected = validateReadKeys(keys);
+  if (!selected.length) return [];
+  if (current.getMany) return current.getMany(selected);
+  const values: (JsonValue | undefined)[] = [];
+  for (const key of selected) values.push(await current.get(key));
+  return values;
 }
 
 /** A finite candidate envelope can touch the same namespace several times.
@@ -131,6 +148,13 @@ export function createDurableProjectionOverlay(
 ): DurableProjectionReadContext {
   return {
     get: async key => changes.has(key) ? changes.get(key) : current.get(key),
+    async getMany(keys) {
+      const selected = validateReadKeys(keys);
+      const missing = selected.filter(key => !changes.has(key));
+      const values = await readDurableProjectionKeys(current, missing);
+      let cursor = 0;
+      return selected.map(key => changes.has(key) ? changes.get(key) : values[cursor++]);
+    },
     async scan(range, limit, continuation) {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_SCAN_LIMIT) throw new RangeError("Projection overlay scan limit is invalid");
       const identity = canonicalize(range);
@@ -220,7 +244,7 @@ export function durableProjectionReadBudget(step: DurableProjectionReadStep): {
     case "manifest": return { memoryReservationBytes: 4 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES, ioOperations: 3 };
     case "segment-open": return { memoryReservationBytes: 0, readBytes: 0, ioOperations: 2 };
     case "directory-page": return { memoryReservationBytes: 4 * MAX_DIRECTORY_PAGE_BYTES, readBytes: MAX_DIRECTORY_PAGE_BYTES, ioOperations: 3 };
-    case "segment-entry": return { memoryReservationBytes: 2 * MAX_VALUE_BYTES, readBytes: MAX_VALUE_BYTES + MAX_KEY_BYTES + SEGMENT_HEADER_BYTES + 8, ioOperations: 3 };
+    case "segment-entry": return { memoryReservationBytes: 2 * MAX_VALUE_BYTES + SEGMENT_OFFSET_BATCH_BYTES, readBytes: MAX_VALUE_BYTES + MAX_KEY_BYTES + SEGMENT_HEADER_BYTES + SEGMENT_OFFSET_BATCH_BYTES, ioOperations: 3 };
   }
 }
 
@@ -230,7 +254,7 @@ export interface FileDurableProjectionIndexOptions {
   readonly managedRecovery?: boolean;
   readonly legacyRootDir?: string;
   readonly allowSegmentReclamation?: boolean;
-  readonly withSourceLock?: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly withSourceLock?: <T>(operation: () => Promise<T>, abort?: AbortSignal) => Promise<T>;
   readonly runDetached?: <T>(operation: () => T) => T;
   readonly authenticated?: boolean;
   readonly rootDir: string;
@@ -257,6 +281,8 @@ export type DurableProjectionCheckpoints = Readonly<
 interface StoredMutation {
   readonly key: string;
   readonly value?: JsonValue;
+  /** A canonical payload already verified against its immutable source row. */
+  readonly encoded?: string;
   readonly tombstone: boolean;
   readonly bytes: number;
 }
@@ -304,6 +330,19 @@ interface RetirementPage {
 interface ProjectionCompaction {
   readonly afterKey?: string;
 }
+class CompactionDirectoryBudgetFull extends Error {}
+class CompactionBatchBudgetFull extends Error {}
+type CompactionIoDimension = "readBytes" | "writeBytes" | "temporaryBytes" | "ioOperations";
+// Local accounting only selects the publication boundary. The device permit
+// remains the authority and still charges every physical effect beforehand.
+const compactionStepUsage = new AsyncLocalStorage<{
+  readonly limit: Record<CompactionIoDimension, number>;
+  readonly used: Record<CompactionIoDimension, number>;
+  guardNextRange: boolean;
+}>();
+const COMPACTION_RANGES_PER_STEP = 8;
+const COMPACTION_DIRECTORY_BYTES = 2 * 1024 * 1024;
+const COMPACTION_DIRECTORY_PAGES = 256;
 
 interface ProjectionManifest {
   readonly formatVersion: 3;
@@ -601,12 +640,17 @@ export class FileDurableProjectionIndex {
   readonly #runReadStep: FileDurableProjectionIndexOptions["runReadStep"];
   #retirementRetryTimer: ReturnType<typeof setTimeout> | undefined;
   #retirementRetryAt: number | undefined;
+  #retirementRetryRunning = false;
+  #retirementRetryRequestedAt: number | undefined;
   #retirementCleanupFailure: { readonly error: unknown } | undefined;
   #maintenanceStopped = false;
+  readonly #maintenanceAbort = new AbortController();
   /** 清理失败、尚待下一个写意图接管的派生文件名(相对 rootDir)。 */
   readonly #uncleared = new Set<string>();
   #writeIntent: ProjectionWriteIntent | undefined;
   #initializing: Promise<void> | undefined;
+  #stagedDirectory: Map<string, { page: DirectoryPage; bytes: Buffer }> | undefined;
+  #stagedDirectoryBytes = 0;
 
   /** Under the source writer fence, observe a publication made by another log
    * instance. Any local unflushed facts are replayed from the newly published
@@ -722,6 +766,10 @@ export class FileDurableProjectionIndex {
     recoveryTarget: DurableProjectionCheckpoints = emptyCheckpoints,
   ): Promise<void> {
     if (this.#initialized) return;
+    // A detached opener can be queued on the source fence held by this caller.
+    // Do the required initialization in the current fence instead of joining
+    // that promise. Physical steps remain serialized and recheck the manifest.
+    if (isHoldingMaintenanceExclusion()) return this.#initializeOnce(emptyCheckpoints, recoveryTarget);
     // 同一实例的并发打开共享一次初始化，不重复申请维护准入。
     this.#initializing ??= this.#initializeOnce(emptyCheckpoints, recoveryTarget)
       .finally(() => { this.#initializing = undefined; });
@@ -1159,8 +1207,11 @@ export class FileDurableProjectionIndex {
   /** 进程停机时取消尚未跨过安全检查点的投影维护义务。 */
   async stopStorageMaintenance(): Promise<void> {
     this.#maintenanceStopped = true;
+    this.#maintenanceAbort.abort(new StorageMaintenanceCancelledError());
     this.#clearRetirementRetry();
     await this.#maintenanceRunner.stop();
+    await this.#initializing?.catch(() => undefined);
+    await this.#manifestQueue.run(async () => undefined);
   }
 
   async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false): Promise<void> {
@@ -1168,14 +1219,20 @@ export class FileDurableProjectionIndex {
     for (;;) {
       const manifest = this.#requireManifest();
       // 退出/启动检查点不承担与历史规模成正比的合并；未落盘覆盖层由权威尾部恢复。
-      if (checkpointOnly && manifest.compaction && this.#active.size > 0) return;
+      if (checkpointOnly && manifest.compaction && this.#active.size > 0) {
+        await this.#consolidateSmallDelta(obligation);
+        return;
+      }
+      if (obligation === 'pre-commit' && manifest.deltaSegments.length === MAX_DELTA_SEGMENTS && this.#active.size > 0 &&
+          await this.#consolidateSmallDelta(obligation)) continue;
       // A recovery checkpoint need not finish a compaction whose durable
-      // manifest already makes all values readable. A new delta still waits
-      // for it, preserving the existing five-segment read bound.
+      // manifest already makes all values readable. A new delta must still
+      // preserve the existing five-segment read bound.
       if (!compact && this.#active.size === 0 && sameCheckpoints(this.checkpoints(), manifest.checkpoints) && this.#recoveryMatches(manifest)) {
         this.#resetActiveProgress(); return;
       }
       if (manifest.compaction && (compact || this.#active.size > 0)) {
+        if ((!compact || obligation === 'pre-commit') && await this.#consolidateSmallDelta(obligation)) continue;
         const frozenInput = {
           checkpoints: manifest.checkpoints,
           deltaSegments: manifest.deltaSegments.map(({ id }) => id),
@@ -1185,10 +1242,12 @@ export class FileDurableProjectionIndex {
           frozenInput,
           obligation,
           async () => {
+            let staged = true;
             while (this.#requireManifest().compaction) {
               const stepManifest = this.#requireManifest();
               const previousGeneration = stepManifest.generation;
-              await this.#runMaintenanceStep(
+              try {
+                await this.#runMaintenanceStep(
                   "projection-compaction",
                   {
                     frozenInput,
@@ -1198,8 +1257,15 @@ export class FileDurableProjectionIndex {
                       : { afterKey: stepManifest.compaction.afterKey }),
                   },
                   obligation,
-                  () => this.#compactNextRange(),
-            );
+                  () => this.#compactRanges(staged),
+                );
+              } catch (error) {
+                if (!(error instanceof CompactionDirectoryBudgetFull) || !staged) throw error;
+                // Rollback has completed. The single-range fallback must get a
+                // fresh permit, never reuse capacity spent on the failed batch.
+                staged = false;
+                continue;
+              }
               if (this.#requireManifest().generation <= previousGeneration) {
                 throw new Error("Projection compaction made no durable progress");
               }
@@ -1247,6 +1313,59 @@ export class FileDurableProjectionIndex {
     }
   }
 
+  /** Checkpoint count alone must not force a rewrite of scattered history.
+   * A bounded tail can become fewer immutable deltas without touching the base.
+   * Larger inputs retain the ordinary, paged base-compaction path. */
+  async #consolidateSmallDelta(obligation: StorageMaintenanceObligation): Promise<boolean> {
+    const manifest = this.#requireManifest();
+    // Preserve initial paged-base construction. This optimization avoids
+    // rewriting an existing historical base; it does not replace that base.
+    if (!manifest.baseRoot) return false;
+    const entryLimit = Math.min(this.#overlayEntries, DEFAULT_OVERLAY_ENTRIES);
+    const byteLimit = Math.min(this.#overlayBytes, DEFAULT_OVERLAY_BYTES);
+    // Keep headroom for subsequent checkpoints instead of repeatedly rewriting
+    // a nearly full delta window. Dense tails retain leveled compaction.
+    const packedLimit = Math.floor(MAX_DELTA_SEGMENTS / 2);
+    if (this.#active.size > entryLimit || manifest.deltaSegments.some(segment => segment.count > entryLimit) ||
+        this.#activeBytes > byteLimit) return false;
+    const input = { phase: 'bounded-delta-consolidation', generation: manifest.generation, checkpoints: this.checkpoints() };
+    return this.#runMaintenanceObligation('projection-flush', input, obligation, () =>
+      this.#runMaintenanceStep('projection-flush', input, obligation, async () => {
+        const current = this.#requireManifest();
+        if ((!current.compaction && current.deltaSegments.length !== MAX_DELTA_SEGMENTS) || this.#active.size > entryLimit ||
+            current.deltaSegments.some(segment => segment.count > entryLimit)) return false;
+        let bytes = 0;
+        for (const segment of current.deltaSegments) {
+          claimStorageIo('ioOperations', 1);
+          const metadata = await stat(path.join(this.rootDir, segment.dataFile)).catch((error: unknown) => {
+            if (isNodeError(error, 'ENOENT')) throw projectionCorrupt('Projection segment data file is missing', error);
+            throw error;
+          });
+          bytes += metadata.size;
+          if (bytes > byteLimit * (MAX_DELTA_SEGMENTS + 1)) return false;
+        }
+        const merged = new Map<string, StoredMutation>();
+        for (const segment of [...current.deltaSegments].reverse()) {
+          for (const entry of await this.#readSegment(segment)) merged.set(entry.key, entry);
+          if (merged.size > entryLimit * packedLimit) return false;
+        }
+        for (const [key, value] of this.#active) merged.set(key, value);
+        const batches: StoredMutation[][] = [];
+        let batch: StoredMutation[] = [], batchBytes = 0;
+        for (const entry of [...merged.values()].sort((a, b) => compareKeys(a.key, b.key))) {
+          if (entry.bytes > byteLimit) return false;
+          if (batch.length && (batch.length >= entryLimit || batchBytes + entry.bytes > byteLimit)) {
+            batches.push(batch); batch = []; batchBytes = 0;
+          }
+          batch.push(entry); batchBytes += entry.bytes;
+          if (batches.length >= packedLimit) return false;
+        }
+        if (batch.length) batches.push(batch);
+        await this.#flushActive(batches);
+        return true;
+      }));
+  }
+
   #runMaintenanceObligation<T>(
     kind: StorageMaintenanceKind,
     inputIdentity: unknown,
@@ -1254,13 +1373,19 @@ export class FileDurableProjectionIndex {
     operation: () => Promise<T>,
   ): Promise<T> {
     const resourceId = `${this.projectionId}:${this.rootDir}`;
-    return this.#maintenanceRunner.run(
-      storageMaintenanceObligation(
+    const request = storageMaintenanceObligation(
         kind,
         resourceId,
         inputIdentity,
         { owner: "durable-projection-index", obligation },
-      ),
+      );
+    // A source owner may have to meet a hard checkpoint before its write.
+    // The detached owner is still queued on that fence: satisfy the same
+    // derived work synchronously, using the usual fenced/charged leaf steps.
+    // Its later turn rechecks the manifest and observes the completed progress.
+    if (isHoldingMaintenanceExclusion() && this.#maintenanceRunner.hasPending(request.workKey)) return operation();
+    return this.#maintenanceRunner.run(
+      request,
       currentMaintenanceAbortSignal(),
       operation,
     );
@@ -1274,26 +1399,41 @@ export class FileDurableProjectionIndex {
     maxWaitMs?: number,
   ): Promise<T> {
     const resourceId = `${this.projectionId}:${this.rootDir}`;
-    return runStorageMaintenanceStep(
-      this.#storageMaintenance,
-      storageMaintenanceRequest(
-        kind,
-        resourceId,
-        inputIdentity,
-        // 是否零等待由维护执行语境单点决定:在协调器串行段或日志锁内调用时,
-        // 建立互斥的原语已标记,准入自动转为零等待;段外调用则按常规等待。
+    // Acquire the source fence and manifest queue before reserving capacity.
+    // A background permit waiting for the source owner can otherwise consume
+    // the very slot/quantum that owner needs to finish and release its fence.
+    return this.#serializeManifest(() => {
+      const request = storageMaintenanceRequest(
+        kind, resourceId, inputIdentity,
         { obligation, ...(maxWaitMs === undefined ? {} : { maxWaitMs }) },
-      ),
-      () => this.#serializeManifest(operation, kind !== "projection-rebuild"),
-    );
+      );
+      return runStorageMaintenanceStep(
+        this.#storageMaintenance,
+        request,
+        async () => {
+          const run = async () => {
+            if (kind !== "projection-rebuild") await this.#refreshFromDisk();
+            return operation();
+          };
+          if (kind !== "projection-compaction") return run();
+          return compactionStepUsage.run({
+            limit: { ...request.atomic.quantum, temporaryBytes: request.atomic.occupancy.temporaryBytes },
+            used: { readBytes: 0, writeBytes: 0, temporaryBytes: 0, ioOperations: 0 },
+            guardNextRange: false,
+          }, run);
+        },
+      );
+    }, false);
   }
 
   #serializeManifest<T>(operation: () => Promise<T>, refresh = true): Promise<T> {
+    const abort = AbortSignal.any([currentMaintenanceAbortSignal(), this.#maintenanceAbort.signal]);
     const run = () => this.#manifestQueue.run(async () => {
+      if (abort.aborted) throw new StorageMaintenanceCancelledError();
       if (refresh) await this.#refreshFromDisk();
       return operation();
-    });
-    return this.#sourceLock ? this.#sourceLock(run) : run();
+    }, abort);
+    return this.#sourceLock ? this.#sourceLock(run, abort) : run();
   }
 
   #readStep<T>(
@@ -1412,6 +1552,14 @@ export class FileDurableProjectionIndex {
   }
 
   #scheduleRetirementRetry(retryAt: number): void {
+    // A recovery page may release thousands of read views while holding its
+    // source fence. Keep one detached waiter until it actually finishes; a
+    // timer firing is not completion. Otherwise every read adds another abort
+    // listener to the same blocked obligation (quadratic registration work).
+    if (this.#retirementRetryRunning) {
+      this.#retirementRetryRequestedAt = Math.min(this.#retirementRetryRequestedAt ?? retryAt, retryAt);
+      return;
+    }
     if (
       this.#maintenanceStopped ||
       (
@@ -1431,12 +1579,19 @@ export class FileDurableProjectionIndex {
       if (this.#retirementRetryTimer !== timer) return;
       this.#retirementRetryTimer = undefined;
       this.#retirementRetryAt = undefined;
+      this.#retirementRetryRunning = true;
+      let failed = false;
       void this.#runDetached(() => runDetachedMaintenanceContext("background", () =>
         this.#runRetirementCleanup({ surfaceFailure: false })
       )).catch((error: unknown) => {
-        if (!this.#maintenanceStopped) {
-          this.#retirementCleanupFailure = { error };
-        }
+        failed = true;
+        if (!this.#maintenanceStopped) this.#retirementCleanupFailure = { error };
+      }).finally(() => {
+        this.#retirementRetryRunning = false;
+        const next = this.#retirementRetryRequestedAt;
+        this.#retirementRetryRequestedAt = undefined;
+        if (!failed && !(this.#retirementCleanupFailure?.error instanceof DurableProjectionStorageError) &&
+            next !== undefined && this.#retirementIdentity()) this.#scheduleRetirementRetry(next);
       });
     }, delayMs);
     timer.unref();
@@ -1445,6 +1600,7 @@ export class FileDurableProjectionIndex {
   }
 
   #clearRetirementRetry(): void {
+    this.#retirementRetryRequestedAt = undefined;
     if (this.#retirementRetryTimer !== undefined) {
       clearTimeout(this.#retirementRetryTimer);
     }
@@ -1452,7 +1608,7 @@ export class FileDurableProjectionIndex {
     this.#retirementRetryAt = undefined;
   }
 
-  async #flushActive(): Promise<void> {
+  async #flushActive(consolidated?: readonly (readonly StoredMutation[])[]): Promise<void> {
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
@@ -1461,13 +1617,13 @@ export class FileDurableProjectionIndex {
     const manifest = this.#requireManifest();
     const checkpoints = this.checkpoints();
     if (
-      this.#active.size === 0 &&
+      !consolidated && this.#active.size === 0 &&
       sameCheckpoints(checkpoints, manifest.checkpoints) && this.#recoveryMatches(manifest)
     ) {
       this.#resetActiveProgress();
       return;
     }
-    if (this.#active.size === 0) {
+    if (!consolidated && this.#active.size === 0) {
       // Only the verified cursor/readiness changes. All referenced files are
       // unchanged, so the atomic manifest is the complete publication: there
       // are no new files for a separate write intent to protect or reclaim.
@@ -1489,14 +1645,25 @@ export class FileDurableProjectionIndex {
       let deltaSegments = [...manifest.deltaSegments];
       let baseRoot = manifest.baseRoot;
       const obsoleteFiles = new Set<string>();
-      if (this.#active.size > 0) {
+      if (consolidated) {
+        for (const segment of deltaSegments) {
+          obsoleteFiles.add(segment.dataFile);
+          obsoleteFiles.add(segment.offsetsFile);
+        }
+        deltaSegments = [];
+      }
+      if (consolidated) {
+        // These sorted ranges are disjoint, so their relative precedence is
+        // immaterial. Tombstones remain in the tail and still mask the base.
+        for (const entries of consolidated) deltaSegments.push(await this.#writeSortedEntries(entries, 0));
+      } else if (this.#active.size > 0) {
         const newest = await this.#writeSegment(
           [...this.#active.values()],
           0,
         );
         deltaSegments = [newest, ...deltaSegments];
       }
-      const compaction = manifest.compaction ??
+      const compaction = consolidated ? undefined : manifest.compaction ??
         (deltaSegments.length > MAX_DELTA_SEGMENTS ? {} : undefined);
       const created = new Set(this.#requireWriteIntent().createdFiles);
       const transientFiles = [...obsoleteFiles].filter((file) =>
@@ -1875,7 +2042,7 @@ export class FileDurableProjectionIndex {
       ...(this.#authenticated ? { authenticated: true as const } : {}) };
   }
 
-  async #compactNextRange(): Promise<void> {
+  async #compactRanges(staged: boolean): Promise<void> {
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
@@ -1887,61 +2054,105 @@ export class FileDurableProjectionIndex {
     await this.#beginWriteIntent(manifest.generation + 1);
     let committed = false;
     try {
-      const batch = await this.#nextCompactionBatch(manifest);
+      this.#stagedDirectory = staged ? new Map() : undefined;
+      this.#stagedDirectoryBytes = 0;
       let baseRoot = manifest.baseRoot;
       let deltaSegments = manifest.deltaSegments;
-      let compaction: ProjectionCompaction | undefined;
+      let compaction: ProjectionCompaction | undefined = manifest.compaction;
       const obsoleteFiles = new Set<string>();
 
-      if (!batch) {
-        deltaSegments = [];
-        for (const segment of manifest.deltaSegments) {
-          obsoleteFiles.add(segment.dataFile);
-          obsoleteFiles.add(segment.offsetsFile);
-        }
-      } else {
-        const replacements: SegmentDescriptor[] = [];
-        const obsoletePages = new Set<string>();
-        if (batch.base) {
-          const values = new Map(
-            (await this.#readSegment(batch.base)).map((entry) => [
-              entry.key,
-              entry,
-            ]),
-          );
-          for (const mutation of batch.mutations) {
-            if (mutation.tombstone) values.delete(mutation.key);
-            else values.set(mutation.key, mutation);
+      for (let range = 0; range < (staged ? COMPACTION_RANGES_PER_STEP : 1); range++) {
+        const priorRoot = baseRoot;
+        const priorCompaction = compaction;
+        const priorObsolete = new Set(obsoleteFiles);
+        const createdBefore = this.#requireWriteIntent().createdFiles.length;
+        const usage = compactionStepUsage.getStore();
+        // The first range keeps the original single-range contract. Before
+        // another range consumes the remaining permit, reserve a quarter for
+        // publishing the completed prefix and cleaning this intent.
+        if (usage) usage.guardNextRange = range > 0;
+        try {
+          const batch = await this.#nextCompactionBatch({ ...manifest, baseRoot, deltaSegments, compaction });
+          if (!batch) {
+            deltaSegments = [];
+            compaction = undefined;
+            for (const segment of manifest.deltaSegments) {
+              obsoleteFiles.add(segment.dataFile);
+              obsoleteFiles.add(segment.offsetsFile);
+            }
+            break;
+          } else {
+            const replacements: SegmentDescriptor[] = [];
+            const obsoletePages = new Set<string>();
+            if (batch.base) {
+              const values = new Map(
+                (await this.#readSegment(batch.base)).map((entry) => [
+                  entry.key,
+                  entry,
+                ]),
+              );
+              for (const mutation of batch.mutations) {
+                if (mutation.tombstone) values.delete(mutation.key);
+                else values.set(mutation.key, mutation);
+              }
+              replacements.push(
+                ...(await this.#writeBaseSegments([...values.values()])),
+              );
+              // Most updates retain the range's first key. Replace its descriptor
+              // directly; deleting and reinserting it rebuilds unchanged branches
+              // and creates extra write intents, directory syncs and retirement debt.
+              if (replacements[0]?.minKey !== batch.base.minKey) {
+                baseRoot = await this.#deleteDirectoryDescriptor(
+                  baseRoot,
+                  batch.base.minKey,
+                  obsoletePages,
+                );
+              }
+              obsoleteFiles.add(batch.base.dataFile);
+              obsoleteFiles.add(batch.base.offsetsFile);
+            } else {
+              replacements.push(
+                ...(await this.#writeBaseSegments(batch.mutations)),
+              );
+            }
+            for (const replacement of replacements) {
+              baseRoot = await this.#setDirectoryDescriptor(
+                baseRoot,
+                replacement,
+                obsoletePages,
+              );
+            }
+            for (const file of obsoletePages) obsoleteFiles.add(file);
+            compaction = { afterKey: batch.afterKey };
           }
-          replacements.push(
-            ...(await this.#writeBaseSegments([...values.values()])),
-          );
-          // Most updates retain the range's first key. Replace its descriptor
-          // directly; deleting and reinserting it rebuilds unchanged branches
-          // and creates extra write intents, directory syncs and retirement debt.
-          if (replacements[0]?.minKey !== batch.base.minKey) {
-            baseRoot = await this.#deleteDirectoryDescriptor(
-              baseRoot,
-              batch.base.minKey,
-              obsoletePages,
-            );
-          }
-          obsoleteFiles.add(batch.base.dataFile);
-          obsoleteFiles.add(batch.base.offsetsFile);
-        } else {
-          replacements.push(
-            ...(await this.#writeBaseSegments(batch.mutations)),
-          );
-        }
-        for (const replacement of replacements) {
-          baseRoot = await this.#setDirectoryDescriptor(
-            baseRoot,
-            replacement,
-            obsoletePages,
-          );
-        }
-        for (const file of obsoletePages) obsoleteFiles.add(file);
-        compaction = { afterKey: batch.afterKey };
+        } catch (error) {
+          if (range === 0 || !(error instanceof CompactionBatchBudgetFull || error instanceof CompactionDirectoryBudgetFull)) throw error;
+          baseRoot = priorRoot;
+          compaction = priorCompaction;
+          obsoleteFiles.clear();
+          for (const file of priorObsolete) obsoleteFiles.add(file);
+          // A partially written next range is never referenced by this root.
+          // Its planned files remain owned by this intent until cleanup.
+          for (const file of this.#requireWriteIntent().createdFiles.slice(createdBefore)) obsoleteFiles.add(file);
+          break;
+        } finally { if (usage) usage.guardNextRange = false; }
+      }
+
+      if (this.#stagedDirectory) {
+        // Intermediate path copies were never published or written. Only the
+        // final reachable directory pages enter the original durable intent.
+        for (const id of this.#stagedDirectory.keys()) obsoleteFiles.delete(directoryPageFile(id));
+        const reachable = new Map<string, { page: DirectoryPage; bytes: Buffer }>();
+        const visit = (pointer?: DirectoryPagePointer): void => {
+          if (!pointer || reachable.has(pointer.id)) return;
+          const item = this.#stagedDirectory!.get(pointer.id);
+          if (!item) return;
+          visit(item.page.left); visit(item.page.right); reachable.set(pointer.id, item);
+        };
+        visit(baseRoot);
+        await this.#planCreatedFiles([...reachable.keys()].map(directoryPageFile));
+        for (const [id, item] of reachable) await this.#persistDirectoryPage(id, item.page, item.bytes, true);
+        if (reachable.size) { claimStorageIo("ioOperations", 1); await syncDirectory(this.rootDir); }
       }
 
       const created = new Set(this.#requireWriteIntent().createdFiles);
@@ -1989,7 +2200,7 @@ export class FileDurableProjectionIndex {
           throw error;
         }
       }
-    }
+    } finally { this.#stagedDirectory = undefined; this.#stagedDirectoryBytes = 0; }
     if (!committed) {
       throw new Error("Projection compaction did not publish a manifest");
     }
@@ -2021,8 +2232,8 @@ export class FileDurableProjectionIndex {
         let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
           : await reader.lowerBound(afterKey);
-        let entry = await reader.entry(index);
-        if (entry?.key === afterKey) entry = await reader.entry(++index);
+        let entry = await reader.storedEntry(index);
+        if (entry?.key === afterKey) entry = await reader.storedEntry(++index);
         if (
           entry &&
           (firstKey === undefined || compareKeys(entry.key, firstKey) < 0)
@@ -2048,11 +2259,11 @@ export class FileDurableProjectionIndex {
         let index = afterKey === undefined || afterKey < delta.minKey
           ? 0
           : await reader.lowerBound(afterKey);
-        let entry = await reader.entry(index);
-        if (entry?.key === afterKey) entry = await reader.entry(++index);
+        let entry = await reader.storedEntry(index);
+        if (entry?.key === afterKey) entry = await reader.storedEntry(++index);
         while (entry && (upperBound === undefined || entry.key < upperBound)) {
-          latest.set(entry.key, storedMutation(entry));
-          entry = await reader.entry(++index);
+          latest.set(entry.key, entry);
+          entry = await reader.storedEntry(++index);
         }
       } finally {
         await reader.close();
@@ -2097,11 +2308,11 @@ export class FileDurableProjectionIndex {
     try {
       const entries: StoredMutation[] = [];
       for (let index = 0; index < descriptor.count; index += 1) {
-        const entry = await reader.entry(index);
+        const entry = await reader.storedEntry(index);
         if (!entry) {
           throw projectionCorrupt("Projection segment ended before its count");
         }
-        entries.push(storedMutation(entry));
+        entries.push(entry);
       }
       return entries;
     } finally {
@@ -2209,6 +2420,8 @@ export class FileDurableProjectionIndex {
   async #loadDirectoryPage(
     pointer: DirectoryPagePointer,
   ): Promise<DirectoryPage> {
+    const staged = this.#stagedDirectory?.get(pointer.id);
+    if (staged) return staged.page;
     const cached = this.#directoryCache.get(pointer.id);
     if (cached) {
       this.#cacheDirectoryPage(pointer.id, cached);
@@ -2282,10 +2495,24 @@ export class FileDurableProjectionIndex {
       ...(right === undefined ? {} : { right }),
     };
     const pointer = directoryPointerFor(page);
-    const file = directoryPageFile(pointer.id);
-    await this.#planCreatedFiles([file]);
-    const temporary = path.join(this.rootDir, `.${file}.tmp`);
     const encoded = Buffer.from(canonicalize(page), "utf8");
+    if (this.#stagedDirectory) {
+      if (this.#stagedDirectory.size >= COMPACTION_DIRECTORY_PAGES ||
+          this.#stagedDirectoryBytes + encoded.byteLength > COMPACTION_DIRECTORY_BYTES) {
+        throw new CompactionDirectoryBudgetFull();
+      }
+      this.#stagedDirectory.set(pointer.id, { page, bytes: encoded });
+      this.#stagedDirectoryBytes += encoded.byteLength;
+      return pointer;
+    }
+    await this.#persistDirectoryPage(pointer.id, page, encoded);
+    return pointer;
+  }
+
+  async #persistDirectoryPage(id: string, page: DirectoryPage, encoded: Buffer, planned = false): Promise<void> {
+    const file = directoryPageFile(id);
+    if (!planned) await this.#planCreatedFiles([file]);
+    const temporary = path.join(this.rootDir, `.${file}.tmp`);
     claimStorageIo("ioOperations", 1);
     const handle = await open(temporary, "wx", 0o600);
     try {
@@ -2302,8 +2529,7 @@ export class FileDurableProjectionIndex {
     await handle.close();
     claimStorageIo("ioOperations", 1);
     await rename(temporary, path.join(this.rootDir, file));
-    this.#cacheDirectoryPage(pointer.id, page);
-    return pointer;
+    this.#cacheDirectoryPage(id, page);
   }
 
   #cacheDirectoryPage(id: string, page: DirectoryPage): void {
@@ -2997,6 +3223,8 @@ class SegmentReader {
   // never to the index or a later read view. Every returned entry still checks
   // its ordinal, digest and canonical payload before use.
   #dataWindow: { readonly start: number; readonly bytes: Buffer } | undefined;
+  #offsetWindow: { readonly startIndex: number; readonly bytes: Buffer } | undefined;
+  #sequentialOffsets = false;
   #cacheChecked = false;
   #files: { readonly data: FileHandle; readonly offsets: FileHandle } | undefined;
   #opening: Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> | undefined;
@@ -3125,6 +3353,17 @@ class SegmentReader {
     return verified && this.#materialize(index, verified);
   }
 
+  /** Compaction preserves canonical bytes; consumers still receive fresh values. */
+  async storedEntry(index: number): Promise<StoredMutation | undefined> {
+    this.#sequentialOffsets = true;
+    const entry = await this.#verified(index);
+    if (!entry) return undefined;
+    const encoded = entry.tombstone ? undefined : entry.encoded ?? (await this.#read(index))?.encoded;
+    if (!entry.tombstone && encoded === undefined) throw projectionCorrupt('Projection segment value is unavailable');
+    return { key: entry.key, tombstone: entry.tombstone, ...(encoded === undefined ? {} : { encoded }),
+      bytes: Buffer.byteLength(entry.key, 'utf8') + (encoded === undefined ? 0 : Buffer.byteLength(encoded, 'utf8')) + SEGMENT_HEADER_BYTES };
+  }
+
   /** 读取并核验一个条目；已核验的条目直接复用，只用于比较键时不解析值。 */
   async #verified(index: number): Promise<VerifiedSegmentEntry | undefined> {
     if (index < 0 || index >= this.descriptor.count) return undefined;
@@ -3173,14 +3412,20 @@ class SegmentReader {
 
   private async readEntry(index: number): Promise<VerifiedSegmentEntry | undefined> {
     const { offsets } = this.#files!;
-    const offsetBytes = Buffer.allocUnsafe(8);
-    claimStorageIo("readBytes", offsetBytes.byteLength);
-    claimStorageIo("ioOperations", 1);
-    const offsetRead = await offsets.read(offsetBytes, 0, 8, index * 8);
-    if (offsetRead.bytesRead !== 8) {
-      throw projectionCorrupt("Projection segment offset table is truncated");
+    let window = this.#offsetWindow;
+    if (!window || index < window.startIndex || (index - window.startIndex + 1) * 8 > window.bytes.length) {
+      // Only the sequential maintenance path pays for an offsets page.
+      // A point lookup must not prefetch unrelated historical positions.
+      const limit = this.#sequentialOffsets ? SEGMENT_OFFSET_BATCH_BYTES : 8;
+      const startIndex = index - index % (limit / 8);
+      const bytes = Buffer.allocUnsafe(Math.min(limit, (this.descriptor.count - startIndex) * 8));
+      claimStorageIo("readBytes", bytes.byteLength);
+      claimStorageIo("ioOperations", 1);
+      const read = await offsets.read(bytes, 0, bytes.length, startIndex * 8);
+      if (read.bytesRead !== bytes.length) throw projectionCorrupt("Projection segment offset table is truncated");
+      window = this.#offsetWindow = { startIndex, bytes };
     }
-    const offset = offsetBytes.readBigUInt64BE();
+    const offset = window.bytes.readBigUInt64BE((index - window.startIndex) * 8);
     if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw projectionCorrupt("Projection segment offset exceeds the safe range");
     }
@@ -3257,6 +3502,7 @@ class SegmentReader {
 
   async close(): Promise<void> {
     this.#dataWindow = undefined;
+    this.#offsetWindow = undefined;
     const files = this.#files ?? await this.#opening?.catch(() => undefined);
     this.#files = undefined;
     this.#opening = undefined;
@@ -3300,7 +3546,7 @@ function encodeSegmentEntry(entry: StoredMutation, ordinal: number, dataFile: st
   const key = Buffer.from(entry.key, "utf8");
   const value = entry.tombstone
     ? Buffer.alloc(0)
-    : Buffer.from(canonicalize(entry.value), "utf8");
+    : Buffer.from(entry.encoded ?? canonicalize(entry.value), "utf8");
   const payload = Buffer.concat([key, value]);
   const header = Buffer.alloc(SEGMENT_HEADER_BYTES);
   header.writeUInt32BE(key.byteLength, 0);
@@ -3310,21 +3556,6 @@ function encodeSegmentEntry(entry: StoredMutation, ordinal: number, dataFile: st
   header.writeBigUInt64BE(BigInt(ordinal), 12);
   segmentEntryChecksum(dataFile, authenticated, header.subarray(0, 20), payload, integrity).copy(header, 20);
   return Buffer.concat([header, payload]);
-}
-
-function storedMutation(entry: SegmentEntry): StoredMutation {
-  const valueBytes = entry.tombstone
-    ? 0
-    : Buffer.byteLength(canonicalize(entry.value), "utf8");
-  return {
-    key: entry.key,
-    ...(entry.value !== undefined ? { value: entry.value } : {}),
-    tombstone: entry.tombstone,
-    bytes:
-      Buffer.byteLength(entry.key, "utf8") +
-      valueBytes +
-      SEGMENT_HEADER_BYTES,
-  };
 }
 
 function validateManifest(value: unknown): ProjectionManifest {
@@ -3921,7 +4152,12 @@ function claimStorageIo(
   dimension: "readBytes" | "writeBytes" | "ioOperations" | "temporaryBytes",
   amount: number,
 ): void {
+  const usage = compactionStepUsage.getStore();
+  if (usage?.guardNextRange && usage.used[dimension] + amount > usage.limit[dimension] * 3 / 4) {
+    throw new CompactionBatchBudgetFull();
+  }
   claimDeviceCapacity(dimension, amount);
+  if (usage) usage.used[dimension] += amount;
 }
 
 function plainRecord(value: unknown): Record<string, unknown> | undefined {

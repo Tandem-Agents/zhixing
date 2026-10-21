@@ -1,4 +1,6 @@
 import type { LogRecordPort } from '@zhixing/core/authority';
+import { currentMaintenanceUrgency, runInMaintenanceContext, runDetachedMaintenanceContext } from '@zhixing/core/resources';
+import { AuthorityWorkObserver } from '../../../core/src/authority/logging.js';
 import { open } from 'node:fs/promises';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -77,6 +79,24 @@ async function workCapture(root: string) {
   });
   onTestFinished(() => { spies.forEach(spy => spy.mockRestore()); materialized.mockRestore(); opened.mockRestore(); syncBuiltinESMExports(); });
   const buckets: { operation: string; data: Record<string, number> }[] = [];
+  const foreground: typeof buckets = [], background: typeof buckets = [];
+  const begin = AuthorityWorkObserver.prototype.begin;
+  const observe = vi.spyOn(AuthorityWorkObserver.prototype, 'begin').mockImplementation(function(operation) {
+    // A detached retirement pump may finish during the measurement's log
+    // settling interval. Attribute at operation entry, before log aggregation
+    // merges foreground and background work with the same checkpoint name.
+    const target = currentMaintenanceUrgency() === 'background' ? background : foreground;
+    const observed = begin.call(this, operation), finish = observed.finish;
+    let finished = false;
+    observed.finish = (...failure) => {
+      finish(...failure);
+      if (finished) return;
+      finished = true;
+      target.push({ operation, data: { ...observed.data, operations: 1 } });
+    };
+    return observed;
+  });
+  onTestFinished(() => observe.mockRestore());
   const port: LogRecordPort = { record: entry => {
     const record = entry as { event?: string; data?: Record<string, number> };
     if (record.event !== 'work') return;
@@ -90,9 +110,15 @@ async function workCapture(root: string) {
     }
     return result;
   };
-  return { port, mark: () => ({ bucket: buckets.length, io: new Map([...io].map(([key, value]) => [key, { ...value }])), ...physical }), since: (from: { bucket: number; io: typeof io } & typeof physical) => ({
+  return { port, mark: () => ({ bucket: buckets.length, foregroundBucket: foreground.length, backgroundBucket: background.length,
+    io: new Map([...io].map(([key, value]) => [key, { ...value }])), ...physical }), since: (from: { bucket: number; foregroundBucket: number; backgroundBucket: number; io: typeof io } & typeof physical) => ({
+    offsetIo: [...io].filter(([file]) => file.endsWith('.offsets')).map(([file, value]) => ({ file,
+      bytes: value.read - (from.io.get(file)?.read ?? 0), calls: value.reads - (from.io.get(file)?.reads ?? 0) })).filter(item => item.calls),
+    workByOperation: Object.fromEntries([...new Set(buckets.slice(from.bucket).map(item => item.operation))].map(name =>
+      [name, buckets.slice(from.bucket).filter(item => item.operation === name).reduce((total, item) => total + (item.data.operations ?? 0), 0)])),
     io: [...io].map(([file, value]) => ({ file, read: value.read - (from.io.get(file)?.read ?? 0), write: value.write - (from.io.get(file)?.write ?? 0), reads: value.reads - (from.io.get(file)?.reads ?? 0), writes: value.writes - (from.io.get(file)?.writes ?? 0) })).filter(value => value.read || value.write).sort((a,b) => b.read - a.read).slice(0, 12),
-    ...aggregate(buckets.slice(from.bucket)), physicalReadBytes: physical.physicalReadBytes - from.physicalReadBytes,
+    backgroundWork: aggregate(background.slice(from.backgroundBucket)),
+    ...aggregate(foreground.slice(from.foregroundBucket)), physicalReadBytes: physical.physicalReadBytes - from.physicalReadBytes,
     physicalWriteBytes: physical.physicalWriteBytes - from.physicalWriteBytes, physicalWrites: physical.physicalWrites - from.physicalWrites,
     segmentEntryProbes: physical.segmentEntryProbes - from.segmentEntryProbes, otherReadBytes: physical.otherReadBytes - from.otherReadBytes, maxSegmentReadRequest: physical.maxSegmentReadRequest,
     materializations: physical.materializations - from.materializations, materializedRuns: physical.materializedRuns - from.materializedRuns, materializedAssignments: physical.materializedAssignments - from.materializedAssignments,
@@ -150,7 +176,21 @@ it('attributes physical observation to the opened synthetic file', async () => {
 });
 
 describe('package 1a cold-storage workload boundary', () => {
-  it.each([32, 128])('native cold open, first send and save stay bounded with %i ended runs', async size => {
+  it('keeps explicit foreground work and detached maintenance separately visible', async () => {
+    const root = await createTempDir('work-attribution'), work = await workCapture(root), before = work.mark();
+    const observer = new AuthorityWorkObserver(work.port, () => 'attribution-test');
+    await runInMaintenanceContext('foreground', async () => {
+      observer.begin('readProjection').finish();
+      await runDetachedMaintenanceContext('background', async () => observer.begin('projection.checkpoint').finish());
+    });
+    observer.flush();
+    const measured = work.since(before);
+    expect(measured.operations).toBe(1);
+    expect(measured.backgroundWork.operations).toBe(1);
+    expect(measured.workByOperation).toEqual({ readProjection: 1, 'projection.checkpoint': 1 });
+  });
+
+  it.each([32, 128])('native cold open, first send and save stay bounded with %i ended runs', async size => runInMaintenanceContext('foreground', async () => {
     const harness = await createConversationBaseHarness();
     await seedEndedHistory(harness, size);
     await harness.source.log.stopStorageMaintenance();
@@ -173,6 +213,7 @@ describe('package 1a cold-storage workload boundary', () => {
     expect(await journal.runState('current')).toBe('queued');
     await settle();
     const coldCurrent = work.since(at);
+    expect(coldCurrent.operations).toBeGreaterThan(0);
 
     at = work.mark();
     await journal.pendingInputs();
@@ -218,9 +259,9 @@ describe('package 1a cold-storage workload boundary', () => {
     expect(firstSend.physicalWriteBytes).toBeGreaterThan(0);
     expect(sources).toHaveLength(0);
     expect(continuation.rows).toBeLessThanOrEqual(8);
-  }, 900_000);
+  }), 900_000);
 
-  it.each([32, 128])('imported cold open, first send and save stay bounded with %i ended runs', async size => {
+  it.each([32, 128])('imported cold open, first send and save stay bounded with %i ended runs', async size => runInMaintenanceContext('foreground', async () => {
     const harness = await createConversationBaseHarness();
     await seedEndedHistory(harness, size);
     await harness.transfer();
@@ -285,5 +326,5 @@ describe('package 1a cold-storage workload boundary', () => {
       expect(phase.preparedFrames).toBeLessThanOrEqual(64);
       expect(phase.readBytes).toBeLessThanOrEqual(512 * 1024);
     }
-  }, 900_000);
+  }), 900_000);
 });

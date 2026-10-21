@@ -15,8 +15,39 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 import { FileArtifactStore, FileAuthorityCommitLog, FileDurableProjectionIndex, bindDurableProjectionMutations, durableProjectionDirectoryName, durableProjectionReadBudget } from "../index.js";
 import { createDefaultDeviceCapacityPolicy, DefaultDeviceCapacityArbiter, DefaultStorageMaintenanceGovernor, runWithDeviceCapacity, withDeviceCapacityStep, currentDeviceCapacityStep, StorageMaintenanceAdmissionError } from "../../resources/index.js";
+import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
 
 describe("authority projection physical reads", () => {
+  it("does not reserve maintenance capacity while waiting for the source owner", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "projection-lock-order-"));
+    const defaults = createDefaultDeviceCapacityPolicy();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+    const source = new SerialTaskQueue(), requested = Promise.withResolvers<void>();
+    let foreground: string | undefined;
+    const bound = { occupancy: { memoryReservationBytes: 4096, temporaryBytes: 0, slots: 1 },
+      quantum: { readBytes: 65536, writeBytes: 0, ioOperations: 4 } };
+    const owner = source.run(async () => {
+      await requested.promise;
+      const result = await arbiter.acquire({ admissionId: "source-control", serviceClass: "storage-foreground",
+        atomic: bound, preferred: bound, maxWaitMs: 0 }, new AbortController().signal);
+      foreground = result.kind;
+      if (result.kind === "granted") result.permit.release();
+    });
+    const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: "lock-order", reducerVersion: 1,
+      storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
+      withSourceLock: operation => { requested.resolve(); return source.run(operation); } });
+    try {
+      await Promise.all([owner, index.initialize({ source: { logId: "lock-order", lsn: 0,
+        frameEndOffset: 64, prefixDigest: `sha256:${"0".repeat(64)}` } })]);
+      expect(foreground).toBe("granted");
+      expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    } finally {
+      requested.resolve(); await owner; await index.stopStorageMaintenance();
+      if (path.dirname(path.resolve(root)).toLowerCase() !== path.resolve(os.tmpdir()).toLowerCase()) throw Error("Unexpected test directory");
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("closes a scan cursor when its first entry is refused and preserves the failure", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "projection-read-cleanup-"));
     const checkpoint = { logId: "cleanup", lsn: 0, frameEndOffset: 64, prefixDigest: "sha256:" + "0".repeat(64) };
