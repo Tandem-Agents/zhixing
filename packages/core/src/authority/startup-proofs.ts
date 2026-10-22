@@ -1,14 +1,15 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createSecretKey, timingSafeEqual, type KeyObject } from "node:crypto";
 import { deserialize, serialize } from "node:v8";
 import type { DurableLogCheckpoint } from "./interfaces.js";
 
 /** An immutable per-home capability injected by the composition owner. The
  * cache key authenticates derived bytes; it never determines WAL readability. */
 export class AuthorityCacheIntegrity {
-  readonly #key: Buffer;
+  // 每次以原始字节建 HMAC 都要重新导入密钥，代价是摘要本身的数倍；导入一次后复用。
+  readonly #key: KeyObject;
   constructor(key: Uint8Array) {
     if (!(key instanceof Uint8Array) || key.byteLength < 32) throw new TypeError("Authority cache integrity key is unavailable");
-    this.#key = Buffer.from(key);
+    this.#key = createSecretKey(Buffer.from(key));
   }
   sign(domain: string, parts: readonly Uint8Array[]): Buffer {
     const hmac = createHmac("sha256", this.#key).update("zhixing-startup-proof\0" + domain + "\0", "utf8");
