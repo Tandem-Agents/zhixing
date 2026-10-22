@@ -4,6 +4,8 @@ import type { ArtifactRef, JsonValue, LogicalRecord, TransferRecord } from '@zhi
 import { canonicalize, protocolDigest, reduceConversationTransfer, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { ConversationBaseSource, isConversationSourceEvidenceError } from './conversation-base-source.js';
 
+import { conversationStateKeyHash } from './conversation-state-key.js';
+
 export interface ConversationBaseBinding {
   readonly state: ConversationTransferState;
   readonly manifest: ArtifactRef; readonly records: ArtifactRef; readonly sessionState: ArtifactRef;
@@ -41,7 +43,7 @@ const transferKey = (id: string) => 'source/transfer/' + hash(id);
 const masked = (value: JsonValue | undefined): boolean => !!value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === 1 && value.conversationBaseDeleted === true;
 export const conversationBaseTombstone = Object.freeze({ conversationBaseDeleted: true });
-const runPrefix = (id: string) => 'conversation/' + protocolDigest('ConversationStateKey', 1, id).slice(7) + '/';
+const runPrefix = (id: string) => 'conversation/' + conversationStateKeyHash(id) + '/';
 const currentPrefixes = (id: string) => {
   const p = runPrefix(id);
   return [p + 'guard/queuedRunByPosition/', p + 'open-run/', p + 'pending-', p + 'ticket-pending/', p + 'ticket-expiry/', p + 'ticket-expiry-reverse/'];

@@ -1,7 +1,7 @@
 import type { ArtifactStore, AuthorityCommitLog, DurableProjectionMutation, DurableProjectionReadContext } from '@zhixing/core/authority';
 import { createDurableProjectionOverlay, readDurableProjectionKeys } from '@zhixing/core/authority';
 import type { JsonValue, LogicalRecord, CommitEnvelope, ReservableResourceLease, UsageReport } from '@zhixing/core/contracts';
-import { canonicalize, protocolDigest, validateGovernorRecord, requiresFormalResourceCoordination, dataPlaneTicketDigest,
+import { canonicalize, validateGovernorRecord, requiresFormalResourceCoordination, dataPlaneTicketDigest,
   type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { emptySubmissionGuardProjection, reduceConversationSubmissionGuard, reduceConversationRunState,
   type RunProjection, type ConversationRunReductionContext, type SubmissionGuardProjection, type ConversationCommitLogRecord, type ConversationAbortTicketAuthorizer } from './conversation-assignment.js';
@@ -11,9 +11,10 @@ import { dataPlaneTicketSyncBoundary } from './data-plane-ticket-lifecycle.js';
 import { foldConversationRunExtras } from './conversation-run-state-extras.js';
 import { foldConversationBaseBindings, preserveBaseDeletions, registerConversationBaseContext, registerConversationBaseRepair, conversationBaseUnavailableKey, conversationBaseRepairRequired, conversationViewAt, conversationBaseKey, openConversationBase, type ConversationBaseBinding } from './conversation-base-registry.js';
 
+import { conversationStateKeyHash as hash } from './conversation-state-key.js';
+
 export const CONVERSATION_RUN_STATE_PROJECTION_ID = 'conversation-run-state-v1';
 export const CONVERSATION_SUBMISSION_STATE_PROJECTION_ID = 'conversation-submission-state-v1';
-const hash = (value: unknown) => protocolDigest('ConversationStateKey', 1, value).slice(7);
 const base = (id: string) => 'conversation/' + hash(id) + '/';
 const fieldPrefix = (id: string, field: string) => base(id) + 'guard/' + field + '/';
 const fieldKey = (id: string, field: string, key: string | number) => fieldPrefix(id, field) + hash(key);
