@@ -113,4 +113,85 @@ describe("authority projection physical reads", () => {
       await stored.stopStorageMaintenance();
     } finally { await writer.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
   });
+
+  it("synchronizes registered projections before the caller's physical step on a single-slot device", async () => {
+    // 打开投影、采纳其他实例的发布是日志自身的工作，成本随登记的投影数增长；调用方按业务估算的
+    // 物理计划只承担自己的读写。每次操作都是新锁会话，投影都须重新采纳发布。
+    const root = await mkdtemp(path.join(os.tmpdir(), "projection-presync-"));
+    const arbiter = singleSlotArbiter();
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
+      storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
+      runProjectionReadStep: leafProjectionReads(arbiter), lockSessionLingerMs: 0 });
+    try {
+      registerCounters(log);
+      for (const id of COUNTERS) await log.append([{ stream: `job:${id}`, body: { n: 1 } }]);
+      const result = await log.transactDurableProjection("counter-a", async () => ({
+        kind: "append", entries: [{ stream: "job:counter-a", body: { n: 2 } }], value: "appended",
+      }), { runPhysicalStep: callerStep(arbiter) });
+      expect(result.value).toBe("appended");
+      expect(arbiter.snapshot().occupancyInUse.slots).toBe(0);
+    } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("adopts other instances' projection publications once per lock session, not on every write", async () => {
+    // 其他实例只能持锁发布：本实例持有锁会话期间不会出现新的发布，后续写入不再逐个重读清单。
+    const root = await mkdtemp(path.join(os.tmpdir(), "projection-session-refresh-"));
+    const arbiter = singleSlotArbiter();
+    const steps: string[] = [];
+    const log = new FileAuthorityCommitLog(path.join(root, "authority"), new FileArtifactStore(path.join(root, "artifacts")), {
+      storageMaintenance: new DefaultStorageMaintenanceGovernor({ capacity: arbiter }),
+      runProjectionReadStep: leafProjectionReads(arbiter, steps), lockSessionLingerMs: 60_000 });
+    try {
+      registerCounters(log);
+      for (const id of COUNTERS) await log.append([{ stream: `job:${id}`, body: { n: 1 } }]);
+      steps.length = 0;
+      await log.transactDurableProjection("counter-b", async () => ({
+        kind: "append", entries: [{ stream: "job:counter-b", body: { n: 2 } }], value: undefined,
+      }), { runPhysicalStep: callerStep(arbiter) });
+      expect(steps.filter((step) => step === "manifest")).toEqual([]);
+    } finally { await log.stopStorageMaintenance(); await rm(root, { recursive: true, force: true }); }
+  });
 });
+
+const COUNTERS = ["counter-a", "counter-b", "counter-c", "counter-d"] as const;
+
+function registerCounters(log: FileAuthorityCommitLog): void {
+  for (const id of COUNTERS) {
+    log.durableProjection({ projectionId: id, reducerVersion: 1, inputs: { streams: [`job:${id}`] },
+      reduce: (envelope) => envelope.entries.filter((entry) => entry.stream === `job:${id}`)
+        .map((entry) => ({ kind: "put" as const, key: "latest", value: entry.body })) });
+  }
+}
+
+function singleSlotArbiter(): DefaultDeviceCapacityArbiter {
+  const defaults = createDefaultDeviceCapacityPolicy();
+  return new DefaultDeviceCapacityArbiter({ policy: { ...defaults, occupancy: { ...defaults.occupancy, slots: 1 } },
+    probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+}
+
+/** 与生产同形的叶级投影读取准入：物理计划内直接记在计划上，计划外各自零等待取得准入。 */
+function leafProjectionReads(arbiter: DefaultDeviceCapacityArbiter, steps?: string[]) {
+  return async <T>(step: Parameters<typeof durableProjectionReadBudget>[0], operation: () => Promise<T>): Promise<T> => {
+    steps?.push(step);
+    if (currentDeviceCapacityStep()?.kind === "physical") return operation();
+    const budget = durableProjectionReadBudget(step);
+    const leaf = { occupancy: { memoryReservationBytes: budget.memoryReservationBytes, temporaryBytes: 0, slots: 1 },
+      quantum: { readBytes: budget.readBytes, writeBytes: 0, ioOperations: budget.ioOperations } };
+    const admission = await arbiter.acquire({ admissionId: "projection-leaf", serviceClass: "storage-foreground",
+      atomic: leaf, preferred: leaf, maxWaitMs: 0 }, new AbortController().signal);
+    if (admission.kind !== "granted") throw new Error(admission.kind);
+    try { return await withDeviceCapacityStep(admission.permit, leaf, operation); } finally { admission.permit.release(); }
+  };
+}
+
+/** 调用方按业务估算的物理计划：只够它自己的一次读写，占用设备唯一的槽位。 */
+function callerStep(arbiter: DefaultDeviceCapacityArbiter) {
+  const bound = { occupancy: { memoryReservationBytes: 4096, temporaryBytes: 0, slots: 1 },
+    quantum: { readBytes: 65536, writeBytes: 65536, ioOperations: 1 } };
+  return async <T>(operation: () => Promise<T>): Promise<T> => {
+    const admission = await arbiter.acquire({ admissionId: "caller-step", serviceClass: "storage-foreground",
+      atomic: bound, preferred: bound, maxWaitMs: 0 }, new AbortController().signal);
+    if (admission.kind !== "granted") throw new Error(admission.kind);
+    try { return await withDeviceCapacityStep(admission.permit, bound, operation); } finally { admission.permit.release(); }
+  };
+}

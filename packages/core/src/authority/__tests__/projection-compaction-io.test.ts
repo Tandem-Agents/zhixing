@@ -40,6 +40,7 @@ vi.mock('../../protocol/index.js', async importOriginal => {
   } };
 });
 import { AuthorityCacheIntegrity, FileDurableProjectionIndex, DurableProjectionStorageError } from '../index.js';
+import { runInMaintenanceContext, runWithMaintenanceUrgency } from '../../resources/index.js';
 
 async function scatteredRangesFixture() {
   const root = await createTempDir('compaction-range-batch');
@@ -88,6 +89,99 @@ it('publishes scattered compaction ranges in bounded batches with the same crash
     expect((await index.scan({}, 256, pinned.continuation)).entries.find(row => row.key === key(512))?.value).toBe(512);
   } finally { work.enabled = false; work.failManifest = false; await index.stopStorageMaintenance(); }
 }, 60_000);
+
+it('merges a large delta that lands inside one base range over several bounded steps with the same crash and reader guarantees', async () => {
+  const root = await createTempDir('compaction-large-range');
+  const options = { rootDir: root, projectionId: 'large-range', reducerVersion: 1, authenticated: true,
+    integrity: new AuthorityCacheIntegrity(Buffer.alloc(32, 23)), allowSegmentReclamation: false };
+  const index = new FileDurableProjectionIndex(options);
+  let lsn = 0;
+  const checkpoint = () => ({ source: { logId: 'large-range', lsn, frameEndOffset: 64 + lsn,
+    prefixDigest: `sha256:${lsn.toString(16).padStart(64, '0')}` as const } });
+  const key = (prefix: string, n: number) => `${prefix}-${String(n).padStart(5, '0')}`;
+  try {
+    await index.initialize(checkpoint());
+    // 六组相互分隔的基段。
+    for (const prefix of ['a', 'b', 'c', 'x', 'y', 'z']) {
+      lsn++;
+      index.publish(await index.prepare(Array.from({ length: 512 }, (_, n) => ({ kind: 'put' as const, key: key(prefix, n), value: prefix + n }))), checkpoint());
+      await index.flush();
+    }
+    expect(JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')).baseRoot).toBeDefined();
+    // 一次写入 5,000 个落在 c 与 x 之间（同一基段范围）的键，再用三个小增量使增量段（连同建基段时留下的一个）超出上限、登记整理。
+    lsn++;
+    index.publish(await index.prepare(Array.from({ length: 5_000 }, (_, n) => ({ kind: 'put' as const, key: key('m', n), value: n }))), checkpoint());
+    await index.flush({ compact: false });
+    for (let n = 0; n < 3; n++) {
+      lsn++;
+      index.publish(await index.prepare([{ kind: 'put', key: key('a', n), value: 'updated' + n }]), checkpoint());
+      await index.flush({ compact: false });
+    }
+    // 第三次发布清单时失败：前两步已发布的部分与其余增量一起仍给出完整、正确的读取。
+    work.manifestWrites = 0; work.enabled = true;
+    work.failManifestAfter = 3;
+    await expect(index.flush()).rejects.toThrow('injected partial compaction');
+    const cold = new FileDurableProjectionIndex({ ...options, readOnly: true });
+    await cold.initialize(checkpoint());
+    expect(await cold.getMany([key('m', 0), key('m', 1_500), key('m', 4_999), key('a', 2), key('c', 511), key('x', 0)]))
+      .toEqual([0, 1_500, 4_999, 'updated2', 'c511', 'x0']);
+    await cold.stopStorageMaintenance();
+    // 整理分多步完成：每步合并的条目有上限，含失败前已发布的两步，发布次数不少于 5,000 / 1,024。
+    await index.flush(); work.enabled = false;
+    expect(work.manifestWrites).toBeGreaterThanOrEqual(5);
+    expect(JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')).compaction).toBeUndefined();
+    const all = new Map<string, unknown>(); let continuation: string | undefined;
+    do { const page = await index.scan({ gte: 'm-', lt: 'm.' }, 256, continuation); for (const entry of page.entries) all.set(entry.key, entry.value); continuation = page.continuation; } while (continuation);
+    expect(all.size).toBe(5_000);
+    expect(await index.getMany([key('m', 2_048), key('a', 0), key('b', 511), key('z', 511)])).toEqual([2_048, 'updated0', 'b511', 'z511']);
+  } finally { work.enabled = false; work.failManifestAfter = undefined; await index.stopStorageMaintenance(); }
+}, 120_000);
+
+it('waits between background compaction steps at the caller gate and continues at once when a foreground flush joins', async () => {
+  const root = await createTempDir('compaction-step-gate');
+  const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: 'step-gate', reducerVersion: 1, allowSegmentReclamation: false });
+  let lsn = 0;
+  const checkpoint = () => ({ source: { logId: 'step-gate', lsn, frameEndOffset: 64 + lsn,
+    prefixDigest: `sha256:${lsn.toString(16).padStart(64, '0')}` as const } });
+  const key = (prefix: string, n: number) => `${prefix}-${String(n).padStart(5, '0')}`;
+  const manifest = async () => JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8'));
+  try {
+    await index.initialize(checkpoint());
+    for (const prefix of ['a', 'b', 'c', 'x', 'y', 'z']) {
+      lsn++;
+      index.publish(await index.prepare(Array.from({ length: 512 }, (_, n) => ({ kind: 'put' as const, key: key(prefix, n), value: prefix + n }))), checkpoint());
+      await index.flush();
+    }
+    lsn++;
+    index.publish(await index.prepare(Array.from({ length: 5_000 }, (_, n) => ({ kind: 'put' as const, key: key('m', n), value: n }))), checkpoint());
+    await index.flush({ compact: false });
+    for (let n = 0; n < 3; n++) {
+      lsn++;
+      index.publish(await index.prepare([{ kind: 'put', key: key('a', n), value: 'updated' + n }]), checkpoint());
+      await index.flush({ compact: false });
+    }
+    expect((await manifest()).compaction).toBeDefined();
+    // 后台整理在每一步之前等调用方的闸门；闸门未放行时一步也不做。
+    let gateCalls = 0, release: () => void = () => undefined;
+    const gate = () => { gateCalls++; return new Promise<void>(resolve => { release = resolve; }); };
+    const background = runWithMaintenanceUrgency(() => 'background', new AbortController().signal, () => index.flush({ betweenSteps: gate }));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const pausedAt = (await manifest()).generation;
+    expect(gateCalls).toBe(1);
+    // 放行一次：推进一步后再次停在闸门。
+    release();
+    for (let n = 0; n < 100 && gateCalls < 2; n++) await new Promise(resolve => setTimeout(resolve, 20));
+    expect(gateCalls).toBe(2);
+    expect((await manifest()).generation).toBeGreaterThan(pausedAt);
+    expect((await manifest()).compaction).toBeDefined();
+    // 前台落盘加入同一维护义务：紧急度升高，不再等闸门，整理一并完成。
+    await runInMaintenanceContext('foreground', () => index.flush());
+    await background;
+    expect(gateCalls).toBe(2);
+    expect((await manifest()).compaction).toBeUndefined();
+    expect(await index.getMany([key('m', 0), key('m', 4_999), key('a', 2), key('z', 511)])).toEqual([0, 4_999, 'updated2', 'z511']);
+  } finally { await index.stopStorageMaintenance(); }
+}, 120_000);
 
 it('preserves initial base construction before optimizing later checkpoint tails', async () => {
   const root = await createTempDir('initial-projection-base');

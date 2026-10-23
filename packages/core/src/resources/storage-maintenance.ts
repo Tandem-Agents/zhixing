@@ -6,6 +6,7 @@ import {
   type DeviceCapacityAdmission,
   type DeviceCapacityArbiterPort,
   type DeviceCapacityBudget,
+  runDetachedDeviceCapacity,
   withDeviceCapacityStep,
 } from "./device-capacity.js";
 import {
@@ -363,12 +364,14 @@ export class StorageMaintenanceTaskRunner {
     operation: (abort: AbortSignal) => Promise<T>,
   ): Promise<T> {
     try {
-      return await runWithMaintenanceUrgency(
+      // 共享义务属于义务本身，不是首个请求者容量步骤的子步骤：它可能比该步骤
+      // 活得长，还会被其他等待者合流，叶级操作各自取得准入。
+      return await runDetachedDeviceCapacity(() => runWithMaintenanceUrgency(
         () => task.urgency,
         task.abort.signal,
         () => operation(task.abort.signal),
         () => task.stopping,
-      );
+      ));
     } catch (error) {
       recordMaintenanceError(this.governor, task.kind, error);
       throw error;

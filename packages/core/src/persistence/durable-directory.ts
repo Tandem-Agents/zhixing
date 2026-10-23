@@ -29,6 +29,9 @@ export async function ensureDurableDirectory(directory: string): Promise<void> {
 }
 
 export async function syncDirectory(directory: string): Promise<void> {
+  // Windows 上只读目录句柄的 sync 必定以 EPERM/EINVAL 失败（下方原本即视为成功），
+  // 打开与关闭只是白付的系统调用，直接返回，行为不变。
+  if (process.platform === "win32") return;
   const handle = await open(directory, "r");
   try {
     await handle.sync().catch((error: unknown) => {

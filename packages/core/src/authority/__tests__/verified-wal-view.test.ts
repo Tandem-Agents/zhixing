@@ -122,15 +122,14 @@ it("retains a bounded append proof after eviction but rejects damaged history", 
   onTestFinished(() => log.stopStorageMaintenance());
   await log.append([{ stream: "control", body: { text: "original" } }]);
   await log.readSnapshot();
-  await log.stopStorageMaintenance(); events.length = 0;
+  events.length = 0;
   verified.verifiedWalViews.delete(log.logPath);
   await expect(log.append([{ stream: "control", body: { text: "second" } }])).resolves.toMatchObject({ lsn: 2 });
-  await log.stopStorageMaintenance();
   expect(events.filter(e => e.event === "work").reduce((n, e) => n + Number(e.data!.recoveries), 0)).toBe(0);
   const bytes = await readFile(log.logPath);
   bytes[bytes.indexOf(Buffer.from("original"))] ^= 1;
   await writeFile(log.logPath, bytes);
-  await expect(log.append([{ stream: "control", body: { text: "third" } }])).rejects.toThrow();
+  await expect(log.append([{ stream: "control", body: { text: "third" } }])).rejects.toThrow("Commit envelope digest is invalid");
 }, 20000);
 
 it("observes an append from a separate process and preserves the old cursor boundary", async () => {

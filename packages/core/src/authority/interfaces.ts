@@ -212,6 +212,28 @@ export interface AuthorityCommitLog {
   loadProjectionCheckpoint?<State>(key: string): Promise<{ readonly state: State; readonly cursor: ProjectionCursor } | undefined>;
   /** 启动证明开启时可用：保存投影检查点；失败不影响调用方。 */
   saveProjectionCheckpoint?(key: string, cursor: ProjectionCursor, state: unknown): Promise<void>;
+  /** 在当前已核验位置为所选投影写入一批不来自新事实的行（旧资料按分区迁移）；持日志锁执行有界计算。 */
+  publishProjectionRows?(ids: readonly string[], compute: (head: DurableLogCheckpoint,
+    read: (projectionId: string) => import("./durable-projection-index.js").DurableProjectionReadContext,
+    source: {
+      readStreamEnvelopes<Body = JsonValue>(streams: readonly string[], afterLsn: number, throughLsn: number, limit?: number): Promise<{
+        readonly commits: readonly CommitEnvelope<Body>[]; readonly checkpoints: readonly DurableLogCheckpoint[]; readonly lastLsn: number; readonly hasMore: boolean;
+      }>;
+      readEnvelopeAt<Body = JsonValue>(checkpoint: DurableLogCheckpoint): Promise<CommitEnvelope<Body>>;
+    }) =>
+    Promise<ReadonlyMap<string, readonly import("./durable-projection-index.js").DurableProjectionMutation[] | import("./durable-projection-index.js").NormalizedProjectionMutations>>,
+    /** deferFlush：行可重新推导的小批写入，不单独落盘，由此后的落盘一并带上；崩溃丢失时重新推导。
+     * betweenSteps：落盘若带出段整理，在步与步之间调用（后台迁移据此给前台让路）。 */
+    options?: { readonly deferFlush?: boolean; readonly betweenSteps?: () => Promise<void> }): Promise<DurableLogCheckpoint>;
+  /** 列出键以 prefix 开头的投影检查点键（未认证；使用前须经 loadProjectionCheckpoint）。 */
+  listProjectionCheckpointKeys?(prefix: string): Promise<readonly string[]>;
+  /** 按流分页读取 (afterLsn, throughLsn] 内的信封及各自已核验位置；经认证帧索引跳过无关帧。 */
+  readStreamEnvelopes?<Body = JsonValue>(streams: readonly string[], afterLsn: number, throughLsn: number, limit?: number): Promise<{
+    readonly commits: readonly CommitEnvelope<Body>[];
+    readonly checkpoints: readonly DurableLogCheckpoint[];
+    readonly lastLsn: number;
+    readonly hasMore: boolean;
+  }>;
   /** 丢弃不再需要的投影检查点；检查点只是缓存，失败不影响调用方。 */
   deleteProjectionCheckpoint?(key: string): Promise<void>;
   /** 登记正式停止前补存检查点的回调；返回注销函数。 */

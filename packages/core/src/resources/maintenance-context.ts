@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { runDetachedDeviceCapacity } from "./device-capacity.js";
 import type { StorageMaintenanceUrgency } from "./storage-maintenance.js";
 
 /**
@@ -71,12 +72,15 @@ export function runInMaintenanceContext<T>(
  * Node 会把 AsyncLocalStorage 传播进 timer；直接在 timer 中继续会错误继承
  * 原调用者的紧急度、取消信号和互斥标记。只有具备独立耐久重试凭据、且由
  * 自身 owner 接管生命周期的后台续跑可以使用本原语。
+ *
+ * 同时退出调用者的设备容量步骤：后台续跑可能比该步骤活得长，其读写也不得
+ * 记在调用者的计划上，叶级操作各自取得准入。
  */
 export function runDetachedMaintenanceContext<T>(
   urgency: StorageMaintenanceUrgency,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return maintenanceContext.run(
+  return runDetachedDeviceCapacity(() => maintenanceContext.run(
     {
       urgency: () => urgency,
       abort: neverAbortMaintenance,
@@ -84,7 +88,7 @@ export function runDetachedMaintenanceContext<T>(
       cancelWhenAbandoned: neverCancelWhenAbandoned,
     },
     operation,
-  );
+  ));
 }
 
 /**

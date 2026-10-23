@@ -63,6 +63,11 @@ export {
   durableProjectionDirectoryName,
   durableProjectionVersionDirectoryName,
   durableProjectionReadBudget,
+  normalizeProjectionMutations, normalizeProjectionMutationsInSlices,
+  mergeNormalizedProjectionMutations,
+  isNormalizedProjectionMutations,
+  projectionMutationKeyCount,
+  type NormalizedProjectionMutations,
   type DurableProjectionDefinition,
   type DurableProjectionInputs,
   type DurableProjectionCheckpoints,
@@ -79,6 +84,7 @@ export {
   type PreparedProjectionDelta,
   type RebuildableDurableProjectionIndex,
 } from "./durable-projection-index.js";
+export { PersistentSortedMap } from "./persistent-sorted-map.js";
 export {
   SurfaceAssetCoordinator,
   surfaceAssetRequestKey,
@@ -138,5 +144,5 @@ export type {
   ProjectionTransactionReducer,
 } from "./interfaces.js";
 export { DeviceLifecycleJournal, registerDeviceLifecycleProjection } from "./device-lifecycle-journal.js";
-export { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, AuthorityProjectionUnavailable, maximumAuthorityRecoveryTailBytes } from "./recovery-work.js";
+export { AUTHORITY_RECOVERY_BUDGET, AuthorityPreparationRequired, AuthorityProjectionUnavailable, awaitAuthorityPreparation, maximumAuthorityRecoveryTailBytes } from "./recovery-work.js";
 export type { AuthorityPreparedWatermark } from "./recovery-work.js";

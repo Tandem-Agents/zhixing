@@ -114,6 +114,19 @@ export function encodeProjectionCheckpoint(
   return Buffer.concat([CHECKPOINT_MAGIC, headerBytes, payload], total);
 }
 
+/** 只读检查点文件头中的键，不作任何认证；内容必须再经 decodeProjectionCheckpoint 认证后使用。 */
+export function peekProjectionCheckpointKey(head: Buffer): string | undefined {
+  try {
+    if (!head.subarray(0, CHECKPOINT_MAGIC.byteLength).equals(CHECKPOINT_MAGIC)) return undefined;
+    const headerEnd = head.indexOf(10, CHECKPOINT_MAGIC.byteLength);
+    if (headerEnd < 0 || headerEnd - CHECKPOINT_MAGIC.byteLength > 64 * 1024) return undefined;
+    const key = (JSON.parse(head.subarray(CHECKPOINT_MAGIC.byteLength, headerEnd).toString("utf8")) as { key?: unknown }).key;
+    return typeof key === "string" ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function decodeProjectionCheckpoint(
   bytes: Buffer,
   key: string,

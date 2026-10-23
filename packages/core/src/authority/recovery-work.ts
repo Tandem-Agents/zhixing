@@ -1,5 +1,6 @@
 import { authorityWalMaximumFrameBytes } from "./wal-frame.js";
 import { StorageMaintenanceAdmissionError } from "../resources/storage-maintenance.js";
+import { isHoldingMaintenanceExclusion } from "../resources/maintenance-context.js";
 import type { DurableLogCheckpoint } from "./interfaces.js";
 
 /** Physical work limits, independent of the number of business identities. */
@@ -49,6 +50,16 @@ export class AuthorityPreparationRequired extends StorageMaintenanceAdmissionErr
     this.name = "AuthorityPreparationRequired";
     this.message = "Authority derived state is being prepared";
   }
+}
+
+/**
+ * 互斥区外的重试点：错误带有可在区外完成的准备时等待它完成并返回 true。准备是确定的前进，
+ * 不占用容量背压的有限等待窗口；准备失败照常抛出。区内或其他错误返回 false，由调用方按背压处理。
+ */
+export async function awaitAuthorityPreparation(error: unknown): Promise<boolean> {
+  if (!(error instanceof AuthorityPreparationRequired) || !error.prepareOutside || isHoldingMaintenanceExclusion()) return false;
+  await error.prepareOutside();
+  return true;
 }
 
 /** 落后量在硬准入上限之内：首次写入或读取前可在锁内同步，工作量与 C8 同时点、受 K 约束。 */

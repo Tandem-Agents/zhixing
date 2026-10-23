@@ -22,6 +22,7 @@ import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
   currentMaintenanceAbortSignal,
+  currentMaintenanceUrgency,
   currentDeviceCapacityStep,
   isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
@@ -38,6 +39,7 @@ import {
   type StorageMaintenanceObligation,
 } from "../resources/index.js";
 import type { DurableLogCheckpoint } from "./interfaces.js";
+import { PersistentSortedMap } from "./persistent-sorted-map.js";
 import { projectionIndexMac, type AuthorityCacheIntegrity } from "./startup-proofs.js";
 
 const INDEX_FORMAT_VERSION = 3;
@@ -53,8 +55,21 @@ const MAX_KEY_BYTES = 2_048;
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_OVERLAY_ENTRIES = 512;
 const DEFAULT_OVERLAY_BYTES = 1024 * 1024;
+// 从权威源重建期间投影不对外可读，已发布进度只是续做位置。覆盖层以有界内存保存整段重建
+// 状态，避免逐页落盘再反复合并；超出时照常溢写为增量段，崩溃后从最近一次落盘续做。
+const DEFAULT_REBUILD_OVERLAY_BYTES = 16 * 1024 * 1024;
+// 内存中的重建进度至多保留这么久即落盘一次，续做的重做量随之有界。
+const REBUILD_CHECKPOINT_INTERVAL_MS = 5_000;
 const PROJECTION_ADMISSION_DEADLINE_MS = 5_000;
 const MAX_DELTA_SEGMENTS = 4;
+/**
+ * 覆盖层条目数达到它时（整批发布，例如旧资料迁移），落盘的逐条编码（规范字节与校验和）在维护步骤之外
+ * 分片预先完成，步骤内只写字节：落盘不再按批量大小占住与日志共用的维护栅栏，也不长时间阻塞事件循环。
+ */
+const PREENCODE_MIN_ENTRIES = 2 * DEFAULT_OVERLAY_ENTRIES;
+/** 大批量的规范化每片条数；预编码按时间片让出（同进程的读写一次要经过多轮事件循环，片越短等得越少）。 */
+const LARGE_BATCH_SLICE_ENTRIES = 64;
+const LARGE_BATCH_SLICE_MS = 4;
 const BASE_SEGMENT_ENTRIES = 512;
 const SEGMENT_OFFSET_BATCH_BYTES = BASE_SEGMENT_ENTRIES * 8;
 const BASE_SEGMENT_BYTES = 1024 * 1024;
@@ -127,11 +142,12 @@ export interface DurableProjectionReadContext {
   ): Promise<DurableProjectionScanPage>;
 }
 
-/** Preserve the existing batch read bound through scoped/legacy read views. */
+/** Preserve the existing batch read bound through scoped/legacy read views.
+ * Each key is validated once by the backing index; wrapping views only keep the batch bound. */
 export async function readDurableProjectionKeys(
   current: DurableProjectionReadContext, keys: readonly string[],
 ): Promise<readonly (JsonValue | undefined)[]> {
-  const selected = validateReadKeys(keys);
+  const selected = boundedReadKeys(keys);
   if (!selected.length) return [];
   if (current.getMany) return current.getMany(selected);
   const values: (JsonValue | undefined)[] = [];
@@ -149,7 +165,7 @@ export function createDurableProjectionOverlay(
   return {
     get: async key => changes.has(key) ? changes.get(key) : current.get(key),
     async getMany(keys) {
-      const selected = validateReadKeys(keys);
+      const selected = boundedReadKeys(keys);
       const missing = selected.filter(key => !changes.has(key));
       const values = await readDurableProjectionKeys(current, missing);
       let cursor = 0;
@@ -230,6 +246,13 @@ export interface DurableProjectionDefinition<Body = JsonValue> {
   readonly reducerVersion: number;
   readonly reduce: DurableProjectionReducer<Body>;
   readonly inputs?: DurableProjectionInputs;
+  /**
+   * 新版本或被重置时不从源起点重建，而以空状态在源头部直接就绪。只用于其所有者能按分区迁移旧状态、
+   * 且归约在分区未迁移时拒绝候选写入（抛出带准备动作的 AuthorityPreparationRequired）的投影。
+   */
+  readonly startAtSource?: boolean | ((head: DurableLogCheckpoint) => boolean);
+  /** 以空状态在源头部起步时（新版本、重置）写入的初始行，例如源为空时直接写迁移完成标记。 */
+  readonly seedAtSource?: (head: DurableLogCheckpoint) => readonly DurableProjectionMutation[];
   /** 可信业务快路径须认证磁盘缓存；无密钥时只接受本实例从权威源重建的状态。 */
   readonly authenticated?: boolean;
 }
@@ -252,6 +275,11 @@ export interface FileDurableProjectionIndexOptions {
   readonly integrity?: AuthorityCacheIntegrity;
   readonly readOnly?: boolean;
   readonly managedRecovery?: boolean;
+  /** 没有可用清单或被重置时，以空状态在源头部直接就绪，不从源起点重建（由所有者按分区迁移旧状态）。
+   * 给出函数时按源头部决定：例如很小的源仍从起点重建，成本有固定上限。 */
+  readonly startAtSource?: boolean | ((head: DurableLogCheckpoint) => boolean);
+  /** 以空状态在源头部起步时的初始行；与起步清单一同生效（见 sourceSeedPending）。 */
+  readonly seedAtSource?: (head: DurableLogCheckpoint) => readonly DurableProjectionMutation[];
   readonly legacyRootDir?: string;
   readonly allowSegmentReclamation?: boolean;
   readonly withSourceLock?: <T>(operation: () => Promise<T>, abort?: AbortSignal) => Promise<T>;
@@ -262,6 +290,8 @@ export interface FileDurableProjectionIndexOptions {
   readonly reducerVersion: number;
   readonly overlayEntries?: number;
   readonly overlayBytes?: number;
+  /** 受管重建期间覆盖层的内存上限（按条目编码字节计）。 */
+  readonly rebuildOverlayBytes?: number;
   readonly clock?: () => number;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   /**
@@ -341,6 +371,11 @@ const compactionStepUsage = new AsyncLocalStorage<{
   guardNextRange: boolean;
 }>();
 const COMPACTION_RANGES_PER_STEP = 8;
+/**
+ * 一个整理步骤合并的增量条目上限（单批与整步都受它约束）。整理步骤持有维护栅栏（即日志锁）：大批写入
+ * （例如旧资料迁移整会话发布）落在同一基段的键范围内时，分多步合并，每步持锁时间与批量大小无关。
+ */
+const COMPACTION_STEP_MUTATIONS = 2 * 512;
 const COMPACTION_DIRECTORY_BYTES = 2 * 1024 * 1024;
 const COMPACTION_DIRECTORY_PAGES = 256;
 
@@ -358,6 +393,11 @@ interface ProjectionManifest {
   readonly rebuilding?: true;
   readonly recoveryTarget?: DurableProjectionCheckpoints;
   readonly unrelatedThrough?: DurableProjectionCheckpoints;
+  /**
+   * 在源头部起步、初始行尚未随增量段落盘：这些行由清单位置推出，每次打开（含只读）先放回覆盖层，
+   * 读者永远看不到“已追平却缺初始行”的状态。写出覆盖层的落盘清除此标志，只改其他部分的清单保留它。
+   */
+  readonly sourceSeedPending?: true;
 }
 
 interface ProjectionRetirementIdentity {
@@ -380,9 +420,63 @@ interface ProjectionWriteIntent {
   readonly manifestDigest?: string;
 }
 
+/**
+ * 在锁外预先规范化的一批写入（逐值求规范字节数是主要成本）。准备时直接合并，锁内不再随批量大小做逐值计算。
+ * 不透明：只能由 normalizeProjectionMutations / mergeNormalizedProjectionMutations 得到。
+ */
+export interface NormalizedProjectionMutations { readonly normalizedProjectionMutations: true }
+const normalizedBatches = new WeakMap<NormalizedProjectionMutations, { readonly entries: ReadonlyMap<string, StoredMutation>; readonly count: number }>();
+
+export function normalizeProjectionMutations(mutations: readonly DurableProjectionMutation[]): NormalizedProjectionMutations {
+  const token: NormalizedProjectionMutations = Object.freeze({ normalizedProjectionMutations: true as const });
+  normalizedBatches.set(token, { entries: normalizeMutations(bindDurableProjectionMutations(mutations)), count: mutations.length });
+  return token;
+}
+
+/** 与 normalizeProjectionMutations 结果相同，分片进行、片间让出事件循环：大批量时不阻塞同进程的其他工作。 */
+export async function normalizeProjectionMutationsInSlices(mutations: readonly DurableProjectionMutation[]): Promise<NormalizedProjectionMutations> {
+  const entries = new Map<string, StoredMutation>();
+  for (let start = 0; start < mutations.length; start += LARGE_BATCH_SLICE_ENTRIES) {
+    if (start > 0) await yieldEventLoop();
+    for (const [key, mutation] of normalizeMutations(bindDurableProjectionMutations(mutations.slice(start, start + LARGE_BATCH_SLICE_ENTRIES)))) {
+      entries.set(key, mutation);
+    }
+  }
+  const token: NormalizedProjectionMutations = Object.freeze({ normalizedProjectionMutations: true as const });
+  normalizedBatches.set(token, { entries, count: mutations.length });
+  return token;
+}
+
+function yieldEventLoop(): Promise<void> {
+  return new Promise<void>(resolve => setImmediate(resolve));
+}
+
+/** 后者覆盖前者的同键写入；用于“锁外整批 + 锁内少量改动”。 */
+export function mergeNormalizedProjectionMutations(base: NormalizedProjectionMutations, overrides: NormalizedProjectionMutations): NormalizedProjectionMutations {
+  const first = normalizedBatch(base), second = normalizedBatch(overrides);
+  const token: NormalizedProjectionMutations = Object.freeze({ normalizedProjectionMutations: true as const });
+  normalizedBatches.set(token, { entries: new Map([...first.entries, ...second.entries]), count: first.count + second.count });
+  return token;
+}
+
+export function isNormalizedProjectionMutations(value: unknown): value is NormalizedProjectionMutations {
+  return typeof value === "object" && value !== null && normalizedBatches.has(value as NormalizedProjectionMutations);
+}
+
+/** 一批写入的键数（已规范化的批按合并后的键计）。 */
+export function projectionMutationKeyCount(mutations: readonly DurableProjectionMutation[] | NormalizedProjectionMutations): number {
+  return isNormalizedProjectionMutations(mutations) ? normalizedBatch(mutations).entries.size : mutations.length;
+}
+
+function normalizedBatch(token: NormalizedProjectionMutations): { readonly entries: ReadonlyMap<string, StoredMutation>; readonly count: number } {
+  const batch = normalizedBatches.get(token);
+  if (!batch) throw new TypeError("Projection mutation batch was not normalized");
+  return batch;
+}
+
 export interface PreparedProjectionDelta {
   readonly owner: FileDurableProjectionIndex;
-  readonly nextActive: ReadonlyMap<string, StoredMutation>;
+  readonly nextActive: PersistentSortedMap<StoredMutation>;
   readonly nextActiveBytes: number;
   readonly nextMutationCount: number;
   readonly nextMutationBytes: number;
@@ -438,7 +532,7 @@ export function createBoundDurableProjectionReadContext(
         : readBoundDurableProjectionValue(key, value);
     },
     async getMany(keys) {
-      const selected = validateReadKeys(keys);
+      const selected = boundedReadKeys(keys);
       const values = current.getMany ? await current.getMany(selected) : await (async () => {
         const result: (JsonValue | undefined)[] = [];
         for (const key of selected) result.push(await current.get(key));
@@ -483,7 +577,9 @@ interface ReadView {
   readonly id: string;
   readonly generation: number;
   readonly expiresAt: number;
-  readonly active: ReadonlyMap<string, StoredMutation>;
+  readonly active: PersistentSortedMap<StoredMutation>;
+  /** 重建期间已落盘条目的内存副本；complete 时它与覆盖层合起来就是全部状态。 */
+  readonly rebuildCache?: { readonly entries: PersistentSortedMap<StoredMutation>; readonly complete: boolean };
   readonly deltaSegments: readonly SegmentDescriptor[];
   readonly baseRoot?: DirectoryPagePointer;
 }
@@ -600,6 +696,10 @@ export class FileDurableProjectionIndex {
   readonly #integrity: AuthorityCacheIntegrity | undefined;
   readonly #readOnly: boolean;
   readonly #managedRecovery: boolean;
+  readonly #startAtSource: boolean | ((head: DurableLogCheckpoint) => boolean);
+  readonly #seedAtSource: ((head: DurableLogCheckpoint) => readonly DurableProjectionMutation[]) | undefined;
+  /** 已把初始行放回覆盖层的清单代次。 */
+  #seededGeneration: number | undefined;
   readonly #legacyRootDir: string | undefined;
   readonly #sourceLock: FileDurableProjectionIndexOptions["withSourceLock"];
   readonly #runDetached: NonNullable<FileDurableProjectionIndexOptions["runDetached"]>;
@@ -617,14 +717,23 @@ export class FileDurableProjectionIndex {
   readonly reducerVersion: number;
   readonly #overlayEntries: number;
   readonly #overlayBytes: number;
+  readonly #rebuildOverlayBytes: number;
   readonly #clock: () => number;
   #initialized = false;
   #manifest: ProjectionManifest | undefined;
-  #active: ReadonlyMap<string, StoredMutation> = new Map();
+  #active: PersistentSortedMap<StoredMutation> = PersistentSortedMap.empty();
   #activeBytes = 0;
   #activeMutationCount = 0;
   #activeMutationBytes = 0;
   #activePublicationCount = 0;
+  #rebuildProgressSince: number | undefined;
+  #rebuildCache: { entries: PersistentSortedMap<StoredMutation>; bytes: number; complete: boolean } | undefined;
+  /** 针对某个覆盖层快照预先编码好的段内容；只在落盘时覆盖层仍是同一快照才使用。 */
+  #preEncoded: { readonly active: PersistentSortedMap<StoredMutation>; readonly id: string;
+    readonly sorted: readonly StoredMutation[]; readonly encoded: readonly Buffer[] } | undefined;
+  // 读视图只需在本实例内唯一且不可预测地复用；随机前缀每实例一次，序号递增。
+  readonly #readViewPrefix = randomBytes(8).toString("hex");
+  #readViewSequence = 0;
   #currentCheckpoints: DurableProjectionCheckpoints | undefined;
   #publicationSequence = 0;
   readonly #readViews = new Map<string, ReadView>();
@@ -684,11 +793,14 @@ export class FileDurableProjectionIndex {
       this.#rebuilding = published.rebuilding === true;
       this.#recoveryTarget = published.recoveryTarget;
       this.#unrelatedThrough = published.unrelatedThrough;
-      this.#active = new Map();
+      this.#active = PersistentSortedMap.empty();
       this.#activeBytes = 0;
       this.#resetActiveProgress();
       this.#directoryCache.clear();
+      this.#resetRebuildCache();
       this.#publicationSequence++;
+      this.#seededGeneration = undefined;
+      this.#applySourceSeed();
   }
 
   constructor(options: FileDurableProjectionIndexOptions) {
@@ -696,6 +808,8 @@ export class FileDurableProjectionIndex {
     this.#integrity = options.integrity;
     this.#readOnly = options.readOnly === true;
     this.#managedRecovery = options.managedRecovery === true;
+    this.#startAtSource = options.startAtSource ?? false;
+    this.#seedAtSource = options.seedAtSource;
     this.#legacyRootDir = options.legacyRootDir && path.resolve(options.legacyRootDir);
     this.#sourceLock = options.withSourceLock;
     this.#runDetached = options.runDetached ?? (operation => operation());
@@ -707,6 +821,7 @@ export class FileDurableProjectionIndex {
     this.reducerVersion = options.reducerVersion;
     this.#overlayEntries = options.overlayEntries ?? DEFAULT_OVERLAY_ENTRIES;
     this.#overlayBytes = options.overlayBytes ?? DEFAULT_OVERLAY_BYTES;
+    this.#rebuildOverlayBytes = options.rebuildOverlayBytes ?? Math.max(this.#overlayBytes, DEFAULT_REBUILD_OVERLAY_BYTES);
     this.#clock = options.clock ?? Date.now;
     this.#maintenanceRunner = new StorageMaintenanceTaskRunner(
       options.storageMaintenance,
@@ -715,6 +830,7 @@ export class FileDurableProjectionIndex {
     this.#runReadStep = options.runReadStep;
     assertPositiveInteger(this.#overlayEntries, "Projection overlay entry budget");
     assertPositiveInteger(this.#overlayBytes, "Projection overlay byte budget");
+    assertPositiveInteger(this.#rebuildOverlayBytes, "Projection rebuild overlay byte budget");
   }
 
   async #selectDirectory(): Promise<void> {
@@ -747,6 +863,64 @@ export class FileDurableProjectionIndex {
     return cloneCheckpoints(manifest.unrelatedThrough ?? manifest.checkpoints);
   }
   isPersistent(): boolean { return this.#persistent; }
+  /** 是否有已发布但尚未落盘的行。 */
+  hasUnflushedRows(): boolean { return this.#active.size > 0; }
+  /** 未落盘的行已占覆盖层上限的一半以上（按条数或字节）。 */
+  overlayAtLeastHalfFull(): boolean { return this.#active.size * 2 >= this.#overlayEntries || this.#activeBytes * 2 >= this.#overlayBytes; }
+  /**
+   * 清单标记初始行尚未落盘时，把它们放回覆盖层（不推进位置，按清单代次只放一次）。初始行由清单位置推出，
+   * 与起步时写下的相同；只读实例同样放回，绝不读出缺初始行的空状态。
+   */
+  #applySourceSeed(): void {
+    const manifest = this.#manifest;
+    if (!manifest?.sourceSeedPending || this.#seededGeneration === manifest.generation) return;
+    const head = manifest.checkpoints.authority;
+    if (!head || !this.#seedAtSource) throw projectionCorrupt("Projection source seed cannot be derived");
+    const normalized = normalizeMutations(bindDurableProjectionMutations(this.#seedAtSource(head)));
+    let nextBytes = this.#activeBytes, incomingBytes = 0;
+    for (const [key, mutation] of normalized) {
+      incomingBytes += mutation.bytes;
+      nextBytes += mutation.bytes - (this.#active.get(key)?.bytes ?? 0);
+    }
+    this.#active = this.#active.withEntries(normalized);
+    this.#activeBytes = nextBytes;
+    this.#activeMutationCount += normalized.size;
+    this.#activeMutationBytes += incomingBytes;
+    this.#activePublicationCount += 1;
+    this.#seededGeneration = manifest.generation;
+    this.#publicationSequence += 1;
+  }
+  #rebuildingFromSource(): boolean { return this.#managedRecovery && this.#rebuilding; }
+  /** 重建中的全部状态都在本实例内存里：读取不经过任何段。 */
+  servesFromMemory(): boolean { return this.#rebuildCache?.complete === true; }
+  /** 读取路径只在确有退役债务、失败或重试时才进入清理；否则它不做任何事。 */
+  #retirementWorkPending(): boolean {
+    return this.#persistent && this.#allowReclamation && (this.#retirementCleanupFailure !== undefined ||
+      this.#retirementRetryTimer !== undefined || this.#manifest?.retirementRoot !== undefined || this.#manifest?.retirementCleanup !== undefined);
+  }
+  /** 本次落盘后副本的精确大小；超出重建内存预算（或不在重建中）时为 undefined。 */
+  #mergedRebuildCacheBytes(): number | undefined {
+    if (!this.#rebuildCache || !this.#rebuildingFromSource()) return undefined;
+    let bytes = this.#rebuildCache.bytes;
+    for (const [key, entry] of this.#active) bytes += entry.bytes - (this.#rebuildCache.entries.get(key)?.bytes ?? 0);
+    return bytes <= this.#rebuildOverlayBytes ? bytes : undefined;
+  }
+  /** 已发布根为空的受管重建，全部状态都在本实例内存里：从完整的空副本开始。 */
+  #resetRebuildCache(): void {
+    const manifest = this.#manifest;
+    this.#rebuildCache = this.#persistent && this.#rebuildingFromSource() && manifest !== undefined && manifest.baseRoot === undefined &&
+      manifest.deltaSegments.length === 0 ? { entries: PersistentSortedMap.empty(), bytes: 0, complete: true } : undefined;
+  }
+  /**
+   * 受管重建的分页进度。重建中的投影不对外可读，覆盖层在内存预算内且距上次落盘不久时
+   * 只留在内存，省去逐页写增量与后续合并；崩溃或停止后从上次已发布位置续做。
+   * 就绪投影的追平照常逐页落盘。
+   */
+  async checkpointRecovery(): Promise<void> {
+    if (this.#rebuildingFromSource() && this.#activeBytes <= this.#rebuildOverlayBytes &&
+        (this.#rebuildProgressSince === undefined || this.#clock() - this.#rebuildProgressSince < REBUILD_CHECKPOINT_INTERVAL_MS)) return;
+    await this.flush({ compact: false });
+  }
   #recoveryMatches(manifest: ProjectionManifest): boolean {
     return this.#rebuilding === (manifest.rebuilding === true) &&
       sameOptionalCheckpoints(this.#recoveryTarget, manifest.recoveryTarget) &&
@@ -759,6 +933,7 @@ export class FileDurableProjectionIndex {
     this.#recoveryTarget = undefined;
     this.#unrelatedThrough = undefined;
     await this.flush({ compact: false });
+    this.#rebuildCache = undefined;
   }
 
   async initialize(
@@ -784,6 +959,7 @@ export class FileDurableProjectionIndex {
     this.#authenticated ??= this.#requiresAuthentication && this.#integrity !== undefined;
     if (this.#requiresAuthentication && !this.#integrity) {
       await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
+      this.#applySourceSeed();
       this.#initialized = true;
       return;
     }
@@ -802,6 +978,7 @@ export class FileDurableProjectionIndex {
         } catch (error) { if (!(error instanceof DurableProjectionStorageError)) throw error; }
       }
       if (!this.#manifest) await this.#installEmptyManifest(emptyCheckpoints, recoveryTarget);
+      this.#applySourceSeed();
       });
       this.#initialized = true;
       return;
@@ -844,6 +1021,7 @@ export class FileDurableProjectionIndex {
       },
     );
     await this.#runRetirementCleanup();
+    this.#applySourceSeed();
     this.#initialized = true;
   }
 
@@ -893,6 +1071,7 @@ export class FileDurableProjectionIndex {
         this.#currentCheckpoints = manifest.checkpoints;
         this.#rebuilding = manifest.rebuilding === true;
         this.#recoveryTarget = manifest.recoveryTarget; this.#unrelatedThrough = manifest.unrelatedThrough;
+        this.#resetRebuildCache();
         return true;
       } catch (error) {
         if (!(error instanceof DurableProjectionStorageError)) throw error;
@@ -949,7 +1128,11 @@ export class FileDurableProjectionIndex {
     emptyCheckpoints: DurableProjectionCheckpoints,
     recoveryTarget: DurableProjectionCheckpoints,
   ): Promise<void> {
-    const checkpoints = validateCheckpoints(emptyCheckpoints);
+    // 从源头部起步的投影：空状态在恢复目标处直接就绪，旧状态由所有者按分区迁移。
+    const head = recoveryTarget.authority;
+    const startAtSource = typeof this.#startAtSource === "function" ? head !== undefined && this.#startAtSource(head) : this.#startAtSource;
+    const checkpoints = validateCheckpoints(startAtSource ? recoveryTarget : emptyCheckpoints);
+    const seeded = startAtSource && this.#seedAtSource !== undefined && checkpoints.authority !== undefined;
     const old = this.#manifest;
     const generation = (old?.generation ?? 0) + 1;
     let retirementRoot = old?.retirementRoot;
@@ -971,7 +1154,8 @@ export class FileDurableProjectionIndex {
       deltaSegments: [],
       ...(retirementRoot ? { retirementRoot } : {}),
       ...(old?.retirementCleanup ? { retirementCleanup: old.retirementCleanup } : {}),
-      ...(this.#managedRecovery ? { rebuilding: true as const, recoveryTarget: cloneCheckpoints(recoveryTarget), unrelatedThrough: cloneCheckpoints(recoveryTarget) } : {}),
+      ...(this.#managedRecovery && !startAtSource ? { rebuilding: true as const, recoveryTarget: cloneCheckpoints(recoveryTarget), unrelatedThrough: cloneCheckpoints(recoveryTarget) } : {}),
+      ...(seeded ? { sourceSeedPending: true as const } : {}),
     };
     if (this.#persistent) {
       if (this.#writeIntent) await this.#finalizeWriteIntent(initial, []);
@@ -980,11 +1164,14 @@ export class FileDurableProjectionIndex {
     this.#rebuilding = initial.rebuilding === true;
     this.#recoveryTarget = initial.recoveryTarget; this.#unrelatedThrough = initial.unrelatedThrough;
     this.#manifest = initial;
+    this.#resetRebuildCache();
     this.#hasPublishedManifest = this.#persistent;
-    this.#active = new Map();
+    this.#active = PersistentSortedMap.empty();
     this.#activeBytes = 0;
     this.#resetActiveProgress();
     this.#currentCheckpoints = checkpoints;
+    this.#seededGeneration = undefined;
+    if (seeded) this.#applySourceSeed();
     // A reset discards corrupt snapshots, but active physical reads retain their
     // separate in-use protection until the owning operation leaves its fence.
     this.#readViews.clear();
@@ -1009,37 +1196,35 @@ export class FileDurableProjectionIndex {
   }
 
   async prepare(
-    mutations: readonly DurableProjectionMutation[],
+    input: readonly DurableProjectionMutation[] | NormalizedProjectionMutations,
   ): Promise<PreparedProjectionDelta> {
     if (this.#writeIntent) await this.refreshPublishedState();
     if (!this.#manifest || !this.#currentCheckpoints) {
       throw new Error("Durable projection index is not initialized");
     }
-    const normalized = normalizeMutations(mutations);
+    const batch = isNormalizedProjectionMutations(input) ? normalizedBatch(input) : undefined;
+    const normalized = batch ? batch.entries : normalizeMutations(input as readonly DurableProjectionMutation[]);
+    const mutations = { length: batch ? batch.count : (input as readonly DurableProjectionMutation[]).length };
     let incomingBytes = 0;
     for (const mutation of normalized.values()) incomingBytes += mutation.bytes;
+    if (this.#rebuildCache && this.#activeBytes + this.#rebuildCache.bytes + incomingBytes > this.#rebuildOverlayBytes) this.#rebuildCache = undefined;
     if (
       this.#persistent && this.#hasUnpersistedProgress() &&
-      (
-        this.#activeMutationCount + mutations.length > this.#overlayEntries ||
-        this.#activeMutationBytes + incomingBytes > this.#overlayBytes ||
-        this.#activePublicationCount + 1 > this.#overlayEntries
-      )
+      (this.#rebuildingFromSource()
+        ? this.#activeBytes + incomingBytes > this.#rebuildOverlayBytes
+        : this.#activeMutationCount + mutations.length > this.#overlayEntries ||
+          this.#activeMutationBytes + incomingBytes > this.#overlayBytes ||
+          this.#activePublicationCount + 1 > this.#overlayEntries)
     ) {
       // 覆盖层已装不下本次 delta,当前权威写必须等这次 flush 完成才能继续:
       // 阻塞关系内在固定为前台,与谁触发这次写无关。
       await runInMaintenanceContext("foreground", () => this.#runFlush("pre-commit"));
     }
     // Most envelopes do not touch this projection. Published overlays are
-    // immutable; only a real mutation needs a new key table.
-    const changedActive = normalized.size > 0 ? new Map(this.#active) : undefined;
-    const nextActive = changedActive ?? this.#active;
+    // immutable; a real mutation copies only the touched tree paths.
     let nextBytes = this.#activeBytes;
-    for (const [key, mutation] of normalized) {
-      nextBytes -= nextActive.get(key)?.bytes ?? 0;
-      changedActive!.set(key, mutation);
-      nextBytes += mutation.bytes;
-    }
+    for (const [key, mutation] of normalized) nextBytes += mutation.bytes - (this.#active.get(key)?.bytes ?? 0);
+    const nextActive = this.#active.withEntries(normalized);
     return {
       owner: this,
       nextActive,
@@ -1062,6 +1247,8 @@ export class FileDurableProjectionIndex {
     this.#activePublicationCount = prepared.nextPublicationCount;
     this.#currentCheckpoints = checkpoints;
     this.#publicationSequence += 1;
+    // 重建进度只在内存时，从上次落盘后的第一次发布开始计时。
+    if (this.#rebuildProgressSince === undefined && this.#rebuildingFromSource()) this.#rebuildProgressSince = this.#clock();
   }
 
   /** Caller has proved, under the source writer fence, that the intervening
@@ -1076,12 +1263,12 @@ export class FileDurableProjectionIndex {
   async get(key: string): Promise<JsonValue | undefined> {
     assertKey(key);
     this.#expireReadViews();
-    await this.#runRetirementCleanup();
+    if (this.#retirementWorkPending()) await this.#runRetirementCleanup();
     const view = this.#captureReadView();
     this.#retainReadView(view);
     try {
-      const active = view.active.get(key);
-      if (active) return active.tombstone ? undefined : active.value;
+      const resident = memoryEntry(view, key);
+      if (resident !== undefined) return resident === null || resident.tombstone ? undefined : resident.value;
       for (const segment of view.deltaSegments) {
         if (key < segment.minKey || key > segment.maxKey) continue;
         const reader = await SegmentReader.open(this.rootDir, segment, this.#runReadStep, this.#segmentEntries, this.#integrity);
@@ -1105,7 +1292,7 @@ export class FileDurableProjectionIndex {
       return undefined;
     } finally {
       this.#releaseReadView(view);
-      await this.#runRetirementCleanup();
+      if (this.#retirementWorkPending()) await this.#runRetirementCleanup();
     }
   }
 
@@ -1114,15 +1301,15 @@ export class FileDurableProjectionIndex {
     const selected = validateReadKeys(keys);
     if (!selected.length) return [];
     this.#expireReadViews();
-    await this.#runRetirementCleanup();
+    if (this.#retirementWorkPending()) await this.#runRetirementCleanup();
     const view = this.#captureReadView();
     this.#retainReadView(view);
     try {
       const pending = new Set(selected);
       const values = new Map<string, JsonValue | undefined>();
       for (const key of pending) {
-        const active = view.active.get(key);
-        if (active) { values.set(key, active.tombstone ? undefined : active.value); pending.delete(key); }
+        const resident = memoryEntry(view, key);
+        if (resident !== undefined) { values.set(key, resident === null || resident.tombstone ? undefined : resident.value); pending.delete(key); }
       }
       const read = async (segment: SegmentDescriptor, candidates: readonly string[]) => {
         if (!candidates.length) return;
@@ -1148,7 +1335,7 @@ export class FileDurableProjectionIndex {
       return selected.map(key => values.get(key));
     } finally {
       this.#releaseReadView(view);
-      await this.#runRetirementCleanup();
+      if (this.#retirementWorkPending()) await this.#runRetirementCleanup();
     }
   }
 
@@ -1186,16 +1373,20 @@ export class FileDurableProjectionIndex {
       };
     } finally {
       this.#releaseReadView(view);
-      await this.#runRetirementCleanup();
+      if (this.#retirementWorkPending()) await this.#runRetirementCleanup();
     }
   }
 
-  async flush(options: { readonly compact?: boolean } = {}): Promise<void> {
+  async flush(options: {
+    readonly compact?: boolean;
+    /** 段整理的步间闸门（见 #betweenCompactionSteps）。 */
+    readonly betweenSteps?: () => Promise<void>;
+  } = {}): Promise<void> {
     if (!this.#persistent) return;
     if (this.#writeIntent) await this.refreshPublishedState();
     // 紧急度继承调用语境,不在这里声明:前台请求触发的提交按前台准入,
     // 启动恢复触发的按恢复,周期回收触发的才是后台。
-    await this.#runFlush("committed", options.compact !== false);
+    await this.#runFlush("committed", options.compact !== false, false, options.betweenSteps);
   }
 
   async flushCheckpoint(): Promise<void> {
@@ -1214,7 +1405,8 @@ export class FileDurableProjectionIndex {
     await this.#manifestQueue.run(async () => undefined);
   }
 
-  async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false): Promise<void> {
+  async #runFlush(obligation: StorageMaintenanceObligation, compact = true, checkpointOnly = false,
+    betweenSteps?: () => Promise<void>): Promise<void> {
     await this.#runRetirementCleanup();
     for (;;) {
       const manifest = this.#requireManifest();
@@ -1244,6 +1436,7 @@ export class FileDurableProjectionIndex {
           async () => {
             let staged = true;
             while (this.#requireManifest().compaction) {
+              await this.#betweenCompactionSteps(betweenSteps);
               const stepManifest = this.#requireManifest();
               const previousGeneration = stepManifest.generation;
               try {
@@ -1286,6 +1479,7 @@ export class FileDurableProjectionIndex {
         this.#resetActiveProgress();
         return;
       }
+      if (this.#active.size >= PREENCODE_MIN_ENTRIES && !this.#rebuildCache?.complete) await this.#preEncodeActive();
       const frozenInput = {
         manifestGeneration: manifest.generation,
         manifestCheckpoints: manifest.checkpoints,
@@ -1311,6 +1505,41 @@ export class FileDurableProjectionIndex {
       );
       await this.#runRetirementCleanup();
     }
+  }
+
+  /**
+   * 段整理的步间闸门：调用方显式传入（例如后台迁移等前台安静），此处不持有维护栅栏（日志锁）与容量许可，
+   * 等待不会挡住任何人。只在维护义务仍为后台紧急度时等待；有前台或恢复等待者加入同一义务、紧急度升高时立即继续。
+   */
+  async #betweenCompactionSteps(gate: (() => Promise<void>) | undefined): Promise<void> {
+    if (!gate || currentMaintenanceUrgency() !== "background") return;
+    let lift!: () => void;
+    const lifted = new Promise<void>(resolve => { lift = resolve; });
+    const raised = setInterval(() => { if (currentMaintenanceUrgency() !== "background") lift(); }, 50);
+    raised.unref?.();
+    const waiting = gate();
+    try { await Promise.race([waiting, lifted]); }
+    finally { clearInterval(raised); waiting.catch(() => undefined); }
+  }
+
+  /** 在维护步骤之外为当前覆盖层快照编码段内容，排序与序号与步骤内写段完全相同；期间覆盖层若变化则放弃。 */
+  async #preEncodeActive(): Promise<void> {
+    const active = this.#active;
+    if (this.#preEncoded?.active === active) return;
+    this.#preEncoded = undefined;
+    const sorted = sortedSegmentEntries([...active.values()]);
+    const id = randomBytes(16).toString("hex"), dataFile = `segment-${id}.data`;
+    const encoded: Buffer[] = [];
+    let sliceEnd = performance.now() + LARGE_BATCH_SLICE_MS;
+    for (let ordinal = 0; ordinal < sorted.length; ordinal++) {
+      if (performance.now() >= sliceEnd) {
+        await yieldEventLoop();
+        if (this.#active !== active) return;
+        sliceEnd = performance.now() + LARGE_BATCH_SLICE_MS;
+      }
+      encoded.push(encodeSegmentEntry(sorted[ordinal]!, ordinal, dataFile, this.#authenticated === true, this.#integrity));
+    }
+    if (this.#active === active) this.#preEncoded = { active, id, sorted, encoded };
   }
 
   /** Checkpoint count alone must not force a rewrite of scattered history.
@@ -1608,11 +1837,93 @@ export class FileDurableProjectionIndex {
     this.#retirementRetryAt = undefined;
   }
 
+  /**
+   * 完成一次全部状态都在内存里的重建：按序直接写出基段与目录，一次发布，不再先落增量段、
+   * 再读回合并。重建期间落下的增量段与旧基树一并转入退役。
+   */
+  async #publishCompleteBase(): Promise<void> {
+    const manifest = this.#requireManifest();
+    const cache = this.#rebuildCache!;
+    const retainedBytes = this.#rebuilding ? this.#mergedRebuildCacheBytes() : undefined;
+    await this.#beginWriteIntent(manifest.generation + 1);
+    let committed = false;
+    try {
+      const state = cache.entries.withEntries(this.#active);
+      const live = [...state.values()].filter(entry => !entry.tombstone);
+      const segments = live.length ? await this.#writeBaseSegments(live) : [];
+      this.#stagedDirectory = new Map();
+      this.#stagedDirectoryBytes = 0;
+      const obsoleteFiles = new Set<string>(manifest.deltaSegments.flatMap(segment => [segment.dataFile, segment.offsetsFile]));
+      let baseRoot: DirectoryPagePointer | undefined;
+      for (const segment of segments) baseRoot = await this.#setDirectoryDescriptor(baseRoot, segment, obsoleteFiles);
+      for (const id of this.#stagedDirectory.keys()) obsoleteFiles.delete(directoryPageFile(id));
+      const reachable = new Map<string, { page: DirectoryPage; bytes: Buffer }>();
+      const visit = (pointer?: DirectoryPagePointer): void => {
+        if (!pointer || reachable.has(pointer.id)) return;
+        const item = this.#stagedDirectory!.get(pointer.id);
+        if (!item) return;
+        visit(item.page.left); visit(item.page.right); reachable.set(pointer.id, item);
+      };
+      visit(baseRoot);
+      await this.#planCreatedFiles([...reachable.keys()].map(directoryPageFile));
+      for (const [id, item] of reachable) await this.#persistDirectoryPage(id, item.page, item.bytes, true);
+      if (reachable.size) { claimStorageIo("ioOperations", 1); await syncDirectory(this.rootDir); }
+      const created = new Set(this.#requireWriteIntent().createdFiles);
+      let retirementRoot = await this.#prependRetirementPages([...obsoleteFiles].filter(file => !created.has(file)), manifest.generation + 1, manifest.retirementRoot);
+      if (manifest.baseRoot) retirementRoot = await this.#writeRetirementPage({
+        formatVersion: RETIREMENT_PAGE_FORMAT_VERSION, retiredAtGeneration: manifest.generation + 1, files: [], tree: manifest.baseRoot,
+        ...(retirementRoot ? { next: retirementRoot } : {}),
+      });
+      const next: ProjectionManifest = {
+        formatVersion: INDEX_FORMAT_VERSION,
+        projectionId: manifest.projectionId,
+        reducerVersion: manifest.reducerVersion,
+        generation: manifest.generation + 1,
+        checkpoints: this.checkpoints(),
+        deltaSegments: [],
+        ...(this.#rebuilding ? { rebuilding: true as const, recoveryTarget: this.#recoveryTarget!, unrelatedThrough: this.#unrelatedThrough! } : {}),
+        ...(baseRoot === undefined ? {} : { baseRoot }),
+        ...(retirementRoot === undefined ? {} : { retirementRoot }),
+        ...(manifest.retirementCleanup === undefined ? {} : { retirementCleanup: manifest.retirementCleanup }),
+      };
+      await this.#finalizeWriteIntent(next, [...obsoleteFiles].filter(file => created.has(file)));
+      await this.#writeManifest(next);
+      this.#manifest = next;
+      committed = true;
+      this.#rebuildCache = retainedBytes === undefined ? undefined : { entries: state, bytes: retainedBytes, complete: true };
+      this.#active = PersistentSortedMap.empty();
+      this.#activeBytes = 0;
+      this.#resetActiveProgress();
+      this.#publicationSequence += 1;
+    } catch (error) {
+      if (!committed) {
+        const outcome = await this.#publicationOutcome();
+        if (outcome?.committed) {
+          try { await syncDirectory(this.rootDir); } catch { throw error; }
+          this.#manifest = outcome.manifest;
+          this.#currentCheckpoints = cloneCheckpoints(outcome.manifest.checkpoints);
+          this.#active = PersistentSortedMap.empty(); this.#activeBytes = 0; this.#resetActiveProgress(); this.#rebuildCache = undefined;
+          this.#publicationSequence++;
+          committed = true;
+        } else {
+          if (outcome) await this.#completeWriteIntent(false);
+          throw error;
+        }
+      }
+    } finally { this.#stagedDirectory = undefined; this.#stagedDirectoryBytes = 0; }
+    await this.#completeWriteIntent(true).catch(() => undefined);
+  }
+
   async #flushActive(consolidated?: readonly (readonly StoredMutation[])[]): Promise<void> {
     if (this.#writeIntent) {
       await this.#completeWriteIntent(
         isCommittedIntent(this.#writeIntent, this.#requireManifest()),
       );
+    }
+    // 全部状态都在内存里时，重建结束或增量段将满都直接以完整状态发布基段，不读回合并。
+    if (!consolidated && this.#rebuildCache?.complete && (!this.#rebuilding ||
+        this.#requireManifest().deltaSegments.length >= MAX_DELTA_SEGMENTS && this.#mergedRebuildCacheBytes() !== undefined)) {
+      return this.#publishCompleteBase();
     }
     const manifest = this.#requireManifest();
     const checkpoints = this.checkpoints();
@@ -1657,12 +1968,17 @@ export class FileDurableProjectionIndex {
         // immaterial. Tombstones remain in the tail and still mask the base.
         for (const entries of consolidated) deltaSegments.push(await this.#writeSortedEntries(entries, 0));
       } else if (this.#active.size > 0) {
-        const newest = await this.#writeSegment(
-          [...this.#active.values()],
-          0,
-        );
+        const prepared = this.#preEncoded?.active === this.#active ? this.#preEncoded : undefined;
+        this.#preEncoded = undefined;
+        const newest = prepared
+          ? await this.#writeSortedEntries(prepared.sorted, 0, prepared)
+          : await this.#writeSegment(
+            [...this.#active.values()],
+            0,
+          );
         deltaSegments = [newest, ...deltaSegments];
       }
+      const mergedCacheBytes = this.#mergedRebuildCacheBytes();
       const compaction = consolidated ? undefined : manifest.compaction ??
         (deltaSegments.length > MAX_DELTA_SEGMENTS ? {} : undefined);
       const created = new Set(this.#requireWriteIntent().createdFiles);
@@ -1696,7 +2012,9 @@ export class FileDurableProjectionIndex {
       await this.#writeManifest(next);
       this.#manifest = next;
       committed = true;
-      this.#active = new Map();
+      this.#rebuildCache = this.#rebuildCache && mergedCacheBytes !== undefined
+        ? { entries: this.#rebuildCache.entries.withEntries(this.#active), bytes: mergedCacheBytes, complete: this.#rebuildCache.complete } : undefined;
+      this.#active = PersistentSortedMap.empty();
       this.#activeBytes = 0;
       this.#resetActiveProgress();
       this.#publicationSequence += 1;
@@ -1707,7 +2025,7 @@ export class FileDurableProjectionIndex {
           try { await syncDirectory(this.rootDir); } catch { throw error; }
           this.#manifest = outcome.manifest;
           this.#currentCheckpoints = cloneCheckpoints(outcome.manifest.checkpoints);
-          this.#active = new Map(); this.#activeBytes = 0; this.#resetActiveProgress();
+          this.#active = PersistentSortedMap.empty(); this.#activeBytes = 0; this.#resetActiveProgress(); this.#rebuildCache = undefined;
           this.#publicationSequence++;
           committed = true;
         } else {
@@ -1739,6 +2057,7 @@ export class FileDurableProjectionIndex {
   }
 
   #resetActiveProgress(): void {
+    this.#rebuildProgressSince = undefined;
     this.#activeMutationCount = 0;
     this.#activeMutationBytes = 0;
     this.#activePublicationCount = 0;
@@ -1763,10 +2082,43 @@ export class FileDurableProjectionIndex {
       key >= range.gte &&
       (exclusiveAfter === undefined || key > exclusiveAfter) &&
       key < range.lt;
-    const activeEntries = [...view.active.values()]
-      .filter((entry) => inRange(entry.key))
-      .sort((left, right) => compareKeys(left.key, right.key));
-    let activeIndex = 0;
+    const activeIterator = view.active.entriesFrom(lowerBound);
+    const nextActiveEntry = (): StoredMutation | undefined => {
+      for (let item = activeIterator.next(); !item.done; item = activeIterator.next()) {
+        const [key, entry] = item.value;
+        if (key >= range.lt) return undefined;
+        if (inRange(key)) return entry;
+      }
+      return undefined;
+    };
+    let activeCurrent = nextActiveEntry();
+    if (view.rebuildCache?.complete) {
+      // 完整的内存状态：覆盖层优先，其余来自已落盘条目的副本，不再读段。
+      const cacheIterator = view.rebuildCache.entries.entriesFrom(lowerBound);
+      const nextCachedEntry = (): StoredMutation | undefined => {
+        for (let item = cacheIterator.next(); !item.done; item = cacheIterator.next()) {
+          const [key, entry] = item.value;
+          if (key >= range.lt) return undefined;
+          if (inRange(key)) return entry;
+        }
+        return undefined;
+      };
+      let cachedCurrent = nextCachedEntry();
+      const output: DurableProjectionEntry[] = [];
+      while (output.length < limit && (activeCurrent !== undefined || cachedCurrent !== undefined)) {
+        let selected: StoredMutation;
+        if (cachedCurrent === undefined || activeCurrent !== undefined && activeCurrent.key <= cachedCurrent.key) {
+          selected = activeCurrent!;
+          if (cachedCurrent?.key === selected.key) cachedCurrent = nextCachedEntry();
+          activeCurrent = nextActiveEntry();
+        } else {
+          selected = cachedCurrent;
+          cachedCurrent = nextCachedEntry();
+        }
+        if (!selected.tombstone && selected.value !== undefined) output.push({ key: selected.key, value: selected.value });
+      }
+      return output;
+    }
     const deltaCursors: SegmentCursor[] = [];
     let baseDescriptor = await this.#firstBaseSegment(
       view.baseRoot,
@@ -1824,7 +2176,7 @@ export class FileDurableProjectionIndex {
       await advanceBase();
       const output: DurableProjectionEntry[] = [];
       while (output.length < limit) {
-        let nextKey = activeEntries[activeIndex]?.key;
+        let nextKey = activeCurrent?.key;
         for (const cursor of deltaCursors) {
           const key = cursor.current?.key;
           if (key !== undefined && (nextKey === undefined || key < nextKey)) {
@@ -1839,9 +2191,11 @@ export class FileDurableProjectionIndex {
           nextKey = baseKey;
         }
         if (nextKey === undefined || nextKey >= range.lt) break;
-        const active = activeEntries[activeIndex]?.key === nextKey
-          ? activeEntries[activeIndex++]
-          : undefined;
+        let active: StoredMutation | undefined;
+        if (activeCurrent?.key === nextKey) {
+          active = activeCurrent;
+          activeCurrent = nextActiveEntry();
+        }
         let selected: SegmentEntry | StoredMutation | undefined = active;
         for (const cursor of deltaCursors) {
           if (cursor.current?.key !== nextKey) continue;
@@ -1885,14 +2239,13 @@ export class FileDurableProjectionIndex {
 
   #captureReadView(): ReadView {
     const manifest = this.#requireManifest();
-    const id =
-      `${manifest.generation}-${this.#publicationSequence}-` +
-      randomBytes(8).toString("hex");
+    const id = `${manifest.generation}-${this.#publicationSequence}-${this.#readViewPrefix}-${++this.#readViewSequence}`;
     return {
       id,
       generation: manifest.generation,
       expiresAt: this.#clock() + READ_VIEW_LEASE_MS,
-      active: new Map(this.#active),
+      active: this.#active,
+      ...(this.#rebuildCache ? { rebuildCache: { entries: this.#rebuildCache.entries, complete: this.#rebuildCache.complete } } : {}),
       deltaSegments: manifest.deltaSegments,
       ...(manifest.baseRoot === undefined
         ? {}
@@ -1950,11 +2303,7 @@ export class FileDurableProjectionIndex {
     mutations: readonly StoredMutation[],
     level: 0 | 1,
   ): Promise<SegmentDescriptor> {
-    const latest = new Map<string, StoredMutation>();
-    for (const mutation of mutations) latest.set(mutation.key, mutation);
-    const sorted = [...latest.values()].sort((left, right) =>
-      compareKeys(left.key, right.key)
-    );
+    const sorted = sortedSegmentEntries(mutations);
     if (sorted.length === 0) {
       throw new TypeError("Cannot write an empty projection segment");
     }
@@ -1964,8 +2313,10 @@ export class FileDurableProjectionIndex {
   async #writeSortedEntries(
     entries: Iterable<StoredMutation> | AsyncIterable<StoredMutation>,
     level: 0 | 1,
+    /** 维护步骤之外为这些条目预先编码的结果（同一段编号、同一顺序）。 */
+    prepared?: { readonly id: string; readonly encoded: readonly Buffer[] },
   ): Promise<SegmentDescriptor> {
-    const id = randomBytes(16).toString("hex");
+    const id = prepared?.id ?? randomBytes(16).toString("hex");
     const dataFile = `segment-${id}.data`;
     const offsetsFile = `segment-${id}.offsets`;
     await this.#planCreatedFiles([dataFile, offsetsFile]);
@@ -1999,7 +2350,8 @@ export class FileDurableProjectionIndex {
         ) {
           throw new TypeError("Projection segment entries are not strictly ordered");
         }
-        const encoded = encodeSegmentEntry(entry, count, dataFile, this.#authenticated === true, this.#integrity);
+        const encoded = prepared ? prepared.encoded[count] : encodeSegmentEntry(entry, count, dataFile, this.#authenticated === true, this.#integrity);
+        if (!encoded) throw new TypeError("Pre-encoded projection segment does not match its entries");
         const offset = Buffer.allocUnsafe(8);
         offset.writeBigUInt64BE(BigInt(position));
         claimStorageIo("writeBytes", offset.byteLength + encoded.byteLength);
@@ -2020,6 +2372,7 @@ export class FileDurableProjectionIndex {
       if (count === 0 || minKey === undefined || maxKey === undefined) {
         throw new TypeError("Cannot write an empty projection segment");
       }
+      if (prepared && count !== prepared.encoded.length) throw new TypeError("Pre-encoded projection segment does not match its entries");
       await writeBatch();
       claimStorageIo("ioOperations", 2);
       await data.sync();
@@ -2061,7 +2414,8 @@ export class FileDurableProjectionIndex {
       let compaction: ProjectionCompaction | undefined = manifest.compaction;
       const obsoleteFiles = new Set<string>();
 
-      for (let range = 0; range < (staged ? COMPACTION_RANGES_PER_STEP : 1); range++) {
+      let merged = 0;
+      for (let range = 0; range < (staged ? COMPACTION_RANGES_PER_STEP : 1) && merged < COMPACTION_STEP_MUTATIONS; range++) {
         const priorRoot = baseRoot;
         const priorCompaction = compaction;
         const priorObsolete = new Set(obsoleteFiles);
@@ -2124,6 +2478,7 @@ export class FileDurableProjectionIndex {
             }
             for (const file of obsoletePages) obsoleteFiles.add(file);
             compaction = { afterKey: batch.afterKey };
+            merged += batch.mutations.length;
           }
         } catch (error) {
           if (range === 0 || !(error instanceof CompactionBatchBudgetFull || error instanceof CompactionDirectoryBudgetFull)) throw error;
@@ -2175,6 +2530,8 @@ export class FileDurableProjectionIndex {
         checkpoints: manifest.checkpoints,
         deltaSegments,
         ...(manifest.rebuilding ? { rebuilding: true as const, recoveryTarget: manifest.recoveryTarget!, unrelatedThrough: manifest.unrelatedThrough! } : {}),
+        // 只合并已落盘的段，覆盖层中尚未落盘的初始行仍待写出。
+        ...(manifest.sourceSeedPending ? { sourceSeedPending: true as const } : {}),
         ...(compaction === undefined ? {} : { compaction }),
         ...(baseRoot === undefined ? {} : { baseRoot }),
         ...(retirementRoot === undefined ? {} : { retirementRoot }),
@@ -2272,6 +2629,8 @@ export class FileDurableProjectionIndex {
     let mutations = [...latest.values()].sort((left, right) =>
       compareKeys(left.key, right.key)
     );
+    // 同一基段范围内的增量很多时只合并前一部分，其余由后续步骤从 afterKey 继续（之后的键仍由增量段覆盖）。
+    if (base && mutations.length > COMPACTION_STEP_MUTATIONS) mutations = mutations.slice(0, COMPACTION_STEP_MUTATIONS);
     if (!base) {
       let count = 0;
       let bytes = 0;
@@ -3207,6 +3566,14 @@ export class FileDurableProjectionIndex {
   }
 }
 
+/** 内存中的条目：undefined 表示须继续查盘，null 表示完整内存状态里确实没有。 */
+function memoryEntry(view: ReadView, key: string): StoredMutation | null | undefined {
+  const active = view.active.get(key);
+  if (active) return active;
+  if (!view.rebuildCache) return undefined;
+  return view.rebuildCache.entries.get(key) ?? (view.rebuildCache.complete ? null : undefined);
+}
+
 function runProjectionReadStep<T>(
   runner: FileDurableProjectionIndexOptions["runReadStep"],
   step: DurableProjectionReadStep,
@@ -3542,6 +3909,13 @@ function normalizeMutations(
   return normalized;
 }
 
+/** 一个段的条目：同键取最后一次写入，按键排序（预编码与写段共用，序号因此一致）。 */
+function sortedSegmentEntries(mutations: readonly StoredMutation[]): StoredMutation[] {
+  const latest = new Map<string, StoredMutation>();
+  for (const mutation of mutations) latest.set(mutation.key, mutation);
+  return [...latest.values()].sort((left, right) => compareKeys(left.key, right.key));
+}
+
 function encodeSegmentEntry(entry: StoredMutation, ordinal: number, dataFile: string, authenticated: boolean, integrity?: AuthorityCacheIntegrity): Buffer {
   const key = Buffer.from(entry.key, "utf8");
   const value = entry.tombstone
@@ -3599,6 +3973,9 @@ function validateManifest(value: unknown): ProjectionManifest {
   const recoveryTarget = record.rebuilding ? validateCheckpoints(record.recoveryTarget) : undefined;
   const unrelatedThrough = record.rebuilding ? validateCheckpoints(record.unrelatedThrough) : undefined;
   if (!record.rebuilding && (record.recoveryTarget !== undefined || record.unrelatedThrough !== undefined)) throw new Error("Projection recovery fields require building state");
+  if (record.sourceSeedPending !== undefined && (record.sourceSeedPending !== true || record.rebuilding !== undefined || checkpoints.authority === undefined)) {
+    throw new Error("Projection source seed state is invalid");
+  }
   if (recoveryTarget && unrelatedThrough) {
     if (!sameCheckpointSources(recoveryTarget, checkpoints) || !sameCheckpointSources(unrelatedThrough, checkpoints)) throw new Error("Projection recovery sources changed");
     for (const [source, point] of Object.entries(checkpoints)) {
@@ -3629,6 +4006,7 @@ function validateManifest(value: unknown): ProjectionManifest {
     ...(retirementRoot === undefined ? {} : { retirementRoot }),
     ...(retirementCleanup === undefined ? {} : { retirementCleanup }),
     ...(record.rebuilding === true ? { rebuilding: true as const, recoveryTarget: recoveryTarget!, unrelatedThrough: unrelatedThrough! } : {}),
+    ...(record.sourceSeedPending === true ? { sourceSeedPending: true as const } : {}),
   };
 }
 
@@ -4034,6 +4412,7 @@ function normalizeManifestOptionals(
     ...(manifest.retirementCleanup === undefined
       ? {}
       : { retirementCleanup: manifest.retirementCleanup }),
+    ...(manifest.sourceSeedPending ? { sourceSeedPending: true as const } : {}),
   };
 }
 
@@ -4106,10 +4485,10 @@ function assertProjectionIdentity(
 }
 
 function assertKey(key: string): void {
-  const bytes = Buffer.byteLength(key, "utf8");
+  // UTF-8 至多每个 UTF-16 码元 3 字节；足够短的键无需逐字节计数。
   if (
     key.length === 0 ||
-    bytes > MAX_KEY_BYTES ||
+    key.length * 3 > MAX_KEY_BYTES && Buffer.byteLength(key, "utf8") > MAX_KEY_BYTES ||
     /[\u0000-\u001f\u007f]/u.test(key)
   ) {
     throw new TypeError("Projection key is invalid");
@@ -4182,6 +4561,12 @@ export function durableProjectionDirectoryName(projectionId: string): string {
 /** 当前版本目录：projectionId 与显式归约版本共同决定；同版本的旧（无版本后缀）目录可原地复用。 */
 export function durableProjectionVersionDirectoryName(projectionId: string, reducerVersion: number): string {
   return durableProjectionDirectoryName(projectionId) + ".v" + reducerVersion;
+}
+
+/** 包装视图只守批量上界；逐键校验留给最终的索引读取。 */
+function boundedReadKeys(keys: readonly string[]): readonly string[] {
+  if (!Array.isArray(keys) || keys.length > 256) throw new TypeError('Projection multi-key read requires at most 256 string keys');
+  return keys;
 }
 
 function validateReadKeys(keys: readonly string[]): string[] {

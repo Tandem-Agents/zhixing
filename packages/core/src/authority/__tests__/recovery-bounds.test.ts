@@ -118,18 +118,24 @@ it("releases the physical WAL lock between candidate pages even when ordinary op
   const def = definition("page-lock-release");
   recovering.durableProjection(def);
   const tokens: string[] = [];
-  const original = FileDurableProjectionIndex.prototype.flush;
-  const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "flush").mockImplementation(async function(this: FileDurableProjectionIndex, options) {
+  // 每页结束时观察锁令牌：重建进度可能只留在内存，页尾不一定落盘，但页与页之间必须换锁。
+  const original = FileDurableProjectionIndex.prototype.checkpointRecovery;
+  const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "checkpointRecovery").mockImplementation(async function(this: FileDurableProjectionIndex) {
     if (this.projectionId === def.projectionId && this.checkpoints().authority!.lsn > 0) {
       tokens.push(JSON.parse(await readFile(path.join(root, "authority", ".commit-log.lock"), "utf8")).token);
     }
-    return original.call(this, options);
+    return original.call(this);
+  });
+  const finishing = FileDurableProjectionIndex.prototype.finishRebuild;
+  const finish = vi.spyOn(FileDurableProjectionIndex.prototype, "finishRebuild").mockImplementation(async function(this: FileDurableProjectionIndex, checkpoints) {
+    if (this.projectionId === def.projectionId) tokens.push(JSON.parse(await readFile(path.join(root, "authority", ".commit-log.lock"), "utf8")).token);
+    return finishing.call(this, checkpoints);
   });
   try {
     await recovering.prepareProjections([def.projectionId]);
     expect(tokens.length).toBeGreaterThanOrEqual(3);
     expect(new Set(tokens).size).toBe(tokens.length);
-  } finally { flush.mockRestore(); }
+  } finally { flush.mockRestore(); finish.mockRestore(); }
 }, 60_000);
 
 it("keeps bounded healthy catch-up in the transaction but waits for new candidates outside domain serial sections", async () => {

@@ -63,6 +63,9 @@ import {
 import { collectArtifactGarbage, FileArtifactStore } from "./artifact-store.js";
 import {
   bindDurableProjectionMutations,
+  isNormalizedProjectionMutations,
+  projectionMutationKeyCount,
+  type NormalizedProjectionMutations,
   createBoundDurableProjectionReadContext,
   durableProjectionDirectoryName,
   durableProjectionVersionDirectoryName,
@@ -131,6 +134,7 @@ import {
   type HostAuthorityLogProfile,
   decodeProjectionCheckpoint,
   encodeProjectionCheckpoint,
+  peekProjectionCheckpointKey,
 } from "./startup-proofs.js";
 import {
   AuthenticatedFrameIndex,
@@ -203,6 +207,8 @@ export interface FileAuthorityCommitLogOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   /** Caller data reads have a leaf budget separate from workload occupancy. */
   readonly runProjectionReadStep?: FileDurableProjectionIndexOptions["runReadStep"];
+  /** 派生投影从权威源重建时内存中保留的状态上限；未给出取默认的固定上限。 */
+  readonly projectionRebuildOverlayBytes?: number;
 }
 
 export interface PlannedAnchorPrefixInstallation<Body> {
@@ -315,10 +321,19 @@ interface RegisteredDurableProjection {
   failure?: unknown;
   recoveryReset?: true;
   readonly authenticated: boolean;
+  readonly startAtSource: boolean;
   readonly state: FileDurableProjectionIndex;
   readonly read: DurableProjectionReadContext & Pick<RebuildableDurableProjectionIndex, "getMany">;
   readonly reduce: DurableProjectionDefinition<JsonValue>["reduce"];
   readonly inputs: DurableProjectionInputs | undefined;
+}
+
+/** 持日志锁期间可用的源读取（与 readStreamEnvelopes / readEnvelopeAt 相同，但不再加锁）。 */
+export interface LockedSourceReader {
+  readStreamEnvelopes<Body = JsonValue>(streams: readonly string[], afterLsn: number, throughLsn: number, limit?: number): Promise<{
+    readonly commits: readonly CommitEnvelope<Body>[]; readonly checkpoints: readonly DurableLogCheckpoint[]; readonly lastLsn: number; readonly hasMore: boolean;
+  }>;
+  readEnvelopeAt<Body = JsonValue>(checkpoint: DurableLogCheckpoint): Promise<CommitEnvelope<Body>>;
 }
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
@@ -348,6 +363,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   readonly #lockWaitMs: number;
   readonly #lockSessionLingerMs: number;
   readonly #lockSessionMaxHoldMs: number;
+  readonly #projectionRebuildOverlayBytes: number | undefined;
   readonly #startupProofs: boolean;
   readonly #integrity: AuthorityCacheIntegrity | undefined;
   readonly #walReverifyIntervalMs: number;
@@ -401,6 +417,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       throw new TypeError("Authority lock session linger must be a non-negative finite duration");
     }
     this.#lockSessionMaxHoldMs = options.lockSessionMaxHoldMs ?? LOCK_SESSION_MAX_HOLD_MS;
+    this.#projectionRebuildOverlayBytes = options.projectionRebuildOverlayBytes;
     if (!Number.isFinite(this.#lockSessionMaxHoldMs) || this.#lockSessionMaxHoldMs < 0) {
       throw new TypeError("Authority lock session hold limit must be a non-negative finite duration");
     }
@@ -579,6 +596,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const existing = this.#durableProjections.get(definition.projectionId);
     if (existing) {
       if (existing.state.reducerVersion !== definition.reducerVersion ||
+          existing.startAtSource !== (definition.startAtSource !== undefined && definition.startAtSource !== false) ||
           JSON.stringify(existing.inputs) !== JSON.stringify(inputs) ||
           (definition.authenticated !== undefined && existing.authenticated !== definition.authenticated)) {
         throw new TypeError(
@@ -605,12 +623,16 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       runDetached: operation => this.#sourceScope.exit(operation),
       projectionId: definition.projectionId,
       reducerVersion: definition.reducerVersion,
+      ...(definition.startAtSource ? { startAtSource: definition.startAtSource } : {}),
+      ...(definition.seedAtSource ? { seedAtSource: definition.seedAtSource } : {}),
       storageMaintenance: this.#storageMaintenance,
       runReadStep: this.#runProjectionReadStep,
+      ...(this.#projectionRebuildOverlayBytes === undefined ? {} : { rebuildOverlayBytes: this.#projectionRebuildOverlayBytes }),
     });
     const registered: RegisteredDurableProjection = {
       inputs,
       authenticated: definition.authenticated === true,
+      startAtSource: definition.startAtSource !== undefined && definition.startAtSource !== false,
       // Replayed derived rows stay in the existing bounded overlay. prepare()
       // spills before its original bounds; reading a short suffix alone does
       // not manufacture a new delta and force a full historical compaction.
@@ -895,6 +917,35 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
   }
 
+  /**
+   * 列出键以 prefix 开头的投影检查点。只读文件头、不作认证，规模是检查点文件数而不是历史；
+   * 取得的键必须再经 loadProjectionCheckpoint 认证（MAC 与已核验帧链边界）后才能使用。
+   */
+  async listProjectionCheckpointKeys(prefix: string): Promise<readonly string[]> {
+    if (!this.#startupProofs) return [];
+    const directory = path.join(this.rootDir, "checkpoints");
+    const keys: string[] = [];
+    const entries = await opendir(directory).catch(() => undefined);
+    if (!entries) return keys;
+    for await (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".bin")) continue;
+      const file = path.join(directory, entry.name);
+      const handle = await open(file, "r").catch(() => undefined);
+      if (!handle) continue;
+      try {
+        const head = Buffer.alloc(64 * 1024 + 16);
+        const { bytesRead } = await handle.read(head, 0, head.byteLength, 0);
+        const key = peekProjectionCheckpointKey(head.subarray(0, bytesRead));
+        if (key?.startsWith(prefix) && this.#checkpointPath(key) === file) keys.push(key);
+      } catch {
+        // 读不了的检查点视同不存在。
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+    }
+    return keys.sort();
+  }
+
   /** 丢弃不再需要的投影检查点（例如已删除的会话）；检查点只是缓存，失败不影响调用方。 */
   async deleteProjectionCheckpoint(key: string): Promise<void> {
     if (this.#readOnly) return;
@@ -1010,6 +1061,121 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         };
       }),
     );
+  }
+
+  /**
+   * 按流分页读取 (afterLsn, throughLsn] 内涉及所选流的信封及各自的已核验位置。认证帧索引按流标记
+   * 跳过无关帧，不读其他流的正文；每页至多 limit 个信封，之后释放日志锁，调用方从 lastLsn 续读。
+   */
+  async readStreamEnvelopes<Body = JsonValue>(
+    streams: readonly string[],
+    afterLsn: number,
+    throughLsn: number,
+    limit = 256,
+  ): Promise<{
+    readonly commits: readonly CommitEnvelope<Body>[];
+    readonly checkpoints: readonly DurableLogCheckpoint[];
+    readonly lastLsn: number;
+    readonly hasMore: boolean;
+  }> {
+    if (streams.length === 0) throw new TypeError("Stream read requires at least one stream");
+    for (const stream of streams) assertStream(stream);
+    assertReplayLsn(afterLsn);
+    assertReplayLsn(throughLsn);
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 256) throw new RangeError("Stream read limit must be 1-256");
+    return this.#withLogLock("readStream", () => this.#readStreamEnvelopes<Body>(streams, afterLsn, throughLsn, limit));
+  }
+
+  async #readStreamEnvelopes<Body>(streams: readonly string[], afterLsn: number, throughLsn: number, limit: number) {
+    const selected = new Set(streams);
+    {
+      const commits: Array<CommitEnvelope<JsonValue>> = [];
+      const checkpoints: DurableLogCheckpoint[] = [];
+      let lastLsn = afterLsn, hasMore = false;
+      if (afterLsn >= throughLsn) return { commits: [], checkpoints: [], lastLsn, hasMore };
+      const scanned = await this.#scanLogFrom(this.#logDataStartOffset(), 0, emptyLogPrefix(this.#requireLogId()), (envelope, boundary) => {
+        if (envelope.lsn > throughLsn) return false;
+        if (commits.length >= limit) { hasMore = true; return false; }
+        if (selected.size === 0 || envelope.entries.some(entry => selected.has(entry.stream))) { commits.push(envelope); checkpoints.push(boundary); }
+        lastLsn = envelope.lsn;
+        return true;
+      // 截止位置之后的第一帧也选中：回调读到它即停止，扫描不再走到日志末尾。
+      }, afterLsn + 1, undefined, selected.size === 0 ? undefined : projectionEnvelopeSelection(selected, throughLsn + 1));
+      if (scanned.incompleteTail) await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
+      if (!hasMore) lastLsn = Math.max(lastLsn, Math.min(throughLsn, scanned.lastLsn));
+      return { commits: commits as Array<CommitEnvelope<Body>>, checkpoints, lastLsn, hasMore };
+    }
+  }
+
+  /**
+   * 在当前已核验位置为所选投影写入一批不来自新事实的行（旧资料按分区迁移的结果）。持日志锁：
+   * 投影先追平到头部；compute 在锁内读取各投影并返回各自的变更，只能做有界工作，不能等待。
+   * 写入不推进投影位置。落盘在放开日志锁之后进行：锁内准入只能零等待，大批写入之后设备采样可能
+   * 尚未刷新，锁外则可等待准入。落盘前崩溃则这批行连同其分区标记一起丢失，下次重新迁移；落盘未成时
+   * 由此后的落盘或正式停止时的检查点带上。
+   */
+  async publishProjectionRows(
+    ids: readonly string[],
+    compute: (head: DurableLogCheckpoint, read: (projectionId: string) => DurableProjectionReadContext, source: LockedSourceReader) =>
+      Promise<ReadonlyMap<string, readonly DurableProjectionMutation[] | NormalizedProjectionMutations>>,
+    options: {
+      readonly deferFlush?: boolean;
+      /** 发布前后落盘若带出段整理，在步与步之间调用（后台迁移据此给前台让路）。 */
+      readonly betweenSteps?: () => Promise<void>;
+    } = {},
+  ): Promise<DurableLogCheckpoint> {
+    const projections = [...new Set(ids)].map(id => {
+      const projection = this.#durableProjections.get(id);
+      if (!projection) throw new TypeError(`Durable projection is not registered: ${id}`);
+      return projection;
+    });
+    // 大批写入会让覆盖层超出上限：若此时还有未落盘的部分，锁内只能先做零等待准入的提交前落盘，
+    // 长时间整理变更之后设备采样可能已过期而被拒，整段锁内工作随之反复重做。先在锁外落盘（可等待准入）。
+    // 推迟落盘的小批写入（可重新推导的行）只在覆盖层过半时先落盘，其余由此后的落盘一并带上。
+    for (const projection of projections) {
+      if (!projection.opened || !projection.state.isPersistent()) continue;
+      if (options.deferFlush && !projection.state.overlayAtLeastHalfFull()) continue;
+      try { await projection.state.flush({ compact: false, ...(options.betweenSteps ? { betweenSteps: options.betweenSteps } : {}) }); }
+      catch (error) { if (maintenanceRetryDelayMs(error) === undefined) throw error; }
+    }
+    const published = new Set<RegisteredDurableProjection>();
+    const head = await this.#withLogLock("projection.publishRows", async () => {
+      published.clear();
+      for (const projection of projections) await this.#synchronizeDurableProjection(projection);
+      const head = this.#durableCheckpoint(await this.#loadLastLsn());
+      // 锁内只能用同一锁会话的读取：日志锁不可重入。
+      const source: LockedSourceReader = {
+        readStreamEnvelopes: async <Body>(streams: readonly string[], afterLsn: number, throughLsn: number, limit = 256) => {
+          for (const stream of streams) assertStream(stream);
+          if (throughLsn > head.lsn) throw new RangeError("Locked stream read is beyond the published head");
+          return this.#readStreamEnvelopes<Body>(streams, afterLsn, throughLsn, limit);
+        },
+        readEnvelopeAt: checkpoint => this.#readEnvelopeAt(checkpoint),
+      };
+      const changes = await compute(head, id => {
+        const projection = this.#durableProjections.get(id);
+        if (!projection || !projections.includes(projection)) throw new TypeError(`Projection is outside this publication: ${id}`);
+        return projection.read;
+      }, source);
+      for (const [id, mutations] of changes) {
+        const projection = this.#durableProjections.get(id);
+        if (!projection || !projections.includes(projection)) throw new TypeError(`Projection is outside this publication: ${id}`);
+        if (!projectionMutationKeyCount(mutations)) continue;
+        // 预先规范化的批在锁外已完成逐值计算，锁内只合并。
+        const prepared = await projection.state.prepare(isNormalizedProjectionMutations(mutations) ? mutations : bindDurableProjectionMutations(mutations));
+        projection.state.publish(prepared, projection.state.checkpoints());
+        published.add(projection);
+      }
+      return head;
+    });
+    if (options.deferFlush) return head;
+    for (const projection of published) {
+      if (!projection.state.isPersistent()) continue;
+      // 行已在内存中发布、后续读写据此进行；暂时的准入背压不使发布失败，由此后的落盘带上。
+      try { await projection.state.flush({ compact: false, ...(options.betweenSteps ? { betweenSteps: options.betweenSteps } : {}) }); }
+      catch (error) { if (maintenanceRetryDelayMs(error) === undefined) throw error; }
+    }
+    return head;
   }
 
   async readEnvelopeAt<Body = JsonValue>(
@@ -1238,9 +1404,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         reference.bytes,
       ]),
     );
-    const runPhysicalStep =
-      options.runPhysicalStep ??
-      (async <T>(operation: () => Promise<T>) => operation());
+    const runPhysicalStep = this.#physicalStepAfterSynchronization(options.runPhysicalStep);
     const operation = () =>
       this.#withLogLock("transactProjection", observation =>
         runPhysicalStep(async () => {
@@ -1384,7 +1548,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
         reference.bytes,
       ]),
     );
-    const runPhysicalStep = options.runPhysicalStep ?? (async <T>(step: () => Promise<T>) => step());
+    const runPhysicalStep = this.#physicalStepAfterSynchronization(options.runPhysicalStep);
     const operation = () =>
       this.#withLogLock("transactDurableProjection", () => runPhysicalStep(async () => {
         for (const [, dependency] of readProjections) {
@@ -1793,7 +1957,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     try {
       const reopening = projection.opened === true;
       await projection.state.initialize(origin, { authority: head });
-      // 只有 WAL 在本实例两次操作之间被其他写者推进时，才需要采用他们已发布的清单；
+      // 其他实例只能持锁发布：只有本实例新取得锁会话时，才需要采用他们已发布的清单；
       // 发布前的维护步骤另在源锁内刷新，避免旧清单覆盖其他实例。
       if (reopening && !this.#refreshedProjections.has(projection)) await projection.state.refreshPublishedState();
       this.#refreshedProjections.add(projection);
@@ -1848,6 +2012,74 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   /** 锁内逐页追平有界尾部；故障留在各自投影上，由调用方按依赖决定是否拒绝。 */
+  /**
+   * 写入前的日志同步：已登记的健康投影在硬界之内的落后量锁内追平（含闲置投影），超出硬界、
+   * 新建或重建中的相关投影在锁外分页准备；无关的候选只推进覆盖位置，故障投影只拒绝相关写。
+   *
+   * 不给 affected 即预同步：打开、采纳其他实例的发布与硬界内追平是日志自身的工作，成本随
+   * 登记的投影数增长，不得记在调用方按业务估算的物理计划上，故写入口在进入调用方步骤之前
+   * 先做一遍。预同步不拒绝任何写，故障与超界原样留给追加时按相关性处理。
+   */
+  async #synchronizeRegisteredProjections(
+    previousCheckpoint: DurableLogCheckpoint,
+    affected?: readonly RegisteredDurableProjection[],
+  ): Promise<void> {
+    const related = (projection: RegisteredDurableProjection) => affected?.includes(projection) === true;
+    const inline: string[] = [], inlineCoverage: string[] = [], pending: string[] = [], coverage: string[] = [];
+    for (const projection of this.#durableProjections.values()) {
+      try {
+        await this.#openDurableProjection(projection, previousCheckpoint);
+      } catch (error) {
+        if (related(projection) || isTransientProjectionError(error)) throw error;
+        continue;
+      }
+      if (projection.failure !== undefined) {
+        if (related(projection)) throw projection.failure;
+        continue;
+      }
+      if (projection.synchronized) continue;
+      const id = projection.state.projectionId;
+      if (!projection.state.isPersistent()) {
+        // 内存派生状态：本次操作内一次追平（见 #synchronizeDurableProjection）。
+        (projection.state.readiness() === "ready" || related(projection) ? inline : inlineCoverage).push(id);
+      } else if (projection.state.readiness() === "ready") {
+        (authorityTailWithinInlineBudget(projection.state.checkpoints().authority!, previousCheckpoint) ? inline : pending).push(id);
+      } else if (related(projection)) {
+        pending.push(id);
+      } else {
+        const covered = projection.state.unrelatedThrough().authority!;
+        if (!sameDurableCheckpoint(covered, previousCheckpoint)) {
+          (authorityTailWithinInlineBudget(covered, previousCheckpoint) ? inlineCoverage : coverage).push(id);
+        }
+      }
+    }
+    if (pending.length || coverage.length) {
+      if (!affected) return;
+      const preparation = new AuthorityPreparationRequired(pending, false, coverage);
+      preparation.isolateFailures = true;
+      preparation.requiredProjections = affected.map(projection => projection.state.projectionId);
+      throw preparation;
+    }
+    if (inline.length || inlineCoverage.length) {
+      await this.#catchUpInline(inline, inlineCoverage);
+      for (const projection of affected ?? []) {
+        if (projection.failure !== undefined) throw projection.failure;
+        if (!projection.synchronized) throw new AuthorityPreparationRequired([projection.state.projectionId]);
+      }
+    }
+  }
+
+  /** 调用方给出物理步骤时，在锁内、进入该步骤之前完成日志同步（见 #synchronizeRegisteredProjections）。 */
+  #physicalStepAfterSynchronization(runPhysicalStep: PhysicalStorageStepRunner | undefined): PhysicalStorageStepRunner {
+    if (!runPhysicalStep) return async (operation) => operation();
+    return async (operation) => {
+      if (!this.#readOnly) {
+        await this.#synchronizeRegisteredProjections(this.#durableCheckpoint(await this.#loadLastLsn()));
+      }
+      return runPhysicalStep(operation);
+    };
+  }
+
   async #catchUpInline(ids: readonly string[], coverage: readonly string[]): Promise<void> {
     // 同一次持锁操作内源头不会变化，投影也已在首页打开并校验：后续页复用首页的头部，
     // 不再逐页重新核验 WAL 或检查点（严格模式下那是整份核验）。
@@ -1962,7 +2194,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
     const start = starts.reduce((a, b) => a.lsn < b.lsn ? a : b);
     const restarted = new Set<RegisteredDurableProjection>();
-    const reads = projections.map(projection => projection.authenticated ? recoveryPageRead(projection.read) : undefined);
+    const reads = projections.map(projection => projection.authenticated ? recoveryPageRead(projection.read, () => projection.state.servesFromMemory()) : undefined);
     let frames = 0;
     await this.#scanLogFrom(start.frameEndOffset, start.lsn, start.prefixDigest, async (envelope, boundary) => {
       for (let i = 0; i < projections.length; i++) {
@@ -2013,7 +2245,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       if (state.readiness() === "building" && sameDurableCheckpoint(state.checkpoints().authority, state.recoveryTarget()!.authority!) &&
           sameDurableCheckpoint(state.unrelatedThrough().authority, head)) {
         await state.finishRebuild({ authority: head });
-      } else await state.flush({ compact: false });
+      } else await state.checkpointRecovery();
       if (state.readiness() === "ready" && sameDurableCheckpoint(state.checkpoints().authority, head)) {
         projection.synchronized = true;
         delete projection.recoveryReset;
@@ -2058,49 +2290,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     const previousLsn = await this.#loadLastLsn();
     const previousCheckpoint = this.#durableCheckpoint(previousLsn);
     const affected = [...this.#durableProjections.values()].filter(projection => projectionConsumes(projection.inputs, entries));
-    // 首次写入前：已登记的健康投影在硬界之内的落后量锁内追平（含闲置投影），超出硬界、
-    // 新建或重建中的相关投影在锁外分页准备；无关的候选只推进覆盖位置，故障投影只拒绝相关写。
-    const inline: string[] = [], inlineCoverage: string[] = [], pending: string[] = [], coverage: string[] = [];
-    for (const projection of this.#durableProjections.values()) {
-      try {
-        await this.#openDurableProjection(projection, previousCheckpoint);
-      } catch (error) {
-        if (affected.includes(projection) || isTransientProjectionError(error)) throw error;
-        continue;
-      }
-      if (projection.failure !== undefined) {
-        if (affected.includes(projection)) throw projection.failure;
-        continue;
-      }
-      if (projection.synchronized) continue;
-      const id = projection.state.projectionId;
-      if (!projection.state.isPersistent()) {
-        // 内存派生状态：本次操作内一次追平（见 #synchronizeDurableProjection）。
-        (projection.state.readiness() === "ready" || affected.includes(projection) ? inline : inlineCoverage).push(id);
-      } else if (projection.state.readiness() === "ready") {
-        (authorityTailWithinInlineBudget(projection.state.checkpoints().authority!, previousCheckpoint) ? inline : pending).push(id);
-      } else if (affected.includes(projection)) {
-        pending.push(id);
-      } else {
-        const covered = projection.state.unrelatedThrough().authority!;
-        if (!sameDurableCheckpoint(covered, previousCheckpoint)) {
-          (authorityTailWithinInlineBudget(covered, previousCheckpoint) ? inlineCoverage : coverage).push(id);
-        }
-      }
-    }
-    if (pending.length || coverage.length) {
-      const preparation = new AuthorityPreparationRequired(pending, false, coverage);
-      preparation.isolateFailures = true;
-      preparation.requiredProjections = affected.map(projection => projection.state.projectionId);
-      throw preparation;
-    }
-    if (inline.length || inlineCoverage.length) {
-      await this.#catchUpInline(inline, inlineCoverage);
-      for (const projection of affected) {
-        if (projection.failure !== undefined) throw projection.failure;
-        if (!projection.synchronized) throw new AuthorityPreparationRequired([projection.state.projectionId]);
-      }
-    }
+    await this.#synchronizeRegisteredProjections(previousCheckpoint, affected);
     const unchanged = [...this.#durableProjections.values()].filter(projection =>
       projection.synchronized && !affected.includes(projection) &&
       sameDurableCheckpoint(projection.state.checkpoints().authority, previousCheckpoint));
@@ -3763,7 +3953,6 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
               // 每次操作都重新按字节核验：同一持锁会话也不跨操作沿用视图，
               // 非协作写者在两次操作之间的改动仍由下一次操作发现。
               this.#operationView = undefined;
-              this.#refreshedProjections.clear();
               this.#work = undefined;
               observation.data.executionMs += performance.now() - executing;
               const releasing = performance.now();
@@ -3859,6 +4048,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       close: () => this.#closeLockSession(session),
       idle: undefined,
     };
+    // 不持锁期间其他实例可能已持锁发布投影清单：新会话里再次打开投影时须重新采纳。
+    this.#refreshedProjections.clear();
     this.#lockSession = session;
     return session;
   }
@@ -4509,6 +4700,8 @@ function hasUnpublishedProgress(projection: RegisteredDurableProjection): boolea
   const state = projection.state;
   const current = state.checkpoints().authority;
   if (!current || !sameDurableCheckpoint(state.publishedCheckpoints().authority, current)) return true;
+  // 位置未变但有未落盘的行（例如按分区迁移写入的结果）也随停止检查点保存。
+  if (state.hasUnflushedRows()) return true;
   return state.readiness() === "building" &&
     !sameDurableCheckpoint(state.publishedRecoveryCoverage().authority, state.unrelatedThrough().authority!);
 }
@@ -4561,21 +4754,24 @@ async function reclaimDirectoryPage(directory: string): Promise<"absent" | "page
  * for every envelope. Published mutations invalidate their keys immediately;
  * failed/restarted pages discard the entire view. No candidate guard is skipped
  * and no cached value crosses a source-fence release or becomes a disk fact. */
-function recoveryPageRead(source: RegisteredDurableProjection['read']) {
-  const rows = new Map<string,{encoded: string | undefined; bytes: number}>();
+function recoveryPageRead(source: RegisteredDurableProjection['read'], resident: () => boolean) {
+  // 与源视图返回的共享只读值相同；保留时量一次大小，命中不再重新编解码。
+  // 全部重建状态都在内存里时读取不碰段，无需去重；内存副本一旦放弃，本页随即开始去重。
+  const rows = new Map<string,{value: JsonValue | undefined; bytes: number}>();
   let bytes = 0;
   const getMany = async (keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]> => {
+    if (resident()) return source.getMany(keys);
     const missing = [...new Set(keys.filter(key => !rows.has(key)))];
     const fetched = missing.length ? await source.getMany(missing) : [];
     const fresh = new Map(missing.map((key,i) => [key,fetched[i]]));
     for (const [key,value] of fresh) {
-      const encoded = value === undefined ? undefined : JSON.stringify(value);
-      const size = Buffer.byteLength(key) + (encoded === undefined ? 0 : Buffer.byteLength(encoded));
-      if (rows.size < 256 && bytes + size <= 256 * 1024) { rows.set(key,{encoded,bytes:size}); bytes += size; }
+      if (rows.size >= 256) break;
+      const size = Buffer.byteLength(key) + (value === undefined ? 0 : Buffer.byteLength(JSON.stringify(value)));
+      if (bytes + size <= 256 * 1024) { rows.set(key,{value,bytes:size}); bytes += size; }
     }
     return keys.map(key => {
       const row=rows.get(key);
-      return row ? (row.encoded === undefined ? undefined : JSON.parse(row.encoded) as JsonValue) : fresh.get(key);
+      return row ? row.value : fresh.get(key);
     });
   };
   const view: DurableProjectionReadContext = {get:async key=>(await getMany([key]))[0],getMany,

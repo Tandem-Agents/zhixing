@@ -2,13 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   claimDeviceCapacity,
   createDefaultDeviceCapacityPolicy,
+  currentDeviceCapacityStep,
   DefaultDeviceCapacityArbiter,
   type DeviceCapacityBudget,
   type DeviceCapacityPolicy,
+  withDeviceCapacityStep,
 } from "../device-capacity.js";
 import {
   currentMaintenanceAbortSignal,
   currentMaintenanceUrgency,
+  runDetachedMaintenanceContext,
   runWithMaintenanceUrgency,
 } from "../maintenance-context.js";
 import {
@@ -193,6 +196,41 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
     gate.resolve();
     await expect(running).resolves.toBe("done");
     expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it("runs background work outside the capacity step of the request that started it", async () => {
+    // 义务与计时器续跑都可能比首个请求者的容量步骤活得长：步骤结束后它们仍在跑，
+    // 绝不能观测到那个已结束的步骤，读写也不得记在它的计划上。
+    const runner = new StorageMaintenanceTaskRunner(governor());
+    const defaults = createDefaultDeviceCapacityPolicy();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: defaults,
+      probe: () => ({ cpuBusyRatio: 0, availableMemoryBytes: 8 * 1024 ** 3, processRssBytes: 32 * 1024 ** 2, temporaryBytesAvailable: 8 * 1024 ** 3 }) });
+    const bound = budget();
+    const admission = await arbiter.acquire({ admissionId: "requester-step", serviceClass: "storage-foreground",
+      atomic: bound, preferred: bound, maxWaitMs: 0 }, new AbortController().signal);
+    if (admission.kind !== "granted") throw new Error(admission.kind);
+    const gate = deferred<void>();
+    let obligationStep!: Promise<unknown>;
+    let timerStep!: Promise<unknown>;
+    await withDeviceCapacityStep(admission.permit, bound, async () => {
+      expect(currentDeviceCapacityStep()?.kind).toBe("physical");
+      obligationStep = runner.run(obligation("outlives-requester"), new AbortController().signal, async () => {
+        await gate.promise;
+        return currentDeviceCapacityStep();
+      });
+      const timer = deferred<unknown>();
+      setTimeout(() => {
+        timer.resolve(runDetachedMaintenanceContext("background", async () => {
+          await gate.promise;
+          return currentDeviceCapacityStep();
+        }));
+      }, 0);
+      timerStep = timer.promise;
+    });
+    admission.permit.release();
+    gate.resolve();
+    await expect(obligationStep).resolves.toBeUndefined();
+    await expect(timerStep).resolves.toBeUndefined();
   });
 
   it("escalates the effective urgency of a coalesced obligation mid-flight", async () => {
