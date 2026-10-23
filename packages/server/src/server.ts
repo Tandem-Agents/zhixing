@@ -320,7 +320,8 @@ async function startServerWithOwner(
   };
 
   function attachConnection(ws: WebSocket, loopback: boolean): void {
-    const connection = createRpcConnection(ws, { loopback });
+    // 向接入面推送（运行流、状态变化）即用户正在看到的前台进展。
+    const connection = createRpcConnection(ws, { loopback, onNotify: () => ctx.foregroundActivity?.pulse() });
     registerConnection(connection);
 
     ws.on("message", (data) => {

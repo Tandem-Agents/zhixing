@@ -75,7 +75,7 @@ export function isLoopbackAddress(address: string | undefined): boolean {
 
 export function createRpcConnection(
   socket: WebSocket,
-  opts?: { loopback?: boolean },
+  opts?: { loopback?: boolean; onNotify?: () => void },
 ): RpcConnection {
   const id = ++nextConnectionId;
   const loopback = opts?.loopback ?? false;
@@ -118,10 +118,12 @@ export function createRpcConnection(
       safeSend(encodeError(messageId, error));
     },
     notify(method, params) {
-      safeSend(encodeNotification(method, params));
+      if (safeSend(encodeNotification(method, params))) opts?.onNotify?.();
     },
     tryNotify(method, params) {
-      return safeSend(encodeNotification(method, params));
+      const sent = safeSend(encodeNotification(method, params));
+      if (sent) opts?.onNotify?.();
+      return sent;
     },
     close(code, reason) {
       if (closed) return;

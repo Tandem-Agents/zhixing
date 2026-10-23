@@ -2,6 +2,7 @@ import {
   currentMaintenanceAbortSignal, currentMaintenanceUrgency, isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs, runWithMaintenanceUrgency, StorageMaintenanceCancelledError,
 } from "@zhixing/core/resources";
+import { awaitAuthorityPreparation } from "@zhixing/core/authority";
 
 /** One stable control identity, one finite recovery window, and no wait inside a serial owner. */
 export async function retryControlAdmission<T>(
@@ -36,6 +37,7 @@ export async function retryControlAdmission<T>(
         if (deadline.signal.aborted) throw lastPressure ?? error;
         const delay = maintenanceRetryDelayMs(error);
         if (delay === undefined || isHoldingMaintenanceExclusion()) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         lastPressure = error;
         timer ??= setTimeout(() => deadline.abort(), 5_000);
         recovering = true;

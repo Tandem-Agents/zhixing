@@ -42,6 +42,10 @@ it("recovers the first native storage cause through the installed reader after l
     expect(notices.some(item => item.includes("降级"))).toBe(true);
     expect(await readFile(obstruction, "utf8")).toBe(marker);
     await unlink(obstruction); // Only this test's verified file, never user data.
+    // 恢复由退避重试驱动：等日志确实恢复写入再收尾，不让恢复与关闭期限赛跑。
+    const recoveredBy = performance.now() + 10000;
+    while (!notices.some(item => item.includes("已恢复")) && performance.now() < recoveredBy) await new Promise(resolve => setTimeout(resolve, 25));
+    expect(notices.some(item => item.includes("已恢复"))).toBe(true);
   } finally { await logging.finish("success", "acceptance-complete"); }
   const cli = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
   const output = await new Promise<string>((resolve, reject) => execFile(process.execPath, [cli, "logs", "--offline", "search"], {

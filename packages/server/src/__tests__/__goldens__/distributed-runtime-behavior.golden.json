@@ -903,6 +903,19 @@
     },
     {
       "emptyRequest": {},
+      "method": "session.inputReceipt",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "session.list",
       "outcome": {
         "code": -32603,

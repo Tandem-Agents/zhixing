@@ -1701,7 +1701,7 @@ export class ConversationManager implements ConversationCommitProjection {
     this.notifyTurnCommitted(session, input.runRecord, {
       turnId: input.runRecord.runId,
       runIndex: accepted.runIndex,
-      runRecordRef: { shardId: accepted.shardId, runIndex: accepted.runIndex },
+      runRecordRef: { shardId: 'owner-log', runIndex: accepted.runIndex },
     });
   }
 

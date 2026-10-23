@@ -290,6 +290,7 @@ async function scanTopology(
     references: number;
   }>();
   const undeclaredPackageImports: Array<{ source: string; dependency: string }> = [];
+  const bundled = new Map<string, ReadonlySet<string>>();
 
   for (const zone of zoneRoots) {
     const sourceFiles = (await walk(zone.root)).filter(
@@ -302,7 +303,8 @@ async function scanTopology(
       for (const moduleRef of collectModuleReferences(sourceFile)) {
         const packageName = internalPackageName(moduleRef.specifier, packageNames);
         if (packageName && owner && packageName !== owner.name) {
-          if (!(packageName in owner.dependencies) && !(packageName in owner.optionalDependencies)) {
+          if (!(packageName in owner.dependencies) && !(packageName in owner.optionalDependencies) &&
+              !(packageName in owner.devDependencies && (await bundledPackages(owner, bundled)).has(packageName))) {
             undeclaredPackageImports.push({ source: toRepoPath(file), dependency: packageName });
           }
         }
@@ -423,4 +425,20 @@ function isWithin(file: string, directory: string): boolean {
 
 function toRepoPath(file: string): string {
   return relative(REPO_ROOT, file).split(sep).join("/");
+}
+
+/**
+ * 构建时被打进使用方产物的包（tsup 的 noExternal）：运行时不再需要它，声明为开发依赖即可。
+ * 直接读使用方的打包配置，不另立名单。
+ */
+async function bundledPackages(owner: PackageManifest, cache: Map<string, ReadonlySet<string>>): Promise<ReadonlySet<string>> {
+  const cached = cache.get(owner.name);
+  if (cached) return cached;
+  const config = await readFile(resolve(REPO_ROOT, owner.directory, "tsup.config.ts"), "utf8").catch(() => "");
+  const names = new Set<string>();
+  for (const match of config.matchAll(/noExternal:\s*\[([^\]]*)\]/g)) {
+    for (const quoted of match[1]!.matchAll(/["']([^"']+)["']/g)) names.add(quoted[1]!);
+  }
+  cache.set(owner.name, names);
+  return names;
 }

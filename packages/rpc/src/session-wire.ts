@@ -306,6 +306,8 @@ export interface SessionConversationEntry {
   observerCount: number;
   pendingCount: number;
   advancement?: SessionAdvancementStateSnapshot;
+  /** 推进状态尚在准备，暂不可知；不等于没有推进。 */
+  advancementPreparing?: true;
 }
 
 export interface SessionListResult {

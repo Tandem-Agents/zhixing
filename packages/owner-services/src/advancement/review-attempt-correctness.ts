@@ -34,6 +34,8 @@ export function createAdvancementReviewAttemptApplication(
   options: AdvancementReviewAttemptCorrectnessOptions,
 ): AdvancementReviewAttemptApplication {
   const state: AdvancementReviewAttemptStatePort = {
+    settleReviewRoot: (conversationId, sessionId, lineageId, generation) =>
+      options.store.settleReviewRoot(conversationId, sessionId, lineageId, generation),
     loadActiveSession: (conversationId) =>
       options.store.loadActiveSession(conversationId),
     loadSession: (conversationId, sessionId) =>

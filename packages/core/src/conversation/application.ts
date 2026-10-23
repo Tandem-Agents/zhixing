@@ -149,6 +149,8 @@ export interface ConversationDirectoryEntry extends ConversationDirectoryRecord 
   readonly observerCount: number;
   readonly pendingCount: number;
   readonly advancement?: ConversationAdvancementProjection;
+  /** 推进状态尚在准备（例如旧资料升级后该会话尚未校验完成），暂不可知；不等于没有推进。 */
+  readonly advancementPreparing?: true;
 }
 
 export type ConversationAvailability =
@@ -810,6 +812,8 @@ export interface ConversationAdvancementProjectionReader {
   read(
     conversationId: string,
   ): Promise<ConversationAdvancementProjection | undefined>;
+  /** 其中读取推进状态须先等待准备的会话；列表不为它们等待，只如实标为准备中。 */
+  preparing?(conversationIds: readonly string[]): Promise<ReadonlySet<string>>;
 }
 
 export type ConversationDirectoryQuery =
@@ -1226,10 +1230,15 @@ export class ConversationDirectoryApplicationService
       else result = { records: orderDurableConversationRecords(all) };
     }
     const records = result.records;
+    // 显示目录不做历史工作：推进状态尚需准备的会话不在这里等待。
+    const preparing = records.length && this.input.advancement?.preparing
+      ? await this.input.advancement.preparing(records.map((record) => record.conversationId))
+      : new Set<string>();
     const conversations = await Promise.all(
       records.map(async (record): Promise<ConversationDirectoryEntry> => {
         const runtime = this.input.runtime?.read(record.conversationId);
-        const advancement = await this.input.advancement?.read(
+        const advancementPreparing = preparing.has(record.conversationId);
+        const advancement = advancementPreparing ? undefined : await this.input.advancement?.read(
           record.conversationId,
         );
         return Object.freeze({
@@ -1240,6 +1249,7 @@ export class ConversationDirectoryApplicationService
           observerCount: runtime?.observerCount ?? 0,
           pendingCount: runtime?.pendingCount ?? 0,
           ...(advancement ? { advancement } : {}),
+          ...(advancementPreparing ? { advancementPreparing: true as const } : {}),
         });
       }),
     );

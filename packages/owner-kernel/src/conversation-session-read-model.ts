@@ -1,4 +1,4 @@
-import type { AuthorityCommitLog, DurableLogCheckpoint } from '@zhixing/core/authority';
+import { awaitAuthorityPreparation, type AuthorityCommitLog, type DurableLogCheckpoint } from '@zhixing/core/authority';
 import type { ConversationReadIndex } from './conversation-read-index.js';
 import type { CommitEnvelope, LogicalRecord } from '@zhixing/core/contracts';
 import { SerialTaskQueue } from '@zhixing/core/persistence';
@@ -158,6 +158,7 @@ export class ConversationSessionReadModel<State extends { readonly domainRevisio
           if (deadline.signal.aborted) throw pressure ?? error;
           const delay = maintenanceRetryDelayMs(error);
           if (delay === undefined || isHoldingMaintenanceExclusion()) throw error;
+          if (await awaitAuthorityPreparation(error)) continue;
           pressure = error;
           timer ??= setTimeout(() => deadline.abort(), 5_000);
           await new Promise<void>(resolve => {

@@ -3,6 +3,7 @@ import {
   createNodeDeviceCapacityProbe,
   DefaultDeviceCapacityArbiter,
   DefaultStorageMaintenanceGovernor,
+  ForegroundActivity,
   type DeviceCapacityBudget,
   type DeviceCapacityClass,
   type DeviceCapacityArbiterPort,
@@ -31,6 +32,9 @@ const WORKLOAD_PREFERRED: DeviceCapacityBudget = {
   },
   quantum: { readBytes: 0, writeBytes: 0, ioOperations: 0 },
 };
+
+/** 前台最近一次活动之后多久仍算活跃：在此之前后台维护（升级后的会话迁移及其段整理）不推进。 */
+export const FOREGROUND_QUIET_MS = 500;
 
 export function createDeviceCapacityRuntime(
   temporaryRoot: string,
@@ -69,12 +73,15 @@ export function createDeviceCapacityRuntime(
       } finally { if (!granted) releaseActivity(); }
     },
   };
+  const foreground = new ForegroundActivity();
   const storage = new DefaultStorageMaintenanceGovernor({
     capacity: arbiter,
   });
   return {
     arbiter,
     storage,
+    // 宿主前台活动（请求在途、运行进行中、向接入面推送）：后台维护据此让路。
+    foreground,
     // Owners with a recovery prefix retain sampling across that prefix and
     // all its leaf admissions. This does not reserve capacity or extend TTL.
     retainActivity: filesystem.retainActivity,

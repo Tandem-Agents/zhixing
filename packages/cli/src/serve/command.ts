@@ -131,6 +131,7 @@ import {
   type ServerContext,
 } from "@zhixing/server";
 import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+import { conversationDecisionMigrationStatus, conversationDecisionPending, startConversationDecisionMigration, stopConversationDecisionMigration } from "@zhixing/owner-kernel/conversation-assignment";
 import {
   createRunEventForwarder,
   SESSION_NOTIFICATIONS,
@@ -311,6 +312,7 @@ import {
   REJECT_REMOTE_WORKSPACE_PROBE,
 } from "./workscene-remote-workspace-probe.js";
 import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
+import { FOREGROUND_QUIET_MS } from "./device-capacity-runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -976,6 +978,7 @@ async function runServerProcess(
   const conversationServices = await createConversationServices({
     onFailure: (error, context) => recordConversationFailure(startupRecords, error, context),
     deviceCapacity: deviceCapacity.arbiter,
+    foregroundActivity: deviceCapacity.foreground,
     onRunStatus: createExtensionStatusObserver(extensionHandle.port),
     mcp: mcpApplication,
     conversationNamingStorage: conversationStorage.naming,
@@ -1059,6 +1062,7 @@ async function runServerProcess(
     }
     const owner = await createLocalConversationOwner({
       onRunStatus: createExtensionStatusObserver(extensionHandle.port),
+      foregroundActivity: deviceCapacity.foreground,
       executorRoleModule: executor,
       evidenceHandler: evidence,
       assignmentRuntimeFactory,
@@ -2219,6 +2223,7 @@ async function runServerProcess(
     runtime: {
       closeAdmission: async (operationId) => {
         managedHostStopping = true;
+        await advancementRecovery?.beginDrain();
         boundInboundRouter?.refuseNewMessages();
         boundExecutorJobOwner?.pauseAccepting();
         schedulerApplication.closeAdmission();
@@ -2279,6 +2284,7 @@ async function runServerProcess(
         );
       }
       await recoverAdvancementAcceptedWork();
+      advancementRecovery?.resume();
       schedulerApplication.resumeAdmission();
       boundExecutorJobOwner?.resumeAccepting();
       meshRuntime?.resumeAcceptingAfterLifecycle();
@@ -2337,6 +2343,7 @@ async function runServerProcess(
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     closeAdmission: async (operationId: string) => {
       managedHostStopping = true;
+      await advancementRecovery?.beginDrain();
       boundInboundRouter?.refuseNewMessages();
       boundExecutorJobOwner?.pauseAccepting();
       schedulerApplication.closeAdmission();
@@ -2804,6 +2811,8 @@ async function runServerProcess(
     advancement: {
       read: async (conversationId) =>
         (await advancementReviews.queryActiveState(conversationId)) ?? undefined,
+      // 旧资料升级后尚未迁移的会话：推进状态须等其决定状态迁移，列表不等待（后台迁移照常进行）。
+      ...(homeAuthority ? { preparing: (conversationIds: readonly string[]) => conversationDecisionPending(homeAuthority.authority, conversationIds) } : {}),
     },
     perspectives: conversationPerspectives,
   });
@@ -3199,6 +3208,7 @@ async function runServerProcess(
         afterCommitRevision,
       ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
     lifecycleShutdown: stopCoordinator,
+    foregroundActivity: deviceCapacity.foreground,
   });
   boundDeliveryStack?.onStatus((notice) => {
     serverCtx.broadcastAll?.("delivery.status", notice);
@@ -3220,6 +3230,19 @@ async function runServerProcess(
   // 启动早期统一入口已完成升级初建与尾部追平，这里只确认并记录水位，不依赖启动恰好发生写入。
   if (homeAuthority) {
     await observeLogPhase(startupRecords, "prepare-projections", () => homeAuthority.prepareRuntime("host-ready"));
+    // 旧资料升级：会话决定状态按会话分区迁移，在后台按最近使用顺序进行，不阻塞就绪。被选中的会话插队按前台
+    // 迁移；尚未迁移的会话第一次被读写时等待它本身的迁移（升级后还要等一次性的全库只读扫描完成）。后台只在
+    // 前台安静时推进：请求在途或正向接入面推送运行进展时暂停，不与终端打开会话、首发和运行争用。
+    const decisionLog = homeAuthority.authority;
+    lifecycleContributions.acquire("decisionMigration.stop", () => stopConversationDecisionMigration(decisionLog));
+    void observeLogPhase(startupRecords, "decision-migration", async () => {
+      await startConversationDecisionMigration(decisionLog, {
+        idle: (signal) => deviceCapacity.foreground.whenQuiet(FOREGROUND_QUIET_MS, signal),
+      });
+      const failed = conversationDecisionMigrationStatus(decisionLog)?.failed;
+      if (failed?.size) console.warn(chalk.yellow(`[server] conversation decision migration left ${failed.size} conversation(s) unmigrated; opening one retries and reports its failure`));
+    }).catch((error: unknown) =>
+      console.warn(chalk.yellow(`[server] conversation decision migration paused: ${error instanceof Error ? error.message : String(error)}`)));
   }
   runner = await runServer({
     exitOnSignal: false,
@@ -3272,8 +3295,9 @@ async function runServerProcess(
       await currentRemovalMigrationApplication?.resumeActive();
       await currentRemovalRecoveryApplication?.resumeActive();
       anchorInternalStopLifecycle.assertServerStartAllowed();
+      await advancementRecovery?.prepare();
       if (advancementRecovery && !startupLifecycleOperation) {
-        await recoverAdvancementAcceptedWork();
+        advancementRecovery.start();
       }
 
       lifecycleContributions.acquire(

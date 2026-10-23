@@ -89,7 +89,8 @@ export class TerminalSessionCommands {
   async #entries(command: 'resume' | 'work', query?: string) {
     const entries = command === 'resume'
       ? (await this.options.controller()!.listConversationPage({ limit: 100, query })).conversations.map(item => ({ id: item.conversationId, name: item.name,
-        description: item.advancement?.status === 'awaiting-rubric-confirmation' ? '待确认推进任务' : item.advancement?.status === 'active' ? '推进中' : item.lastActiveAt }))
+        description: item.advancementPreparing ? '升级校验中' : item.advancement?.status === 'awaiting-rubric-confirmation' ? '待确认推进任务'
+          : item.advancement?.status === 'active' ? '推进中' : item.lastActiveAt }))
       : (await this.options.workscene.list()).map(item => ({ id: item.sceneId, name: item.name,
         description: item.workspace ? [item.workspace.deviceName, item.workspace.workspaceName].filter(Boolean).join(' / ') : '未绑定工作区' }));
     return boundedControlProjection(entries, 1024 * 1024);

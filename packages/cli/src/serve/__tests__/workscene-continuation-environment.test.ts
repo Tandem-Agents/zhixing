@@ -19,6 +19,15 @@ class MemorySecrets {
   async delete(ref: { kind: string; bindingId: string }) {
     this.entries.delete(`${ref.kind}/${ref.bindingId}`);
   }
+  // 写者打开日志前原子取得缓存完整性密钥：仅缺失时创建，已有值从不覆盖。
+  async getOrCreate(ref: { kind: string; bindingId: string }, create: () => string) {
+    const key = `${ref.kind}/${ref.bindingId}`;
+    if (!this.entries.has(key)) this.entries.set(key, create());
+    return this.entries.get(key)!;
+  }
+  async getExisting(ref: { kind: string; bindingId: string }) {
+    return this.entries.get(`${ref.kind}/${ref.bindingId}`) ?? null;
+  }
   async list() {
     return [];
   }

@@ -3123,6 +3123,7 @@ function projectConversationEntry(
     observerCount: entry.observerCount,
     pendingCount: entry.pendingCount,
     ...(entry.advancement ? { advancement: entry.advancement } : {}),
+    ...(entry.advancementPreparing ? { advancementPreparing: true } : {}),
   };
 }
 

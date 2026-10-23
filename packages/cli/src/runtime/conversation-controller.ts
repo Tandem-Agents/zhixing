@@ -403,6 +403,12 @@ export class ConversationController<Outcome = TurnOutcome> {
     completionKnown?: boolean;
     completion?: ConversationCommitSummary;
   }>();
+  /**
+   * 由本地回合负责展示的运行（输入、过程与终态都已在该回合显示）。与旁观记录分开保存、只由本地回合写入：
+   * 恢复扫描会为大量历史运行写旁观记录，不能把这里挤掉。此后的恢复与迟到通知只把该回合尚未显示的正文
+   * 补进同一回合，不再把它的输入、状态或正文当作旁观运行重新展示。
+   */
+  private readonly localRunTurns = new Map<string, { readonly turnId: string; readonly text: ObservedTextPrefix }>();
   private readonly turnOutcomes = new Map<string, Promise<Outcome>>();
   private readonly pendingAbortByTurn = new Map<
     string,
@@ -1081,6 +1087,7 @@ export class ConversationController<Outcome = TurnOutcome> {
   private releaseDurableRun(turnId: string): void {
     const runId = this.durableRunByTurn.get(turnId);
     if (!runId) return;
+    rememberLocalRun(this.localRunTurns, runId, { turnId, text: this.processRuns.get(runId)?.text ?? new ObservedTextPrefix() });
     this.durableRunByTurn.delete(turnId);
     this.durableRuns.delete(runId);
     this.pendingFinals.delete(runId);
@@ -1098,7 +1105,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         rememberBounded(this.pendingFinals, frame.runId, frame);
       }
       const observed = this.observedContinuations.get(frame.runId);
-      if (this.active.conversationId === frame.conversationId && !observed?.settled) {
+      if (this.active.conversationId === frame.conversationId && !observed?.settled && !this.localRunTurns.has(frame.runId)) {
         this.startContinuationFinalLookup(frame);
       }
       return;
@@ -1206,7 +1213,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   private finishObservedStatus(notice: ConversationStatusNotice): void {
     const observed = this.observedContinuations.get(notice.ref.runId);
     const result = terminalResultForStatus(notice);
-    if (!observed || observed.settled || !result || observed.conversationId !== this.active.conversationId) return;
+    // 本地回合已显示该运行的终态，迟到的状态不再作为旁观运行显示。
+    if (!observed || observed.settled || !result || observed.conversationId !== this.active.conversationId || this.localRunTurns.has(notice.ref.runId)) return;
     observed.settled = true;
     const identity = { conversationId: observed.conversationId, runId: notice.ref.runId };
     this.opts.onObservedTurnDelta?.(identity);
@@ -1258,7 +1266,8 @@ export class ConversationController<Outcome = TurnOutcome> {
   private finishRecoveryReset(conversationId: string): void {
     this.recoveryFactProgress = undefined;
     this.completionCursor = undefined;
-    this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear();
+    // 显示已从历史重建：此前由本地回合显示的运行，此后按历史与恢复事实展示。
+    this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear(); this.localRunTurns.clear();
     for (const output of this.localOutput.values()) if (output.conversationId === conversationId) {
       output.text.reset(); output.recovering = false;
     }
@@ -1420,6 +1429,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     if (!result) return;
     if (!current()) return;
     let observed = this.observedContinuations.get(runId);
+    const local = !watch && this.localRunTurns.has(runId);
     const historyCovered = fact.commitRevision !== undefined && fact.commitRevision <= historyThroughCommitRevision ||
       fact.historyCovered === true && !observed && !watch && notice.state !== 'uncertain';
     // Recovery reads all old terminal runs. Only an actual communication or
@@ -1427,12 +1437,12 @@ export class ConversationController<Outcome = TurnOutcome> {
     // Input facts are consumed independently, including uncommitted sources.
     const historicalInteractive = !observed && !watch && !fact.communication && !fact.continuation && notice.state !== 'uncertain';
     if (!observed) {
-      observed = { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: !!progress.localSettled || historyCovered || historicalInteractive };
+      observed = { conversationId, sequences: new Map(), text: new ObservedTextPrefix(), settled: !!progress.localSettled || historyCovered || historicalInteractive || local };
       rememberBounded(this.observedContinuations, runId, observed);
     }
     observed.terminalInputsReconciled = true;
     observed.communication ||= fact.communication;
-    if (!observed.settled) {
+    if (!observed.settled && !local) {
       const identity = { conversationId, runId };
       const label = observed.communication ? '来信处理' : fact.continuation ? '任务续接' : '运行';
       await this.emitRecoveredYield({ type: 'text_delta', text: result.reason === 'error' ? `\n${label}未完成：${result.error.message}\n` : `\n${label}已停止。\n` }, { ...identity, kind: 'status', notice });
@@ -1449,7 +1459,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         if (!current()) return;
         if (page.reset) throw new RecoveryGenerationChanged();
         if (page.input) {
-          const localTurnId = this.durableRuns.get(runId)?.turnId ?? this.observedContinuations.get(runId)?.localTurnId;
+          const localTurnId = this.durableRuns.get(runId)?.turnId ?? this.localRunTurns.get(runId)?.turnId ?? this.observedContinuations.get(runId)?.localTurnId;
           const communication = page.input.identity.source.kind === 'conversation';
           // The same live input is already displayed by its sender. Cold inputs
           // have no local receipt; preserve their source and original text.
@@ -1482,8 +1492,10 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (!completion.summary || completion.conversationId !== frame.conversationId || completion.runId !== frame.runId ||
           frame.commitRevision !== undefined && completion.commitRevision !== frame.commitRevision) throw Error('Committed result is not yet available');
       const watch = this.durableRuns.get(frame.runId), output = watch && this.localOutput.get(watch.turnId);
+      // 本地回合已结束的运行：正文只从该回合已显示的部分接着补，仍归这一回合。
+      const local = watch ? undefined : this.localRunTurns.get(frame.runId);
       const observed = this.observedContinuations.get(frame.runId) ?? {
-        conversationId: frame.conversationId, sequences: new Map(), text: output?.text ?? new ObservedTextPrefix(), settled: false, completionKnown: false, localTurnId: watch?.turnId,
+        conversationId: frame.conversationId, sequences: new Map(), text: output?.text ?? local?.text ?? new ObservedTextPrefix(), settled: false, completionKnown: false, localTurnId: watch?.turnId ?? local?.turnId,
       };
       observed.completionKnown = true;
       Object.assign(observed, { completion: completion.summary });
@@ -1714,7 +1726,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       this.opts.onProcess?.({ ...value, payload: { kind: 'gap', reason: '过程来源已换代，请刷新正文。' } });
       this.wakeRecovery(); return;
     }
-    if (source.streamEpoch < process.source.streamEpoch) return;
+    // 同一派发的来源必然同带或同缺流代次（校验保证 assignmentId 与 streamEpoch 成对）；只在都有时比较。
+    if (source.streamEpoch !== undefined && process.source.streamEpoch !== undefined && source.streamEpoch < process.source.streamEpoch) return;
     process.source = source;
     // closed intentionally reuses the last data sequence. It has its own
     // idempotence bit and must not be swallowed by ordinary data deduplication.
@@ -2337,6 +2350,7 @@ export class ConversationController<Outcome = TurnOutcome> {
     clearTimeout(this.recoveryTimer); this.recoveryTimer = undefined;
     clearTimeout(this.completionRetry); this.completionRetry = undefined;
     this.observedContinuations.clear();
+    this.localRunTurns.clear();
     for (const unsub of this.unsubscribes) unsub();
     for (const turnId of this.pendingAbortByTurn.keys()) {
       this.resolvePendingAbort(turnId);
@@ -2393,6 +2407,13 @@ function advancedStatusCursors(
   return next.filter(cursor => previous.some(before =>
     before.conversationId === cursor.conversationId && before.runId === cursor.runId &&
     cursor.afterStatusRevision > before.afterStatusRevision));
+}
+
+/** 本地回合负责展示的运行：一次会话内的本地回合数有限，保留足够长，覆盖恢复扫描可能滞后的范围。 */
+function rememberLocalRun(map: Map<string, { readonly turnId: string; readonly text: ObservedTextPrefix }>, runId: string, value: { readonly turnId: string; readonly text: ObservedTextPrefix }): void {
+  map.delete(runId);
+  map.set(runId, value);
+  if (map.size > 512) map.delete(map.keys().next().value!);
 }
 
 function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V): void {

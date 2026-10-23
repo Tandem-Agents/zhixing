@@ -398,6 +398,8 @@ async function runChain(topology: "in-process" | "mesh", prepareOnly?: {
       Constructor: ConversationAssignmentLedger,
       authority: {
         artifacts: executor.artifacts,
+        // 与生产同源：执行前按当前会话权威核对 owner 代次。
+        conversationAuthority: executor.conversationAuthority,
         executorCapabilities: executor.executorCapabilities,
         executorId: executor.executorId,
         executorLog: executor.executorLog,

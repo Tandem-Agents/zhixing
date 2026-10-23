@@ -2,7 +2,7 @@ import type {
   AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplication,
 } from "@zhixing/core/advancement/application";
-import type { AdvancementProxyMessage, AdvancementSession } from "@zhixing/core/advancement";
+import type { AdvancementProxyMessage, AdvancementSession, AdvancementReviewAttempt } from "@zhixing/core/advancement";
 import type { RunRecord, RunRecordRef } from "@zhixing/core/transcript";
 import type { AdvancementConversationDirectory } from "./conversation-directory-port.js";
 import type { AdvancementController } from "./controller.js";
@@ -21,6 +21,12 @@ import { hasPendingWorksceneTask } from "@zhixing/core/workscene/application";
 
 const RECOVERY_SCAN_PAGE_SIZE = 50;
 
+export interface AdvancementRecoveryReadPort {
+  list(after?: string): Promise<{ conversationIds: readonly string[]; next?: string }>;
+  cleanup(conversationId: string, after?: string): Promise<{ items: readonly { sessionId: string; attempt: AdvancementReviewAttempt; deleted?: boolean }[]; next?: string }>;
+  run(conversationId: string, sessionId: string, before?: number): Promise<{ record: RunRecord; runRecordRef: RunRecordRef } | null | undefined>;
+}
+
 export interface AdvancementRecoveryMaintenanceOptions {
   readonly advancement: AdvancementController;
   readonly reviews: AdvancementReviewAttemptApplication;
@@ -30,6 +36,7 @@ export interface AdvancementRecoveryMaintenanceOptions {
   readonly reviewResults: AdvancementReviewResultProjectionApplication;
   readonly originalTasks?: AdvancementOriginalTaskAdmissionPort;
   readonly logger?: Pick<Console, "warn">;
+  readonly pending?: AdvancementRecoveryReadPort;
 }
 
 export type AdvancementRecoveryResult =
@@ -38,6 +45,7 @@ export type AdvancementRecoveryResult =
         | "no-active-session"
         | "not-active"
         | "no-pending-recovery"
+        | "recovery-pending"
         | "awaiting-original-run";
       readonly conversationId: string;
     }
@@ -97,6 +105,11 @@ export interface AdvancementRecoveryOptions {
 }
 
 export interface AdvancementRecoveryMaintenance {
+  prepare(): Promise<void>;
+  start(): void;
+  resume(): void;
+  stop(): Promise<void>;
+  beginDrain(): Promise<void>;
   recoverAllOpenSessions(): Promise<readonly AdvancementRecoveryResult[]>;
   recoverConversation(
     conversationId: string,
@@ -116,6 +129,14 @@ class DefaultAdvancementRecoveryMaintenance
   private readonly scheduled = new Set<string>();
   private readonly recovering = new Map<string, Promise<AdvancementRecoveryResult>>();
   private readonly scheduler: ProxyMessageScheduler;
+  private cursor?: string;
+  private readonly originals = new Map<string, string>();
+  private readonly cleanups = new Map<string, string>();
+  private timer?: ReturnType<typeof setTimeout>;
+  private loop?: Promise<void>;
+  private stopped = false;
+  private draining = false;
+  private abort = new AbortController();
 
   constructor(private readonly options: AdvancementRecoveryMaintenanceOptions) {
     this.scheduler = new ProxyMessageScheduler({
@@ -124,9 +145,13 @@ class DefaultAdvancementRecoveryMaintenance
   }
 
   async recoverAllOpenSessions(): Promise<readonly AdvancementRecoveryResult[]> {
-    const conversations = await this.options.directory.list();
+    if (this.stopped) return [];
+    const page = this.options.pending ? await this.options.pending.list(this.cursor) : undefined;
+    this.cursor = page?.next;
+    const conversations = page ? page.conversationIds.map(id => ({ id })) : await this.options.directory.list();
     const results: AdvancementRecoveryResult[] = [];
     for (const conversation of conversations) {
+      if (this.stopped) break;
       try {
         results.push(await this.recoverConversation(conversation.id));
       } catch (error) {
@@ -136,10 +161,40 @@ class DefaultAdvancementRecoveryMaintenance
     return results;
   }
 
+  async prepare(): Promise<void> { await this.options.pending?.list(); }
+  start(): void {
+    if (this.stopped || this.draining || this.timer || this.loop) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.loop = this.recoverAllOpenSessions().then(() => {}, error => {
+        if (!this.stopped) this.options.logger?.warn(`[advancement-recovery] ${String(error)}`);
+      }).finally(() => { this.loop = undefined; this.start(); });
+    }, 1000);
+    this.timer.unref?.();
+  }
+  async stop(): Promise<void> {
+    await this.beginDrain();
+    this.stopped = true; this.abort.abort();
+    clearTimeout(this.timer); this.timer = undefined;
+    await this.loop;
+    await Promise.allSettled([...this.recovering.values()]);
+  }
+  async beginDrain(): Promise<void> {
+    this.draining = true; this.abort.abort(); clearTimeout(this.timer); this.timer = undefined;
+    await this.loop; await Promise.allSettled([...this.recovering.values()]);
+  }
+  resume(): void {
+    if (this.stopped) return;
+    this.draining = false;
+    if (this.abort.signal.aborted) this.abort = new AbortController();
+    this.start();
+  }
+
   recoverConversation(
     conversationId: string,
     options?: AdvancementRecoveryOptions,
   ): Promise<AdvancementRecoveryResult> {
+    if (this.stopped) return Promise.resolve({ status: 'no-pending-recovery', conversationId });
     const running = this.recovering.get(conversationId);
     if (running) return running;
     const recovery = this.recoverConversationOnce(conversationId, options).finally(
@@ -153,11 +208,15 @@ class DefaultAdvancementRecoveryMaintenance
     return recovery;
   }
 
-  private async recoverOriginalAdmissions(conversationId: string): Promise<void> {
-    let after: string | undefined;
+  private async recoverOriginalAdmissions(conversationId: string): Promise<AdvancementRecoveryResult | undefined> {
+    let failure: AdvancementRecoveryResult | undefined;
+    let after = this.originals.get(conversationId);
     do {
       const page = await this.options.advancement.listPendingOriginalTasks(conversationId, after);
+      if (page.next) this.originals.set(conversationId, page.next); else this.originals.delete(conversationId);
       for (const sessionId of page.sessionIds) {
+        if (this.stopped || this.draining) return failure;
+        try {
         const session = await this.options.advancement.loadExactSession(conversationId, sessionId);
         const obligation = session?.originalTaskAdmission;
         if (!session || !obligation || obligation.status !== "pending") continue;
@@ -177,9 +236,11 @@ class DefaultAdvancementRecoveryMaintenance
           conversationId, advancementSessionId: session.id, turnId: obligation.intent.turnId,
           inputDigest: obligation.intent.inputDigest, runId: admitted.runId,
         });
+        } catch (error) { const failed = this.failed(conversationId, sessionId, undefined, error); failure ??= failed; }
       }
       after = page.next;
-    } while (after !== undefined);
+    } while (!this.options.pending && after !== undefined);
+    return failure;
   }
 
   private async recoverConversationOnce(
@@ -187,20 +248,26 @@ class DefaultAdvancementRecoveryMaintenance
     options?: AdvancementRecoveryOptions,
   ): Promise<AdvancementRecoveryResult> {
     let session: AdvancementSession | null;
+    let admissionFailure: AdvancementRecoveryResult | undefined;
     try {
-      await this.recoverOriginalAdmissions(conversationId);
-      await this.options.reviews.reconcileConversation(conversationId);
+      if (!this.draining) admissionFailure = await this.recoverOriginalAdmissions(conversationId);
+      const work = await this.options.pending?.cleanup(conversationId, this.cleanups.get(conversationId));
+      if (work?.next) this.cleanups.set(conversationId, work.next); else this.cleanups.delete(conversationId);
+      await this.options.reviews.reconcileConversation(conversationId, work?.items);
+      if (work?.items.some(item => item.deleted)) return { status: 'no-active-session', conversationId };
+      if (this.draining) return { status: 'no-pending-recovery', conversationId };
       session = await this.options.advancement.loadActiveSession(conversationId);
     } catch (err) {
       return this.failed(conversationId, undefined, undefined, err);
     }
-    if (!session) return { status: "no-active-session", conversationId };
+    if (!session) return admissionFailure ?? { status: "no-active-session", conversationId };
     if (session.status !== "active") {
       return { status: "not-active", conversationId };
     }
 
     let lastRecoveredRun: AdvancementRecoveryResult | undefined;
     while (true) {
+      if (this.draining || this.stopped) return { status: 'recovery-pending', conversationId };
       const acceptedRun = await this.findUnreviewedAcceptedRun(session, options);
       if (acceptedRun === null) {
         return { status: "awaiting-original-run", conversationId };
@@ -219,7 +286,8 @@ class DefaultAdvancementRecoveryMaintenance
         !latest.runs.some(
           (review) =>
             review.runRecordRef !== undefined &&
-            runRefKey(review.runRecordRef) === runRefKey(acceptedRun.runRecordRef),
+            (this.options.pending ? review.runRecordRef.runIndex === acceptedRun.runRecordRef.runIndex
+              : runRefKey(review.runRecordRef) === runRefKey(acceptedRun.runRecordRef)),
         )
       ) {
         return this.failed(
@@ -232,9 +300,14 @@ class DefaultAdvancementRecoveryMaintenance
         );
       }
       session = latest;
+      if (this.options.pending) {
+        if (await this.findUnreviewedAcceptedRun(session, options)) return { status: 'recovery-pending', conversationId };
+        break;
+      }
     }
 
     if (!session.outstandingProxyMessageId) {
+      if (this.draining || this.stopped) return { status: 'recovery-pending', conversationId };
       let rebuilt: Awaited<
         ReturnType<AdvancementReviewAttemptApplication["rebuildMissingProxyMessage"]>
       >;
@@ -384,6 +457,7 @@ class DefaultAdvancementRecoveryMaintenance
     | null
     | undefined
   > {
+    if (this.options.pending) return this.options.pending.run(session.conversationId, session.id, options?.beforeRunIndex);
     let before: RunRecordRef | undefined;
     const reviewed = new Set(
       session.runs
@@ -464,6 +538,7 @@ class DefaultAdvancementRecoveryMaintenance
         runIndex: accepted.record.runIndex,
         runRecord: accepted.record,
         runRecordRef: accepted.runRecordRef,
+        abortSignal: this.abort.signal,
       });
       await this.options.reviewResults.projectReviewResult({
         conversationId: session.conversationId,

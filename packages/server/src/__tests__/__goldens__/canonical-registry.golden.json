@@ -191,6 +191,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.inputReceipt",
+        "requiresAuth": true
+      },
+      {
         "name": "session.list",
         "requiresAuth": true
       },
@@ -486,6 +490,10 @@
       },
       {
         "name": "session.history",
+        "requiresAuth": true
+      },
+      {
+        "name": "session.inputReceipt",
         "requiresAuth": true
       },
       {
@@ -787,6 +795,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.inputReceipt",
+        "requiresAuth": true
+      },
+      {
         "name": "session.list",
         "requiresAuth": true
       },
@@ -1085,6 +1097,10 @@
         "requiresAuth": true
       },
       {
+        "name": "session.inputReceipt",
+        "requiresAuth": true
+      },
+      {
         "name": "session.list",
         "requiresAuth": true
       },
@@ -1308,9 +1324,11 @@
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:logAccess.close",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
@@ -1427,6 +1445,7 @@
           "rpc:session.contextBudget",
           "rpc:session.delete",
           "rpc:session.history",
+          "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
           "rpc:session.rename",
@@ -1513,9 +1532,11 @@
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:logAccess.close",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
@@ -1632,6 +1653,7 @@
           "rpc:session.contextBudget",
           "rpc:session.delete",
           "rpc:session.history",
+          "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
           "rpc:session.rename",
@@ -1715,9 +1737,11 @@
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:logAccess.close",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
@@ -1822,6 +1846,7 @@
           "rpc:session.contextBudget",
           "rpc:session.delete",
           "rpc:session.history",
+          "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
           "rpc:session.rename",
@@ -1893,9 +1918,11 @@
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:logAccess.close",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:advancementRecovery.stop",
           "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:decisionMigration.stop",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
@@ -2000,6 +2027,7 @@
           "rpc:session.contextBudget",
           "rpc:session.delete",
           "rpc:session.history",
+          "rpc:session.inputReceipt",
           "rpc:session.list",
           "rpc:session.new",
           "rpc:session.rename",
@@ -2490,6 +2518,17 @@
       {
         "owner": "anchor-host",
         "role": "runtime",
+        "id": "advancementRecovery.stop",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:advancementRecovery.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
         "id": "anchorInternalStop.close",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:anchorInternalStop.close",
@@ -2515,6 +2554,17 @@
         "id": "conversationProtocol.stopRecovery",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "decisionMigration.stop",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:decisionMigration.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -3675,6 +3725,15 @@
         "name": "session.history",
         "requiresAuth": true,
         "key": "rpc:session.history",
+        "category": "rpc",
+        "target": {
+          "rowId": "conversation-read"
+        }
+      },
+      {
+        "name": "session.inputReceipt",
+        "requiresAuth": true,
+        "key": "rpc:session.inputReceipt",
         "category": "rpc",
         "target": {
           "rowId": "conversation-read"

@@ -111,9 +111,6 @@ it.each(['current', 'legacy'] as const)('keeps adopted conversation authority us
   let writeError: string | undefined;
   try { await admit(next, 'after-migration', 2); } catch (error) { writeError = error instanceof Error ? error.message : String(error); }
   const after = await f.targetStore.authorityLog().checkpoint();
-  console.log('ADOPTED_PLANNED_EVIDENCE', JSON.stringify({ format, conversationId, adoption: publication.manifest.transferId,
-    planned: TRANSFER_ID, originalTarget: publication.manifest.targetDeviceId, currentDevice: f.targetKey.deviceId,
-    adoptedOwnerEpoch: publication.manifest.nextOwnerEpoch, resolved, historyRecovered: true, writeError, walUnchanged: before.lsn === after.lsn }));
   expect.soft(writeError).toBeUndefined();
   expect(after.lsn).toBeGreaterThan(before.lsn);
   expect(await next.currentState('after-migration')).toBe('queued');

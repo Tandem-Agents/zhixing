@@ -3,8 +3,8 @@ import { assertArtifactRef, createDurableProjectionOverlay, readDurableProjectio
 import type { ArtifactRef, JsonValue, LogicalRecord, TransferRecord } from '@zhixing/core/contracts';
 import { canonicalize, protocolDigest, reduceConversationTransfer, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { ConversationBaseSource, isConversationSourceEvidenceError } from './conversation-base-source.js';
-
 import { conversationStateKeyHash } from './conversation-state-key.js';
+import { decisionMigrationRequired, decisionPartitionReady } from './conversation-decision-partition-keys.js';
 
 export interface ConversationBaseBinding {
   readonly state: ConversationTransferState;
@@ -39,7 +39,10 @@ export function conversationBaseRepairRequired(log: AuthorityCommitLog, binding:
   };
   return error;
 }
-const transferKey = (id: string) => 'source/transfer/' + hash(id);
+/** 转移状态行：按转移编号，整体属于转移分区。 */
+export const CONVERSATION_TRANSFER_STATE_PREFIX = 'source/transfer/';
+const transferKey = (id: string) => CONVERSATION_TRANSFER_STATE_PREFIX + hash(id);
+export { transferKey as conversationTransferStateKey };
 const masked = (value: JsonValue | undefined): boolean => !!value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === 1 && value.conversationBaseDeleted === true;
 export const conversationBaseTombstone = Object.freeze({ conversationBaseDeleted: true });
@@ -199,6 +202,8 @@ export function conversationViewForSource(current: DurableProjectionReadContext,
 
 export async function conversationViewAt(log: AuthorityCommitLog, current: DurableProjectionReadContext, id: string,
   changes?: ReadonlyMap<string, JsonValue | undefined>): Promise<DurableProjectionReadContext> {
+  // 旧资料迁移期间，未迁移会话的决定状态尚不存在：先迁移该会话再整体重做本次读写，绝不读到空状态。
+  if (!await decisionPartitionReady(current, id)) throw decisionMigrationRequired(log, [id]);
   const binding = await current.get(conversationBaseKey(id)) as unknown as ConversationBaseBinding | undefined;
   if (!binding) return current;
   if (await current.get(conversationBaseUnavailableKey(id))) throw conversationBaseRepairRequired(log, binding);
@@ -228,7 +233,7 @@ export async function preserveBaseDeletions(log: AuthorityCommitLog, view: Durab
   const binding = await view.get(conversationBaseKey(id)) as unknown as ConversationBaseBinding | undefined;
   if (!binding) return;
   const source = await openConversationBase(log, binding);
-  for (const [key, value] of changes) if (value === undefined && !currentPrefixes(id).some(prefix => key.startsWith(prefix)) && await source.read(base => base.get(key)) !== undefined) {
+  for (const [key, value] of changes) if (value === undefined && !key.startsWith('advancement-pending/') && !currentPrefixes(id).some(prefix => key.startsWith(prefix)) && await source.read(base => base.get(key)) !== undefined) {
     changes.set(key, conversationBaseTombstone);
   }
 }

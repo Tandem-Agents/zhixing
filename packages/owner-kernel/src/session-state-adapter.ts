@@ -14,7 +14,7 @@ import {
   assertPrincipalAllowsAuthorityMethod,
   assertProtocolIdentifier,
 } from "@zhixing/core/protocol";
-import { advancementHeadSession, advancementSubmissionRequestId } from "@zhixing/core/advancement";
+import { advancementSubmissionRequestId } from "@zhixing/core/advancement";
 import type { ConversationRunJournal } from "./conversation-assignment.js";
 
 export interface ConversationSessionStateAdapterOptions {
@@ -59,9 +59,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
       assertProtocolIdentifier(sessionId, "Advancement sessionId");
       return this.#journal(conversationId).advancementSession(sessionId);
     }
-    return advancementHeadSession(
-      await this.#journal(conversationId).advancementSessions(),
-    );
+    return this.#journal(conversationId).advancementHead();
   }
 
   async readAdvancementSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }, ctx: AuthorityCallContext) {
@@ -105,7 +103,7 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
             `Session does not exist: ${conversationId}`,
           );
         }
-        await this.#options.establishIdentity?.(conversationId);
+        if (!authority.deleted) await this.#options.establishIdentity?.(conversationId);
       }
       const result = await journal.applyAdvancementEvents({
         requestId: ctx.requestId,

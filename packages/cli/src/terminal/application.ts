@@ -709,6 +709,10 @@ class TerminalApplication {
       }
       await this.#controller.reattachActiveObserver({ reloadHistory }); await this.#localView.refresh();
     } else {
+      // 打开最近对话通常很快；旧资料升级后首次打开需先校验该对话的历史，超过片刻才如实提示，不报就绪。
+      const preparing = setTimeout(() => {
+        if (!this.#abort.signal.aborted) void this.#publish({ ...this.#mainView, message: '正在准备最近的对话…' }).catch(() => {});
+      }, 300);
       const initial = await observeStartupPhase(this.#logging.records, 'terminal.select-conversation', () => selectInitialConversation({
         list: () => this.#conversation.list(), listPage: (page) => this.#conversation.listPage(page), newConversation: () => this.#conversation.newConversation(),
         pendingContinuationConfirmation: () => this.#conversation.pendingContinuationConfirmation(),
@@ -721,7 +725,7 @@ class TerminalApplication {
           }
           return boundedControlProjection({ ...result, advancement: undefined }, 256 * 1024);
         }); },
-      }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) }));
+      }, { confirmContinuation: capabilities => this.#confirmLimited(capabilities) })).finally(() => clearTimeout(preparing));
       this.#abort.signal.throwIfAborted();
       if (this.#history?.offline || this.#display.first !== this.#display.last) {
         this.#history = undefined;

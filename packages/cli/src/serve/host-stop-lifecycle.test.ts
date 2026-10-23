@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog, registerDeviceLifecycleProjection } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -255,6 +255,8 @@ async function createFixture(options: {
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => "2026-08-12T00:00:00.000Z",
   });
+  // 与宿主相同：投影先由其所有者登记再打开日志；主机停止记录不经签名校验，校验器被调用即视为错误。
+  registerDeviceLifecycleProjection(log, { verify() { throw new Error("host stop records are not signature-verified"); } });
   const journal = new DeviceLifecycleJournal(log);
   const order: string[] = [];
   const settled = new Map<string, unknown>();

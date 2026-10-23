@@ -1,4 +1,5 @@
 import { localConversationId } from "@zhixing/core/conversation";
+import { FileAuthorityCommitLog } from '@zhixing/core/authority';
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
 import { describe, expect, it, vi } from "vitest";
@@ -33,6 +34,7 @@ describe("closed lifecycle startup", () => {
   }, LIFECYCLE_TIMEOUT_MS);
 
   it("defers readiness and accepted-work recovery until the exact lifecycle resumes", async () => {
+    const projectionReads = vi.spyOn(FileAuthorityCommitLog.prototype, 'transactDurableProjection');
     const readiness = vi.spyOn(
       ConversationProtocolRuntime.prototype,
       "recoverReadinessProjections",
@@ -41,6 +43,7 @@ describe("closed lifecycle startup", () => {
     const accepted = vi.spyOn(ConversationProtocolRuntime.prototype, "recover");
     const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
     try {
+      const beforeStart = projectionReads.mock.calls.length;
       await fixture.assembly.start({
         lifecycle: {
           operationId: "stop-closed-startup",
@@ -51,6 +54,7 @@ describe("closed lifecycle startup", () => {
       expect(intents).not.toHaveBeenCalled();
       expect(readiness).not.toHaveBeenCalled();
       expect(accepted).not.toHaveBeenCalled();
+      expect(projectionReads.mock.calls.slice(beforeStart).some(([id]) => id === 'advancement-recovery-v1')).toBe(true);
 
       await fixture.assembly.recoverAcceptedWorkForLifecycle();
       expect(intents).toHaveBeenCalledTimes(1);
@@ -61,6 +65,7 @@ describe("closed lifecycle startup", () => {
       intents.mockRestore();
       readiness.mockRestore();
       accepted.mockRestore();
+      projectionReads.mockRestore();
     }
   }, LIFECYCLE_TIMEOUT_MS);
 });

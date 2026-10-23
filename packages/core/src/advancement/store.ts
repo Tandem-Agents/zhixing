@@ -425,6 +425,14 @@ export class AdvancementStore {
     });
   }
 
+  async settleReviewRoot(conversationId: string, sessionId: string, lineageId: string, generation: number): Promise<void> {
+    const current = await this.loadSession(conversationId, sessionId);
+    if (!current || current.reviewRootSettlements?.some(value => value.lineageId === lineageId && value.generation === generation)) return;
+    const attempt = current.reviewAttempts?.find(value => value.lineageId === lineageId);
+    if (!attempt || attempt.generation === generation && !["consumed", "expired", "deferred"].includes(attempt.phase)) return;
+    await this.appendDomainEvent(conversationId, sessionId, { type: "review_root_settled", timestamp: new Date().toISOString(), sessionId, lineageId, generation });
+  }
+
   async transitionReviewAttempt(
     conversationId: string,
     sessionId: string,

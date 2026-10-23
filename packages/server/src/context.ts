@@ -9,6 +9,7 @@ import type {
   ChannelStatus,
   HttpHandler,
 } from "@zhixing/core/channels";
+import type { ForegroundActivityPort } from "@zhixing/core/resources";
 import type {
   ConfirmationDecision,
   ConfirmationRequest,
@@ -301,6 +302,8 @@ export interface ServerContext {
   lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
+  /** 宿主前台活动：请求在途与向接入面推送都计入，后台维护据此让路。未注入时不观察。 */
+  foregroundActivity?: ForegroundActivityPort;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**
@@ -338,6 +341,7 @@ export interface CreateContextOptions {
   readonly conversationFinalHistory?: ServerContext["conversationFinalHistory"];
   lifecycleShutdown?: LifecycleShutdownAdapter;
   conversationRpc?: FirstPartyConversationRpcRouter;
+  foregroundActivity?: ForegroundActivityPort;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -360,5 +364,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     conversationFinalHistory: opts.conversationFinalHistory,
     lifecycleShutdown: opts.lifecycleShutdown,
     conversationRpc: opts.conversationRpc,
+    foregroundActivity: opts.foregroundActivity,
   };
 }

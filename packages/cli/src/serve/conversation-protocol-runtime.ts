@@ -45,6 +45,8 @@ import {
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
+  pendingAdvancementConversations,
+  prioritizeConversationDecisionMigration,
   conversationRecoveryPage,
   conversationRecoveryPending,
   ConversationAssignmentCancelledError,
@@ -2469,8 +2471,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   /** The selected conversation must be prepared before a surface reports ready. */
   async prepareConversationReadiness(conversationId: string): Promise<void> {
     await this.#prepareControlBasis();
+    // 旧资料升级后该会话的决定状态若尚未迁移，插到后台迁移的最前；准备该会话时等它本身的迁移
+    // （升级后首次另需等一次性的全库只读扫描完成）。
+    prioritizeConversationDecisionMigration(this.#authority.authorityLog, conversationId);
     await this.#prepareConversationBasis(conversationId);
   }
+
 
   /** 业务入口开放前追平控制索引；稳态仅续读未覆盖尾部，不再延后到首次发送。 */
   #prepareControlBasis(): Promise<void> {
@@ -2687,6 +2693,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
    */
   taskListBeforeMutation(conversationId: string, requestId: string) {
     return this.#journal(conversationId).taskListBeforeMutation(requestId);
+  }
+
+  /** Local owner-only recovery port; no metadata directory or surface authority. */
+  get advancementPending() {
+    return {
+      list: (after?: string) => pendingAdvancementConversations(this.#authority.authorityLog, this.#authority.artifacts, this.#authority.verifier, after),
+      cleanup: (conversationId: string, after?: string) => this.#journal(conversationId).pendingAdvancementCleanup(after),
+      run: (conversationId: string, sessionId: string, before?: number) => this.#journal(conversationId).pendingAdvancementRun(sessionId, before),
+    };
   }
 
   get sessionState(): SessionStatePort {

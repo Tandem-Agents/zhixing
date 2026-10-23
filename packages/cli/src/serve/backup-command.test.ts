@@ -657,7 +657,7 @@ async function startActiveCheckpointReceiver(
     endpointDirectory: mesh.bootstrapProjection.endpoints,
     transportPeerDirectory: mesh.bootstrapProjection.transportPeers,
     trustProjection: Object.freeze({
-      loadTrustRecord: () => mesh.bootstrapStore.loadTrustRecord(),
+      loadCurrentTrust: () => mesh.bootstrapStore.loadCurrentTrust(),
     }),
     services,
     ...(onError ? { onConnectionError: onError } : {}),

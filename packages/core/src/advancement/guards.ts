@@ -282,9 +282,19 @@ export function assertAdvancementEventBatchLegal(
         }
         break;
       }
+      case "review_root_settled": {
+        const session = requireSession(work, event.sessionId);
+        const attempt = session.reviewAttempts.find(value => value.lineageId === event.lineageId);
+        // Advancing the same lineage already proves earlier generations were
+        // terminal; their resource cleanup receipts may arrive later.
+        if (!attempt || event.generation > attempt.generation ||
+            event.generation === attempt.generation && !isTerminalReviewAttempt(attempt.phase)) throw new Error("Advancement root cleanup must bind a terminal attempt");
+        break;
+      }
       case "review_attempt_transitioned": {
-        const session = requireActive(work, event.sessionId);
+        const session = requireSession(work, event.sessionId);
         const attempt = event.attempt;
+        if (session.status !== "active" && !isTerminalReviewAttempt(attempt.phase)) throw new Error("Closed advancement cannot start or invoke a review");
         const expectedLineage = advancementReviewLineageId(
           event.sessionId,
           attempt.runRecordRef,

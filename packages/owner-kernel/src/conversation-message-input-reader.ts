@@ -1,6 +1,6 @@
 import { userMessageFromTurnInput } from '@zhixing/core';
 import type { ConversationMessageStatus } from '@zhixing/core/conversation/application';
-import type { ArtifactStore, AuthorityCommitLog, DurableLogCheckpoint, DurableProjectionReadContext } from '@zhixing/core/authority';
+import { awaitAuthorityPreparation, type ArtifactStore, type AuthorityCommitLog, type DurableLogCheckpoint, type DurableProjectionReadContext } from '@zhixing/core/authority';
 import type { ConversationRunState, UserTurnInput } from '@zhixing/core/contracts';
 import { validateNonEmptyUserTurnInput } from '@zhixing/core/protocol';
 import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs,
@@ -260,6 +260,7 @@ export class ConversationMessageInputReader {
       } catch (error) {
         const delay = maintenanceRetryDelayMs(error);
         if (delay === undefined || isHoldingMaintenanceExclusion() || signal.aborted) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         deadline ??= performance.now() + 5000;
         if (performance.now() >= deadline) throw error;
         await waitForMaintenanceRetry(Math.min(delay, 250, Math.max(1, deadline - performance.now())));
@@ -289,6 +290,7 @@ export class ConversationMessageInputReader {
       } catch (error) {
         const delay = maintenanceRetryDelayMs(error);
         if (delay === undefined || isHoldingMaintenanceExclusion() || signal.aborted) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         deadline ??= performance.now() + 5000;
         if (performance.now() >= deadline) throw error;
         await waitForMaintenanceRetry(Math.min(delay, 250));

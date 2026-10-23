@@ -29,6 +29,7 @@ import type {
  * 控制器只依赖接口，不感知持久化形态。
  */
 export interface AdvancementSessionStore {
+  settleReviewRoot(conversationId: string, sessionId: string, lineageId: string, generation: number): Promise<void>;
   readSubmission(conversationId: string, identity: { readonly surfacePrincipal: string; readonly submissionId: string }): Promise<AdvancementSubmissionReceipt | null>;
   settleSubmission(conversationId: string, identity: AdvancementSubmissionIdentity, outcome: AdvancementSubmissionOutcome): Promise<void>;
   regenerateSession(conversationId: string, previousSessionId: string, nextSessionId: string, draft: RubricContractDraftSnapshot, exit: AdvancementExit, submission?: AdvancementSubmissionIdentity): Promise<{ readonly exited: AdvancementSession; readonly created: AdvancementSession }>;
@@ -177,6 +178,14 @@ export interface SessionAdvancementStoreOptions {
  * 语义和文件控制日志一致，控制器零感知。
  */
 export class SessionAdvancementStore implements AdvancementSessionStore {
+  async settleReviewRoot(conversationId: string, sessionId: string, lineageId: string, generation: number): Promise<void> {
+    const current = await this.loadSession(conversationId, sessionId);
+    if (!current || current.reviewRootSettlements?.some(value => value.lineageId === lineageId && value.generation === generation)) return;
+    const attempt = current.reviewAttempts?.find(value => value.lineageId === lineageId);
+    if (!attempt || attempt.generation === generation && !["consumed", "expired", "deferred"].includes(attempt.phase)) return;
+    await this.#write(conversationId, [{ type: "review_root_settled", sessionId, lineageId, generation, timestamp: this.#now() }],
+      advancementReviewAttemptMutationId(lineageId, generation, "root-settled"));
+  }
   readonly #port: SessionStatePort;
   readonly #hostComponent: string;
   readonly #requestIdFor: () => string;
@@ -640,6 +649,7 @@ function advancementEventIsReflected(
 ): boolean {
   if (event.type === "submission_settled" || event.sessionId !== session.id) return false;
   switch (event.type) {
+    case "review_root_settled": return session.reviewRootSettlements?.some(value => value.lineageId === event.lineageId && value.generation === event.generation) === true;
     case "review_attempt_transitioned": {
       const current = session.reviewAttempts?.find(
         (attempt) => attempt.lineageId === event.attempt.lineageId,

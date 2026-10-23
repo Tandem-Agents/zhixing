@@ -16,7 +16,7 @@ describe("production startup server ownership", () => {
       "await currentRemovalMigrationApplication?.resumeActive()",
       "await currentRemovalRecoveryApplication?.resumeActive()",
       "anchorInternalStopLifecycle.assertServerStartAllowed()",
-      "await recoverAdvancementAcceptedWork()",
+      "await advancementRecovery?.prepare()",
       "anchorInternalStopLifecycle.install({",
       "await startConversationRecovery({",
       "await boundChannelConnections?.activate()",

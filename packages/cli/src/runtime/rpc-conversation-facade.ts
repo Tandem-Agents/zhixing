@@ -65,6 +65,12 @@ import type { ConversationControlCursor, ConversationControlPage, ConversationIn
 import { boundedControlProjection } from './control-projection.js';
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
+/**
+ * 打开既有对话可能先要完成该对话的升级校验（耗时随该对话自身的历史），期间终端如实提示、可随时中止；
+ * 不按普通请求的时限放弃，只保留一个宽松上限。
+ */
+const RESUME_DEADLINE_MS = 15 * 60_000;
+
 export interface SessionHistoryOptions {
   /** 单页 run 数上限(宿主默认 20、上限 200) */
   limit?: number;
@@ -585,7 +591,7 @@ export class RpcConversationFacade {
     return client.request<SessionResumeResult>("session.resume", {
       conversationId,
       ...this.#continuationConsent(),
-    });
+    }, { deadline: Date.now() + RESUME_DEADLINE_MS });
   }
 
   async consumeReviseAdvancement<T>(conversationId: string, advancementSessionId: string, userFeedback: string, consume: (result: SessionAdvancementReviseResult) => T, rubricDraftId?: string): Promise<T> {
@@ -602,8 +608,9 @@ export class RpcConversationFacade {
   async consumeResume<T>(conversationId: string, consume: (result: SessionResumeResult) => T): Promise<T> {
     const client = await this.link.getClient();
     const params = { conversationId, ...this.#continuationConsent() };
-    return client.consume ? client.consume<SessionResumeResult, T>('session.resume', params, consume)
-      : consume(await client.request<SessionResumeResult>('session.resume', params));
+    const options = { deadline: Date.now() + RESUME_DEADLINE_MS };
+    return client.consume ? client.consume<SessionResumeResult, T>('session.resume', params, consume, options)
+      : consume(await client.request<SessionResumeResult>('session.resume', params, options));
   }
 
   async consumeResumeIfExists<T>(conversationId: string, consume: (result: SessionResumeResult) => T): Promise<T | null> {

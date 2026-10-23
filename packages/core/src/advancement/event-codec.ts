@@ -134,6 +134,9 @@ export function isAdvancementControlEvent(
           "type",
         ]) && typeof event.proxyMessageId === "string"
       );
+    case "review_root_settled":
+      return hasExactKeys(event, ["type", "timestamp", "sessionId", "lineageId", "generation"]) &&
+        isNonEmptyString(event.lineageId) && Number.isSafeInteger(event.generation) && Number(event.generation) > 0;
     case "review_attempt_transitioned":
       return (
         hasExactKeys(event, ["attempt", "sessionId", "timestamp", "type"]) &&

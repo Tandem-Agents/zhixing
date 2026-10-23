@@ -58,6 +58,8 @@ export class TerminalProcessProjection {
     try { validateSessionProcessProjection(value); } catch { this.pause('过程展示超出容量或不可读取'); return; }
     if (!this.#matches(value.source, generation)) return;
     const source = value.source, previousSource = this.#assignmentSource;
+    // 派发作用域只接收带派发身份的来源（校验保证 assignmentId 与 streamEpoch 成对出现）。
+    if (source.assignmentId === undefined || source.streamEpoch === undefined) return;
     if (previousSource && previousSource.assignmentId !== source.assignmentId) {
       this.pause('过程来源已换代，请刷新正文。'); return;
     }

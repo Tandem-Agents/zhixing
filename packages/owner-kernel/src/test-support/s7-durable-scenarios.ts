@@ -133,8 +133,9 @@ export async function executeSessionActivityCase(
     sceneId: "scene-a",
     lastActiveAt: NOW,
   } as const;
+  const reopen = () => fixture.createJournal().authorityState();
   if (caseKey === "wrong-stream") {
-    await fixture.log.append([{
+    await witnessOutOfBandCorruption(fixture, [{
       stream: `run:${fixture.conversationId}`,
       body: sessionActivityEntry(
         fixture.conversationId,
@@ -143,23 +144,17 @@ export async function executeSessionActivityCase(
         "upsert",
         1,
       ).body,
-    }]);
-    await expectFailure(() => fixture.createJournal().authorityState(), "run stream", { kind: "corruption", caseKey: "wrong-stream" });
+    }], "run stream", reopen, caseKey);
   } else if (caseKey === "invalid-time") {
-    const entries = [
+    await witnessOutOfBandCorruption(fixture, [
       { stream: `run:${fixture.conversationId}`, body: { ...meta, lastActiveAt: "not-a-time" } },
       sessionActivityEntry(fixture.conversationId, "scene-a", "not-a-time", "upsert", 1),
-    ];
-    await expectFailure(() => fixture.log.append<unknown>(entries), "time");
-    assert((await fixture.log.readAll()).length === 0, "invalid time must not be committed by the journal writer");
-    await fixture.corruptLog.append<unknown>(entries);
-    await expectFailure(() => fixture.createJournal().authorityState(), "time", { kind: "corruption", caseKey: "invalid-time" });
+    ], "time", reopen, caseKey);
   } else if (caseKey === "identity-rebinding") {
-    await fixture.log.append<unknown>([
+    await witnessOutOfBandCorruption(fixture, [
       { stream: `run:${fixture.conversationId}`, body: meta },
       sessionActivityEntry("ws:scene-a:other", "scene-a", NOW, "upsert", 1),
-    ]);
-    await expectFailure(() => fixture.createJournal().authorityState(), "atomic activity", { kind: "corruption", caseKey: "identity-rebinding" });
+    ], "atomic activity", reopen, caseKey);
   } else {
     throw new Error(`Unimplemented session activity corruption: ${caseKey}`);
   }
@@ -190,10 +185,24 @@ async function createSessionActivityFixture() {
     clock: () => NOW,
   });
   const journal = createJournal();
-  // Simulate an out-of-band writer: these bytes bypass the journal's write-time
-  // projection validators, so reopening must independently detect corruption.
+  // 带外写入者：这些字节绕过日志写者的写时投影校验，重开时必须独立识别损坏。
   const corruptLog = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, { clock: () => NOW });
   return { conversationId, log, journal, createJournal, corruptLog };
+}
+
+/** 损坏见证：写者追加即拒且不落盘；带外写入者落盘后，重开的读取方必须独立识别。 */
+async function witnessOutOfBandCorruption(
+  fixture: { readonly log: AuthorityCommitLog; readonly corruptLog: AuthorityCommitLog },
+  entries: readonly { readonly stream: string; readonly body: unknown }[],
+  fragment: string,
+  reopen: () => Promise<unknown>,
+  caseKey: string,
+): Promise<void> {
+  const before = (await fixture.log.readAll()).length;
+  await expectFailure(() => fixture.log.append<unknown>(entries), fragment);
+  assert((await fixture.log.readAll()).length === before, `corrupt ${caseKey} record was committed by the journal writer`);
+  await fixture.corruptLog.append<unknown>(entries);
+  await expectFailure(reopen, fragment, { kind: "corruption", caseKey });
 }
 
 async function sessionActivityRecords(log: AuthorityCommitLog) {
@@ -437,6 +446,7 @@ export async function executeAdvancementEventCase(
 
   const digestOf = (events: readonly AdvancementControlEvent[]) =>
     byteDigest(Buffer.from(canonicalize(events), "utf8"));
+  const reopen = () => fixture.createJournal().advancementSessions();
   if (caseKey === "invalid-event") {
     const entries = [
       {
@@ -450,19 +460,12 @@ export async function executeAdvancementEventCase(
         },
       },
     ];
-    await expectFailure(() => fixture.log.append<unknown>(entries), "contract failed");
-    assert((await fixture.log.readAll()).length === 0, "invalid event must not be committed by the journal writer");
-    await fixture.corruptLog.append<unknown>(entries);
-    await expectFailure(
-      () => fixture.createJournal().advancementSessions(),
-      "contract failed",
-      { kind: "corruption", caseKey },
-    );
+    await witnessOutOfBandCorruption(fixture, entries, "contract failed", reopen, caseKey);
     return;
   }
   if (caseKey === "non-monotonic-revision") {
     await write([advancementCreatedEvent("任务")], "write-mono");
-    await fixture.log.append<unknown>([
+    await witnessOutOfBandCorruption(fixture, [
       {
         stream: `run:${conversationId}`,
         body: {
@@ -473,17 +476,12 @@ export async function executeAdvancementEventCase(
           event: advancementConfirmedEvent(),
         },
       },
-    ]);
-    await expectFailure(
-      () => fixture.createJournal().advancementSessions(),
-      "not monotonic",
-      { kind: "corruption", caseKey },
-    );
+    ], "not monotonic", reopen, caseKey);
     return;
   }
   if (caseKey === "conflicting-durable-payload") {
     await write([advancementCreatedEvent("任务")], "write-dup");
-    await fixture.log.append<unknown>([
+    await witnessOutOfBandCorruption(fixture, [
       {
         stream: `run:${conversationId}`,
         body: {
@@ -494,12 +492,7 @@ export async function executeAdvancementEventCase(
           event: advancementConfirmedEvent(),
         },
       },
-    ]);
-    await expectFailure(
-      () => fixture.createJournal().advancementSessions(),
-      "conflicting durable payloads",
-      { kind: "corruption", caseKey },
-    );
+    ], "conflicting durable payloads", reopen, caseKey);
     return;
   }
   throw new Error(`Unimplemented advancement corruption: ${caseKey}`);

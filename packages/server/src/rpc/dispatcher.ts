@@ -50,6 +50,16 @@ export class RpcDispatcher {
       return;
     }
 
+    // 处理期间计为前台活动：后台维护在请求在途时让路。
+    const foreground = this.deps.server.foregroundActivity?.enter();
+    try {
+      await this.#dispatch(connection, parsed);
+    } finally {
+      foreground?.();
+    }
+  }
+
+  async #dispatch(connection: RpcConnection, parsed: Extract<ReturnType<typeof parseMessage>, { kind: "request" | "notification" }>): Promise<void> {
     if (parsed.kind === "request") {
       const { id, method, params } = parsed.message;
       try {
@@ -70,17 +80,15 @@ export class RpcDispatcher {
     }
 
     // notification
-    if (parsed.kind === "notification") {
-      const { method, params } = parsed.message;
-      try {
-        await this.deps.registry.dispatch(method, params, {
-          connection,
-          server: this.deps.server,
-        });
-      } catch (err) {
-        // notification 没有 id，无法响应错误——仅 log
-        this.deps.onError?.(err, { method });
-      }
+    const { method, params } = parsed.message;
+    try {
+      await this.deps.registry.dispatch(method, params, {
+        connection,
+        server: this.deps.server,
+      });
+    } catch (err) {
+      // notification 没有 id，无法响应错误——仅 log
+      this.deps.onError?.(err, { method });
     }
   }
 }

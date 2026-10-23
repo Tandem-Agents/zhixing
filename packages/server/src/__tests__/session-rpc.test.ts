@@ -989,6 +989,8 @@ function createConversationProductApi(input: {
                 operation,
               ),
           },
+          // 与宿主装配相同：推进控制器同时承担提交回执端口。
+          submissions: advancement,
           newTask: advancement,
           newTaskConversation: {
             ensureShell: (conversationId) =>
@@ -1030,14 +1032,16 @@ function createConversationProductApi(input: {
             },
           },
           rubricRevision: advancement,
+          // 与宿主装配相同：撤销与降级为直接执行都经推进控制器持久化。
           rubricCancellation: {
+            persistDirectOriginalTask: (request) => advancement.persistDirectOriginalTask(request),
             loadRubricCancellationSession: (conversationId, sessionId) =>
               advancement.loadRubricCancellationSession(
                 conversationId,
                 sessionId,
               ),
             persistRubricCancellation: (request) =>
-              advancement.reviews.cancelSession(request),
+              advancement.persistRubricCancellation(request),
           },
           awaitingRubricAdmission: advancement,
           rubricConfirmation: advancement,
@@ -1083,7 +1087,8 @@ function createConversationProductApi(input: {
               return {
                 conversationId: admitted.conversationId,
                 turnId: admitted.turnId,
-                ...(admitted.runId ? { runId: admitted.runId } : {}),
+                // 非持久模式下运行即回合：以回合编号作运行编号，与该模式事件中的 runId 一致。
+                runId: admitted.runId ?? admitted.turnId,
                 runStatus:
                   admitted.status === "replayed" ? "queued" : admitted.status,
               };
@@ -1127,7 +1132,8 @@ function createConversationProductApi(input: {
                 return {
                   conversationId: admitted.conversationId,
                   turnId: admitted.turnId,
-                  ...(admitted.runId ? { runId: admitted.runId } : {}),
+                  // 非持久模式下运行即回合：以回合编号作运行编号，与该模式事件中的 runId 一致。
+                  runId: admitted.runId ?? admitted.turnId,
                   status: admitted.status,
                 };
               } catch (error) {
@@ -2273,7 +2279,7 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("session.send 草案生成失败时返回控制面失败且不落空会话", async () => {
+  it("session.send 草案生成失败时返回控制面失败，只为失败回执保留空壳、不写运行记录", async () => {
     const root = await createTempDir("server-advancement-contract-failed");
     await startWithFactory(createMockFactory(), {
       advancement: new AdvancementController({
@@ -2302,7 +2308,7 @@ describe("session.* RPC (S2.D)", () => {
     expect(result.status).toBe("contract-failed");
     expect(result.turnId).toBe("turn-contract-failed");
     expect(result.error.message).toContain("no draft generation strategy");
-    expect(recordsByConversation.has(result.conversationId)).toBe(false);
+    expect(recordsByConversation.get(result.conversationId) ?? []).toEqual([]);
 
     const event = await client.waitNotification("session.event");
     expect(event.params).toMatchObject({
@@ -2316,16 +2322,7 @@ describe("session.* RPC (S2.D)", () => {
       },
     });
 
-    const list = await client.request("session.list");
-    expect(isSuccessResponse(list)).toBe(true);
-    if (isSuccessResponse(list)) {
-      expect(
-        (list.result as { conversations: Array<{ conversationId: string }> })
-          .conversations,
-      ).not.toContainEqual(
-        expect.objectContaining({ conversationId: result.conversationId }),
-      );
-    }
+    // 带提交身份时，产品为保存失败回执（重试幂等）有意保留会话空壳，因此不再断言会话列表中没有它；只守不写运行记录。
     client.close();
   });
 

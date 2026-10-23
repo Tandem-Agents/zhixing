@@ -11,7 +11,8 @@ import { conversationCommitSummary } from './conversation-commit-summary.js';
 import { projectStatusEntry } from './conversation-status-projection.js';
 import { createChannelInteractionJournalState, advanceChannelInteractionJournal } from './channel-interaction-records.js';
 import { conversationStateBase as base, conversationStateHash as hash, conversationStateFieldKey as fieldKey,
-  encodeConversationState as encode, decodeConversationState as decode, readConversationStateField as field } from './conversation-run-state-index.js';
+  encodeConversationState as encode, decodeConversationState as decode, readConversationStateField as field,
+  conversationStateFieldPrefix as fieldPrefix, scanConversationState as scanState } from './conversation-run-state-index.js';
 
 export interface ConversationRunRoot {
   domainRevision: number; deleted: boolean; clearedThroughLsn: number; hasDurableIdentity: boolean;
@@ -28,6 +29,7 @@ export interface ConversationRunRoot {
 export type ConversationInputLocation = { readonly checkpoint: DurableLogCheckpoint; readonly item: number }
   | { readonly imported: ConversationBaseLocation };
 const rootKey = (id: string) => base(id) + 'run-root';
+export { rootKey as conversationRunRootKey };
 export async function readConversationRunRoot(view: DurableProjectionReadContext, id: string): Promise<ConversationRunRoot> {
   const row = await view.get(rootKey(id));
   return row === undefined ? { domainRevision: 0, deleted: false, clearedThroughLsn: 0, hasDurableIdentity: false, pendingLifecycleCount: 0 } : decode(row) as ConversationRunRoot;
@@ -77,10 +79,10 @@ export async function foldConversationRunExtras(input: {
     if (value.kind === 'task-list-op') put('taskListRequestIds', requestId, true);
     if (value.kind === 'session-meta' && value.patch?.name !== undefined) root.sessionName = value.patch.name;
     if (value.kind === 'segment-append') {
+      // 只保留本轮清空以来出现过的片段：判重只针对当前窗口，清空时整组删除。
       const segment = value.segment!;
-      const seen = await get<number>('segmentRevisionSeen', segment.segmentId);
-      if (seen !== undefined && seen > (root.clearedThroughRevision ?? 0) || root.latestSegment && Date.parse(root.latestSegment.timestamp) > Date.parse(segment.timestamp)) throw corruptRunJournal('Segment history is duplicated or non-monotonic');
-      put('segmentRevisionSeen', segment.segmentId, root.domainRevision);
+      if (await get('segmentSeen', segment.segmentId) !== undefined || root.latestSegment && Date.parse(root.latestSegment.timestamp) > Date.parse(segment.timestamp)) throw corruptRunJournal('Segment history is duplicated or non-monotonic');
+      put('segmentSeen', segment.segmentId, true);
       root.latestSegment = { segmentId: segment.segmentId, timestamp: segment.timestamp };
     }
   };
@@ -89,7 +91,8 @@ export async function foldConversationRunExtras(input: {
       const committed = await get<Extract<ConversationRunJournalRecord, { t: 'committed' }>>('committedByAssignment', body.assignmentId);
       if (!committed || committed.runId !== body.runId || committed.commitRevision !== body.commitRevision || await get('projectedByAssignment', body.assignmentId)) throw corruptRunJournal('Projection progress does not name one unprojected commit');
       if (await get<string>('committedDigest', body.assignmentId) !== body.digest) throw corruptRunJournal('Projection progress digest does not match its bundle');
-      put('projectedByAssignment', body.assignmentId, body); pending('commit', body.assignmentId, undefined);
+      // 摘要只用于核对这一次投影进度；投影完成后不再参与任何决定。
+      put('projectedByAssignment', body.assignmentId, body); drop('committedDigest', body.assignmentId); pending('commit', body.assignmentId, undefined);
     } else if (body.kind === 'conversation-lifecycle-projection') {
       const prior = await get<{ requestId: string; mutation: string }>('pendingLifecycleProjections', body.domainRevision);
       if (!prior || prior.requestId !== body.requestId || prior.mutation !== body.mutation) throw corruptRunJournal('Lifecycle projection progress does not bind its pending fact');
@@ -123,7 +126,10 @@ export async function foldConversationRunExtras(input: {
       root.domainRevision = body.domainRevision; root.hasDurableIdentity = true; root.pendingLifecycleCount++;
       put('lifecycleByRequest', body.requestId, body); put('pendingLifecycleProjections', body.domainRevision, body);
       pending('lifecycle', String(body.domainRevision), body.domainRevision);
-      if (body.mutation === 'clear') { root.clearedThroughLsn = sourceLsn; root.clearedThroughRevision = body.domainRevision; delete root.latestSegment; }
+      if (body.mutation === 'clear') {
+        root.clearedThroughLsn = sourceLsn; root.clearedThroughRevision = body.domainRevision; delete root.latestSegment;
+        for (const row of await scanState(view, fieldPrefix(id, 'extra-segmentSeen'))) input.drop(row.key);
+      }
       else root.deleted = true;
       root.lastActiveAt = envelope.at; break;
     }

@@ -10,6 +10,8 @@ const SRC_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+// 子进程从本包目录解析依赖：检查的是本包的导入图，不随运行方的工作目录变化。
+const PACKAGE_DIR = path.resolve(SRC_DIR, "..");
 
 const ENTRY_FILE = path.join(SRC_DIR, "index.ts");
 // Structural import checks own a bounded child process. Let its timeout clean up
@@ -65,7 +67,7 @@ describe("CLI entry import graph", () => {
       registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
       const entry = await import(${JSON.stringify(pathToFileURL(path.join(dist, entry!)).href)});
       process.stdout.write(JSON.stringify({ exported: typeof entry.launchTerminal, modules: [...modules] }));
-    `], { timeout: 15_000, windowsHide: true });
+    `], { timeout: 15_000, windowsHide: true, cwd: PACKAGE_DIR });
     const loaded = JSON.parse(stdout) as { exported: string; modules: string[] };
     expect(loaded.exported).toBe('function');
     expect(loaded.modules.filter(url => url.startsWith(pathToFileURL(`${dist}${path.sep}`).href))).toHaveLength(1);
@@ -79,7 +81,7 @@ describe("CLI entry import graph", () => {
       await import('@zhixing/network/proxy');
       await import(${JSON.stringify(pathToFileURL(path.join(SRC_DIR, "render-events.ts")).href)});
       process.stdout.write(JSON.stringify([...modules].filter(url => /undici|cli-highlight|highlight\.js/u.test(url))));
-    `], { timeout: 15000, windowsHide: true });
+    `], { timeout: 15000, windowsHide: true, cwd: PACKAGE_DIR });
     expect(JSON.parse(stdout)).toEqual([]);
   }, IMPORT_CHECK_TIMEOUT_MS);
   it.each(["application", "text-session"])("loads built %s without the backend execution stack", async (surface) => {
@@ -92,7 +94,7 @@ describe("CLI entry import graph", () => {
       registerHooks({ load(url, context, next) { modules.add(url); return next(url, context); } });
       await import(${JSON.stringify(pathToFileURL(path.join(dist, entry!)).href)});
       process.stdout.write(JSON.stringify([...modules].filter(url => /packages\/(owner-kernel|executor|orchestrator|runtime-host|mcp|tools-builtin)\/dist\//u.test(url))));
-    `], { timeout: 15_000, windowsHide: true });
+    `], { timeout: 15_000, windowsHide: true, cwd: PACKAGE_DIR });
     expect(JSON.parse(stdout)).toEqual([]);
   }, IMPORT_CHECK_TIMEOUT_MS);
 

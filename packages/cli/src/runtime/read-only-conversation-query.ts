@@ -7,7 +7,7 @@ export async function listReadOnlyConversations(
   maxConversations: number,
 ) {
   if (storage.listPage) {
-    const records: Awaited<ReturnType<ConversationDirectoryStorage['list']>> = [];
+    const records: Array<Awaited<ReturnType<ConversationDirectoryStorage['list']>>[number]> = [];
     let after: import('@zhixing/core/conversation/application').ConversationDirectoryCursor | undefined;
     while (records.length < maxConversations) {
       const page = await storage.listPage({ limit: Math.min(100, maxConversations - records.length), after });

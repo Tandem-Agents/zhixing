@@ -64,7 +64,8 @@ describe("artifact read capacity", () => {
     const arbiter = runtime.arbiter;
     const store = new FileArtifactStore(path.join(home, 'artifacts'), { runReadStep: artifactReadCapacity(arbiter) });
     const root = path.join(home, 'stream-spool');
-    const options = { runReadStep: artifactReadCapacity(arbiter), storageMaintenance: runtime.storage };
+    // 与宿主装配相同：制品读取与投影读取各自取得 Host 读取准入。
+    const options = { runReadStep: artifactReadCapacity(arbiter), runProjectionReadStep: projectionReadCapacity(arbiter), storageMaintenance: runtime.storage };
     const spool = new AssignmentStreamSpool(root, store, options);
     const restarted = new AssignmentStreamSpool(root, store, options);
     try {

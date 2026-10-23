@@ -1,5 +1,5 @@
 import type { ArtifactStore, AuthorityCommitLog } from '@zhixing/core/authority';
-import type { ArtifactRef, ConversationRunState, TranscriptRunRecord, UserTurnInput } from '@zhixing/core/contracts';
+import type { ArtifactRef, ConversationRunState, JsonValue, TranscriptRunRecord, UserTurnInput } from '@zhixing/core/contracts';
 import { canonicalize, interactionMirrorBatchDigest, validateConversationEnvelope, validateConversationSealedBundle,
   validateNonEmptyUserTurnInput, validateTranscriptRunRecord, verifyProtocolStep, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
 import { emptyConversationRunProjection, type RunProjection, type AdmittedProjection, type ConversationAbortTicketAuthorizer,
@@ -9,7 +9,7 @@ import { CONVERSATION_RUN_STATE_PROJECTION_ID, registerConversationRunProjection
   conversationStateBase as base, conversationStateHash as hash, readConversationStateField as field, scanConversationState as scan,
   type ConversationRunScope } from './conversation-run-state-index.js';
 import { conversationViewAt, conversationBaseKey, openConversationBase, type ConversationBaseBinding } from './conversation-base-registry.js';
-import { conversationWorkingVersion, conversationFieldReader } from './conversation-run-state-index.js';
+import { conversationWorkingVersion, conversationFieldReader, sameStoredJson } from './conversation-run-state-index.js';
 import type { ConversationBaseSource } from './conversation-base-source.js';
 
 export interface ConversationDecisionScope extends ConversationRunScope {
@@ -101,8 +101,14 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
     const pending = async (name: string) => scope.current === false ? [] : (await scan(view, base(id) + 'pending-' + name + '/', 32)).map(entry => entry.value);
     const recover = await pending('recovery'), acknowledgements = await pending('ack'), projections = await pending('commit');
     for (const value of [...recover, ...acknowledgements, ...projections]) { if (typeof value !== 'string') throw Error('Invalid conversation obligation'); assignments.add(value); }
-    if (extra.latestCommit) { assignments.add(extra.latestCommit.assignmentId); runs.add(extra.latestCommit.runId); }
     const commits = new Map<number, Extract<ConversationRunJournalRecord, { t: 'committed' }>>();
+    if (extra.latestCommit) {
+      // Sequence checks need the authenticated head, not all fields belonging
+      // to its already closed run. Explicit subjects still load their complete
+      // records below; ordinary current-view queries retain their existing set.
+      commits.set(extra.latestCommit.commitRevision, extra.latestCommit);
+      if (scope.current !== false) { assignments.add(extra.latestCommit.assignmentId); runs.add(extra.latestCommit.runId); }
+    }
     if (scope.historyAfter !== undefined) {
       const p = base(id) + 'commit-order/'; let after = p + String(scope.historyAfter).padStart(16, '0');
       for (;;) {
@@ -252,9 +258,15 @@ export async function readConversationRunViewMetadata(view: import('@zhixing/cor
     }
     return { state, version: guard.version, inputs: inputRows, appended: appendedRows, mirrors, controls };
 }
+/** A materialized decision view keeps the verified dispatch without its window input. */
+export function materializedDispatchEnvelope<T extends { readonly work: object }>(dispatch: T): T {
+  const { windowInput: _input, ...work } = dispatch.work as { windowInput?: unknown };
+  return { ...dispatch, work };
+}
+
 export async function materializeConversationRunView(options: {
   conversationId: string; artifacts: ArtifactStore; verifier: ProtocolSignatureVerifier; scope: ConversationDecisionScope;
-  selected: ConversationRunView; previous?: RunProjection;
+  selected: ConversationRunView; previous?: Pick<RunProjection, 'admittedByRun' | 'appendedInputs' | 'assignedById'>;
   readEnvelopeAt(location: import('@zhixing/core/authority').DurableLogCheckpoint): Promise<import('@zhixing/core/contracts').CommitEnvelope<unknown>>;
   readImportedRecord?(location: import('./conversation-base-source.js').ConversationBaseLocation): Promise<import('./conversation-transfer.js').ConversationTransferAuthorityRecord>;
   readAdvancementStatus?(id: string): Promise<import('@zhixing/core/advancement').AdvancementSession['status'] | undefined>;
@@ -281,7 +293,7 @@ export async function materializeConversationRunView(options: {
   };
   for (const [runId, row] of inputs) if (open(state.stateByRun.get(runId)?.state)) {
     const previous = options.previous?.admittedByRun.get(runId);
-    const same = previous?.input && previous.lsn === row.lsn && canonicalize(previous.record) === canonicalize(row.record) &&
+    const same = previous?.input && previous.lsn === row.lsn && sameStoredJson(previous.record as unknown as JsonValue, row.record as unknown as JsonValue) &&
       (row.inputRef ? previous.inputRef?.digest === row.inputRef.digest && previous.inputRef.bytes === row.inputRef.bytes : previous.inputDigest === row.inputDigest);
     if (same || scope.hydrate) state.admittedByRun.set(runId, { ...row, input: same ? previous.input : await materializeInput(row) });
   }
@@ -291,11 +303,11 @@ export async function materializeConversationRunView(options: {
   }
   for (const [assignmentId, assigned] of state.assignedById) if (open(state.stateByRun.get(assigned.record.runId)?.state)) {
     const previous = options.previous?.assignedById.get(assignmentId);
-    if (previous?.envelope && previous.record.dispatchDigest === assigned.record.dispatchDigest && canonicalize(previous.record.dispatchRef) === canonicalize(assigned.record.dispatchRef)) state.assignedById.set(assignmentId, { ...assigned, envelope: previous.envelope });
+    if (previous?.envelope && previous.record.dispatchDigest === assigned.record.dispatchDigest && sameStoredJson(previous.record.dispatchRef as unknown as JsonValue, assigned.record.dispatchRef as unknown as JsonValue)) state.assignedById.set(assignmentId, { ...assigned, envelope: previous.envelope });
     else if (scope.hydrate) {
       const bytes = await artifacts.get(assigned.record.dispatchRef);
       const dispatch = await verifyProtocolStep(() => validateConversationEnvelope(JSON.parse(Buffer.from(bytes).toString('utf8')), verifier));
-      const { windowInput: _input, ...work } = dispatch.work; state.assignedById.set(assignmentId, { ...assigned, envelope: { ...dispatch, work } });
+      state.assignedById.set(assignmentId, { ...assigned, envelope: materializedDispatchEnvelope(dispatch) });
     }
   }
   for (const [digest, source] of mirrors) {

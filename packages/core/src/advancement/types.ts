@@ -331,6 +331,8 @@ export interface AdvancementSession {
   readonly advancementWindow?: AdvancementWindowState;
   /** 每个 accepted run 最新一代裁判尝试；完整历史仍由 owner 事件日志保留。 */
   readonly reviewAttempts?: readonly AdvancementReviewAttempt[];
+  /** Monotonic receipts for terminal root cleanup; attempts remain historical facts. */
+  readonly reviewRootSettlements?: readonly { readonly lineageId: string; readonly generation: number }[];
   readonly evidence?: AdvancementEvidenceProjection;
   readonly exit?: AdvancementExit;
 }
@@ -358,6 +360,7 @@ export type AdvancementStoreEvent =
   | AdvancementProxyEnqueuedEvent
   | AdvancementProxySettledEvent
   | AdvancementReviewAttemptTransitionedEvent
+  | AdvancementReviewRootSettledEvent
   | AdvancementEvidenceRequestedEvent
   | AdvancementEvidenceResultEvent
   | AdvancementEvidenceSettledEvent
@@ -585,6 +588,14 @@ export interface AdvancementReviewAttemptTransitionedEvent {
   readonly timestamp: string;
   readonly sessionId: string;
   readonly attempt: AdvancementReviewAttempt;
+}
+
+export interface AdvancementReviewRootSettledEvent {
+  readonly type: "review_root_settled";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly lineageId: string;
+  readonly generation: number;
 }
 
 export interface AdvancementEvidenceGeneration {

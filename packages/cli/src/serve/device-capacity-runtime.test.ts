@@ -198,6 +198,8 @@ describe("asynchronous entry capacity sampling", () => {
 
   it("refreshes expired disk pressure for an already queued request without another acquire", async () => {
     const home = await createTempDir("capacity-queued");
+    // 采样周期、新鲜度与仲裁排空都按假时钟推进：真实计时在高负载下漂移，探测次数随之不稳。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
     const sample = { bavail: 1024 * 1024, bsize: 4096 } as StatsFs;
     let complete!: (value: StatsFs) => void;
     const pending = new Promise<StatsFs>((resolve) => {
@@ -234,11 +236,13 @@ describe("asynchronous entry capacity sampling", () => {
         return result;
       });
     try {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await vi.advanceTimersByTimeAsync(300);
       held.permit.release();
       expect(settled).toBe(false);
       expect(probe).toHaveBeenCalledTimes(2);
       complete(sample);
+      // 不足下一个采样周期：只触发补采后的即时续采与仲裁排空。
+      await vi.advanceTimersByTimeAsync(50);
       const resumed = await queued;
       expect(resumed.kind).toBe("granted");
       if (resumed.kind === "granted") resumed.permit.release();
@@ -250,6 +254,7 @@ describe("asynchronous entry capacity sampling", () => {
       abort.abort();
       complete(sample);
       await queued;
+      vi.useRealTimers();
     }
   }, 5000);
 });

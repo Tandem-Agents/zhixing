@@ -75,7 +75,7 @@ describe("executor job owner production surface", () => {
     const recoverableJobObligations = vi.fn()
       .mockResolvedValueOnce({
         entries: [{
-          envelope: { assignmentId: "assignment-b" },
+          envelope: { v: 1, schemaId: "DispatchEnvelope", assignmentId: "assignment-b" },
           execution: true,
           cancellation: false,
           interaction: false,
@@ -84,7 +84,7 @@ describe("executor job owner production surface", () => {
       })
       .mockResolvedValueOnce({
         entries: [{
-          envelope: { assignmentId: "assignment-a" },
+          envelope: { v: 1, schemaId: "DispatchEnvelope", assignmentId: "assignment-a" },
           execution: false,
           cancellation: true,
           interaction: false,

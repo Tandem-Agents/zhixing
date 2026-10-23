@@ -1517,3 +1517,22 @@ it.each(["admitted", "rejected"] as const)("recovers old direct obligation benea
   expect(await reloaded.loadSession("conv-1", "adv-direct")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: outcome } });
   expect((await reloaded.loadActiveSession("conv-1"))?.id).toBe("adv-new");
 });
+
+it('discovers only pending pages, advances past a permanent failure, and stops its retry loop', async () => {
+  const list = vi.fn(async (after?: string) => after ? { conversationIds: ['healthy'] } : { conversationIds: ['broken'], next: 'page-2' });
+  const all = vi.fn(() => { throw Error('unbounded directory must not be used'); });
+  const loads = vi.fn(async (id: string) => { if (id === 'broken') throw Error('permanent synthetic failure'); return null; });
+  const recovery = createOwnerAdvancementRecoveryMaintenance({
+    pending: { list, cleanup: async () => ({ items: [] }), run: async () => undefined },
+    advancement: { listPendingOriginalTasks: async () => ({ sessionIds: [] }), loadActiveSession: loads } as never,
+    reviews: { reconcileConversation: async () => {} } as never,
+    directory: { list: all } as never, proxyTurns: {} as never, reviewResults: emptyReviewResults(),
+  });
+  expect((await recovery.recoverAllOpenSessions())[0]?.status).toBe('failed');
+  expect((await recovery.recoverAllOpenSessions())[0]?.conversationId).toBe('healthy');
+  expect(list.mock.calls).toEqual([[undefined], ['page-2']]);
+  expect(all).not.toHaveBeenCalled();
+  recovery.start(); await recovery.stop();
+  expect(await recovery.recoverAllOpenSessions()).toEqual([]);
+  expect(list).toHaveBeenCalledTimes(2);
+});

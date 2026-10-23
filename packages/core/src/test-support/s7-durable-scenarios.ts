@@ -553,10 +553,15 @@ export async function executeWorkspaceBindingRootCase(
 }
 
 function corruptWorkspaceCatalogLog(): AuthorityCommitLog {
+  const corrupt = async () => {
+    throw new AuthorityStorageError("commit-log-corrupt", "injected catalog corruption");
+  };
+  // 绑定服务构造时登记投影（只登记不读），任何读取都报日志损坏。
   return {
-    async readSnapshot() {
-      throw new AuthorityStorageError("commit-log-corrupt", "injected catalog corruption");
-    },
+    durableProjection: () => undefined,
+    transactDurableProjection: corrupt,
+    readSnapshot: corrupt,
+    checkpoint: corrupt,
   } as unknown as AuthorityCommitLog;
 }
 
@@ -823,60 +828,56 @@ export async function executeWorkspaceProbeCase(
       at: NOW,
     },
   }]);
-  let corruptionOutcome: Readonly<{
-    kind: "corruption";
-    caseKey: string;
-  }>;
+  let body: unknown;
   if (caseKey === "invalid-result") {
-    await corrupt.probeLog.append([{
-      stream: "executor:workspace-probes",
-      body: {
-        t: "probe-completed",
-        key,
-        requestDigest,
-        result: {},
-        at: NOW,
-      },
-    }]);
-    corruptionOutcome = { kind: "corruption", caseKey: "invalid-result" };
+    body = {
+      t: "probe-completed",
+      key,
+      requestDigest,
+      result: {},
+      at: NOW,
+    };
   } else if (caseKey === "request-result-mismatch") {
-    await corrupt.probeLog.append([{
-      stream: "executor:workspace-probes",
-      body: {
-        t: "probe-completed",
-        key,
-        requestDigest,
-        result: createSignedWorkspaceProbeResult({
-          v: 1,
-          requestId: "another-request",
-          bindingRef: corruptRequest.bindingRef,
-          workspaceBindingRevision: 1,
-          probe: "directory",
-          executorId: "executor-a",
-        }, identity),
-        at: NOW,
-      },
-    }]);
-    corruptionOutcome = { kind: "corruption", caseKey: "request-result-mismatch" };
+    body = {
+      t: "probe-completed",
+      key,
+      requestDigest,
+      result: createSignedWorkspaceProbeResult({
+        v: 1,
+        requestId: "another-request",
+        bindingRef: corruptRequest.bindingRef,
+        workspaceBindingRevision: 1,
+        probe: "directory",
+        executorId: "executor-a",
+      }, identity),
+      at: NOW,
+    };
   } else if (caseKey === "broken-replay-index") {
-    await corrupt.probeLog.append([{
-      stream: "executor:workspace-probes",
-      body: {
-        t: "probe-started-v2",
-        key,
-        requestDigest,
-        request: corruptRequest,
-        at: NOW,
-      },
-    }]);
-    corruptionOutcome = { kind: "corruption", caseKey: "broken-replay-index" };
+    body = {
+      t: "probe-started-v2",
+      key,
+      requestDigest,
+      request: corruptRequest,
+      at: NOW,
+    };
   } else {
     throw new Error(`Unimplemented workspace probe corruption: ${caseKey}`);
   }
+  const fragment = caseKey === "invalid-result" ? "result" : caseKey === "request-result-mismatch" ? "completion" : "reused";
+  const entry = { stream: "executor:workspace-probes", body };
+  // 探测投影在追加时归约新帧：损坏记录在写入前就被拒，不会落进持久日志。
+  const before = (await corrupt.probeLog.readAll()).length;
+  await expectFailure(() => corrupt.probeLog.append<unknown>([entry]), fragment);
+  assert(
+    (await corrupt.probeLog.readAll()).length === before,
+    "corrupt workspace probe record appended a durable record",
+  );
+  // 带外写入者绕过写时投影校验，恢复所有者重放时必须独立识别损坏。
+  await new FileAuthorityCommitLog(corrupt.probeLogPath, corrupt.artifacts, { clock: () => NOW }).append<unknown>([entry]);
   await expectFailure(
     () => corrupt.createHandler().probe(corruptRequest),
-    caseKey === "invalid-result" ? "result" : caseKey === "request-result-mismatch" ? "completion" : "reused",
-    corruptionOutcome,
+    fragment,
+    { kind: "corruption", caseKey },
   );
 }
 
@@ -907,8 +908,9 @@ async function createWorkspaceProbeFixture(clock: () => string = () => NOW) {
     { displayName: "Workspace", absolutePath: workspace },
     control("probe-binding-create"),
   );
+  const probeLogPath = path.join(root, "probe-log");
   const probeLog = new FileAuthorityCommitLog(
-    path.join(root, "probe-log"),
+    probeLogPath,
     artifacts,
     { clock: () => NOW },
   );
@@ -934,6 +936,8 @@ async function createWorkspaceProbeFixture(clock: () => string = () => NOW) {
     handler,
     createHandler,
     probeLog,
+    probeLogPath,
+    artifacts,
     owner: new EnvironmentProbeOwner({
       signer: identity,
       verifier: identity,

@@ -979,6 +979,7 @@ export class LocalConversationOwnerAssembly {
       proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
     });
     const recovery = createAdvancementRecoveryMaintenance({
+      pending: protocol.advancementPending,
       advancement,
       reviews,
       directory: {
@@ -1102,16 +1103,20 @@ export class LocalConversationOwnerAssembly {
             this.#transferringConversations.add(transfer.identity.conversationId);
           }
         }
+        // Preparing derived owner state is read-only business work, even while
+        // lifecycle admission is frozen. Never defer this scan to the first send.
+        await this.#recovery.prepare();
         if (!options.lifecycle || options.lifecycle.recoverAcceptedWork) {
           await this.#intents.recover();
           await this.#protocol.recoverReadinessProjections();
           await this.#protocol.recover();
-          await this.#recovery.recoverAllOpenSessions();
+          if (!options.lifecycle) this.#recovery.start();
           if (!options.lifecycle) this.#protocol.startRecoveryLoop();
         }
         if (this.#state !== "starting") {
           // close 已介入:停掉刚起的恢复循环,由 close 统一收束。
           await this.#protocol.stopRecoveryLoop();
+          await this.#recovery.stop();
           throw new Error("Local conversation owner is closing");
         }
         this.#state = "ready";
@@ -1178,16 +1183,19 @@ export class LocalConversationOwnerAssembly {
     this.#state = "closing";
     this.#transferAbort.abort(new Error("Local conversation transfer source is stopping"));
     this.#protocol.beginShutdownDrain();
+    await this.#recovery.beginDrain();
     const starting = this.#starting;
     if (starting) await starting.catch(() => {});
     await this.#waitForCommandDrain();
     if (neverStarted) {
+      await this.#recovery.stop();
       await this.#protocol.stopRecoveryLoop().catch(() => {});
       await this.#manager.disposeAll().catch(() => {});
       this.#state = "closed";
       return;
     }
     if (this.#hostStopSettledOperationId) {
+      await this.#recovery.stop();
       await this.#protocol.stopRecoveryLoop().catch(() => {});
       await this.#manager.disposeAll().catch(() => {});
       this.#state = "closed";
@@ -1236,6 +1244,7 @@ export class LocalConversationOwnerAssembly {
       failure = error;
     }
     await this.#protocol.stopRecoveryLoop().catch(() => {});
+    await this.#recovery.stop();
     if (failure === undefined) {
       // 循环停止后无任何新标记来源,复读一次确认静止。
       const quiet = await probe().catch(() => false);
@@ -1298,6 +1307,7 @@ export class LocalConversationOwnerAssembly {
     }
     this.#hostStopOperationId = operationId;
     this.#protocol.beginShutdownDrain();
+    await this.#recovery.beginDrain();
     await this.#waitForCommandDrain();
     this.#hostStopSnapshot ??= await this.preflightForDeviceRemoval(operationId);
   }
@@ -1366,6 +1376,7 @@ export class LocalConversationOwnerAssembly {
 
   resumeRecoveryAfterLifecycle(): void {
     this.#protocol.startRecoveryLoop();
+    this.#recovery.resume();
   }
 
   hostStopAcceptedWorkItems(

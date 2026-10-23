@@ -520,6 +520,8 @@ describe("AdvancementReviewAttemptApplication.reviewAcceptedRun", () => {
       "run_reviewed",
       "review_attempt_transitioned",
       "completed",
+      // 验收根的尝试已终结：写入单调的根清理回执，推进待办目录据此移除该根的未完成义务。
+      "review_root_settled",
     ]);
   });
 
@@ -889,18 +891,15 @@ describe("AdvancementReviewAttemptApplication.reviewAcceptedRun", () => {
       message: "用户修正验收标准，原契约退出，按修正后的标准重新确认。",
       occurredAt: controller.activeUserTurnNow(),
     };
-    const exited = await controller.persistActiveUserTurnExit({
-      conversationId: "conv-1",
-      advancementSessionId: "session-1",
-      exit,
-    });
-    const closure = await controller.composeActiveUserTurnClosure(exited);
-    const created = await controller.persistRegeneratedRubricSession({
+    // 与应用层相同：旧契约退出与新契约创建是一次原子再生，之后再组合退出总结。
+    const { exited, created } = await controller.persistRegeneratedRubricSession({
       advancementSessionId: "adv_draft-regen",
+      previousSessionId: "session-1",
       conversationId: "conv-1",
-      originalUserTask: task("把测试修到全绿"),
+      exit,
       draft: revised,
     });
+    const closure = await controller.composeActiveUserTurnClosure(exited);
     expect(exit.reason).toBe("superseded");
     expect(exited.status).toBe("exited");
     expect(closure.summary).toContain("任务推进已退出");

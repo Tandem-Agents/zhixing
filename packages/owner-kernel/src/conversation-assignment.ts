@@ -4,14 +4,33 @@ import { projectionCheckpointKey } from "@zhixing/core/authority";
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from "./conversation-publish-obligations.js";
 import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
 export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
-import { registerConversationRunProjection, readConversationSubmissionState, conversationWorkingVersion } from './conversation-run-state-index.js';
+import { registerConversationRunProjection, registerConversationRunReadProjection, readConversationSubmissionState, conversationWorkingVersion } from './conversation-run-state-index.js';
 import { prepareConversationRunView, conversationDecisionScope, readConversationExactValue, type ConversationDecisionScope } from './conversation-run-state-view.js';
+import { registerAdvancementRecoveryProjection, readAdvancementRecovery, advancementPendingPrefix, advancementRecoveryPrefix, advancementRecoveryRoot, advancementRecoveryHead, advancementPendingRun, type AdvancementCleanupWork } from './advancement-recovery-index.js';
 import { CONVERSATION_RUN_STATE_PROJECTION_ID } from './conversation-run-state-index.js';
 import type { JsonValue } from '@zhixing/core/contracts';
 import { readConversationStateField } from './conversation-run-state-index.js';
 import { conversationStateFieldPrefix, decodeConversationState } from './conversation-run-state-index.js';
 import { readConversationRunRoot } from './conversation-run-state-extras.js';
+import { conversationViewAt } from './conversation-base-registry.js';
 import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
+
+function isAdvancementCleanupEvent(event: AdvancementControlEvent): boolean {
+  return event.type === 'review_root_settled' || event.type === 'review_attempt_transitioned' && ['consumed', 'expired', 'deferred'].includes(event.attempt.phase);
+}
+
+/** Owner-internal discovery. The run projection validates all contributing facts. */
+export async function pendingAdvancementConversations(log: AuthorityCommitLog, artifacts: ArtifactStore, verifier: ProtocolSignatureVerifier, after?: string) {
+  registerConversationRunReadProjection(log, artifacts, verifier);
+  registerAdvancementRecoveryProjection(log, artifacts);
+  if (after && !after.startsWith(advancementPendingPrefix)) throw new TypeError('Invalid advancement discovery cursor');
+  return readAdvancementRecovery(log, async view => {
+    const page = await view.scan({ ...(after ? { gt: after } : { gte: advancementPendingPrefix }), lt: advancementPendingPrefix + '\uffff' }, 16);
+    return { conversationIds: page.entries.map(row => {
+      if (typeof row.value !== 'string') throw new TypeError('Invalid advancement pending directory'); return row.value;
+    }), ...(page.continuation ? { next: page.entries.at(-1)!.key } : {}) };
+  });
+}
 import { Buffer } from "node:buffer";
 import { isHoldingMaintenanceExclusion, currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceAdmissionError, StorageMaintenanceCancelledError, DeviceCapacityAdmissionError } from "@zhixing/core/resources";
 import { userMessageFromTurnInput, type Message } from "@zhixing/core";
@@ -55,6 +74,7 @@ import {
   type ProjectionCursor,
   type ProjectionTransactionContext,
   type ProjectionTransactionDecision,
+  awaitAuthorityPreparation,
 } from "@zhixing/core/authority";
 import type {
   ArtifactRef,
@@ -1170,6 +1190,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     { readonly eventsDigest: string; readonly domainRevision: number; readonly receipt?: AdvancementSubmissionReceipt } | undefined
   > {
     assertIdentifier(requestId, "Advancement write request id");
+    if (this.#readBaseGeneration === 0) return readConversationExactValue(this.#log, this.#conversationId, 'advancementWrites', requestId);
     return this.#sessionRead.read((state) => structuredClone(state.advancementWrites.get(requestId)));
   }
 
@@ -1665,6 +1686,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         } catch (error) {
           const delay = maintenanceRetryDelayMs(error);
           if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+          if (await awaitAuthorityPreparation(error)) continue;
           retryDeadline ??= performance.now() + 5_000;
           const remaining = retryDeadline - performance.now();
           if (remaining <= 0) throw error;
@@ -5785,6 +5807,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   /** 折叠后的推进会话列表（创建时间升序）——权威日志投影重放，可重建。 */
   async advancementSession(sessionId: string): Promise<AdvancementSession | null> {
     assertIdentifier(sessionId, "Advancement session id");
+    if (this.#readBaseGeneration === 0) {
+      const value = await readConversationExactValue<NonNullable<ReturnType<RunProjection['advancementSessions']['get']>>>(this.#log, this.#conversationId, 'advancementSessions', sessionId);
+      return value ? freezeAdvancementSessions(new Map([[sessionId, value]]))[0]! : null;
+    }
     if (!await this.#readIndex.hasAdvancement(this.#conversationId)) return null;
     return this.#sessionRead.read(state => {
       const value = state.advancementSessions.get(sessionId);
@@ -5793,6 +5819,14 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   }
 
   async pendingAdvancementOriginalTasks(after?: string): Promise<{ readonly sessionIds: readonly string[]; readonly next?: string }> {
+    if (this.#readBaseGeneration === 0) return this.#readAdvancementRecovery(async current => {
+      const view = await conversationViewAt(this.#log, current, this.#conversationId);
+      if ((await advancementRecoveryRoot(view, this.#conversationId)).deleted) return { sessionIds: [] };
+      const prefix = advancementRecoveryPrefix(this.#conversationId) + 'original/';
+      const page = await view.scan({ ...(after ? { gt: prefix + after } : { gte: prefix }), lt: prefix + '\uffff' }, 16);
+      const ids = page.entries.map(row => row.value as string);
+      return { sessionIds: ids, ...(page.continuation ? { next: ids.at(-1)! } : {}) };
+    });
     if (!await this.#readIndex.hasAdvancement(this.#conversationId)) return { sessionIds: [] };
     return this.#sessionRead.read(state => {
       const ids = [...state.advancementSessions.values()]
@@ -5809,6 +5843,37 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     return this.#sessionRead.read(state => freezeAdvancementSessions(state.advancementSessions));
   }
 
+  async advancementHead(): Promise<AdvancementSession | null> {
+    const id = await this.#readAdvancementRecovery(
+      async current => advancementRecoveryHead(await conversationViewAt(this.#log, current, this.#conversationId), this.#conversationId));
+    return id ? this.advancementSession(id) : null;
+  }
+
+  async pendingAdvancementRun(sessionId: string, before?: number) {
+    const work = await this.#readAdvancementRecovery(
+      async current => advancementPendingRun(await conversationViewAt(this.#log, current, this.#conversationId), this.#conversationId, sessionId, before));
+    if (!work) return work;
+    const accepted = await this.committedRun(work.runId);
+    if (!accepted || accepted.runRecord.runIndex !== work.runIndex) throw new Error('Advancement pending run has no matching accepted fact');
+    return { record: accepted.runRecord, runRecordRef: { shardId: 'owner-log', runIndex: work.runIndex } };
+  }
+
+  async pendingAdvancementCleanup(after?: string) {
+    return this.#readAdvancementRecovery(async current => {
+      const view = await conversationViewAt(this.#log, current, this.#conversationId);
+      const root = await advancementRecoveryRoot(view, this.#conversationId), prefix = advancementRecoveryPrefix(this.#conversationId) + 'cleanup/';
+      if (after && !after.startsWith(prefix)) throw new TypeError('Advancement cleanup cursor belongs to another conversation');
+      const page = await view.scan({ ...(after ? { gt: after } : { gte: prefix }), lt: prefix + '\uffff' }, 16);
+      return { items: page.entries.map(row => ({ ...row.value as unknown as AdvancementCleanupWork, deleted: !!root.deleted })),
+        ...(page.continuation ? { next: page.entries.at(-1)!.key } : {}) };
+    });
+  }
+
+  #readAdvancementRecovery<T>(read: (view: import('@zhixing/core/authority').DurableProjectionReadContext) => Promise<T>): Promise<T> {
+    registerAdvancementRecoveryProjection(this.#log, this.#artifacts);
+    return readAdvancementRecovery(this.#log, read);
+  }
+
   /**
    * 推进控制事件的原子写入：一次推进写入（单事件或复合事件组）按序验证、
    * 在同一提交落盘；同一 requestId 回放原结果，异载荷拒绝。
@@ -5817,6 +5882,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     readonly requestId: string;
     readonly events: readonly AdvancementControlEvent[];
   }): Promise<{ readonly domainRevision: number }> {
+    registerAdvancementRecoveryProjection(this.#log, this.#artifacts);
     assertIdentifier(input.requestId, "Advancement write request id");
     if (input.events.length === 0) {
       throw new TypeError("Advancement write requires at least one event");
@@ -5855,7 +5921,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
             value: { domainRevision: existing.domainRevision },
           };
         }
-        if (state.deleted) {
+        if (state.deleted && !input.events.every(isAdvancementCleanupEvent)) {
           throw new AdvancementWriteRejectedError(
             "AdvancementStore: conversation has been durably deleted",
           );
@@ -6229,8 +6295,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     const prepared = await prepareConversationRunView({ log: this.#log, artifacts: this.#artifacts, verifier: this.#verifier,
       conversationId: this.#conversationId, scope, previous: this.#runProjection?.state, legacy: this.#legacyAbortTickets,
       ...(this.#importedBaseSource ? { baseSource: this.#importedBaseSource } : {}) });
-    if (scope.advancement) prepared.state.advancementSessions.clear();
-    if (scope.advancement) for (const [id, value] of await this.#sessionRead.read(state => structuredClone([...state.advancementSessions]))) prepared.state.advancementSessions.set(id, value);
     return prepared;
   }
 
@@ -6245,6 +6309,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       try { return await operation(); } catch (error) {
         const delay = error instanceof ConversationWorkingSetChanged ? 0 : maintenanceRetryDelayMs(error);
         if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         deadline ??= performance.now() + 5_000;
         if (performance.now() >= deadline) throw error;
         if (delay) await waitForMaintenanceRetry(Math.min(delay, deadline - performance.now()));
@@ -6368,6 +6433,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       } catch (error) {
         const delay = maintenanceRetryDelayMs(error);
         if (selecting || delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         retryDeadline ??= performance.now() + 5_000;
         const remaining = retryDeadline - performance.now();
         if (remaining <= 0) throw error;
@@ -6964,6 +7030,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       } catch (error) {
         const delay = error instanceof ConversationWorkingSetChanged ? 0 : maintenanceRetryDelayMs(error);
         if (delay === undefined || isHoldingMaintenanceExclusion() || abort.aborted) throw error;
+        if (await awaitAuthorityPreparation(error)) continue;
         retryDeadline ??= performance.now() + 5_000;
         if (performance.now() >= retryDeadline) throw error;
         if (delay) await waitForMaintenanceRetry(Math.min(delay, retryDeadline - performance.now()));
@@ -12383,6 +12450,7 @@ export async function reduceConversationSessionFact(context: Pick<ConversationRu
           if (!isAdvancementControlEvent(rawEvent, context.verifier)) throw corruptRunJournal("Run journal contains an invalid advancement event");
           return rawEvent;
         });
+        if (state.deleted && !isAdvancementCleanupEvent(event)) throw corruptRunJournal('Deleted conversation contains a non-maintenance advancement event');
         try {
           assertAdvancementEventBatchLegal(state.advancementSessions, [event]);
         } catch (error) {
@@ -12448,3 +12516,5 @@ export async function validateImportedConversationCommit(context: Pick<Conversat
   if (!envelopeHasConversationCommitSidecars(group as ConversationFactGroup, context.conversationId, body, bundle, closure.batch)) throw corruptRunJournal('Imported commit has incomplete conversation sidecars');
   applyCommittedSessionMutations(state, closure.batch?.records ?? []);
 }
+export { startConversationDecisionMigration, stopConversationDecisionMigration, prioritizeConversationDecisionMigration, conversationDecisionReady,
+  conversationDecisionPending, conversationDecisionMigrationStatus } from './conversation-decision-partitions.js';

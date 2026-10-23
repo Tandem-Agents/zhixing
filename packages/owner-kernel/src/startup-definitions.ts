@@ -6,4 +6,5 @@ export { registerDeferredIntentProjection } from "./deferred-global-intents.js";
 export { registerConversationReadProjection } from "./conversation-read-index.js";
 export { registerConversationRecoveryProjection } from "./conversation-recovery-index.js";
 export { registerConversationRunProjection } from "./conversation-run-state-index.js";
+export { registerAdvancementRecoveryProjection } from "./advancement-recovery-index.js";
 export { registerConversationTransferProjection } from "./conversation-transfer.js";

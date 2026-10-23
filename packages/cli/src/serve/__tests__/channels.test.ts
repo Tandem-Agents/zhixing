@@ -575,7 +575,7 @@ describe("managed Channel production composition", () => {
     const jobOwner = { acceptedWorkItems: async () => [], pauseAccepting() {}, drain: async () => {}, resumeAccepting() {} };
     const inbound = { refuseNewMessages() {}, drainAcceptedMessages: async () => {}, resumeNewMessages() {} };
     const authority = { resourceGovernor: { coordinate: async (fn: () => Promise<void>) => fn() } };
-    const binding = await lifecycleBindings({ protocolDigest, boundLocalConversationOwner: undefined, boundConversations: undefined,
+    const binding = await lifecycleBindings({ protocolDigest, advancementRecovery: undefined, boundLocalConversationOwner: undefined, boundConversations: undefined,
       boundJobRelayObligations: undefined, boundExecutorJobOwner: undefined, boundConversationProtocol: undefined,
       boundInboundRouter: inbound, boundAuthorityRuntime: authority, boundDeliveryStack: { lifecycle: delivery },
       boundChannelStatuses: channel.statuses, boundChannelConnections: channel,

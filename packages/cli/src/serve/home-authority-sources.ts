@@ -56,7 +56,8 @@ const SHARED_REQUIRED = [...CORE_WRITE_REQUIRED, "device-lifecycle-state-v1", "c
 const AUTHORITY_REQUIRED = [CURRENT_TRUST_PROJECTION_ID, ...SHARED_REQUIRED, "credential-exposures-v1",
   "global-skill-authority-v1", "global-workscene-authority-v1", "global-rubric-authority-v1",
   "workscene-session-activity-v2", "global-schedule-authority-v1", "job-publish-pending-v1",
-  "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "conversation-submission-state-v1", "surface-asset-grants"] as const;
+  "conversation-read-directory", "conversation-recovery-pending-v1", "conversation-run-state-v1", "advancement-recovery-v1",
+  "surface-asset-grants"] as const;
 const EXECUTOR_REQUIRED = [...SHARED_REQUIRED, "conversation-recovery-pending-v1", "workspace-binding-state-v1", "workspace-probe-state-v1",
   "executor-job-interaction-obligations"] as const;
 
@@ -222,7 +223,8 @@ export class HomeAuthoritySources {
       registerWorkspaceProbeProjection } = core;
     const { registerControlAdmissionProjection, registerConversationIdentityProjection, registerScheduleAuthorityProjection,
       registerJobPublishPendingProjection, registerDeferredIntentProjection, registerConversationReadProjection,
-      registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection } = owner;
+      registerConversationTransferProjection, registerConversationRecoveryProjection, registerConversationRunProjection,
+      registerAdvancementRecoveryProjection } = owner;
     const { registerExecutorJobRecoveryProjection } = executorDefinitions;
     const { credentialExposureIndex } = mesh;
     const { registerSurfaceAssetProjection } = surfaceAssets;
@@ -246,6 +248,8 @@ export class HomeAuthoritySources {
     registerJobPublishPendingProjection(authority);
     registerConversationReadProjection(authority, artifacts, verifier);
     registerConversationRunProjection(authority, artifacts, verifier);
+    // 推进待办依赖同一前缀上的 canonical；同批登记、同页准备，首开只扫一遍历史。
+    registerAdvancementRecoveryProjection(authority, artifacts);
     registerSurfaceAssetProjection(authority, artifacts, verifier);
     registerWorkspaceBindingProjection(executor);
     registerWorkspaceProbeProjection(executor, verifier);

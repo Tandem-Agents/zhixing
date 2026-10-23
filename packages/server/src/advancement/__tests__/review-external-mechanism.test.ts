@@ -83,6 +83,8 @@ describe("Advancement review external mechanism", () => {
       budget: root.budget,
       requestId: root.requestId,
       audience: { executorId: "executor-1" },
+      // 评审证据的受管委派：只交给绑定的执行器，调用次数不超过根预算，不再向下委派。
+      delegation: { executorId: "executor-1", maxBudget: { maxCalls: 8 }, maxDepth: 1 },
       scopeBinding: {
         kind: "conversation",
         conversationId: "conversation-1",

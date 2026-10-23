@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { readConversationSubmissionState } from '../conversation-run-state-index.js';
 import {
+  AuthorityCacheIntegrity, FileDurableProjectionIndex, durableProjectionDirectoryName,
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
@@ -36,7 +39,7 @@ import {
   ControlAdmissionJournal,
   createConversationControlEnvelope,
 } from "../control-admission.js";
-import { ConversationRunJournal } from "../conversation-assignment.js";
+import { ConversationRunJournal, pendingAdvancementConversations, startConversationDecisionMigration } from "../conversation-assignment.js";
 import { createOwnerDeliveryParticipant } from "../delivery.js";
 import { ConversationSessionStateAdapter } from "../session-state-adapter.js";
 import {
@@ -65,20 +68,20 @@ const verifier: ProtocolSignatureVerifier = {
   },
 };
 
-async function createHarness(conversationId = "conv-1", ownerEpoch = 1, journalVerifier = verifier) {
+async function createHarness(conversationId = "conv-1", ownerEpoch = 1, journalVerifier = verifier, integrity?: AuthorityCacheIntegrity) {
   const root = await createTempDir("session-state-adapter");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
   const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
     clock: () => NOW,
-    lockWaitMs: 2_000,
+    lockWaitMs: 2_000, integrity,
   }));
-  const makeJournal = () =>
+  const makeJournal = (ownerLog = log) =>
     new ConversationRunJournal({
       conversationId,
       ownerEpoch,
-      log,
+      log: ownerLog,
       artifacts,
       signer,
       verifier: journalVerifier,
@@ -91,7 +94,7 @@ async function createHarness(conversationId = "conv-1", ownerEpoch = 1, journalV
       },
       projection: { async project() {} },
       delivery: createOwnerDeliveryParticipant({
-        authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
+        authority: new DeliveryAuthority({ log: ownerLog, anchorEpoch: 1 }),
       }),
       clock: () => NOW,
     });
@@ -869,6 +872,7 @@ it("retains exact cancelled direct intent across a new head and authority replay
   await h.write([{ type: "original_task_directed", timestamp: NOW, sessionId: "session-1", admissionIntent: confirmation.admissionIntent,
     exit: { reason: "user-cancelled", message: "直接执行", occurredAt: NOW } }]);
   await h.write([createdEvent({ id: "session-new" })]);
+  expect((await pendingAdvancementConversations(h.log, h.artifacts, verifier)).conversationIds).toEqual(['conv-1']);
   const recovered = h.makeJournal();
   const adapter = new ConversationSessionStateAdapter({ journalFor: () => recovered, sessionExists: async () => true });
   expect((await adapter.readAdvancementState("conv-1", hostCtx("head")))?.id).toBe("session-new");
@@ -876,6 +880,7 @@ it("retains exact cancelled direct intent across a new head and authority replay
   expect(await adapter.readAdvancementState("conv-1", hostCtx("exact"), "session-1")).toMatchObject({ status: "cancelled", originalTaskAdmission: { mode: "direct", status: "pending" } });
   await adapter.mutate("conv-1", { kind: "advancement-event", events: [{ type: "original_task_admitted", sessionId: "session-1", timestamp: NOW, turnId: "turn-1", inputDigest: confirmation.admissionIntent.inputDigest, runId: "run-direct" }] }, hostCtx("settle-direct"));
   expect(await adapter.listPendingAdvancementOriginalTasks("conv-1", hostCtx("done"))).toEqual({ sessionIds: [] });
+  expect((await pendingAdvancementConversations(h.log, h.artifacts, verifier)).conversationIds).toEqual([]);
   await expect(adapter.listPendingAdvancementOriginalTasks("conv-1", { ...hostCtx("forbidden"), principal: { kind: "surface", surfacePrincipal: "surface:test", connectionId: "conn-test" } } as never)).rejects.toThrow();
 }, DURABLE_IO_TEST_TIMEOUT_MS);
 
@@ -902,3 +907,155 @@ it("advancement submission receipt shares the business commit and survives head 
   await h.write(events, requestId);
   await expect(h.write([created, { type: "submission_settled", conversationId: "conv-1", timestamp: NOW, receipt: { ...receipt, identity: { ...identity, requestDigest: protocolDigest("Submission", 1, { text: "changed" }) } } }], requestId)).rejects.toThrow("conflicting durable payloads");
 }, DURABLE_IO_TEST_TIMEOUT_MS);
+
+it('retains deleted conversation resource cleanup until its exact durable receipt, without resurrecting identity', async () => {
+  const { advancementReviewLineageId, advancementReviewAttemptId, advancementReviewRootRequestId } = await import('@zhixing/core/advancement');
+  const h = await createHarness(); await h.write([createdEvent(), confirmedEvent()]);
+  const runRecordRef = { shardId: 'owner-log', runIndex: 0 }, lineageId = advancementReviewLineageId('session-1', runRecordRef);
+  const attempt = { lineageId, generation: 1, runId: 'accepted-run', runIndex: 0, runRecordRef, phase: 'started' as const,
+    root: { workload: { kind: 'control' as const, id: advancementReviewAttemptId(lineageId, 1), attempt: 1 },
+      budget: { maxCalls: 8, maxTokens: 300000 }, requestId: advancementReviewRootRequestId(lineageId, 1) } };
+  await h.write([{ type: 'review_attempt_transitioned', sessionId: 'session-1', timestamp: NOW, attempt }]);
+  await h.log.append([{ stream: 'run:conv-1', body: { t: 'session-lifecycle', requestId: 'delete-with-cleanup', domainRevision: 3, mutation: 'delete' } }]);
+  expect((await pendingAdvancementConversations(h.log, h.artifacts, verifier)).conversationIds).toEqual(['conv-1']);
+  expect((await h.journal.pendingAdvancementCleanup()).items).toEqual([{ sessionId: 'session-1', attempt, deleted: true }]);
+  expect(await h.journal.pendingAdvancementOriginalTasks()).toEqual({ sessionIds: [] });
+  const establish = vi.fn(); const port = new ConversationSessionStateAdapter({ journalFor: () => h.makeJournal(), establishIdentity: establish });
+  await port.mutate('conv-1', { kind: 'advancement-event', events: [{ type: 'review_attempt_transitioned', sessionId: 'session-1', timestamp: NOW, attempt: { ...attempt, phase: 'expired' } }] }, hostCtx('expire-deleted-root'));
+  await port.mutate('conv-1', { kind: 'advancement-event', events: [{ type: 'review_root_settled', sessionId: 'session-1', timestamp: NOW, lineageId, generation: 1 }] }, hostCtx('settle-deleted-root'));
+  expect(establish).not.toHaveBeenCalled();
+  expect((await h.journal.pendingAdvancementCleanup()).items).toEqual([]);
+  expect((await pendingAdvancementConversations(h.log, h.artifacts, verifier)).conversationIds).toEqual([]);
+  expect((await h.journal.authorityState()).deleted).toBe(true);
+}, DURABLE_IO_TEST_TIMEOUT_MS);
+
+it.each(['review', 'clear'] as const)('locates accepted advancement runs exactly and removes the suffix on %s', async mode => {
+  const h = await createHarness(); await h.write([createdEvent(), confirmedEvent()]);
+  await seedCommittedSessionMutations(h);
+  const first = await h.journal.pendingAdvancementRun('session-1');
+  expect(first?.record.runId).toBe('committed-run');
+  expect(first?.runRecordRef).toEqual({ shardId: 'owner-log', runIndex: 1 });
+  expect(await h.journal.pendingAdvancementRun('session-1', 1)).toBeUndefined();
+  if (mode === 'clear') await h.log.append([{ stream: 'run:conv-1', body: { t: 'session-lifecycle', requestId: 'clear-review-suffix', domainRevision: 4, mutation: 'clear' } }]);
+  else await h.write([{ type: 'run_reviewed', timestamp: NOW, sessionId: 'session-1', review: review({ runIndex: 1, runRecordRef: { shardId: 'old-physical', runIndex: 1 } }) }]);
+  expect(await h.journal.pendingAdvancementRun('session-1')).toBeUndefined();
+}, DURABLE_IO_TEST_TIMEOUT_MS);
+
+it('keeps advancement recovery out of execution-only journal construction', async () => {
+  const registered = vi.spyOn(FileAuthorityCommitLog.prototype, 'durableProjection');
+  try {
+    const h = await createHarness();
+    expect(registered.mock.calls.some(([definition]) => definition.projectionId === 'advancement-recovery-v1')).toBe(false);
+    await h.write([createdEvent()]);
+    expect(registered.mock.calls.some(([definition]) => definition.projectionId === 'advancement-recovery-v1')).toBe(true);
+    expect((await h.read())?.id).toBe('session-1');
+  } finally { registered.mockRestore(); }
+}, DURABLE_IO_TEST_TIMEOUT_MS);
+
+it('pending discovery prepares its validation reader without installing an unrelated submission writer', async () => {
+  const root=await createTempDir('advancement-pending-reader');
+  const artifacts=new FileArtifactStore(path.join(root,'artifacts'));
+  const log=trackAuthorityLog(new FileAuthorityCommitLog(path.join(root,'log'),artifacts));
+  const registered=vi.spyOn(log,'durableProjection');
+  expect(await pendingAdvancementConversations(log,artifacts,verifier)).toEqual({conversationIds:[]});
+  const ids=registered.mock.calls.map(([definition])=>definition.projectionId);
+  expect(ids).toContain('conversation-run-state-v1');
+  expect(ids).toContain('advancement-recovery-v1');
+  expect(ids).not.toContain('conversation-submission-state-v1');
+},DURABLE_IO_TEST_TIMEOUT_MS);
+
+it.each(['pending-delete','session-text','session-state','session-key','session-absent','guard-delete'] as const)(
+  'cold production reads reject unsigned %s and recover the complete authenticated state', async attack => {
+    const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32, 71));
+    const h = await createHarness('conv-1',1,verifier,integrity);
+    await h.write([createdEvent()]);
+    const confirmation = confirmedEvent();
+    if (confirmation.type !== 'rubric_confirmed') throw Error('fixture');
+    await h.write([{ type:'original_task_directed', sessionId:'session-1',timestamp:NOW,admissionIntent:confirmation.admissionIntent,
+      exit:{reason:'user-cancelled',message:'direct',occurredAt:NOW} }]);
+    const expected = await h.journal.advancementSession('session-1');
+    expect((await pendingAdvancementConversations(h.log,h.artifacts,verifier)).conversationIds).toEqual(['conv-1']);
+    // Exercise the actual guard read port, now backed by the canonical state.
+    await readConversationSubmissionState(h.log,h.artifacts,verifier,'conv-1',{});
+    await h.log.stopStorageMaintenance();
+    const wal = await fs.readFile(h.log.logPath);
+    const id = attack === 'pending-delete' ? 'advancement-recovery-v1' : 'conversation-run-state-v1';
+    const version = attack === 'pending-delete' ? 2 : 3;
+    const folder = path.join(h.log.rootDir,'projections',durableProjectionDirectoryName(id)+'.v'+version);
+    const manifest = JSON.parse(await fs.readFile(path.join(folder,'manifest.json'),'utf8'));
+    expect(manifest.integrity).toMatch(/^[a-f0-9]{64}$/);
+    // Read the public fixture rows through their legitimate authenticated view.
+    const published = new FileDurableProjectionIndex({rootDir:folder,projectionId:id,reducerVersion:version,
+      authenticated:true,integrity,readOnly:true,allowSegmentReclamation:false});
+    await published.initialize(manifest.checkpoints);
+    const publicRows: Array<{key:string;value:import('@zhixing/core/contracts').JsonValue}> = [];
+    let publishedCursor: string | undefined;
+    do { const page=await published.scan({},256,publishedCursor); publicRows.push(...page.entries); publishedCursor=page.continuation; } while(publishedCursor);
+    await published.stopStorageMaintenance();
+    // The attacker has no integrity key; even self-consistent public checksums
+    // and correctly bound row identities cannot authorize this publication.
+    const index = new FileDurableProjectionIndex({rootDir:folder,projectionId:id,reducerVersion:version,allowSegmentReclamation:false});
+    await index.initialize(manifest.checkpoints);
+    let changed = 0;
+    const mutations: import('@zhixing/core/authority').DurableProjectionMutation[] = [];
+    {
+      for (const row of publicRows) {
+        const text = JSON.stringify(row.value);
+        const match = attack === 'pending-delete' ? row.key.startsWith('advancement-pending/')
+          : attack === 'guard-delete' ? row.key.endsWith('/root') : row.key.includes('advancementSessions') && text.includes('session-1');
+        if (!match) { mutations.push({kind:'put',key:row.key,value:row.value}); continue; }
+        changed++;
+        if (attack.endsWith('delete') || attack === 'session-absent') mutations.push({kind:'tombstone',key:row.key});
+        else {
+          const forged = attack === 'session-text' ? text.replaceAll('把测试修到全绿','UNSIGNED-TEXT')
+            : attack === 'session-state' ? text.replaceAll('cancelled','completed') : text.replaceAll('session-1','wrong-session');
+          expect(forged).not.toBe(text);
+          mutations.push({kind:'put',key:row.key,value:JSON.parse(forged)});
+        }
+      }
+    }
+    expect(changed).toBeGreaterThan(0);
+    index.publish(await index.prepare(mutations),manifest.checkpoints); await index.flush(); await index.stopStorageMaintenance();
+    const cold=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{integrity,clock:()=>NOW}));
+    const journal=h.makeJournal(cold);
+    expect(await journal.advancementSession('session-1')).toEqual(expected);
+    // 被篡改的派生目录不被采用：它从源头部重新起步，按会话从认证事实迁移；后台迁移完成后待办完整，不漏义务。
+    await pendingAdvancementConversations(cold,h.artifacts,verifier);
+    await startConversationDecisionMigration(cold);
+    expect((await pendingAdvancementConversations(cold,h.artifacts,verifier)).conversationIds).toEqual(['conv-1']);
+    expect(await journal.advancementSession('absent-session')).toBeNull();
+    await readConversationSubmissionState(cold,h.artifacts,verifier,'conv-1',{});
+    expect(await fs.readFile(h.log.logPath)).toEqual(wal);
+  },30000);
+it('advancement cold readers replay a same-identity old signed state, rotate keys, and keep authenticated files unchanged without a key', async () => {
+  const integrity = new AuthorityCacheIntegrity(Buffer.alloc(32,72));
+  const h = await createHarness('conv-1',1,verifier,integrity);
+  await h.write([createdEvent()]);
+  await pendingAdvancementConversations(h.log,h.artifacts,verifier);
+  await h.log.stopStorageMaintenance();
+  const source=path.join(h.log.rootDir,'projections'), snapshot=path.join(h.log.rootDir,'old-derived-snapshot');
+  await fs.cp(source,snapshot,{recursive:true});
+  const writer=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{integrity,clock:()=>NOW}));
+  const writerJournal=h.makeJournal(writer), adapter=new ConversationSessionStateAdapter({journalFor:()=>writerJournal,sessionExists:async()=>true});
+  const confirmation=confirmedEvent(); if(confirmation.type!=='rubric_confirmed')throw Error('fixture');
+  await adapter.mutate('conv-1',{kind:'advancement-event',events:[{type:'original_task_directed',sessionId:'session-1',timestamp:NOW,
+    admissionIntent:confirmation.admissionIntent,exit:{reason:'user-cancelled',message:'direct',occurredAt:NOW}}]},hostCtx('after-old-snapshot'));
+  const expected=await writerJournal.advancementSession('session-1');
+  await pendingAdvancementConversations(writer,h.artifacts,verifier); await writer.stopStorageMaintenance();
+  // Restore signed older manifests and their referenced pages, leaving the WAL.
+  await fs.cp(snapshot,source,{recursive:true,force:true});
+  const cold=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{integrity,clock:()=>NOW}));
+  expect(await h.makeJournal(cold).advancementSession('session-1')).toEqual(expected);
+  expect((await pendingAdvancementConversations(cold,h.artifacts,verifier)).conversationIds).toEqual(['conv-1']);
+  await cold.stopStorageMaintenance();
+  const manifests=async()=>Promise.all((await fs.readdir(source)).map(async name=>[name,await fs.readFile(path.join(source,name,'manifest.json'),'utf8').catch(()=>null)]));
+  const before=await manifests();
+  const strict=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{readOnly:true,clock:()=>NOW}));
+  expect(await h.makeJournal(strict).advancementSession('session-1')).toEqual(expected);
+  expect((await pendingAdvancementConversations(strict,h.artifacts,verifier)).conversationIds).toEqual(['conv-1']);
+  await strict.stopStorageMaintenance();
+  expect(await manifests()).toEqual(before);
+  const rotated=trackAuthorityLog(new FileAuthorityCommitLog(h.log.rootDir,h.artifacts,{integrity:new AuthorityCacheIntegrity(Buffer.alloc(32,73)),clock:()=>NOW}));
+  expect(await h.makeJournal(rotated).advancementSession('session-1')).toEqual(expected);
+  expect((await pendingAdvancementConversations(rotated,h.artifacts,verifier)).conversationIds).toEqual(['conv-1']);
+},30000);

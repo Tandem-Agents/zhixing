@@ -112,6 +112,9 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
     id: "sessionProcess.dispose",
     stage: "runtime",
   },
+  { owner: 'anchor-host', role: 'runtime', id: 'advancementRecovery.stop', stage: 'runtime' },
+  // 后登记先执行：在停止推进恢复与各存储之前，先取消并等后台决定状态迁移退出。
+  { owner: 'anchor-host', role: 'runtime', id: 'decisionMigration.stop', stage: 'runtime' },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];
 
 /**

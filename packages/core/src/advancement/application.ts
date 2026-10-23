@@ -123,6 +123,7 @@ function hasDurableRunRecordRef(
 }
 
 export interface AdvancementReviewAttemptStatePort {
+  settleReviewRoot?(conversationId: string, sessionId: string, lineageId: string, generation: number): Promise<void>;
   loadActiveSession(conversationId: string): Promise<AdvancementSession | null>;
   loadSession(
     conversationId: string,
@@ -278,7 +279,7 @@ export interface AdvancementReviewAttemptApplication {
     proxyMessageId: string;
   }>): Promise<"settled" | "not-applicable">;
   reviewAcceptedRun(input: AdvancementReviewAttemptInput): Promise<AdvancementTurnReviewResult>;
-  reconcileConversation(conversationId: string): Promise<void>;
+  reconcileConversation(conversationId: string, pending?: readonly { sessionId: string; attempt: AdvancementReviewAttempt; deleted?: boolean }[]): Promise<void>;
   cancelSession(input: Readonly<{
     conversationId: string;
     advancementSessionId: string;
@@ -388,12 +389,27 @@ export class AdvancementReviewAttemptApplicationService
     return await flight;
   }
 
-  async reconcileConversation(conversationId: string): Promise<void> {
+  async reconcileConversation(conversationId: string, pending?: readonly { sessionId: string; attempt: AdvancementReviewAttempt; deleted?: boolean }[]): Promise<void> {
+    if (pending) {
+      for (const work of pending) {
+        let session = await this.#state.loadSession(conversationId, work.sessionId);
+        if (!session) throw new Error('Pending review cleanup has no session fact');
+        let attempt = work.attempt;
+        if (!isTerminalReviewAttempt(attempt)) {
+          if (session.status === 'active' && !work.deleted) continue;
+          const settled = await this.#commitTerminal(conversationId, session.id,
+            terminalReviewAttempt(attempt, attempt.phase === 'invoking' ? 'deferred' : 'expired', '推进已关闭，恢复未完成的资源清理。'));
+          session = settled.session; attempt = settled.attempt;
+        }
+        await this.#cleanupTerminalRoot(session, attempt);
+      }
+      return;
+    }
     const sessions = await this.#state.loadConversationSessions(conversationId);
     for (const session of sessions) {
       for (const attempt of session.reviewAttempts ?? []) {
         if (isTerminalReviewAttempt(attempt)) {
-          await this.#cleanupTerminalRoot(attempt);
+          await this.#cleanupTerminalRoot(session, attempt);
         }
       }
     }
@@ -442,7 +458,7 @@ export class AdvancementReviewAttemptApplicationService
       occurredAt,
     );
     for (const attempt of terminals) {
-      await this.#cleanupTerminalRoot(attempt);
+      await this.#cleanupTerminalRoot(cancelled, attempt);
     }
     return cancelled;
   }
@@ -491,6 +507,15 @@ export class AdvancementReviewAttemptApplicationService
     if (session.status !== "active") {
       return { kind: "skipped", reason: "not-active" };
     }
+    // A legacy physical transcript location and owner-log may name the same
+    // accepted run. Keep the persisted attempt identity across that upgrade.
+    if (input.runId && input.runRecordRef) {
+      const prior = session.reviewAttempts?.find(attempt => attempt.runId === input.runId);
+      if (prior) {
+        if (prior.runRecordRef.runIndex !== input.runIndex) throw new Error('Accepted run identity changed its index');
+        input = { ...input, runRecordRef: prior.runRecordRef };
+      }
+    }
 
     const existingAttempt = input.runRecordRef
       ? reviewAttemptForRun(session, input.runRecordRef)
@@ -498,7 +523,7 @@ export class AdvancementReviewAttemptApplicationService
     if (
       existingAttempt &&
       isTerminalReviewAttempt(existingAttempt) &&
-      !(await this.#cleanupTerminalRoot(existingAttempt))
+      !(await this.#cleanupTerminalRoot(session, existingAttempt))
     ) {
       return deferredReview(
         session,
@@ -541,7 +566,7 @@ export class AdvancementReviewAttemptApplicationService
       attempt = settled.attempt;
     }
     if (attempt && isTerminalReviewAttempt(attempt)) {
-      const cleaned = await this.#cleanupTerminalRoot(attempt);
+      const cleaned = await this.#cleanupTerminalRoot(session, attempt);
       if (!cleaned) {
         return deferredReview(
           session,
@@ -606,7 +631,7 @@ export class AdvancementReviewAttemptApplicationService
         session.id,
         expired,
       );
-      await this.#cleanupTerminalRoot(settled.attempt);
+      await this.#cleanupTerminalRoot(session, settled.attempt);
       return deferredReview(
         settled.session,
         settled.attempt.detail ?? expired.detail!,
@@ -652,7 +677,7 @@ export class AdvancementReviewAttemptApplicationService
           durable.generation === attempt.generation &&
           isTerminalReviewAttempt(durable)
         ) {
-          await this.#cleanupTerminalRoot(durable);
+          await this.#cleanupTerminalRoot(session, durable);
         }
         return deferredReview(
           afterFailure,
@@ -679,7 +704,7 @@ export class AdvancementReviewAttemptApplicationService
         session.id,
         expired,
       );
-      await this.#cleanupTerminalRoot(settled.attempt);
+      await this.#cleanupTerminalRoot(session, settled.attempt);
       return deferredReview(
         settled.session,
         settled.attempt.detail ?? expired.detail!,
@@ -712,7 +737,7 @@ export class AdvancementReviewAttemptApplicationService
               lease,
             );
       if (durableAfterAcquire?.phase !== "invoking") {
-        await this.#cleanupTerminalRoot(cleanupAttempt);
+        await this.#cleanupTerminalRoot(session, cleanupAttempt);
       }
       if (!afterAcquire) {
         throw new Error(
@@ -747,7 +772,7 @@ export class AdvancementReviewAttemptApplicationService
         session.id,
         expired,
       );
-      await this.#cleanupTerminalRoot(settled.attempt);
+      await this.#cleanupTerminalRoot(session, settled.attempt);
       return deferredReview(
         settled.session,
         settled.attempt.detail ?? evidence.reason,
@@ -780,7 +805,7 @@ export class AdvancementReviewAttemptApplicationService
         (latestSession.status !== "active" ||
           (latestAttempt !== undefined && isTerminalReviewAttempt(latestAttempt)))
       ) {
-        await this.#cleanupTerminalRoot(
+        await this.#cleanupTerminalRoot(session, 
           latestAttempt && isTerminalReviewAttempt(latestAttempt)
             ? latestAttempt
             : terminalReviewAttempt(
@@ -820,7 +845,7 @@ export class AdvancementReviewAttemptApplicationService
         session.id,
         deferred,
       );
-      await this.#cleanupTerminalRoot(settled.attempt);
+      await this.#cleanupTerminalRoot(session, settled.attempt);
       return deferredReview(
         settled.session,
         settled.attempt.detail ?? outcome.reason,
@@ -836,7 +861,7 @@ export class AdvancementReviewAttemptApplicationService
       evidence.requestId,
       consumed,
     );
-    await this.#cleanupTerminalRoot(consumed);
+    await this.#cleanupTerminalRoot(session, consumed);
     return result;
   }
 
@@ -1237,7 +1262,14 @@ export class AdvancementReviewAttemptApplicationService
     }
   }
 
-  async #cleanupTerminalRoot(attempt: AdvancementReviewAttempt): Promise<boolean> {
+  async #cleanupTerminalRoot(session: AdvancementSession, attempt: AdvancementReviewAttempt): Promise<boolean> {
+    if (session.reviewRootSettlements?.some(value => value.lineageId === attempt.lineageId && value.generation === attempt.generation)) return true;
+    const cleaned = await this.#releaseTerminalRoot(attempt);
+    if (cleaned) await this.#state.settleReviewRoot?.(session.conversationId, session.id, attempt.lineageId, attempt.generation);
+    return cleaned;
+  }
+
+  async #releaseTerminalRoot(attempt: AdvancementReviewAttempt): Promise<boolean> {
     if (!isTerminalReviewAttempt(attempt)) return false;
     let inspection = await this.#roots.inspect(attempt.root);
     if (inspection.kind === "absent" || inspection.kind === "dequeued") {
@@ -1376,6 +1408,7 @@ function isTurnReviewResult(
 }
 
 function reviewAttemptFlightKey(input: AdvancementReviewAttemptInput): string {
+  if (input.runId) return `${input.conversationId}:run:${input.runId}`;
   return input.runRecordRef
     ? `${input.conversationId}:${input.runRecordRef.shardId}:${input.runRecordRef.runIndex}`
     : `${input.conversationId}:legacy:${input.runIndex}`;
@@ -1540,6 +1573,7 @@ export type AdvancementAcceptedTurnCatchUpResult = Readonly<{
     | "no-active-session"
     | "not-active"
     | "no-pending-recovery"
+    | "recovery-pending"
     | "awaiting-original-run"
     | "already-running"
     | "already-scheduled"

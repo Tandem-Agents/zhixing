@@ -25,6 +25,7 @@ export interface MutableAdvancementSession {
   outstandingProxyMessageId?: string;
   advancementWindow?: AdvancementWindowState;
   reviewAttempts: NonNullable<AdvancementSession["reviewAttempts"]>[number][];
+  reviewRootSettlements?: NonNullable<AdvancementSession["reviewRootSettlements"]>[number][];
   evidencePending: AdvancementEvidenceProjection["pending"][number][];
   evidenceGenerations: AdvancementEvidenceGeneration[];
   exit?: AdvancementSession["exit"];
@@ -176,6 +177,18 @@ export function applyAdvancementEvent(
       }
       break;
     }
+    case "review_root_settled": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      const existing = session.reviewRootSettlements ?? [];
+      const prior = existing.find(value => value.lineageId === event.lineageId && value.generation === event.generation);
+      if (!prior) session.reviewRootSettlements = [
+        ...existing,
+        { lineageId: event.lineageId, generation: event.generation },
+      ];
+      session.updatedAt = event.timestamp;
+      break;
+    }
     case "review_attempt_transitioned": {
       const session = sessions.get(event.sessionId);
       if (!session) return;
@@ -293,6 +306,7 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
     ...(session.reviewAttempts.length > 0
       ? { reviewAttempts: session.reviewAttempts.map((attempt) => structuredClone(attempt)) }
       : {}),
+    ...(session.reviewRootSettlements?.length ? { reviewRootSettlements: structuredClone(session.reviewRootSettlements) } : {}),
     ...(session.evidencePending.length > 0 || session.evidenceGenerations.length > 0
       ? {
           evidence: {

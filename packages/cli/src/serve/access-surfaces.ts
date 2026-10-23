@@ -490,6 +490,8 @@ export async function createHostLosslessDataPlane(
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 export interface CreateConversationServicesInput {
   readonly deviceCapacity: import('@zhixing/core/resources').DeviceCapacityArbiterPort;
+  /** 本机执行的运行计为宿主前台活动。 */
+  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
   readonly onFailure?: import("./conversation-protocol-runtime.js").ConversationProtocolRuntimeOptions["onFailure"];
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
   readonly mcp?: import("@zhixing/core/mcp-management").McpConnectionPort;
@@ -629,6 +631,7 @@ export async function createConversationServices(
                 dataPlaneTickets: dataPlaneAssembly.assignmentTickets,
                 runtimeFactory: inputAssignmentRuntimeFactory,
                 createStream: dataPlaneAssembly.createStream,
+                ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
               },
             });
             if (!boundary.localLedger) {
@@ -880,6 +883,7 @@ export async function createConversationServices(
     proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
   });
   const advancementRecovery = createAdvancementRecoveryMaintenance({
+    pending: protocol.advancementPending,
     advancement: advancementController,
     reviews: advancementReviews,
     directory: input.advancementDirectory,
@@ -892,6 +896,7 @@ export async function createConversationServices(
     reviewResults,
     logger: console,
   });
+  inputLifecycleContributions.acquire('advancementRecovery.stop', () => advancementRecovery.stop());
   const advancementAcceptedTurns =
     new AdvancementAcceptedTurnApplicationService({
       catchUp: {
@@ -991,6 +996,8 @@ export async function createConversationServices(
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
 export interface CreateLocalConversationOwnerInput {
   readonly onRunStatus?: (notice: import("@zhixing/core/contracts").ConversationStatusNotice) => void;
+  /** 本机执行的运行计为宿主前台活动。 */
+  readonly foregroundActivity?: import('@zhixing/core/resources').ForegroundActivityPort;
   readonly executorRoleModule: ExecutorRoleModule;
   readonly evidenceHandler: EvidenceHandlerPort & { stopAccepting(): void };
   readonly assignmentRuntimeFactory: RuntimeFactory;
@@ -1072,6 +1079,7 @@ export async function createLocalConversationOwner(
       runtimeFactory: input.assignmentRuntimeFactory,
       dataPlaneTickets: inputExecutorDataPlane.assignmentTickets,
       createStream: (input) => inputExecutorDataPlane!.createStream(input),
+      ...(input.foregroundActivity ? { foreground: input.foregroundActivity } : {}),
     },
   });
   if (!localExecutorBoundary.staging) {

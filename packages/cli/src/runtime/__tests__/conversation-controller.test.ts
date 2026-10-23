@@ -423,6 +423,51 @@ describe('bounded authoritative recovery consumer', () => {
     } finally { controller.dispose(); }
   });
 
+  it('keeps a committed local run with its turn when a late recovery reaches it after many other runs', async () => {
+    // 慢宿主下恢复扫描滞后：本地回合已显示并结束的运行，在扫描为大量其他运行写过旁观记录之后才被扫到，
+    // 仍只能归它自己的回合——不再作为来信重新显示它的输入，也不再另起一块重复它的正文。
+    const f = makeFakes(), fragment = vi.fn(async () => {}), recovered = vi.fn(), state = vi.fn();
+    let runId = '', turnId = '', committed = false, late = false;
+    const text = '本地回合已经完整显示的正文';
+    const message = { role: 'assistant' as const, content: [{ type: 'text' as const, text }] };
+    const summary = { runIndex: 9, handedOff: false, conflict: false };
+    const others = Array.from({ length: 70 }, (_, n) => ({ kind: 'status' as const, notice: notice(100 + n), communication: false }));
+    const final = () => ({ kind: 'final' as const, frame: { v: 1 as const, conversationId: 'conv-1', runId, commitRevision: 9, digest: `sha256:${'b'.repeat(64)}` } });
+    const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => {
+      const at = after?.after.lsn ?? 0, page = (lsn: number, facts: ConversationControlPage['facts']) =>
+        ({ facts, cursor: { ...cursor(lsn), historyThroughCommitRevision: 0 }, hasMore: false, reset: false });
+      if (late && at < 300) return page(300, [...others, { kind: 'input' as const, cursor: { ...inputCursor(), runId } }, final()]);
+      if (committed && at < 200) return page(200, [final()]);
+      return page(Math.max(at, 100), []);
+    });
+    const consumeInputPage = vi.fn(async (_id: string, _run: string, _cursor: unknown, consume: (page: ConversationInputPage) => Promise<unknown>) => consume({
+      input: { identity: { id: turnId, source: { kind: 'user' } }, text: 'request', contentOffset: 0, final: true },
+      cursor: { ...inputCursor(), runId }, hasMore: false, reset: false,
+    }));
+    const completion = vi.fn(async () => ({ conversationId: 'conv-1', runId, commitRevision: 9, ...(committed ? { summary } : {}) }));
+    const fragmentCursor = { conversationId: 'conv-1', ownerEpoch: 1, revision: 9, message: 0, block: 0, offset: 0 };
+    const bodyPage = vi.fn(async () => ({ fragments: [{ type: 'text', role: 'assistant', text, block: 0, message: 0, length: text.length, cursor: fragmentCursor }],
+      hasMore: false, reset: false }));
+    const controller = new ConversationController({ conversation: { ...f.conversation, controlPage: pages, consumeInputPage, completion, bodyPage } as unknown as RpcConversationFacade,
+      workscene: f.workscene as unknown as RpcWorksceneFacade, pagedRecovery: true, onYield: () => {}, onObservedInputFragment: fragment,
+      onRecoveryYield: recovered, onRecoveryState: state, projectCommittedOutcome: value => value }, initial);
+    try {
+      await controller.start();
+      const turn = await controller.beginTurn('request'); runId = turn.runId!; turnId = turn.turnId;
+      const source = { conversationId: 'conv-1', runId, assignmentId: 'a', streamEpoch: 1, sourceSeq: 0 };
+      f.emit.process(projectProcessYield({ ...source, sourceSeq: ++source.sourceSeq }, { type: 'text_delta', text }));
+      f.emit.process(projectProcessYield({ ...source, sourceSeq: ++source.sourceSeq }, { type: 'assistant_message', message }));
+      committed = true;
+      f.emit.status({ ...notice(20), ref: { ...notice(20).ref, runId }, state: 'committed' });
+      await expect(turn.outcome).resolves.toEqual(summary);
+      late = true; state.mockClear();
+      await controller.reattachActiveObserver();
+      await vi.waitFor(() => { expect(consumeInputPage).toHaveBeenCalled(); expect(state).toHaveBeenLastCalledWith('idle'); });
+      expect(fragment).not.toHaveBeenCalled();
+      expect(recovered.mock.calls.filter(([event, from]) => from.runId === runId && event.type === 'text_delta')).toEqual([]);
+    } finally { controller.dispose(); }
+  });
+
   it('does not advance past an unconsumed fragment or trust a later live revision during overflow and reconnect', async () => {
     const f = makeFakes();
     const pages = vi.fn(async (_id: string, after?: ConversationControlCursor): Promise<ConversationControlPage> => {

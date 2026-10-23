@@ -134,6 +134,8 @@ function context(
       verifier: {},
       executorLog: {},
       artifacts: {},
+      // 执行前核对 owner 代次的当前会话权威（本用例只验装配，不执行派发）。
+      conversationAuthority: { readProjectionIds: () => [], prepare: async () => undefined },
       localControlAdmission: {},
       executorCapabilities: {},
       executorResourceGovernor: executorResources,

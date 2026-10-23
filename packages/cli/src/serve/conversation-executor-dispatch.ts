@@ -288,6 +288,8 @@ export interface ConversationExecutorHostBoundaryOptions {
     readonly dataPlaneTickets?: ConstructorParameters<
       typeof ConversationAssignmentLedger
     >[0]["dataPlaneTickets"];
+    /** 派发的运行时存续期间（派发、内核、提交收尾）计为宿主前台活动：后台维护据此让路。 */
+    readonly foreground?: import("@zhixing/core/resources").ForegroundActivityPort;
     readonly createStream?: (input: {
       readonly assignmentId: string;
       readonly ref: import("@zhixing/core/contracts").ExecutionRef;
@@ -930,6 +932,7 @@ function createLocalConversationExecutorMechanism(
         }
         const execution = new ConversationKernelExecution(runtime!);
         executions.set(input.assignmentId, execution);
+        const releaseForeground = local.foreground?.enter();
         return {
           runtime: runtime!,
           bindRuntime(binding) {
@@ -992,14 +995,16 @@ function createLocalConversationExecutorMechanism(
             };
           },
           async dispose(reason) {
-            bindings.delete(input.assignmentId);
-            await runtime!.dispose(reason);
-            if (baseRuntime !== runtime) await baseRuntime!.dispose(reason);
-            executions.delete(input.assignmentId);
-            options.authority.releaseLocalConversationEnvironmentPreflight(
-              input.manifest,
-              input.assignmentId,
-            );
+            try {
+              bindings.delete(input.assignmentId);
+              await runtime!.dispose(reason);
+              if (baseRuntime !== runtime) await baseRuntime!.dispose(reason);
+              executions.delete(input.assignmentId);
+              options.authority.releaseLocalConversationEnvironmentPreflight(
+                input.manifest,
+                input.assignmentId,
+              );
+            } finally { releaseForeground?.(); }
           },
         };
       },

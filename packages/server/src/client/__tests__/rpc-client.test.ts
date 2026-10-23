@@ -264,7 +264,7 @@ describe("RpcClient", () => {
     });
     client = c;
     await c.connect();
-    await expect(c.request("slow")).rejects.toThrow(/timeout/i);
+    await expect(c.request("slow")).rejects.toThrow(/deadline exceeded/i);
   });
 
   // ─── 并发请求 ───

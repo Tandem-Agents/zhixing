@@ -48,6 +48,9 @@ import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing/mesh";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
+import { registerDeviceLifecycleProjection } from "@zhixing/core/authority/startup-definitions";
+import { registerControlAdmissionProjection, registerConversationIdentityProjection, registerConversationRecoveryProjection,
+  registerConversationTransferProjection, registerDeferredIntentProjection } from "@zhixing/owner-kernel/startup-definitions";
 import {
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
@@ -427,6 +430,8 @@ function createExecutorLedger(input: {
     ownerControl: createOwnerControlAuthorizer(
       input.authority.verifier,
       () => new Date().toISOString(),
+      // 与宿主装配相同：执行前按当前会话权威核对 owner 代次。
+      input.authority.conversationAuthority,
     ),
     snapshotFor: input.snapshotFor,
     permissionSnapshotFor: input.permissionSnapshotFor,
@@ -469,6 +474,13 @@ async function createRemoteConversationExecutor(input: {
     artifacts,
     { clock: () => new Date().toISOString() },
   );
+  // 与宿主写者相同：执行器日志在首次写入前登记固定投影（见 home-authority-sources 的写者定义）。
+  registerDeviceLifecycleProjection(log, input.authority.verifier);
+  registerControlAdmissionProjection(log, artifacts);
+  registerConversationIdentityProjection(log, artifacts);
+  registerDeferredIntentProjection(log);
+  registerConversationTransferProjection(log, input.authority.verifier);
+  registerConversationRecoveryProjection(log, artifacts);
   const permissions = new Map<string, TrustRuleSnapshot>();
   let snapshot = executorSnapshot(executorId, executorKey, 1);
   // 远端 executor 的资源治理必须以自己的身份与账本运行——资源根的

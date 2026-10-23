@@ -251,7 +251,7 @@ describe("production mesh control plane", () => {
     expect(onTrustReconciled).toHaveBeenCalledTimes(2);
     for (const [index, record] of [initialTrust, joinedTrust].entries()) {
       const view = onTrustReconciled.mock.calls[index]![0];
-      expect(view).toEqual({ homeId: record.homeId, trustEpoch: record.trustEpoch,
+      expect(view).toEqual({ homeId: record.homeId, trustEpoch: record.trustEpoch, anchorEpoch: record.anchorEpoch,
         chainHead: record.chainHead, issuer: record.issuer,
         members: record.members.filter(member => member.state === "active") });
       expect(view).not.toHaveProperty("signature");
@@ -513,12 +513,14 @@ function trustRecord(
   anchor: DeviceIdentity,
   executor: DeviceIdentity,
   peerRole: "executor" | "surface" = "executor",
-): HomeTrustRecord {
+): HomeTrustRecord & { anchorEpoch: number } {
   return {
     v: 1,
     schemaId: "HomeTrustRecord",
     homeId: "home-test",
     trustEpoch: 1,
+    // 当前信任投影带 anchor 任期（由信任链派生）。
+    anchorEpoch: 1,
     issuer: { deviceId: anchor.deviceId, issuerKeyId: anchor.deviceId },
     chainHead: { seq: 2, eventDigest: `sha256:${"1".repeat(64)}` },
     members: [
@@ -529,12 +531,13 @@ function trustRecord(
   };
 }
 
-function anchorOnlyTrustRecord(anchor: DeviceIdentity): HomeTrustRecord {
+function anchorOnlyTrustRecord(anchor: DeviceIdentity): HomeTrustRecord & { anchorEpoch: number } {
   return {
     v: 1,
     schemaId: "HomeTrustRecord",
     homeId: "home-test",
     trustEpoch: 1,
+    anchorEpoch: 1,
     issuer: { deviceId: anchor.deviceId, issuerKeyId: anchor.deviceId },
     chainHead: { seq: 1, eventDigest: `sha256:${"0".repeat(64)}` },
     members: [{ device: anchor, roles: ["anchor"], state: "active" }],

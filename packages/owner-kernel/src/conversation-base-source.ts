@@ -97,7 +97,7 @@ export class ConversationBaseSource {
           commit.checkpointDigest !== state.manifest.digest || commit.freezeProofDigest !== sourceFreezeProofDigest(proof)) throw new TypeError('Conversation base commit does not bind its source proof');
     }
     if (!input.log.artifactProjection) throw new TypeError('Authority does not provide artifact-derived pages');
-    const cache = input.log.artifactProjection({ projectionId: 'conversation-base-seed', reducerVersion: 5, artifact: state.manifest, ownerCheckpoint: input.ownerCheckpoint });
+    const cache = input.log.artifactProjection({ projectionId: 'conversation-base-seed', reducerVersion: 7, artifact: state.manifest, ownerCheckpoint: input.ownerCheckpoint });
     const source = new ConversationBaseSource(input.log, input.artifacts, verifier, state, state.manifest, cache);
     source.#header = await cache.read(view => view.get('source/header')) as unknown as SourceHeader | undefined;
     if (source.#header) source.#checkHeader(source.#header);

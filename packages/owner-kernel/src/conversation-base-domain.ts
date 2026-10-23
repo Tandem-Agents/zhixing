@@ -16,6 +16,8 @@ import { readConversationGuardView, conversationRecordScope, conversationGuardRo
 import { reduceConversationRecoveryFacts } from './conversation-recovery-index.js';
 import type { ConversationBaseSource, ConversationBaseHeader, ConversationBaseLocation, AuthenticatedConversationFacts } from './conversation-base-source.js';
 import { corruptRunJournal } from './conversation-run-contracts.js';
+import { advancementRecoveryRoot, foldAdvancementRecovery } from './advancement-recovery-index.js';
+import { loadCommittedBundleBinding } from './conversation-assignment.js';
 
 const ordinal = (value: number) => String(value).padStart(16, '0');
 const controlKey = (id: string) => 'source/control/' + hash(id);
@@ -119,6 +121,14 @@ export async function prepareConversationBaseDomain(source: ConversationBaseSour
       await storeConversationGuard(view, id, state, before, group.sourceLsn, changes);
       await foldConversationRunExtras({ id, entry, envelope: group, item, view, put, drop, artifacts: source.artifacts, verifier: source.verifier,
         guard: state, context, priorState, priorAssignment, validated });
+      if (body.t === 'advancement-event') await foldAdvancementRecovery({ id, view, put, drop, event: await stored(body.event, source) });
+      else if (body.t === 'session-lifecycle' || body.t === 'session-meta' && body.operation === 'delete')
+        await foldAdvancementRecovery({ id, view, put, drop, lifecycle: body.t === 'session-meta' ? 'delete' : body.mutation as 'clear' | 'delete' });
+      else if (body.t === 'committed' && (await advancementRecoveryRoot(view, id)).active) {
+        const binding = await loadCommittedBundleBinding(group as ConversationFactGroup, source.artifacts, candidate => candidate.assignmentId === body.assignmentId);
+        const record = 'metadata' in binding.closure ? binding.closure.metadata : binding.closure.runRecord;
+        await foldAdvancementRecovery({ id, view, put, drop, committed: { runId: body.runId as string, record } });
+      }
       if (validated && body.t === 'advancement-event') for (const session of validated.advancementSessions.values()) {
         put('source/advancement-order/' + ordinal(Number.MAX_SAFE_INTEGER - Date.parse(session.createdAt)) + '/' + session.id, session.id);
       }
