@@ -1,3 +1,4 @@
+// test-source: exclusive —— 本文件断言 64 MB / 15s 墙钟资源边界，须在无并发测试负载时执行。
 import { spawn } from "node:child_process";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
