@@ -44,7 +44,7 @@
 ### Hermes Agent 源码
 
 - **仓库**: https://github.com/NousResearch/hermes-agent
-- **本地路径**: `E:\Dev\longxia\hermes-agent-main`
+- **本地路径**: `hermes-agent-main`
 - **可信度**: ★★★★★ — 开源仓库（MIT），直接阅读源码
 - **版本说明**: v0.6.0 (2026-03-30)
 - **技术栈**: Python，核心文件 ~9,200 行（run_agent.py）

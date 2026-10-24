@@ -52,7 +52,7 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 ## OpenClaw：provider 插件 + 单一 `web_search` 工具
 
-**原稿证据类型**：源码定位（仓库根 `E:\Dev\longxia\_refs\openclaw-main`，下列路径相对仓库根）。
+**原稿证据类型**：源码定位（仓库根 `openclaw-main`，下列路径相对仓库根）。
 
 > 本节研究对象为 OpenClaw（`github.com/openclaw/openclaw`），不是 OpenCode；不将不同项目的实现混作同一证据。
 
@@ -113,7 +113,7 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 
 ## Hermes：客户端多后端可插拔
 
-**原稿证据类型**：源码定位（仓库根 `E:\Dev\longxia\_refs\hermes-agent-main`，Python 3.11）。
+**原稿证据类型**：源码定位（仓库根 `hermes-agent-main`，Python 3.11）。
 
 ### 工具与后端
 
@@ -185,9 +185,9 @@ Claude Code 的 **WebFetch 是另一回事**，且更接近本地管线：域名
 调研时间 2026-05-23。
 
 **原稿源码定位（历史本地路径，未附版本锁定）**
-- OpenClaw：`E:\Dev\longxia\_refs\openclaw-main`（`extensions/*/`、`src/agents/tools/`、`src/plugins/`、`src/web-search/`、`src/security/`）
-- Hermes：`E:\Dev\longxia\_refs\hermes-agent-main`（`tools/web_tools.py`、`tools/registry.py`、`model_tools.py`）
-- Claude Code 逆向 schema：`E:\Dev\longxia\_refs\claude-code-reverse\results\tools\WebSearch.tool.yaml`；反混淆源码 `E:\Dev\longxia\_refs\claude-code-deobfuscation`（原稿检索依据，不能单独证明客户端不存在搜索实现）
+- OpenClaw：`openclaw-main`（`extensions/*/`、`src/agents/tools/`、`src/plugins/`、`src/web-search/`、`src/security/`）
+- Hermes：`hermes-agent-main`（`tools/web_tools.py`、`tools/registry.py`、`model_tools.py`）
+- Claude Code 逆向 schema：`claude-code-reverse\results\tools\WebSearch.tool.yaml`；反混淆源码 `claude-code-deobfuscation`（原稿检索依据，不能单独证明客户端不存在搜索实现）
 - 知行现状：`packages/tools-builtin/src/web-fetch.ts`、`web-fetch/distill.ts`、`factories.ts`
 
 **原研究的网页来源（历史资料）**

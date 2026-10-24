@@ -76,7 +76,7 @@
 - **失败保留**：候选5/7的启动或退出证明失败均保留，发现后中止对应批次并修复。早期热启驱动首次phase写入与harness初始化竞争、以及Host空闲退出使冷热混组，已改为等待observer、持有真实连接并校验没有新Host；旧数据未删。旧pending驱动曾误用不会返回committed的状态通知，最终已用completion端口闭合。
 - **历史事故限制**：前任一次ledger-unknown的原始首错日志已经缺失；已保存权威事实链，不猜成CPU原因。当前终态压力窗口通过故障注入和重试验证，未把已丢失的历史首错伪称为已复现。
 
-本轮主要证据目录为 `collab/threads/20261014-startup-closure-3c71/`。真实终端原始格网、PTY输出、合成home与保留缓存位于本机 `C:/Users/lenovo/AppData/Local/Temp/claude/e--Dev-longxia-zhixing/689f3f05-5fd8-4bd0-a797-66ead2c88c26/scratchpad/perf/`。PNG由真实CHAR_INFO格网呈现，属于终端抓帧展示，不是OS像素截图；字体替代不作为产品布局变更。
+本轮主要证据目录为 `collab/threads/20261014-startup-closure-3c71/`。真实终端原始格网、PTY输出、合成home与保留缓存保存在本机，未入库。PNG由真实CHAR_INFO格网呈现，属于终端抓帧展示，不是OS像素截图；字体替代不作为产品布局变更。
 
 ## V5 历史结论（不代表当前候选）
 

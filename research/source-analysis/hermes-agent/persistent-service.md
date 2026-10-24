@@ -2,7 +2,7 @@
 
 > **分析状态**: ✅ 完整分析（2026-04-16）
 > **核心问题**: Hermes 如何实现 7×24 常驻运行、17 平台消息网关、定时调度？
-> **源码路径**: `E:\Dev\longxia\_refs\hermes-agent-main\gateway\`
+> **源码路径**: `hermes-agent-main\gateway\`
 
 ## 一、核心结论
 

@@ -1,6 +1,6 @@
 # OpenClaw MCP 架构
 
-> 源码调研，基于 `E:\Dev\longxia\_refs\openclaw-main`（TypeScript 单体仓库）。路径相对仓库根，行号为调研时所见。纯事实记录，不含对知行的设计建议。
+> 源码调研，基于 `openclaw-main`（TypeScript 单体仓库）。路径相对仓库根，行号为调研时所见。纯事实记录，不含对知行的设计建议。
 
 ## 核心结论：MCP 不是一个模块，是三个相互独立的子系统
 

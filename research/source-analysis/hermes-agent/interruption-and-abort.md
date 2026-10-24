@@ -35,7 +35,7 @@ Hermes Agent 的中断与 abort 链路并不基于 `asyncio.CancelledError`，�
 | Stream consumer cancel | `gateway/stream_consumer.py:230-236` | 直接引证 |
 | 已有项目分析（参考用）| `research/source-analysis/hermes-agent/persistent-service.md` | 不替代源码 |
 
-> 行号皆来自 `E:/Dev/longxia/_refs/hermes-agent-main/`。`run_agent.py` 全文 9910 行；`gateway/run.py` 7900+ 行；`cli.py` 9000+ 行。三大入口都是单文件巨石，但内部行号定位精确。
+> 行号皆来自 `hermes-agent-main/`。`run_agent.py` 全文 9910 行；`gateway/run.py` 7900+ 行；`cli.py` 9000+ 行。三大入口都是单文件巨石，但内部行号定位精确。
 
 ## 一、用户中断（SIGINT / Ctrl+C）链路
 

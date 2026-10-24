@@ -1,7 +1,7 @@
 # Slash Command 输入补全 — Hermes Agent 源码解析
 
 > **所属系统**: Hermes Agent | **分析状态**: 已完成
-> **信息来源**（路径相对 `E:/Dev/longxia/_refs/hermes-agent-main/`）:
+> **信息来源**（路径相对 `hermes-agent-main/`）:
 > - `hermes_cli/commands.py` L1-50（模块说明）、L37-50（`CommandDef` dataclass）、L56-230（`COMMAND_REGISTRY` literal 入库）、L240-274（`COMMANDS / SUBCOMMANDS / _PIPE_SUBS_RE` 派生结构）、L642-971（`SlashCommandCompleter`）、L978-1033（`SlashCommandAutoSuggest`）
 > - `cli.py` L581（import）、L8155-8173（`SlashCommandCompleter + SlashCommandAutoSuggest + TextArea` 装配）
 > - 关联：Telegram / Slack / Discord 的 gateway 分派也读同一份 `COMMAND_REGISTRY`（见 `slack_subcommand_map` / `GATEWAY_KNOWN_COMMANDS`）

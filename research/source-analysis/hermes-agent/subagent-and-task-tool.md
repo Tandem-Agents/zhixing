@@ -43,7 +43,7 @@ Skills（`skills/` 目录、`tools/skills_tool.py`、`tools/skill_manager_tool.p
 | 测试用例 | `tests/agent/test_subagent_progress.py`、`tests/cli/test_cli_interrupt_subagent.py`、`tests/tools/test_delegate_subagent_timeout_diagnostic.py`、`tests/agent/test_subagent_stop_hook.py` | 引证 |
 | Skills 系统对比 | `tools/skills_tool.py:1-67`、`tools/skill_manager_tool.py:1-33`、`skills/software-development/subagent-driven-development/SKILL.md` | 直接引证 |
 
-> 行号皆来自 `E:/Dev/longxia/_refs/hermes-agent-main/`。`tools/delegate_tool.py` 全文 2525 行；`run_agent.py` 全文 9000+ 行；`hermes_state.py` 全文约 2000 行。
+> 行号皆来自 `hermes-agent-main/`。`tools/delegate_tool.py` 全文 2525 行；`run_agent.py` 全文 9000+ 行；`hermes_state.py` 全文约 2000 行。
 
 ## 一、详细机制分析
 

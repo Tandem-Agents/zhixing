@@ -156,7 +156,7 @@
 【固定尾注正文·开始（本行禁止发送）】
 本轮结束时，通过 Codex 原生任务通信能力向协调对话 thread ID `01a02f45-1a72-7690-90e8-9e8def854d08` 发送且只发送下面一行：
 
-工作包本轮已结束。请重新读取 `E:\Dev\longxia\zhixing\research\design\workbench\unit-development-workbench.md` 中“持续协调项目推进”提示词内容，检查发送本通知的目标对话最新状态并继续调度。
+工作包本轮已结束。请重新读取 `research\design\workbench\unit-development-workbench.md` 中“持续协调项目推进”提示词内容，检查发送本通知的目标对话最新状态并继续调度。
 
 通知发送成功后停止。
 【固定尾注正文·结束（本行禁止发送）】

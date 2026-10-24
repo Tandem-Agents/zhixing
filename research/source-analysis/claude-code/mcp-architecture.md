@@ -1,6 +1,6 @@
 # Claude Code MCP 架构
 
-> 源码调研，基于本地逆向/重写资料。**deobfuscation 层（cleanroom 重写）零 MCP 覆盖**，本文不依赖它。主证据来自 **analysis 层**（`E:\Dev\longxia\_refs\claude-code-analysis`，cleanroom 重写的结构化 TS 源码 `src/services/mcp/`，代表**较新版本**），交叉印证用 **reverse 层**（`E:\Dev\longxia\_refs\claude-code-reverse`，真实抓取的混淆/美化源码 + README + 真实 tool schema，代表**较旧版本**）。路径相对各自资料根。纯事实记录，不含对知行的设计建议。
+> 源码调研，基于本地逆向/重写资料。**deobfuscation 层（cleanroom 重写）零 MCP 覆盖**，本文不依赖它。主证据来自 **analysis 层**（`claude-code-analysis`，cleanroom 重写的结构化 TS 源码 `src/services/mcp/`，代表**较新版本**），交叉印证用 **reverse 层**（`claude-code-reverse`，真实抓取的混淆/美化源码 + README + 真实 tool schema，代表**较旧版本**）。路径相对各自资料根。纯事实记录，不含对知行的设计建议。
 >
 > **版本差异贯穿全文**：reverse（旧）只有 stdio+SSE、CLI 无 url/oauth；analysis（新）有 7 种 transport、OAuth/XAA、企业策略、7 种 scope。命名约定 `mcp__server__tool` 两版完全一致（reverse 硬编码 + analysis 函数化），是最可靠的事实。
 

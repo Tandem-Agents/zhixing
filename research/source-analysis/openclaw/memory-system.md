@@ -1,6 +1,6 @@
 # OpenClaw 记忆与学习系统源码分析
 
-> 分析对象：`E:\Dev\longxia\openclaw-main`
+> 分析对象：`openclaw-main`
 > 分析日期：2026-04-09
 > 核心问题：OpenClaw "越用越聪明" 的精确机制是什么？
 

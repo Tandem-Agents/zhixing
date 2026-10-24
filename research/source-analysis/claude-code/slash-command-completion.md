@@ -1,7 +1,7 @@
 # Slash Command 输入补全 — Claude Code 源码解析
 
 > **所属系统**: Claude Code | **分析状态**: 已完成
-> **信息来源**（行号基于 cleanroom deobfuscated 源码，路径相对 `E:/Dev/longxia/_refs/claude-code-analysis/`）:
+> **信息来源**（行号基于 cleanroom deobfuscated 源码，路径相对 `claude-code-analysis/`）:
 > - 触发/过滤核心：`src/utils/suggestions/commandSuggestions.ts` L1-567 全文
 > - 命令解析：`src/utils/slashCommandParsing.ts` L1-60 全文
 > - Typeahead 状态机：`src/hooks/useTypeahead.tsx` L1-1384（重点 L353-884 的 `updateSuggestions` dispatcher；L944-1225 的 Tab/Enter 分派）

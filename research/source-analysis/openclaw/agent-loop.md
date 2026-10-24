@@ -13,7 +13,7 @@ OpenClaw 的智能体循环分为两层：内层 Pi-Agent-Core 负责 LLM↔工�
 | 来源 | 路径 | 可信度 |
 |------|------|--------|
 | Pi-Agent-Core 开源仓库 | [github.com/badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts) | ★★★★★（源码直读）|
-| OpenClaw 本地源码 | `E:\Dev\longxia\openclaw-main\src\agents\pi-embedded-runner\` | ★★★★★（源码直读）|
+| OpenClaw 本地源码 | `openclaw-main\src\agents\pi-embedded-runner\` | ★★★★★（源码直读）|
 
 ## 一、内层循环：Pi-Agent-Core
 

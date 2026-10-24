@@ -1,7 +1,7 @@
 # OpenClaw Skill(技能)子系统实现级调研
 
 > 源码 v2026.5.25 / 2026-05-25
-> 唯一事实来源：`E:\Dev\longxia\_refs\openclaw-main`（pi-* 依赖已是 `@earendil-works`）。
+> 唯一事实来源：`openclaw-main`（pi-* 依赖已是 `@earendil-works`）。
 > 本文只调研 OpenClaw 现状，不含知行自身的设计建议。每条论断尽量落到 `file:line`。
 > 凡是没在源码 100% 核到的，文中明确标 **[未在源码确认]**。事实与评价分节标注。
 

@@ -1,6 +1,6 @@
 # Hermes Agent MCP 架构
 
-> 源码调研，基于 `E:\Dev\longxia\_refs\hermes-agent-main`（Python 3.11）。路径相对仓库根，行号为调研时所见。纯事实记录，不含对知行的设计建议。
+> 源码调研，基于 `hermes-agent-main`（Python 3.11）。路径相对仓库根，行号为调研时所见。纯事实记录，不含对知行的设计建议。
 
 ## 概述：单文件 client 核心 + 专用后台事件循环 + 官方 Python SDK
 

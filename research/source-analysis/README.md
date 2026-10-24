@@ -38,7 +38,7 @@
 
 ### Hermes Agent
 
-> **仓库**: https://github.com/NousResearch/hermes-agent | **本地**: `E:\Dev\longxia\_refs\hermes-agent-main` | **文档**: https://hermes-agent.nousresearch.com/docs/ | **协议**: MIT
+> **仓库**: https://github.com/NousResearch/hermes-agent | **本地**: `hermes-agent-main` | **文档**: https://hermes-agent.nousresearch.com/docs/ | **协议**: MIT
 
 Nous Research 开发的自主进化型开源智能体，核心差异化在于 Skills 自主创建/迭代、分层记忆系统和 15 平台消息网关。Python 技术栈，48K+ Stars。
 与 OpenClaw 同为独立部署型智能体，但架构理念和扩展机制存在显著差异，对知行的记忆系统、技能进化、多平台架构设计有重要参考价值。

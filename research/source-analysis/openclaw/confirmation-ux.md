@@ -1,7 +1,7 @@
 # OpenClaw 确认交互 UX — 源码解析
 
 > **所属系统**: OpenClaw | **焦点**: CLI/TUI 的审批请求交互  
-> **源码位置**: `e:/Dev/longxia/openclaw-main/`  
+> **源码位置**: `openclaw-main/`  
 > **分析日期**: 2026-04-13  
 > **核对方式**: 直接阅读下列源文件并记录真实行号
 

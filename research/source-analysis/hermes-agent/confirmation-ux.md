@@ -2,7 +2,7 @@
 
 > **所属系统**: Hermes Agent (Python, Nous Research)  
 > **焦点**: CLI 交互式审批对话框  
-> **源码位置**: `e:/Dev/longxia/hermes-agent-main/`  
+> **源码位置**: `hermes-agent-main/`  
 > **分析日期**: 2026-04-13  
 > **核对方式**: 直接阅读 `cli.py`、`tools/approval.py`，记录真实行号
 

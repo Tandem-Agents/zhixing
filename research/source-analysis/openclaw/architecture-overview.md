@@ -1,7 +1,7 @@
 # OpenClaw — 架构与方案设计总览
 
 > **分析状态**：基于当前真实源码全量重新核实（已对照 `2026.5.25` 新源码逐条复核行号/路径/结论；上一次基线为 `2026.4.27`）
-> **源码版本依据**：`E:\Dev\longxia\_refs\openclaw-main`，`package.json` version `2026.5.25`，`packageManager pnpm@11.2.2`，`engines.node >=22.19.0`
+> **源码版本依据**：`openclaw-main`，`package.json` version `2026.5.25`，`packageManager pnpm@11.2.2`，`engines.node >=22.19.0`
 > **更新日期**：2026-05-25
 
 一句话定性：OpenClaw 是一个**自托管、单用户的"个人 AI 助手"**——它在用户已有的消息通道（WhatsApp/Telegram/Slack/Discord/iMessage 等）上回应，内置一个 Gateway 作为控制平面，把多通道消息汇聚到一个可插件化扩展（通道/工具/Provider/Agent 引擎/上下文引擎全可注册）的 Agent 运行时（README.md 原文："OpenClaw is a personal AI assistant you run on your own devices... The Gateway is just the control plane — the product is the assistant"）。
