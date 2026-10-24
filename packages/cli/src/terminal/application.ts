@@ -187,6 +187,8 @@ class TerminalApplication {
   #taskStatusDirty = false;
   #taskStatusSending?: Promise<void>;
   #startupWatch?: string;
+  // 进行中的启动尝试：结束前提交一律不接纳，会话页如实投影为“启动中”，不提前提示可发送
+  #startupAttempt?: object;
   #noticeDisplayReady?: Promise<void>;
   #releaseNoticeDisplay?: () => void;
   #sceneCreateAbort?: AbortController;
@@ -447,12 +449,12 @@ class TerminalApplication {
     switch (action.kind) {
       case 'startup':
         if (this.#started) throw Error('terminal-startup-already-requested');
-        this.#started = true; this.#background(() => this.args.length ? this.#independentCommand() : this.#startup()); return { accepted: true };
+        this.#started = true; this.#background(release => this.args.length ? this.#independentCommand() : this.#startup(release)); return { accepted: true };
       case 'recovery-part': case 'recovery-page': case 'recovery-cancel':
         await this.#recovery.act(action); return { accepted: true };
       case 'retry-connection':
         if (this.#mainView.inputReceiptPending) { this.#receiptRetryRequested = true; this.#receiptRetry?.(); return { accepted: true }; }
-        this.#leaveHistoryRead(); this.#background(() => this.#startup()); return { accepted: true };
+        this.#leaveHistoryRead(); this.#background(release => this.#startup(release)); return { accepted: true };
       case 'display-retry': this.#controller?.retryRecovery(); this.#background(() => this.#retryDisplay()); return { accepted: true };
       case 'exit': void this.#close(this.args.length ? 130 : 0, 'user-exit'); return { accepted: true };
       case 'configuration-action': case 'secret-value':
@@ -611,17 +613,22 @@ class TerminalApplication {
     }
   }
 
-  #background(operation: () => Promise<void>): void {
+  #background(operation: (release: () => void) => Promise<void>): void {
     if (this.#operation || this.#presentingConfirmation || this.#abort.signal.aborted) throw Error('terminal-operation-in-progress');
-    const work = operation().catch(async error => {
+    // 操作的独占部分可以提前结束：交还之后到达的提交与操作按常规准入，收尾工作不再占着准入门
+    let work: Promise<void> | undefined, released = false;
+    const release = () => { released = true; if (work && this.#operation === work) this.#operation = undefined; };
+    work = operation(release).catch(async error => {
       if (this.#abort.signal.aborted) return;
       recordTerminalFailure(this.#logging.records, error, 'terminal-operation-failed');
       this.#mainView = { ...this.#mainView, busy: false, message: error instanceof ConfigurationEditPendingError
         ? error.message : `操作未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`,
         ...(error instanceof ConfigurationEditPendingError ? { choices: [{ id: 'config', label: '重新打开配置并核对状态' }, { id: 'exit', label: '退出终端' }] } : {}) };
+      // 操作已结束：先交还准入门，再发布结果视图
+      release();
       if (!this.#editor) await this.#publish(this.#mainView);
-    }).finally(() => { if (this.#operation === work) this.#operation = undefined; });
-    this.#operation = work;
+    }).finally(release);
+    if (!released) this.#operation = work;
     void work.catch(() => this.#close(70, 'application-operation-undelivered'));
   }
 
@@ -658,7 +665,11 @@ class TerminalApplication {
     }
   }
 
-  async #startup(): Promise<void> {
+  async #startup(release: () => void = () => {}): Promise<void> {
+    const attempt = {};
+    this.#startupAttempt = attempt;
+    // 本次启动有了结果（可接纳、不可用或失败）：先清启动态、交还准入门，再发布结果视图
+    const finish = () => { if (this.#startupAttempt === attempt) this.#startupAttempt = undefined; release(); };
     // Directory preparation overlaps connection/history RPC work. It belongs
     // to the existing display queue and is joined before input admission; close
     // already drains that same queue on cancellation or an unavailable service.
@@ -696,10 +707,10 @@ class TerminalApplication {
       const message = result.result.kind === 'read-unavailable' ? result.result.message : result.result.kind === 'secret-store-error'
         ? '本机凭据仓库当前不可用。请先恢复系统凭据访问，再重试。'
         : '本机配置未就绪。请修复配置后重试，或退出查看运行记录。';
-      await this.#unavailable(message); return;
+      finish(); await this.#unavailable(message); return;
     }
     if (result.kind === 'unavailable') {
-      await this.#unavailable(result.error instanceof CoreHostUnavailableError ? result.error.publicReason : '本机服务连接失败。'); return;
+      finish(); await this.#unavailable(result.error instanceof CoreHostUnavailableError ? result.error.publicReason : '本机服务连接失败。'); return;
     }
     this.#holdNoticeDisplay(); this.#taskNotices?.resume();
     if (this.#controller) {
@@ -792,15 +803,36 @@ class TerminalApplication {
     this.#mainView = { ...this.#mainView, connected: true, busy: false, choices: undefined, connectionState: undefined, readyForInput: true };
     this.#startupWatch = undefined;
     this.#historyReturn = undefined;
+    // 待确认的验收方式是接纳新输入前的必要前置：先由选择页处理（可收起），期间会话页仍投影为启动态
+    if (this.#pendingRubric || this.#deferredRubric) await this.#resolveRubric();
+    // 先交还准入门再报可发送：看到可发送之后到达的提交按常规准入
+    finish();
     await this.#publish(this.#mainView);
-    this.#resumeNoticeDisplay();
+    // 交还之后可能已开始更新的启动尝试，通知显示的暂停归它管
+    if (!this.#startupAttempt) this.#resumeNoticeDisplay();
     // Discovery starts after the connected first page; it is not part of N's
     // admission graph. A directly typed skill awaits this same refresh owner.
     void this.#ensureSkillsBinding().then(binding => binding.commands.refresh()).catch(error => this.#skillsFailed(error));
     void this.#tasks?.refresh();
-    if (this.#pendingRubric || this.#deferredRubric) await this.#resolveRubric();
-    await this.#confirmations.refresh();
-    } finally { this.#resumeNoticeDisplay(); }
+    // 待处理确认的核对与运行中随时到达的确认通知同性质，不是提交前置；宿主不会因未核对而放行任何操作
+    void this.#confirmations.refresh().catch(error => this.#confirmationRefreshFailed(error));
+    } catch (error) {
+      // 尚未建立会话就失败：没有可接纳输入的对象，如实呈现为可重试的不可用；已有会话时按常规操作失败处理
+      if (this.#controller || this.#abort.signal.aborted) throw error;
+      recordTerminalFailure(this.#logging.records, error, 'terminal-startup-failed');
+      finish(); await this.#unavailable(`启动未完成：${error instanceof Error ? error.message.slice(0, 2048) : '请重试或查看运行记录。'}`);
+    } finally {
+      if (this.#startupAttempt === attempt) this.#startupAttempt = undefined;
+      if (!this.#startupAttempt) this.#resumeNoticeDisplay();
+    }
+  }
+
+  #confirmationRefreshFailed(error: unknown): void {
+    if (this.#abort.signal.aborted) return;
+    recordTerminalFailure(this.#logging.records, error, 'terminal-confirmation-refresh-failed');
+    this.#mainView = { ...this.#mainView, message: '待处理确认未能核对；不会自动允许任何操作。可以重新核对。',
+      choices: [{ id: 'confirmation-retry', label: '重新核对待处理确认' }] };
+    if (!this.#editor && !this.#selection) void this.#publish(this.#mainView).catch(() => this.#close(70, 'terminal-confirmation-notice-undelivered'));
   }
 
   async #unavailable(message: string): Promise<void> {
@@ -2085,7 +2117,9 @@ class TerminalApplication {
     if (this.#abort.signal.aborted) return Promise.reject(Error('terminal-application-closed'));
     if (current && !current()) return Promise.resolve();
     if (!this.#ownsPage(view)) return Promise.resolve();
-    this.#nextView = { view: { ...view, conversationId: view.conversationId ?? this.#controller?.current.conversationId,
+    // 启动未结束时，选会话/首屏历史/恢复进度等任何会话页更新都保持启动态；已声明的连接态（如不可用）照原样
+    const starting = this.#startupAttempt !== undefined && view.kind === 'conversation' && !view.connectionState;
+    this.#nextView = { view: { ...view, ...(starting ? { connectionState: 'starting' as const } : {}), conversationId: view.conversationId ?? this.#controller?.current.conversationId,
       environment: view.kind === 'conversation' && this.#resolvedLocalView ? terminalEnvironment(this.#resolvedLocalView) : undefined }, current };
     if (!this.#publishing) this.#publishing = (async () => {
       while (this.#nextView && !this.#abort.signal.aborted) {

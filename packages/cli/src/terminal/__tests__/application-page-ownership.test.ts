@@ -45,6 +45,20 @@ describe('foreground terminal page ownership', () => {
     target[kind] = undefined; await target.publishHistoryView();
     expect(views.at(-1).kind).toBe('conversation');
   });
+  it('keeps every conversation update in the starting projection until startup admits input', async () => {
+    const { target, views } = fixture(); target.startupAttempt = {};
+    await target.publish({ ...target.mainView, message: '正在准备最近的对话…' });
+    expect(views.at(-1)).toMatchObject({ kind: 'conversation', connectionState: 'starting', message: '正在准备最近的对话…' });
+    target.history = { hasMore: true }; await target.publishHistoryView();
+    expect(views.at(-1).connectionState).toBe('starting');
+    await target.publish({ ...target.mainView, connectionState: 'unavailable' });
+    expect(views.at(-1).connectionState).toBe('unavailable');
+    await target.publish({ kind: 'configuration', title: '配置' });
+    expect(views.at(-1).connectionState).toBeUndefined();
+    target.startupAttempt = undefined;
+    await target.publish({ ...target.mainView, readyForInput: true });
+    expect(views.at(-1).connectionState).toBeUndefined();
+  });
   it('rechecks ownership of an already queued main update before delivering it', async () => {
     const { target, views } = fixture(), delivery = Promise.withResolvers<void>();
     target.channel.send = async (message: any) => { views.push(message.view); await delivery.promise; };
