@@ -1,5 +1,10 @@
 import { expect, it, vi } from 'vitest';
-import { BASE_CONVERSATION, BASE_TRANSFER, createConversationBaseHarness } from './conversation-base-harness.js';
+import { BASE_CONVERSATION, BASE_TRANSFER, baseVerifier, createConversationBaseHarness } from './conversation-base-harness.js';
+import { ReferenceMessageInputReader } from './reference-message-input-reader.js';
+import { ConversationReadIndex } from '../conversation-read-index.js';
+import type { ConversationRunJournal } from '../conversation-assignment.js';
+import type { DurableLogCheckpoint, FileArtifactStore, FileAuthorityCommitLog } from '@zhixing/core/authority';
+import type { ConversationBodyPage, ConversationControlCursor, ConversationControlFact, ConversationControlPage } from '@zhixing/core/contracts';
 import { conversationRecoveryPage, conversationRecoveryPending } from '../conversation-recovery-index.js';
 import { ConversationBaseSource } from '../conversation-base-source.js';
 import { conversationBaseKey, openConversationBase, type ConversationBaseBinding } from '../conversation-base-registry.js';
@@ -123,3 +128,97 @@ it('discovers adopted queued work, pages its source input and retires it durably
   expect(await restarted.owner.currentState('queued')).toBe('cancelled');
   expect(await conversationRecoveryPending(restarted.log, restarted.artifacts, BASE_CONVERSATION)).toBe(false);
 }, 120_000);
+
+/** 生产路径（运行状态合并视图）与早期全量折叠实现读同一份持久基底与本地日志 */
+async function compareOutsideHistory(owner: ConversationRunJournal, data: { log: FileAuthorityCommitLog; artifacts: FileArtifactStore },
+  source: Parameters<ConversationReadIndex['installBaseView']>[0]) {
+  const directory = new ConversationReadIndex(data.log, data.artifacts, baseVerifier); directory.installBaseView(source);
+  const reference = new ReferenceMessageInputReader(data.log, directory, data.artifacts, BASE_CONVERSATION); reference.installBaseView(source);
+  const normalize = (page: Awaited<ReturnType<ConversationRunJournal['messageInputsOutsideHistory']>>) => ({
+    inputs: page.inputs.map(input => [input.message.inputIdentity?.id, input.runId, input.state, input.consumed, input.disposition]),
+    truncated: page.truncated, interruptibleRuns: page.interruptibleRuns,
+  });
+  const [actual, expected] = [await owner.messageInputsOutsideHistory(), await reference.messageInputsOutsideHistory()];
+  expect(normalize(actual)).toEqual(normalize(expected));
+  return normalize(actual);
+}
+
+it('reads outside-history inputs and control targets over a persistent base like the full fold across pages and a restart', async () => {
+  const h = await createConversationBaseHarness();
+  // 66 条取消的基底输入跨过 64 条一页的边界，另有两个排队的会话来源运行作为控制目标
+  for (let n = 0; n < 66; n++) await h.input(h.sourceJournal, 'base-' + n, n);
+  await h.admit(h.sourceJournal, 'base-queued-0', 66); await h.admit(h.sourceJournal, 'base-queued-1', 67);
+  await h.transfer();
+  const first = await compareOutsideHistory(h.targetJournal, h.target, (await h.importer.committedBaseSource(BASE_TRANSFER)).source);
+  expect(first.inputs).toHaveLength(68);
+  expect(first.interruptibleRuns).toEqual([{ runId: 'base-queued-0', state: 'queued' }, { runId: 'base-queued-1', state: 'queued' }]);
+  const restarted = await h.restartTarget();
+  expect(await compareOutsideHistory(restarted.owner, restarted, restarted.publication.source)).toEqual(first);
+}, 240_000);
+
+it('merges persistent base and local outside-history inputs like the full fold and hides them behind a local clear', async () => {
+  const h = await createConversationBaseHarness();
+  for (let n = 0; n < 66; n++) await h.input(h.sourceJournal, 'base-' + n, n);
+  await h.transfer();
+  await h.admit(h.targetJournal, 'local-queued', 66);
+  for (let n = 0; n < 3; n++) await h.input(h.targetJournal, 'local-' + n, 67 + n);
+  const merged = await compareOutsideHistory(h.targetJournal, h.target, (await h.importer.committedBaseSource(BASE_TRANSFER)).source);
+  expect(merged.inputs).toHaveLength(70);
+  expect(merged.interruptibleRuns).toEqual([{ runId: 'local-queued', state: 'queued' }]);
+  const restarted = await h.restartTarget();
+  expect(await compareOutsideHistory(restarted.owner, restarted, restarted.publication.source)).toEqual(merged);
+  await restarted.owner.cancelRun({ runId: 'local-queued', requestId: 'cancel-local-queued' });
+  expect((await h.mutate(restarted.owner, restarted, 'clear-target', { kind: 'window-op', op: 'clear' })).kind).toBe('applied');
+  await h.input(restarted.owner, 'after-clear', 70);
+  const cleared = await compareOutsideHistory(restarted.owner, restarted, restarted.publication.source);
+  expect(cleared.inputs.map(input => input[0])).toEqual(['message-after-clear']);
+}, 240_000);
+
+it('starts control recovery at the history boundary over a persistent base and resets a boundary older than the adoption', async () => {
+  const h = await createConversationBaseHarness();
+  for (let n = 0; n < 66; n++) await h.input(h.sourceJournal, 'base-' + n, n);
+  await h.admit(h.sourceJournal, 'base-queued-0', 66); await h.admit(h.sourceJournal, 'base-queued-1', 67);
+  // 收编之前取得的边界：这份历史不含后来装入的基底
+  const early = await h.targetJournal.recoveryPage({ mode: 'body-page', conversationId: BASE_CONVERSATION, includeInputs: true }) as ConversationBodyPage;
+  await h.transfer();
+  expect(await h.targetJournal.recoveryPage({ mode: 'control-page', conversationId: BASE_CONVERSATION, historyThrough: early.historyThrough! })).toMatchObject({ reset: true, facts: [] });
+  const scan = async (first: { historyThrough?: DurableLogCheckpoint }) => {
+    const facts: ConversationControlFact[] = []; let cursor: ConversationControlCursor | undefined;
+    for (;;) {
+      const page = await h.targetJournal.recoveryPage({ mode: 'control-page', conversationId: BASE_CONVERSATION, ...(cursor ? { cursor } : first) }) as ConversationControlPage;
+      expect(page.reset).toBe(false); facts.push(...page.facts); cursor = page.cursor;
+      if (!page.hasMore) return facts;
+    }
+  };
+  const first = await h.targetJournal.recoveryPage({ mode: 'body-page', conversationId: BASE_CONVERSATION, includeInputs: true }) as ConversationBodyPage;
+  const full = await scan({}), bounded = await scan({ historyThrough: first.historyThrough! });
+  // 旧扫描读完整个基底（68 条输入与 68 个状态）；从边界起步只补发基底里仍未结束的两个运行
+  expect(full.filter(fact => fact.kind === 'input')).toHaveLength(68);
+  expect(bounded.filter(fact => fact.kind === 'input')).toEqual([]);
+  const openStatus = (facts: ConversationControlFact[]) => facts.flatMap(fact => fact.kind === 'status' && fact.notice.state === 'queued'
+    ? [[fact.notice.ref.runId, fact.notice.statusRevision, fact.communication]] : []);
+  expect(openStatus(bounded)).toEqual(openStatus(full));
+  expect(bounded.map(fact => fact.kind === 'status' && fact.historyCovered)).toEqual([true, true]);
+}, 240_000);
+
+it('moves a base run out of the current set when the target changes its state', async () => {
+  // 小基底：较大基底下目标端对基底运行的决定会撞上已登记的 backpressure 缺陷（剩余工作台账，包4）
+  const h = await createConversationBaseHarness();
+  await h.admit(h.sourceJournal, 'base-queued-0', 0); await h.admit(h.sourceJournal, 'base-queued-1', 1);
+  await h.transfer();
+  const boundary = async () => ((await h.targetJournal.recoveryPage({ mode: 'body-page', conversationId: BASE_CONVERSATION, includeInputs: true })) as ConversationBodyPage).historyThrough!;
+  const scan = async (historyThrough: DurableLogCheckpoint) => {
+    const facts: ConversationControlFact[] = []; let cursor: ConversationControlCursor | undefined;
+    for (;;) {
+      const page = await h.targetJournal.recoveryPage({ mode: 'control-page', conversationId: BASE_CONVERSATION, ...(cursor ? { cursor } : { historyThrough }) }) as ConversationControlPage;
+      facts.push(...page.facts); cursor = page.cursor;
+      if (!page.hasMore) return facts.flatMap(fact => fact.kind === 'status' ? [[fact.notice.ref.runId, fact.notice.state, !!fact.historyCovered]] : [[fact.kind]]);
+    }
+  };
+  const before = await boundary();
+  await h.targetJournal.cancelRun({ runId: 'base-queued-0', requestId: 'target-cancel' });
+  // 边界在取消之前：已取消的基底运行不在当前集合，它的新状态由尾部给出
+  expect(await scan(before)).toEqual([['base-queued-1', 'queued', true], ['base-queued-0', 'cancelled', false]]);
+  // 边界在取消之后：只剩仍在排队的基底运行
+  expect(await scan(await boundary())).toEqual([['base-queued-1', 'queued', true]]);
+}, 240_000);

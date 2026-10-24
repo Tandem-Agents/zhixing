@@ -30,6 +30,7 @@ import type {
   StreamFrame,
   ConversationControlCursor,
   ConversationControlFact,
+  ConversationControlPage,
   ConversationInputCursor,
   ConversationInputFragment,
   ConversationCommitSummary,
@@ -229,7 +230,8 @@ export interface ConversationControllerOptions<Outcome = TurnOutcome> {
   onRecoveryDrain?: (turn: ObservedTurnNotification) => Promise<void>;
   onRecoveryReset?: (conversationId: string, current: () => boolean) => Promise<void>;
   historyRunIds?: () => readonly string[];
-  historyThroughInputLsn?: () => number | undefined;
+  /** 已显示历史首页冻结的本地权威边界；控制恢复从这里起步，边界之前只补齐仍有义务的运行。 */
+  historyThrough?: () => import('@zhixing/core/authority').DurableLogCheckpoint | undefined;
 }
 
 export interface InitialConversationSelection {
@@ -409,6 +411,9 @@ export class ConversationController<Outcome = TurnOutcome> {
    * 补进同一回合，不再把它的输入、状态或正文当作旁观运行重新展示。
    */
   private readonly localRunTurns = new Map<string, { readonly turnId: string; readonly text: ObservedTextPrefix }>();
+  /** 两条恢复链各自尚未交给消费者的精确补齐事实（按源顺序），只在新边界扫描时取得、随页成功消费前移 */
+  private recoveryExact: { readonly conversationId: string; readonly entries: readonly ExactFact[] } | undefined;
+  private completionExact: { readonly conversationId: string; readonly entries: readonly ExactFact[] } | undefined;
   private readonly turnOutcomes = new Map<string, Promise<Outcome>>();
   private readonly pendingAbortByTurn = new Map<
     string,
@@ -1088,6 +1093,11 @@ export class ConversationController<Outcome = TurnOutcome> {
     const runId = this.durableRunByTurn.get(turnId);
     if (!runId) return;
     rememberLocalRun(this.localRunTurns, runId, { turnId, text: this.processRuns.get(runId)?.text ?? new ObservedTextPrefix() });
+    if (this.localRunTurns.size > 512) {
+      // 恢复链按终态逐个回收；仍超过上限说明恢复长期落后，不逐出未完成的归属，改为从历史重建显示
+      if (this.opts.pagedRecovery) { this.recoveryResetRequested = true; this.wakeRecovery(); }
+      else this.localRunTurns.delete(this.localRunTurns.keys().next().value!);
+    }
     this.durableRunByTurn.delete(turnId);
     this.durableRuns.delete(runId);
     this.pendingFinals.delete(runId);
@@ -1267,7 +1277,8 @@ export class ConversationController<Outcome = TurnOutcome> {
     this.recoveryFactProgress = undefined;
     this.completionCursor = undefined;
     // 显示已从历史重建：此前由本地回合显示的运行，此后按历史与恢复事实展示。
-    this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.observedContinuations.clear(); this.localRunTurns.clear();
+    this.recoveryResetRequested = false; this.recoveryCursor = undefined; this.recoveryExact = undefined; this.completionExact = undefined;
+    this.observedContinuations.clear(); this.localRunTurns.clear();
     for (const output of this.localOutput.values()) if (output.conversationId === conversationId) {
       output.text.reset(); output.recovering = false;
     }
@@ -1285,7 +1296,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (!current()) return;
           this.finishRecoveryReset(conversationId);
         }
-        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.(), this.recoveryCursor ? undefined : this.opts.historyThroughInputLsn?.());
+        const page = await this.opts.conversation.controlPage(conversationId, this.recoveryCursor, this.recoveryCursor ? undefined : this.opts.historyRunIds?.(), this.recoveryCursor ? undefined : this.opts.historyThrough?.());
         if (!current()) return;
         if (page.reset) {
           this.recoveryResetRequested = true;
@@ -1293,9 +1304,16 @@ export class ConversationController<Outcome = TurnOutcome> {
           if (!current()) return;
           this.finishRecoveryReset(conversationId); this.recoveryRequested = true; continue;
         }
+        if (!this.recoveryCursor && page.cursor.historyThroughInputLsn !== undefined) {
+          this.finalRevisionByConversation.set(conversationId, Math.max(this.finalRevisionByConversation.get(conversationId) ?? 0, page.cursor.historyThroughCommitRevision ?? 0));
+          this.recoveryExact = { conversationId, entries: await this.exactRunFacts(conversationId, this.obligatedRuns(conversationId, 'recovery'), page.cursor.historyThroughInputLsn, current) };
+          if (!current()) return;
+        }
+        const merged = mergeExactFacts(page, this.recoveryExact?.conversationId === conversationId ? this.recoveryExact.entries : []);
+        const facts = merged.facts;
         // Only this bounded metadata page survives its receive consumer. One
         // retry lifetime stays at the same fact; no failed fact is evicted.
-        for (const fact of page.facts) {
+        for (const fact of facts) {
           let delay = 25;
           const key = JSON.stringify([conversationId, page.cursor.upper, fact]);
           const progress = this.recoveryFactProgress?.key === key ? this.recoveryFactProgress.progress : {};
@@ -1322,6 +1340,7 @@ export class ConversationController<Outcome = TurnOutcome> {
         }
         if (!current()) return;
         this.recoveryCursor = page.cursor;
+        this.recoveryExact = merged.pending.length ? { conversationId, entries: merged.pending } : undefined;
         this.opts.onRecoveryState?.('idle');
         if (page.hasMore) this.recoveryRequested = true;
         await new Promise<void>(setImmediate);
@@ -1367,14 +1386,19 @@ export class ConversationController<Outcome = TurnOutcome> {
       do {
         this.completionScanRequested = false;
         const page = await this.opts.conversation.controlPage(conversationId, this.completionCursor,
-          this.completionCursor ? undefined : this.opts.historyRunIds?.(), this.completionCursor ? undefined : this.opts.historyThroughInputLsn?.());
+          this.completionCursor ? undefined : this.opts.historyRunIds?.(), this.completionCursor ? undefined : this.opts.historyThrough?.());
         if (!current()) return;
         if (page.reset) {
-          this.completionCursor = undefined;
+          this.completionCursor = undefined; this.completionExact = undefined;
           if (++resets >= 3) throw new RecoveryGenerationChanged();
           this.completionScanRequested = true; continue;
         }
-        for (const fact of page.facts) {
+        if (!this.completionCursor && page.cursor.historyThroughInputLsn !== undefined) {
+          this.completionExact = { conversationId, entries: await this.exactRunFacts(conversationId, this.obligatedRuns(conversationId, 'completion'), page.cursor.historyThroughInputLsn, current) };
+          if (!current()) return;
+        }
+        const merged = mergeExactFacts(page, this.completionExact?.conversationId === conversationId ? this.completionExact.entries : []);
+        for (const fact of merged.facts) {
           if (!current()) return;
           if (fact.kind === 'final') await this.confirmCommittedRun(fact.frame, current);
           else if (fact.kind === 'status') {
@@ -1384,6 +1408,7 @@ export class ConversationController<Outcome = TurnOutcome> {
           }
         }
         this.completionCursor = page.cursor;
+        this.completionExact = merged.pending.length ? { conversationId, entries: merged.pending } : undefined;
         if (page.hasMore) this.completionScanRequested = true;
         await new Promise<void>(setImmediate);
       } while (current() && this.completionScanRequested);
@@ -1405,6 +1430,30 @@ export class ConversationController<Outcome = TurnOutcome> {
     this.completionScan = work;
   }
 
+  /**
+   * 历史边界之前仍归本进程处理的运行：本地等待中的回合、尚未结算的旁观运行；完成链另含未关闭的过程展示
+   * （其终态还要结束过程投影）。其余边界前的事实由历史展示覆盖，不再读取。
+   */
+  private obligatedRuns(conversationId: string, chain: 'recovery' | 'completion'): string[] {
+    const runs = new Set<string>();
+    for (const [runId, watch] of this.durableRuns) if (watch.conversationId === conversationId) runs.add(runId);
+    for (const [runId, observed] of this.observedContinuations) if (observed.conversationId === conversationId && !observed.settled) runs.add(runId);
+    if (chain === 'completion') for (const [runId, process] of this.processRuns) if (!process.closed && process.source.conversationId === conversationId) runs.add(runId);
+    return [...runs];
+  }
+
+  /**
+   * 按运行精确读取边界之前的终态与 final（每次至多 32 个），跨批按源顺序排好，再与当前集合段按源顺序合并后
+   * 交给同一消费者。边界之后的事实与未结束运行的状态不在其中，仍由控制页按日志顺序给出。
+   */
+  private async exactRunFacts(conversationId: string, runIds: readonly string[], through: number, current: () => boolean): Promise<ExactFact[]> {
+    const entries: ExactFact[] = [];
+    for (let offset = 0; offset < runIds.length && current(); offset += 32) {
+      entries.push(...(await this.opts.conversation.runFacts(conversationId, runIds.slice(offset, offset + 32), through)).entries);
+    }
+    return entries.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+  }
+
   private async consumeRecoveredFact(conversationId: string, fact: ConversationControlFact, progress: RecoveryProgress, current: () => boolean, historyThroughCommitRevision: number): Promise<void> {
     if (fact.kind === 'input') {
       progress.inputCursor ??= fact.cursor;
@@ -1417,6 +1466,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       if (!historyCovered || this.durableRuns.has(fact.frame.runId)) await this.presentRecoveredFinal(fact.frame, progress, current, historyCovered);
       if (!current()) return;
       this.finalRevisionByConversation.set(conversationId, Math.max(this.finalRevisionByConversation.get(conversationId) ?? 0, fact.frame.commitRevision));
+      // 已提交运行的显示到此结算完毕，本地回合不再需要认领它
+      if (!this.durableRuns.has(fact.frame.runId)) this.localRunTurns.delete(fact.frame.runId);
       return;
     }
     const notice = fact.notice, runId = notice.ref.runId;
@@ -1451,6 +1502,8 @@ export class ConversationController<Outcome = TurnOutcome> {
       observed.settled = true;
       this.opts.onObservedTurnComplete?.(identity);
     }
+    // 未提交的终态（取消、失败、过期）到此显示完毕；uncertain 之后还可能提交，仍归本地回合
+    if (notice.state !== 'uncertain' && !watch) this.localRunTurns.delete(runId);
   }
 
   private async presentRecoveredInputs(conversationId: string, runId: string, progress: RecoveryProgress, current: () => boolean): Promise<void> {
@@ -2409,11 +2462,29 @@ function advancedStatusCursors(
     cursor.afterStatusRevision > before.afterStatusRevision));
 }
 
-/** 本地回合负责展示的运行：一次会话内的本地回合数有限，保留足够长，覆盖恢复扫描可能滞后的范围。 */
+type ExactFact = import('@zhixing/core/contracts').ConversationRunFactsPage['entries'][number];
+
+/**
+ * 把精确补齐的事实与本页开头的当前集合段按源顺序合并。当前集合段在本页读完时，剩余的精确事实排在其后的
+ * 尾部事实之前；没读完时，顺序键更大的精确事实留到下一页再合并。
+ */
+function mergeExactFacts(page: ConversationControlPage, pending: readonly ExactFact[]): { facts: ConversationControlFact[]; pending: readonly ExactFact[] } {
+  if (!pending.length) return { facts: [...page.facts], pending };
+  const orders = page.currentOrder ?? [], facts: ConversationControlFact[] = [];
+  let next = 0;
+  for (let index = 0; index < orders.length; index++) {
+    while (next < pending.length && pending[next]!.order < orders[index]!) facts.push(pending[next++]!.fact);
+    facts.push(page.facts[index]!);
+  }
+  const rest = page.facts.slice(orders.length);
+  if (page.cursor.current) return { facts: [...facts, ...rest], pending: pending.slice(next) };
+  return { facts: [...facts, ...pending.slice(next).map(entry => entry.fact), ...rest], pending: [] };
+}
+
+/** 本地回合负责展示的运行：恢复链消费完它的终态后回收（见 consumeRecoveredFact） */
 function rememberLocalRun(map: Map<string, { readonly turnId: string; readonly text: ObservedTextPrefix }>, runId: string, value: { readonly turnId: string; readonly text: ObservedTextPrefix }): void {
   map.delete(runId);
   map.set(runId, value);
-  if (map.size > 512) map.delete(map.keys().next().value!);
 }
 
 function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V): void {

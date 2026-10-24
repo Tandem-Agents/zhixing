@@ -568,10 +568,12 @@ it.each([false, true])('orders cancelled inputs and successful bodies once after
   expect(first.fragments.map(f => f.text)).toEqual(['reply-success-4', 'success-4', 'cancel-3', 'reply-success-2']);
   const fragments = await timelinePages(cold, terminalCursor);
   expect(fragments.map(f => f.text).reverse()).toEqual(['cancel-early', 'success-2', 'reply-success-2', 'cancel-3', 'success-4', 'reply-success-4']);
-  const page = await cold.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', historyThroughInputLsn: first.historyThroughInputLsn }) as ConversationControlPage;
+  expect(first.historyThrough?.lsn).toBe(first.historyThroughInputLsn);
+  const page = await cold.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', historyThrough: first.historyThrough }) as ConversationControlPage;
   expect(page.facts.filter(f => f.kind === 'input')).toEqual([]);
   expect(page.cursor.historyThroughCommitRevision).toBe(2);
-  expect(page.facts.filter(f => f.kind === 'status')).toEqual([expect.objectContaining({ historyCovered: true })]);
+  // 边界之前的运行都已结束，由历史覆盖，不再下发状态事实
+  expect(page.facts.filter(f => f.kind === 'status')).toEqual([]);
   await h.add('live-remote', 'arrived after history opened', 4);
   const live = await cold.recoveryPage({ mode: 'control-page', conversationId: 'recovery-conversation', cursor: page.cursor }) as ConversationControlPage;
   expect(live.facts.filter(f => f.kind === 'input').map(f => f.cursor.runId)).toEqual(['live-remote']);

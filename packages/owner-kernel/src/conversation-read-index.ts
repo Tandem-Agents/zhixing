@@ -17,6 +17,20 @@ import { loadStored, snapshotStored } from './control-admission.js';
 const interruptible = (state: string | undefined): state is ConversationControlTargets['targets'][number]['state'] =>
   state !== undefined && ['queued', 'dispatched', 'running', 'cancel-requested'].includes(state);
 interface ControlCandidate { readonly kind: 'control-target'; readonly conversationId: string; readonly runId: string; readonly lsn: number; readonly local: boolean }
+/** 未结束的运行：lsn/item 是当前状态记录的位置（导入基底的行在源日志的位置空间），statusRevision 是该记录的状态修订 */
+export interface OpenRun { readonly runId: string; readonly lsn: number; readonly item: number; readonly statusRevision: number; readonly local: boolean }
+/** 一个运行最新状态记录的位置与修订（导入基底与本地同一键，本地覆盖基底） */
+export interface StatusAt { readonly lsn: number; readonly item: number; readonly statusRevision: number; readonly local: boolean }
+/** 源顺序键：来源段（b 导入基底在前、l 本地在后）、位置、条目序号，与扫描日志的顺序一致 */
+export const sourceOrder = (local: boolean, lsn: number, item: number) => (local ? 'l' : 'b') + ':' + ordinal(lsn) + ':' + ordinal(item);
+/** 导入基底里只在运行未结束时会变化的行（历史外候选、当前集合与可中断候选），基底推导时写在这个前缀下，收编提交时播种进本地 */
+export const currentSeedPrefix = (conversationId: string) => prefix(conversationId) + 'current-seed:';
+/** 当前集合的行按来源分段（b 导入基底在前、l 本地在后），段内按状态记录的位置与条目序号，与扫描日志的顺序一致 */
+const openRunKey = (p: string, local: boolean, lsn: number, item: number, runId: string) =>
+  p + 'open-run:' + (local ? 'l' : 'b') + ':' + ordinal(lsn) + ':' + ordinal(item) + ':' + JSON.stringify(runId);
+export const openRunState = (state: string) => ['queued', 'dispatched', 'running', 'cancel-requested', 'uncertain'].includes(state);
+/** 已提交运行的 final：按运行精确取得，内容与 final-outbox 记录一致 */
+export interface FinalPointer { readonly commitRevision: number; readonly digest: string; readonly lsn: number; readonly item: number }
 
 export interface ReadMeta {
   count: number; clearedThrough: number; baseRevision: number; name?: string;
@@ -30,6 +44,15 @@ export type TimelinePointer = { readonly key: string; readonly lsn: number } & (
 const timelineKey = (lsn: number, item: number, local: boolean) => `${local ? 0 : 1}:${ordinal(Number.MAX_SAFE_INTEGER - lsn)}:${ordinal(Number.MAX_SAFE_INTEGER - item)}`;
 const prefix = (conversationId: string) => `${JSON.stringify(conversationId)}:`;
 const ordinal = (revision: number) => String(revision).padStart(16, '0');
+/** 历史外候选：按来源（l 本地 / b 导入基底）分段，段内按位置倒序，扫描从最新开始 */
+const outsideKey = (p: string, imported: boolean, pointer: InputPointer) =>
+  p + 'outside:' + (imported ? 'b' : 'l') + ':' + ordinal(Number.MAX_SAFE_INTEGER - pointer.position) + ':' + JSON.stringify(pointer.inputKey);
+/** uncertain 运行的历史外候选：按来源分段，段内按位置升序 */
+const outsideUncertainKey = (p: string, imported: boolean, pointer: InputPointer) =>
+  p + 'outside-uncertain:' + (imported ? 'b' : 'l') + ':' + ordinal(pointer.position) + ':' + JSON.stringify(pointer.inputKey);
+/** 不存在，或被本地写成导入基底的墓碑 */
+const absent = (value: unknown) => value === undefined || value === null ||
+  typeof value === 'object' && (value as { conversationBaseDeleted?: unknown }).conversationBaseDeleted === true;
 /** Domain read directory contains identities and authoritative locators only.
  * Metadata queries never reconstruct execution state or open transcript bodies. */
 export class ConversationReadIndex {
@@ -56,15 +79,20 @@ export class ConversationReadIndex {
     return validated.outcomes.filter(item => item.outcome.t === 'conflicted').length;
   }
   async controlTargets(conversationId: string): Promise<ConversationControlTargets> {
-    if (this.#baseView) {
-      const view = this.#baseView, p = prefix(conversationId);
-      const [base, local] = await Promise.all([
-        this.#baseDirectoryView!.get(p + 'meta') as Promise<ReadMeta | undefined>,
-        this.index.get(p + 'meta') as Promise<ReadMeta | undefined>,
-      ]);
-      const meta = this.#mergeValues(base, local);
-      if (meta.deleted) return { targets: [] };
-      const candidates = new Map<string, ControlCandidate>();
+    const queued: ConversationControlTargets['targets'][number][] = [], active: typeof queued = [];
+    for (const candidate of await this.controlCandidates(conversationId)) {
+      const target = { runId: candidate.runId, state: candidate.state };
+      if (candidate.state === 'queued') { if (queued.length < 2) queued.push(target); }
+      else active.push(target);
+      if (active.length === 2) break;
+    }
+    return { targets: active.length ? active : queued };
+  }
+  /** 当前可中断的会话来源运行（clear / delete 之后可见的），带首个输入的位置；只读当前候选行 */
+  async controlCandidates(conversationId: string): Promise<readonly { runId: string; state: ConversationControlTargets['targets'][number]['state']; lsn: number }[]> {
+    const collect = async (view: DurableProjectionReadContext, seed: ReadonlyMap<string, ControlCandidate> | undefined, getStatus: (key: string) => Promise<unknown>,
+      local: ReadMeta | undefined, base: ReadMeta | undefined) => {
+      const p = prefix(conversationId), candidates = new Map(seed);
       let after: string | undefined;
       do {
         const page = await view.scan({ ...(after ? { gt: after } : { gte: p + 'control-candidate:' }), lt: p + 'control-candidate:\uffff' }, 64);
@@ -75,48 +103,107 @@ export class ConversationReadIndex {
         }
         after = page.continuation ? page.entries.at(-1)!.key : undefined;
       } while (after);
-      const queued: ConversationControlTargets['targets'][number][] = [], active: typeof queued = [];
+      const result: { runId: string; state: ConversationControlTargets['targets'][number]['state']; lsn: number }[] = [];
       for (const candidate of candidates.values()) {
         if (candidate.local ? candidate.lsn <= (local?.clearedLsn ?? 0) : !!local?.clearId || candidate.lsn <= (base?.clearedLsn ?? 0)) continue;
-        const key = p + 'status:' + JSON.stringify(candidate.runId);
-        const status = await view.get(key) as unknown as StatusHistoryEntry | undefined;
-        if (!status || !interruptible(status.state)) continue;
-        const target = { runId: candidate.runId, state: status.state };
-        if (status.state === 'queued') { if (queued.length < 2) queued.push(target); }
-        else active.push(target);
-        if (active.length === 2) break;
+        const status = await getStatus(p + 'status:' + JSON.stringify(candidate.runId)) as StatusHistoryEntry | undefined;
+        if (status && interruptible(status.state)) result.push({ runId: candidate.runId, state: status.state, lsn: candidate.lsn });
       }
-      return { targets: active.length ? active : queued };
+      return result;
+    };
+    if (this.#baseView) {
+      const view = this.#baseView, p = prefix(conversationId);
+      const [base, local] = await Promise.all([
+        this.#baseDirectoryView!.get(p + 'meta') as Promise<ReadMeta | undefined>,
+        this.index.get(p + 'meta') as Promise<ReadMeta | undefined>,
+      ]);
+      if (this.#mergeValues(base, local).deleted) return [];
+      return collect(view, undefined, key => view.get(key), local, base);
     }
-    return (await this.log.transactDurableProjection<never, ConversationControlTargets>('conversation-read-directory', async current => {
+    return (await this.log.transactDurableProjection<never, Awaited<ReturnType<ConversationReadIndex['controlCandidates']>>>('conversation-read-directory', async current => {
       const p = prefix(conversationId), local = await current.get(p + 'meta') as unknown as ReadMeta | undefined;
-      const meta = this.#mergeState(conversationId, local);
-      if (meta.deleted) return { kind: 'return', value: { targets: [] } };
-      const candidates = new Map(this.#baseControlCandidates.get(conversationId));
-      let after: string | undefined;
-      do {
-        const page = await current.scan({ ...(after ? { gt: after } : { gte: p + 'control-candidate:' }), lt: p + 'control-candidate:\uffff' }, 64);
-        for (const entry of page.entries) {
-          const value = entry.value as unknown as ControlCandidate;
-          if (value.kind !== 'control-target' || value.conversationId !== conversationId || entry.key !== p + 'control-candidate:' + JSON.stringify(value.runId)) throw Error('Control target binding is invalid');
-          candidates.set(value.runId, value);
-        }
-        after = page.continuation ? page.entries.at(-1)!.key : undefined;
-      } while (after);
-      const queued: ConversationControlTargets['targets'][number][] = [], active: typeof queued = [];
-      for (const candidate of candidates.values()) {
-        if (candidate.local ? candidate.lsn <= (local?.clearedLsn ?? 0) :
-          !!local?.clearId || candidate.lsn <= ((this.#base.get(p + 'meta') as unknown as ReadMeta | undefined)?.clearedLsn ?? 0)) continue;
-        const key = p + 'status:' + JSON.stringify(candidate.runId);
-        const status = (await current.get(key) ?? this.#base.get(key)) as unknown as StatusHistoryEntry | undefined;
-        if (!status || !interruptible(status.state)) continue;
-        const target = { runId: candidate.runId, state: status.state };
-        if (status.state === 'queued') { if (queued.length < 2) queued.push(target); }
-        else active.push(target);
-        if (active.length === 2) break;
-      }
-      return { kind: 'return', value: { targets: active.length ? active : queued } };
+      if (this.#mergeState(conversationId, local).deleted) return { kind: 'return', value: [] };
+      const base = this.#base.get(p + 'meta') as unknown as ReadMeta | undefined;
+      return { kind: 'return', value: await collect(current, this.#baseControlCandidates.get(conversationId),
+        async key => await current.get(key) ?? this.#base.get(key), local, base) };
     })).value;
+  }
+  /** 历史外候选的可见性：本地按本地 clear，导入基底在本地 clear 后整体隐藏、否则按基底 clear */
+  async outsideVisibility(conversationId: string): Promise<{ deleted: boolean; localClearedLsn: number; baseHidden: boolean; baseClearedLsn: number }> {
+    const key = prefix(conversationId) + 'meta';
+    const local = await this.index.get(key) as unknown as ReadMeta | undefined;
+    const base = (this.#baseDirectoryView ? await this.#baseDirectoryView.get(key) : this.#base.get(key)) as unknown as ReadMeta | undefined;
+    return { deleted: this.#mergeValues(base, local).deleted === true, localClearedLsn: local?.clearedLsn ?? 0,
+      baseHidden: !!local?.clearId, baseClearedLsn: base?.clearedLsn ?? 0 };
+  }
+  /**
+   * 一段历史外候选，按键序（普通段从新到旧、uncertain 段按位置升序）；每页至多 64 条。
+   * 导入基底段由两部分组成：基底里永不变化的候选，和收编时播种进本地、在本地维护的候选；两者键不重叠，
+   * 各扫一页按键合并，不经过遮蔽，读取量与已完成的候选数量无关。
+   */
+  async outsidePage(conversationId: string, kind: 'outside' | 'outside-uncertain', imported: boolean, after: string | undefined)
+    : Promise<{ readonly entries: readonly { readonly key: string; readonly pointer: InputPointer }[]; readonly continuation?: string }> {
+    const p = prefix(conversationId) + kind + ':' + (imported ? 'b' : 'l') + ':';
+    const range = { ...(after ? { gt: after } : { gte: p }), lt: p + '\uffff' };
+    let page: { entries: readonly { key: string; value: JsonValue }[]; continuation?: string };
+    if (!imported) page = await this.index.scan(range, 64);
+    else if (this.#baseDirectoryView) page = await mergedPage(this.index, this.#baseDirectoryView, range, 64);
+    else {
+      const rows = [...this.#base].filter(([key]) => key > (after ?? '') && key >= p && key < p + '\uffff').sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+      const entries = [];
+      for (const [key, value] of rows) {
+        const local = await this.index.get(key);
+        if (!absent(local ?? value)) entries.push({ key, value: (local ?? value) as JsonValue });
+        if (entries.length === 64) break;
+      }
+      page = { entries, ...(entries.length === 64 ? { continuation: entries.at(-1)!.key } : {}) };
+    }
+    // 续页沿用本页最后一个原始键（扫描的续页令牌不透明，不能当键用）
+    return { entries: page.entries.filter(entry => !absent(entry.value)).map(entry => ({ key: entry.key, pointer: entry.value as unknown as InputPointer })),
+      ...(page.continuation && page.entries.length ? { continuation: page.entries.at(-1)!.key } : {}) };
+  }
+  /** 一页未结束的运行（当前集合）；每页至多 32 条，续页沿用最后一个原始键。持久基底的这类行在收编时已播种进本地 */
+  async openRunPage(conversationId: string, after: string | undefined)
+    : Promise<{ readonly entries: readonly { readonly key: string; readonly run: OpenRun }[]; readonly continuation?: string }> {
+    const p = prefix(conversationId) + 'open-run:';
+    const range = { ...(after ? { gt: after } : { gte: p }), lt: p + '￿' };
+    let page: { entries: readonly { key: string; value: JsonValue }[]; continuation?: string };
+    if (this.#baseDirectoryView) page = await mergedPage(this.index, this.#baseDirectoryView, range, 32);
+    else {
+      const local = await this.index.scan(range, 32);
+      const base = [...this.#base].filter(([key]) => key > (after ?? '') && key >= p && key < p + '￿');
+      if (!base.length) page = local;
+      else {
+        // 内存预载的基底：与本地行按键合并，本地优先，取前 32 条
+        const merged = new Map<string, JsonValue>(base);
+        for (const entry of local.entries) merged.set(entry.key, entry.value);
+        const bound = local.continuation ? local.entries.at(-1)!.key : undefined;
+        const rows = [...merged].filter(([key]) => bound === undefined || key <= bound).sort(([x], [y]) => x < y ? -1 : x > y ? 1 : 0);
+        const entries = rows.slice(0, 32).map(([key, value]) => ({ key, value }));
+        page = { entries, ...(rows.length > 32 || local.continuation ? { continuation: entries.at(-1)!.key } : {}) };
+      }
+    }
+    return { entries: page.entries.filter(entry => !absent(entry.value)).map(entry => ({ key: entry.key, run: entry.value as unknown as OpenRun })),
+      ...(page.continuation && page.entries.length ? { continuation: page.entries.at(-1)!.key } : {}) };
+  }
+  /** 已提交运行的 final（只来自本地 final-outbox） */
+  async final(conversationId: string, runId: string): Promise<FinalPointer | undefined> {
+    return await this.index.get(prefix(conversationId) + 'final:' + JSON.stringify(runId)) as unknown as FinalPointer | undefined;
+  }
+  /** 最新状态记录的位置与修订：本地有记录时取本地，否则取导入基底 */
+  async statusAt(conversationId: string, runIds: readonly string[]): Promise<readonly (StatusAt | undefined)[]> {
+    const keys = runIds.map(runId => prefix(conversationId) + 'status-at:' + JSON.stringify(runId));
+    const local = await this.index.getMany(keys);
+    return Promise.all(local.map(async (value, index) => (value ?? (this.#baseDirectoryView ? await this.#baseDirectoryView.get(keys[index]!) : this.#base.get(keys[index]!))) as unknown as StatusAt | undefined));
+  }
+  /** 输入是否已被消费（首条输入看 initial-consumed，追加输入看 input-consumed），本地与导入基底合并 */
+  async consumedInputs(conversationId: string, pointers: readonly InputPointer[]): Promise<readonly boolean[]> {
+    const p = prefix(conversationId);
+    return Promise.all(pointers.map(async pointer => {
+      const key = pointer.initial ? p + 'initial-consumed:' + JSON.stringify(pointer.runId) : p + 'input-consumed:' + JSON.stringify(pointer.inputKey);
+      const value = this.#baseView ? await this.#baseView.get(key) : await this.index.get(key) ?? this.#base.get(key);
+      return value === true;
+    }));
   }
   async sessionPage(conversationId: string, afterLsn: number): Promise<readonly DurableLogCheckpoint[]> {
     const p = prefix(conversationId) + 'session:';
@@ -360,7 +447,9 @@ export class ConversationReadIndex {
     if (!source || source.stream !== 'run:' + conversationId) throw Error('conversation-read-input-location');
     const body = validateConversationRunRecord(source.body, this.verifier);
     if ((body.t !== 'admitted' && body.t !== 'run-input-appended') || body.runId !== runId || body.ingressKey !== pointer.inputKey || (body.t === 'admitted' ? body.queuedPosition : body.position) !== pointer.position) throw Error('conversation-read-input-binding');
-    return { pointer, input: body.input };
+    // 记录自带的消息身份（较早的接纳只有 ingressId，指针里的身份是兜底补的）
+    const identity = body.ingress.turnOrigin?.messageIdentity;
+    return { pointer, input: body.input, ...(identity ? { identity } : {}) };
     }));
   }
   /** The transfer owner already verified this immutable prefix. Keep only its
@@ -372,16 +461,7 @@ export class ConversationReadIndex {
       get: key => this.index.get(key),
       scan: (range, limit) => this.index.scan(range, limit),
     };
-    const directory: DurableProjectionReadContext = {
-      get: key => source.read(view => view.get('directory/' + key)),
-      scan: async (range, limit) => {
-        const prefix = 'directory/';
-        const query = { ...(range.gte ? { gte: prefix + range.gte } : {}), ...(range.gt ? { gt: prefix + range.gt } : {}), ...(range.lt ? { lt: prefix + range.lt } : {}) };
-        const page = await source.read(view => view.scan(query, limit));
-        return { entries: page.entries.map(entry => ({ key: entry.key.slice(prefix.length), value: entry.value })),
-          ...(page.continuation ? { continuation: page.continuation.slice(prefix.length) } : {}) };
-      },
-    };
+    const directory = baseDirectoryView(source);
     this.#baseView = conversationViewOverlay(local, directory);
     this.#baseDirectoryView = directory;
     this.#readBaseRecord = item => source.recordAt(item);
@@ -403,6 +483,14 @@ export class ConversationReadIndex {
       });
       for (const change of changes) if (change.kind === 'put') candidate.set(change.key, change.value); else candidate.delete(change.key);
       start = end;
+    }
+    // 内存预载没有收编播种：种子区的行放回原键，按普通基底行读取
+    for (const [key, value] of [...candidate]) {
+      const match = key.match(/^("(?:[^"\\]|\\.)*"):current-seed:/);
+      if (!match) continue;
+      const seedPrefix = match[1] + ':current-seed:';
+      candidate.delete(key);
+      candidate.set(key.slice(seedPrefix.length), typeof value === 'string' && value.startsWith(seedPrefix) ? value.slice(seedPrefix.length) : value);
     }
     const controls = new Map<string, Map<string, ControlCandidate>>();
     for (const value of candidate.values()) {
@@ -622,6 +710,40 @@ export class ConversationDirectoryReducer {
       await change(id, runId, consumed && previous?.stops ? { ...previous, action: false } : undefined);
     };
     const retain = (id: string, runId: string, action: boolean, stops = 0) => change(id, runId, { lsn, action, stops });
+    // 历史外输入的直接候选：输入被接纳时登记，所属运行已提交且该输入已消费时消除；uncertain 运行的
+    // 候选另有按位置升序的行。会变化的行都在本地（导入基底里排队运行的行在收编时播种进本地），消除即删除。
+    const local = checkpoint !== undefined;
+    const outsideView = scan ? createDurableProjectionOverlay({ get, scan }, overlay) : undefined;
+    const reconcileOutside = async (p: string, runId: string, stateChanged: boolean) => {
+      const status = await read(p + 'status:' + JSON.stringify(runId)) as unknown as StatusHistoryEntry | undefined;
+      if (status?.state !== 'committed' && !stateChanged) return;
+      if (!outsideView) throw Error('Outside-history candidates require their current directory');
+      const m = (key: string) => local ? key : p + 'current-seed:' + key;
+      // 基底推导中运行走到终态：其后不会再变化，留下的候选转进永不变化的前缀
+      const settled = !local && !!status && !openRunState(status.state);
+      const rowsPrefix = m(p + 'outside-run:' + JSON.stringify(runId) + ':');
+      let after: string | undefined;
+      do {
+        const page = await outsideView.scan({ ...(after ? { gt: after } : { gte: rowsPrefix }), lt: rowsPrefix + '￿' }, 64);
+        for (const row of page.entries) {
+          const outsideKey = row.value;
+          if (typeof outsideKey !== 'string') continue;
+          const pointer = await read(m(outsideKey)) as unknown as InputPointer | undefined;
+          if (absent(pointer)) continue;
+          const imported = outsideKey.startsWith(p + 'outside:b:');
+          const uncertainKey = outsideUncertainKey(p, imported, pointer!);
+          const consumedKey = pointer!.initial ? p + 'initial-consumed:' + JSON.stringify(runId) : p + 'input-consumed:' + JSON.stringify(pointer!.inputKey);
+          // 删除不先读：归约追平时每次多读一个键会随记录数增长（1a 的有界工作量）
+          if (status?.state === 'committed' && await read(consumedKey) === true) {
+            drop(m(outsideKey)); drop(row.key); drop(m(uncertainKey));
+          } else if (settled) {
+            put(outsideKey, pointer); drop(m(outsideKey)); drop(row.key); drop(m(uncertainKey));
+          } else if (status?.state === 'uncertain') put(m(uncertainKey), pointer);
+          else if (!absent(await read(m(uncertainKey)))) drop(m(uncertainKey));
+        }
+        after = page.continuation ? page.entries.at(-1)!.key : undefined;
+      } while (after);
+    };
     for (const [item, entry] of entries.entries()) {
       // A stop only becomes durable in the control stream. Record its effect as
       // a keyed row so readers never replay the whole stream per instance.
@@ -664,6 +786,8 @@ export class ConversationDirectoryReducer {
       if (checkpoint && entry.stream === 'final-outbox' && (entry.body as { t?: string })?.t === 'final') {
         const final = validateFinalOutboxRecord(entry.body);
         put(prefix(final.conversationId) + 'control:' + ordinal(lsn), checkpoint);
+        if (final.state === 'pending') put(prefix(final.conversationId) + 'final:' + JSON.stringify(final.runId),
+          { commitRevision: final.commitRevision, digest: final.digest, lsn, item } satisfies FinalPointer);
       }
       if (!entry.stream.startsWith('run:')) continue;
       const id = entry.stream.slice(4), p = prefix(id), key = `${p}meta`, raw = entry.body;
@@ -673,13 +797,17 @@ export class ConversationDirectoryReducer {
       const body = validateConversationRunRecord(raw, this.verifier);
       if (checkpoint && isMessageDeliveryFact(body)) put(p + 'message-fact:' + ordinal(lsn), checkpoint);
       if (body.t === 'assigned') put(p + 'assignment-run:' + JSON.stringify(body.assignmentId), body.runId);
-      if (body.t === 'run-input-consumed') for (const input of body.ingressKeys) put(p + 'input-consumed:' + JSON.stringify(input), true);
+      if (body.t === 'run-input-consumed') {
+        for (const input of body.ingressKeys) put(p + 'input-consumed:' + JSON.stringify(input), true);
+        await reconcileOutside(p, body.runId, false);
+      }
       if (body.t === 'supersede-started-observed') {
         const run = await read(p + 'assignment-run:' + JSON.stringify(body.assignmentId));
-        if (typeof run === 'string') put(p + 'initial-consumed:' + JSON.stringify(run), true);
+        if (typeof run === 'string') { put(p + 'initial-consumed:' + JSON.stringify(run), true); await reconcileOutside(p, run, false); }
       }
       if (body.t === 'run-input-opened' || body.t === 'run-input-closed' || body.t === 'committed' || body.t === 'state' && body.state === 'running') {
         put(p + 'initial-consumed:' + JSON.stringify(body.runId), true);
+        if (body.t !== 'state') await reconcileOutside(p, body.runId, false);
       }
       if (body.t === 'run-input-opened') drop(p + 'input-closed:' + JSON.stringify(body.runId));
       if (body.t === 'run-input-closed') put(p + 'input-closed:' + JSON.stringify(body.runId), true);
@@ -752,11 +880,19 @@ export class ConversationDirectoryReducer {
           put(p + 'input:' + JSON.stringify(body.runId) + ':' + ordinal(pointer.position), pointer);
           const order = timelineKey(lsn, item, !!checkpoint);
           put(p + 'timeline:' + order, { key: order, lsn, kind: 'input', input: pointer });
+          // 基底推导时，只在运行未结束时会变化的行写在种子区（收编时播种进本地，见 currentSeedPrefix）
+          const m = (key: string) => local ? key : currentSeedPrefix(id) + key;
+          const candidateKey = outsideKey(p, !checkpoint, pointer);
+          put(m(candidateKey), pointer);
+          put(m(p + 'outside-run:' + JSON.stringify(body.runId) + ':' + JSON.stringify(body.ingressKey)), candidateKey);
+          const runStatus = await read(p + 'status:' + JSON.stringify(body.runId)) as unknown as StatusHistoryEntry | undefined;
+          if (runStatus?.state === 'uncertain') put(m(outsideUncertainKey(p, !checkpoint, pointer)), pointer);
           if (identity.source.kind === 'conversation') {
             put(p + 'communication:' + JSON.stringify(body.runId), true);
-            put(p + 'control-input:' + JSON.stringify(body.runId), lsn);
+            // 输入位置：基底的位置带上来源，播种后本地重新登记可中断候选时保持基底的位置空间
+            put(m(p + 'control-input:' + JSON.stringify(body.runId)), local ? lsn : { lsn, local: false });
             const status = await read(p + 'status:' + JSON.stringify(body.runId)) as unknown as StatusHistoryEntry | undefined;
-            if (status === undefined || interruptible(status.state)) put(p + 'control-candidate:' + JSON.stringify(body.runId),
+            if (status === undefined || interruptible(status.state)) put(m(p + 'control-candidate:' + JSON.stringify(body.runId)),
               { kind: 'control-target', conversationId: id, runId: body.runId, lsn, local: !!checkpoint } satisfies ControlCandidate);
           }
         }
@@ -772,11 +908,29 @@ export class ConversationDirectoryReducer {
         const status = projectStatusEntry(body, at, previousState, resolutions);
         put(statusKey, status);
         put(p + 'status-history:' + JSON.stringify(body.runId) + ':' + ordinal(body.statusRevision), status);
-        const candidateKey = p + 'control-candidate:' + JSON.stringify(body.runId);
-        const inputLsn = await read(p + 'control-input:' + JSON.stringify(body.runId));
-        if (interruptible(body.state) && typeof inputLsn === 'number') put(candidateKey,
-          { kind: 'control-target', conversationId: id, runId: body.runId, lsn: inputLsn, local: !!checkpoint } satisfies ControlCandidate);
+        const position = local ? item : baseStart + item;
+        put(p + 'status-at:' + JSON.stringify(body.runId), { lsn, item: position, statusRevision: body.statusRevision, local } satisfies StatusAt);
+        // 当前集合：运行未结束时登记，状态变化时移到新位置，结束时删除；基底推导时这些行在种子区
+        const m = (key: string) => local ? key : currentSeedPrefix(id) + key;
+        const atKey = m(p + 'open-run-at:' + JSON.stringify(body.runId));
+        const priorKey = await read(atKey);
+        const nextKey = openRunState(body.state) ? m(openRunKey(p, local, lsn, position, body.runId)) : undefined;
+        if (typeof priorKey === 'string' && priorKey !== nextKey) drop(priorKey);
+        if (nextKey) {
+          put(nextKey, { runId: body.runId, lsn, item: position, statusRevision: body.statusRevision, local } satisfies OpenRun);
+          put(atKey, nextKey);
+        } else if (typeof priorKey === 'string') drop(atKey);
+        const candidateKey = m(p + 'control-candidate:' + JSON.stringify(body.runId));
+        // 输入位置：本地接纳记一个数；基底运行的带着来源，候选保持基底的位置空间
+        const input = await read(m(p + 'control-input:' + JSON.stringify(body.runId))) as unknown;
+        const inputAt = typeof input === 'number' ? { lsn: input, local: !!checkpoint }
+          : input && typeof input === 'object' && typeof (input as { lsn?: unknown }).lsn === 'number' ? { lsn: (input as { lsn: number }).lsn, local: (input as { local?: unknown }).local === true } : undefined;
+        if (interruptible(body.state) && inputAt) put(candidateKey,
+          { kind: 'control-target', conversationId: id, runId: body.runId, lsn: inputAt.lsn, local: inputAt.local } satisfies ControlCandidate);
         else drop(candidateKey);
+        // 基底推导中运行走到终态：输入位置只在运行未结束时需要，种子区里不留（不随基底历史播种）
+        if (!local && !openRunState(body.state) && input !== undefined) drop(m(p + 'control-input:' + JSON.stringify(body.runId)));
+        if (status.state === 'committed' || status.state === 'uncertain' || previous?.state === 'uncertain' || !local && !openRunState(status.state)) await reconcileOutside(p, body.runId, true);
         continue;
       }
       if (body.t === 'advancement-event') {
@@ -872,6 +1026,39 @@ const directoryBindings = new WeakMap<AuthorityCommitLog, {
   readonly reducer: ConversationDirectoryReducer;
   readonly index: ReturnType<AuthorityCommitLog['durableProjection']>;
 }>();
+/** 导入基底中读目录的那一段（键去掉 directory/ 前缀），与本地读目录同一套键 */
+/**
+ * 两个键不重叠的来源各扫一页、按键合并，取前 limit 条；续页键是本页最后一条。
+ * 一次调用固定两次底层扫描，不像遮蔽视图那样为补足名额继续翻页。
+ */
+async function mergedPage(local: DurableProjectionReadContext, base: DurableProjectionReadContext, range: { gt?: string; gte?: string; lt: string }, limit: number) {
+  const [left, right] = await Promise.all([local.scan(range, limit), base.scan(range, limit)]);
+  // 按构造两来源的键不重叠；同一键若同时出现，取本地那份
+  const merged = new Map(right.entries.map(entry => [entry.key, entry]));
+  for (const entry of left.entries) merged.set(entry.key, entry);
+  const rows = [...merged.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const entries = rows.slice(0, limit);
+  // 某一来源的本页没读完，它之后的键可能落在另一来源已返回的键之前：只返回到两者都读到的位置为止
+  const leftEnd = left.continuation ? left.entries.at(-1)?.key : undefined, rightEnd = right.continuation ? right.entries.at(-1)?.key : undefined;
+  const bound = leftEnd !== undefined && rightEnd !== undefined ? (leftEnd < rightEnd ? leftEnd : rightEnd) : leftEnd ?? rightEnd;
+  const visible = bound === undefined ? entries : entries.filter(entry => entry.key <= bound);
+  const more = rows.length > visible.length || !!left.continuation || !!right.continuation;
+  return { entries: visible, ...(more && visible.length ? { continuation: visible.at(-1)!.key } : {}) };
+}
+
+function baseDirectoryView(source: Pick<ConversationBaseSource, 'read'>): DurableProjectionReadContext {
+  const prefix = 'directory/';
+  return {
+    get: key => source.read(view => view.get(prefix + key)),
+    scan: async (range, limit) => {
+      const query = { ...(range.gte ? { gte: prefix + range.gte } : {}), ...(range.gt ? { gt: prefix + range.gt } : {}), ...(range.lt ? { lt: prefix + range.lt } : {}) };
+      const page = await source.read(view => view.scan(query, limit));
+      return { entries: page.entries.map(entry => ({ key: entry.key.slice(prefix.length), value: entry.value })),
+        ...(page.continuation ? { continuation: page.continuation.slice(prefix.length) } : {}) };
+    },
+  };
+}
+
 export function registerConversationReadProjection(log: AuthorityCommitLog, artifacts: ArtifactStore, verifier: ProtocolSignatureVerifier) {
   const existing = directoryBindings.get(log);
   if (existing) {
@@ -881,7 +1068,7 @@ export function registerConversationReadProjection(log: AuthorityCommitLog, arti
   registerConversationBaseContext(log, artifacts, verifier);
   const reducer = new ConversationDirectoryReducer(artifacts, verifier);
   const index = log.durableProjection<ConversationRunJournalRecord>({
-    projectionId: 'conversation-read-directory', reducerVersion: 16,
+    projectionId: 'conversation-read-directory', reducerVersion: 18,
     inputs: { families: ['run:', 'transfer:'], streams: ['final-outbox', 'control'] },
     reduce: async (envelope, current, position) => {
       const seeds = new Map<string, JsonValue | undefined>();
@@ -928,25 +1115,35 @@ export function registerConversationReadProjection(log: AuthorityCommitLog, arti
             await scan(p + 'continuation-frontier:' + suffix + ':', (key, value) => seeds.set(key, value));
           }
           await scan('continuation-stop-request:', (key, value) => seeds.set(key, value));
+          // 基底里会随本地事实变化的行（只属于冻结时仍排队的运行）播种进本地，此后在本地维护、真实删除
+          const seedPrefix = currentSeedPrefix(id);
+          await scan(seedPrefix, (key, value) => seeds.set(key.slice(seedPrefix.length),
+            typeof value === 'string' && value.startsWith(seedPrefix) ? value.slice(seedPrefix.length) : value));
         } catch (error) {
           if (position.candidate || !isConversationSourceEvidenceError(error)) throw error;
           seeds.set(conversationBaseUnavailableKey(id), true);
         }
       }
-      const get = async (key: string): Promise<JsonValue | undefined> => {
-        if (seeds.has(key)) return seeds.get(key);
-        const value = await current.get(key); if (value !== undefined) return value;
-        // Only finite continuation keys consult the immutable source. Native
-        // transcript counters and live directories never merge a whole base.
-        const match = key.match(/^("(?:[^"\\]|\\.)*"):(continuation-(?:root|origin|consumed|advancement)|stop):/);
-        if (!match) return;
-        const id = JSON.parse(match[1]!) as string;
+      const baseOf = async (id: string) => {
         const binding = (seeds.get(conversationBaseKey(id)) ?? await current.get(conversationBaseKey(id))) as unknown as ConversationBaseBinding | undefined;
         if (!binding) return;
         if (await current.get(conversationBaseUnavailableKey(id))) throw conversationBaseRepairRequired(log, binding);
-        return (await openConversationBase(log, binding)).read(view => view.get('directory/' + key));
+        return openConversationBase(log, binding);
       };
-      const mutations = await reducer.reduce(envelope.entries, envelope.at, envelope.lsn, get, position.checkpoint, 0, (range, limit) => createDurableProjectionOverlay(current, seeds).scan(range, limit));
+      const get = async (key: string): Promise<JsonValue | undefined> => {
+        if (seeds.has(key)) return seeds.get(key);
+        const value = await current.get(key); if (value !== undefined) return value;
+        // Only finite continuation keys and set-once consumption receipts consult
+        // the immutable source. Status deliberately stays local (imported prior
+        // states are not loaded). 会变化的历史外候选与当前集合行在收编时已播种进本地。
+        // Native transcript counters and live directories never merge a whole base.
+        const match = key.match(/^("(?:[^"\\]|\\.)*"):(continuation-(?:root|origin|consumed|advancement)|stop|initial-consumed|input-consumed):/);
+        if (!match) return;
+        const source = await baseOf(JSON.parse(match[1]!) as string);
+        return source?.read(view => view.get('directory/' + key));
+      };
+      const scan = (range: Parameters<DurableProjectionReadContext['scan']>[0], limit: number) => createDurableProjectionOverlay(current, seeds).scan(range, limit);
+      const mutations = await reducer.reduce(envelope.entries, envelope.at, envelope.lsn, get, position.checkpoint, 0, scan);
       return [...seeds].map(([key, value]): DurableProjectionMutation => value === undefined ? { kind: 'tombstone', key } : { kind: 'put', key, value }).concat(mutations);
     },
   });

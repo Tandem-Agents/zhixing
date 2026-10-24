@@ -1,3 +1,4 @@
+/** 按消息 id 的状态查询：历史外读取的语义与规模见 conversation-outside-history 的两个测试文件 */
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { createTempDir } from '@zhixing/test-utils';
@@ -18,14 +19,13 @@ async function fixture() {
   const artifacts = new FileArtifactStore(path.join(root, 'artifacts'));
   const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, 'log'), artifacts));
   const positions: DurableLogCheckpoint[] = [];
-  let base: { lsn: number; at: string; stream: string; body: unknown }[] = [];
-  const messages = new Map<string, { pointer: InputPointer; initial: boolean; inputKey: string; base?: boolean }>();
+  const messages = new Map<string, { pointer: InputPointer; initial: boolean; inputKey: string }>();
   const statuses = new Map<string, { state: string; statusRevision: number }>();
   const runByAssignment = new Map<string, string>();
   const initialConsumed = new Set<string>(), consumed = new Set<string>(), closed = new Set<string>();
   const messagePage = vi.fn(async (_: string, after: number) => positions.filter(p => p.lsn > after).slice(0, 64));
   const inputAt = vi.fn(async (_: string, pointer: InputPointer) => {
-    const record = pointer.checkpoint ? (await log.readEnvelopeAt(pointer.checkpoint)).entries[pointer.item]! : base[pointer.item]!;
+    const record = (await log.readEnvelopeAt(pointer.checkpoint!)).entries[pointer.item]!;
     return { pointer, input: (record.body as ReturnType<typeof admission>).input };
   });
   const inputsAt = vi.fn(async (id: string, pointers: readonly InputPointer[]) => Promise.all(pointers.map(pointer => inputAt(id, pointer))));
@@ -39,7 +39,7 @@ async function fixture() {
       closed: closed.has(message.pointer.runId) } };
   });
   const reader = new ConversationMessageInputReader(log, { messagePage, inputAt, inputsAt, messageMetadata } as unknown as ConversationReadIndex, artifacts, 'c');
-  const foldMeta = (raw: unknown, item: number, checkpoint?: DurableLogCheckpoint, fromBase = false) => {
+  const foldMeta = (raw: unknown, item: number, checkpoint?: DurableLogCheckpoint) => {
     const body = raw as { t?: string; runId?: string; state?: string; statusRevision?: number; ingressKey?: string;
       queuedPosition?: number; position?: number; assignmentId?: string;
       ingress?: { ingressId?: string; turnOrigin?: { messageIdentity?: { id: string; source: unknown } } };
@@ -49,7 +49,7 @@ async function fixture() {
       const initial = body.t === 'admitted';
       const pointer: InputPointer = { runId: body.runId!, inputKey: body.ingressKey!, position: initial ? body.queuedPosition ?? 0 : body.position ?? 0,
         identity: identity as InputPointer['identity'], initial, item, lsn: checkpoint?.lsn ?? 0, ...(checkpoint ? { checkpoint } : {}) };
-      messages.set(identity.id, { pointer, initial, inputKey: body.ingressKey!, ...(fromBase ? { base: true } : {}) });
+      messages.set(identity.id, { pointer, initial, inputKey: body.ingressKey! });
       if (initial) statuses.set(body.runId!, statuses.get(body.runId!) ?? { state: 'queued', statusRevision: 0 });
       return;
     }
@@ -98,32 +98,8 @@ async function fixture() {
     positions.push(checkpoint);
     for (const [item, raw] of bodies.entries()) foldMeta(raw, item, checkpoint);
   };
-  const installBase = (bodies: unknown[]) => {
-    for (const [id, message] of messages) if (message.base) messages.delete(id);
-    base = bodies.map((body, item) => ({ lsn: item + 30, at: '2026-10-01T00:00:00.000Z', stream: 'run:c', body }));
-    for (const [item, raw] of bodies.entries()) foldMeta(raw, item, undefined, true);
-    reader.installBase(base);
-  };
-  return { log, reader, append, installBase, inputAt, inputsAt, messagePage, artifacts };
+  return { log, reader, append };
 }
-
-it('queries initial and appended delivery without opening historical execution artifacts', async () => {
-  const f = await fixture();
-  await f.append(admission('r'), state('r', 'queued'), { t: 'assigned', runId: 'r', assignmentId: 'a', dispatchRef: 'must-not-read' },
-    state('r', 'running', 'a'), { t: 'run-input-opened', runId: 'r', assignmentId: 'a' });
-  const extra = (id: string, position: number) => ({ ...admission(id, position), t: 'run-input-appended', runId: 'r', position });
-  await f.append(extra('used', 1), extra('unused', 2), { t: 'run-input-consumed', runId: 'r', assignmentId: 'a', ingressKeys: ['used'] },
-    { t: 'run-input-closed', runId: 'r', assignmentId: 'a' }, { t: 'cancel-fence', assignmentId: 'a' }, state('r', 'cancelled', 'a'));
-  const get = vi.spyOn(f.artifacts, 'get').mockRejectedValue(Error('Execution artifacts must not be opened'));
-  const page = await f.reader.messageInputsOutsideHistory();
-  expect(page.inputs.map(({ consumed, disposition, message }) => [message.inputIdentity?.id, consumed, disposition]))
-    .toEqual([['r', true, 'consumed'], ['used', true, 'consumed'], ['unused', false, 'stopped']]);
-  expect(get).not.toHaveBeenCalled();
-  get.mockRestore();
-  await f.append({ t: 'committed', runId: 'r', assignmentId: 'a' }, state('r', 'committed', 'a'));
-  expect((await f.reader.messageInputsOutsideHistory()).inputs.map(x => x.message.inputIdentity?.id)).toEqual(['unused']);
-  expect(await f.reader.messageStatus('r')).toMatchObject({ consumed: true, state: 'committed' });
-}, DURABLE_IO_TEST_TIMEOUT_MS);
 
 it('retains old assignment started evidence through uncertainty and replacement', async () => {
   const f = await fixture();
@@ -133,42 +109,4 @@ it('retains old assignment started evidence through uncertainty and replacement'
   await f.append({ t: 'supersede-started-observed', assignmentId: 'old' }, { t: 'assignment-superseded', assignmentId: 'old' },
     state('r', 'queued'), { t: 'assigned', runId: 'r', assignmentId: 'new' }, state('r', 'dispatched', 'new'));
   expect(await f.reader.messageStatus('r')).toMatchObject({ consumed: true, state: 'dispatched' });
-}, DURABLE_IO_TEST_TIMEOUT_MS);
-
-it('discovers remote control targets beyond the uncertain-first display limit without reading their bodies', async () => {
-  const f = await fixture();
-  await f.append(admission('remote', 0, 'conversation'), state('remote', 'queued'));
-  for (let i = 1; i <= 205; i++) await f.append(admission('uncertain-' + i, i), state('uncertain-' + i, 'uncertain'));
-  const result = await f.reader.messageInputsOutsideHistory();
-  expect(result.truncated).toBe(true); expect(result.inputs).toHaveLength(200);
-  expect(result.interruptibleRuns).toEqual([{ runId: 'remote', state: 'queued' }]);
-  expect(f.inputAt).toHaveBeenCalledTimes(200);
-  expect(f.inputAt.mock.calls.some(([, p]) => p.runId === 'remote')).toBe(false);
-  expect(f.messagePage.mock.calls.length).toBe(4);
-}, DURABLE_IO_TEST_TIMEOUT_MS);
-
-it('uses imported input locators with local control facts and resets on clear, deletion and base replacement', async () => {
-  const f = await fixture();
-  f.installBase([admission('base'), state('base', 'queued')]);
-  await f.append({ t: 'assigned', runId: 'base', assignmentId: 'a' }, state('base', 'running', 'a'));
-  expect(await f.reader.messageStatus('base')).toMatchObject({ state: 'running', consumed: true });
-  await f.append({ t: 'session-lifecycle', mutation: 'clear' });
-  await f.append(admission('new', 100), state('new', 'queued'));
-  expect((await f.reader.messageInputsOutsideHistory()).inputs.map(x => x.message.inputIdentity?.id)).toEqual(['new']);
-  await f.append({ t: 'session-meta', operation: 'delete' });
-  expect((await f.reader.messageInputsOutsideHistory()).inputs).toEqual([]);
-  f.installBase([admission('replacement'), state('replacement', 'queued')]);
-  expect(await f.reader.messageStatus('base')).toBeUndefined();
-}, DURABLE_IO_TEST_TIMEOUT_MS);
-
-it('does not return an old body after the read base changes during materialization', async () => {
-  const f = await fixture();
-  f.installBase([admission('old'), state('old', 'queued')]);
-  const original = f.inputAt.getMockImplementation()!;
-  f.inputAt.mockImplementationOnce(async (id, pointer) => {
-    const result = await original(id, pointer);
-    f.installBase([admission('new'), state('new', 'queued')]);
-    return result;
-  });
-  expect((await f.reader.messageInputsOutsideHistory()).inputs.map(x => x.message.inputIdentity?.id)).toEqual(['new']);
 }, DURABLE_IO_TEST_TIMEOUT_MS);

@@ -78,14 +78,28 @@ it('accepts bounded owner timeline cursors and rejects malformed history coverag
   const request = { mode: 'body-page', conversationId: 'conversation-b', includeInputs: true, cursor };
   await registry.dispatch('session.statusHistory', request, context as never);
   expect(read).toHaveBeenLastCalledWith(request);
-  const coverage = { mode: 'control-page', conversationId: 'conversation-b', historyThroughInputLsn: 991 };
+  const through = { logId: 'authority-log', lsn: 991, frameEndOffset: 4096, prefixDigest: 'synthetic-proof' };
+  const coverage = { mode: 'control-page', conversationId: 'conversation-b', historyThrough: through };
   await registry.dispatch('session.statusHistory', coverage, context as never);
   expect(read).toHaveBeenLastCalledWith(coverage);
+  // 当前集合段的游标与按运行精确读取
+  const phased = { mode: 'control-page', conversationId: 'conversation-b', cursor: { conversationId: 'conversation-b', ownerEpoch: 2, clearedThroughLsn: 0, baseItem: 0,
+    historyThroughInputLsn: 991, current: { after: '"conversation-b":open-run:"r"' }, upper: through, after: through, item: 0 } };
+  const facts = { mode: 'run-facts', conversationId: 'conversation-b', runIds: ['run-1', 'run-2'], historyThroughInputLsn: 991 };
+  for (const valid of [phased, { ...phased, cursor: { ...phased.cursor, current: {} } }, facts]) {
+    await registry.dispatch('session.statusHistory', valid, context as never);
+    expect(read).toHaveBeenLastCalledWith(valid);
+  }
   for (const invalid of [{ ...request, includeInputs: false }, ...[
     { ...history, key: '../../source' }, { ...history, throughLsn: -1 }, { ...history, throughLsn: 1.5 }, { ...history, after: false }, { ...history, artifact: 'caller-source' },
   ].map(history => ({ ...request, cursor: { ...cursor, history } })),
-    { ...request, direction: 'forward', cursor: { ...cursor, history: { ...history, after: true } } }, { ...coverage, historyThroughInputLsn: -1 }]) {
+    { ...request, direction: 'forward', cursor: { ...cursor, history: { ...history, after: true } } }, { ...coverage, historyThrough: { ...through, lsn: -1 } },
+    { ...coverage, historyThroughInputLsn: 991 }, { ...coverage, cursor: phased.cursor },
+    { ...phased, cursor: { ...phased.cursor, current: { after: 3 } } }, { ...phased, cursor: { ...phased.cursor, current: { after: 'x', more: true } } },
+    { ...phased, cursor: { ...phased.cursor, historyThroughInputLsn: undefined } },
+    { ...facts, runIds: [] }, { ...facts, runIds: Array.from({ length: 33 }, (_, i) => 'run-' + i) }, { ...facts, runIds: [''] }, { ...facts, cursor: phased.cursor },
+    { ...facts, historyThroughInputLsn: undefined }, { ...facts, historyThroughInputLsn: -1 }]) {
     await expect(registry.dispatch('session.statusHistory', invalid, context as never)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   }
-  expect(read).toHaveBeenCalledTimes(2);
+  expect(read).toHaveBeenCalledTimes(5);
 });

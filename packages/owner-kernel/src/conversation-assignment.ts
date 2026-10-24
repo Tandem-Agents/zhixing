@@ -1,6 +1,6 @@
 import { isAuthenticatedConversationFacts, type AuthenticatedConversationFacts, type ConversationBaseLocation } from './conversation-base-source.js';
 import { verifyProtocolStep, rethrowUnloadedProtocolIdentity } from "@zhixing/core/protocol";
-import { projectionCheckpointKey } from "@zhixing/core/authority";
+import { projectionCheckpointKey, type DurableLogCheckpoint } from "@zhixing/core/authority";
 import { domainPublishDecisionRequired, publishDomainSequence, publishProgressFollows } from "./conversation-publish-obligations.js";
 import { conversationRecoveryPage, prepareConversationEffects, conversationRecoveryVersion, CONVERSATION_RECOVERY_PROJECTION_ID, type ConversationEffectSelection } from "./conversation-recovery-index.js";
 export { conversationRecoveryPage, conversationRecoveryPending } from "./conversation-recovery-index.js";
@@ -12,7 +12,7 @@ import type { JsonValue } from '@zhixing/core/contracts';
 import { readConversationStateField } from './conversation-run-state-index.js';
 import { conversationStateFieldPrefix, decodeConversationState } from './conversation-run-state-index.js';
 import { readConversationRunRoot } from './conversation-run-state-extras.js';
-import { conversationViewAt } from './conversation-base-registry.js';
+import { conversationBaseKey, conversationViewAt, type ConversationBaseBinding } from './conversation-base-registry.js';
 import { advancementSubmissionRequestId, type AdvancementSubmissionReceipt } from "@zhixing/core/advancement";
 
 function isAdvancementCleanupEvent(event: AdvancementControlEvent): boolean {
@@ -40,7 +40,7 @@ import { hasPendingWorksceneTask, validateWorksceneContinuationCommit, workscene
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import type { ConversationRecoveryRequest, ConversationRecoveryPage, ConversationControlCursor, ConversationControlFact, ConversationInputCursor, ConversationInputPage } from '@zhixing/core/contracts';
 import { projectStatusEntry, conversationStatusNotice, type StatusHistoryEntry } from './conversation-status-projection.js';
-import { ConversationReadIndex, type ControlRead } from './conversation-read-index.js';
+import { ConversationReadIndex, openRunState, sourceOrder, type ControlRead } from './conversation-read-index.js';
 import { ConversationSessionReadModel } from './conversation-session-read-model.js';
 import { createConversationProjectionDraft } from './conversation-projection-draft.js';
 import type { ConversationBaseSource } from './conversation-base-source.js';
@@ -2404,6 +2404,35 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       if ('ready' in summary) throw Error('Committed metadata index is being prepared');
       return { conversationId: this.#conversationId, runId: request.runId, ownerEpoch: this.#ownerEpoch, commitRevision: commit.commitRevision, summary };
     }
+    if (request.mode === 'run-facts') {
+      if (!Array.isArray(request.runIds) || request.runIds.length > 32) throw new TypeError('Run fact request exceeds 32 runs');
+      for (const runId of request.runIds) assertIdentifier(runId, 'Run fact id');
+      const through = request.historyThroughInputLsn;
+      if (!Number.isSafeInteger(through) || through < 0) throw new TypeError('Invalid ordered history boundary');
+      // 换基底时整批重读，同一页的事实只来自同一份读取基底
+      for (;;) {
+        const generation = this.#readBaseGeneration;
+        if ((await this.#readIndex.state(this.#conversationId)).deleted) return { entries: [] };
+        const runIds = [...new Set(request.runIds)], controls = await this.#readIndex.control(this.#conversationId, runIds);
+        const statusAt = await this.#readIndex.statusAt(this.#conversationId, runIds);
+        const entries: { order: string; fact: Exclude<ConversationControlFact, { kind: 'input' }> }[] = [];
+        for (const [index, runId] of runIds.entries()) {
+          const status = controls.get(runId)!, at = statusAt[index];
+          // 状态与其位置须是同一修订；未结束的运行由当前集合给出，边界之后的状态由尾部按日志顺序给出
+          const covered = !!at && at.statusRevision === status.entry?.statusRevision && (!at.local || at.lsn <= through);
+          const fact = covered && !openRunState(status.entry!.state) ? this.#statusFact(runId, status, true) : undefined;
+          if (fact) entries.push({ order: sourceOrder(at!.local, at!.lsn, at!.item), fact });
+          const final = status.commit ? await this.#readIndex.final(this.#conversationId, runId) : undefined;
+          if (final && final.lsn <= through && final.commitRevision === status.commit!.commitRevision) {
+            entries.push({ order: sourceOrder(true, final.lsn, final.item), fact: { kind: 'final', frame: finalFrame({ t: 'final', conversationId: this.#conversationId, runId,
+              commitRevision: final.commitRevision, digest: final.digest, state: 'pending' }, await this.#readIndex.finalConflicts(status.commit!)) } });
+          }
+        }
+        // 按源顺序返回：调用方跨批合并时以这个顺序键为准
+        entries.sort((a, b) => a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+        if (generation === this.#readBaseGeneration) return { entries };
+      }
+    }
     const importedSource = this.#importedBaseSource;
     const sourceMeta = importedSource ? await importedSource.read(view => view.get('directory/' + JSON.stringify(this.#conversationId) + ':meta')) as unknown as { clearId?: string; clearedLsn?: number } | undefined : undefined;
     const base = importedSource ? { id: importedSource.namespace, clearId: sourceMeta?.clearId, clearedThroughLsn: sourceMeta?.clearedLsn ?? 0,
@@ -2447,20 +2476,35 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       return page;
     }
     if (request.historyRunIds && (request.historyRunIds.length > 4 || request.cursor)) throw new TypeError('Invalid consumed history boundary');
-    if (request.historyThroughInputLsn !== undefined && (request.cursor || !Number.isSafeInteger(request.historyThroughInputLsn) || request.historyThroughInputLsn < 0 || request.historyThroughInputLsn > head.lsn)) throw new TypeError('Invalid ordered history boundary');
-    let historyThroughCommitRevision = request.historyThroughInputLsn === undefined ? 0 :
-      (await this.#readIndex.historyCommit(this.#conversationId, request.historyThroughInputLsn))?.commitRevision ?? 0;
+    const through = request.historyThrough;
+    if (through !== undefined && (request.cursor || through.logId !== head.logId || !Number.isSafeInteger(through.lsn) || through.lsn < 0 || through.lsn > head.lsn)) throw new TypeError('Invalid ordered history boundary');
+    const origin = !request.cursor || reset || request.cursor.after.lsn === 0 ? await this.#log.originCheckpoint() : undefined;
+    // 历史边界必须是本日志上可验证的 checkpoint：首页冻结的本地 head
+    if (through && (through.lsn === 0 ? through.frameEndOffset !== origin!.frameEndOffset || through.prefixDigest !== origin!.prefixDigest : (await this.#log.readEnvelopeAt(through), false))) {
+      throw new TypeError('Invalid ordered history boundary');
+    }
+    if (through && (lifecycle.cleared > through.lsn || importedSource && !await this.#baseActiveAt(importedSource, through))) {
+      // 边界之后发生的 clear 或收编/换基底使这份历史过期：重置后重新取历史，不跳过新来源
+      return { facts: [], cursor: { conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
+        clearId: lifecycle.clearId, baseId: base?.id, baseItem: 0, upper: head, after: origin!, item: 0 }, hasMore: false, reset: true };
+    }
+    let historyThroughCommitRevision = through === undefined ? 0 :
+      (await this.#readIndex.historyCommit(this.#conversationId, through.lsn))?.commitRevision ?? 0;
     for (const runId of request.historyRunIds ?? []) assertIdentifier(runId, 'Consumed history run id');
     const consumed = await this.#readIndex.control(this.#conversationId, request.historyRunIds ?? []);
     for (const { commit } of consumed.values()) {
-      if (request.historyThroughInputLsn === undefined && commit) historyThroughCommitRevision = Math.max(historyThroughCommitRevision, commit.commitRevision);
+      if (through === undefined && commit) historyThroughCommitRevision = Math.max(historyThroughCommitRevision, commit.commitRevision);
     }
-    const origin = !request.cursor || reset || request.cursor.after.lsn === 0 ? await this.#log.originCheckpoint() : undefined;
-    let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : {
+    let cursor: ConversationControlCursor = request.cursor && !reset ? { ...request.cursor, ownerEpoch: this.#ownerEpoch } : through ? {
+      // 从边界起步：基底与边界之前的事实都已由历史覆盖，先补发其中仍未结束的运行，再扫边界之后
+      conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
+      clearId: lifecycle.clearId, baseId: base?.id, baseItem: base?.count ?? 0,
+      historyThroughCommitRevision, historyThroughInputLsn: through.lsn, current: {},
+      upper: head, after: through.lsn === 0 ? origin! : through, item: 0,
+    } : {
       conversationId: this.#conversationId, ownerEpoch: this.#ownerEpoch, clearedThroughLsn: lifecycle.cleared,
       clearId: lifecycle.clearId, baseId: base?.id, baseItem: baseVisible ? 0 : base?.count ?? 0,
       historyThroughCommitRevision,
-      ...(request.historyThroughInputLsn !== undefined ? { historyThroughInputLsn: request.historyThroughInputLsn } : {}),
       upper: head, after: origin!, item: 0,
     };
     if (cursor.after.lsn === cursor.upper.lsn && cursor.item === 0) cursor = { ...cursor, upper: head };
@@ -2501,8 +2545,8 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         } });
       } else if (record.stream === runStream(this.#conversationId) && 't' in body && body.t === 'state') {
         const status = controls.get(body.runId)!;
-        const notice = status.entry?.statusRevision === body.statusRevision ? conversationStatusNotice(this.#conversationId, this.#ownerEpoch, body.runId, status.entry) : undefined;
-        const fact = notice ? { kind: 'status' as const, ...(cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn) ? { historyCovered: true } : {}), notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice, communication: status.communication, continuation: status.continuation, ...(status.commit ? { commitRevision: status.commit.commitRevision } : {}) } : undefined;
+        const fact = status.entry?.statusRevision === body.statusRevision ? this.#statusFact(body.runId, status,
+          cursor.historyThroughInputLsn !== undefined && (imported || upper.lsn <= cursor.historyThroughInputLsn)) : undefined;
         if (fact) facts.push(fact);
       } else if (record.stream === 'final-outbox' && 't' in body && body.t === 'final' && body.conversationId === this.#conversationId && body.state === 'pending') {
         const commit = controls.get(body.runId)?.commit;
@@ -2510,9 +2554,28 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
         facts.push({ kind: 'final', frame: finalFrame(body, await this.#readIndex.finalConflicts(commit)) });
       }
     };
+    // 当前集合：边界之前（含基底）仍未结束的运行，按运行补发一次当前状态；边界之后的状态记录由尾部扫描给出。
+    // 候选行与状态分两次读：只有状态仍是行里记的那一修订才补发，已经变化的（新状态在边界之后）交给尾部。
+    const currentOrder: string[] = [];
+    while (cursor.current && facts.length < 32) {
+      const page = await this.#readIndex.openRunPage(this.#conversationId, cursor.current.after);
+      const visible = page.entries.filter(({ run }) => run.local ? run.lsn <= cursor.historyThroughInputLsn! && run.lsn > targetClear
+        : baseVisible && run.lsn > base!.clearedThroughLsn);
+      const controls = await this.#readIndex.control(this.#conversationId, visible.map(({ run }) => run.runId));
+      let after = cursor.current.after, complete = true;
+      for (const { key, run } of page.entries) {
+        if (facts.length >= 32) { complete = false; break; }
+        const status = visible.some(entry => entry.key === key) ? controls.get(run.runId) : undefined;
+        const fact = status?.entry?.statusRevision === run.statusRevision ? this.#statusFact(run.runId, status, true) : undefined;
+        if (fact) { facts.push(fact); currentOrder.push(sourceOrder(run.local, run.lsn, run.item)); }
+        after = key;
+      }
+      if (complete && !page.continuation) { const { current: _current, ...rest } = cursor; cursor = rest; }
+      else { const next = complete ? page.continuation : after; cursor = { ...cursor, current: next === undefined ? {} : { after: next } }; }
+    }
     // Each finite chunk reads its control keys against one verified authority
     // view. It is discarded before the next chunk; lifecycle is rechecked below.
-    const imported = base ? await base.page(cursor.baseItem) : [];
+    const imported = base && !cursor.current ? await base.page(cursor.baseItem) : [];
     const importedControls = await controlFor(baseVisible ? imported.filter(record => record.lsn > base!.clearedThroughLsn) : []);
     for (const record of imported) {
       if (facts.length >= 32) break;
@@ -2520,7 +2583,7 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
       cursor = { ...cursor, baseItem: cursor.baseItem + 1 };
     }
     // A bounded scan also yields on logs containing unrelated conversation facts.
-    if (facts.length < 32 && cursor.baseItem >= (base?.count ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
+    if (facts.length < 32 && !cursor.current && cursor.baseItem >= (base?.count ?? 0) && cursor.after.lsn < cursor.upper.lsn && !lifecycle.deleted) {
       // Select this conversation's authoritative envelope locators in one
       // verified directory read. The batch still verifies the complete WAL;
       // unrelated conversations do not force empty RPC pages or repeated scans.
@@ -2569,7 +2632,23 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
     }
     const current = await lifecycleOf();
     if (readGeneration !== this.#readBaseGeneration || current.cleared !== cursor.clearedThroughLsn || current.clearId !== cursor.clearId || current.deleted) return { facts: [], cursor, hasMore: false, reset: true };
-    return { facts, cursor, hasMore: cursor.baseItem < (base?.count ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
+    return { facts, ...(currentOrder.length ? { currentOrder } : {}), cursor, hasMore: !!cursor.current || cursor.baseItem < (base?.count ?? 0) || cursor.after.lsn < cursor.upper.lsn, reset };
+  }
+
+  /** 一个运行当前状态的控制事实（扫描、当前集合补发与精确端口共用） */
+  #statusFact(runId: string, status: ControlRead, historyCovered: boolean): Extract<ConversationControlFact, { kind: 'status' }> | undefined {
+    const notice = conversationStatusNotice(this.#conversationId, this.#ownerEpoch, runId, status.entry!);
+    if (!notice) return;
+    return { kind: 'status', ...(historyCovered ? { historyCovered: true } : {}), notice: 'reason' in notice ? { ...notice, reason: notice.reason?.slice(0, 2048) } : notice,
+      communication: status.communication, continuation: status.continuation, ...(status.commit ? { commitRevision: status.commit.commitRevision } : {}) };
+  }
+
+  /** 导入基底在历史边界处已经生效（绑定的激活点不晚于边界，且是当前装入的同一份基底） */
+  async #baseActiveAt(source: ConversationBaseSource, through: DurableLogCheckpoint): Promise<boolean> {
+    const binding = (await this.#log.transactDurableProjection<never, ConversationBaseBinding | undefined>(CONVERSATION_RUN_STATE_PROJECTION_ID,
+      async view => ({ kind: 'return', value: await view.get(conversationBaseKey(this.#conversationId)) as unknown as ConversationBaseBinding | undefined }))).value;
+    return !!binding && binding.manifest.digest === source.manifestRef.digest && binding.manifest.bytes === source.manifestRef.bytes &&
+      binding.activation.logId === through.logId && binding.activation.lsn <= through.lsn;
   }
 
   async assign(

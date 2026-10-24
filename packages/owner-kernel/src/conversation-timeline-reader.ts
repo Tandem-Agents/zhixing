@@ -12,10 +12,13 @@ export class ConversationTimelineReader {
     const state = { ...await this.directory.state(this.conversationId) }, cursor = input.cursor;
     if (state.deleted || cursor && (!cursor.history || cursor.conversationId !== this.conversationId || cursor.ownerEpoch !== this.ownerEpoch || cursor.clearId !== state.clearId))
       return { fragments: [], hasMore: !state.deleted, reset: true };
-    const throughLsn = cursor?.history?.throughLsn ?? (await this.directory.log.checkpoint()).lsn;
+    // 首页冻结本地 head：后续页沿用同一 LSN，完整 checkpoint 只在首页给出，供控制页从这里起步
+    const head = cursor?.history ? undefined : await this.directory.log.checkpoint();
+    const throughLsn = cursor?.history?.throughLsn ?? head!.lsn;
     const page = await this.#page(input, throughLsn, state);
     const after = await this.directory.state(this.conversationId);
-    return after.deleted || after.clearId !== state.clearId ? { fragments: [], hasMore: !after.deleted, reset: true } : { ...page, historyThroughInputLsn: throughLsn };
+    return after.deleted || after.clearId !== state.clearId ? { fragments: [], hasMore: !after.deleted, reset: true }
+      : { ...page, historyThroughInputLsn: throughLsn, ...(head ? { historyThrough: head } : {}) };
   }
   async #page(input: { cursor?: ConversationBodyCursor; direction?: 'forward' | 'reverse'; runId?: string }, throughLsn: number, state: ReadMeta): Promise<ConversationBodyPage> {
     const clearId = state.clearId, fragments: ConversationBodyFragment[] = [];

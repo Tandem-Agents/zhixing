@@ -79,7 +79,8 @@ type View = Omit<TerminalView, 'generation'>;
 type SkillsBinding = { client: SkillCatalogClient; commands: TerminalSkillCommands; route(name: string): { readonly route: 'input' } | undefined };
 class EmptyTerminalSubmission extends Error {}
 interface TerminalHistoryState {
-  historyThroughInputLsn?: number;
+  /** 历史首页冻结的本地权威边界；控制恢复从这里起步 */
+  historyThrough?: import('@zhixing/core/authority').DurableLogCheckpoint;
   conversationId: string;
   buffered?: ConversationBodyPage;
   bodyCursor?: ConversationBodyCursor; hasMore: boolean; offline: boolean; recoveryRunIds?: readonly string[];
@@ -748,7 +749,7 @@ class TerminalApplication {
         presentationProfile: 'bounded-v1',
         onProcess: value => this.#processSession.accept(value),
         pagedRecovery: true,
-        historyThroughInputLsn: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.historyThroughInputLsn : undefined,
+        historyThrough: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.historyThrough : undefined,
         historyRunIds: () => this.#history?.conversationId === this.#controller?.current.conversationId ? this.#history?.recoveryRunIds ?? [] : [],
         onRecoveryDrain: source => {
           this.#outputProjection.end(source.conversationId, source.turnId, source.runId);
@@ -1021,13 +1022,15 @@ class TerminalApplication {
       const page = history.buffered ?? await observeStartupPhase(this.#mainView.readyForInput ? undefined : this.#logging.records,
         'terminal.history-rpc', () => this.#conversation.bodyPage(history.conversationId, history.bodyCursor, { includeInputs: true }));
       if (!current()) return;
-      if (page.reset) { history.buffered = undefined; history.bodyCursor = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
+      if (page.reset) { history.buffered = undefined; history.bodyCursor = undefined; history.historyThrough = undefined; this.#historyParser.close(); throw Error('terminal-history-generation-changed'); }
+      // 边界只在首页给出（含准备中的首页）；后续页的 LSN 与它不一致时不再使用
+      if (page.historyThrough) history.historyThrough = page.historyThrough;
+      else if (history.historyThrough && history.historyThrough.lsn !== page.historyThroughInputLsn) history.historyThrough = undefined;
       if (page.preparing) {
         history.bodyCursor = page.cursor;
         progress(`正在恢复历史索引（${Math.floor(page.preparing.bytes / 1024)} / ${Math.ceil(page.preparing.total / 1024)} KiB）…`);
         await this.#publishHistoryView(); await new Promise<void>(setImmediate); continue;
       }
-      history.historyThroughInputLsn = page.historyThroughInputLsn;
       history.buffered = page;
       const source = page.fragments[0];
       if (!source) { history.buffered = undefined; history.bodyCursor = page.cursor; history.hasMore = page.hasMore; continue; }

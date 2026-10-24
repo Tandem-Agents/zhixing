@@ -663,14 +663,21 @@ export class RpcConversationFacade {
     return boundedControlProjection(await client.request('session.statusHistory', { mode: 'control-targets', conversationId }), 16 * 1024);
   }
 
-  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThroughInputLsn?: number): Promise<ConversationControlPage> {
-    const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}), ...(historyThroughInputLsn !== undefined ? { historyThroughInputLsn } : {}) };
+  async controlPage(conversationId: string, cursor?: ConversationControlCursor, historyRunIds?: readonly string[], historyThrough?: import('@zhixing/core/authority').DurableLogCheckpoint): Promise<ConversationControlPage> {
+    const client = await this.link.getClient(), params = { mode: 'control-page', conversationId, cursor, ...(historyRunIds?.length ? { historyRunIds } : {}), ...(historyThrough ? { historyThrough } : {}) };
     const consume = (page: ConversationControlPage): ConversationControlPage => boundedControlProjection({ ...page,
       facts: page.facts.map(fact => fact.kind === 'status' && 'reason' in fact.notice
         ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact),
     }, 512 * 1024);
     return client.consume ? client.consume('session.statusHistory', params, consume)
       : consume(await client.request<ConversationControlPage>('session.statusHistory', params));
+  }
+  /** 指定运行（至多 32 个）在历史边界之前的终态与已提交的 final */
+  async runFacts(conversationId: string, runIds: readonly string[], historyThroughInputLsn: number): Promise<import('@zhixing/core/contracts').ConversationRunFactsPage> {
+    const client = await this.link.getClient();
+    const page = await client.request<import('@zhixing/core/contracts').ConversationRunFactsPage>('session.statusHistory', { mode: 'run-facts', conversationId, runIds, historyThroughInputLsn });
+    return boundedControlProjection({ entries: page.entries.map(({ order, fact }) => ({ order, fact: fact.kind === 'status' && 'reason' in fact.notice
+      ? { ...fact, notice: { ...fact.notice, reason: fact.notice.reason?.slice(0, 2048) } } : fact })) }, 512 * 1024);
   }
   async completion(conversationId: string, runId: string, ownerEpoch?: number): Promise<import('@zhixing/core/contracts').ConversationCompletionPage> {
     const client = await this.link.getClient();
