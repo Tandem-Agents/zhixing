@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_RETENTION_DAYS, runRetentionSweep } from "../retention.js";
+import { SnapshotStore } from "../snapshot/store.js";
 
 const NOW = new Date("2026-06-11T00:00:00.000Z");
 /** 窗内时刻（1 天前） */
@@ -48,6 +49,8 @@ async function writeConversation(
     shards?: ShardSpec[];
     lastClearAt?: string;
     snapshots?: { createdAt: string }[];
+    /** 早期本地测试资料：只有快照文件、没有索引 */
+    legacySnapshots?: { createdAt: string }[];
     rawIndex?: string;
   },
 ): Promise<string> {
@@ -84,16 +87,28 @@ async function writeConversation(
     }
   }
   if (opts.snapshots) {
+    // 经 store 登记：覆盖边界随创建顺序递增（与生产写入路径一致）
+    for (const [i, snap] of opts.snapshots.entries()) {
+      const writer = new SnapshotStore(root, { now: () => Date.parse(snap.createdAt) });
+      await writer.write(convId, {
+        coveredThroughRunIndex: i,
+        structuredSummary: { facts: "f", state: "s", active: "a" },
+        tokensBefore: 100,
+        tokensAfter: 10,
+      });
+    }
+  }
+  if (opts.legacySnapshots) {
     const sDir = path.join(convDir, "snapshots");
     await fs.mkdir(sDir, { recursive: true });
-    for (const snap of opts.snapshots) {
+    for (const [i, snap] of opts.legacySnapshots.entries()) {
       await fs.writeFile(
         path.join(sDir, `${snap.createdAt.replace(/[:.]/g, "-")}.json`),
         JSON.stringify({
           version: 1,
           conversationId: convId,
           createdAt: snap.createdAt,
-          coveredThroughRunIndex: 0,
+          coveredThroughRunIndex: i,
           structuredSummary: { facts: "f", state: "s", active: "a" },
           tokensBefore: 100,
           tokensAfter: 10,
@@ -109,9 +124,10 @@ async function listShardFiles(convDir: string): Promise<string[]> {
   return entries.filter((e) => e.endsWith(".jsonl")).sort();
 }
 
+/** 快照正文文件（索引文件不计） */
 async function listSnapshotFiles(convDir: string): Promise<string[]> {
   try {
-    return (await fs.readdir(path.join(convDir, "snapshots"))).sort();
+    return (await fs.readdir(path.join(convDir, "snapshots"))).filter((name) => name.endsWith(".json")).sort();
   } catch {
     return [];
   }
@@ -276,6 +292,19 @@ describe("runRetentionSweep — 快照单一判据", () => {
     // 被换代的删；最新的虽超期但未退役 → 在用豁免
     expect(report.snapshotsDeleted).toBe(1);
     expect(await listSnapshotFiles(convDir)).toHaveLength(1);
+  });
+
+  it("早期本地测试资料（只有快照文件）在保留期中一次性建立索引，按同一判据清理", async () => {
+    const convDir = await writeConversation(tmpRoot, "conv-a", {
+      legacySnapshots: [{ createdAt: STALE_OLDER }, { createdAt: STALE }],
+    });
+
+    const report = await runRetentionSweep({ roots: [tmpRoot], now: NOW });
+
+    expect(report.snapshotsDeleted).toBe(1);
+    const left = await listSnapshotFiles(convDir);
+    expect(left).toHaveLength(1);
+    expect(left[0]).toContain("2026-05-02");
   });
 
   it("损坏快照文件不动（无 createdAt 判据，宁留勿删）也不参与最新判定", async () => {

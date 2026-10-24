@@ -10,8 +10,10 @@ import type {
 import type {
   Message,
 } from "@zhixing/core/types";
-import type {
-  TranscriptRunRecord,
+import {
+  SnapshotAnchorInvariantError,
+  TranscriptOutcomeUnknownError,
+  type TranscriptRunRecord,
 } from "@zhixing/core/transcript";
 import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import {
@@ -1648,6 +1650,57 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
+    it("promote 把队首的 provisionalRunIndex 作为 expectedRunIndex 传给存储（重试的稳定身份）", async () => {
+      const options: unknown[] = [];
+      let next = 0;
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        appendRun: async (_cid, _record, opts) => {
+          options.push(opts);
+          return { runIndex: next++, shardId: "000001" };
+        },
+      });
+      await mgr.getOrCreate("eph-expected", { ephemeral: true });
+      const record = (text: string) => ({
+        timestamp: new Date().toISOString(),
+        messages: [{ role: "user" as const, content: [{ type: "text" as const, text }] }],
+      });
+      await mgr.recordTurn("eph-expected", record("a"));
+      await mgr.recordTurn("eph-expected", record("b"));
+      expect(options).toEqual([{ expectedRunIndex: 0 }, { expectedRunIndex: 1 }]);
+      await mgr.disposeAll();
+    });
+
+    it("持久会话 recordTurn 结果未知 → 下一轮开始前从已发布状态重建窗口，运行体保留", async () => {
+      let loads = 0;
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async () => { loads++; return loads === 1 ? undefined : { bootstrap: null, turnCount: 7 }; },
+        appendRun: async () => { throw new TranscriptOutcomeUnknownError("unknown"); },
+      });
+      const session = await mgr.getOrCreate("persist-unknown");
+      const runtime = session.runtime;
+      const windowBefore = session.window;
+      await expect(mgr.recordTurn("persist-unknown", {
+        timestamp: new Date().toISOString(),
+        messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "q" }] }],
+      })).rejects.toBeInstanceOf(TranscriptOutcomeUnknownError);
+      expect(session.viewStale).toBe(true);
+      await mgr.prepareRuntimeProjectionForTurn("persist-unknown");
+      expect(loads).toBe(2);
+      expect(session.viewStale).toBe(false);
+      expect(session.window).not.toBe(windowBefore);
+      expect(session.turnCount).toBe(7);
+      expect(session.runtime).toBe(runtime);
+      await mgr.disposeAll();
+    });
+
     it("ephemeral acceptRun 携 provisional runIndex（pending 队列序号），promote 对账一致时静默", async () => {
       const runtime = createMockRuntime("eph-prov");
       const factory: RuntimeFactory = { create: async () => runtime };
@@ -2039,6 +2092,7 @@ describe("ConversationManager", () => {
       }
       const session = mgr.getSession("snap-2")!;
       expect(session.turnCount).toBe(2); // recordTurn 主流程不受影响
+      expect(session.snapshotAnchorsTrusted).toBe(true); // 普通写失败不改变锚的可信
       await mgr.disposeAll();
     });
 
@@ -2065,6 +2119,36 @@ describe("ConversationManager", () => {
         // persistent 化后的折叠：锚不可信 → 不写快照
         await mgr.recordTurn("snap-3", makeRecord("q2"), structuredCompact);
         expect(writeSnapshot).not.toHaveBeenCalled();
+        await mgr.disposeAll();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("快照存储报覆盖边界没有前进 → 锚不可信，该会话停写", async () => {
+      const writeSnapshot = vi.fn(async () => {
+        throw new SnapshotAnchorInvariantError("coverage does not advance");
+      });
+      const runtime = foldingRuntime("snap-4");
+      let next = 0;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const mgr = new ConversationManager(
+          { create: async () => runtime },
+          { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+          {
+            appendRun: async () => ({ runIndex: next++, shardId: "000001" }),
+            writeSnapshot,
+          },
+        );
+        const session = await mgr.getOrCreate("snap-4");
+        stubFoldAnchor(session);
+        await mgr.recordTurn("snap-4", makeRecord("a"), structuredCompact);
+        expect(writeSnapshot).toHaveBeenCalledTimes(1);
+        expect(session.snapshotAnchorsTrusted).toBe(false);
+        await mgr.recordTurn("snap-4", makeRecord("b"), structuredCompact);
+        expect(writeSnapshot).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0]![0])).toContain("快照写入失败");
         await mgr.disposeAll();
       } finally {
         warnSpy.mockRestore();

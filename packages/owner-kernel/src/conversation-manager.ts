@@ -18,7 +18,7 @@
 import { createAttentionWindow, type AttentionWindowState, type WindowCompact, type WindowFoldOutcome } from "@zhixing/core/context";
 import { type AbortReason } from "@zhixing/core/interrupt";
 import { type AgentEventMap, type Message } from "@zhixing/core";
-import { type AppendRunResult, type AppendCommittedRunResult, type RunRecordInput, type RunRecordRef, type SnapshotInput, type TurnSource, type TranscriptRunRecord } from "@zhixing/core/transcript";
+import { SnapshotAnchorInvariantError, TranscriptOutcomeUnknownError, type AppendRunOptions, type AppendRunResult, type AppendCommittedRunResult, type CommittedRunSource, type RunRecordInput, type RunRecordRef, type SnapshotInput, type TurnSource, type TranscriptRunRecord } from "@zhixing/core/transcript";
 import type { ConversationInvocation } from "@zhixing/core/contracts";
 import type {
   AbortResult,
@@ -80,9 +80,12 @@ export interface ManagedSession {
    * 注意力窗口 —— "给 LLM 看什么"的唯一内存权威,会话状态归 manager 而非
    * 执行体。恢复历史经启动装填对作为窗口起始条目;窗口只经接受协议前进
    * (recordTurn 在持久化 / pending 入列成功后调 acceptRun),run 输入瞬态
-   * 构造、失败路径窗口不动——无需任何回滚。
+   * 构造、失败路径窗口不动——无需任何回滚。持久化结果未知时（viewStale）在下一轮
+   * 开始前从已发布状态重建，不影响运行体、pending 队列与清理责任。
    */
-  readonly window: AttentionWindowState;
+  window: AttentionWindowState;
+  /** 持久化结果未知：窗口可能与已发布状态不一致，下一轮开始前重建 */
+  viewStale?: boolean;
   readonly createdAt: string;
   lastActiveAt: string;
   busy: boolean;
@@ -151,12 +154,14 @@ export type EnsureConversation = (conversationId: string) => Promise<void>;
 export type AppendRun = (
   conversationId: string,
   input: RunRecordInput,
+  options?: AppendRunOptions,
 ) => Promise<AppendRunResult>;
 
-/** AuthorityCommitLog 已提交 run 的幂等 transcript 投影入口。 */
+/** AuthorityCommitLog 已提交 run 的幂等 transcript 投影入口；source 为已提交事实的来源绑定。 */
 export type AppendCommittedRun = (
   conversationId: string,
   input: TranscriptRunRecord,
+  source?: CommittedRunSource,
 ) => Promise<AppendCommittedRunResult>;
 
 export interface ConversationManagerCallbacks {
@@ -345,6 +350,21 @@ export class ConversationManager implements ConversationCommitProjection {
   /** Called by the turn owner after acquiring its slot, before issuing an assignment. */
   async prepareRuntimeProjectionForTurn(conversationId: string): Promise<void> {
     await this.refreshRuntimeProjection(conversationId, true);
+    await this.rebuildStaleView(conversationId);
+  }
+
+  /** 持久化结果未知后，只重建窗口视图与轮数（从已发布状态装载），运行体与队列不动 */
+  private async rebuildStaleView(conversationId: string): Promise<void> {
+    // 常规路径（视图未失效）不进 id 锁
+    if (!this.sessions.get(conversationId)?.viewStale) return;
+    await this.withIdLock(conversationId, async () => {
+      const session = this.sessions.get(conversationId);
+      if (!session?.viewStale || session.ephemeral) return;
+      const history = await this.loadHistory?.(conversationId);
+      session.window = createAttentionWindow({ conversationId, bootstrap: history?.bootstrap ?? undefined });
+      session.turnCount = history?.turnCount ?? 0;
+      session.viewStale = false;
+    });
   }
 
   private async refreshRuntimeProjection(conversationId: string, beforeTurn = false): Promise<void> {
@@ -1657,7 +1677,15 @@ export class ConversationManager implements ConversationCommitProjection {
           "(was this manager constructed without appendRun while the session is not ephemeral?)",
       );
     }
-    const { runIndex, shardId } = await this.appendRunCb(conversationId, record);
+    let appended: AppendRunResult;
+    try {
+      appended = await this.appendRunCb(conversationId, record);
+    } catch (error) {
+      // 结果未知：不按“本轮不成为事实”处理，窗口在下一轮开始前从已发布状态重建
+      if (error instanceof TranscriptOutcomeUnknownError) session.viewStale = true;
+      throw error;
+    }
+    const { runIndex, shardId } = appended;
     const outcome = session.window.acceptRun({
       runMessages: record.messages,
       runIndex,
@@ -1686,7 +1714,11 @@ export class ConversationManager implements ConversationCommitProjection {
       conversationId,
       input.sessionMutations,
     );
-    const accepted = await this.appendCommittedRunCb(conversationId, input.runRecord);
+    const accepted = await this.appendCommittedRunCb(conversationId, input.runRecord, {
+      assignmentId: input.assignmentId,
+      commitRevision: input.commitRevision,
+      digest: input.digest,
+    });
     if (!accepted.appended) return;
     const session = this.sessions.get(conversationId);
     if (!session) return;
@@ -2112,6 +2144,8 @@ export class ConversationManager implements ConversationCommitProjection {
         tokensAfter: windowCompact.tokensAfter,
       });
     } catch (err) {
+      // 覆盖边界没有随创建顺序前进：折叠锚点不可信，本会话停写（错误的覆盖边界比缺失更糟）
+      if (err instanceof SnapshotAnchorInvariantError) session.snapshotAnchorsTrusted = false;
       console.warn(
         `[ConversationManager] 快照写入失败 conv=${conversationId}（不影响 run record 与窗口）:`,
         err instanceof Error ? err.message : err,
@@ -2156,7 +2190,10 @@ export class ConversationManager implements ConversationCommitProjection {
     // 持久化错位，warn 暴露（窗口锚修正随快照消费者落地，在那之前锚无
     // 消费者、无实害）。
     for (let head = session.pendingRuns.peek(); head; head = session.pendingRuns.peek()) {
-      const { runIndex } = await this.appendRunCb(conversationId, head.record);
+      // 队首的 provisionalRunIndex 是入队时定下的稳定身份：重试时 store 按该位置核对已发布记录，不重复追加
+      const { runIndex } = await this.appendRunCb(conversationId, head.record, {
+        expectedRunIndex: head.provisionalRunIndex,
+      });
       if (runIndex !== head.provisionalRunIndex) {
         // 锚错位 → 该会话快照降级停写：错误的覆盖边界会让启动装填
         // 重叠 / 缺漏，比没有快照更糟

@@ -1,26 +1,18 @@
 /**
  * 时间窗保留清理 —— 持久层自带的独立维护能力。
  *
- * 定性：纯物理层清理，只看索引元数据（分片以封笔时刻判窗 + 是否活跃、
- * 快照以自身 createdAt 判窗 + 在用/退役），不碰语义、绝不打开分片正文。
- * 调度器的 system task 只是薄触发壳（到点调用、转执行摘要），全部清理
- * 算法内聚在此——持久层的维护逻辑不泄漏到调度层。
+ * 定性：纯物理层清理，不碰语义、绝不打开分片正文。调度器的 system task 只是
+ * 薄触发壳（到点调用、转执行摘要），全部清理算法内聚在持久层。
  *
- * 与写入方（owner）的并发契约：
- *   - 索引由 owner 唯一写；本模块对索引**严格只读**、对文件只删——从根上
- *     消除跨进程并发写索引的冲突（清理跑在常驻进程、cli 写在 cli 进程）。
- *     刻意不复用 store 的自愈读路径（ensureReadableIndex 会重建索引 = 写）：
- *     索引读不出就跳过本对话，自愈归 owner。
- *   - 删除后索引里短暂的死记录由读取容错吸收（readShardLines 对缺失文件
- *     视为空分片）；删被占用文件失败（Windows 锁定语义）→ 跳过、下轮再来。
- *   - 幂等：重复执行无新副作用（已删文件 ENOENT 静默跳过）。
+ * 分片：经该 scope 的唯一写者 store 实例执行（与追加共用同一把锁）。按序号从旧到新
+ * 判定“序号相邻后继的创建时刻 < cutoff”（封笔时刻也出窗，片内数据才真正超期），
+ * 遇到第一个不满足的就停；先发布根撤可见，再物理删除，遇占用停下、下轮续做。
+ * 永不删活跃分片；只剩一个分片时不删。
  *
- * 分片三条铁律：永不删活跃分片；对话只剩一个分片（必然活跃）即使超期也
- * 不删；真删、不入垃圾桶。
- *
- * 快照单一判据：删 iff 自身 createdAt 超期 && !(最新快照 && 未退役)。
- * 退役 = createdAt 严格早于 lastClearAt（清空使更早快照退出在用），退役只
- * 摘掉"在用豁免"、不提前删——老化一律按快照自身 createdAt 同窗判。
+ * 快照：经该 scope 的唯一写者 SnapshotStore 实例执行，lastClearAt 取自转录的只读视图。
+ * 判据：删 iff 自身 createdAt 超期 && !(最新快照 && 未退役)。退役 = createdAt 严格早于
+ * lastClearAt（清空使更早快照退出在用），退役只摘掉"在用豁免"、不提前删——老化一律按快照
+ * 自身 createdAt 同窗判。已登记快照按 createdAt 递增，要删的是前缀：先撤可见，再删除、可续做。
  *
  * 语义边界：保留窗内的归档才是「唯一真相源 + 可检索召回」；真删意味着
  * 放弃窗外数据的真相源地位与召回可能，检索召回的范围 = 保留窗内。
@@ -28,13 +20,10 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import {
-  TRANSCRIPT_DIR_NAME,
-  TRANSCRIPT_INDEX_FILE_NAME,
-} from "./shard/store.js";
-import { TRANSCRIPT_INDEX_VERSION, type TranscriptIndex } from "./shard/types.js";
-import { SNAPSHOTS_DIR_NAME } from "./snapshot/store.js";
-import { SNAPSHOT_FILE_VERSION } from "./snapshot/types.js";
+import { fromSafePathSegment } from "../paths.js";
+import { readDirectoryView } from "./shard/directory-view.js";
+import { ShardedTranscriptStore, TRANSCRIPT_DIR_NAME } from "./shard/store.js";
+import { SnapshotStore } from "./snapshot/store.js";
 
 /** 默认保留窗（天）—— 窗内数据是唯一真相源，窗外由本清理收走 */
 export const DEFAULT_RETENTION_DAYS = 27;
@@ -49,6 +38,13 @@ export interface RetentionSweepOptions {
   readonly retentionDays?: number;
   /** 时钟注入（测试锚定），默认当前时刻 */
   readonly now?: Date;
+  /**
+   * 每个根对应的唯一写者 store 实例。生产必须传入，使清理与追加共用同一把锁；
+   * 缺省时为该根新建实例（仅测试）。
+   */
+  readonly transcriptStoreFor?: (root: string) => ShardedTranscriptStore;
+  /** 每个根对应的唯一写者快照 store 实例，与快照登记共用同一把锁；缺省时为该根新建实例（仅测试） */
+  readonly snapshotStoreFor?: (root: string) => SnapshotStore;
 }
 
 export interface RetentionSweepReport {
@@ -88,12 +84,14 @@ export async function runRetentionSweep(
     } catch {
       continue; // 根不存在（如尚无任何工作场景）——合法空域
     }
+    const store = options.transcriptStoreFor?.(root) ?? new ShardedTranscriptStore(root);
+    const snapshots = options.snapshotStoreFor?.(root) ?? new SnapshotStore(root);
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const convDir = path.join(root, entry.name);
       report.conversationsScanned++;
       try {
-        await sweepConversation(convDir, cutoff, report);
+        await sweepConversation(store, snapshots, convDir, fromSafePathSegment(entry.name), cutoff, report);
       } catch (e) {
         report.warnings.push(`${convDir}: ${errorText(e)}`);
       }
@@ -103,149 +101,23 @@ export async function runRetentionSweep(
 }
 
 async function sweepConversation(
+  store: ShardedTranscriptStore,
+  snapshots: SnapshotStore,
   convDir: string,
+  conversationId: string,
   cutoff: string,
   report: RetentionSweepReport,
 ): Promise<void> {
-  const index = await readIndexReadonly(convDir, report);
-  if (index) {
-    await sweepShards(convDir, index, cutoff, report);
+  const transcriptDir = path.join(convDir, TRANSCRIPT_DIR_NAME);
+  const view = await readDirectoryView(transcriptDir);
+  if (view) {
+    const shards = await store.retainShards(conversationId, cutoff);
+    report.shardsDeleted += shards.deleted;
+    for (const warning of shards.warnings) report.warnings.push(`${convDir}: ${warning}`);
   }
-  await sweepSnapshots(convDir, index?.lastClearAt, cutoff, report);
-}
-
-/**
- * 严格只读的索引读取：缺失（尚无写入 / 非对话目录）静默返 null；存在但
- * 损坏 → warning + null（自愈归 owner 写路径，清理绝不重建索引）。
- */
-async function readIndexReadonly(
-  convDir: string,
-  report: RetentionSweepReport,
-): Promise<TranscriptIndex | null> {
-  const indexFile = path.join(
-    convDir,
-    TRANSCRIPT_DIR_NAME,
-    TRANSCRIPT_INDEX_FILE_NAME,
-  );
-  let raw: string;
-  try {
-    raw = await fs.readFile(indexFile, "utf-8");
-  } catch {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as TranscriptIndex;
-    if (
-      parsed.version === TRANSCRIPT_INDEX_VERSION &&
-      Array.isArray(parsed.shards)
-    ) {
-      return parsed;
-    }
-    report.warnings.push(`${indexFile}: unrecognized index shape`);
-  } catch (e) {
-    report.warnings.push(`${indexFile}: ${errorText(e)}`);
-  }
-  return null;
-}
-
-async function sweepShards(
-  convDir: string,
-  index: TranscriptIndex,
-  cutoff: string,
-  report: RetentionSweepReport,
-): Promise<void> {
-  // 铁律：只剩一个分片（必然活跃）即使标记异常 / 超期也不删
-  if (index.shards.length <= 1) return;
-  // 按序号数值排序找后继——不依赖索引数组顺序（未来 owner 惰性剔除死记录
-  // 等操作不该破坏判据），且数值序免疫零填充位宽的字典序边角
-  const ordered = [...index.shards].sort(
-    (a, b) => Number.parseInt(a.id, 10) - Number.parseInt(b.id, 10),
-  );
-  for (let i = 0; i < ordered.length; i++) {
-    const meta = ordered[i]!;
-    if (meta.isActive) continue; // 铁律：永不删活跃分片
-    // 片龄 ≠ 数据龄（rollover 按大小触发，一片可能跨数月仍在写）：片内最晚
-    // 数据的上界 = 后继片的 createdAt（rollover 登记新片的时刻即本片封笔
-    // 时刻，索引里天然记录）。只有封笔时刻也出窗，片内一切数据才真正超期
-    // ——保留窗承诺以数据时刻为准，不以文件创建时刻为准。
-    const successor = ordered[i + 1];
-    if (!successor) continue; // 非活跃片无后继是异常态，保守不删
-    if (successor.createdAt >= cutoff) continue; // 封笔仍在窗内 → 保留
-    const file = path.join(convDir, TRANSCRIPT_DIR_NAME, meta.file);
-    if (await deleteFileIdempotent(file, report)) {
-      report.shardsDeleted++;
-    }
-  }
-}
-
-async function sweepSnapshots(
-  convDir: string,
-  lastClearAt: string | undefined,
-  cutoff: string,
-  report: RetentionSweepReport,
-): Promise<void> {
-  const snapDir = path.join(convDir, SNAPSHOTS_DIR_NAME);
-  let entries: string[];
-  try {
-    entries = await fs.readdir(snapDir);
-  } catch {
-    return; // 无快照目录——从未切过段的对话
-  }
-
-  // 先读出全部可判定项（createdAt 可取），再定"最新"——损坏文件不参与
-  // 判定也不删（删除判据必须基于 createdAt，读不出就不动它）
-  const candidates: { file: string; createdAt: string }[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".json")) continue;
-    const file = path.join(snapDir, entry);
-    try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as {
-        version?: number;
-        createdAt?: unknown;
-      };
-      if (
-        parsed.version === SNAPSHOT_FILE_VERSION &&
-        typeof parsed.createdAt === "string"
-      ) {
-        candidates.push({ file, createdAt: parsed.createdAt });
-      }
-    } catch {
-      // 坏文件不动：无 createdAt 判据，宁留勿删（派生缓存，无害）
-    }
-  }
-  if (candidates.length === 0) return;
-
-  const latestCreatedAt = candidates.reduce(
-    (max, c) => (c.createdAt > max ? c.createdAt : max),
-    candidates[0]!.createdAt,
-  );
-
-  for (const c of candidates) {
-    if (c.createdAt >= cutoff) continue; // 窗内保留（退役不提前删）
-    const retired =
-      lastClearAt !== undefined && c.createdAt < lastClearAt;
-    const inUse = c.createdAt === latestCreatedAt && !retired;
-    if (inUse) continue; // 在用快照视同活跃，永不删
-    if (await deleteFileIdempotent(c.file, report)) {
-      report.snapshotsDeleted++;
-    }
-  }
-}
-
-/** 真删单文件：已不存在 → 幂等跳过；占用 / 权限失败 → warning、下轮再来 */
-async function deleteFileIdempotent(
-  file: string,
-  report: RetentionSweepReport,
-): Promise<boolean> {
-  try {
-    await fs.unlink(file);
-    return true;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      report.warnings.push(`${file}: ${errorText(e)}`);
-    }
-    return false;
-  }
+  const retained = await snapshots.retainSnapshots(conversationId, cutoff, view?.lastClearAt);
+  report.snapshotsDeleted += retained.deleted;
+  for (const warning of retained.warnings) report.warnings.push(`${convDir}: ${warning}`);
 }
 
 function errorText(e: unknown): string {

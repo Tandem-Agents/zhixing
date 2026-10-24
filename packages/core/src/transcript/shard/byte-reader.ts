@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
-import { open, opendir, type FileHandle } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { ArtifactJsonIndex } from '../../authority/artifact-json-index.js';
 import type { ArtifactRef } from '../../contracts/index.js';
+import { publishedShardSize, readDirectoryView, strictOffsetOf } from './directory-view.js';
+import type { TranscriptView } from './types.js';
 
 const MAX = Number.MAX_SAFE_INTEGER, CHUNK = 64 * 1024;
 export interface TranscriptBodyCursor {
@@ -32,6 +34,8 @@ export class TranscriptByteReader {
     expected?: ArtifactRef; hash: ReturnType<typeof createHash>; at: number };
   #closed = false;
   #lastClearAt?: string;
+  #view?: TranscriptView;
+  readonly #published = new Map<number, number | undefined>();
   readonly #visibility = new Map<string, { checked: NonNullable<TranscriptBodyCursor['visibleThrough']>; tail?: TranscriptBodyCursor; scan?: TranscriptBodyCursor }>();
   get lastClearAt(): string | undefined { return this.#lastClearAt; }
   constructor(readonly directory: string, indexDirectory?: string) {
@@ -51,21 +55,52 @@ export class TranscriptByteReader {
   async #assertIdentity(file: FileHandle, identity: string): Promise<void> {
     if (this.#closed || await this.#identity(file) !== identity) throw Error('transcript-byte-generation-changed');
   }
+  /**
+   * 每次读取开始时取一次视图：前驱按序号算出，每片只读到视图下的已发布长度。文件短于已发布长度
+   * 是损坏；末尾不完整的记录只在旧测试格式转换来的区域内跳过，严格区内同样是损坏。
+   */
+  async #refreshView(): Promise<void> { this.#view = await readDirectoryView(this.directory) ?? undefined; this.#published.clear(); }
+  /** 同一视图下每片的已发布长度只取一次：封存片要读后继片的位置文件头，逐条倒退时不重复读 */
+  async #publishedSize(seq: number): Promise<number | null | undefined> {
+    const view = this.#view;
+    if (!view) return undefined;
+    if (this.#published.has(seq)) return this.#published.get(seq);
+    const size = await publishedShardSize(this.directory, view, seq);
+    if (size !== null) this.#published.set(seq, size);
+    return size;
+  }
   async #previous(shard?: string): Promise<string | undefined> {
-    let latest: string | undefined;
-    let dir; try { dir = await opendir(this.directory); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
-    for await (const entry of dir) if (/^\d{6}\.jsonl$/u.test(entry.name) && entry.isFile() && (!shard || entry.name < shard) && (!latest || entry.name > latest)) latest = entry.name;
-    return latest;
+    const view = this.#view;
+    if (!view) return;
+    const seq = shard ? Number.parseInt(shard, 10) - 1 : view.tailSize > 0 ? view.activeSeq : view.activeSeq - 1;
+    return Number.isSafeInteger(seq) && seq >= view.fromSeq && seq >= 1 ? `${String(seq).padStart(6, '0')}.jsonl` : undefined;
+  }
+  async #missing(seq: number): Promise<undefined> {
+    // 视图之后 retention 已撤可见并删除：新视图不含该片即到此为止，否则是损坏
+    await this.#refreshView();
+    if (this.#view && seq < this.#view.fromSeq) return undefined;
+    throw Error('transcript-byte-shard-missing');
   }
   async #line(shard: string, before?: number): Promise<TranscriptBodyCursor | undefined> {
     if (!/^\d{6}\.jsonl$/u.test(shard)) throw Error('transcript-byte-shard');
-    const file = await open(path.join(this.directory, shard), 'r');
+    const seq = Number.parseInt(shard, 10), view = this.#view;
+    const published = await this.#publishedSize(seq);
+    if (published === null) return await this.#missing(seq);
+    let file: FileHandle;
+    try { file = await open(path.join(this.directory, shard), 'r'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return await this.#missing(seq);
+    }
     try {
-      const identity = await this.#identity(file), size = (await file.stat()).size;
+      const stat = (await file.stat()).size, strictFrom = strictOffsetOf(view, seq);
+      if (published !== undefined && stat < published) throw Error('transcript-byte-shard-truncated');
+      const identity = await this.#identity(file), size = published ?? stat;
       let to = Math.min(size, before ?? size), at = to;
       const sliceIdentity = JSON.stringify([path.resolve(this.directory), shard, identity]);
       const terminal = Buffer.alloc(1);
       if (to > 0 && (await file.read(terminal, 0, 1, to - 1)).bytesRead === 1 && terminal[0] === 10) to--;
+      else if (to > strictFrom) throw Error('transcript-byte-shard-truncated');
       const cached = await this.json.sourceSlice(sliceIdentity, to);
       if (cached !== undefined) {
         await this.#assertIdentity(file, identity);
@@ -134,6 +169,7 @@ export class TranscriptByteReader {
    * The yielded reader is valid until advancing this generator. */
   async *records(signal?: AbortSignal): AsyncGenerator<{ readonly ref: ArtifactRef; readonly json: ArtifactJsonIndex; readonly runIndex: number }> {
     this.#lastClearAt = undefined;
+    await this.#refreshView();
     const last = await this.#previous(); let cursor = last ? await this.#line(last) : undefined;
     while (cursor) {
       signal?.throwIfAborted();
@@ -203,6 +239,7 @@ export class TranscriptByteReader {
   async page(input: { cursor?: TranscriptBodyCursor; forward?: boolean; signal?: AbortSignal } = {}): Promise<TranscriptBodyPage> {
     input.signal?.throwIfAborted();
     let cursor = input.cursor;
+    await this.#refreshView();
     const shard = await this.#previous(), tail = shard ? await this.#line(shard) : undefined;
     if (cursor && !await this.#visible(cursor, tail, input.signal)) return { fragments: [], cursor, hasMore: true, preparing: { bytes: 0, total: 1 } };
     const visibleThrough = cursor?.visibleThrough ?? (tail ? { shard: tail.shard, to: tail.to, identity: tail.identity } : undefined);

@@ -678,8 +678,8 @@ async function capturePersistence() {
       tokensAfter: 20,
     });
 
-    const index = await transcript.readIndex("golden-conversation");
-    const shard = await transcript.readShardLines("golden-conversation", index!.shards[0]!);
+    const index = await transcript.readView("golden-conversation");
+    const shard = await transcript.readShardLines("golden-conversation", { seq: index!.activeSeq, view: index! });
     const snapshot = await snapshots.list("golden-conversation");
     const meta = JSON.parse(
       await readFile(join(conversations, "golden-conversation", "meta.json"), "utf8"),

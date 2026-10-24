@@ -28,6 +28,7 @@ import {
   SnapshotStore,
   createReadOnlyTranscriptSource,
   TranscriptByteReader,
+  countRunsInView,
   readRunsReverse,
   runRetentionSweep,
   type RetentionSweepReport,
@@ -74,15 +75,18 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   const user = createScopeStorage({ kind: "user" }, zhixingHome);
   const workscenes = new Map<string, ScopeStorage>();
 
+  const sceneStorage = (sceneId: string): ScopeStorage => {
+    let storage = workscenes.get(sceneId);
+    if (!storage) {
+      storage = createScopeStorage({ kind: "workscene", sceneId }, zhixingHome);
+      workscenes.set(sceneId, storage);
+    }
+    return storage;
+  };
   const routeConversation = (conversationId: string) => {
     const { scope, localId } = parseConversationId(conversationId);
     if (scope.kind === "user") return { ...user, localId };
-    let storage = workscenes.get(scope.sceneId);
-    if (!storage) {
-      storage = createScopeStorage(scope, zhixingHome);
-      workscenes.set(scope.sceneId, storage);
-    }
-    return { ...storage, localId };
+    return { ...sceneStorage(scope.sceneId), localId };
   };
 
   const directory = createConversationDirectory({
@@ -104,22 +108,22 @@ export function createConversationStorageInfrastructure(input: Readonly<{
       if (committedTurnCount === 0) return undefined;
       const storage = routeConversation(conversationId);
       const { scope } = parseConversationId(conversationId);
+      // 早期本地测试资料（v1 转录索引）在首次读取前一次性转换；当前格式只是打开。摘要是可丢弃的
+      // 派生缓存：启动只经它的只读选取视图（不等写者、不写盘、出错即不带摘要），恢复、修复与转换
+      // 都归维护
+      await storage.transcript.prepareRead(storage.localId);
+      // 轮数与 clear 边界取自同一次读到的转录视图：owner 前缀给出的可信轮数优先，纯转录会话由视图
+      // O(1) 算出，不枚举记录；clear 之后、第一次提交之前轮数为 0
+      const view = await storage.transcript.readView(storage.localId);
+      let turnCount = committedTurnCount;
+      if (turnCount === undefined) {
+        turnCount = view ? countRunsInView(view) : 0;
+        if (turnCount === undefined) throw new Error("Prepared transcript view has no published run watermark");
+      }
+      if (!turnCount) return undefined;
       const reader = new TranscriptByteReader(path.join(conversationsDir(scope, zhixingHome), toSafePathSegment(storage.localId), 'transcript'),
         path.join(zhixingHome, 'cache', 'transcript-read-index'));
       try {
-        // Production already has the count in the owner's current read model.
-        // Enumerating every JSONL record just to count it makes the first send
-        // grow with history, and an append changes every slice cache identity.
-        let turnCount = committedTurnCount ?? 0;
-        if (committedTurnCount === undefined) {
-          for await (const _ of reader.records()) turnCount++;
-        }
-        if (!turnCount) return undefined;
-        // Legacy-only callers discover clear during the count pass. With owner
-        // metadata, the existing snapshot reader uses its persisted clear index;
-        // a durable clear has count zero until its first post-clear commit.
-        const clearBoundary = committedTurnCount === undefined
-          ? { lastClearAt: reader.lastClearAt } : undefined;
         const bootstrap = await buildStartupBootstrap({
           conversationId: storage.localId,
           store: storage.transcript,
@@ -127,7 +131,7 @@ export function createConversationStorageInfrastructure(input: Readonly<{
           capability: { optimalMaxTokens: input.optimalMaxTokens },
           estimator: createTokenEstimator(),
           runs: readBootstrapRunViews(reader),
-          ...(clearBoundary ? { clearBoundary } : {}),
+          clearBoundary: { lastClearAt: view?.lastClearAt },
         });
         return { bootstrap, turnCount };
       } finally { await reader.close(); }
@@ -136,15 +140,16 @@ export function createConversationStorageInfrastructure(input: Readonly<{
       const storage = routeConversation(conversationId);
       await storage.transcript.init(storage.localId);
     },
-    async appendRun(conversationId, record) {
+    async appendRun(conversationId, record, options) {
       const storage = routeConversation(conversationId);
-      return storage.transcript.appendRunRecord(storage.localId, record);
+      return storage.transcript.appendRunRecord(storage.localId, record, options);
     },
-    async appendCommittedRun(conversationId, record) {
+    async appendCommittedRun(conversationId, record, source) {
       const storage = routeConversation(conversationId);
       return storage.transcript.appendCommittedRunRecord(
         storage.localId,
         record,
+        source,
       );
     },
     async writeSnapshot(conversationId, snapshot) {
@@ -173,7 +178,18 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   const maintenance = Object.freeze({
     prepareDirectory: (signal?: AbortSignal) => prepareConversationDirectory(conversationsDir({ kind: 'user' }, zhixingHome), signal),
     async runRetentionSweep() {
-      return runRetentionSweep({ roots: await collectConversationRoots(zhixingHome) });
+      // 清理经各 scope 的唯一写者 store 实例执行，与追加共用同一把锁
+      const stores = new Map<string, ScopeStorage>([
+        [path.resolve(conversationsDir({ kind: "user" }, zhixingHome)), user],
+      ]);
+      for (const sceneId of await listWorksceneIds(zhixingHome)) {
+        stores.set(path.resolve(getWorkSceneConversationsRoot(sceneId, zhixingHome)), sceneStorage(sceneId));
+      }
+      return runRetentionSweep({
+        roots: [...stores.keys()],
+        transcriptStoreFor: (root) => stores.get(path.resolve(root))!.transcript,
+        snapshotStoreFor: (root) => stores.get(path.resolve(root))!.snapshots,
+      });
     },
     async isConversationDataAlive(directoryName: string) {
       const conversationId = fromSafePathSegment(directoryName);
@@ -261,19 +277,12 @@ function createScopeStorage(scope: ConversationScope, zhixingHome: string): Scop
   });
 }
 
-async function collectConversationRoots(zhixingHome: string): Promise<string[]> {
-  const roots = [conversationsDir({ kind: "user" }, zhixingHome)];
+async function listWorksceneIds(zhixingHome: string): Promise<string[]> {
   try {
-    const entries = await fs.readdir(getWorkScenesRoot(zhixingHome), {
-      withFileTypes: true,
-    });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        roots.push(getWorkSceneConversationsRoot(entry.name, zhixingHome));
-      }
-    }
+    const entries = await fs.readdir(getWorkScenesRoot(zhixingHome), { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   } catch {
     // A missing workscene root is a valid empty storage domain.
+    return [];
   }
-  return roots;
 }

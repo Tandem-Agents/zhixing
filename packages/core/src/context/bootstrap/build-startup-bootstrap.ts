@@ -55,7 +55,15 @@ export interface StartupRunProjection {
 
 /** Context-owned read demand; the filesystem snapshot implementation stays at the Host edge. */
 export interface StartupSnapshotSource {
-  list(conversationId: string): Promise<readonly SegmentSnapshotFile[]>;
+  /** 一次只读选取：存在性与选取以同一次取到的索引为边界，发现与选取的读量都与快照数量无关 */
+  openSelection(conversationId: string): Promise<StartupSnapshotSelection>;
+}
+
+export interface StartupSnapshotSelection {
+  /** 有已登记的可见快照：决定是否预留摘要额度 */
+  readonly hasCandidates: boolean;
+  /** coverage < earliestLoadedRunIndex 中 createdAt 最大、且晚于 lastClearAt 的那一份；没有或读不出时为 null */
+  select(earliestLoadedRunIndex: number, lastClearAt: string | undefined): Promise<SegmentSnapshotFile | null>;
 }
 
 /** 装填预算的绝对上限 —— 注意力优质区间内为"接续感"付出的最大成本 */
@@ -87,9 +95,8 @@ export async function buildStartupBootstrap(
     Math.floor(capability.optimalMaxTokens / 4),
     BOOTSTRAP_BUDGET_CAP_TOKENS,
   );
-  const candidateSnapshots = await snapshots.list(conversationId);
-  const summaryReserve =
-    candidateSnapshots.length > 0 ? SUMMARY_TOKEN_RESERVE : 0;
+  const selection = await snapshots.openSelection(conversationId);
+  const summaryReserve = selection.hasCandidates ? SUMMARY_TOKEN_RESERVE : 0;
 
   // 2. 倒读装原文：逐组（整 run record）入预算，装满即止。
   //    最近一组必装——它是连贯底线，预算放不下时降级为压缩核而非丢弃；
@@ -127,7 +134,7 @@ export async function buildStartupBootstrap(
 
   // 3. 摘要：最新的"未退役且严格早于已装原文起点"的快照；不满足向更旧回退
   const summaryText = await pickSnapshotSummary(
-    candidateSnapshots,
+    selection,
     store,
     conversationId,
     earliestLoadedRunIndex,
@@ -155,33 +162,24 @@ export async function buildStartupBootstrap(
 // ─── 快照选择 ───
 
 /**
- * 从新到旧找首个满足两条件的快照并渲染为摘要文本：
+ * 选出同时满足两条件、createdAt 最大的快照并渲染为摘要文本：
  *   - 未退役：createdAt 晚于最近一次清空（清空前的摘要对新事实流无效）
  *   - 严格早于原文起点：coveredThroughRunIndex < 已装原文最早 runIndex
- *     （否则摘要与原文重叠，向更旧快照回退）
+ *     （否则摘要与原文重叠，回退到更旧的快照）
  */
 async function pickSnapshotSummary(
-  candidates: readonly SegmentSnapshotFile[],
+  selection: StartupSnapshotSelection,
   store: TranscriptReadSource,
   conversationId: string,
   earliestLoadedRunIndex: number,
   clearBoundary?: { readonly lastClearAt?: string },
 ): Promise<string | null> {
-  if (candidates.length === 0) return null;
+  if (!selection.hasCandidates) return null;
 
   const lastClearAt = clearBoundary ? clearBoundary.lastClearAt :
-    (await store.ensureReadableIndex(conversationId))?.lastClearAt;
-
-  for (const snapshot of candidates) {
-    if (lastClearAt !== undefined && snapshot.createdAt <= lastClearAt) {
-      // 列表按 createdAt 降序——首个退役者之后全部退役
-      return null;
-    }
-    if (snapshot.coveredThroughRunIndex < earliestLoadedRunIndex) {
-      return renderSummary(snapshot);
-    }
-  }
-  return null;
+    (await store.readView(conversationId))?.lastClearAt;
+  const snapshot = await selection.select(earliestLoadedRunIndex, lastClearAt);
+  return snapshot ? renderSummary(snapshot) : null;
 }
 
 /** 三段摘要渲染 + 字符封顶：超出先截 active 尾，仍超保 facts 优先 */

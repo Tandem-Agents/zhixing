@@ -21,6 +21,8 @@ interface ConversationDirectoryTranscriptPort extends TranscriptReadSource {
   exists(conversationId: string): Promise<boolean>;
   init(conversationId: string): Promise<void>;
   appendClear(conversationId: string): Promise<void>;
+  /** 会话目录被删除后丢弃打开态缓存 */
+  forget(conversationId: string): Promise<void>;
 }
 
 interface ScopeHandles {
@@ -170,10 +172,13 @@ export function createConversationDirectory(deps: {
           scope.sceneId,
           h.localId,
         );
+        await h.transcript.forget(h.localId);
         return existing;
       }
       if (!existing) return false;
       await h.repo.delete(h.localId);
+      // 目录已删：丢弃转录的打开态缓存，同 id 重建时从磁盘重新打开
+      await h.transcript.forget(h.localId);
       return true;
     },
 

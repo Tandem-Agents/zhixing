@@ -198,22 +198,24 @@
     ],
     "transcript": {
       "index": {
-        "activeShardId": "000001",
-        "conversationId": "golden-conversation",
-        "shards": [
-          {
-            "createdAt": "<createdAt:string>",
-            "file": "000001.jsonl",
-            "id": "000001",
-            "isActive": true
-          }
-        ],
-        "version": 1
+        "activeSeq": 1,
+        "clearBoundaryRunIndex": 0,
+        "fromRunIndex": 0,
+        "fromSeq": 1,
+        "nextRunIndex": 1,
+        "prevSealedSize": 0,
+        "pub": 2,
+        "strictFrom": {
+          "offset": 0,
+          "seq": 1
+        },
+        "tailSize": 391
       },
       "shard": [
         {
           "conversationId": "golden-conversation",
           "createdAt": "<createdAt:string>",
+          "firstRunIndex": 0,
           "shardId": "000001",
           "type": "header",
           "version": 1

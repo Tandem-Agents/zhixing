@@ -39,14 +39,15 @@ describe("read-only conversation query", () => {
     const result = await queryReadOnlyConversationHistory(createReadOnlyConversationStorage(home), "cleared", 1);
     expect(result).toEqual({ history: { entries: [] }, renderedRuns: 0 });
   });
-  it.each(["missing", "corrupt"] as const)("reconstructs a %s index from the read-only shards", async condition => {
+  it.each(["missing", "corrupt"] as const)("reports a damaged directory instead of guessing when the index is %s", async condition => {
     await writeConversation("rebuild", "重建", "2026-01-02T00:00:00.000Z", [run("仍可读取", "分片回复", 0)]);
     const index = path.join(home, "conversations", "rebuild", "transcript", "index.json");
     if (condition === "missing") await fs.unlink(index);
     else await fs.writeFile(index, JSON.stringify({ shards: null }));
-    const result = await queryReadOnlyConversationHistory(createReadOnlyConversationStorage(home), "rebuild", 1);
-    expect(result.renderedRuns).toBe(1);
-    expect(result.history.entries[0]).toMatchObject({ userText: "仍可读取", assistantText: "分片回复" });
+    await expect(queryReadOnlyConversationHistory(createReadOnlyConversationStorage(home), "rebuild", 1))
+      .rejects.toThrow(/transcript/i);
+    // 只读端不写盘：原有分片保持原样
+    expect(await fs.readdir(path.join(home, "conversations", "rebuild", "transcript"))).not.toContain("root.bin");
   });
   it("accepts historical metadata without createdAt", async () => {
     await writeConversation("legacy", "旧元数据", "2026-01-02T00:00:00.000Z", [run("仍可浏览", "兼容回复", 0)]);

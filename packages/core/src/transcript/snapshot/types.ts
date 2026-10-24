@@ -34,3 +34,39 @@ export interface SnapshotInput {
 }
 
 export const SNAPSHOT_FILE_VERSION = 1;
+
+/** 一次只读选取：以同一次取到的索引根为边界 */
+export interface SnapshotSelection {
+  /** 有已登记的可见快照（决定启动装填是否预留摘要额度）；登记存在不保证此刻正文一定可读 */
+  readonly hasCandidates: boolean;
+  /**
+   * coverage < earliestLoadedRunIndex 中 createdAt 最大、且晚于 lastClearAt 的那一份。
+   * 命中正文缺失或损坏时，按固定次数向更早的已登记项降级；仍不可用返回 null。
+   */
+  select(earliestLoadedRunIndex: number, lastClearAt: string | undefined): Promise<SegmentSnapshotFile | null>;
+}
+
+/** 保留期一步的结果 */
+export interface RetainSnapshotsReport {
+  deleted: number;
+  warnings: string[];
+}
+
+/**
+ * 新快照的覆盖边界没有超过已登记的最后一份，而它的 createdAt 更晚：正常写入路径上覆盖边界随
+ * 创建顺序严格递增，出现这种形态说明折叠锚点不可信，不能当作普通的跳过。
+ */
+export class SnapshotAnchorInvariantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotAnchorInvariantError";
+  }
+}
+
+/** 摘要索引不可用（根两半都无效、已登记项损坏、有索引分段却没有根）：写入方不写，修复由保留期维护完成 */
+export class SnapshotIndexDamagedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotIndexDamagedError";
+  }
+}

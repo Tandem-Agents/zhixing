@@ -209,9 +209,8 @@ describe("窗口 × 持久化分层契约", () => {
     expect(await collectRecords(store, "c3")).toEqual([]); // 读边界
 
     // 物理仍在（append-only：清空不销毁）
-    const index = await store.readIndex("c3");
-    const lines = await store.readShardLines("c3", index!.shards[0]!);
-    expect(lines.filter((l) => l.type === "run")).toHaveLength(1);
+    const lines = await store.readShardLines("c3", { seq: 1 });
+    expect(lines!.filter((l) => l.type === "run")).toHaveLength(1);
 
     // 清空后继续对话，runIndex 连续
     const idx = await acceptViaProtocol(store, window, "c3", runMessages("清空后"));

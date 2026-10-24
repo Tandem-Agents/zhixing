@@ -60,6 +60,161 @@ describe("conversation storage infrastructure", () => {
     expect(JSON.stringify(after?.bootstrap)).not.toContain("PRESERVED-EARLIER-FACT");
   }, 30_000);
 
+  it("counts a transcript-only conversation and its clear boundary from one published view without enumerating records", async () => {
+    const root = await createTempDir("bootstrap-view-count");
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 4_000,
+      worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+    });
+    const { conversationId } = await storage.directory.create();
+    for (let i = 0; i < 30; i++) {
+      await storage.runtime.appendCommittedRun(conversationId, run(`row-${i}:` + "x".repeat(3000), i));
+    }
+    await storage.runtime.writeSnapshot(conversationId, {
+      coveredThroughRunIndex: 10,
+      structuredSummary: { facts: "FACT-BEFORE-CLEAR", state: "", active: "" },
+      tokensBefore: 100, tokensAfter: 10,
+    });
+    const records = TranscriptByteReader.prototype.records;
+    let visited = 0;
+    vi.spyOn(TranscriptByteReader.prototype, "records").mockImplementation(async function* (this: TranscriptByteReader, ...args) {
+      for await (const record of records.apply(this, args)) { visited++; yield record; }
+    });
+    const loaded = await storage.runtime.loadHistory(conversationId);
+    expect(loaded?.turnCount).toBe(30);
+    expect(visited).toBeLessThanOrEqual(2);
+    expect(JSON.stringify(loaded?.bootstrap)).toContain("FACT-BEFORE-CLEAR");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await storage.directory.clearStoredView(conversationId);
+    expect(await storage.runtime.loadHistory(conversationId)).toBeUndefined();
+    await storage.runtime.appendCommittedRun(conversationId, run("AFTER-CLEAR", 30));
+    const after = await storage.runtime.loadHistory(conversationId);
+    expect(after?.turnCount).toBe(1);
+    expect(JSON.stringify(after?.bootstrap)).toContain("AFTER-CLEAR");
+    expect(JSON.stringify(after?.bootstrap)).not.toContain("FACT-BEFORE-CLEAR");
+  }, 30_000);
+
+  it("opening a transcript-only conversation reads the same records and lists no directory at 8 / 32 / 128 runs", async () => {
+    const root = await createTempDir("bootstrap-view-scale");
+    const storage = createConversationStorageInfrastructure({
+      zhixingHome: root, optimalMaxTokens: 4_000,
+      worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+    });
+    const rows: Array<{ n: number; visited: number; readdir: number }> = [];
+    for (const n of [8, 32, 128]) {
+      const { conversationId } = await storage.directory.create();
+      for (let i = 0; i < n; i++) await storage.runtime.appendCommittedRun(conversationId, run(`row-${i}:` + "x".repeat(3000), i));
+      await storage.runtime.writeSnapshot(conversationId, {
+        coveredThroughRunIndex: n - 4,
+        structuredSummary: { facts: "EARLIER", state: "", active: "" },
+        tokensBefore: 100, tokensAfter: 10,
+      });
+      const records = TranscriptByteReader.prototype.records;
+      let visited = 0;
+      const recordsSpy = vi.spyOn(TranscriptByteReader.prototype, "records").mockImplementation(async function* (this: TranscriptByteReader, ...args) {
+        for await (const record of records.apply(this, args)) { visited++; yield record; }
+      });
+      const readdir = vi.spyOn(fs, "readdir");
+      try {
+        expect((await storage.runtime.loadHistory(conversationId))?.turnCount).toBe(n);
+        rows.push({ n, visited, readdir: readdir.mock.calls.length });
+      } finally { recordsSpy.mockRestore(); readdir.mockRestore(); }
+    }
+    for (const row of rows) {
+      expect(row.visited).toBe(rows[0]!.visited);
+      expect(row.readdir).toBe(0);
+    }
+  }, 60_000);
+
+  describe("opening a conversation treats the summary cache as optional", () => {
+    async function fixture() {
+      const root = await createTempDir("bootstrap-snapshot-cache");
+      const storage = createConversationStorageInfrastructure({
+        zhixingHome: root, optimalMaxTokens: 160,
+        worksceneConversationStorageRemoval: createWorksceneStorageCleanupInfrastructure({ zhixingHome: root }).conversations,
+      });
+      const { conversationId } = await storage.directory.create();
+      for (let i = 0; i < 6; i++) await storage.runtime.appendCommittedRun(conversationId, run(`USER-${i}-` + "-".repeat(500), i));
+      await storage.runtime.writeSnapshot(conversationId, {
+        coveredThroughRunIndex: 0,
+        structuredSummary: { facts: "SUMMARY-0", state: "", active: "" },
+        tokensBefore: 100, tokensAfter: 10,
+      });
+      const conversationDir = path.join(root, "conversations", toSafePathSegment(conversationId));
+      const snapshots = path.join(conversationDir, "snapshots");
+      return { storage, conversationId, conversationDir, snapshots, index: path.join(snapshots, "index.bin") };
+    }
+
+    it("uses the summary when the cache is healthy", async () => {
+      const f = await fixture();
+      const history = await f.storage.runtime.loadHistory(f.conversationId);
+      expect(history?.turnCount).toBe(6);
+      expect(JSON.stringify(history?.bootstrap)).toContain("SUMMARY-0");
+    });
+
+    it("opens from the transcript when reading the snapshot index fails", async () => {
+      const f = await fixture();
+      const open = fs.open.bind(fs);
+      vi.spyOn(fs, "open").mockImplementation((async (file: Parameters<typeof fs.open>[0], flags?: string, mode?: number) => {
+        if (path.resolve(String(file)) === path.resolve(f.index)) throw Object.assign(new Error("injected snapshot index EIO"), { code: "EIO" });
+        return open(file, flags, mode);
+      }) as typeof fs.open);
+      const history = await f.storage.runtime.loadHistory(f.conversationId);
+      expect(history?.turnCount).toBe(6);
+      expect(JSON.stringify(history?.bootstrap)).not.toContain("SUMMARY-0");
+    });
+
+    it("opens while an unfinished snapshot registration cannot be cleaned up", async () => {
+      const f = await fixture();
+      await new Promise((resolve) => setTimeout(resolve, 5)); // 新快照的 createdAt 必须晚于已登记的那份
+      const open = fs.open.bind(fs), unlink = fs.unlink.bind(fs);
+      const publish = vi.spyOn(fs, "open").mockImplementation((async (file: Parameters<typeof fs.open>[0], flags?: string, mode?: number) => {
+        if (path.resolve(String(file)) === path.resolve(f.index) && flags === "r+") throw Object.assign(new Error("injected index publish error"), { code: "EIO" });
+        return open(file, flags, mode);
+      }) as typeof fs.open);
+      vi.spyOn(fs, "unlink").mockImplementation((async (file: Parameters<typeof fs.unlink>[0]) => {
+        if (path.dirname(path.resolve(String(file))) === path.resolve(f.snapshots) && String(file).endsWith(".json")) {
+          throw Object.assign(new Error("injected pending snapshot EBUSY"), { code: "EBUSY" });
+        }
+        return unlink(file);
+      }) as typeof fs.unlink);
+      await expect(f.storage.runtime.writeSnapshot(f.conversationId, {
+        coveredThroughRunIndex: 2, structuredSummary: { facts: "SUMMARY-2", state: "", active: "" }, tokensBefore: 100, tokensAfter: 10,
+      })).rejects.toThrow();
+      publish.mockRestore();
+      const history = await f.storage.runtime.loadHistory(f.conversationId);
+      expect(history?.turnCount).toBe(6);
+      expect(JSON.stringify(history?.bootstrap)).toContain("SUMMARY-0");
+      expect(JSON.stringify(history?.bootstrap)).not.toContain("SUMMARY-2");
+    });
+
+    it.each([null, ["facts"], { facts: "f", state: 1, active: "" }])("skips a summary body whose structure is not renderable (%j)", async (summary) => {
+      const f = await fixture();
+      const [name] = (await fs.readdir(f.snapshots)).filter((entry) => entry.endsWith(".json"));
+      const file = path.join(f.snapshots, name!);
+      const body = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, unknown>;
+      await fs.writeFile(file, JSON.stringify({ ...body, structuredSummary: summary }));
+      const history = await f.storage.runtime.loadHistory(f.conversationId);
+      expect(history?.turnCount).toBe(6);
+      expect(JSON.stringify(history?.bootstrap)).not.toContain("SUMMARY-0");
+    });
+
+    it("degrades when both halves of the snapshot index root are damaged", async () => {
+      const f = await fixture();
+      await fs.writeFile(f.index, Buffer.alloc(1024));
+      const history = await f.storage.runtime.loadHistory(f.conversationId);
+      expect(history?.turnCount).toBe(6);
+      expect(JSON.stringify(history?.bootstrap)).not.toContain("SUMMARY-0");
+    });
+
+    it("still fails the open when the transcript itself is damaged", async () => {
+      const f = await fixture();
+      const shard = path.join(f.conversationDir, "transcript", "000001.jsonl");
+      await fs.truncate(shard, (await fs.stat(shard)).size - 10);
+      await expect(f.storage.runtime.loadHistory(f.conversationId)).rejects.toThrow();
+    });
+  });
+
   it.each(['ENOENT', 'EACCES'])('classifies a read-only history directory failure without pretending unreadable data is absent (%s)', async code => {
     const root = await createTempDir('readonly-history-error');
     const failure = Object.assign(new Error('synthetic directory failure'), { code });
@@ -93,7 +248,8 @@ describe("conversation storage infrastructure", () => {
       coveredThroughRunIndex: 0, structuredSummary: { facts: "facts", state: "state", active: "active" },
       tokensBefore: 20, tokensAfter: 5,
     });
-    expect(await fs.readdir(path.join(root, "conversations", toSafePathSegment(user.conversationId), "snapshots"))).toHaveLength(1);
+    expect((await fs.readdir(path.join(root, "conversations", toSafePathSegment(user.conversationId), "snapshots")))
+      .filter((name) => name.endsWith(".json"))).toHaveLength(1);
     await storage.naming.rename(user.conversationId, "Owner root");
     expect((await storage.naming.get(user.conversationId))?.name).toBe("Owner root");
     await storage.maintenance.runRetentionSweep();

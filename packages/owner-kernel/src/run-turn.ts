@@ -17,7 +17,7 @@
 import { userMessageFromTurnInput, type Message, type UserTurnInputLike } from "@zhixing/core";
 import { type AbortReason } from "@zhixing/core/interrupt";
 import { type AgentYield, type RunResult } from "@zhixing/core/loop";
-import { type TurnSource } from "@zhixing/core/transcript";
+import { TranscriptOutcomeUnknownError, type TurnSource } from "@zhixing/core/transcript";
 import type { ConversationManager } from "./conversation-manager.js";
 import type { RunTurnOptions, SessionRuntime } from "./types.js";
 import type {
@@ -41,11 +41,12 @@ export interface RunTurnHooks {
    * 持久化失败回调 —— run 本身成功（runResult.agentResult.reason === "completed"），
    * 但 `ConversationManager.recordTurn` 抛错时触发。
    *
-   * 此时窗口未前进（接受协议在持久化成功之后才触窗口）——本轮不成为对话事实，
-   * 但用户仍会看到本轮 assistant 回复（在 `runResult.agentResult` 里，由 caller
-   * 发给用户）。
+   * outcome 为 "failed" 时窗口未前进（接受协议在持久化成功之后才触窗口）——本轮不成为
+   * 对话事实；为 "unknown" 时持久化结果无法确认，本轮可能已成为事实，窗口在下一轮开始前
+   * 从已发布状态重建。两种情况下用户都会看到本轮 assistant 回复（在 `runResult.agentResult`
+   * 里，由 caller 发给用户）。
    */
-  readonly onCommitFailure?: (err: unknown, runResult: RunResult) => void;
+  readonly onCommitFailure?: (err: unknown, runResult: RunResult, outcome?: "failed" | "unknown") => void;
   /** Final-outbox publication failed after the authoritative commit already succeeded. */
   readonly onFinalPublishFailure?: (err: unknown, runResult: RunResult) => void;
 }
@@ -331,7 +332,7 @@ export async function* runTurnWithCommit(
     } catch (err) {
       // 持久化失败：窗口未前进、本轮不成为对话事实。不 re-throw —— caller 的
       // 主流程（发回复给用户）不应被持久化失败打断，但要观测，走 hook 通知。
-      hooks?.onCommitFailure?.(err, runResult);
+      hooks?.onCommitFailure?.(err, runResult, err instanceof TranscriptOutcomeUnknownError ? "unknown" : "failed");
     }
   }
 

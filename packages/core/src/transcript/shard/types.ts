@@ -19,11 +19,8 @@ import type {
 // ─── 分片索引 ───
 
 /**
- * 分片索引 —— owner（写入方）唯一可写，整文件原子重写（tmp + rename）。
- *
- * `createdAt` 取索引记录值、不依赖文件系统时间戳（Windows birthtime 不可靠、
- * 跨平台不一致）——这是清理判据稳定的前提。垃圾回收对索引**只读**、对分片
- * 文件只删：从根上消除跨进程并发写索引的冲突。
+ * 早期本地测试资料的 v1 索引（整文件 `index.json`）。当前格式由 `root.bin` 与各片 `.pos`
+ * 表达；v1 只在首次打开时一次性转换，原件保留不改。
  */
 export interface TranscriptIndex {
   version: 1;
@@ -46,6 +43,7 @@ export interface TranscriptShardMeta {
   /** ISO 时刻，取写入时值 —— 时间窗清理的唯一判据 */
   createdAt: string;
   isActive: boolean;
+  firstRunIndex?: number;
 }
 
 // ─── 分片记录行 ───
@@ -57,6 +55,8 @@ export interface ShardHeader {
   conversationId: string;
   shardId: string;
   createdAt: string;
+  /** 本片首个 run 的 runIndex（换片时的 nextRunIndex）；旧读者只校验必需字段，容忍此字段 */
+  firstRunIndex?: number;
 }
 
 /**
@@ -115,11 +115,86 @@ export interface RunRecordInput {
 export interface AppendRunResult {
   runIndex: number;
   shardId: string;
+  /** false：expectedRunIndex 指向的位置已发布同一记录，本次未追加 */
+  appended?: boolean;
+}
+
+/** appendRunRecord 的选项 */
+export interface AppendRunOptions {
+  /**
+   * 调用方认定的本条位置（如 promote 队首的 provisionalRunIndex）。小于已发布水位时按该位置
+   * 核对已发布记录：相同返回 appended: false，不同报冲突；身份来自位置，正文只用于核对。
+   */
+  readonly expectedRunIndex?: number;
+}
+
+/** owner 物化的来源绑定，复用已提交事实的身份字段 */
+export interface CommittedRunSource {
+  readonly assignmentId: string;
+  readonly commitRevision: number;
+  readonly digest: string;
+}
+
+/** 只读视图：一次读取以同一次取到的根为边界，只读已发布前缀 */
+export interface TranscriptView {
+  readonly pub: number;
+  readonly activeSeq: number;
+  /** 活跃片的已发布字节数；读活跃片只读到这里 */
+  readonly tailSize: number;
+  /** 已发布水位；旧测试格式的只读派生视图中未知 */
+  readonly nextRunIndex?: number;
+  /** 可见下界：序号小于它的片已撤可见 */
+  readonly fromSeq: number;
+  readonly fromRunIndex: number;
+  readonly clearBoundaryRunIndex?: number;
+  readonly lastClearAt?: string;
+  /** 活跃片之前那一片的封片字节数；更早的封存片的封片长度记在其后继片的位置文件头里 */
+  readonly prevSealedSize?: number;
+  /** 严格区起点：其后的已发布字节不可解析即为损坏；之前的字节来自旧测试格式转换，按容忍处理 */
+  readonly strictFrom?: { readonly seq: number; readonly offset: number };
+}
+
+/**
+ * 读取一片。带视图时只读该视图下的已发布范围（活跃片到 tailSize，封存片到封片长度），
+ * 文件短于已发布范围、或严格区内有不可解析的行，都按损坏报告；不带视图时读整个文件，坏行跳过。
+ */
+export interface TranscriptShardRef {
+  readonly seq: number;
+  readonly view?: TranscriptView;
+}
+
+/** 写入在恢复后仍无法确认是否耐久发布：调用方不得按“确定失败”处理 */
+export class TranscriptOutcomeUnknownError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "TranscriptOutcomeUnknownError";
+  }
+}
+
+/** 目录状态与已发布事实不符（根两半都无效、有分片却无根、未经意图解释的字节等）：失败关闭 */
+export class TranscriptDirectoryDamagedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TranscriptDirectoryDamagedError";
+  }
+}
+
+/** 只读者遇到根正在被连续发布、有界重读仍未收敛：可重试，不是损坏 */
+export class TranscriptViewBusyError extends Error {
+  constructor() {
+    super("Transcript directory root is being published; retry the read");
+    this.name = "TranscriptViewBusyError";
+  }
 }
 
 /** AuthorityCommitLog 派生投影的追加结果；重复 runId 只返回既有位置。 */
 export interface AppendCommittedRunResult extends AppendRunResult {
   appended: boolean;
+  /**
+   * "retired"：该 run 已投影，但其分片已被保留期清理，无法再核对载荷；shardId 为
+   * 定位落点的已删分片。缺省表示已逐条核对（或刚追加）。
+   */
+  evidence?: "retired";
 }
 
 /** 倒读原语的游标 —— 无状态分页：传上一页最早一条的位置，从它之前继续 */

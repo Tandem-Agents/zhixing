@@ -9,7 +9,6 @@
  */
 
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { extractFirstText } from "@zhixing/core";
@@ -212,7 +211,7 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
     }
   });
 
-  it("索引缺失但分片在 → 装填对含完整历史，不丢一轮（倒读自愈贯穿到入口）", async () => {
+  it("已有转录 → 装填对含完整历史，不丢一轮（倒读贯穿到入口）", async () => {
     const { conversationStorage, created, ctx, convDir } = await setupCtx();
     await conversationStorage.runtime.appendRun("conv-x", {
       timestamp: new Date().toISOString(),
@@ -228,9 +227,6 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
         { role: "assistant", content: [{ type: "text", text: "re:二" }] },
       ],
     });
-    // 模拟索引层事故：index.json 丢失（替换窗口崩溃 / 误删），分片完好
-    await fs.unlink(path.join(convDir, "conv-x", "transcript", "index.json"));
-
     const session = await ctx.conversations!.getOrCreate("conv-x");
 
     expect(created).toEqual(["conv-x"]);
