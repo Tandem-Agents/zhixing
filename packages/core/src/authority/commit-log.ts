@@ -677,7 +677,26 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       runReadStep: this.#runProjectionReadStep,
     });
     const open = async () => { await state.initialize(checkpoints); await state.refreshPublishedState(); };
-    const view = createBoundDurableProjectionReadContext(state);
+    // 续读不保留读视图：消费方按键续读，保留下来的旧代际视图会把这份投影的回收挡到租期结束。
+    // 续读位置只绑定区间与上一页末键，与日志投影的逻辑续读相同。
+    const view = createBoundDurableProjectionReadContext({
+      get: key => state.get(key),
+      getMany: keys => state.getMany(keys),
+      scan: async (range, limit, continuation) => {
+        const rangeIdentity = canonicalize(range);
+        let resumed: DurableProjectionScanRange = range;
+        if (continuation !== undefined) {
+          const token = JSON.parse(Buffer.from(continuation, 'base64url').toString('utf8')) as { range?: unknown; after?: unknown };
+          if (token.range !== rangeIdentity || typeof token.after !== 'string') throw new TypeError('Artifact projection continuation is invalid');
+          const { gte: _gte, gt: _gt, ...rest } = range;
+          resumed = { ...rest, gt: token.after };
+        }
+        const page = await state.scan(resumed, limit);
+        if (!page.continuation) return page;
+        state.releaseContinuation(page.continuation);
+        return { entries: page.entries, continuation: Buffer.from(JSON.stringify({ range: rangeIdentity, after: page.entries.at(-1)!.key })).toString('base64url') };
+      },
+    });
     const cache: import('./interfaces.js').ArtifactProjectionCache = {
       prepare: operation => {
         if (this.#maintenanceStopped) return Promise.reject(new StorageMaintenanceCancelledError());
@@ -1901,7 +1920,9 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       if (!sameDurableCheckpoint(token.checkpoint, checkpoint)) throw new Error("Durable projection continuation is stale");
       after = token.after;
     }
-    const page = await projection.read.scan({ ...range, ...(after === undefined ? {} : { gt: after }) }, limit);
+    // 续读以上一页末键为开区间下界，替换原下界（区间不能同时带 gte 与 gt）
+    const { gte: _gte, gt: _gt, ...upper } = range;
+    const page = await projection.read.scan(after === undefined ? range : { ...upper, gt: after }, limit);
     if (!page.continuation) return page;
     projection.state.releaseContinuation(page.continuation);
     return { entries: page.entries, continuation: Buffer.from(JSON.stringify({

@@ -80,7 +80,7 @@ export async function prepareConversationRunView(options: {
   const source = selected.value.source;
   const state = await materializeConversationRunView({ ...options, scope, selected: selected.value.metadata,
     readEnvelopeAt: location => log.readEnvelopeAt(location),
-    ...(source ? { readImportedRecord: location => source.record(location) } : {}),
+    ...(source ? { readImportedRecord: location => source.record(location), prefetchImported: locations => source.prefetch(locations) } : {}),
     readAdvancementStatus: sessionId => readConversationExactValue(log, id, 'advancementStatuses', sessionId) });
   return { state, version: selected.value.version, cursor: selected.cursor };
 }
@@ -269,10 +269,18 @@ export async function materializeConversationRunView(options: {
   selected: ConversationRunView; previous?: Pick<RunProjection, 'admittedByRun' | 'appendedInputs' | 'assignedById'>;
   readEnvelopeAt(location: import('@zhixing/core/authority').DurableLogCheckpoint): Promise<import('@zhixing/core/contracts').CommitEnvelope<unknown>>;
   readImportedRecord?(location: import('./conversation-base-source.js').ConversationBaseLocation): Promise<import('./conversation-transfer.js').ConversationTransferAuthorityRecord>;
+  prefetchImported?(locations: readonly import('./conversation-base-source.js').ConversationBaseLocation[]): Promise<void>;
   readAdvancementStatus?(id: string): Promise<import('@zhixing/core/advancement').AdvancementSession['status'] | undefined>;
 }) {
   const { conversationId: id, artifacts, verifier, scope, selected } = options;
   const { state, inputs, appended, mirrors, controls } = selected;
+  // 下面要读的导入记录先一次补齐：排他段内取不到锁时整批交到段外，不逐条重做
+  if (options.prefetchImported) {
+    const imported = [...[...inputs].filter(([runId]) => open(state.stateByRun.get(runId)?.state)).map(([, row]) => row.source),
+      ...(scope.hydrate ? [...appended.values()].map(row => row.source) : []), ...mirrors.values()]
+      .flatMap(source => 'imported' in source ? [source.imported] : []);
+    if (imported.length) await options.prefetchImported(imported);
+  }
   const readAt = async (source: ConversationInputLocation) => {
     if ('imported' in source) {
       if (!options.readImportedRecord) throw new TypeError('Imported input requires its authenticated source reader');

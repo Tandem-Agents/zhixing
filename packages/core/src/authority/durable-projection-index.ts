@@ -190,7 +190,9 @@ export function createDurableProjectionOverlay(
       const selected = new Map<string, JsonValue>();
       let readAfter = after;
       for (;;) {
-        const page = await current.scan({ ...range, ...(readAfter === undefined ? {} : { gt: readAfter }) }, limit);
+        // 续读时以上一页末键为排他下界，取代原范围的下界（gte 与 gt 不能并用）
+        const { gte: _gte, gt: _gt, ...upper } = range;
+        const page = await current.scan(readAfter === undefined ? range : { ...upper, gt: readAfter }, limit);
         const boundary = page.entries.at(-1)?.key;
         if (page.continuation && boundary === undefined) throw new DurableProjectionStorageError("Projection overlay base scan made no progress");
         for (const entry of page.entries) {
@@ -751,6 +753,8 @@ export class FileDurableProjectionIndex {
   #retirementRetryAt: number | undefined;
   #retirementRetryRunning = false;
   #retirementRetryRequestedAt: number | undefined;
+  /** 上一步退役因旧代际读视图受阻时的位置；阻挡仍在时不再取源锁空转，等视图释放或到期。 */
+  #retirementBlocker: { readonly identity: ProjectionRetirementIdentity; readonly retiredAtGeneration: number } | undefined;
   #retirementCleanupFailure: { readonly error: unknown } | undefined;
   #maintenanceStopped = false;
   readonly #maintenanceAbort = new AbortController();
@@ -919,6 +923,10 @@ export class FileDurableProjectionIndex {
   async checkpointRecovery(): Promise<void> {
     if (this.#rebuildingFromSource() && this.#activeBytes <= this.#rebuildOverlayBytes &&
         (this.#rebuildProgressSince === undefined || this.#clock() - this.#rebuildProgressSince < REBUILD_CHECKPOINT_INTERVAL_MS)) return;
+    // 已就绪投影的追尾检查点与停止检查点同口径：上次运行留下未完成的段整理、尾部又并不进有界增量时，
+    // 不在启动追尾里补完这次与历史规模成正比的合并；覆盖层留在内存，由权威尾部恢复，合并仍由此后
+    // 写入路径的落盘承担。重建本身与历史成正比，照常落盘保存进度。
+    if (!this.#rebuilding) return this.flushCheckpoint();
     await this.flush({ compact: false });
   }
   #recoveryMatches(manifest: ProjectionManifest): boolean {
@@ -1192,7 +1200,9 @@ export class FileDurableProjectionIndex {
 
   releaseContinuation(encoded: string): void {
     const { viewId } = decodeContinuation(encoded);
-    if (!this.#inUseReadViews.has(viewId)) this.#readViews.delete(viewId);
+    if (this.#inUseReadViews.has(viewId) || !this.#readViews.delete(viewId)) return;
+    // 与释放最后一个使用者相同：它可能正是挡住退役的那个旧代际视图
+    if (this.#retirementIdentity()) this.#scheduleRetirementRetry(this.#clock() + RETIREMENT_CONTINUATION_DELAY_MS);
   }
 
   async prepare(
@@ -1412,7 +1422,9 @@ export class FileDurableProjectionIndex {
       const manifest = this.#requireManifest();
       // 退出/启动检查点不承担与历史规模成正比的合并；未落盘覆盖层由权威尾部恢复。
       if (checkpointOnly && manifest.compaction && this.#active.size > 0) {
-        await this.#consolidateSmallDelta(obligation);
+        // 收拢要读入整个增量窗口；覆盖层未过半时不值得为保存它付这笔读取：尾部仍由权威日志恢复，
+        // 余下的覆盖层容量也不会让此后第一次写入被迫落盘
+        if (this.overlayAtLeastHalfFull()) await this.#consolidateSmallDelta(obligation);
         return;
       }
       if (obligation === 'pre-commit' && manifest.deltaSegments.length === MAX_DELTA_SEGMENTS && this.#active.size > 0 &&
@@ -1687,6 +1699,13 @@ export class FileDurableProjectionIndex {
       const failure = this.#retirementCleanupFailure;
       this.#retirementCleanupFailure = undefined;
       throw failure.error;
+    }
+    // 上一步因本实例的旧代际读视图受阻、且这些视图仍在：再取源锁核对只会得到同样的结论，
+    // 还会把零等待的前台读挤掉。释放最后一个使用者时另有唤醒，未使用的视图按到期时间重试。
+    if (this.#retirementStillBlocked()) {
+      const retryAt = this.#blockedRetirementRetryAt();
+      if (retryAt !== undefined) this.#scheduleRetirementRetry(retryAt);
+      return;
     }
     // Retired files are already durably queued and no longer publish values.
     // Do not repeatedly reclaim them under a caller's source/owner exclusion
@@ -2297,6 +2316,32 @@ export class FileDurableProjectionIndex {
     for (const [id, view] of this.#readViews) {
       if (view.expiresAt <= now) this.#readViews.delete(id);
     }
+  }
+
+  /** 记下的退役阻挡是否仍成立：同一退役位置，且本实例仍有早于该代际的读视图。只看内存，不取锁。 */
+  #retirementStillBlocked(): boolean {
+    const blocker = this.#retirementBlocker;
+    if (!blocker) return false;
+    const current = this.#retirementIdentity();
+    if (current && sameRetirementIdentity(current, blocker.identity)) {
+      this.#expireReadViews();
+      const older = (view: ReadView) => view.generation < blocker.retiredAtGeneration;
+      if ([...this.#readViews.values()].some(older) || [...this.#inUseReadViews.values()].some(({ view }) => older(view))) return true;
+    }
+    this.#retirementBlocker = undefined;
+    return false;
+  }
+
+  /** 受阻时下一次值得核对的时间：未在使用的阻挡视图里最早的到期；全部在用时由释放唤醒。 */
+  #blockedRetirementRetryAt(): number | undefined {
+    const blocker = this.#retirementBlocker;
+    if (!blocker) return undefined;
+    let retryAt: number | undefined;
+    for (const [id, view] of this.#readViews) {
+      if (view.generation >= blocker.retiredAtGeneration || this.#inUseReadViews.has(id)) continue;
+      retryAt = retryAt === undefined ? view.expiresAt : Math.min(retryAt, view.expiresAt);
+    }
+    return retryAt;
   }
 
   async #writeSegment(
@@ -3321,6 +3366,7 @@ export class FileDurableProjectionIndex {
       if (view.generation < page.retiredAtGeneration) blocked = true;
     }
     if (blocked) {
+      this.#retirementBlocker = { identity: expected, retiredAtGeneration: page.retiredAtGeneration };
       return {
         kind: "blocked",
         ...(retryAt === undefined ? {} : { retryAt }),
@@ -3592,6 +3638,10 @@ class SegmentReader {
   #dataWindow: { readonly start: number; readonly bytes: Buffer } | undefined;
   #offsetWindow: { readonly startIndex: number; readonly bytes: Buffer } | undefined;
   #sequentialOffsets = false;
+  // 上一次从文件读取的条目序号：紧接其后的读取才是顺序访问，才值得预读
+  #lastReadIndex = -2;
+  // 点查（二分定位、按键取值）进行中：二分收尾时探测常落在相邻序号上，那不是顺序访问，不预读
+  #pointLookups = 0;
   #cacheChecked = false;
   #files: { readonly data: FileHandle; readonly offsets: FileHandle } | undefined;
   #opening: Promise<{ readonly data: FileHandle; readonly offsets: FileHandle }> | undefined;
@@ -3672,12 +3722,23 @@ class SegmentReader {
   }
 
   async get(key: string): Promise<SegmentEntry | undefined> {
-    const index = await this.lowerBound(key);
-    const verified = await this.#verified(index);
-    return verified?.key === key ? this.#materialize(index, verified) : undefined;
+    return this.#pointLookup(async () => {
+      const index = await this.lowerBound(key);
+      const verified = await this.#verified(index);
+      return verified?.key === key ? this.#materialize(index, verified) : undefined;
+    });
   }
 
-  async getMany(keys: readonly string[]): Promise<ReadonlyMap<string, SegmentEntry>> {
+  async #pointLookup<T>(operation: () => Promise<T>): Promise<T> {
+    this.#pointLookups++;
+    try { return await operation(); } finally { this.#pointLookups--; }
+  }
+
+  getMany(keys: readonly string[]): Promise<ReadonlyMap<string, SegmentEntry>> {
+    return this.#pointLookup(() => this.#getMany(keys));
+  }
+
+  async #getMany(keys: readonly string[]): Promise<ReadonlyMap<string, SegmentEntry>> {
     const sorted = [...new Set(keys)].sort();
     const values = new Map<string, SegmentEntry>();
     const pending = [{ low: 0, high: this.descriptor.count, from: 0, to: sorted.length }];
@@ -3700,7 +3761,11 @@ class SegmentReader {
     return values;
   }
 
-  async lowerBound(key: string): Promise<number> {
+  lowerBound(key: string): Promise<number> {
+    return this.#pointLookup(() => this.#lowerBound(key));
+  }
+
+  async #lowerBound(key: string): Promise<number> {
     let low = 0;
     let high = this.descriptor.count;
     while (low < high) {
@@ -3819,7 +3884,11 @@ class SegmentReader {
       throw projectionCorrupt("Projection segment entry header is invalid");
     }
     const payload = Buffer.allocUnsafe(keyBytes + valueBytes);
-    const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, true);
+    // 只有顺序访问（扫描的下一条或维护路径的顺序遍历）预读后续条目；二分查找的探测按条目
+    // 实际大小读取，单次探测的读量不随段大小增长
+    const sequential = this.#sequentialOffsets || (this.#pointLookups === 0 && index === this.#lastReadIndex + 1);
+    this.#lastReadIndex = index;
+    const payloadRead = await this.#readData(payload, Number(offset) + SEGMENT_HEADER_BYTES, sequential);
     if (
       payloadRead.bytesRead !== payload.byteLength ||
       !timingSafeEqual(segmentEntryChecksum(this.descriptor.dataFile, this.descriptor.authenticated === true,

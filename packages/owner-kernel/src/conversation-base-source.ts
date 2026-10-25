@@ -1,11 +1,12 @@
-import { artifactJsonIndex, AuthorityPreparationRequired, AuthorityStorageError, assertArtifactRef,
+import { artifactJsonIndex, AuthorityPreparationRequired, AuthorityStorageError, assertArtifactRef, readDurableProjectionKeys,
   type ArtifactStore, type AuthorityCommitLog, type ArtifactProjectionCache, type DurableLogCheckpoint,
   type DurableProjectionReadContext } from '@zhixing/core/authority';
 import type { ArtifactRef, ConversationTransferManifest, JsonValue, LogicalRecord } from '@zhixing/core/contracts';
 import { canonicalize, protocolDigest, createProtocolDigestAccumulator, sourceFreezeProofDigest,
   validateConversationTransferCommit, validateConversationTransferManifest, validateSourceFreezeProof,
   assertConversationFreezeProofBinding, type ConversationTransferState, type ProtocolSignatureVerifier } from '@zhixing/core/protocol';
-import { currentMaintenanceAbortSignal, maintenanceRetryDelayMs, waitForMaintenanceRetry, StorageMaintenanceCancelledError } from '@zhixing/core/resources';
+import { currentMaintenanceAbortSignal, isHoldingMaintenanceExclusion, maintenanceRetryDelayMs, waitForMaintenanceRetry,
+  StorageMaintenanceCancelledError } from '@zhixing/core/resources';
 import type { ConversationTransferAuthorityRecord } from './conversation-transfer.js';
 
 export type ConversationBaseManifest = Omit<ConversationTransferManifest, 'contentAssets'>;
@@ -41,6 +42,8 @@ const rawKey = (n: number) => 'source/record/' + ordinal(n);
 const groupKey = (n: number) => 'source/group/' + ordinal(n);
 const streamPrefix = (stream: string) => 'source/stream/' + JSON.stringify(stream) + '/';
 const sameRef = (a: ArtifactRef, b: ArtifactRef) => a.digest === b.digest && a.bytes === b.bytes;
+/** 就绪基底点读行的进程内缓存上限（一次决定的主体数上限是 512）。 */
+const MAX_CACHED_ROWS = 4096;
 
 /** Source-domain facts authenticated by a frozen manifest. This deliberately
  * has no envelopeDigest, target LSN or local WAL cursor. */
@@ -75,6 +78,8 @@ export class ConversationBaseSource {
   #header: SourceHeader | undefined;
   #preparing: Promise<void> | undefined;
   #unavailable: Error | undefined;
+  /** 就绪基底的记录与分组行由已签清单派生、此后不变，读过即按键缓存（null 表示已证明不存在）。 */
+  readonly #rows = new Map<string, JsonValue | null>();
   private constructor(readonly log: AuthorityCommitLog, readonly artifacts: ArtifactStore,
     readonly verifier: ProtocolSignatureVerifier, readonly state: ConversationTransferState,
     readonly manifestRef: ArtifactRef, readonly cache: ArtifactProjectionCache) {
@@ -155,19 +160,59 @@ export class ConversationBaseSource {
       return operation(view);
     });
   }
-  async record(location: ConversationBaseLocation): Promise<ConversationTransferAuthorityRecord> {
+  #assertLocation(location: ConversationBaseLocation): void {
     if (!sameRef(location.manifest, this.manifestRef) || location.conversationId !== this.manifest.conversationId ||
         location.sourceDeviceId !== this.manifest.sourceDeviceId || location.sourceOwnerEpoch !== this.manifest.sourceOwnerEpoch || location.transferId !== this.manifest.transferId) {
       throw new TypeError('Imported record locator belongs to another source');
     }
-    const row = await this.read(view => view.get(rawKey(location.record))) as unknown as RecordLocation | undefined;
+  }
+  /** 预先装入一组导入记录的定位行：决定前物化要读的记录一次补齐，不在排他段内逐条等锁。 */
+  async prefetch(locations: readonly ConversationBaseLocation[]): Promise<void> {
+    for (const location of locations) this.#assertLocation(location);
+    await this.#readyRows(locations.map(location => rawKey(location.record)));
+  }
+  async record(location: ConversationBaseLocation): Promise<ConversationTransferAuthorityRecord> {
+    this.#assertLocation(location);
+    const [row] = await this.#readyRows([rawKey(location.record)]) as unknown as (RecordLocation | undefined)[];
     if (!row || row.sourceLsn !== location.sourceLsn) throw new TypeError('Imported record locator is missing or changed');
     return this.#record(row);
   }
   async recordAt(index: number): Promise<ConversationTransferAuthorityRecord> {
-    const row = await this.read(view => view.get(rawKey(index))) as unknown as RecordLocation | undefined;
+    const [row] = await this.#readyRows([rawKey(index)]) as unknown as (RecordLocation | undefined)[];
     if (!row || row.index !== index) throw new TypeError('Imported source record is missing');
     return this.#record(row);
+  }
+  #readyRows(keys: readonly string[]): Promise<readonly (JsonValue | undefined)[]> {
+    return this.#cachedRows(keys, chunk => this.read(view => readDurableProjectionKeys(view, chunk)));
+  }
+  /**
+   * 按键读记录阶段之后不再变化的记录/分组行，读过即缓存。排他段内取不到日志锁时不等待也不失败：
+   * 报待装入并附上段外补齐，调用方离开排他段、照常等锁补齐后重做，重做时直接命中缓存，不再需要锁。
+   */
+  async #cachedRows(keys: readonly string[],
+    read: (keys: readonly string[]) => Promise<readonly (JsonValue | undefined)[]>): Promise<readonly (JsonValue | undefined)[]> {
+    const missing = [...new Set(keys)].filter(key => !this.#rows.has(key));
+    const found = new Map<string, JsonValue | undefined>();
+    const fill = async () => {
+      for (let offset = 0; offset < missing.length; offset += 256) {
+        const chunk = missing.slice(offset, offset + 256), values = await read(chunk);
+        chunk.forEach((key, index) => { found.set(key, values[index]); this.#remember(key, values[index]); });
+      }
+    };
+    if (missing.length) {
+      try { await fill(); } catch (error) {
+        // 已是待装入（例如基底尚未就绪）的原样交出；只把排他段内取不到锁的背压改成段外补齐
+        if (error instanceof AuthorityPreparationRequired || !isHoldingMaintenanceExclusion() || maintenanceRetryDelayMs(error) === undefined) throw error;
+        const required = new AuthorityPreparationRequired([]);
+        required.prepareOutside = fill;
+        throw required;
+      }
+    }
+    return keys.map(key => found.has(key) ? found.get(key) : this.#rows.get(key) ?? undefined);
+  }
+  #remember(key: string, value: JsonValue | undefined): void {
+    if (!this.#rows.has(key) && this.#rows.size >= MAX_CACHED_ROWS) this.#rows.delete(this.#rows.keys().next().value!);
+    this.#rows.set(key, value ?? null);
   }
   async recordForValidation(location: ConversationBaseLocation, group: AuthenticatedConversationFacts, view: DurableProjectionReadContext): Promise<ConversationTransferAuthorityRecord> {
     if (!groups.has(group) || group.source !== this || location.record >= group.firstRecord + group.entries.length || !sameRef(location.manifest, this.manifestRef) ||
@@ -186,14 +231,18 @@ export class ConversationBaseSource {
   }
   async group(first: number, view?: DurableProjectionReadContext): Promise<AuthenticatedConversationFacts | undefined> {
     if (!this.#header || !['domain', 'session', 'ready'].includes(this.#header.phase)) throw this.preparationRequired();
-    const read = <T>(fn: (context: DurableProjectionReadContext) => Promise<T>) => view ? fn(view) : this.cache.read(fn);
-    const group = await read(context => context.get(groupKey(first))) as unknown as { first: number; end: number; lsn: number; at: string } | undefined;
+    // 记录阶段已结束：分组与记录行不再变化，锁外读取走缓存；锁内校验直接读所给视图
+    const rows = (keys: readonly string[]) => view ? readDurableProjectionKeys(view, keys)
+      : this.#cachedRows(keys, chunk => this.cache.read(context => readDurableProjectionKeys(context, chunk)));
+    const [group] = await rows([groupKey(first)]) as unknown as ({ first: number; end: number; lsn: number; at: string } | undefined)[];
     if (!group) return;
     const entries: LogicalRecord<unknown>[] = [];
-    for (let n = group.first; n < group.end; n++) {
-      const row = await read(context => context.get(rawKey(n))) as unknown as RecordLocation | undefined;
-      if (!row) throw new TypeError('Imported group is missing a source record');
-      const record = await this.#record(row); entries.push({ stream: record.stream, body: record.body });
+    for (let start = group.first; start < group.end; start += 256) {
+      const keys = Array.from({ length: Math.min(256, group.end - start) }, (_, offset) => rawKey(start + offset));
+      for (const row of await rows(keys) as unknown as (RecordLocation | undefined)[]) {
+        if (!row) throw new TypeError('Imported group is missing a source record');
+        const record = await this.#record(row); entries.push({ stream: record.stream, body: record.body });
+      }
     }
     return new AuthenticatedConversationFacts(seal, this, first, group.lsn, group.at, entries);
   }

@@ -8,7 +8,8 @@ import type { ConversationBodyPage, ConversationControlCursor, ConversationContr
 import { conversationRecoveryPage, conversationRecoveryPending } from '../conversation-recovery-index.js';
 import { ConversationBaseSource } from '../conversation-base-source.js';
 import { conversationBaseKey, openConversationBase, type ConversationBaseBinding } from '../conversation-base-registry.js';
-import { runWithMaintenanceUrgency, StorageMaintenanceCancelledError } from '@zhixing/core/resources';
+import { runHoldingMaintenanceExclusion, runWithMaintenanceUrgency, StorageMaintenanceCancelledError } from '@zhixing/core/resources';
+import { AuthorityPreparationRequired } from '@zhixing/core/authority';
 
 it('adopts authenticated domain facts and keeps the local write decision on base plus tail', async () => {
   const h = await createConversationBaseHarness();
@@ -129,6 +130,50 @@ it('discovers adopted queued work, pages its source input and retires it durably
   expect(await conversationRecoveryPending(restarted.log, restarted.artifacts, BASE_CONVERSATION)).toBe(false);
 }, 120_000);
 
+it('admits new input and cancels the adopted queued run immediately after adopting a larger base', async () => {
+  // 基底跨过 64 条一页并带一个仍在排队的运行：收编后立即作决定，决定前物化要读导入记录，
+  // 不能被基底投影的后台回收以零等待挤掉
+  const h = await createConversationBaseHarness();
+  for (let n = 0; n < 66; n++) await h.input(h.sourceJournal, 'base-' + n, n);
+  await h.admit(h.sourceJournal, 'base-queued', 66);
+  await h.transfer();
+  await h.admit(h.targetJournal, 'after-adoption', 67);
+  expect(await h.targetJournal.currentState('after-adoption')).toBe('queued');
+  await h.targetJournal.cancelRun({ runId: 'base-queued', requestId: 'cancel-base-queued' });
+  expect(await h.targetJournal.currentState('base-queued')).toBe('cancelled');
+  const restarted = await h.restartTarget();
+  expect(await restarted.owner.currentState('base-queued')).toBe('cancelled');
+  expect(await restarted.owner.currentState('after-adoption')).toBe('queued');
+}, 240_000);
+
+it('reads imported records inside a domain exclusion by filling them outside it while the log is busy', async () => {
+  const h = await createConversationBaseHarness();
+  await h.input(h.sourceJournal, 'filled', 0);
+  await h.transfer();
+  // 重启后的实例还没读过任何记录行
+  const { publication } = await h.restartTarget();
+  const source = publication.source;
+  const occupy = () => {
+    const held = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+    const busy = source.cache.read(async () => { held.resolve(); await release.promise; });
+    return { held: held.promise, release: async () => { release.resolve(); await busy; } };
+  };
+  const first = occupy();
+  await first.held;
+  // 排他段内取不到日志锁：不等待，报待装入并附上段外补齐
+  const required = await runHoldingMaintenanceExclusion(() => source.recordAt(0)).then(() => undefined, (error: unknown) => error);
+  expect(required).toBeInstanceOf(AuthorityPreparationRequired);
+  const filling = (required as AuthorityPreparationRequired).prepareOutside!();
+  await first.release();
+  await filling;
+  // 补齐之后日志再被占用，排他段内的重做直接命中，不再需要锁
+  const second = occupy();
+  await second.held;
+  const record = await runHoldingMaintenanceExclusion(() => source.recordAt(0));
+  expect(record.lsn).toBeGreaterThan(0);
+  await second.release();
+}, 120_000);
+
 /** 生产路径（运行状态合并视图）与早期全量折叠实现读同一份持久基底与本地日志 */
 async function compareOutsideHistory(owner: ConversationRunJournal, data: { log: FileAuthorityCommitLog; artifacts: FileArtifactStore },
   source: Parameters<ConversationReadIndex['installBaseView']>[0]) {
@@ -202,7 +247,6 @@ it('starts control recovery at the history boundary over a persistent base and r
 }, 240_000);
 
 it('moves a base run out of the current set when the target changes its state', async () => {
-  // 小基底：较大基底下目标端对基底运行的决定会撞上已登记的 backpressure 缺陷（剩余工作台账，包4）
   const h = await createConversationBaseHarness();
   await h.admit(h.sourceJournal, 'base-queued-0', 0); await h.admit(h.sourceJournal, 'base-queued-1', 1);
   await h.transfer();

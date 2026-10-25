@@ -348,12 +348,12 @@ describe("FileDurableProjectionIndex", () => {
     const first = new FileAuthorityCommitLog(logRoot, artifactStore);
     const firstReduce = vi.fn(mutationsFor);
     const firstIndex = first.durableProjection({ ...definition, reduce: firstReduce });
-    const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "flush");
+    // 已就绪投影的追尾页按检查点口径保存一次（不承担历史合并）
+    const flush = vi.spyOn(FileDurableProjectionIndex.prototype, "flushCheckpoint");
     try {
       await expect(firstIndex.get("item")).resolves.toBe(4);
       await expect(firstIndex.get("item")).resolves.toBe(4);
       expect(flush).toHaveBeenCalledTimes(1);
-      expect(flush).toHaveBeenCalledWith({ compact: false });
     } finally { flush.mockRestore(); }
     expect(firstReduce).toHaveBeenCalledTimes(5);
     const persisted = await readProjectionManifest(path.join(logRoot, "projections", durableProjectionDirectoryName(definition.projectionId) + ".v1"));
@@ -1451,3 +1451,35 @@ it('coalesces retirement wakeups while a recovery owner holds the source fence',
     }));
   } finally {run.mockRestore();await index.stopStorageMaintenance();}
 },10000);
+
+it('does not take the source fence again while an older read view still blocks retirement', async () => {
+  const root = await createTempDir('retirement-blocked-view');
+  let fences = 0;
+  const index = new FileDurableProjectionIndex({ rootDir: root, projectionId: 'retirement-blocked', reducerVersion: 1,
+    withSourceLock: operation => { fences++; return operation(); } });
+  try {
+    await index.initialize({ source: checkpoint(0) });
+    const put = async (n: number) => {
+      index.publish(await index.prepare([{ kind: 'put', key: 'key-' + n, value: n }]), { source: checkpoint(n + 1) });
+      await index.flush({ compact: false });
+    };
+    await put(0); await put(1);
+    // 满页留下续读视图，它早于随后整理产生的退役代际
+    const page = await index.scan({}, 1);
+    expect(page.continuation).toBeDefined();
+    for (let n = 2; n < 8; n++) await put(n);
+    await index.flush();
+    const retired = async () => (await readdir(root)).filter(file => file.startsWith('retirement-')).length;
+    expect(await retired()).toBeGreaterThan(0);
+    // 第一次核对得到受阻；之后阻挡仍在，读取不再为退役取源锁
+    await index.get('absent');
+    const before = fences;
+    for (let n = 0; n < 20; n++) { await index.get('absent'); await new Promise(resolve => setTimeout(resolve, 2)); }
+    expect(fences).toBe(before);
+    expect(await retired()).toBeGreaterThan(0);
+    // 释放续读视图即唤醒退役，随后完成
+    index.releaseContinuation(page.continuation!);
+    await vi.waitFor(async () => expect(await retired()).toBe(0));
+    await expect(index.get('key-7')).resolves.toBe(7);
+  } finally { await index.stopStorageMaintenance(); }
+});

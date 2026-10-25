@@ -407,6 +407,23 @@ it('checkpoints a small deduplicated tail without leaving already-verified facts
   } finally { await h.index.stopStorageMaintenance(); }
 }, 30_000);
 
+it('leaves a small tail to authority recovery instead of reading the whole delta window while a compaction is pending', async () => {
+  const h = await sparseDeltaFixture();
+  try {
+    const before = await h.manifest();
+    expect(before.compaction).toBeDefined();
+    h.index.publish(await h.index.prepare([{ kind: 'put', key: 'key-00002', value: 'tail' }]), h.checkpoint(11));
+    work.offsetReads = 0; work.manifestWrites = 0; work.enabled = true;
+    await h.index.flushCheckpoint();
+    work.enabled = false;
+    // 停止与启动追尾的检查点都不为一个远未过半的覆盖层读入增量窗口，也不改写已发布状态
+    expect(work.offsetReads).toBe(0);
+    expect(work.manifestWrites).toBe(0);
+    expect(await h.manifest()).toEqual(before);
+    expect(await h.index.get('key-00002')).toBe('tail');
+  } finally { work.enabled = false; await h.index.stopStorageMaintenance(); }
+}, 30_000);
+
 it('keeps a missing consolidated source segment classified as recoverable projection corruption', async () => {
   const h = await sparseDeltaFixture();
   try {

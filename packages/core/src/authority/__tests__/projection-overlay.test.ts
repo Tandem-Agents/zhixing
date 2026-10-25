@@ -46,6 +46,18 @@ it("merges candidate inserts, replacements and deletions across finite pages wit
   expect(await overlay.get("a")).toBe("updated");
 });
 
+it("continues an inclusive range past a fully masked base page without combining bounds", async () => {
+  const base = source();
+  // 与真实索引一致：同一范围不能同时带 gte 与 gt
+  const strict: DurableProjectionReadContext = { ...base, scan: async (range, limit, continuation) => {
+    if (range.gte !== undefined && range.gt !== undefined) throw new TypeError("Projection scan range cannot combine gte and gt");
+    return base.scan(range, limit, continuation);
+  } };
+  const overlay = createDurableProjectionOverlay(strict, new Map<string, JsonValue | undefined>([["a", undefined], ["c", undefined]]));
+  const page = await overlay.scan({ gte: "a", lt: "zz" }, 2);
+  expect(page.entries).toEqual([{ key: "d", value: "d" }, { key: "e", value: "e" }]);
+});
+
 it("binds candidate continuations to their original range", async () => {
   const overlay = createDurableProjectionOverlay(source(), new Map());
   const first = await overlay.scan({ gte: "c", lt: "z" }, 1);
