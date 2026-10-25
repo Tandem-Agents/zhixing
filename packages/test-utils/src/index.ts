@@ -12,6 +12,8 @@ export { createTempDir, createDescribeTempDir } from "./temp-dir.js";
 export type { DescribeTempDir } from "./temp-dir.js";
 export { assertGolden, normalizeGolden } from "./golden.js";
 export type { GoldenNormalizeOptions } from "./golden.js";
+export { captureFileIo, defaultFileIoCategory } from "./file-io-capture.js";
+export type { FileIoCapture, FileIoSnapshot, FileIoTotals } from "./file-io-capture.js";
 export {
   defineRuntimeFactoryConformance,
   type RuntimeFactoryConformanceHarness,
