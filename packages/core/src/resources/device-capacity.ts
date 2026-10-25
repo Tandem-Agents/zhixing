@@ -78,7 +78,8 @@ export interface DeviceCapacityPressure {
   readonly cpuBusyRatio: number;
   readonly availableMemoryBytes: number;
   readonly processRssBytes: number;
-  readonly temporaryBytesAvailable: number;
+  /** 缺省表示临时空间样本此刻不可用（过期或探测失败），不是零：只有要预留临时空间的请求因此受阻。 */
+  readonly temporaryBytesAvailable?: number;
 }
 
 export interface DeviceCapacityDiagnostics {
@@ -357,6 +358,8 @@ export class DefaultDeviceCapacityArbiter
     const occupancyCapacity = this.#occupancyCapacity(pressure);
     const granted = emptyDeviceCapacityBudget();
     for (const dimension of OCCUPANCY_DIMENSIONS) {
+      // 临时空间未知时，能走到这里的请求原子需求为 0，也不多给
+      if (unknownDimension(dimension, pressure)) continue;
       const available =
         occupancyCapacity[dimension] - this.#occupancyInUse[dimension];
       granted.occupancy[dimension] = Math.min(
@@ -409,6 +412,10 @@ export class DefaultDeviceCapacityArbiter
     }
     const capacity = this.#occupancyCapacity(pressure);
     for (const dimension of OCCUPANCY_DIMENSIONS) {
+      if (unknownDimension(dimension, pressure)) {
+        if (atomic.occupancy[dimension] > 0) return false;
+        continue;
+      }
       if (
         capacity[dimension] - this.#occupancyInUse[dimension] <
         atomic.occupancy[dimension]
@@ -460,6 +467,10 @@ export class DefaultDeviceCapacityArbiter
     }
     const capacity = this.#occupancyCapacity(pressure);
     for (const dimension of OCCUPANCY_DIMENSIONS) {
+      if (unknownDimension(dimension, pressure)) {
+        if (atomic.occupancy[dimension] > 0) return "probe-unavailable";
+        continue;
+      }
       if (
         capacity[dimension] - this.#occupancyInUse[dimension] <
         atomic.occupancy[dimension]
@@ -490,7 +501,8 @@ export class DefaultDeviceCapacityArbiter
             this.#policy.occupancy.memorySafetyReserveBytes,
         ),
       ),
-      temporaryBytes: Math.max(
+      // 临时空间样本不可用时这一维不放出新容量；其余维度照常按各自的样本裁决
+      temporaryBytes: pressure.temporaryBytesAvailable === undefined ? 0 : Math.max(
         0,
         Math.min(
           this.#policy.occupancy.temporaryBytes,
@@ -891,15 +903,14 @@ export function createNodeDeviceCapacityProbe(
       previousCpu = currentCpu;
       sampleStartedAt = sampledAt;
     }
-    const filesystem = options.readFilesystem?.() ?? statfsSync(temporaryRoot);
-    const temporaryBytesAvailable = toSafeInteger(
-      Number(filesystem.bavail) * Number(filesystem.bsize),
-    );
+    // 磁盘样本不可用（尚未就绪、已过期或探测失败）只让临时空间这一维未知
+    let filesystem: { readonly bavail: number; readonly bsize: number } | undefined;
+    try { filesystem = options.readFilesystem?.() ?? statfsSync(temporaryRoot); } catch { filesystem = undefined; }
     return {
       cpuBusyRatio,
       availableMemoryBytes: toSafeInteger(freemem()),
       processRssBytes: toSafeInteger(process.memoryUsage().rss),
-      temporaryBytesAvailable,
+      ...(filesystem ? { temporaryBytesAvailable: toSafeInteger(Number(filesystem.bavail) * Number(filesystem.bsize)) } : {}),
     };
   };
 }
@@ -1000,10 +1011,20 @@ function validatePressure(pressure: DeviceCapacityPressure): void {
     "Device available memory sample",
   );
   assertNonNegativeSafeInteger(pressure.processRssBytes, "Device RSS sample");
-  assertNonNegativeSafeInteger(
-    pressure.temporaryBytesAvailable,
-    "Device temporary-space sample",
-  );
+  if (pressure.temporaryBytesAvailable !== undefined) {
+    assertNonNegativeSafeInteger(
+      pressure.temporaryBytesAvailable,
+      "Device temporary-space sample",
+    );
+  }
+}
+
+/** 这一维的样本此刻不可用：只能拒绝要它的请求，不能当作零或推给其他维度。 */
+function unknownDimension(
+  dimension: (typeof OCCUPANCY_DIMENSIONS)[number],
+  pressure: DeviceCapacityPressure | undefined,
+): boolean {
+  return dimension === "temporaryBytes" && pressure !== undefined && pressure.temporaryBytesAvailable === undefined;
 }
 
 function assertNonNegativeSafeInteger(value: number, label: string): void {

@@ -206,6 +206,42 @@ describe("DefaultDeviceCapacityArbiter", () => {
     if (admitted.kind === "granted") admitted.permit.release();
   });
 
+  it("blocks only temporary-space reservations while the disk sample is unavailable", async () => {
+    // 磁盘样本缺失（过期或探测失败）不是零，也不能推给其他维度：只读、只占内存与槽位的请求照常裁决
+    const { temporaryBytesAvailable: _disk, ...withoutDisk } = pressure();
+    let current: DeviceCapacityPressure = pressure();
+    const arbiter = new DefaultDeviceCapacityArbiter({ policy: policy(3), probe: () => current });
+    const signal = new AbortController().signal;
+    // 样本还在时已有请求占着临时空间；随后样本不可用
+    const holder = await arbiter.acquire(request("holds-disk", budget(1, { temporaryBytes: MIB })), signal);
+    if (holder.kind !== "granted") throw Error("the holder is admitted on a fresh sample");
+    current = withoutDisk;
+    const disk = await arbiter.acquire(request("needs-disk", budget(1, { temporaryBytes: 1 })), signal);
+    expect(disk).toMatchObject({ kind: "backpressured", blockedBy: "probe-unavailable" });
+    const read = await arbiter.acquire({ ...request("read-only", budget(1, { readBytes: 10 })),
+      preferred: budget(1, { readBytes: 10, temporaryBytes: 8 * MIB }) }, signal);
+    if (read.kind !== "granted") throw Error("a read-only request does not depend on the disk sample");
+    expect(read.permit.granted.occupancy.temporaryBytes).toBe(0);
+    expect(arbiter.snapshot()).toMatchObject({ occupancyCapacity: { temporaryBytes: 0 }, devicePressure: { availableMemoryBytes: 64 * MIB } });
+    // 其他维度仍按各自的样本：内存不足照样受阻
+    current = { ...withoutDisk, availableMemoryBytes: 0 };
+    expect(await arbiter.acquire(request("memory", budget(1)), signal)).toMatchObject({ kind: "backpressured", blockedBy: "memoryReservationBytes" });
+    read.permit.release();
+    holder.permit.release();
+    // 样本恢复后临时空间照常放出
+    current = pressure();
+    const restored = await arbiter.acquire(request("needs-disk-again", budget(1, { temporaryBytes: 1 })), signal);
+    expect(restored.kind).toBe("granted");
+    if (restored.kind === "granted") restored.permit.release();
+  });
+
+  it("keeps the other pressure dimensions when the disk sample cannot be read", () => {
+    const probe = createNodeDeviceCapacityProbe("unused-root", { readFilesystem: () => { throw Error("disk sample is stale"); } });
+    const sample = probe();
+    expect(sample.temporaryBytesAvailable).toBeUndefined();
+    expect(sample.availableMemoryBytes).toBeGreaterThan(0);
+  });
+
   it("uses a stable CPU sampling window instead of treating an immature sample as saturation", async () => {
     const temporaryRoot = await createTempDir("device-capacity-probe");
     let now = 0;

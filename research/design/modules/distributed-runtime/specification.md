@@ -955,6 +955,7 @@ type StorageMaintenanceObligation = "pre-commit" | "committed";
 type DeviceCapacityDimension =
   | "memoryReservationBytes" | "temporaryBytes" | "slots"
   | "readBytes" | "writeBytes" | "ioOperations";
+type DeviceCapacityBlocker = DeviceCapacityDimension | "probe-unavailable" | "derived-preparation";
 type DeviceCapacityClass =
   | "workload-interactive" | "workload-advancement"
   | "workload-scheduler" | "workload-orchestration"
@@ -977,7 +978,7 @@ interface DeviceCapacityPermit {
 }
 type DeviceCapacityAdmission =
   | { kind: "granted"; permit: DeviceCapacityPermit }
-  | { kind: "backpressured"; blockedBy: DeviceCapacityDimension; retryAfterMs: number }
+  | { kind: "backpressured"; blockedBy: DeviceCapacityBlocker; retryAfterMs: number }
   | { kind: "capacity-gap"; blockedBy: DeviceCapacityDimension; required: number; available: number }
   | { kind: "cancelled" };
 interface DeviceCapacityDiagnostics {
@@ -988,7 +989,7 @@ interface DeviceCapacityDiagnostics {
     cpuBusyRatio: number; availableMemoryBytes: number; processRssBytes: number;
   };
   queued: Partial<Record<DeviceCapacityClass, number>>;
-  blockedBy?: DeviceCapacityDimension;
+  blockedBy?: DeviceCapacityBlocker;
   lastViolation?: {
     admissionId: string; dimension: DeviceCapacityDimension;
     limit: number; requested: number;
@@ -1022,6 +1023,8 @@ interface StorageMaintenanceGovernorPort {
 `DeviceCapacityArbiterPort` 及默认实现归 `@zhixing/core` 的中立资源基础层，`StorageMaintenanceGovernorPort` 归其存储层；CLI 组合根只创建和注入，每个设备运行时恰一 arbiter、一 storage governor。只有 arbiter 持有本机容量预留与 I/O 额度；ResourceGovernor 可继续维护耐久业务配额与并发上限，但不得把它们当成第二份设备准入真相。`ResourceLease` 只证明业务授权，不持有本地 permit；run / job / control / evidence / orchestration-node 在每个实际本机执行批次开始前，由其本机执行所有者按可信 `AdmissionClass` 与版本化 executor 策略派生 class、atomic 和 preferred，批次结束即释放，禁止采信业务载荷自报成本。网络等待、用户交互和闲置 lease 不占 permit。重启不恢复可丢 permit；恢复的 workload 在继续执行前重新申请。arbiter 的 `temporaryBytes` 可用量取当前文件系统余量减安全保留与进程内预留，崩溃残留文件自然占用余量，禁止依赖已丢 permit 还原磁盘占用。
 
 `occupancy` 是 permit 存续期间独占并在释放时归还的准入预留：`memoryReservationBytes` 只表示由可信策略按显式缓冲区和有界工作集推导的保守上界，不等同于无法可靠归因的进程 RSS；`temporaryBytes` 与 `slots` 分别预留临时空间和并发槽位。`quantum` 是按本地单调时间补充、在资源操作前扣减的 I/O 额度，未使用部分在释放时归还，已使用部分不得归还。CPU 压力只作为设备级准入信号和诊断，执行公平性由 class 队列、槽位及有界原子步骤保证，不按进程级采样结果给单个 permit 定罪；`cpuBusyRatio` 是同一可注入设备探针在固定采样窗内得到的 `[0,1]` 聚合值，内存诊断同样来自该探针，禁止由调用任务自报。`atomic` 是一个不可再切分、完成后可安全检查点化的步骤成本上界，也是最小可用授权；每个可执行任务的 `atomic.occupancy.slots ≥ 1`，禁止全零成本绕过治理。`preferred` 是本批期望上界。arbiter 逐维验证 `atomic ≤ preferred`：atomic 超过设备策略与当前持久占用所决定、且不能仅靠已授 permit 释放而恢复的可用上限时立即返回 `capacity-gap`；只因其他 permit 暂时占用则等待或返回 `backpressured`。准入成功只可授予 `atomic ≤ granted ≤ preferred`。请求中的全部数值字段均为非负安全整数。
+
+设备压力样本按维度判定可用性。磁盘余量（`temporaryBytes` 的可用量）由独立线程按固定间隔同步采样（间隔初值 50ms），准入只使用新鲜窗口（初值 250ms）内的样本。磁盘样本缺失或过期时，只有这一维不可用：需要预留临时空间（`atomic.occupancy.temporaryBytes > 0`）的请求返回 `backpressured`（`blockedBy: "probe-unavailable"`）；不预留临时空间的请求照常按内存、槽位与 I/O 额度裁决，此时可授予的临时空间为零。任何请求都不会因这一维未知而多得临时空间，也不绕过其余维度的记账。整份压力样本（CPU、内存）不可得时，全部请求返回 `probe-unavailable`。依赖投影准备的请求在准备完成前返回 `derived-preparation`。采样线程所在文件系统的系统调用挂起时，线程阻塞在该调用里，磁盘样本随之过期，需要临时空间的请求持续以 `probe-unavailable` 背压；进程退出要等该调用返回，等待多久取决于宿主操作系统与文件系统，本规范不对它给出上界。
 
 取得 permit 后，每个不可分步骤必须先以 `tryBegin(stepBound)` 预留额度，且 `stepBound ≤ atomic`；同一 permit 同时至多存在一个未完成步骤，并行度通过多个独立 permit 表达。`occupancy` 只校验该步骤上界不超过 permit 已独占的 granted occupancy，多个串行步骤复用同一预留；`quantum` 从 permit 剩余额度按声明上界预扣。任一校验不足时返回 `undefined`，任务在当前安全检查点释放并重新申请，禁止先执行再补账。受治理的缓冲区、临时文件和 I/O 包装器必须在副作用前核对本步骤累计资源请求不超过 stepBound；越界请求零副作用拒绝，记录 `lastViolation` 并封闭 permit。`DeviceCapacityStepPermit.complete()` 只在步骤结束的 `finally` 中恰一次关闭该预留，不接收无法可靠归因的事后 actual；外层 permit 的 `release()` 同样恰一次调用。由此 arbiter 对预留与资源请求提供可机械验收的硬边界，设备级 CPU/RSS 观测只参与新准入和诊断。
 
@@ -2444,7 +2447,7 @@ capture、crypto、local CAS、directory/paired target、receiver staging 与 cl
 
 - **双平面、单容量真相**：ResourceGovernor 负责业务授权、耐久配额和计费，storage governor 负责本机存储义务；二者状态机分离，但实际本机执行的并发槽位、显式工作内存预留、磁盘 I/O 与临时空间只能经同一 `DeviceCapacityArbiterPort` 准入。workload 的四类 `AdmissionClass` 与 storage 的三类 `urgency` 分别机械映射到七个 `DeviceCapacityClass`，禁止调用方自报或把两类压成同一优先级。arbiter 使用同一版本化策略、预留账、I/O 额度和诊断快照，禁止静态物理配额各算一份或任一平面绕过；CPU 与进程 RSS 只作设备级压力信号，不作任务级硬扣账。
 - **装配与所有权**：arbiter 与 storage governor 先于任何存储打开或迁移，在每个设备运行时各创建一次并注入全部日志、投影、生命周期索引、资产维护器和 workspace 兼容桥迁移器；环境管理与 probe handler 复用同一 arbiter。未启用相关存储的角色不创建任务；可选 mesh、channel 或 surface 组件不得成为权威维护义务的唯一任务所有者。
-- **容量与工作量**：`occupancy` 的显式工作内存预留、临时空间和槽位在 permit 存续期间独占；`quantum` 的读写字节和 I/O 次数按单调时间补充并在操作前按上界预扣。每类任务按 §3.4b 声明可安全检查点化的 atomic 上界，页、segment、GC、scrub 与重建按此拆步；arbiter 只授予可容纳 atomic 的批次，受治理资源包装器在副作用前核对本步骤累计请求额度，越界零副作用拒绝并封闭 permit。CPU 竞争由公平队列、并发槽位和有界检查点治理，不以进程级采样冒充任务实际用量。迁移在改写源文件前取得完整临时空间；`capacity-gap` 与暂时性 `backpressured` 必须分型，前者不得永久排队。
+- **容量与工作量**：`occupancy` 的显式工作内存预留、临时空间和槽位在 permit 存续期间独占；`quantum` 的读写字节和 I/O 次数按单调时间补充并在操作前按上界预扣。每类任务按 §3.4b 声明可安全检查点化的 atomic 上界，页、segment、GC、scrub 与重建按此拆步；arbiter 只授予可容纳 atomic 的批次，受治理资源包装器在副作用前核对本步骤累计请求额度，越界零副作用拒绝并封闭 permit。CPU 竞争由公平队列、并发槽位和有界检查点治理，不以进程级采样冒充任务实际用量。迁移在改写源文件前取得完整临时空间；`capacity-gap` 与暂时性 `backpressured` 必须分型，前者不得永久排队。设备压力样本按维度判定可用性（§3.4b）：磁盘余量缺失或过期只让需要临时空间的请求以 `probe-unavailable` 背压，不连带内存、槽位与 I/O 额度的裁决，也不多授予临时空间；判定始终只用新鲜样本，不放宽新鲜窗口。
 - **分类与准入**：`obligation` 只表示任务能否随未提交候选一起消失：仅服务该候选、取消后无需续做为 `pre-commit`；由 WAL、manifest、checkpoint、写意图或生命周期事实独立证明、调用消失后仍须完成为 `committed`。`urgency` 只由阻塞关系决定：当前用户或权威操作等待它为 `foreground`，恢复可用性但无当前调用等待为 `recovery`，其余预防与回收为 `background`；不得由外部输入或调用方偏好提级。每个等待者独立接收 `backpressured` / `capacity-gap` / `cancelled`，不得借取消终结共享 committed 义务；候选业务写依赖的维护未完成时权威日志零追加。
 - **耐久真相与恢复**：governor 队列、permit 和统计都是可丢运行态，且不得依赖受治理存储。flush/compaction 义务来自 manifest/frozen batch，重建/scrub 来自 checkpoint 与日志，格式迁移来自格式状态与迁移凭据，workspace 迁移来自 migrationId、sourceSnapshotToken 及 open / activated / abandoned 终态，workspace catalog reset 来自根 manifest 的 `pendingReset`，生命周期与 GC 来自权威记录、索引游标、候选和写意图；§3.4b 列明的任务所有者按规范 workKey 管理 single-flight、等待者和重试，governor 与 arbiter 均不另写业务事实。`committed` 工作预算不足时不得改写既有业务结果，重启后从上述来源恢复并重新申请 permit；workload 同样不恢复旧 permit，只在恢复执行前重新申请。
 - **公平与锁序**：设备 arbiter 为七个 class 都保留正份额，其中 workload-interactive 与阻塞当前操作的 storage-foreground 具有低延迟保证，workload-advancement / scheduler / orchestration、storage-recovery / background 在持续满载下也不得永久饥饿；空闲容量可借用但不得侵占保留份额。等待容量时不得持 authority、manifest、projection 或 ArtifactStore 锁；取得 permit 后按固定锁序复核前提，失效即零副作用释放。阻塞写入的恢复任务按 storage-foreground 重新准入，禁止长期停留在低优先级队列扩大 fail-closed 窗口。

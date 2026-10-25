@@ -10,8 +10,7 @@ import {
 } from "@zhixing/core/resources";
 import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import { mkdirSync } from "node:fs";
-import { statfs } from "node:fs/promises";
-import path from "node:path";
+import { diskPressure, type DiskSamplerStarter } from "./disk-pressure-sampler.js";
 
 const MIB = 1024 * 1024;
 
@@ -38,11 +37,11 @@ export const FOREGROUND_QUIET_MS = 500;
 
 export function createDeviceCapacityRuntime(
   temporaryRoot: string,
-  options: { createDirectory?: boolean; activityDriven?: boolean } = {},
+  options: { createDirectory?: boolean; activityDriven?: boolean; diskSampler?: DiskSamplerStarter } = {},
 ) {
   if (options.createDirectory !== false) mkdirSync(temporaryRoot, { recursive: true });
   const stopped = new AbortController();
-  const filesystem = asyncFilesystemPressure(temporaryRoot, options.activityDriven === true);
+  const filesystem = diskPressure(temporaryRoot, options.activityDriven === true, options.diskSampler);
   const underlying = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: createNodeDeviceCapacityProbe(
@@ -105,87 +104,3 @@ export function createDeviceCapacityRuntime(
 
 export type DeviceCapacityRuntime = ReturnType<typeof createDeviceCapacityRuntime>;
 
-/** A single asynchronous disk sample feeds the existing synchronous arbiter contract. */
-function asyncFilesystemPressure(root: string, activityDriven: boolean) {
-  const maxAgeMs = 250, refreshMs = 100;
-  let closed = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let sampled: { bavail: number; bsize: number } | undefined,
-    sampledAt = 0;
-  let flight: Promise<void> | undefined;
-  let refreshStartedAt = 0;
-  let activities = 0;
-  const fresh = (): boolean => !closed && sampled !== undefined && performance.now() - sampledAt < maxAgeMs;
-  const schedule = (): void => {
-    if (closed || timer || (activityDriven && activities === 0)) return;
-    // Cadence is measured from probe start, not completion. Otherwise a valid
-    // 200 ms sample plus the 100 ms interval necessarily exceeds the 250 ms
-    // freshness bound and repeatedly rejects zero-wait control reads.
-    timer = setTimeout(() => { timer = undefined; void refresh(); },
-      Math.max(0, refreshMs - (performance.now() - refreshStartedAt)));
-    timer.unref();
-  };
-  const refresh = (): Promise<void> =>
-    closed ? Promise.resolve() : (flight ??= (async () => {
-      refreshStartedAt = performance.now();
-      let current = path.resolve(root);
-      for (;;) {
-        try {
-          const value = await statfs(current);
-          if (closed) return;
-          sampled = value;
-          sampledAt = performance.now();
-          return;
-        } catch (error) {
-          if (closed) return;
-          const parent = path.dirname(current);
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === current) throw error;
-          current = parent;
-        }
-      }
-    })().catch(() => { sampled = undefined; }).finally(() => {
-      flight = undefined;
-      schedule();
-    }));
-  if (!activityDriven) void refresh();
-  return {
-    retainActivity: (): (() => void) => {
-      if (closed) return () => {};
-      activities++;
-      if (!fresh()) void refresh(); else schedule();
-      let released = false;
-      return () => {
-        if (released) return; released = true; activities--;
-        if (activityDriven && activities === 0) { clearTimeout(timer); timer = undefined; }
-      };
-    },
-    close: (): void => { closed = true; clearTimeout(timer); timer = undefined; sampled = undefined; },
-    read: () => {
-      if (!fresh()) {
-        void refresh();
-        throw Error("设备磁盘探测尚未就绪");
-      }
-      return sampled!;
-    },
-    prepare: async (maxWaitMs: number, abort: AbortSignal): Promise<void> => {
-      if (fresh() || abort.aborted || closed) return;
-      const pending = refresh();
-      if (maxWaitMs === 0) return;
-      let timer: ReturnType<typeof setTimeout> | undefined, cancelled: (() => void) | undefined;
-      try {
-        await Promise.race([
-          pending,
-          new Promise<void>((resolve) => {
-            cancelled = () => resolve();
-            abort.addEventListener("abort", cancelled, { once: true });
-            timer = setTimeout(resolve, Math.min(250, maxWaitMs));
-            if (abort.aborted) resolve();
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-        if (cancelled) abort.removeEventListener("abort", cancelled);
-      }
-    },
-  };
-}
