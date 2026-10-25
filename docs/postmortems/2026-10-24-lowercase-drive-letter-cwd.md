@@ -24,4 +24,5 @@
 
 - 昂贵验证（全量构建加重测试）开始前，用一个只打印 `process.cwd()` 的脚本核对盘符，不是预期形式就中止整条链。不要依赖 `pwd`（MSYS 显示的路径与 node 看到的可能不同）。
 - 链式验证里，构建失败之后不再继续跑测试：失败构建可能清掉了部分产物，后面的结果都不可用。
+- 本机没有 bun：全量构建用 `pnpm release:version:check && pnpm -r --filter '!@zhixing/terminal-ui' --filter '!zhixing' run build`，日志开头应是 “Scope: 17 of 19 workspace projects”。根脚本 `pnpm build` 不带过滤，会去构建 terminal-ui 并报 `spawn bun ENOENT`，与工作目录无关，但现象相同，先看 Scope 行区分。
 - 这次失败的运行整体作废、单独归档，不从里面挑“看起来通过”的部分。
